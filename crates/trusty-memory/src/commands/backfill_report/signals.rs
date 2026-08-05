@@ -12,13 +12,14 @@
 //! have no way to tell which quarter. So each signal states a fact the reader
 //! can check against the row beside it, and stops there.
 //!
-//! What: five checks, each true or false from the drawer row alone. They are
-//! listed on the row so a reader can see *why* something is near the top; they
-//! never combine into a score and never order the output — injection frequency
-//! does that.
+//! What: six checks, each true or false from the drawer row and the scanned log
+//! window alone. They are listed on the row so a reader can see *why* something
+//! is near the top; they never combine into a score and never order the output —
+//! injection frequency does that.
 //!
 //! Test: `tags_are_reported_verbatim`, `date_stamp_only_scans_the_opening`,
-//! `weight_retained_needs_both_age_and_weight`, `no_signal_implies_empty_list`.
+//! `weight_retained_needs_both_age_and_weight`, `no_signal_implies_empty_list`,
+//! `predates_log_window_fires_only_outside_coverage`.
 
 use chrono::{DateTime, Utc};
 use trusty_common::memory_core::decay::DecayConfig;
@@ -52,6 +53,15 @@ pub enum Signal {
     /// Old enough to be stale, yet the 90-day half-life still leaves most of its
     /// weight — the §C7 arithmetic, evaluated for this specific row.
     WeightRetained,
+    /// The drawer was created before the scanned log window opens, so part of
+    /// its life is unmeasured.
+    ///
+    /// Why this is its own signal: a 0-injection row means two opposite things
+    /// that warrant opposite decisions. Without this marker, "nobody retrieves
+    /// this, it costs nothing, leave it" and "the logs do not reach back far
+    /// enough to know" are indistinguishable on the page, and a reader would
+    /// have to compare each row's age against the coverage header by hand.
+    PredatesLogWindow,
 }
 
 impl Signal {
@@ -63,6 +73,7 @@ impl Signal {
             Signal::MaxImportance => "importance=1.0".to_string(),
             Signal::NoExpiry => "no-expiry".to_string(),
             Signal::WeightRetained => "weight-retained".to_string(),
+            Signal::PredatesLogWindow => "predates-log-window".to_string(),
         }
     }
 }
@@ -80,9 +91,12 @@ const REPORTED_TAGS: [&str; 4] = [
 /// Why: gathering them in one pass keeps the "observation, not verdict" rule in
 /// a single reviewable place.
 /// What: checks the four reported tags, the opening date stamp, the importance
-/// ceiling, the absence of an expiry, and the retained-weight condition.
-/// Test: `tags_are_reported_verbatim`, `no_signal_implies_empty_list`.
-pub fn observe(drawer: &Drawer, age_days: f32, _now: DateTime<Utc>) -> Vec<Signal> {
+/// ceiling, the absence of an expiry, the retained-weight condition, and whether
+/// the drawer predates `window_start` — the earliest hook-log entry scanned, or
+/// `None` when no log was read at all.
+/// Test: `tags_are_reported_verbatim`, `no_signal_implies_empty_list`,
+/// `predates_log_window_fires_only_outside_coverage`.
+pub fn observe(drawer: &Drawer, age_days: f32, window_start: Option<DateTime<Utc>>) -> Vec<Signal> {
     let mut out = Vec::new();
     for tag in REPORTED_TAGS {
         if drawer.tags.iter().any(|t| t == tag) {
@@ -104,6 +118,12 @@ pub fn observe(drawer: &Drawer, age_days: f32, _now: DateTime<Utc>) -> Vec<Signa
         && decayed / drawer.importance >= WEIGHT_RETAINED_FRACTION
     {
         out.push(Signal::WeightRetained);
+    }
+    // #4891: only meaningful when a window exists. With no log scanned at all,
+    // every count is 0 for a different reason, and the report says that once at
+    // the top rather than tagging all 2,287 rows with it.
+    if window_start.is_some_and(|start| drawer.created_at < start) {
+        out.push(Signal::PredatesLogWindow);
     }
     out
 }

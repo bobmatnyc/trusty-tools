@@ -284,7 +284,7 @@ fn tags_are_reported_verbatim() {
         1,
         &["status", "resume-target", "unrelated"],
     );
-    let s = observe(&d, 1.0, Utc::now());
+    let s = observe(&d, 1.0, None);
     assert!(s.contains(&Signal::Tagged("status".into())));
     assert!(s.contains(&Signal::Tagged("resume-target".into())));
     assert!(
@@ -297,11 +297,11 @@ fn tags_are_reported_verbatim() {
 #[test]
 fn date_stamp_only_scans_the_opening() {
     let opening = drawer("SESSION CHECKPOINT 2026-07-16 — done", 0.5, 1, &[]);
-    assert!(observe(&opening, 1.0, Utc::now()).contains(&Signal::DateStamped));
+    assert!(observe(&opening, 1.0, None).contains(&Signal::DateStamped));
 
     let buried = drawer(&format!("{} 2026-07-16", "x".repeat(400)), 0.5, 1, &[]);
     assert!(
-        !observe(&buried, 1.0, Utc::now()).contains(&Signal::DateStamped),
+        !observe(&buried, 1.0, None).contains(&Signal::DateStamped),
         "a date deep in the body is not a headline date stamp"
     );
 }
@@ -310,28 +310,50 @@ fn date_stamp_only_scans_the_opening() {
 fn weight_retained_needs_both_age_and_weight() {
     // 3 days old: too young to be called stale, even though weight is retained.
     let young = drawer("x", 1.0, 3, &[]);
-    assert!(!observe(&young, 3.0, Utc::now()).contains(&Signal::WeightRetained));
+    assert!(!observe(&young, 3.0, None).contains(&Signal::WeightRetained));
 
     // 19 days at a 90-day half-life keeps 86% — the ADR §C7 case exactly.
     let old = drawer("x", 1.0, 19, &[]);
-    assert!(observe(&old, 19.0, Utc::now()).contains(&Signal::WeightRetained));
+    assert!(observe(&old, 19.0, None).contains(&Signal::WeightRetained));
 }
 
 #[test]
 fn max_importance_and_expiry_are_reported() {
     let mut d = drawer("x", 1.0, 1, &[]);
-    assert!(observe(&d, 1.0, Utc::now()).contains(&Signal::MaxImportance));
-    assert!(observe(&d, 1.0, Utc::now()).contains(&Signal::NoExpiry));
+    assert!(observe(&d, 1.0, None).contains(&Signal::MaxImportance));
+    assert!(observe(&d, 1.0, None).contains(&Signal::NoExpiry));
 
     d.expires_at = Some(Utc::now() + Duration::days(7));
-    assert!(!observe(&d, 1.0, Utc::now()).contains(&Signal::NoExpiry));
+    assert!(!observe(&d, 1.0, None).contains(&Signal::NoExpiry));
 }
 
 #[test]
 fn no_signal_implies_empty_list() {
     let mut d = drawer("plain text with no date and no tags", 0.5, 1, &[]);
     d.expires_at = Some(Utc::now() + Duration::days(1));
-    assert!(observe(&d, 1.0, Utc::now()).is_empty());
+    assert!(observe(&d, 1.0, None).is_empty());
+}
+
+#[test]
+fn predates_log_window_fires_only_outside_coverage() {
+    let window_start = Utc::now() - Duration::days(31);
+
+    // Created before the logs begin: part of its life is unmeasured, so a 0 here
+    // means "unknown", not "cold".
+    let older = drawer("older than the logs", 0.5, 60, &[]);
+    assert!(observe(&older, 60.0, Some(window_start)).contains(&Signal::PredatesLogWindow));
+
+    // Created inside the window: a 0 here genuinely means nobody retrieves it.
+    let inside = drawer("created inside the window", 0.5, 5, &[]);
+    assert!(!observe(&inside, 5.0, Some(window_start)).contains(&Signal::PredatesLogWindow));
+}
+
+#[test]
+fn predates_log_window_is_silent_when_no_log_was_scanned() {
+    // With no window at all, every count is 0 for one reason the report states
+    // once at the top. Tagging every row would be noise, not information.
+    let ancient = drawer("very old drawer", 0.5, 900, &[]);
+    assert!(!observe(&ancient, 900.0, None).contains(&Signal::PredatesLogWindow));
 }
 
 // -------------------------------------------------------- census + render
@@ -436,6 +458,137 @@ fn zero_injection_drawers_rank_last() {
         "high importance alone must never manufacture a frequency"
     );
     assert_eq!(census.rows[0].share_of_turns, 0.0);
+}
+
+#[test]
+fn colliding_excerpts_are_marked_on_every_affected_row() {
+    // Two drawers whose contents differ only past the 220-char preview cut, so
+    // they render an identical excerpt and the hook log cannot tell them apart.
+    let logs = tempfile::tempdir().expect("logs");
+    let root = tempfile::tempdir().expect("root");
+    let shared_head = "SESSION PAUSE 2026-07-16 — RESUME TARGET. ".repeat(8);
+    let a = drawer(&format!("{shared_head} FIRST tail"), 1.0, 20, &["status"]);
+    let b = drawer(&format!("{shared_head} SECOND tail"), 1.0, 20, &["status"]);
+    let unique = drawer("a drawer nobody else resembles", 0.5, 20, &[]);
+    fixture_palace(root.path(), "p", &[a.clone(), b.clone(), unique.clone()]);
+
+    assert_eq!(
+        drawer_preview(&a.content),
+        drawer_preview(&b.content),
+        "fixture precondition: these two must actually collide"
+    );
+
+    let inj = section("p", &[(&drawer_preview(&a.content), &["status"])]);
+    write_log(
+        logs.path(),
+        "enriched-prompts.2026-08-01.jsonl",
+        &[log_line("p", &inj), log_line("p", &inj)],
+    );
+
+    let index = InjectionIndex::scan_dir(logs.path()).expect("scan");
+    let census = build_census(root.path(), &index, None, 0).expect("census");
+
+    let row_a = census.rows.iter().find(|r| r.drawer_id == a.id).expect("a");
+    let row_b = census.rows.iter().find(|r| r.drawer_id == b.id).expect("b");
+    let row_u = census
+        .rows
+        .iter()
+        .find(|r| r.drawer_id == unique.id)
+        .expect("u");
+
+    assert_eq!(row_a.collision_peers, Some(1), "both sides must be marked");
+    assert_eq!(row_b.collision_peers, Some(1), "both sides must be marked");
+    assert_eq!(
+        row_u.collision_peers, None,
+        "a unique excerpt is not marked"
+    );
+
+    assert_eq!(
+        (row_a.injections, row_b.injections),
+        (2, 2),
+        "the shared count is reported on both — the marker is what makes that honest"
+    );
+    assert_ne!(
+        row_a.content_digest, row_b.content_digest,
+        "the digest must separate rows the excerpt cannot"
+    );
+
+    // And the reader sees it, in the header and on the rows.
+    let mut buf = Vec::new();
+    render_text(&mut buf, &census, &index.stats, 25).expect("render");
+    let s = String::from_utf8(buf).expect("utf8");
+    assert!(s.contains("2 row(s) share an excerpt"));
+    // Count stanza markers only — the header's "Marked ⚠ SHARED below" mentions
+    // the same string.
+    assert_eq!(
+        s.lines().filter(|l| l.starts_with("    ⚠ SHARED")).count(),
+        2
+    );
+    assert!(s.contains(&row_a.content_digest));
+    assert!(s.contains(&row_b.content_digest));
+}
+
+#[test]
+fn unique_excerpts_are_not_marked() {
+    let logs = tempfile::tempdir().expect("logs");
+    let root = tempfile::tempdir().expect("root");
+    fixture_palace(
+        root.path(),
+        "p",
+        &[drawer("alpha", 0.5, 1, &[]), drawer("beta", 0.5, 1, &[])],
+    );
+
+    let index = InjectionIndex::scan_dir(logs.path()).expect("scan");
+    let census = build_census(root.path(), &index, None, 0).expect("census");
+    assert!(census.rows.iter().all(|r| r.collision_peers.is_none()));
+
+    let mut buf = Vec::new();
+    render_text(&mut buf, &census, &index.stats, 25).expect("render");
+    let s = String::from_utf8(buf).expect("utf8");
+    assert!(!s.contains("SHARED"), "no collision, no warning");
+    assert!(!s.contains("share an excerpt"));
+}
+
+#[test]
+fn identical_excerpts_in_different_palaces_do_not_collide() {
+    // The hook-log index is keyed per palace, so the same excerpt in two palaces
+    // is two independent counts and neither is misattributed.
+    let logs = tempfile::tempdir().expect("logs");
+    let root = tempfile::tempdir().expect("root");
+    let same = "an excerpt that appears in two palaces";
+    fixture_palace(root.path(), "a", &[drawer(same, 0.5, 1, &[])]);
+    fixture_palace(root.path(), "b", &[drawer(same, 0.5, 1, &[])]);
+
+    let index = InjectionIndex::scan_dir(logs.path()).expect("scan");
+    let census = build_census(root.path(), &index, None, 0).expect("census");
+    assert_eq!(census.rows.len(), 2);
+    assert!(census.rows.iter().all(|r| r.collision_peers.is_none()));
+}
+
+#[test]
+fn collision_json_field_is_always_present() {
+    let logs = tempfile::tempdir().expect("logs");
+    let root = tempfile::tempdir().expect("root");
+    let d = drawer("solo drawer", 0.5, 1, &[]);
+    fixture_palace(root.path(), "p", std::slice::from_ref(&d));
+
+    let index = InjectionIndex::scan_dir(logs.path()).expect("scan");
+    let census = build_census(root.path(), &index, None, 0).expect("census");
+    let mut buf = Vec::new();
+    render_json(&mut buf, &census, &index.stats, 25).expect("render");
+    let v: serde_json::Value = serde_json::from_slice(&buf).expect("json");
+
+    // Present-and-null, never absent: a consumer tests one field rather than
+    // inferring safety from a missing key.
+    assert!(
+        v["candidates"][0]
+            .as_object()
+            .expect("obj")
+            .contains_key("excerpt_collision_peers"),
+        "the field must exist even when there is no collision"
+    );
+    assert!(v["candidates"][0]["excerpt_collision_peers"].is_null());
+    assert!(v["candidates"][0]["content_digest"].is_string());
 }
 
 #[test]

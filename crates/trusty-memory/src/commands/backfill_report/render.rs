@@ -85,6 +85,21 @@ pub fn render_text(
             palace = row.palace,
             room = row.room
         )?;
+        // A shared count is the one number on this page that does not mean what
+        // it appears to mean, so it is called out ABOVE the count it qualifies —
+        // a reader who stops after the number must still have seen the warning.
+        if let Some(peers) = row.collision_peers {
+            writeln!(
+                out,
+                "    ⚠ SHARED     this excerpt is identical to {peers} other drawer(s) in {palace}; \
+                 the count below is for all {total} together, not this drawer alone. \
+                 Content digest {digest} distinguishes them.",
+                peers = peers,
+                palace = row.palace,
+                total = peers + 1,
+                digest = row.content_digest
+            )?;
+        }
         // The coverage line counts injections estate-wide; this percentage is
         // against the drawer's OWN palace. Name the denominator here so the two
         // numbers cannot be read as contradicting each other.
@@ -173,6 +188,20 @@ fn render_coverage(out: &mut dyn Write, census: &Census, stats: &ScanStats) -> R
             o.error.as_deref().unwrap_or("unknown")
         )?;
     }
+    // Silence here is itself the report: no line means every excerpt was unique
+    // and every count below belongs to exactly one drawer.
+    let colliding = census
+        .rows
+        .iter()
+        .filter(|r| r.collision_peers.is_some())
+        .count();
+    if colliding > 0 {
+        writeln!(
+            out,
+            "  {colliding} row(s) share an excerpt with another drawer — their counts are \
+             combined, not per-drawer. Marked ⚠ SHARED below."
+        )?;
+    }
     Ok(())
 }
 
@@ -227,6 +256,11 @@ pub fn render_json(
                 "effective_importance": r.effective_importance,
                 "has_expiry": r.has_expiry,
                 "signals": r.signals.iter().map(|s| s.label()).collect::<Vec<_>>(),
+                // Always present, never omitted-when-null: a consumer must be
+                // able to test one field to know whether `injections` is this
+                // drawer's alone, rather than inferring it from a missing key.
+                "excerpt_collision_peers": r.collision_peers,
+                "content_digest": r.content_digest,
             })
         })
         .collect();

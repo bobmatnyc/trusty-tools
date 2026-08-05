@@ -34,11 +34,11 @@
 //! `report_writes_nothing_to_the_palace`,
 //! `incompatible_store_is_reported_not_recreated`.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use trusty_common::memory_core::decay::DecayConfig;
 use trusty_common::memory_core::palace::Drawer;
 use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
@@ -55,8 +55,17 @@ use crate::commands::prompt_context::format::drawer_preview;
 /// Why: the ticket's actionability bar is that a human can triage a single
 /// drawer from one row — which needs identity, enough content to recognise it,
 /// how old it is, how much it costs, and how privileged it currently is.
-/// What: every field is measured or read, none inferred. `injections` and
-/// `share_of_turns` come from the hook logs; the rest from the drawer row.
+///
+/// What: every field is read from the drawer row or measured from the hook logs,
+/// with one qualification the reader must be able to see. `injections` is keyed
+/// on the 220-char `excerpt`, so if two drawers in one palace truncate to the
+/// same excerpt they are indistinguishable in the logs and both receive the
+/// combined count — misattributed to each, not split between them. That case is
+/// never left silent: [`collision_peers`](Self::collision_peers) is `Some` on
+/// every row it affects and [`content_digest`](Self::content_digest)
+/// distinguishes rows whose excerpts read identically. The live estate has zero
+/// collisions across 2,287 rows today; near-duplicate session checkpoints (§C5)
+/// are the content most likely to converge on a shared prefix as it grows.
 #[derive(Debug, Clone)]
 pub struct CandidateRow {
     pub palace: String,
@@ -77,6 +86,23 @@ pub struct CandidateRow {
     pub has_expiry: bool,
     /// Objective observations about this drawer. Not a classification.
     pub signals: Vec<Signal>,
+    /// Other drawers in this palace whose `excerpt` is byte-identical to this
+    /// one. `None` when the excerpt is unique — the case for every row in the
+    /// live estate today.
+    ///
+    /// When `Some(n)`, this row's `injections` is the count for all `n + 1`
+    /// drawers together, not this drawer alone. Acting on the number without
+    /// reading the peers would retire the wrong drawer.
+    pub collision_peers: Option<usize>,
+    /// Short digest of the drawer's **full, untruncated** content.
+    ///
+    /// Why: when two rows collide their stanzas are visually identical down to
+    /// the last rendered character, so a reader cannot tell which is which. The
+    /// digest differs whenever the underlying content differs, which is what
+    /// makes the two rows separable on the page. Stable only within one run —
+    /// it disambiguates rows, it is not an identifier to store or compare across
+    /// runs.
+    pub content_digest: String,
 }
 
 /// What one palace's read produced, including a failure that did not stop the run.
@@ -102,12 +128,15 @@ pub struct Census {
 /// (registry dir, log index, filters) makes the read-only property testable —
 /// a test can point it at a fixture palace and assert the files are unchanged.
 /// What: for each palace (optionally filtered), reads drawers read-only, joins
-/// each to its injection count, drops rows below `min_injections`, and sorts by
-/// injections descending with the oldest drawer breaking ties. One palace
-/// failing to open is recorded in `outcomes` and skipped — a single locked or
-/// corrupt palace must not deny the operator the other 92.
+/// each to its injection count, drops rows below `min_injections`, marks excerpt
+/// collisions, and sorts by injections descending with the oldest drawer
+/// breaking ties. One palace failing to open is recorded in `outcomes` and
+/// skipped — a single locked or corrupt palace must not deny the operator the
+/// other 92.
 /// Test: `ranks_by_injection_count`, `min_injections_filters`,
-/// `unreadable_palace_is_recorded_not_fatal`.
+/// `incompatible_store_is_reported_not_recreated` (one palace fails to open, is
+/// recorded in `outcomes`, and is skipped while the rest still report),
+/// `colliding_excerpts_are_marked_on_every_affected_row`.
 pub fn build_census(
     registry_dir: &Path,
     index: &InjectionIndex,
@@ -118,7 +147,7 @@ pub fn build_census(
         .with_context(|| format!("list palaces under {}", registry_dir.display()))?;
     let mut census = Census::default();
     let decay = DecayConfig::default();
-    let now = Utc::now();
+    let window_start = index.stats.earliest;
 
     for palace in palaces {
         let slug = palace.id.0.clone();
@@ -160,7 +189,10 @@ pub fn build_census(
                             0.0,
                         ),
                         has_expiry: drawer.expires_at.is_some(),
-                        signals: super::signals::observe(drawer, age_days, now),
+                        signals: super::signals::observe(drawer, age_days, window_start),
+                        // Filled in below, once the whole palace has been read.
+                        collision_peers: None,
+                        content_digest: content_digest(&drawer.content),
                     });
                 }
             }
@@ -172,12 +204,65 @@ pub fn build_census(
         }
     }
 
+    mark_excerpt_collisions(&mut census.rows);
     census.rows.sort_by(|a, b| {
         b.injections
             .cmp(&a.injections)
             .then_with(|| b.age_days.total_cmp(&a.age_days))
     });
     Ok(census)
+}
+
+/// Mark every row whose `(palace, excerpt)` is shared with another row.
+///
+/// Why: the hook logs key on the rendered excerpt, so colliding drawers are
+/// genuinely indistinguishable there and both receive the combined count. That
+/// is a real limit of the measurement, and the one thing it must never do is
+/// stay invisible — a reader who trusts a misattributed number retires the wrong
+/// drawer, which is exactly the harm ADR-0028's human gate exists to prevent.
+///
+/// What: counts occurrences of each `(palace, excerpt)` pair and writes
+/// `collision_peers = Some(n - 1)` on every row in a group of `n > 1`. Rows with
+/// a unique excerpt keep `None`.
+///
+/// A collision never hides behind `min_injections`: colliding rows share one
+/// excerpt and therefore one count, so the filter keeps or drops them together.
+///
+/// Test: `colliding_excerpts_are_marked_on_every_affected_row`,
+/// `unique_excerpts_are_not_marked`.
+fn mark_excerpt_collisions(rows: &mut [CandidateRow]) {
+    let mut counts: HashMap<(&str, &str), usize> = HashMap::new();
+    for row in rows.iter() {
+        *counts
+            .entry((row.palace.as_str(), row.excerpt.as_str()))
+            .or_default() += 1;
+    }
+    let shared: HashMap<(String, String), usize> = counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|((p, e), n)| ((p.to_string(), e.to_string()), n))
+        .collect();
+    if shared.is_empty() {
+        return;
+    }
+    for row in rows.iter_mut() {
+        if let Some(n) = shared.get(&(row.palace.clone(), row.excerpt.clone())) {
+            row.collision_peers = Some(n - 1);
+        }
+    }
+}
+
+/// Short digest of a drawer's full content, for telling colliding rows apart.
+///
+/// What: `DefaultHasher` rendered as 8 hex characters. Deliberately not a
+/// cryptographic or cross-run-stable hash — its only job is to differ when two
+/// visually identical stanzas have different underlying content, within one
+/// report. Nothing persists or compares it.
+fn content_digest(content: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    format!("{:08x}", hasher.finish() as u32)
 }
 
 /// Filename of a palace's KG store.

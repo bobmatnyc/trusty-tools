@@ -11,8 +11,18 @@ Added
   - injection frequency is recovered from the enriched-prompt hook logs, which record the
     rendered injection but no drawer id. The join re-renders each drawer's preview with
     the same `drawer_preview` the injection pipeline uses and counts matching bullets;
-    against the live estate it reproduces ADR-0028 §C7's table (3,705 injections / 45.1%
-    for the top drawer, where the ADR measured 3,612 / 44.8% a day earlier)
+    against the live estate it reproduces ADR-0028 §C7's table — the top drawer measures
+    45.1% of `trusty-tools` turns where the ADR measured 44.8%, and the second measures
+    20.7% against its 21.2%. The share is quoted rather than the raw count because the
+    count climbs with every logged turn; only the ratio is stable enough to cite
+  - two drawers in one palace whose content truncates to the same 220-char excerpt are
+    indistinguishable in the logs and receive one combined count. Such rows are marked
+    `⚠ SHARED` with a content digest that separates them, and counted in the header, so a
+    combined count can never be mistaken for a per-drawer one. The live estate has no
+    collisions today
+  - a drawer created before the scanned log window carries `predates-log-window`, so a
+    reading of 0 injections is distinguishable from "genuinely never retrieved" — the two
+    warrant opposite decisions
   - no tier is suggested. §C4 measured why: `resume-target` splits 71/26 across tiers, so
     a tag-derived verdict would be wrong for a quarter of rows while looking exactly as
     confident as the rest. Rows carry checkable observations instead
