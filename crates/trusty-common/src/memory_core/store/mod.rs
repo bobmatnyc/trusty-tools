@@ -20,7 +20,9 @@ pub mod payload_store;
 pub mod redb_open;
 // ADR-0027 T2: additive, fail-open room backfill run at palace open.
 pub mod room_backfill;
-// ADR-0027 T1/T4: room record shape plus the resolve-or-create entry point.
+// ADR-0027 T10: the read-only plan the backfill executes and `--dry-run` prints.
+pub mod room_plan;
+// ADR-0027 T1/T4/T6: room record shape, resolve-or-create, and the room surface.
 pub mod rooms;
 pub mod vector;
 
@@ -34,6 +36,10 @@ pub use redb_open::{
     INCOMPATIBLE_SUFFIX, backup_incompatible_file, incompatible_backup_path,
     is_incompatible_format, open_or_recreate,
 };
-pub use room_backfill::{BackfillReport, backfill_rooms, backfill_rooms_fail_open};
-pub use rooms::{RoomRecord, RoomSummary, resolve_or_create_room, resolve_room_filter_id};
+pub use room_backfill::{BackfillReport, LabelSource, backfill_rooms, backfill_rooms_fail_open};
+pub use room_plan::{RoomPlanAction, RoomPlanEntry, plan_rooms};
+pub use rooms::{
+    RoomRecord, RoomSummary, create_room, list_room_summaries, rename_room, resolve_or_create_room,
+    resolve_room_filter_id, resolve_room_selector,
+};
 pub use vector::{VectorHit, VectorStore};

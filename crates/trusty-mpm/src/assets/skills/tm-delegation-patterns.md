@@ -116,6 +116,47 @@ The daemon idle-nudge (#2621) does NOT cover in-conversation subagents — they
 have no tmux pane — so PM-side re-engagement is the only mechanism below the
 managed-session layer.
 
+## Concurrent Dispatch: Declare File Ownership
+
+🔴 Before dispatching concurrent work, name in each brief the files owned by
+every other in-flight branch, and instruct the agent to STOP and report rather
+than edit one. **We stack, we do not race.**
+
+Paste a block shaped like this into every concurrent brief:
+
+```
+🔴 Files owned by other in-flight branches — do not touch
+- feat/<branch-a>: core/agent_cost.rs, bin/tm/commands/pm_guard*.rs
+- fix/<branch-b>: core/agent_source*.rs, core/managed_config.rs
+Stop and report if you need one.
+```
+
+The doctrine is that no two in-flight PRs share a module, and that coupled
+changes stack rather than race. The ownership block is the mechanism that
+enforces it: an agent cannot see the other branches, so unless the brief names
+their files it will edit across the line and only git finds out.
+
+Measured on 2026-08-03: five concurrent PRs across five branches, every brief
+carrying the block — zero merge conflicts, zero rebases.
+
+## A Running Agent's Scope Is Fixed
+
+🔴 New work is a new agent, or it waits. NEVER add scope to a live agent.
+
+Adding scope to a running agent feels cheaper than dispatching fresh and is the
+opposite. Cost tracks **accumulated context over the agent's lifetime**: every
+tool round re-sends the whole transcript, so each added task extends the life and
+every subsequent round pays for the accumulation. One agent given two mid-flight
+additions reached 269.9k tokens while writing a five-line changelog file — see
+[#4837](https://github.com/bobmatnyc/trusty-tools/issues/4837) for the evidence.
+
+Several narrow agents each ending near 60k cost far less than one reaching 400k
+doing identical work.
+
+Not covered by this rule: re-engaging a parked agent with the outcome of work it
+already owns (`SendMessage` after CI settles — Long-Wait Delegation item 4
+above). That closes existing scope; it does not add new scope.
+
 ## Delegation Best Practices
 
 1. **Provide context** — background the agent needs, not just the task.

@@ -459,7 +459,7 @@
           <!-- #4682: every count goes through countLabel — a peek-based row
                reports 0 for UNKNOWN, and printing that reads as fact. -->
           <span class="badge badge-muted" title={p.cached === false ? 'Not loaded — expand for live counts' : ''}>
-            {countLabel(p, 'wing_count')} wings
+            {countLabel(p, 'room_count')} rooms
           </span>
           <span class="badge badge-muted">{countLabel(p, 'drawer_count')} drawers</span>
           <span class="badge badge-info">{countLabel(p, 'vector_count')} vectors</span>

@@ -62,13 +62,20 @@
 //! `framework/*` dirs), then (2) refreshes the framework source and deploys the
 //! FULL agent/skill roster from the resolved source dirs so the complete,
 //! spawnable set is guaranteed present. Idempotent — safe to call on every
-//! spawn (the deployers checksum-skip unchanged files).
+//! spawn (the deployers checksum-skip unchanged files). Since #4840 the AGENT
+//! half of step (2) also REFRESHES the bundled agent source from the
+//! compiled-in bundle first, via
+//! [`crate::core::agent_source::autodeploy_agents_for`] — before that, only the
+//! manual `tm install` ever wrote `~/.trusty-mpm/framework/agents/`, so a
+//! merged, compiled-in `BASE-AGENT.md` change silently reached no running
+//! agent.
 //! Test: `ensure_managed_config_dir_deploys_full_roster`,
-//! `ensure_managed_config_dir_is_idempotent`.
+//! `ensure_managed_config_dir_is_idempotent`,
+//! `ensure_managed_config_dir_refreshes_stale_bundled_agents`,
+//! `ensure_managed_config_dir_survives_an_unwritable_agent_target`.
 
 use std::path::Path;
 
-use crate::core::agent_deployer::deploy_agents;
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_tiers::deploy_all_skill_tiers;
 use crate::core::standalone::global_config::ensure_global_config_dir;
@@ -95,9 +102,15 @@ use crate::core::standalone::global_config::ensure_global_config_dir;
 ///    the resolved source dirs ([`FrameworkPaths::agent_source_dir`] /
 ///    `skill_source_dir`) into `<config_dir>/agents` and `<config_dir>/skills`,
 ///    guaranteeing the full spawnable set regardless of install/submodule state.
+///    The AGENT half routes through
+///    [`crate::core::agent_source::autodeploy_agents_for`] (#4840), which
+///    re-materializes the bundled agent source from the compiled-in bundle when
+///    its stamp differs, then deploys it — and which never returns an error, so
+///    a failed deploy degrades to a warning instead of blocking the spawn.
 ///
 /// Test: `ensure_managed_config_dir_deploys_full_roster`,
-/// `ensure_managed_config_dir_is_idempotent`.
+/// `ensure_managed_config_dir_is_idempotent`,
+/// `ensure_managed_config_dir_refreshes_stale_bundled_agents`.
 pub fn ensure_managed_config_dir(config_dir: &Path) -> anyhow::Result<()> {
     ensure_managed_config_dir_with_root(&FrameworkPaths::default(), config_dir)
 }
@@ -112,7 +125,9 @@ pub fn ensure_managed_config_dir(config_dir: &Path) -> anyhow::Result<()> {
 /// [`ensure_managed_config_dir`], using `fw` for both the `ensure_global_config_dir`
 /// managed-root argument (`fw.root`) and the full-roster source dirs.
 /// Test: `ensure_managed_config_dir_deploys_full_roster`,
-/// `ensure_managed_config_dir_is_idempotent`.
+/// `ensure_managed_config_dir_is_idempotent`,
+/// `ensure_managed_config_dir_refreshes_stale_bundled_agents`,
+/// `ensure_managed_config_dir_survives_an_unwritable_agent_target`.
 pub fn ensure_managed_config_dir_with_root(
     fw: &FrameworkPaths,
     config_dir: &Path,
@@ -129,10 +144,31 @@ pub fn ensure_managed_config_dir_with_root(
         tracing::warn!("managed config dir: skill source refresh failed (non-fatal): {err}");
     }
 
+    // #4840: refresh the bundled agent SOURCE from the compiled-in bundle
+    // before deploying it. Until this call existed, `~/.trusty-mpm/framework/
+    // agents/` was written only by the manual `tm install`, so a compiled-in
+    // `BASE-AGENT.md` change reached no running agent until someone remembered
+    // to re-run it. `autodeploy_agents_for` never returns an error — a broken
+    // deploy must not block a session — so anything it could not do comes back
+    // as a warning line instead.
     let agents_dest = config_dir.join("agents");
-    deploy_agents(&fw.agent_source_dir(), &agents_dest).map_err(|e| {
-        anyhow::anyhow!("failed to deploy full agent roster into managed config dir: {e}")
-    })?;
+    let agents = crate::core::agent_source::autodeploy_agents_for(fw, &agents_dest);
+    if agents.refreshed {
+        tracing::info!(
+            "managed config dir: bundled agent source refreshed from the running binary"
+        );
+    }
+    // #4840: a file the deployer declines to overwrite (untracked-and-differing,
+    // or a user-owned entry that was edited), and an agent that failed to
+    // compose at all, used to be handled SILENTLY — the other half of the
+    // defect. `agents.warnings` is a bounded count-plus-preview summary (at
+    // most a couple of lines), matching `agents::deployer`'s own #2504 policy:
+    // this runs on every spawn AND every resume, and the stale set is never
+    // reconciled until someone runs `--reset-agents`, so one line per file
+    // would be permanent log spam. PR #4848 review (HIGH).
+    for warning in &agents.warnings {
+        tracing::warn!("managed config dir: {warning}");
+    }
 
     // PR #2818 review (round 3, MEDIUM decision): route through the multi-tier
     // orchestrator so a user-custom skill (`fw.user_skill_source_dir()`)
@@ -260,6 +296,55 @@ mod tests {
         let second = std::fs::read_to_string(config_dir.join("agents/engineer.md")).unwrap();
 
         assert_eq!(first, second, "re-provisioning must be idempotent");
+    }
+
+    #[test]
+    fn ensure_managed_config_dir_refreshes_stale_bundled_agents() {
+        // #4840: the exact measured shape — a framework agent source written by
+        // an older `tm install` sits on disk while the running binary embeds a
+        // newer one. Provisioning must close that gap with no manual step.
+        let tmp = TempDir::new().unwrap();
+        let fw = FrameworkPaths::under(tmp.path());
+        std::fs::create_dir_all(&fw.agents).unwrap();
+        std::fs::write(
+            fw.agents.join("BASE-AGENT.md"),
+            "---\nname: BASE-AGENT\ndescription: base\n---\n\nSTALE-SENTINEL-4840\n",
+        )
+        .unwrap();
+        let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
+
+        ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(fw.agents.join("BASE-AGENT.md")).unwrap(),
+            crate::core::bundle::BASE_AGENT,
+            "the bundled agent SOURCE must be re-materialized from the running binary"
+        );
+        let deployed = std::fs::read_to_string(config_dir.join("agents/BASE-AGENT.md")).unwrap();
+        assert!(
+            !deployed.contains("STALE-SENTINEL-4840"),
+            "the stale composition must not survive into the deploy target"
+        );
+    }
+
+    #[test]
+    fn ensure_managed_config_dir_survives_an_unwritable_agent_target() {
+        // Fail open (#4840): a broken agent deploy must never block a session.
+        // A regular file where `<config_dir>/agents` belongs makes every write
+        // under it impossible and cannot be repaired by `create_dir_all`.
+        let tmp = TempDir::new().unwrap();
+        let fw = FrameworkPaths::under(tmp.path());
+        let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("agents"), "blocking file\n").unwrap();
+
+        ensure_managed_config_dir_with_root(&fw, &config_dir)
+            .expect("an undeployable agent roster must not fail provisioning");
+
+        assert!(
+            config_dir.join("settings.json").exists(),
+            "the rest of the config dir must still be provisioned"
+        );
     }
 
     #[test]

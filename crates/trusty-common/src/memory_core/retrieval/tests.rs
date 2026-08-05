@@ -1261,3 +1261,190 @@ async fn recall_top_k_caps_result_count() {
         deep.len()
     );
 }
+
+// ── ADR-0027 T7: the room filter reaches L3 and both recall entry points ──
+
+/// Seed one drawer per room into a fresh handle, vectors included.
+///
+/// Why: every room-filter test below needs two semantically-similar drawers
+/// that differ only by room, so the filter — not the ranking — is what decides
+/// the outcome.
+async fn seed_two_rooms(
+    handle: &PalaceHandle,
+    embedder: &dyn crate::memory_core::embed::Embedder,
+) -> (Uuid, Uuid) {
+    // The legacy fold ids: these drawers are never persisted, so the palace
+    // has no ROOMS row and `resolve_room_filter_id` falls back to the fold.
+    let backend = Drawer::new(
+        crate::memory_core::room_identity::room_to_uuid(&RoomType::Backend),
+        "Rust is a systems programming language",
+    );
+    let frontend = Drawer::new(
+        crate::memory_core::room_identity::room_to_uuid(&RoomType::Frontend),
+        "Rust is a systems programming toolkit",
+    );
+    let (backend_id, frontend_id) = (backend.id, frontend.id);
+    for d in [&backend, &frontend] {
+        let vecs = embedder
+            .embed_batch(std::slice::from_ref(&d.content))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(d.id, vecs[0].clone())
+            .await
+            .unwrap();
+    }
+    handle.add_drawer(backend);
+    handle.add_drawer(frontend);
+    (backend_id, frontend_id)
+}
+
+/// Why: ADR-0027 T7 — before this, `memory_recall_deep` was the one recall
+/// path a room scope could not reach, so a caller narrowing to one room
+/// silently got every room back (the invisible-failure class D4.4 rejects).
+/// What: two similar drawers in different rooms; an L3 search filtered to one.
+/// Test: this test itself.
+#[tokio::test]
+async fn l3_room_filter_excludes_other_rooms() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let (backend_id, frontend_id) = seed_two_rooms(&handle, embedder.as_ref()).await;
+
+    let results = retrieve_l3(
+        &handle,
+        embedder.as_ref(),
+        "systems programming Rust",
+        Some(RoomType::Backend),
+        5,
+    )
+    .await
+    .unwrap();
+
+    assert!(!results.is_empty(), "L3 should return the in-room drawer");
+    assert!(
+        results
+            .iter()
+            .all(|r| uuid_prefix_eq(r.drawer.id, backend_id)),
+        "room_filter must exclude drawers from other rooms, got: {:?}",
+        results.iter().map(|r| r.drawer.id).collect::<Vec<_>>()
+    );
+    assert!(
+        !results
+            .iter()
+            .any(|r| uuid_prefix_eq(r.drawer.id, frontend_id)),
+        "Frontend-room drawer leaked through a Backend room_filter"
+    );
+}
+
+/// Why: `retrieve_l3(None)` must behave exactly as it did before T7 — an
+/// added parameter that changed unfiltered results would silently regress
+/// every existing `recall_deep` caller.
+/// What: a single indexed drawer (so the ANN search is deterministic —
+/// asserting that a k-NN query returns BOTH of two near-identical vectors is
+/// an approximate-search coin flip, not a filter assertion). `None` must
+/// return it; a filter naming a different room must not.
+#[tokio::test]
+async fn l3_without_a_room_filter_returns_every_room() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+
+    let drawer = Drawer::new(
+        crate::memory_core::room_identity::room_to_uuid(&RoomType::Frontend),
+        "React uses a virtual DOM for rendering",
+    );
+    let drawer_id = drawer.id;
+    let vecs = embedder
+        .embed_batch(std::slice::from_ref(&drawer.content))
+        .await
+        .unwrap();
+    handle
+        .vector_store
+        .upsert(drawer_id, vecs[0].clone())
+        .await
+        .unwrap();
+    handle.add_drawer(drawer);
+
+    let unfiltered = retrieve_l3(&handle, embedder.as_ref(), "virtual DOM React", None, 5)
+        .await
+        .unwrap();
+    assert!(
+        unfiltered
+            .iter()
+            .any(|r| uuid_prefix_eq(r.drawer.id, drawer_id)),
+        "an unfiltered L3 must return the drawer regardless of its room"
+    );
+
+    let other_room = retrieve_l3(
+        &handle,
+        embedder.as_ref(),
+        "virtual DOM React",
+        Some(RoomType::Backend),
+        5,
+    )
+    .await
+    .unwrap();
+    assert!(
+        other_room.is_empty(),
+        "a Backend filter must not return a Frontend drawer, got {:?}",
+        other_room.iter().map(|r| r.drawer.id).collect::<Vec<_>>()
+    );
+}
+
+/// Why: T7's user-visible contract is on `memory_recall` /
+/// `memory_recall_deep`, so the filter must survive the L0/L1 merge those
+/// entry points perform — not just work one layer down.
+#[tokio::test]
+async fn recall_in_room_scopes_l2_hits() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let (_backend_id, frontend_id) = seed_two_rooms(&handle, embedder.as_ref()).await;
+
+    let results = recall_in_room(
+        &handle,
+        embedder.as_ref(),
+        "systems programming Rust",
+        Some(RoomType::Backend),
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !results
+            .iter()
+            .any(|r| r.layer == 2 && uuid_prefix_eq(r.drawer.id, frontend_id)),
+        "an out-of-room drawer reached a room-scoped recall"
+    );
+}
+
+/// Symmetric with `recall_in_room_scopes_l2_hits`, over the L3 lane.
+#[tokio::test]
+async fn recall_deep_in_room_scopes_l3_hits() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let (_backend_id, frontend_id) = seed_two_rooms(&handle, embedder.as_ref()).await;
+
+    let results = recall_deep_in_room(
+        &handle,
+        embedder.as_ref(),
+        "systems programming Rust",
+        Some(RoomType::Backend),
+        10,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !results
+            .iter()
+            .any(|r| r.layer == 3 && uuid_prefix_eq(r.drawer.id, frontend_id)),
+        "an out-of-room drawer reached a room-scoped deep recall"
+    );
+}

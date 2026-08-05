@@ -426,15 +426,16 @@ pub fn health_tab_lines(screen: &HealthScreen) -> Vec<String> {
 pub fn palace_index_tab_lines(row: &CollectionRow) -> Vec<String> {
     let mut lines = Vec::with_capacity(12);
 
-    // Header: vector / drawer / wing counts.
+    // Header: vector / drawer / room counts.
     lines.push(format!(
         "Vectors:    {:<12} Drawers: {}",
         format_with_commas(row.count),
         format_with_commas(row.drawer_count),
     ));
+    // #4811: was "Wings:", rendered from a room count (ADR-0027 C3.4).
     lines.push(format!(
-        "Wings:      {}",
-        format_with_commas(row.wing_count),
+        "Rooms:      {}",
+        format_with_commas(row.room_count),
     ));
     lines.push(String::new());
 

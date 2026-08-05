@@ -137,6 +137,25 @@ pub fn default_wing_key(room: &RoomType) -> String {
     canonical_room_key(DEFAULT_WING_ID, &room_label(room))
 }
 
+/// Classify a caller-typed room name, keeping the spelling of a custom body.
+///
+/// Why (ADR-0027 D1.3): the canonical key lowercases, so `Decisions` and
+/// `decisions` are the same room either way — but the *label* is what a human
+/// reads back out of `room_list`, and `RoomType::parse` lowercases the custom
+/// body, so a room a person deliberately named `Sprint Notes` would list as
+/// `sprint notes`. This restores the spelling without becoming a second
+/// parser: classification still comes from `RoomType::parse` alone (D4.1),
+/// and only the display body is substituted.
+/// What: delegates to `RoomType::parse`; for a `Custom` result, swaps the
+/// lowercased body back for the caller's trimmed original.
+/// Test: `parse_preserving_case_keeps_custom_spelling`.
+pub fn parse_room_preserving_case(name: &str) -> RoomType {
+    match RoomType::parse(name) {
+        RoomType::Custom(_) => RoomType::Custom(name.trim().to_string()),
+        builtin => builtin,
+    }
+}
+
 /// Mint the id for a room that has no row yet.
 ///
 /// Why (ADR-0027 D1.3): UUIDv5 is a full SHA-1 digest with no 16-byte fold, so
@@ -296,6 +315,24 @@ mod tests {
             room_to_uuid(&RoomType::Custom("status".to_string())).to_string(),
             "43767577-7372-2e29-7b7d-6b7f81803038"
         );
+    }
+
+    #[test]
+    fn parse_preserving_case_keeps_custom_spelling() {
+        // The canonical key lowercases either way, so identity is unchanged;
+        // what this preserves is the label a human reads back out of
+        // `room_list` (ADR-0027 D1.3).
+        assert_eq!(
+            parse_room_preserving_case("  Sprint Notes  "),
+            RoomType::Custom("Sprint Notes".to_string())
+        );
+        assert_eq!(
+            canonical_room_key(DEFAULT_WING_ID, "Sprint Notes"),
+            canonical_room_key(DEFAULT_WING_ID, "sprint notes")
+        );
+        // Built-ins still classify through the ONE parser (ADR-0027 D4.1).
+        assert_eq!(parse_room_preserving_case("docs"), RoomType::Documentation);
+        assert_eq!(parse_room_preserving_case("BACKEND"), RoomType::Backend);
     }
 
     #[test]

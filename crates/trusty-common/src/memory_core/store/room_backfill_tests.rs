@@ -13,7 +13,8 @@ use crate::memory_core::room_identity::{
     DEFAULT_WING_ID, canonical_room_key, default_wing_key, mint_room_id, room_label, room_to_uuid,
 };
 use crate::memory_core::store::kg::{KnowledgeGraph, Triple};
-use crate::memory_core::store::rooms::{RoomRecord, resolve_or_create_room_sync};
+use crate::memory_core::store::room_plan::{RoomPlanAction, plan_rooms};
+use crate::memory_core::store::rooms::{RoomRecord, rename_room, resolve_or_create_room_sync};
 use chrono::Utc;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -120,13 +121,9 @@ fn backfill_rename_survives_second_run() {
     assert!(before.label.starts_with("unresolved-"));
     assert!(!before.resolved, "synthesised labels are marked unresolved");
 
-    // Simulate the human rename that `room_rename` (ticket T6) will perform.
-    let renamed = RoomRecord {
-        label: "sprint-notes".to_string(),
-        resolved: true,
-        ..before
-    };
-    kg.store().force_put_room(id, &renamed).expect("rename");
+    // The human rename `room_rename` performs (ticket T6) — the production
+    // path, not a test-only stand-in.
+    rename_room(&kg.store(), id, "sprint-notes").expect("rename");
 
     backfill_rooms(&kg, &drawers).expect("second pass");
     let after = kg.store().get_room(id).unwrap().expect("row survives");
@@ -414,4 +411,132 @@ fn filter_id_matches_write_path_after_backfill() {
         crate::memory_core::store::rooms::resolve_room_filter_id(&kg, &room),
         drawer.room_id
     );
+}
+
+// ── T10: the dry-run plan, and that it writes nothing ────────────────────
+
+/// Raw `(key, value)` pairs from one redb table.
+type RawRows = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// Raw `(key, value)` bytes of the room tables AND the drawer table.
+///
+/// Why: `--dry-run` must be provably read-only. A decoded comparison would
+/// miss a rewrite that round-trips to the same value, and comparing the
+/// database FILES cannot work at all — redb rewrites its own header when a
+/// database is opened, even for a pure read. The table bytes are the right
+/// instrument: they change if and only if a row was written.
+fn room_registry_snapshot(kg: &KnowledgeGraph) -> (RawRows, RawRows) {
+    (
+        kg.store().raw_room_rows().expect("raw rooms"),
+        kg.store().raw_drawer_rows().expect("raw drawers"),
+    )
+}
+
+#[test]
+fn dry_run_plan_writes_nothing() {
+    // ADR-0027 D1.4: the CLI audit path "exits without writing"; `--apply` is
+    // required to write. `plan_rooms` is that audit, so it must not leave a
+    // single row behind — including the schema marker.
+    let (_d, kg) = open_kg();
+    let drawers = vec![
+        seed_legacy_drawer(&kg, &RoomType::General, "a"),
+        seed_legacy_drawer(&kg, &RoomType::Custom("work".to_string()), "b"),
+        seed_legacy_drawer(
+            &kg,
+            &RoomType::Custom("qqqqqqqqqqqqqqqqqq".to_string()),
+            "c",
+        ),
+    ];
+
+    let before = room_registry_snapshot(&kg);
+    assert!(before.0.is_empty(), "no rooms registered yet");
+    assert_eq!(before.1.len(), 3, "three drawers seeded");
+
+    let plan = plan_rooms(&kg, &drawers).expect("plan");
+    // Run it twice — a read that memoises into a write would show up here.
+    let plan_again = plan_rooms(&kg, &drawers).expect("plan again");
+
+    let after = room_registry_snapshot(&kg);
+    assert_eq!(
+        before, after,
+        "a dry-run plan must not change one byte of ROOMS, ROOM_KEYS or DRAWERS"
+    );
+    assert_eq!(
+        kg.store().room_schema_version().unwrap(),
+        None,
+        "the schema marker is a write and must not be stamped by a plan"
+    );
+    assert_eq!(plan, plan_again, "the plan is deterministic");
+    assert_eq!(plan.len(), 3);
+    assert!(plan.iter().all(|e| e.would_insert()));
+    assert!(plan.iter().all(|e| e.drawer_count == 1));
+}
+
+#[test]
+fn plan_matches_what_backfill_inserts() {
+    // The audit and the write must be one implementation, not two that can
+    // disagree — an operator who approves a dry-run gets exactly that.
+    let (_d, kg) = open_kg();
+    let drawers = vec![
+        seed_legacy_drawer(&kg, &RoomType::Planning, "a"),
+        seed_legacy_drawer(&kg, &RoomType::Planning, "b"),
+        seed_legacy_drawer(&kg, &RoomType::Custom("status".to_string()), "c"),
+    ];
+
+    let plan = plan_rooms(&kg, &drawers).expect("plan");
+    assert_eq!(plan.len(), 2);
+    let planned: Vec<(Uuid, String)> = plan.iter().map(|e| (e.room_id, e.label())).collect();
+    assert_eq!(
+        plan.iter()
+            .find(|e| e.room_id == room_to_uuid(&RoomType::Planning))
+            .unwrap()
+            .drawer_count,
+        2
+    );
+
+    let report = backfill_rooms(&kg, &drawers).expect("apply");
+    assert_eq!(report.inserted, 2);
+    let mut written: Vec<(Uuid, String)> = kg
+        .store()
+        .list_rooms()
+        .unwrap()
+        .into_iter()
+        .map(|(id, r)| (id, r.label))
+        .collect();
+    written.sort();
+    let mut planned = planned;
+    planned.sort();
+    assert_eq!(planned, written, "the plan is exactly what was written");
+}
+
+#[test]
+fn plan_reports_registered_rooms_as_untouched() {
+    let (_d, kg) = open_kg();
+    let drawers = vec![seed_legacy_drawer(&kg, &RoomType::General, "a")];
+    backfill_rooms(&kg, &drawers).expect("first pass");
+    rename_room(&kg.store(), room_to_uuid(&RoomType::General), "Everything").expect("rename");
+
+    // Planning over an ALREADY-registered palace must be read-only too — the
+    // empty-table case above cannot catch a same-key overwrite.
+    let before = room_registry_snapshot(&kg);
+    let plan = plan_rooms(&kg, &drawers).expect("plan");
+    assert_eq!(
+        before,
+        room_registry_snapshot(&kg),
+        "planning over registered rooms must not rewrite a single row"
+    );
+    assert_eq!(plan.len(), 1);
+    assert!(
+        !plan[0].would_insert(),
+        "an existing row is never re-inserted"
+    );
+    assert_eq!(
+        plan[0].label(),
+        "Everything",
+        "the plan shows the human's name"
+    );
+    assert!(matches!(
+        plan[0].action,
+        RoomPlanAction::Registered { resolved: true, .. }
+    ));
 }
