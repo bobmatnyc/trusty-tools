@@ -401,6 +401,58 @@ fn tier_s_cap_error(
     ))
 }
 
+/// Count active hot facts across every palace under `data_root`.
+///
+/// Why (#4888): the synchronous counterpart to [`gather_hot_triples`], for
+/// callers with no `AppState` and no async runtime. The count MUST span every
+/// palace, because the injected surface does — a per-palace count would report
+/// 0 for an empty palace while 20 facts were live in the one next to it.
+/// What: enumerates palaces from the filesystem via
+/// `PalaceRegistry::list_palaces`, opens each through `registry` (which caches,
+/// so the target palace is not reopened), and keeps hot-predicate actives. A
+/// palace that fails to open is skipped with a `warn` rather than silently
+/// treated as empty — under-counting here would admit a fact past the cap.
+/// Test: `kuzu_migrate_gate_counts_across_palaces`.
+fn gather_hot_triples_sync(
+    registry: &trusty_common::memory_core::PalaceRegistry,
+    data_root: &std::path::Path,
+) -> Vec<(String, String, String)> {
+    let palaces = match trusty_common::memory_core::PalaceRegistry::list_palaces(data_root) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Tier S sync gate: could not list palaces: {e:#}");
+            Vec::new()
+        }
+    };
+    let mut out = Vec::new();
+    for palace in palaces {
+        let handle = match registry.open_palace(data_root, &palace.id) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(
+                    palace = %palace.id.as_str(),
+                    "Tier S sync gate: skipping unreadable palace: {e:#}",
+                );
+                continue;
+            }
+        };
+        let store = handle.kg.store();
+        match store.list_active(TIER_S_SYNC_SCAN_LIMIT, 0) {
+            Ok(triples) => out.extend(
+                triples
+                    .into_iter()
+                    .filter(|t| is_hot_predicate(&t.predicate))
+                    .map(|t| (t.subject, t.predicate, t.object)),
+            ),
+            Err(e) => tracing::warn!(
+                palace = %palace.id.as_str(),
+                "Tier S sync gate: KG read failed: {e:#}",
+            ),
+        }
+    }
+    out
+}
+
 /// Tier S gate for the offline `kuzu-migrate` import path.
 ///
 /// Why (#4888): the migration asserts `relation.relation_type` verbatim from a
@@ -408,15 +460,32 @@ fn tier_s_cap_error(
 /// four hot predicates would import straight onto the always-injected surface,
 /// past both limits. Unlikely, but the gate is cheap and an enforcement point
 /// with a known hole is worse than none.
-/// What: the same two rules as [`check_tier_s_admission`], applied
-/// synchronously because the importer is blocking and has no `AppState`. It
-/// therefore counts within the palace being imported rather than across the
-/// registry, and takes no admission lock — sound here because the importer is
-/// operator-run, offline, and single-writer. Returns `Ok(())` immediately for
-/// cold predicates, which is every relation type in practice.
-/// Test: `kuzu_migrate_gate_rejects_hot_predicate_over_limits`.
+///
+/// What: the same two rules as [`check_tier_s_admission`], sharing the same
+/// [`tier_s_form_error`] / [`tier_s_cap_error`] primitives so the two gates
+/// cannot drift. Returns `Ok(())` immediately for cold predicates, which is
+/// every relation type in practice.
+///
+/// **Scope:** counts across every palace under `data_root`, via
+/// [`gather_hot_triples_sync`], because that is what reaches the injected
+/// surface. Counting only the palace being imported would let an operator
+/// import a 21st standing fact into an empty palace while another palace was
+/// already at 20 — no concurrency required, one run, and the cap is broken.
+///
+/// **No admission lock**, unlike the async gate. This is a separate decision
+/// from the scope above and rests on its own reasoning: `kuzu-migrate` builds
+/// a fresh `PalaceRegistry`, which defaults to `OpenIntent::ReadOnlyClient`,
+/// so contention with a daemon holding `OpenIntent::Writer` degrades to a
+/// read-only snapshot whose writes fail loudly rather than racing. The
+/// importer is also single-threaded, so there is no second writer to order
+/// against.
+///
+/// Test: `kuzu_migrate_gate_rejects_hot_predicate_over_limits`,
+/// `kuzu_migrate_gate_counts_across_palaces`.
 pub fn check_tier_s_admission_sync(
-    store: &trusty_common::memory_core::store::kg_redb::KgStoreRedb,
+    registry: &trusty_common::memory_core::PalaceRegistry,
+    data_root: &std::path::Path,
+    target_store: &trusty_common::memory_core::store::kg_redb::KgStoreRedb,
     subject: &str,
     predicate: &str,
     object: &str,
@@ -427,26 +496,20 @@ pub fn check_tier_s_admission_sync(
     if let Some(e) = tier_s_form_error(object) {
         return Err(e);
     }
-    // Same replacement rule as the async gate: superseding an active
-    // `(subject, predicate)` does not grow the surface.
-    let existing = store.query_active(subject).unwrap_or_default();
+    // Same replacement rule as the async gate, and palace-scoped for the same
+    // reason: supersession closes the prior interval only within this palace.
+    let existing = target_store.query_active(subject).unwrap_or_default();
     if existing.iter().any(|t| t.predicate == predicate) {
         return Ok(());
     }
-    let active: Vec<(String, String, String)> = store
-        .list_active(TIER_S_SYNC_SCAN_LIMIT, 0)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|t| is_hot_predicate(&t.predicate))
-        .map(|t| (t.subject, t.predicate, t.object))
-        .collect();
+    let active = gather_hot_triples_sync(registry, data_root);
     match tier_s_cap_error(&active, subject, predicate) {
         Some(e) => Err(e),
         None => Ok(()),
     }
 }
 
-/// Scan window for the synchronous gate's active-fact count.
+/// Per-palace scan window for the synchronous gate's active-fact count.
 ///
 /// Why: `list_active` needs a finite limit. Tier S is capped at 20, so any
 /// window comfortably above that answers "is it full?" correctly; 1024 matches

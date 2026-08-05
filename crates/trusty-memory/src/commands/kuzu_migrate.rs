@@ -378,6 +378,8 @@ pub fn handle_kuzu_data_migrate(
         // surface past both Tier S limits. Refusals join the existing
         // warn-and-skip path so a bad relation never aborts the import.
         if let Err(e) = crate::prompt_facts::check_tier_s_admission_sync(
+            &registry,
+            &data_root,
             &store,
             &triple.subject,
             &triple.predicate,

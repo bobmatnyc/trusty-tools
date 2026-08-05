@@ -3074,6 +3074,8 @@ async fn kuzu_migrate_gate_rejects_hot_predicate_over_limits() {
 
     // Cold relation type — the ordinary case, admitted regardless of length.
     crate::prompt_facts::check_tier_s_admission_sync(
+        &state.registry,
+        &state.data_root,
         &store,
         "entity:a",
         "relates_to",
@@ -3083,6 +3085,8 @@ async fn kuzu_migrate_gate_rejects_hot_predicate_over_limits() {
 
     // Hot predicate over the form limit — refused.
     let err = crate::prompt_facts::check_tier_s_admission_sync(
+        &state.registry,
+        &state.data_root,
         &store,
         "entity:a",
         "is_fact",
@@ -3094,6 +3098,8 @@ async fn kuzu_migrate_gate_rejects_hot_predicate_over_limits() {
     // Hot predicate at the cap — refused.
     fill_tier_s(&state, "kuzu", crate::prompt_facts::TIER_S_MAX_FACTS).await;
     let err = crate::prompt_facts::check_tier_s_admission_sync(
+        &state.registry,
+        &state.data_root,
         &store,
         "entity:b",
         "is_fact",
@@ -3101,4 +3107,51 @@ async fn kuzu_migrate_gate_rejects_hot_predicate_over_limits() {
     )
     .expect_err("a hot predicate at the cap must be refused");
     assert!(format!("{err:#}").contains("Tier S is full"), "{err:#}");
+}
+
+/// Why (#4888): the sync gate must count across every palace, because the
+/// injected surface does. Counting only the palace being imported reported 0
+/// for an empty target while 20 facts were live next door — one operator, one
+/// run, no concurrency, and the cap silently broke. This test fails against a
+/// per-palace count.
+#[tokio::test]
+async fn kuzu_migrate_gate_counts_across_palaces() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "full-one"}))
+        .await
+        .expect("palace_create");
+    dispatch_tool(&state, "palace_create", json!({"name": "empty-two"}))
+        .await
+        .expect("palace_create");
+
+    // Palace A holds the entire Tier S budget; palace B is untouched.
+    fill_tier_s(&state, "full-one", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let target = crate::tools::helpers::open_palace_handle(&state, "empty-two").expect("handle");
+    let target_store = target.kg.store();
+    // Cold bookkeeping triples from `palace_create` are fine; what matters is
+    // that the target holds no Tier S facts of its own, so a per-palace count
+    // would see 0 here.
+    assert!(
+        !target_store
+            .list_active(64, 0)
+            .expect("list_active")
+            .iter()
+            .any(|t| crate::prompt_facts::is_hot_predicate(&t.predicate)),
+        "the import target must hold no hot facts — that is the whole point",
+    );
+
+    let err = crate::prompt_facts::check_tier_s_admission_sync(
+        &state.registry,
+        &state.data_root,
+        &target_store,
+        "entity:x",
+        "is_fact",
+        "a 21st standing fact arriving through the offline importer",
+    )
+    .expect_err("importing into an empty palace must still see the full surface");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("Tier S is full"), "{msg}");
+    // The inventory names the facts from the OTHER palace.
+    assert!(msg.contains("rule-0 has_convention"), "{msg}");
 }
