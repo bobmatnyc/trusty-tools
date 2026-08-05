@@ -125,7 +125,10 @@ fn provisioning_message(label: Option<&str>, detail: Option<&str>) -> String {
 /// clone-percent progress, before attaching.
 /// What: (1) shows a `trusty_progress` spinner (auto-hidden in non-TTY/plain
 /// output); (2) POSTs `{ repo_url, ref: "HEAD", task: "", force_new: true,
-/// background: true }`; (3) if the daemon answered synchronously (`201` with a
+/// background: true }`, plus `name_hint` when the caller supplied one (#4965 —
+/// the picker's `n <name>`; the key is omitted entirely for `None`, so the
+/// unnamed path's wire shape is unchanged); (3) if the daemon answered
+/// synchronously (`201` with a
 /// name — an older daemon ignoring `background`) attaches immediately; (4)
 /// otherwise polls `GET .../{id}/provision-status` every [`POLL_INTERVAL`] up
 /// to [`PROVISION_DEADLINE`], upgrading the spinner via [`provisioning_message`]
@@ -143,6 +146,7 @@ pub(crate) async fn launch_new_session_and_attach(
     client: &reqwest::Client,
     url: &str,
     repo_url: &str,
+    name_hint: Option<&str>,
 ) -> anyhow::Result<AttachOutcome> {
     let first_run = needs_first_run_clone(repo_url);
     let progress_output = trusty_progress::Output::to_stderr();
@@ -151,21 +155,30 @@ pub(crate) async fn launch_new_session_and_attach(
         spawn_progress_message(first_run.as_ref()),
     );
 
+    let mut body = serde_json::json!({
+        "repo_url": repo_url,
+        "ref": "HEAD",
+        "task": "",
+        // #2450: the picker's EXPLICIT "launch new session" choice — force a
+        // fresh session so the daemon's in-project reconnect pre-flight
+        // (#1707) never adopts an unrelated live session for this project.
+        "force_new": true,
+        // #2605: provision asynchronously — the POST returns a job id
+        // immediately and we poll for progress, so a large-repo clone can
+        // never outlast the client's HTTP timeout.
+        "background": true,
+    });
+    // #4965: added only when the operator named the session (`n <name>`) —
+    // `body` is a literal object, so the index-assign always inserts. Omitting
+    // the key for `None` keeps the unnamed request byte-identical to what
+    // `session::start`'s wire-shape tests already pin.
+    if let Some(hint) = name_hint {
+        body["name_hint"] = serde_json::Value::String(hint.to_string());
+    }
+
     let send_result = client
         .post(format!("{url}/api/v1/sessions/managed"))
-        .json(&serde_json::json!({
-            "repo_url": repo_url,
-            "ref": "HEAD",
-            "task": "",
-            // #2450: the picker's EXPLICIT "launch new session" choice — force a
-            // fresh session so the daemon's in-project reconnect pre-flight
-            // (#1707) never adopts an unrelated live session for this project.
-            "force_new": true,
-            // #2605: provision asynchronously — the POST returns a job id
-            // immediately and we poll for progress, so a large-repo clone can
-            // never outlast the client's HTTP timeout.
-            "background": true,
-        }))
+        .json(&body)
         .send()
         .await;
 

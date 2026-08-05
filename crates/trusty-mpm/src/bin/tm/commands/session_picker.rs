@@ -67,8 +67,12 @@ use super::managed::filter_live_sessions;
 pub(crate) enum PickerDecision {
     /// Resume the session at this 0-based index into the sessions slice.
     Resume(usize),
-    /// Launch a brand-new session.
-    LaunchNew,
+    /// Launch a brand-new session, optionally with an operator-supplied name
+    /// hint (#4965). `None` — the bare-Enter, `[N]` and bare-`n` paths — lets
+    /// the daemon derive the name from the repo as it always has; `Some(name)`
+    /// — typed as `n <name>` — forwards the raw string as `name_hint`, which
+    /// `trusty_common::session_naming` sanitizes daemon-side.
+    LaunchNew(Option<String>),
     /// User chose to quit without action.
     Quit,
     /// Input was not recognised; the caller quits cleanly.
@@ -708,14 +712,18 @@ pub(crate) fn decide_for_index(
 ///   • `"q"` / `"Q"` → `Quit`
 ///   • `"ls"` / `"list"` (case-insensitive, #3863) → `ListSessions` — re-print
 ///     the current list in place, never a selection
-///   • empty / whitespace, `sessions` empty → `LaunchNew`
+///   • empty / whitespace, `sessions` empty → `LaunchNew(None)`
 ///   • empty / whitespace, `sessions` non-empty → [`decide_for_index`] on
 ///     position 0, gated by `first_needs_restart`
 ///   • `N` matching some `sessions[i].slot` → [`decide_for_index`] on `i`
 ///     (an EXPLICIT numeric choice never applies the restart-confirm gate —
 ///     it always dispatches directly, confirm or not, per #2148)
 ///   • `N` == `(highest displayed slot) + 1` (or `1` when `sessions` is
-///     empty) → `LaunchNew`
+///     empty) → `LaunchNew(None)`
+///   • `n` / `N` with an empty or whitespace-only remainder → `LaunchNew(None)`
+///     — a slot-independent alias for the numeric launch-new choice (#4965)
+///   • `n<name>` / `n <name>` → `LaunchNew(Some(name))`; the raw trimmed
+///     remainder is forwarded as `name_hint` and sanitized daemon-side
 ///   • `d<N>` / `d <N>` matching a LIVE `sessions[i].slot` → `Delete(i)`
 ///     (#2304); the driver still runs a confirm/force-confirm prompt before
 ///     deleting. Matching a TOMBSTONED slot → `SlotDeleted(i)` (#3034 — no
@@ -738,7 +746,10 @@ pub(crate) fn decide_for_index(
 /// `guided_picker_delete_prefix_on_deleted_slot_blocked`,
 /// `guided_picker_launch_new_uses_highest_slot_with_gaps`,
 /// `guided_picker_ls_returns_list_sessions`,
-/// `guided_picker_list_returns_list_sessions`.
+/// `guided_picker_list_returns_list_sessions`,
+/// `guided_picker_n_launches_new_unnamed`,
+/// `guided_picker_n_with_argument_carries_name_hint`,
+/// `guided_picker_n_does_not_shadow_other_commands`.
 pub(crate) fn parse_picker_choice(
     line: &str,
     sessions: &[ManagedSessionSummary],
@@ -803,9 +814,24 @@ pub(crate) fn parse_picker_choice(
             None => PickerDecision::Unrecognised,
         };
     }
+    // #4965: `n` / `n <name>` launches a new session. The numeric launch-new
+    // slot moves as sessions come and go, so there was nothing to memorize and
+    // no way to name the result — every other spawn surface already accepts a
+    // `name_hint`. Parsed with the same `strip_prefix` shape as `d<N>`/`r<N>`,
+    // and after them so those prefixes stay unambiguous. The remainder is
+    // passed through raw: `session_naming::resolve_session_name` lowercases,
+    // collapses separators and truncates it daemon-side, so validating here
+    // would only duplicate (and eventually contradict) that.
+    if let Some(rest) = choice.strip_prefix(['n', 'N']) {
+        let name = rest.trim();
+        return match name.is_empty() {
+            true => PickerDecision::LaunchNew(None),
+            false => PickerDecision::LaunchNew(Some(name.to_string())),
+        };
+    }
     if choice.is_empty() {
         if sessions.is_empty() {
-            return PickerDecision::LaunchNew;
+            return PickerDecision::LaunchNew(None);
         }
         return decide_for_index(sessions, 0, first_needs_restart);
     }
@@ -816,7 +842,7 @@ pub(crate) fn parse_picker_choice(
             return decide_for_index(sessions, idx, false);
         }
         if n == next_slot {
-            return PickerDecision::LaunchNew;
+            return PickerDecision::LaunchNew(None);
         }
     }
     PickerDecision::Unrecognised
@@ -834,8 +860,9 @@ pub(crate) fn parse_picker_choice(
 /// input; propagates attach/launch errors.
 ///   • `Resume(i)` → [`super::guided_resume::resume_guided_session`] which
 ///     handles daemon restart when needed and then attaches internally;
-///   • `LaunchNew` → [`super::guided_launch::launch_new_session_and_attach`] when
-///     the scope carries a `repo_url`; otherwise prints an actionable hint and
+///   • `LaunchNew(name_hint)` → [`super::guided_launch::launch_new_session_and_attach`]
+///     when the scope carries a `repo_url`, forwarding the `n <name>` hint
+///     (#4965) when one was typed; otherwise prints an actionable hint and
 ///     redisplays the menu (fleet-wide `tm ls` has no single launch target);
 ///   • `ConfirmRestart(i)` (#2148) → print a one-line "type the number to
 ///     confirm" notice and redisplay the SAME menu — no daemon round-trip;
@@ -918,9 +945,11 @@ pub(crate) async fn run_tty_picker(
             .map(|s| !s.deleted && super::guided_resume::needs_restart(&s.state))
             .unwrap_or(false);
         if sessions.is_empty() {
-            eprintln!("[Enter] launch new session");
-            eprintln!("[ls]    re-print this list");
-            eprintln!("[q]     quit");
+            eprintln!("[Enter]    launch new session");
+            // #4965: the named form, advertised wherever launch-new is offered.
+            eprintln!("[n <name>] launch new session named <name>");
+            eprintln!("[ls]       re-print this list");
+            eprintln!("[q]        quit");
         } else {
             if stale_slots {
                 // #4230: `tm restart` is a hard error where launchd owns the
@@ -947,6 +976,10 @@ pub(crate) async fn run_tty_picker(
                 );
             }
             eprintln!("[{new_idx}] launch new session");
+            // #4965: `n` is the slot-independent alias for the line above —
+            // the `[{new_idx}]` number shifts as sessions come and go, so it
+            // is nothing an operator can memorize, and it cannot carry a name.
+            eprintln!("[n <name>] launch new session named <name> (e.g. n auth-refactor)");
             eprintln!("[d<N>] delete session N (e.g. d1)");
             eprintln!("[r<N> <new-name>] rename session N (e.g. r1 tm-my-new-name)");
             eprintln!("[ls] re-print this list");
@@ -995,11 +1028,15 @@ pub(crate) async fn run_tty_picker(
                     break;
                 }
             }
-            PickerDecision::LaunchNew => match scope.repo_url.as_deref() {
+            PickerDecision::LaunchNew(name_hint) => match scope.repo_url.as_deref() {
                 Some(repo) => {
-                    let outcome =
-                        super::guided_launch::launch_new_session_and_attach(client, url, repo)
-                            .await?;
+                    let outcome = super::guided_launch::launch_new_session_and_attach(
+                        client,
+                        url,
+                        repo,
+                        name_hint.as_deref(),
+                    )
+                    .await?;
                     if outcome.ends_interactive_loop() {
                         break;
                     }
@@ -1085,8 +1122,8 @@ pub(crate) async fn run_tty_picker(
             // instead — no daemon round-trip.
             PickerDecision::Unrecognised => {
                 eprintln!(
-                    "tm: unrecognised choice '{}' — accepted: 1..{new_idx}, ls, d<N>, \
-                     r<N> <name>, q",
+                    "tm: unrecognised choice '{}' — accepted: 1..{new_idx}, n [<name>], \
+                     ls, d<N>, r<N> <name>, q",
                     line.trim()
                 );
                 continue;
