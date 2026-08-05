@@ -206,59 +206,12 @@ pub(crate) async fn doctor(url: &str, flags: &crate::cli::DoctorFlags) -> anyhow
         other => eprintln!("doctor: unexpected result {other:?}"),
     }
 
-    if flags.prune_stale_skills {
-        prune_stale_skills_locally();
-    }
-
-    if flags.fix_skills {
-        super::doctor_fix_skills::fix_skills_locally(flags.include_frozen);
-    }
+    // #4948: every opt-in local action the report can be followed by lives in
+    // `doctor_repair`, so this file stays the report and the actions stay
+    // together.
+    super::doctor_repair::run_post_report_actions(flags);
 
     Ok(())
-}
-
-/// Hidden `--prune-stale-skills` action — force-remove pre-rename
-/// `~/.claude/skills/mpm-*` directories.
-///
-/// Why: the mpm-*→tm-* skill rename (#1905) never deletes a skill's old
-/// directory when it is renamed (`skill_deployer::deploy_skills` only writes,
-/// never removes). In normal operation this is handled automatically and
-/// silently by the one-time startup migration
-/// (`core::stale_skills::run_stale_mpm_skills_migration_once`); this hidden
-/// flag exists only as a manual escape hatch for troubleshooting (e.g. the
-/// migration marker file was lost or hand-edited). This runs entirely
-/// against the local filesystem — like `tm install` and `tm repair` —
-/// independent of where the daemon (whose report is printed above) happens
-/// to be reachable.
-/// What: resolves `~/.claude/skills/` via [`FrameworkPaths::default`], calls
-/// [`find_stale_mpm_skills`] to list only trusty-mpm's own frozen pre-rename
-/// skill names (never an unrelated `mpm-*` skill from another tool), prints
-/// what it found, then [`remove_stale_mpm_skills`] to delete them.
-/// Test: `core::stale_skills::tests` covers the detection/removal logic this
-/// wraps; this function itself is thin I/O + printing.
-fn prune_stale_skills_locally() {
-    use trusty_mpm::core::paths::FrameworkPaths;
-    use trusty_mpm::core::stale_skills::{find_stale_mpm_skills, remove_stale_mpm_skills};
-
-    let paths = FrameworkPaths::default();
-    let dir = paths.claude_skills_dir();
-    let stale = find_stale_mpm_skills(&dir);
-    if stale.is_empty() {
-        println!(
-            "\nno stale pre-rename mpm-* skills found in {}",
-            dir.display()
-        );
-        return;
-    }
-
-    println!("\nremoving {} stale pre-rename skill(s):", stale.len());
-    for skill in &stale {
-        println!("  - {}", skill.name);
-    }
-    match remove_stale_mpm_skills(&stale) {
-        Ok(n) => println!("removed {n} stale skill directory(ies)"),
-        Err(e) => eprintln!("failed to remove stale skills: {e}"),
-    }
 }
 
 /// `validate` subcommand — diff a workspace's deployed `.claude/{agents,skills}`

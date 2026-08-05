@@ -427,3 +427,122 @@ fn repair_leaves_a_missing_tier_directory_alone() {
         "repair must not create a skills directory it was only inspecting"
     );
 }
+
+/// #4948: a dry run reports exactly the set an apply would rewrite.
+///
+/// Why: the preview is only worth trusting if it is produced by the code that
+/// performs the repair. This asserts the two agree on the SET — same tiers,
+/// same stems, same order — which is what a separate planner would eventually
+/// get wrong.
+#[test]
+fn dry_run_reports_the_same_set_it_would_repair() {
+    let tmp = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let dest = paths.claude_skills_dir();
+    let _src = deploy_real(&dest, "tm-workflow", "v1", None);
+    let reference = reference_of(&[("tm-workflow", "v2")]);
+
+    let previewed = repair_skills_in_mode(
+        &reference,
+        &paths,
+        None,
+        false,
+        backups.path(),
+        RepairMode::DryRun,
+    );
+    assert_eq!(previewed.len(), 1, "{previewed:?}");
+    assert_eq!(
+        previewed[0].action,
+        RepairAction::WouldRepair { existed: true }
+    );
+    assert_eq!(previewed[0].path, dest.join("tm-workflow").join("SKILL.md"));
+    assert!(
+        !previewed[0].changed(),
+        "a preview never counts as a change"
+    );
+
+    let applied = repair_skills(&reference, &paths, None, false, backups.path());
+    let previewed_keys: Vec<_> = previewed
+        .iter()
+        .map(|o| (o.tier, &o.stem, &o.path))
+        .collect();
+    let applied_keys: Vec<_> = applied.iter().map(|o| (o.tier, &o.stem, &o.path)).collect();
+    assert_eq!(
+        previewed_keys, applied_keys,
+        "the preview and the apply disagreed about what to repair"
+    );
+}
+
+/// #4948: the dry run writes NOTHING — not the skill, not a backup, not the
+/// ledger.
+///
+/// Why: `--fix` defaults to this mode, so "changes nothing" is the entire
+/// safety claim. It is asserted against the filesystem, not against the
+/// function's own report.
+#[test]
+fn dry_run_writes_absolutely_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let dest = paths.claude_skills_dir();
+    let _src = deploy_real(&dest, "tm-workflow", "v1", None);
+
+    let skill = dest.join("tm-workflow").join("SKILL.md");
+    let manifest_before =
+        fs::read(dest.join(crate::core::skill_manifest::SKILL_MANIFEST_FILE)).unwrap();
+
+    repair_skills_in_mode(
+        &reference_of(&[("tm-workflow", "v2")]),
+        &paths,
+        None,
+        true,
+        backups.path(),
+        RepairMode::DryRun,
+    );
+
+    assert_eq!(
+        fs::read_to_string(&skill).unwrap(),
+        "v1",
+        "the dry run rewrote the skill"
+    );
+    assert_eq!(
+        fs::read(dest.join(crate::core::skill_manifest::SKILL_MANIFEST_FILE)).unwrap(),
+        manifest_before,
+        "the dry run rewrote the ownership ledger"
+    );
+    assert!(
+        !backups.path().join("operator-home").exists(),
+        "the dry run took a backup, which is itself a write"
+    );
+}
+
+/// #4948: a FROZEN (hand-edited) skill is refused in the preview too.
+///
+/// Why: the preview must not promise a repair the apply path would skip — an
+/// operator reading "would be overwritten" about their own hand-edited file
+/// and then finding it untouched has been told two wrong things at once.
+#[test]
+fn dry_run_still_refuses_a_frozen_skill() {
+    let tmp = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let dest = paths.claude_skills_dir();
+    let _src = deploy_real(&dest, "tm-workflow", "v1", None);
+    hand_edit(&dest, "tm-workflow", "the operator's own edit");
+
+    let previewed = repair_skills_in_mode(
+        &reference_of(&[("tm-workflow", "v2")]),
+        &paths,
+        None,
+        false,
+        backups.path(),
+        RepairMode::DryRun,
+    );
+    assert_eq!(previewed.len(), 1, "{previewed:?}");
+    assert_eq!(previewed[0].action, RepairAction::SkippedFrozen);
+    assert_eq!(
+        fs::read_to_string(dest.join("tm-workflow").join("SKILL.md")).unwrap(),
+        "the operator's own edit"
+    );
+}

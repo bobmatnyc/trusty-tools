@@ -122,8 +122,13 @@ pub(super) fn check_hooks_hygiene(
             "hooks_contamination",
             CheckStatus::Warn,
             format!(
-                "{} project settings file{} carr{} tm hook entries — run `tm hooks clean` \
-                 (dry run first) to remove them: {}",
+                // #4948: name the in-place repair first — an operator reading
+                // this is already running `tm doctor`, and a remedy they have
+                // to remember a different command for is the reason these
+                // findings sat unactioned for weeks.
+                "{} project settings file{} carr{} tm hook entries — `tm doctor --fix` \
+                 previews the removal for this project and `--yes` applies it; \
+                 `tm hooks clean` sweeps every project under $HOME: {}",
                 contaminated.len(),
                 if contaminated.len() == 1 { "" } else { "s" },
                 if contaminated.len() == 1 { "ies" } else { "y" },

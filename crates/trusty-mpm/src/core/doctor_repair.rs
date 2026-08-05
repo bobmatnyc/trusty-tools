@@ -41,8 +41,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::push_guard::{GuardState, HookInstall, inspect_pre_push_guard,
-    install_pre_push_guard};
+use crate::core::push_guard::{
+    GuardState, HookInstall, inspect_pre_push_guard, install_pre_push_guard,
+};
 use crate::core::standalone::hooks::cleanup::clean_settings_file;
 
 /// Whether a repair may write, or is only describing what it would write.
@@ -285,11 +286,7 @@ pub fn refuse_legacy_sources(home: &Path) -> Vec<RepairStep> {
     if let Ok(entries) = std::fs::read_dir(&skills) {
         let mut legacy: Vec<PathBuf> = entries
             .flatten()
-            .filter(|e| {
-                e.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.starts_with("tm-"))
-            })
+            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("tm-")))
             .map(|e| e.path())
             .collect();
         legacy.sort();

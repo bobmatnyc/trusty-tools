@@ -58,7 +58,8 @@ pub(super) fn check_push_guard(project_dir: Option<&Path>) -> DoctorCheck {
             format!(
                 "no cross-branch push guard at {} — a worktree tracking a foreign branch can \
                  force-push over that branch's reviewed lineage (#2867). Install it (idempotent, \
-                 covers every worktree of this clone at once): `tm repair push-guard`",
+                 covers every worktree of this clone at once): `tm repair push-guard`, or \
+                 `tm doctor --fix --yes` (#4948)",
                 path.display()
             ),
         ),
@@ -67,7 +68,7 @@ pub(super) fn check_push_guard(project_dir: Option<&Path>) -> DoctorCheck {
             CheckStatus::Warn,
             format!(
                 "the cross-branch push guard at {} is an older revision (#2867). Upgrade it: \
-                 `tm repair push-guard`",
+                 `tm repair push-guard`, or `tm doctor --fix --yes` (#4948)",
                 path.display()
             ),
         ),
