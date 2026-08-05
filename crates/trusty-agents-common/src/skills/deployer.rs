@@ -27,8 +27,10 @@
 
 use std::path::Path;
 
-use crate::agents::manifest::{Result, atomic_write, checksum};
-use crate::skills::manifest::{SkillManifest, SkillManifestEntry};
+use crate::agents::manifest::{ManifestError, Result, atomic_write, checksum};
+use crate::skills::manifest::{
+    SkillManifest, SkillManifestEntry, SkillManifestSave, with_skill_manifest_lock,
+};
 
 /// Summary of one [`deploy_skills`] run.
 ///
@@ -124,24 +126,56 @@ pub fn deploy_skills_filtered(
     dest: &Path,
     select: impl Fn(&str) -> bool,
 ) -> Result<DeployStats> {
-    let mut stats = DeployStats::default();
-
     // No source directory means nothing to deploy — an empty result, not an
     // error, so a fresh install with no skills still succeeds. This is a
     // legitimate state for a fresh checkout, but it is also indistinguishable
     // from a misconfigured `skill_source_dir()` (e.g. a submodule that failed
     // to initialise) unless we log it — silently returning an empty
     // `DeployStats` previously left operators with no signal that zero
-    // skills were ever considered (A2, tm-skills-portfolio epic).
+    // skills were ever considered (A2, tm-skills-portfolio epic). Checked
+    // BEFORE taking the ledger lock so a no-op deploy neither blocks on a
+    // concurrent writer nor creates a lock sidecar in a directory it will not
+    // touch.
     if !source.is_dir() {
         tracing::warn!(
             source = %source.display(),
             "skill source directory missing — no skills will be deployed"
         );
-        return Ok(stats);
+        return Ok(DeployStats::default());
     }
 
+    // #4881: the ENTIRE load-modify-save cycle runs under the directory's
+    // exclusive ledger lock. Four writers share this target — a session
+    // launch's deploy, `sync-assets`, `tm catalog apply`, and (since #4882) the
+    // project-tier deploy on a version change — and without the lock two of
+    // them that both load before either saves silently drop each other's
+    // entries, after which the files those entries described read as
+    // user-edited and are skipped forever. See
+    // `manifest::with_skill_manifest_lock`.
+    with_skill_manifest_lock(dest, || deploy_skills_locked(source, dest, select))
+}
+
+/// The body of [`deploy_skills_filtered`], run while holding the ledger lock.
+///
+/// Why (#4881): split out so the critical section is a single expression the
+/// lock helper wraps, and so the lock's scope is impossible to misread — every
+/// manifest load, file write, and manifest save in this function happens with
+/// the lock held. Mirrors `agents::deployer::deploy_agents_locked`.
+/// What: the classify/write/save pipeline documented on
+/// [`deploy_skills_filtered`]. Never call it directly; it is unsafe against
+/// concurrent writers by construction.
+/// Test: covered by every `deploy_*` test through the public wrapper, plus
+/// `deploy_blocks_while_the_skill_ledger_lock_is_held`.
+fn deploy_skills_locked(
+    source: &Path,
+    dest: &Path,
+    select: impl Fn(&str) -> bool,
+) -> Result<DeployStats> {
+    let mut stats = DeployStats::default();
+
     let mut manifest = SkillManifest::load(dest);
+    // #4881: the snapshot the compare-and-swap save is checked against.
+    let base = manifest.clone();
     let now = chrono::Utc::now().to_rfc3339();
 
     // Collect skill filenames deterministically so output and tests are stable.
@@ -241,7 +275,20 @@ pub fn deploy_skills_filtered(
         }
     }
 
-    manifest.save(dest)?;
+    // #4881: refuse rather than clobber if the ledger moved under us. Holding
+    // the lock makes that impossible among writers that take it, so a refusal
+    // here means an UNLOCKED writer exists — a bug to surface, not to paper
+    // over. Deploy is idempotent, so the next run redoes this cycle intact.
+    match manifest.save_if_current(dest, &base)? {
+        SkillManifestSave::Written => {}
+        SkillManifestSave::RefusedStale => {
+            return Err(ManifestError::Io(std::io::Error::other(format!(
+                "the skill manifest at {} changed during this deploy — an unlocked \
+                 writer bypassed `with_skill_manifest_lock`; nothing was written",
+                dest.display()
+            ))));
+        }
+    }
 
     Ok(stats)
 }

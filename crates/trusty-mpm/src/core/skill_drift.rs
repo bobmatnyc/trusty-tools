@@ -333,8 +333,18 @@ pub fn audit_deployed_skills(reference: &SkillReference, dest_dir: &Path) -> Tie
             // A tier directory that does not exist, or exists and is empty, was
             // simply never deployed to. One that holds entries WITHOUT a ledger
             // cannot be attributed at all.
+            // #4881: "populated" means DEPLOYED SKILLS, not merely non-empty.
+            // The ledger lock's sidecar (`.trusty-mpm-skills-manifest.json.lock`)
+            // is created when the lock is taken, which is before anything is
+            // written — counting it would report a tier that was never deployed
+            // to as unattributable, and `tm doctor` would call it unverifiable.
+            // Every deployed skill is a `<stem>/` directory, so dot-prefixed
+            // entries are bookkeeping by construction.
             let populated = std::fs::read_dir(dest_dir)
-                .map(|mut d| d.next().is_some())
+                .map(|d| {
+                    d.flatten()
+                        .any(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                })
                 .unwrap_or(false);
             if populated {
                 ManifestState::AbsentButPopulated

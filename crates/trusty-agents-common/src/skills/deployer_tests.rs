@@ -365,3 +365,62 @@ fn deploy_single_file_skill_has_no_references_dir() {
 
     assert!(!tgt.path().join("tm-doctor").join("references").exists());
 }
+
+#[test]
+fn deploy_blocks_while_the_skill_ledger_lock_is_held() {
+    // #4881: proves the WHOLE load-modify-save cycle is inside the lock, not
+    // just the save. The main thread holds the target's ledger lock; a deploy
+    // running concurrently must not finish, or write anything, until that lock
+    // is released.
+    //
+    // Deterministic in both directions, with no reliance on scheduling luck:
+    // an UNLOCKED deploy of two tiny files completes in well under a
+    // millisecond, so the 2s "still blocked?" probe cannot pass by accident;
+    // and a deploy that IS blocked on `flock` stays blocked for exactly as long
+    // as the lock is held, so the locked version cannot fail by accident.
+    use std::sync::mpsc;
+
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+
+    let (tx, rx) = mpsc::channel();
+    let src_path = src.path().to_path_buf();
+    let deploy_target = tgt.path().to_path_buf();
+    let deployed_marker = tgt.path().join("tm-doctor").join("SKILL.md");
+
+    // The handle leaves the critical section rather than being joined inside
+    // it: the deploy cannot finish until we release, so joining under the lock
+    // would deadlock this test rather than exercise it.
+    let handle = crate::skills::manifest::with_skill_manifest_lock::<_, ManifestError, _>(
+        tgt.path(),
+        || {
+            let handle = std::thread::spawn(move || {
+                tx.send(deploy_skills(&src_path, &deploy_target).unwrap())
+                    .ok();
+            });
+
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(2)).is_err(),
+                "deploy completed while the skill ledger lock was held — its \
+                 load-modify-save is not inside the lock"
+            );
+            assert!(
+                !deployed_marker.exists(),
+                "deploy wrote a skill file while the ledger lock was held"
+            );
+            Ok(handle)
+        },
+    )
+    .unwrap();
+
+    handle.join().unwrap();
+    let stats = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("deploy must complete once the lock is released");
+    assert_eq!(stats.deployed.len(), 2);
+    assert!(
+        SkillManifest::load(tgt.path()).is_managed("tm-doctor"),
+        "the released deploy must have recorded its entries"
+    );
+}

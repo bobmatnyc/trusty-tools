@@ -33,7 +33,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::agents::manifest::{Result, checksum};
-use crate::skills::manifest::{SkillManifest, SkillManifestEntry};
+use crate::skills::manifest::{SkillManifest, SkillManifestEntry, with_skill_manifest_lock};
 use crate::skills::unmanaged::{UnmanagedBundledSkill, unmanaged_bundled_skills};
 
 /// Filename of the per-backup-root ledger of what was copied where.
@@ -88,6 +88,30 @@ pub struct AdoptedSkill {
 /// `adopt_backs_up_before_recording`, `adopt_leaves_an_operator_skill_alone`,
 /// `adopt_then_deploy_refreshes_a_stale_skill`, `adopt_no_findings_writes_nothing`.
 pub fn adopt_unmanaged_bundled_skills(
+    dest: &Path,
+    bundled: &BTreeSet<String>,
+    backup_root: &Path,
+) -> Result<Vec<AdoptedSkill>> {
+    // #4881: cheap read-only precheck OUTSIDE the lock, so a no-op adoption
+    // neither blocks on a concurrent writer nor leaves a lock sidecar in a
+    // directory it will not touch — `adopt_no_findings_writes_nothing` holds
+    // the target byte-identical. The authoritative scan happens again inside.
+    if unmanaged_bundled_skills(dest, bundled).is_empty() {
+        return Ok(Vec::new());
+    }
+    with_skill_manifest_lock(dest, || adopt_locked(dest, bundled, backup_root))
+}
+
+/// The body of [`adopt_unmanaged_bundled_skills`], run holding the ledger lock.
+///
+/// Why (#4881): adoption is a load-modify-save of the same ledger the deployer
+/// writes; unlocked, it drops whatever a concurrent deploy recorded. Never call
+/// it directly, and never from inside another [`with_skill_manifest_lock`] on
+/// the same directory (`flock` on a second descriptor self-deadlocks).
+/// What: the scan/back-up/record pipeline documented on the public wrapper.
+/// Test: the `adopt_*` tests in `reconcile_tests.rs` exercise it through that
+/// wrapper.
+fn adopt_locked(
     dest: &Path,
     bundled: &BTreeSet<String>,
     backup_root: &Path,
