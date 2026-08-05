@@ -519,8 +519,11 @@ fn deployed_agent_dirs_from_is_pure_and_ordered() {
 fn deployed_agent_dirs_from_skips_absent_managed_tier() {
     // A stripped environment resolves no managed config dir; the remaining two
     // tiers must keep their relative order rather than shifting a placeholder in.
-    let dirs =
-        deployed_agent_dirs_from(Path::new("/proj"), None, Path::new("/home/u/.claude/agents"));
+    let dirs = deployed_agent_dirs_from(
+        Path::new("/proj"),
+        None,
+        Path::new("/home/u/.claude/agents"),
+    );
     assert_eq!(
         dirs,
         vec![

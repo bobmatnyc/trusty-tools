@@ -56,10 +56,22 @@ const PROJECT: &str = "<project>";
 /// dead pointer.
 /// What: `(repo-relative path, what it holds)`.
 const REPO_DOCS: &[(&str, &str)] = &[
-    ("docs/adr/INDEX.md", "Index of every architecture decision record — the ADR is the authority on why a mechanism is shaped the way it is."),
-    ("docs/specs/README.md", "Index of the numbered DOC-* specs (behaviour contracts). A spec, not an ADR, is what a source file's `# Spec References` block links back to."),
-    ("docs/reference/", "Operational reference: release workflow, worktree discipline, SLOC cap, environment variables, threat model."),
-    ("docs/SUMMARY.md", "mdBook table of contents spanning every crate's docs."),
+    (
+        "docs/adr/INDEX.md",
+        "Index of every architecture decision record — the ADR is the authority on why a mechanism is shaped the way it is.",
+    ),
+    (
+        "docs/specs/README.md",
+        "Index of the numbered DOC-* specs (behaviour contracts). A spec, not an ADR, is what a source file's `# Spec References` block links back to.",
+    ),
+    (
+        "docs/reference/",
+        "Operational reference: release workflow, worktree discipline, SLOC cap, environment variables, threat model.",
+    ),
+    (
+        "docs/SUMMARY.md",
+        "mdBook table of contents spanning every crate's docs.",
+    ),
 ];
 
 /// Commands that report the harness's LIVE state, rather than this catalog's
@@ -130,7 +142,10 @@ fn render_layout(out: &mut String, paths: &FrameworkPaths, managed: &Path) {
             &paths.framework,
             "tm-owned, auto-materialised bundled tree. Never hand-edit — `tm install` and session prep overwrite it.",
         ),
-        (&paths.agents, "Bundled agent SOURCE files (pre-composition)."),
+        (
+            &paths.agents,
+            "Bundled agent SOURCE files (pre-composition).",
+        ),
         (
             &paths.skills,
             "Bundled skill SOURCE files, re-materialised whenever the binary's embedded bundle fingerprint changes.",
