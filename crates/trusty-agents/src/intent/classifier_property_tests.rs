@@ -12,12 +12,21 @@
 //!
 //! Then copy this file to `src/intent/property_tests.rs`.
 //!
-//! ## Coverage: 22 tests
+//! ## Coverage
 //!
 //! - Invariants: totality (never panics), determinism, whitespace invariance
 //! - Slash prefix always Implementation
-//! - Action verb dominance across all verb x context combinations (23 * 6 = 138 cases)
-//! - Word count boundary sweep (1-15 words)
+//! - #4319 OWNER DECISION (2026-07-29, final iteration — seventh follow-up):
+//!   NO verb — hard or plain — is evidence for `Implementation`, alone or
+//!   corroborated by ANY word list. `no_verb_ever_reaches_implementation_from_context_alone`
+//!   below systematically pairs all 23 `ACTION_VERBS` (including the 4
+//!   `route::TCODE_HARD_VERBS`) against all 46 `TECHNICAL_CONTEXT_WORDS`
+//!   entries (1058 combinations) and asserts none reach `Implementation` —
+//!   this supersedes the round-6 property tests, which only ever verified
+//!   the opposite (that hard verbs DID reach Implementation when
+//!   corroborated), a design round 7 deleted after it was proven unsafe.
+//! - Word count boundary sweep (1-30 words, all Conversational absent
+//!   verb/question signals — #4319)
 //! - Constant-list completeness guards (count, lowercase, no duplicates, no overlap)
 //! - Regression: underscored identifiers must not split into action verbs
 
@@ -120,51 +129,176 @@ fn slash_prefix_always_implementation() {
 }
 
 // =====================================================================
-// Invariant 5: Any input containing an action verb must return Implementation
+// Invariant 5 (REPLACED, #4319 OWNER DECISION, 2026-07-29, final iteration —
+// seventh follow-up): round 6 gave the 4 `route::TCODE_HARD_VERBS`
+// (fix/debug/implement/refactor) a "wins if corroborated by a
+// `TECHNICAL_CONTEXT_WORDS` word" path to `Implementation` — code-critic's
+// CRITICAL sixth follow-up then proved that STILL crashes on ordinary
+// sentences using words already in that exact list ("fix my gym session",
+// "debug the incident report from the fender bender", "refactor the outage
+// in our friendship", and ~24 more — see `classifier_regression_tests.rs`'s
+// `hard_verb_polysemy_with_everyday_sense_context_word_is_research_not_implementation`).
+// The owner's final ruling: no word list, of any size or care, can carry
+// the weight of deciding `Implementation` — the failure is structural (verb
+// + word list is exploitable BY CONSTRUCTION, since it can never tell "the
+// bug" the software defect from "a bug" the insect), not a gap to patch.
+// So this section no longer tests "does a corroborated hard verb reach
+// Implementation" (it never does, for any verb, now) — it tests the
+// OPPOSITE property exhaustively: pair EVERY `ACTION_VERBS` entry (all 23,
+// hard and plain treated identically) against EVERY `TECHNICAL_CONTEXT_WORDS`
+// entry (all 46) and confirm NONE of the resulting 1058 combinations reach
+// Implementation. This is a superset of, and supersedes, every prior
+// hand-curated regression list in this section.
 // =====================================================================
 
 #[test]
-fn action_verb_always_dominates() {
-    let action_verbs = [
-        "write",
-        "create",
-        "build",
-        "run",
-        "fix",
-        "implement",
-        "add",
-        "update",
-        "delete",
-        "test",
-        "deploy",
-        "generate",
-        "show",
-        "list",
-        "find",
-        "search",
-        "refactor",
-        "remove",
-        "rename",
-        "install",
-        "compile",
-        "debug",
-        "check",
+fn no_verb_ever_reaches_implementation_from_a_context_word_alone() {
+    // Exhaustive sweep: every ACTION_VERBS entry (23, hard and plain
+    // identically — the hard-verb/plain-verb distinction only still exists
+    // in `route.rs`'s separate `route_task`, never in `classify_intent`)
+    // paired with every TECHNICAL_CONTEXT_WORDS entry (46) in a generic
+    // "{verb} the {word}" template. None of these 1058 combinations may
+    // reach Implementation; each has exactly one action verb and one
+    // context word and no other signal (no question word, no research
+    // verb, no file token, no snake_case identifier, no error marker), so
+    // each must land on Research via the `has_action_verb &&
+    // has_technical_context_word` rule.
+    for verb in ACTION_VERBS {
+        for word in TECHNICAL_CONTEXT_WORDS {
+            let input = format!("{verb} the {word}");
+            assert_ne!(
+                classify_intent(&input),
+                IntentClass::Implementation,
+                "'{input}' (verb '{verb}' + context word '{word}') must NEVER reach Implementation — \
+                 no word list, of any size, feeds the Implementation decision"
+            );
+            assert_eq!(
+                classify_intent(&input),
+                IntentClass::Research,
+                "'{input}' should land on Research"
+            );
+        }
+    }
+}
+
+#[test]
+fn hard_verbs_never_reach_implementation_from_bare_verb_alone() {
+    let hard_verbs = ["fix", "debug", "implement", "refactor"];
+    let context_free = ["{v} something", "please {v} the thing"];
+    let never_implementation = [
+        "can you {v} it",
+        "explain how to {v} a test",
+        "what should I {v}",
+        // "hello, {v} a script" used to reach Implementation once
+        // corroborated by "script" (a TECHNICAL_CONTEXT_WORDS entry) — round
+        // 7 deletes that path too, so it now lands on Research like every
+        // other verb+context-word combination.
+        "hello, {v} a script",
     ];
-    let contexts = [
-        "{v} something",
-        "please {v} the thing",
+
+    for verb in &hard_verbs {
+        for ctx in &context_free {
+            let input = ctx.replace("{v}", verb);
+            assert_eq!(
+                classify_intent(&input),
+                IntentClass::Conversational,
+                "hard verb '{}' in context-free '{}' should be Conversational, not Implementation",
+                verb,
+                input
+            );
+        }
+        for ctx in &never_implementation {
+            let input = ctx.replace("{v}", verb);
+            assert_ne!(
+                classify_intent(&input),
+                IntentClass::Implementation,
+                "hard verb '{}' in '{}' must NEVER reach Implementation — no verb does, now",
+                verb,
+                input
+            );
+            assert_eq!(
+                classify_intent(&input),
+                IntentClass::Research,
+                "hard verb '{}' in '{}' should land on Research",
+                verb,
+                input
+            );
+        }
+    }
+}
+
+#[test]
+fn hard_verbs_never_reach_implementation_against_genuinely_non_technical_objects() {
+    // Code-critic CRITICAL fifth follow-up (2026-07-29): exercises each hard
+    // verb against objects with an UNAMBIGUOUSLY non-technical, everyday
+    // reading and NO other signal. None of these 36 combinations (4 verbs x
+    // 9 objects) should ever reach Implementation — with no context word
+    // present, they fall through to Conversational.
+    let hard_verbs = ["fix", "debug", "implement", "refactor"];
+    let non_technical_objects = [
+        "a drink",
+        "my hair",
+        "breakfast",
+        "my schedule",
+        "my life",
+        "a new morning routine",
+        "better habits",
+        "why I feel anxious",
+        "me up with your friend",
+    ];
+    for verb in &hard_verbs {
+        for obj in &non_technical_objects {
+            let input = format!("{verb} {obj}");
+            assert_eq!(
+                classify_intent(&input),
+                IntentClass::Conversational,
+                "hard verb '{}' with non-technical object '{}' ('{}') must land on Conversational",
+                verb,
+                obj,
+                input
+            );
+        }
+    }
+}
+
+#[test]
+fn plain_action_verbs_never_reach_implementation_from_context_alone() {
+    let plain_verbs = [
+        "write", "create", "build", "run", "add", "update", "delete", "test", "deploy", "generate",
+        "show", "list", "find", "search", "remove", "rename", "install", "compile", "check",
+    ];
+    let context_free = ["{v} something", "please {v} the thing"];
+    let never_implementation = [
         "can you {v} it",
         "explain how to {v} a test",
         "what should I {v}",
         "hello, {v} a script",
     ];
-    for verb in &action_verbs {
-        for ctx in &contexts {
+
+    for verb in &plain_verbs {
+        for ctx in &context_free {
             let input = ctx.replace("{v}", verb);
             assert_eq!(
                 classify_intent(&input),
+                IntentClass::Conversational,
+                "plain verb '{}' in context-free '{}' should be Conversational, not Implementation",
+                verb,
+                input
+            );
+        }
+        for ctx in &never_implementation {
+            let input = ctx.replace("{v}", verb);
+            assert_ne!(
+                classify_intent(&input),
                 IntentClass::Implementation,
-                "action verb '{}' in '{}' should be Implementation",
+                "plain verb '{}' in '{}' must NEVER reach Implementation from context alone",
+                verb,
+                input
+            );
+            assert_eq!(
+                classify_intent(&input),
+                IntentClass::Research,
+                "plain verb '{}' in '{}' should land on Research",
                 verb,
                 input
             );
@@ -174,6 +308,10 @@ fn action_verb_always_dominates() {
 
 // =====================================================================
 // Parameterized: word count boundary sweep (no verb signals)
+//
+// #4319: word count alone must NEVER promote a message to Implementation.
+// Every length from 1 to 30 words, absent any action/research verb,
+// question word, or trailing "?", stays Conversational.
 // =====================================================================
 
 #[test]
@@ -196,7 +334,7 @@ fn word_count_boundary_sweep() {
         "probably",
     ];
 
-    for n in 1..=15 {
+    for n in 1..=30 {
         let input: String = filler
             .iter()
             .cycle()
@@ -205,23 +343,13 @@ fn word_count_boundary_sweep() {
             .collect::<Vec<_>>()
             .join(" ");
         let result = classify_intent(&input);
-        if n <= 10 {
-            assert_eq!(
-                result,
-                IntentClass::Conversational,
-                "word_count={} should be Conversational, got {:?}",
-                n,
-                result
-            );
-        } else {
-            assert_eq!(
-                result,
-                IntentClass::Implementation,
-                "word_count={} (>10) should be Implementation, got {:?}",
-                n,
-                result
-            );
-        }
+        assert_eq!(
+            result,
+            IntentClass::Conversational,
+            "word_count={} (no verb signals) should be Conversational, got {:?}",
+            n,
+            result
+        );
     }
 }
 

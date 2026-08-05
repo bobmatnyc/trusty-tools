@@ -13,7 +13,7 @@
 //! commands are always Implementation so the user can force the full pipeline.
 //! Test: `cargo test intent::` exercises greetings, closings, self-questions,
 //! research verbs, question words, action-verb tasks, and edge cases.
-//! See `tests` module below — fixes #199, #203.
+//! See `tests` module below — fixes #199, #203, #4319.
 
 /// Deterministic Tm-vs-Tcode router for the `dispatch_task` bridge tool
 /// (epic #3052, PR B, lane 3).
@@ -48,10 +48,20 @@ pub enum IntentClass {
     Implementation,
 }
 
-/// Action verbs that strongly indicate an implementation request.
-///
-/// Why: Centralizing the verb list as a constant keeps the classifier honest
-/// — any change to "what counts as a task verb" lives in one place.
+/// Action verbs that signal "this is a task, not idle chat" — but, per the
+/// #4319 owner decision (2026-07-29, final iteration), NEVER by themselves
+/// evidence for `IntentClass::Implementation`. Round 2 disproved a bare hit
+/// on this list -> `Implementation` ("can you check if it's raining
+/// tomorrow" crashed); round 6 disproved hard-verb-subset-of-this-list plus
+/// `TECHNICAL_CONTEXT_WORDS` -> `Implementation` (~29 ordinary sentences
+/// crashed). This constant earns its keep for two narrower, lower-stakes
+/// jobs only: (1) suppressing the greeting-prefix short-circuit — "hello,
+/// can you write a script" should NOT collapse to `Conversational` just
+/// because it starts with "hello"; (2) pairing with
+/// `TECHNICAL_CONTEXT_WORDS` to pick `Research` over `Conversational` for an
+/// ambiguous plain-verb-plus-generic-noun sentence. Neither job feeds
+/// `Implementation` — see `classify_intent`'s doc comment for the exhaustive
+/// 4-signal contract.
 /// What: Lowercase verb tokens; matched as whole words against normalized input.
 const ACTION_VERBS: &[&str] = &[
     "write",
@@ -173,6 +183,112 @@ const SELF_QUESTIONS: &[&str] = &[
     "you there",
 ];
 
+/// #4319 (OWNER DECISION, 2026-07-29, final iteration — seventh follow-up):
+/// this list is used ONLY to help choose `Research` vs `Conversational`. It
+/// NEVER feeds `IntentClass::Implementation`, in any combination, with any
+/// verb, hard or plain. That is not new — the second follow-up already
+/// established it — but a SIXTH round briefly reintroduced a "hard verb +
+/// this list" path to `Implementation`, which was then proven unsafe by the
+/// same method (executing the classifier) that found every prior gap: "fix
+/// my gym session", "debug the incident report from the fender bender",
+/// "fix the queue at the deli counter", "refactor the outage in our
+/// friendship", "debug my unresponsive teenager", and ~24 more ordinary
+/// sentences all reached `Implementation` using words ALREADY in this exact
+/// list — not a hypothetical gap, the list itself. The owner's final
+/// decision: no word list, of any size, curated with any amount of care,
+/// can distinguish "the bug" (a software defect) from "a bug in my garden"
+/// (an insect) using only the word `bug`. `Implementation` is now reachable
+/// via exactly 4 signals — none of them a word list — enumerated
+/// exhaustively in `classify_intent`'s doc comment. This list's role is
+/// unchanged from the second follow-up: choosing `Research` over
+/// `Conversational` for a plain-verb-plus-generic-noun sentence or a
+/// verb-less bug report, where the blast radius of a wrong guess is near
+/// zero (in-process, tool-armed, no subprocess either way) — see
+/// `classify_intent`'s doc comment for why that asymmetry is exactly what
+/// makes a word list safe here and unsafe for `Implementation`.
+const TECHNICAL_CONTEXT_WORDS: &[&str] = &[
+    "broken",
+    "failing",
+    "fails",
+    "crash",
+    "crashed",
+    "crashing",
+    "error",
+    "errors",
+    "issue",
+    "issues",
+    "bug",
+    "bugs",
+    "regression",
+    "outage",
+    "incident",
+    "unresponsive",
+    "timeout",
+    "timeouts",
+    "exception",
+    "exceptions",
+    "middleware",
+    "backend",
+    "frontend",
+    "database",
+    "server",
+    "endpoint",
+    "api",
+    "staging",
+    "production",
+    "auth",
+    "authentication",
+    "token",
+    "session",
+    "config",
+    "configuration",
+    "deployment",
+    "credentials",
+    "certificate",
+    "pipeline",
+    "queue",
+    "cache",
+    "container",
+    "script",
+    "codebase",
+    "tests",
+    "release",
+];
+
+/// #4319 (OWNER DECISION, 2026-07-29, final iteration): True when `input`
+/// carries one of the THREE non-slash unambiguous signals — the ENTIRE
+/// evidence base for `IntentClass::Implementation` (together with a leading
+/// `/`, that's all four; see `classify_intent`'s doc comment for the
+/// authoritative enumeration). Deliberately contains NO word list of any
+/// kind — every previous word-list-based attempt at this function (hard
+/// verbs, generic context words, code-artifact nouns) was proven unsafe by
+/// executing the classifier against ordinary English. Combines, all reused
+/// rather than reimplemented: `route::has_repo_file_token` (a `.rs`/`.ts`/
+/// `.py` extension or `src/` path token), `route::has_error_or_stack_trace_marker`
+/// (a raw `error:` marker or a "unit test"/"failing test"/"stack trace"
+/// phrase), and a snake_case-identifier check (a token containing `_`
+/// longer than 3 chars, e.g. `delegate_to_agent` — `normalize` already
+/// preserves underscores for exactly this reason, so recognizing that
+/// preserved shape reuses the SAME design decision rather than adding a
+/// fourth detector).
+/// Test: `classifier_regression_tests::*` (bucket tests), `route_tests::*`.
+fn has_unambiguous_technical_signal(input: &str, words: &[&str]) -> bool {
+    route::has_repo_file_token(input)
+        || route::has_error_or_stack_trace_marker(input)
+        || words.iter().any(|w| w.len() > 3 && w.contains('_'))
+}
+
+/// #4319: True when `input` carries the broader, AMBIGUOUS technical/bug-
+/// report vocabulary in `TECHNICAL_CONTEXT_WORDS` — used ONLY to route
+/// `Research` (a verb-less bug report, or a plain verb plus a generic
+/// context word), NEVER `Implementation`. See `TECHNICAL_CONTEXT_WORDS`'s
+/// doc comment: this function must never be consulted by the
+/// `Implementation` decision, in any combination, with any verb.
+/// Test: `classifier_regression_tests::*` (bug-report and bucket-1 cases).
+fn has_technical_context_word(words: &[&str]) -> bool {
+    words.iter().any(|w| TECHNICAL_CONTEXT_WORDS.contains(w))
+}
+
 /// Strip surrounding/embedded punctuation for matching.
 ///
 /// Why: Users write "Hello!" / "hi." / "hey," — comparing to plain "hello"
@@ -207,11 +323,97 @@ pub(crate) fn normalize(input: &str) -> String {
 /// Why: Lets `submit_task` and `run_pm_task_with_session` route each input
 /// to its cheapest viable path — direct reply (Conversational), in-process
 /// tool-armed loop (Research), or full subprocess pipeline (Implementation).
-/// What: Applies heuristics in priority order — empty, slash command, greeting,
-/// closing, self-question, research-question, action-verb scan, length-based
-/// fallback.
-/// Test: `tests::*` below covers greetings, closings, self-questions, research
-/// verbs, question words, clear task verbs, slash commands, and edge cases.
+///
+/// **#4319 OWNER DECISION (2026-07-29, final iteration — seventh follow-up):
+/// `IntentClass::Implementation` is reachable via EXACTLY these four signals,
+/// and no others. This is the complete, exhaustive list — cross-check it
+/// against the actual `return IntentClass::Implementation` sites in this
+/// function before trusting it; this exact sentence has been wrong before
+/// (see the history below).**
+/// 1. A leading `/` (slash command) — explicit, unambiguous user intent.
+/// 2. A repo-file-shaped token — a path with a separator plus an extension,
+///    or a known source extension (`route::has_repo_file_token`: `.rs`/
+///    `.ts`/`.py`, or a `src/` path token).
+/// 3. A snake_case identifier — a token containing `_`, longer than 3
+///    chars (e.g. `delegate_to_agent`).
+/// 4. An explicit error / stack-trace marker (`route::has_error_or_stack_trace_marker`:
+///    a raw `error:` substring, or a "unit test"/"failing test"/"stack
+///    trace" phrase).
+///
+/// Signals 2-4 are combined in `has_unambiguous_technical_signal` and
+/// checked together (no verb of any kind is required for them to fire).
+/// **No word list of any kind — no verb, hard or plain, and no noun —
+/// contributes to this decision, in any combination, at any point in this
+/// function.** Every ambiguous case (a verb-less bug report, a verb plus a
+/// generic noun, or plain conversational text with no signal at all) routes
+/// to `Research` instead: in-process, tool-armed — the PM decides, and can
+/// still invoke `dispatch_task` when it judges the work warrants it
+/// (`ctrl::pm_task::dispatch::history::run_pm_task_with_history` registers
+/// `PmBridgeTool` unconditionally for any non-`Conversational`
+/// classification — its only intent-based branch is a `Conversational`-only
+/// fast-path skip). A wrong `Research` guess costs one extra decision hop;
+/// a wrong `Implementation` guess (in the one path that still distinguishes
+/// them, `api::server::handlers`'s subprocess-workflow branch) crashes the
+/// chat. `TECHNICAL_CONTEXT_WORDS`/`ACTION_VERBS` still exist, but ONLY to
+/// help choose `Research` over `Conversational` for that ambiguous middle
+/// ground — see their own doc comments; neither is consulted by the
+/// `Implementation` decision anywhere in this function.
+///
+/// This is the seventh and, the owner has stated, final iteration on this
+/// exact question, arrived at only after six narrower designs were each
+/// disproven by executing the classifier against ordinary English:
+/// 1. (Original #4319) word count over 10 -> `Implementation`. Disproven:
+///    "confirm the research agent is available" (an ordinary check-in)
+///    crashed.
+/// 2. A bare `ACTION_VERBS` hit -> `Implementation`. Disproven: "can you
+///    check if it's raining tomorrow" crashed.
+/// 3. A plain verb plus ANY `TECHNICAL_CONTEXT_WORDS` co-occurrence ->
+///    `Implementation`. Disproven: "check my token balance" crashed.
+/// 4. The above, plus a narrow "tests"/"release" carve-out for "run the
+///    tests"/"build the release" -> `Implementation`. Disproven: "check my
+///    blood tests" / "check the release date of the movie" crashed.
+/// 5. An unconditional `"help me "` prefix -> `Implementation` (pre-existing
+///    on `origin/main`, predating all of the above). Disproven: "help me
+///    relax" / "help me plan my week" and 11 more ordinary
+///    requests-for-assistance crashed.
+/// 6. A hard verb (fix/debug/implement/refactor) plus a
+///    `TECHNICAL_CONTEXT_WORDS` co-occurrence -> `Implementation`.
+///    Disproven: "fix my gym session", "debug the incident report from the
+///    fender bender", "refactor the outage in our friendship", and ~26 more
+///    ordinary sentences crashed — using words ALREADY in
+///    `TECHNICAL_CONTEXT_WORDS`, proving the failure was structural (any
+///    word list combined with any verb is exploitable this way), not a gap
+///    in that list's coverage. The regression tests for round 6 were
+///    themselves written to confirm the design rather than probe it (they
+///    asserted the broken combination didn't occur, rather than searching
+///    for sentences where it did) — the signal that this whole approach
+///    (verb + word list, however corroborated) cannot converge, which is
+///    why round 7 removes word lists from the decision entirely rather than
+///    narrowing them further.
+///
+/// There is no known residual risk of the SAME shape as rounds 1-6: none of
+/// the four signals above depend on a word list, so there is no vocabulary
+/// gap left to close. Signals 2-4 are syntactic (a file extension, an
+/// underscore, a literal `error:`/phrase), not semantic, so they don't carry
+/// the polysemy that broke every word-list-based design. This is a
+/// structural difference, not a promise that the syntactic checks
+/// themselves are flawless in every case (e.g. a snake_case token could in
+/// principle appear in non-code prose) — any such case, if found, should be
+/// added as a new verified regression test rather than reopening a word
+/// list.
+/// Test: `tests::*` below covers greetings, closings, self-questions,
+/// research verbs, question words, clear task verbs, slash commands, the
+/// #4319 long-conversational-input regression, and edge cases;
+/// `classifier_regression_tests::*` pins the four decision buckets including the
+/// 14-sentence ordinary-noun regression, the 13-phrase "help me" regression,
+/// and the 29-phrase hard-verb-polysemy regression — split into two shapes,
+/// since they resolve differently: 9 phrases pairing a hard verb with a
+/// genuinely non-technical object (no `TECHNICAL_CONTEXT_WORDS` token at
+/// all, e.g. "fix a drink") land on `Conversational`; the other 20 pairing a
+/// hard verb with an object that happens to contain a
+/// `TECHNICAL_CONTEXT_WORDS` token in its everyday sense (e.g. "fix my gym
+/// session") land on `Research`. Neither shape ever reaches `Implementation`
+/// — the whole verb tier is gone.
 pub fn classify_intent(input: &str) -> IntentClass {
     let trimmed = input.trim();
 
@@ -280,44 +482,82 @@ pub fn classify_intent(input: &str) -> IntentClass {
         }
     }
 
-    // Action verbs ALWAYS win — even over question words and research verbs.
-    // "how do I fix this bug" -> Implementation (because "fix" is concrete work).
-    // "explain how to write a test" -> Implementation (because "write" wins).
-    if has_action_verb {
-        return IntentClass::Implementation;
-    }
-
-    // Research signal: starts with question word OR contains a research verb,
-    // and lacks an action verb (checked above).
+    // Research signal: starts with question word OR contains a research
+    // verb. Checked BEFORE `has_unambiguous_technical_signal` below so a
+    // genuine QUESTION about an identifier — "what does run_pm_task do" —
+    // still lands on Research instead of the snake_case-identifier check
+    // alone forcing Implementation. Contrast "find all uses of
+    // delegate_to_agent": no leading question word, so it falls through to
+    // the identifier check below and correctly reaches Implementation.
     if starts_with_question_word || has_research_verb {
         return IntentClass::Research;
     }
 
-    // Question mark on a short input with no action verb -> Research
-    // (e.g. "is bedrock enabled?", "does this support tokio?").
-    if ends_with_question_mark && word_count <= 15 {
+    // #4319 OWNER DECISION (2026-07-29, final iteration): `has_unambiguous_technical_signal`
+    //    — a repo-file-shaped token, a snake_case identifier, or an explicit
+    //    error/stack-trace marker — is the LAST of the 4 TOTAL paths to
+    //    `Implementation` (slash command is the other) — see
+    //    `classify_intent`'s doc comment for the authoritative, exhaustive
+    //    enumeration and the full 7-round history of why every word-list-based
+    //    alternative (hard verbs, generic context words, code-artifact nouns,
+    //    hard verb + context word) was proven unsafe by executing the
+    //    classifier. NO verb of any kind is checked here or anywhere else in
+    //    this function as evidence for `Implementation` — "how do I fix this
+    //    bug" and "debug the auth middleware" now correctly land on `Research`
+    //    (formally rescinded as must-work-Implementation cases by the owner;
+    //    "fix main.rs" still reaches `Implementation` via the file token
+    //    below, and "/fix the thing" via the slash command above).
+    if has_unambiguous_technical_signal(trimmed, &words) {
+        return IntentClass::Implementation;
+    }
+
+    // A trailing question mark is positive evidence of an interrogative, not
+    // a coding command -> Research, regardless of length.
+    if ends_with_question_mark {
         return IntentClass::Research;
     }
 
-    // "help me ..." is an implementation request even though "help" alone
-    // isn't a verb we list (to avoid catching "help?").
-    if normalized.starts_with("help me ") || normalized == "help me" {
-        return IntentClass::Implementation;
+    // A plain verb plus a generic technical-context word ("check my token
+    // balance", "check the staging area before the wedding") is AMBIGUOUS,
+    // not unambiguous — it goes to Research, never Implementation. Proven
+    // regression (second follow-up): treating this combination as
+    // sufficient for Implementation still crashed the subprocess pipeline
+    // on ordinary sentences using common polysemous nouns (token, session,
+    // config, queue, cache, container, timeout, exception, incident,
+    // certificate, production, staging, ...). `TECHNICAL_CONTEXT_WORDS`
+    // earns its keep here — this is a `Research`-vs-`Conversational` choice
+    // only, never `Implementation`.
+    if has_action_verb && has_technical_context_word(&words) {
+        return IntentClass::Research;
     }
 
-    // Short input, no action/research/question signal -> probably conversational.
-    if word_count <= 4 {
-        return IntentClass::Conversational;
+    // A verb-less bug report or incident narrative must not silently drop
+    // to Conversational just because it names no `ACTION_VERBS` word — that
+    // is WORSE than the original bug (a real coding request answered as
+    // chat, with nothing anywhere to signal it happened). Route it to
+    // Research instead: in-process, tool-armed, lets the PM decide with
+    // real tools available, and — critically — never spawns a subprocess.
+    if has_technical_context_word(&words) {
+        return IntentClass::Research;
     }
 
-    // Long input without action verbs but past the threshold -> Implementation.
-    if word_count > 10 {
-        return IntentClass::Implementation;
-    }
-
-    // Ambiguous middle range (5-10 words, no action verb): treat as
-    // conversational. The user can re-issue with an action verb if they
-    // actually wanted delegation.
+    // No positive evidence of ANY kind -> default to the cheap conversational
+    // path. Word count alone is NEVER evidence for `Implementation` (#4319);
+    // neither is any verb (hard or plain), any word list, or a `"help me "`
+    // prefix — see this function's doc comment for the complete, final
+    // 4-signal contract and the full history of why every word-list-based
+    // alternative was disproven.
+    //
+    // Genuine coding requests carrying an unambiguous technical signal or a
+    // slash command still classify `Implementation` here and still reach
+    // Tcode via `route_task` -> `ProcessPmBridge::run_tcode`. "run the
+    // tests"/"build the release" (and, now, "fix the login bug"/"debug the
+    // auth middleware") classify `Research` instead — `dispatch_task` stays
+    // reachable from `Research` regardless, and `route::route_task` (left
+    // UNCHANGED by this round — its word list picks between two safe
+    // backends, not a crash surface) carries its own narrow, route.rs-local
+    // "tests"/"release" exception so `dispatch_task("run the tests")`
+    // still resolves to `Tcode`.
     IntentClass::Conversational
 }
 
@@ -326,8 +566,8 @@ pub fn classify_intent(input: &str) -> IntentClass {
 mod classifier_tests;
 
 #[cfg(test)]
-#[path = "classifier_tests_2.rs"]
-mod classifier_tests_2;
+#[path = "classifier_regression_tests.rs"]
+mod classifier_regression_tests;
 
 #[cfg(test)]
 #[path = "classifier_property_tests.rs"]
