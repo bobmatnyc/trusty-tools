@@ -1885,88 +1885,10 @@ async fn note_succeeds_while_state_is_warming() {
     assert_eq!(result["status"], "stored");
 }
 
-/// Why (issue #1970): `memory_recall` must never block/error on embedder
-/// state — it should degrade to the BM25/L0/L1 fallback and return
-/// normally while the daemon is `Warming`.
-/// What: dispatch `memory_recall` against a Warming state and assert the
-/// call succeeds with a well-formed (possibly empty, since BM25 isn't
-/// wired up in this unit test and L1 isn't live-refreshed mid-process)
-/// results array — the key assertion is the absence of a "warming up"
-/// error, not the result content (see
-/// `bm25_hits_hydrate_from_handle_during_warmup` for content-level
-/// coverage of the fallback's BM25 hydration path).
-/// Test: this test.
-#[tokio::test]
-async fn recall_does_not_error_while_state_is_warming() {
-    let (state, _tmp) = test_state_warming();
-    let _ = dispatch_tool(
-        &state,
-        "palace_create",
-        serde_json::json!({"name": "warmtest-recall"}),
-    )
-    .await
-    .expect("palace_create");
-
-    let result = dispatch_tool(
-        &state,
-        "memory_recall",
-        serde_json::json!({
-            "palace": "warmtest-recall",
-            "query": "test query"
-        }),
-    )
-    .await
-    .expect("memory_recall must not error while Warming (issue #1970)");
-    assert!(result["results"].is_array());
-}
-
-/// Why (issue #1970): `memory_recall_deep` mirrors `memory_recall`'s
-/// warming-fallback posture.
-/// Test: this test.
-#[tokio::test]
-async fn recall_deep_does_not_error_while_state_is_warming() {
-    let (state, _tmp) = test_state_warming();
-    let _ = dispatch_tool(
-        &state,
-        "palace_create",
-        serde_json::json!({"name": "warmtest-recall-deep"}),
-    )
-    .await
-    .expect("palace_create");
-
-    let result = dispatch_tool(
-        &state,
-        "memory_recall_deep",
-        serde_json::json!({
-            "palace": "warmtest-recall-deep",
-            "query": "test query"
-        }),
-    )
-    .await
-    .expect("memory_recall_deep must not error while Warming (issue #1970)");
-    assert!(result["results"].is_array());
-}
-
-/// Why (issue #1970, was #914 Part A): `memory_recall_all` must not error
-/// while `Warming` either — it fans the same BM25/L0/L1 fallback out across
-/// every palace.
-/// Test: this test (regression guard for the gap originally fixed in #914
-/// Part A, now re-targeted at graceful degradation instead of a hard error).
-#[tokio::test]
-async fn recall_all_does_not_error_while_state_is_warming() {
-    let (state, _tmp) = test_state_warming();
-
-    let result = dispatch_tool(
-        &state,
-        "memory_recall_all",
-        serde_json::json!({
-            "q": "test query issued while warming up"
-        }),
-    )
-    .await
-    .expect("memory_recall_all must not error while Warming (issue #1970)");
-    assert!(result["results"].is_array());
-}
+// Issue #1970's degraded-recall tests for memory_recall / memory_recall_deep /
+// memory_recall_all moved to tests/recall_degraded_lane.rs (#4836): they gate on
+// a process-wide embedder cell that `dispatch_remember_then_recall` initialises
+// in this binary, so here they were order-dependent no-ops.
 
 /// Why (issue #1970): `bm25_hits_to_recall_results` is the piece that makes
 /// the warming-fallback recall path actually useful — without it, BM25

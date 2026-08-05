@@ -297,24 +297,6 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     }))
 }
 
-/// Degraded-embedder recall fallback (issue #1970): L0/L1 + BM25 only.
-///
-/// Why: mirrors trusty-search's staged-pipeline degradation — rather than
-/// blocking/erroring while the shared embedder cold-inits, every recall
-/// variant should return identity + essential drawers plus whatever the
-/// BM25 lexical lane can resolve, with the semantic (vector) layer simply
-/// omitted until the embedder warms up.
-/// What: seeds the result set with `retrieve_l0_l1`, joins the optional BM25
-/// lane (query runs regardless of embedder state — BM25 has no embedder
-/// dependency), hydrates any BM25-only hits via `bm25_hits_to_recall_results`,
-/// merges without duplicating drawers already present, re-sorts by score
-/// descending, and truncates to `top_k`.
-/// ADR-0027 T7: `room` scopes the lexical lane here for the same reason it
-/// scopes L2/L3 — a caller who narrowed to one room must never be handed
-/// another room's drawer just because the daemon happened to be warming. L0/L1
-/// are deliberately left unfiltered, matching `retrieval::recall_in_room`.
-/// Test: `recall_falls_back_to_bm25_and_l0_l1_while_warming`,
-/// `recall_deep_falls_back_to_bm25_and_l0_l1_while_warming`.
 /// Whether a recall may use the vector lane, or must take the degraded
 /// L0/L1 + BM25 fallback.
 ///
@@ -337,6 +319,24 @@ fn vector_lane_available(state: &AppState) -> bool {
         || trusty_common::memory_core::retrieval::shared_embedder_initialized()
 }
 
+/// Degraded-embedder recall fallback (issue #1970): L0/L1 + BM25 only.
+///
+/// Why: mirrors trusty-search's staged-pipeline degradation — rather than
+/// blocking/erroring while the shared embedder cold-inits, every recall
+/// variant should return identity + essential drawers plus whatever the
+/// BM25 lexical lane can resolve, with the semantic (vector) layer simply
+/// omitted until the embedder warms up.
+/// What: seeds the result set with `retrieve_l0_l1`, joins the optional BM25
+/// lane (query runs regardless of embedder state — BM25 has no embedder
+/// dependency), hydrates any BM25-only hits via `bm25_hits_to_recall_results`,
+/// merges without duplicating drawers already present, re-sorts by score
+/// descending, and truncates to `top_k`.
+/// ADR-0027 T7: `room` scopes the lexical lane here for the same reason it
+/// scopes L2/L3 — a caller who narrowed to one room must never be handed
+/// another room's drawer just because the daemon happened to be warming. L0/L1
+/// are deliberately left unfiltered, matching `retrieval::recall_in_room`.
+/// Test: `recall_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`,
+/// `recall_deep_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`.
 async fn recall_without_embedder(
     state: &AppState,
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
