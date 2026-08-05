@@ -21,9 +21,25 @@ use super::{ChunkSnapshot, CodeIndexer};
 
 impl CodeIndexer {
     /// Snapshot the HNSW vector store, if one is wired. Best-effort: returns
-    /// `Ok(false)` if no store is attached (BM25-only mode) so callers can
-    /// chain without checking.
+    /// `Ok(false)` if no store is attached (BM25-only mode) or if the index is
+    /// write-quarantined (issue #4226), so callers can chain without checking.
+    ///
+    /// Why the quarantine arm (issue #4226): a corpus-open failure does NOT
+    /// stop the HNSW store from being wired — `build_store_for_entry` runs
+    /// before the corpus open — so the shutdown flush kept saving the graph of
+    /// a quarantined index. `UsearchStore::save`'s own guards do not cover
+    /// this: the #1711 zero-vector guard only protects an EXISTING snapshot,
+    /// and the #1717 shrink guard is inert below
+    /// `SHRINK_GUARD_MIN_ON_DISK_VECTORS` (1 000) on-disk vectors and above a
+    /// 50 % ratio, so a partially-repopulated quarantined index could still
+    /// shrink its graph durably.
+    /// Test: `quarantined_index_refuses_hnsw_snapshot_write` in
+    /// `tests/quarantine_durable_writes_4226.rs`.
     pub async fn save_vector_store(&self, path: &std::path::Path) -> Result<bool> {
+        // #4226: a quarantined index performs no durable write of any kind.
+        if self.refuse_durable_write("save_vector_store", &path.display().to_string()) {
+            return Ok(false);
+        }
         let Some(store) = &self.store else {
             return Ok(false);
         };
@@ -237,6 +253,7 @@ impl CodeIndexer {
     /// its batch loop so the final state is always durable.
     /// What: when `force` is false, increments the per-index batch counter and
     /// returns early unless the counter is a multiple of the snapshot interval.
+    /// Then refuses outright when the index is write-quarantined (issue #4226).
     /// Otherwise skips when the daemon's data dir is unresolvable (tests,
     /// broken HOME env), then snapshots HNSW (via `VectorStore::save_to`) and
     /// chunks (via `save_chunks_to_disk`) concurrently with regular search
@@ -259,6 +276,17 @@ impl CodeIndexer {
             if !n.is_multiple_of(crate::core::indexer::HNSW_SNAPSHOT_BATCH_INTERVAL) {
                 return;
             }
+        }
+        // #4226: a write-quarantined index performs no durable write. Placed
+        // after the throttle so the refusal count tracks would-be snapshots
+        // rather than every committed batch, and before the `dirty`/`in_flight`
+        // protocol so no state is published for a task that never runs. The
+        // spawned task below writes BOTH the HNSW graph and — because
+        // `persist_chunks_json` is `self.corpus.is_none()`, which quarantine
+        // makes `true` — the legacy `chunks.json` snapshot; gating here covers
+        // both effects at once rather than one call site at a time.
+        if self.refuse_durable_write("spawn_incremental_persist", &self.index_id) {
+            return;
         }
         // Memory-explosion fix: coalesce concurrent calls so at most ONE
         // persist task is alive per index. Each task allocates ~1× the corpus

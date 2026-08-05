@@ -31,6 +31,23 @@
 //! answering with silent empty results is issue #4087 and is deliberately out
 //! of scope here.
 //!
+//! # The two write families, and why BOTH are gated (#4226)
+//!
+//! `refuse_incremental_write` covers the *ingest* family — the watcher path
+//! that destroyed the #4122 index. It is not the whole story. `CodeIndexer`
+//! also owns a *snapshot* family — [`CodeIndexer::save_chunks_to_disk`],
+//! [`CodeIndexer::flush_corpus_to_disk`], [`CodeIndexer::save_vector_store`],
+//! and `persist_hnsw::spawn_incremental_persist` — which writes the legacy
+//! `chunks.json` corpus snapshot and the HNSW graph to plain files, NOT
+//! through `self.corpus`. Those writers key on `self.corpus.is_none()`,
+//! which on a quarantined index is `true`, so #4122 left them firing: the
+//! shutdown flush wrote the (deliberately empty) in-memory corpus over
+//! `chunks.json`, silently destroying a snapshot that
+//! `indexer::migrations::JsonCorpusToRedbMigration` still reads at warm boot.
+//! [`CodeIndexer::refuse_durable_write`] gates that family, so the ERROR
+//! diagnostic's "the on-disk corpus is untouched" claim is now true of every
+//! on-disk artifact and not merely of redb.
+//!
 //! # LOAD-BEARING INVARIANT: `corpus_open_failed == true` ⇒ `self.corpus == None`
 //!
 //! This — NOT "reindexes are operator-initiated" — is what makes the ungated
@@ -42,6 +59,11 @@
 //! (`ingest::commit::commit_corpus_to_redb` early-returns on `None`), and
 //! because `service::reindex::staging::should_stage(has_corpus_store())` is
 //! `false` here, so such a reindex never even stages.
+//!
+//! The invariant is what makes the redb lane safe; it is emphatically NOT
+//! what makes the snapshot lane safe. `self.corpus == None` is precisely the
+//! condition that TURNS THE SNAPSHOT WRITERS ON — which is why they need
+//! their own gate rather than inheriting this one (#4226).
 //!
 //! The invariant holds because the only producer of `corpus_open_failed ==
 //! true` (`service::persistence_loader::build_indexer_from_entry`) is exactly
@@ -92,18 +114,101 @@ impl CodeIndexer {
         self.corpus_open_failed
     }
 
-    /// Number of incremental writes refused since the index entered
-    /// quarantine (issue #4122).
+    /// Number of writes refused since the index entered quarantine (issue
+    /// #4122; widened to cover snapshot writes by #4226).
     ///
     /// Why: the refusal must be observable from something other than a log
     /// line — tests need a deterministic condition to wait on instead of a
     /// sleep, and operators need a count rather than "some writes were
     /// dropped".
-    /// What: monotonic counter, reset to 0 by
-    /// [`Self::clear_corpus_open_failure`] when the index recovers.
+    /// What: monotonic counter covering BOTH refusal families — incremental
+    /// ingest ([`Self::refuse_incremental_write`]) and durable snapshot
+    /// flushes ([`Self::refuse_durable_write`]). Reset to 0 by
+    /// [`Self::clear_corpus_open_failure`] when the index recovers. The name
+    /// is retained for API compatibility.
     /// Test: `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`.
     pub fn refused_incremental_writes(&self) -> u64 {
         self.incremental_writes_refused.load(Ordering::Relaxed)
+    }
+
+    /// Bump the refusal counter and decide whether this refusal is loud.
+    ///
+    /// Why: both refusal families ([`Self::refuse_incremental_write`] and
+    /// [`Self::refuse_durable_write`]) share one counter and one log-rate
+    /// policy; duplicating the `fetch_add` + modulo in each would let them
+    /// drift apart.
+    /// What: returns the post-increment count and `true` when the caller
+    /// should log at ERROR rather than DEBUG.
+    /// Test: `quarantine_refusal_emits_error_level_diagnostic` (first refusal
+    /// is loud); `quarantined_shutdown_flush_does_not_destroy_chunks_json`
+    /// (the durable-write family shares the counter).
+    fn count_refusal(&self) -> (u64, bool) {
+        let refused = self
+            .incremental_writes_refused
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        (
+            refused,
+            refused == 1 || refused.is_multiple_of(QUARANTINE_ERROR_LOG_INTERVAL),
+        )
+    }
+
+    /// Refuse a durable *snapshot* write (`chunks.json`, the HNSW graph) while
+    /// this index is quarantined; returns `true` when the caller must abandon
+    /// the write (issue #4226).
+    ///
+    /// Why: the #4122 quarantine gated the ingest family only, and the
+    /// snapshot family is keyed on `self.corpus.is_none()` — which quarantine
+    /// makes `true`. So the one lane the quarantine was meant to close stayed
+    /// open on the shutdown path: `flush_corpus_to_disk` fell through to
+    /// `save_chunks_to_disk` and wrote the deliberately-empty in-memory corpus
+    /// over the legacy `chunks.json` snapshot, which
+    /// `indexer::migrations::JsonCorpusToRedbMigration` still reads at warm
+    /// boot. Gating the *family* rather than the single `chunks.json` call
+    /// site also covers the HNSW snapshot, whose own shrink guards
+    /// (`core::store::usearch_store::SHRINK_GUARD_MIN_ON_DISK_VECTORS`) are
+    /// inert below 1 000 on-disk vectors and above the 50 % ratio.
+    /// What: no-op returning `false` when not quarantined. Otherwise bumps
+    /// [`Self::refused_incremental_writes`] and logs — ERROR on the first
+    /// refusal and every [`QUARANTINE_ERROR_LOG_INTERVAL`]th thereafter,
+    /// DEBUG in between — then returns `true`.
+    /// Test: `quarantined_shutdown_flush_does_not_destroy_chunks_json` and
+    /// `quarantined_index_refuses_hnsw_snapshot_write` in
+    /// `tests/quarantine_durable_writes_4226.rs`.
+    pub(crate) fn refuse_durable_write(&self, op: &str, target: &str) -> bool {
+        if !self.corpus_open_failed {
+            return false;
+        }
+        let (refused, loud) = self.count_refusal();
+        let index_id = &self.index_id;
+        if loud {
+            tracing::error!(
+                index_id = %index_id,
+                op = %op,
+                target = %target,
+                refused_writes = refused,
+                "index '{index_id}': REFUSING durable snapshot write ({op} {target}) — \
+                 this index's durable redb corpus failed to open at load time \
+                 (corpus_open_failed), so the index is write-quarantined and its \
+                 in-memory corpus is EMPTY. Writing that empty state out would \
+                 overwrite the on-disk snapshot with nothing — the legacy \
+                 chunks.json snapshot is still read at warm boot by the \
+                 chunks.json → index.redb migration, so destroying it destroys a \
+                 recovery source (issue #4226). {refused} write(s) refused so far. \
+                 TO RECOVER: fix the underlying redb file (permissions, stale lock, \
+                 corruption), then RESTART THE DAEMON — only a successful \
+                 CorpusStore::open lifts the quarantine."
+            );
+        } else {
+            tracing::debug!(
+                index_id = %index_id,
+                op = %op,
+                target = %target,
+                refused_writes = refused,
+                "write-quarantined index refused a durable snapshot write (issue #4226)"
+            );
+        }
+        true
     }
 
     /// Refuse `op` against `target` when this index is quarantined, logging a
@@ -140,12 +245,9 @@ impl CodeIndexer {
              #4122)?",
             self.index_id
         );
-        let refused = self
-            .incremental_writes_refused
-            .fetch_add(1, Ordering::Relaxed)
-            + 1;
+        let (refused, loud) = self.count_refusal();
         let index_id = &self.index_id;
-        if refused == 1 || refused.is_multiple_of(QUARANTINE_ERROR_LOG_INTERVAL) {
+        if loud {
             tracing::error!(
                 index_id = %index_id,
                 op = %op,
@@ -156,8 +258,10 @@ impl CodeIndexer {
                  (corpus_open_failed), so the index is write-quarantined. Accepting \
                  watcher/incremental writes against an unopened corpus builds a fresh \
                  PARTIAL corpus over the original and destroys it permanently (issue \
-                 #4122). {refused} write(s) refused so far; the on-disk corpus is \
-                 untouched and still recoverable. TO RECOVER: fix the underlying redb \
+                 #4122). {refused} write(s) refused so far; NO on-disk artifact of \
+                 this index is written while quarantined — not index.redb, not the \
+                 legacy chunks.json snapshot, not the HNSW graph (issue #4226) — so \
+                 all of them stay recoverable. TO RECOVER: fix the underlying redb \
                  file (permissions, stale lock, corruption), then RESTART THE DAEMON — \
                  only a successful CorpusStore::open lifts the quarantine, and it is \
                  attempted solely at load time (there is no in-process reopen retry). \
