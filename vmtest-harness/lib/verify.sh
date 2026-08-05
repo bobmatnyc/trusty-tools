@@ -552,7 +552,7 @@ _verify_package_expectation() {
 #       doctor.rs:151` resolves `stable_set()` FILTERED TO `m.daemon`. So
 #       `trusty-code`, `trusty-installer` and `tga` are STRUCTURALLY ABSENT and
 #       can never satisfy a predicate quantified over `member(p)`. THEY ARE NOT
-#       EXEMPT FROM VERIFICATION: `verify_binaries` asserts all 13 in-scope
+#       EXEMPT FROM VERIFICATION: `verify_binaries` asserts all 14 in-scope
 #       binaries present (including `tcode`, `trusty-installer`, `tctl`, `tga`)
 #       and `verify_single_install` gates the multi-binary ones. Both are
 #       UNAFFECTED by this scoping and both are stronger evidence of a correct
@@ -676,7 +676,7 @@ _verify_package_expectation() {
 #
 # WHAT THIS DOES NOT NARROW, so nobody over-reads it: `on_path == true` and
 # `version != null` are STILL ASSERTED for every in-scope member doctor reports;
-# all 13 binaries are still asserted present; all 4 Single-Install gates still
+# all 14 binaries are still asserted present; all 4 Single-Install gates still
 # run; §1.3's RC-1 liveness-only rule is untouched. DAEMON HEALTH, and nothing
 # else, is what narrowed.
 #
@@ -899,7 +899,7 @@ verify_versions() {
 #
 # THERE IS NO UNIFIED DAEMON HEALTH JSON. Every daemon exposes `GET /health` and
 # every one returns JSON, but there is NO SHARED TYPE IN `trusty-common` and no
-# unified schema — four daemons, four independently-evolved shapes, with no field
+# unified schema — six daemons, six independently-evolved shapes, with no field
 # in common beyond `status` and `version`:
 #   - trusty-search  service/server/health.rs  — ~22 fields, several
 #                    `skip_serializing_if` (ABSENT, not null)
@@ -909,6 +909,23 @@ verify_versions() {
 #                    catalog_unknown, catalog_changes, supervised, version
 #   - trusty-review  service/handlers.rs       — status, version, dry_run,
 #                    reviewer_model, inference, deps{...}
+#   - trusty-analyze service/routes.rs:176-180 — status, version,
+#                    search_reachable. EXACTLY THREE fields (`HealthResponse`),
+#                    and `status` is computed: "ok" when search is reachable,
+#                    "degraded" when it is not — see the 503 discussion below.
+#   - trusty-console server/mod.rs:433-438     — status, version. EXACTLY TWO,
+#                    and both are literals: a `json!` with a hardcoded
+#                    `"status":"ok"` and `CARGO_PKG_VERSION`. It reports no
+#                    state of its own at all.
+#
+# THE LAST TWO ROWS WERE ADDED LATE AND THE OMISSION WAS ITSELF THE DEFECT.
+# `trusty-analyze` joined the probed set on 2026-08-04 and `trusty-console` on
+# 2026-08-05 (#4921), but this table kept saying "four" — the same transcription
+# drift that produced the hardcoded four-name list `_verify_daemon_set` was
+# written to eliminate. The spread got WIDER with them, not narrower: 22 fields
+# to 2. Note also that `trusty-console`'s literal `{"status":"ok"}` is precisely
+# the payload the #3364 squatter class describes, which is why RC-1's envelope
+# would need a `service` discriminator and not merely a shared field set.
 #
 # Two further hazards this must not paper over:
 #   - `trusty-mpm` HAS TWO DIFFERENT `/health` ENDPOINTS ON TWO DIFFERENT PORTS.
@@ -924,7 +941,7 @@ verify_versions() {
 #
 # A STRONG ASSERTION HERE WOULD HAVE TO BE INVENTED, and DOC-1 §7.1's whole
 # argument for JSON-only is that the oracle must not depend on surfaces free to
-# change underneath it. An envelope four crates have not agreed on is exactly
+# change underneath it. An envelope six crates have not agreed on is exactly
 # such a surface.
 #
 # WHAT CHANGES IF RC-1 EVER LANDS — exactly three things, and nothing else: this
@@ -1052,9 +1069,12 @@ verify_daemon_liveness() {
 # product surface: it is an in-scope package, `stable_set` marks it a daemon,
 # and `stack doctor` has reported it on every run. It was absent from a
 # HARDCODED FOUR-NAME LIST in this function, transcribed from §1.3's
-# four-shape table. Deriving the set removes the transcription and the drift
-# with it — `trusty-console` is a `stable_set` daemon too and is correctly
-# excluded here, by the intersection, because the TSV marks it out of scope.
+# health-shape table AS IT THEN STOOD — four rows; it carries six today, and
+# that table was itself corrected on 2026-08-05 for the same drift. Deriving
+# the set removes the transcription and the drift
+# with it — `trusty-console` is a `stable_set` daemon too and is now INCLUDED
+# here, by the same intersection and with no edit to this function, because the
+# TSV marks it in scope as of 2026-08-05 (#4921). Its liveness IS verified.
 _verify_daemon_set() {
     local vm="$1"
     LIVENESS_DAEMONS=$(_verify_doctor_json "$vm" | jq -r '.members[].member' 2>/dev/null \
@@ -1357,7 +1377,7 @@ verify_degraded_probe() {
 
     # ---- 1. FAULT A — trusty-search, gracefully, and BY ITSELF. ----------
     # `tctl stop <member>` resolves exactly the named member through
-    # `select_members` (lifecycle.rs), so the other four daemons are untouched;
+    # `select_members` (lifecycle.rs), so the other five daemons are untouched;
     # that they stay live is asserted, not assumed, by the negative direction's
     # verdict run below, which names every daemon it rejects.
     log 'degraded-check: FAULT A — `tctl stop trusty-search --json --yes` (that daemon only)'

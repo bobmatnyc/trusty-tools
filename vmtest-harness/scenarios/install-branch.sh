@@ -69,7 +69,7 @@ scenario_install_branch() {
     # 2. Install each in-scope CRATE from the cloned tree — "each in-scope
     #    crate", not each row and not each binary (§12.5's own loop comment).
     #    `tsv_scope_crate_dirs` emits UNIQUE crate directories in
-    #    first-appearance order: thirteen in-scope rows, eight directories
+    #    first-appearance order: fourteen in-scope rows, nine directories
     #    (§F-3). Install order is TSV row order (§F-10(b)) — performance-neutral
     #    under a shared CARGO_TARGET_DIR, and `trusty-installer` precedes N2 in
     #    row order already, which is what N2 needs.

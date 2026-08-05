@@ -492,7 +492,7 @@ PASS  iff  tool_version is a non-empty string
 This is the one DOC-1 §7.1 source that does not exist as a contract.
 
 Every daemon does expose `GET /health`, and it returns JSON. But there is **no
-shared type in `trusty-common`** and no unified schema. There are **five**
+shared type in `trusty-common`** and no unified schema. There are **six**
 independently-evolved shapes, with no field in common beyond `status` and
 `version`:
 
@@ -503,6 +503,21 @@ independently-evolved shapes, with no field in common beyond `status` and
 | `trusty-analyze` | `crates/trusty-analyze/src/service/routes.rs:75` | `crates/trusty-analyze/src/service/routes.rs:176-180` — `status`, `version`, `search_reachable`. Handler at `routes.rs:188-201`. **The only daemon here that signals through the HTTP STATUS CODE**: 200 + `status:"ok"` when trusty-search is reachable, **503** + `status:"degraded"` when it is not. |
 | `trusty-mpm` | `crates/trusty-mpm/src/daemon/api.rs:181` | `crates/trusty-mpm/src/daemon/api/types.rs:41-87` — `status`, `catalog_stale`, `catalog_unknown`, `catalog_changes`, `supervised`, `version` |
 | `trusty-review` | `crates/trusty-review/src/service/mod.rs:130` | `crates/trusty-review/src/service/handlers.rs:171-186` — `status`, `version`, `dry_run`, `reviewer_model`, `inference`, `deps{…}` |
+| `trusty-console` | `crates/trusty-console/src/server/mod.rs:318` | **No struct at all** — an inline `json!` literal at `crates/trusty-console/src/server/mod.rs:433-438` with a hardcoded `"status":"ok"` and `CARGO_PKG_VERSION`. Exactly **two** fields, neither reflecting any state the daemon actually observes. |
+
+> **`trusty-console` added 2026-08-05** *(#4921)*, when D3 was widened to nine
+> crates and brought it into the harness's in-scope set. It was already a
+> `stable_set()` daemon, so the derived iteration set picked it up with no code
+> change — which is precisely the property the 2026-08-04 note below was written to
+> establish, now exercised for the first time.
+>
+> **It also widens the spread this section exists to document, rather than
+> narrowing it:** 22 fields at one end, 2 at the other. And its literal
+> `{"status":"ok"}` is exactly the payload the **#3364** squatter class describes —
+> a generic body on a stale port that the INTERIM predicate cannot distinguish from
+> a real one. That is not a new hazard, but `trusty-console` is now the cheapest
+> demonstration of why RC-1's envelope needs a `service` discriminator and not
+> merely an agreed field set.
 
 > **`trusty-analyze` WAS MISSING FROM THIS TABLE, AND THE OMISSION PROPAGATED**
 > *(added 2026-08-04)*. It is an in-scope package, `stable_set()` marks it a
@@ -1555,7 +1570,8 @@ that will be slow.
 ### 9. `expected-binaries.tsv` schema
 
 DOC-1 §7.2 establishes the table as the single authoritative expectation source and
-gives a seed table of eight rows (seven until D3 was widened on 2026-07-31).
+gives a seed table of nine rows (seven until D3 was widened on 2026-07-31, eight
+until it was widened again on 2026-08-05).
 DOC-1 §7.2's own note flags the `--check-table`
 diff source of truth as unnamed and recommends the `[[bin]]` targets. This section
 gives the real schema, the real seed content enumerated from the workspace, and
@@ -1621,9 +1637,9 @@ which is a further argument for keying on package name.
 #### 9.3 Seed content
 
 Enumerated from the workspace manifests. **27** explicit `[[bin]]` targets across 20
-manifests, plus one implicit target (§9.4) — **28** rows in total. **Thirteen** rows
-are in scope; DOC-1 D3's **eight** crates produce **thirteen** binaries, not eight.
-The eight in-scope `crate_dir` values are the eight D3 directories — see §12.5 and
+manifests, plus one implicit target (§9.4) — **28** rows in total. **Fourteen** rows
+are in scope; DOC-1 D3's **nine** crates produce **fourteen** binaries, not nine.
+The nine in-scope `crate_dir` values are the nine D3 directories — see §12.5 and
 the plan's §F-3 on why the loop over them must deduplicate.
 
 > **Correction, 2026-07-31 — the explicit count read 26.** The prose said "26
@@ -1636,6 +1652,31 @@ the plan's §F-3 on why the loop over them must deduplicate.
 > to read `cargo metadata` rather than a `crates/*/Cargo.toml` glob; the prose
 > counted the manifest but not its target. "20 manifests" was right; only the target
 > total was wrong, and the table was right all along.
+
+> **Amendment, 2026-08-05 — in scope goes from thirteen rows to fourteen;
+> `trusty-console` moved (#4921).** DOC-1 D3 was widened to nine crates by its own
+> dated amendment of the same date; this section follows it. The row below moved
+> from the out-of-scope block to the END of the in-scope block and now carries
+> `in_scope=yes` with `present` in all three `expect_*` columns.
+>
+> **The 28-row total is UNCHANGED, and that is the point of the out-of-scope
+> block.** Nothing was added to the table and nothing was removed from it — the
+> `in_scope` column flipped on a row that was already carried. The counts that
+> move are the derived ones: **fourteen** in-scope rows, **nine** `crate_dir`
+> values, **nine** package names. `--check-table` prints exactly those three
+> numbers and reported `in scope: 14 binaries, 9 crate directories, 9 packages`
+> against the shipped table.
+>
+> **END, not alphabetical, and the position is load-bearing.** Appending keeps
+> `trusty-git-analytics` at `crate_dir` position 6, which the pattern-(a) prose in
+> `lib/source.sh` cites when it says the directory/package discontinuity bites
+> after five successful installs. An alphabetical insert would have moved it to 7
+> and falsified that sentence silently.
+>
+> Evidence for the row itself is recorded in DOC-1 D3's 2026-08-05 amendment: one
+> `[[bin]]`, an unconditional `/health`, `publish` by cargo default, and
+> `daemon = true` in `stable_set()` since before the harness existed. The
+> crates.io release skew that makes pattern (a) known-red on it is #4917.
 
 ```
 package	crate_dir	binary	bin_path	req_features	in_scope	expect_a	expect_b	expect_c
@@ -1652,6 +1693,7 @@ tga	trusty-git-analytics	tga	src/main.rs	-	yes	present	present	present
 trusty-mpm	trusty-mpm	tm	src/bin/tm/main.rs	cli	yes	present	present	present
 trusty-mpm	trusty-mpm	trusty-mpm	src/bin/tm/main.rs	cli	yes	present	present	present
 trusty-review	trusty-review	trusty-review	src/main.rs	-	yes	present	present	present
+trusty-console	trusty-console	trusty-console	src/main.rs	-	yes	present	present	present
 # --- out of scope per DOC-1 D3; carried so --check-table can detect additions ---
 trusty-agents	trusty-agents	tagent	src/main.rs	-	no	-	-	-
 trusty-agents-ui	trusty-agents/ui/src-tauri	trusty-agents-ui	src/main.rs	-	no	-	-	-
@@ -1661,7 +1703,6 @@ trusty-channels	trusty-channels	telegram-mcp	src/bin/telegram-mcp.rs	-	no	-	-	-
 trusty-code-gui	trusty-code-gui	trusty-code-gui	src/main.rs	-	no	-	-	-
 trusty-common	trusty-common	candle_metal_bench	src/bin/candle_metal_bench.rs	embedder-candle	no	-	-	-
 trusty-common	trusty-common	tickets-mcp	src/bin/tickets_mcp.rs	tickets	no	-	-	-
-trusty-console	trusty-console	trusty-console	src/main.rs	-	no	-	-	-
 trusty-embedderd-py	trusty-embedderd-py	trusty-embedderd-py	src/main.rs	-	no	-	-	-
 trusty-gworkspace	trusty-gworkspace	trusty-gworkspace-mcp	src/bin/trusty-gworkspace-mcp.rs	-	no	-	-	-
 trusty-kb	trusty-kb	trusty-kb	src/main.rs	-	no	-	-	-
@@ -1765,9 +1806,10 @@ right call for a document that could only flag the premise. It is the wrong call
 that the premise has been checked and D2 amended: an assertion known in advance to
 be false is not a safety net, it is a scheduled failure. Both `trusty-mpm` rows
 above now carry **`expect_a = present`**, matching DOC-1 D2 and §7.5 as amended, and
-all **thirteen** in-scope binaries are expected present under all three patterns
+all **fourteen** in-scope binaries are expected present under all three patterns
 (twelve when this paragraph was written; the thirteenth is `trusty-review`, added
-by the D3 amendment of the same date — §9.3 note 2).
+by the D3 amendment of the same date — §9.3 note 2; the fourteenth is
+`trusty-console`, added by the D3 amendment of 2026-08-05 — §9.3's amendment).
 
 The `expect_*` columns and the pattern-aware oracle **stay** regardless. With the
 gap dissolved no in-scope row currently diverges across patterns, but the columns

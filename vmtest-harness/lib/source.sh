@@ -285,7 +285,7 @@ source_deliver_released() {
 # <binary>`, once per TSV row — looks like tidying up and is a change in
 # meaning: DOC-1 §7.4's Single-Install Convention gate asserts exactly one
 # thing, that ONE package-granular install yields EVERY sidecar. Install each
-# sidecar by name and `verify_binaries` reports 13/13 while
+# sidecar by name and `verify_binaries` reports 14/14 while
 # `verify_single_install` passes four times over, and NOTHING has tested the
 # convention. A crate that silently stopped shipping a sidecar would still show
 # green. Unlike a missing table row, `--check-table` cannot catch it, because
@@ -442,8 +442,8 @@ install_from_path() {
 # discontinuity between directory name and package name is exactly what DOC-1 D3
 # warns about and the whole reason `expected-binaries.tsv` carries BOTH columns.
 # A pattern-(a) loop written over crate directories fails on one crate out of
-# eight, and it fails at the LAST possible moment — after seven successful
-# multi-minute installs.
+# nine, and it fails at a LATE moment — after five successful multi-minute
+# installs, `trusty-git-analytics` being the sixth crate directory in TSV order.
 #
 # `--locked` IS MANDATORY, AND IT IS NOT A STYLE CHOICE. Default `cargo install`
 # RE-RESOLVES the dependency graph and IGNORES the lockfile the package was
@@ -567,7 +567,7 @@ install_from_registry() {
 # tripwire covering all three patterns. Patterns (b)/(c) install by DIRECTORY
 # (`tsv_scope_crate_dirs`, the default); pattern (a) installs by PACKAGE NAME
 # (`tsv_scope_packages`), because that is what `cargo install` takes (§9.2). Both
-# sets have eight members today, so a COUNT-ONLY check would pass pattern (a)
+# sets have nine members today, so a COUNT-ONLY check would pass pattern (a)
 # even if the loop had been driven off the wrong accessor and installed
 # `trusty-git-analytics` instead of `tga` — which is precisely the discontinuity
 # DOC-1 D3 warns about. The assertion is therefore on the SET, not the count:
@@ -621,14 +621,14 @@ install_assert_install_count() {
     expected=$("$accessor" | wc -l | tr -d ' ')
     actual=$(grep -c . "$ledger" | tr -d ' ')
     [ "$actual" = "$expected" ] \
-        || die 60 "install ran ${actual} times, expected ${expected} (one per ${unit}, from \`${accessor}\`). Thirteen in-scope ROWS resolve to ${expected} distinct values (§F-3); a count equal to the row count means the loop is iterating rows or binaries instead."
+        || die 60 "install ran ${actual} times, expected ${expected} (one per ${unit}, from \`${accessor}\`). Fourteen in-scope ROWS resolve to ${expected} distinct values (§F-3); a count equal to the row count means the loop is iterating rows or binaries instead."
 
     dups=$(sort "$ledger" | uniq -d)
     if [ -n "$dups" ]; then
         die 60 "a ${unit} was installed twice: $(printf '%s' "$dups" | tr '\n' ' ')"
     fi
 
-    # SET equality, not just count. Under pattern (a) both accessors emit eight
+    # SET equality, not just count. Under pattern (a) both accessors emit nine
     # values, so a count-only check cannot tell `tga` from
     # `trusty-git-analytics` — the one discontinuity DOC-1 D3 names.
     missing=$(comm -23 <("$accessor" | sort) <(sort "$ledger") | tr '\n' ' ')
