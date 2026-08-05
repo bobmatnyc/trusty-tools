@@ -8,7 +8,7 @@ Thank you for your interest in contributing to trusty-tools! This document provi
 
 ### Prerequisites
 
-- Rust 1.91+ (enforced by MSRV in the workspace)
+- Rust 1.94+ (enforced by MSRV in the workspace)
 - Git
 - Node.js + pnpm (only if working on embedded Svelte UIs)
 

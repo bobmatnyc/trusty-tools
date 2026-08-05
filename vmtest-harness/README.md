@@ -454,7 +454,7 @@ vmtest-harness/
 ├── expected-binaries.tsv      # the authoritative binary expectation table
 ├── lib/
 │   ├── vm.sh                  # the OS boundary — the ONLY file that may say `tart`
-│   ├── provision.sh           # mise + rust@1.91 + uv + gh, in the guest
+│   ├── provision.sh           # mise + rust@1.94 + uv + gh, in the guest
 │   ├── source.sh              # source delivery, one function per pattern
 │   └── verify.sh              # the JSON-only assertion oracle
 ├── scenarios/

@@ -50,7 +50,7 @@ Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
 
 ### From Source with Cargo
 
-Requires Rust 1.91 or later ([install Rust](https://rustup.rs/)).
+Requires Rust 1.94 or later ([install Rust](https://rustup.rs/)).
 
 ```bash
 cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search --locked

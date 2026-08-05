@@ -82,7 +82,7 @@ and issue #2222. On a mismatched host, `trusty-embedderd`'s startup now fails
 fast with an explicit glibc-version error instead of hanging for up to
 `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s).
 
-🟢 **MSRV drift** — the workspace pins `rust-version = "1.91"`. Running
+🟢 **MSRV drift** — the workspace pins `rust-version = "1.94"`. Running
 `rustup update` and picking up a new nightly may introduce syntax that
 compiles locally but fails on CI. Prefer stable channel toolchains.
 

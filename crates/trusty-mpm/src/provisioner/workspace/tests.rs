@@ -942,7 +942,7 @@ fn fake_ensure_base_checkout_is_idempotent_on_valid_base() {
 /// What: writes a lock marker file and backdates its modified time past
 /// `LOCK_STALE_AFTER` via `File::set_modified` (no `filetime` dependency
 /// needed — this has been in `std` since Rust 1.75, well under this
-/// workspace's 1.91 MSRV). Asserts `lock_is_stale` reports it as stale, then
+/// workspace's 1.94 MSRV). Asserts `lock_is_stale` reports it as stale, then
 /// asserts `acquire_base_checkout_lock` recovers PROMPTLY (well under
 /// `LOCK_ACQUIRE_TIMEOUT`) rather than blocking out the full timeout, and
 /// that dropping the returned guard removes the marker file.

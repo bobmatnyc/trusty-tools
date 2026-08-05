@@ -53,7 +53,9 @@
 #   CHANNEL 2 — REACHABILITY. Channel 1 alone is not the assertion §6.2's prose
 #     makes, and the gap is exactly where a real toolchain lands. MANIFEST Phase 3
 #     recorded it with observed output: a guest provisioned by THIS PROJECT'S OWN
-#     `mise use -g rust@1.91` installs cargo at `~/.cargo/bin/cargo` and a mise
+#     `mise use -g rust@1.91` (the MSRV pin at the time; provision.sh installs
+#     1.94 today, and the reachability gap below is version-independent)
+#     installs cargo at `~/.cargo/bin/cargo` and a mise
 #     shim, NEITHER of which is on the base PATH — so it PASSED N1 (exit 0,
 #     observed). DOC-1 §4.3 leans on N1 to catch a golden image that silently
 #     ships a toolchain, and an image baked by our own `provision.sh` would not
@@ -146,7 +148,7 @@ negative_probe_n1() {
     fi
 
     if [ "$fail" -ne 0 ]; then
-        die 30 "N1 FAIL — the guest already has a Rust toolchain where DOC-2 §6.2 requires none. Two likely causes: base-image drift (DOC-2 §3), or a guest that has ALREADY BEEN PROVISIONED — including a golden image baked by this project's own \`mise use -g rust@1.91\`, which installs into \$HOME/.cargo/bin and the mise shims and which the pre-2026-08-02 probe could not see. Either way this is a FINDING, not a nuisance. Base-PATH exits: ${codes}"
+        die 30 "N1 FAIL — the guest already has a Rust toolchain where DOC-2 §6.2 requires none. Two likely causes: base-image drift (DOC-2 §3), or a guest that has ALREADY BEEN PROVISIONED — including a golden image baked by this project's own provisioning (\`mise use -g rust@<msrv>\`, see lib/provision.sh), which installs into \$HOME/.cargo/bin and the mise shims and which the pre-2026-08-02 probe could not see. Either way this is a FINDING, not a nuisance. Base-PATH exits: ${codes}"
     fi
     log "N1 PASS (base PATH: ${codes}; and no toolchain reachable on disk, through mise, or through a login/interactive shell)"
 }

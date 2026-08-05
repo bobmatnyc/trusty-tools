@@ -131,7 +131,7 @@ curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.
 # Or via Homebrew (if already installed):
 brew install bobmatnyc/trusty/trusty-mpm
 
-# Or via cargo (requires Rust 1.91+):
+# Or via cargo (requires Rust 1.94+):
 cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-mpm --locked
 ```
 
