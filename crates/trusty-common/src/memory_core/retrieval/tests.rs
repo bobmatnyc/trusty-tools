@@ -651,6 +651,23 @@ async fn shared_embedder_is_singleton() {
     );
 }
 
+/// Why (#4836): callers need to ask "is the embedder live?" without triggering a
+/// cold init. The recall handlers use exactly this to avoid serving a
+/// query-independent fallback while a stale readiness latch says `Warming`, so
+/// the accessor must report the cell's real state rather than a cached guess.
+/// What: seeds the shared cell, then asserts the accessor reports initialised.
+/// (The pre-seed state is not asserted: this static is process-wide and other
+/// tests in this binary may legitimately have initialised it first.)
+/// Test: This test itself.
+#[test]
+fn shared_embedder_initialized_flips_after_seeding() {
+    seed_shared_embedder_with_mock();
+    assert!(
+        shared_embedder_initialized(),
+        "the shared embedder must report initialised once seeded"
+    );
+}
+
 /// Why: Closet tag boost should raise a tagged drawer's rank above an
 /// untagged but otherwise-similar drawer.
 /// What: Insert two drawers — one whose content shares keywords with the

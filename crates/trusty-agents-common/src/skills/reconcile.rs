@@ -33,7 +33,9 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::agents::manifest::{Result, checksum};
-use crate::skills::manifest::{SkillManifest, SkillManifestEntry};
+use crate::skills::manifest::{
+    SkillManifest, SkillManifestEntry, SkillManifestSave, with_skill_manifest_lock,
+};
 use crate::skills::unmanaged::{UnmanagedBundledSkill, unmanaged_bundled_skills};
 
 /// Filename of the per-backup-root ledger of what was copied where.
@@ -92,12 +94,38 @@ pub fn adopt_unmanaged_bundled_skills(
     bundled: &BTreeSet<String>,
     backup_root: &Path,
 ) -> Result<Vec<AdoptedSkill>> {
+    // #4881: cheap read-only precheck OUTSIDE the lock, so a no-op adoption
+    // neither blocks on a concurrent writer nor leaves a lock sidecar in a
+    // directory it will not touch — `adopt_no_findings_writes_nothing` holds
+    // the target byte-identical. The authoritative scan happens again inside.
+    if unmanaged_bundled_skills(dest, bundled).is_empty() {
+        return Ok(Vec::new());
+    }
+    with_skill_manifest_lock(dest, || adopt_locked(dest, bundled, backup_root))
+}
+
+/// The body of [`adopt_unmanaged_bundled_skills`], run holding the ledger lock.
+///
+/// Why (#4881): adoption is a load-modify-save of the same ledger the deployer
+/// writes; unlocked, it drops whatever a concurrent deploy recorded. Never call
+/// it directly, and never from inside another [`with_skill_manifest_lock`] on
+/// the same directory (`flock` on a second descriptor self-deadlocks).
+/// What: the scan/back-up/record pipeline documented on the public wrapper.
+/// Test: the `adopt_*` tests in `reconcile_tests.rs` exercise it through that
+/// wrapper.
+fn adopt_locked(
+    dest: &Path,
+    bundled: &BTreeSet<String>,
+    backup_root: &Path,
+) -> Result<Vec<AdoptedSkill>> {
     let found = unmanaged_bundled_skills(dest, bundled);
     if found.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut manifest = SkillManifest::load(dest);
+    // #4881: the snapshot the merging save replays this run's delta against.
+    let base = manifest.clone();
     let now = chrono::Utc::now().to_rfc3339();
     let mut adopted = Vec::with_capacity(found.len());
 
@@ -126,7 +154,15 @@ pub fn adopt_unmanaged_bundled_skills(
         });
     }
 
-    manifest.save(dest)?;
+    // #4881: backups are already on disk and the whole point of adoption is the
+    // manifest record, so this save must publish — see `save_merging`.
+    if manifest.save_merging(dest, &base)? == SkillManifestSave::Merged {
+        tracing::warn!(
+            dest = %dest.display(),
+            "the skill manifest changed during adoption — a writer bypassed the \
+             ledger lock; its entries were merged rather than dropped"
+        );
+    }
     Ok(adopted)
 }
 

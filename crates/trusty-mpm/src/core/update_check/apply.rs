@@ -22,7 +22,9 @@ use crate::core::agent_manifest::{
 };
 use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
-use crate::core::skill_manifest::{SKILL_MANIFEST_FILE, SkillManifest};
+use crate::core::skill_manifest::{
+    SKILL_MANIFEST_FILE, SkillManifest, SkillManifestSave, with_skill_manifest_lock,
+};
 use crate::core::skill_tiers::deploy_all_skill_tiers;
 use crate::provisioner::GitBackend;
 
@@ -52,10 +54,11 @@ pub enum ApplyError {
 
 /// Lift a ledger failure into [`ApplyError`].
 ///
-/// Why: `with_agent_manifest_lock` reports a lock-acquisition failure as the
-/// caller's own error type (#4409), which requires this conversion. Prune is
-/// the only stage here that takes the lock directly, so a ledger failure on
-/// this path is always a prune-stage failure.
+/// Why: `with_agent_manifest_lock` (#4409) and `with_skill_manifest_lock`
+/// (#4881) report a lock-acquisition failure as the caller's own error type,
+/// which requires this conversion. Prune is the only stage here that takes
+/// either lock directly, so a ledger failure on this path is always a
+/// prune-stage failure.
 /// What: renders the ledger error into the `Prune` variant's message.
 /// Test: exercised by `apply_prune_removes_deselected` (happy path).
 impl From<ManifestError> for ApplyError {
@@ -241,9 +244,34 @@ fn prune_agents_locked(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>,
 /// `<target>/<stem>/` (ignoring absence) and drops the manifest entry; saves the
 /// manifest if anything changed. The [`SkillManifest`] is keyed by stem, matching
 /// the skill deployer. Returns the removed stems, sorted.
+///
+/// CONCURRENCY (#4881): the whole load-modify-save runs under the skill ledger
+/// lock, for the same reason [`prune_agents`] does — an unlocked prune racing a
+/// session launch's skill deploy drops the launch's ledger entries, and the
+/// files those entries described then read as user-edited and are skipped
+/// forever. As with agents, the deploy (step 3) and this prune (step 4) are two
+/// SEPARATE locked sections rather than one span: `flock` is not reentrant, so a
+/// single span would have to call an unlocked inner deploy entry point, which is
+/// a worse hazard than the residual window. A skill deployed between the two
+/// steps that this prune then removes returns on the next deploy — deploy is
+/// idempotent, and no ledger update is ever lost.
 /// Test: `apply_prune_removes_deselected`.
 fn prune_skills(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyError> {
+    with_skill_manifest_lock(target, || prune_skills_locked(target, plan))
+}
+
+/// The body of [`prune_skills`], run while holding the skill ledger lock.
+///
+/// Why/What: mirrors [`prune_agents_locked`] — the critical section is one
+/// expression so the lock's scope cannot be misread. Never call it directly, and
+/// never from inside another `with_skill_manifest_lock` on the same directory.
+/// Test: `apply_prune_removes_deselected`.
+fn prune_skills_locked(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyError> {
     let mut manifest = SkillManifest::load(target);
+    // #4881: the snapshot the merging save replays this run's delta against —
+    // here the delta is REMOVALS, which `save_merging` applies to the current
+    // on-disk document rather than reverting a concurrent writer's inserts.
+    let base = manifest.clone();
     let mut pruned: Vec<String> = Vec::new();
 
     let candidates: Vec<String> = manifest.managed.keys().cloned().collect();
@@ -260,9 +288,19 @@ fn prune_skills(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyE
     }
 
     if !pruned.is_empty() {
-        manifest
-            .save(target)
-            .map_err(|e| ApplyError::Prune(e.to_string()))?;
+        // #4881: the skill DIRECTORIES are already removed, so this save must
+        // publish or the manifest keeps listing files that no longer exist.
+        if manifest
+            .save_merging(target, &base)
+            .map_err(|e| ApplyError::Prune(e.to_string()))?
+            == SkillManifestSave::Merged
+        {
+            tracing::warn!(
+                target = %target.display(),
+                "the skill manifest changed during prune — a writer bypassed the \
+                 ledger lock; its entries were merged rather than dropped"
+            );
+        }
         debug_assert!(target.join(SKILL_MANIFEST_FILE).exists());
     }
     pruned.sort_unstable();

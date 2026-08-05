@@ -233,6 +233,18 @@ pub(super) async fn add_alias_handler(
         .or_else(|| state.default_palace.clone())
         .ok_or_else(|| ApiError::bad_request("missing 'palace' (no default palace configured)"))?;
     let handle = open_handle(&state, &palace_name)?;
+    // #4888: the HTTP alias endpoint writes `is_alias_for` directly, so it
+    // needs the same Tier S gate as the `add_alias` MCP tool it mirrors.
+    // `_admission` holds the admission lock until after `kg.assert` below.
+    let _admission = crate::prompt_facts::check_tier_s_admission(
+        &state,
+        &handle,
+        &req.short,
+        "is_alias_for",
+        &req.full,
+    )
+    .await
+    .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
     let triple = Triple {
         subject: req.short.clone(),
         predicate: "is_alias_for".to_string(),

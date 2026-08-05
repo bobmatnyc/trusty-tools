@@ -12,6 +12,7 @@
 //! `cargo test -p trusty-agents-common -- skills::deployer`.
 
 use super::*;
+use crate::agents::manifest::ManifestError;
 use std::fs;
 use tempfile::TempDir;
 
@@ -364,4 +365,187 @@ fn deploy_single_file_skill_has_no_references_dir() {
     deploy_skills(src.path(), tgt.path()).unwrap();
 
     assert!(!tgt.path().join("tm-doctor").join("references").exists());
+}
+
+#[test]
+fn deploy_blocks_while_the_skill_ledger_lock_is_held() {
+    // #4881: proves the WHOLE load-modify-save cycle is inside the lock, not
+    // just the save. The main thread holds the target's ledger lock; a deploy
+    // running concurrently must not finish, or write anything, until that lock
+    // is released.
+    //
+    // Deterministic in both directions, with no reliance on scheduling luck:
+    // an UNLOCKED deploy of two tiny files completes in well under a
+    // millisecond, so the 2s "still blocked?" probe cannot pass by accident;
+    // and a deploy that IS blocked on `flock` stays blocked for exactly as long
+    // as the lock is held, so the locked version cannot fail by accident.
+    use std::sync::mpsc;
+
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+
+    let (tx, rx) = mpsc::channel();
+    let src_path = src.path().to_path_buf();
+    let deploy_target = tgt.path().to_path_buf();
+    let deployed_marker = tgt.path().join("tm-doctor").join("SKILL.md");
+
+    // The handle leaves the critical section rather than being joined inside
+    // it: the deploy cannot finish until we release, so joining under the lock
+    // would deadlock this test rather than exercise it.
+    let handle = crate::skills::manifest::with_skill_manifest_lock::<_, ManifestError, _>(
+        tgt.path(),
+        || {
+            let handle = std::thread::spawn(move || {
+                tx.send(deploy_skills(&src_path, &deploy_target).unwrap())
+                    .ok();
+            });
+
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(2)).is_err(),
+                "deploy completed while the skill ledger lock was held — its \
+                 load-modify-save is not inside the lock"
+            );
+            assert!(
+                !deployed_marker.exists(),
+                "deploy wrote a skill file while the ledger lock was held"
+            );
+            Ok(handle)
+        },
+    )
+    .unwrap();
+
+    handle.join().unwrap();
+    let stats = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("deploy must complete once the lock is released");
+    assert_eq!(stats.deployed.len(), 2);
+    assert!(
+        SkillManifest::load(tgt.path()).is_managed("tm-doctor"),
+        "the released deploy must have recorded its entries"
+    );
+}
+
+#[test]
+fn a_racing_writer_freezes_nothing_on_either_side() {
+    // #4881 — the invariant a save must uphold once files are on disk. This is
+    // the regression test for a CAS that returned `Err` after `atomic_write`
+    // had already published every `SKILL.md`: the bytes were newer than their
+    // recorded checksums, so the next deploy read all of them as hand-edits and
+    // skipped the whole tier forever — manufacturing the freeze this issue
+    // exists to prevent.
+    //
+    // The interleaving is CONSTRUCTED, not raced: it replays the deployer's own
+    // ordering (load, write files, save against the base loaded earlier) with a
+    // competing writer publishing in between. The assertion that matters is
+    // made by the REAL deployer afterwards — its classifier is what freezes.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    write_sources(src.path());
+
+    // A first, uncontended deploy. This is the `base` an in-flight deploy loads.
+    deploy_skills(src.path(), tgt.path()).unwrap();
+    let base = SkillManifest::load(tgt.path());
+
+    // A writer that does NOT take the ledger lock — an older installed `tm`
+    // during a rollout — publishes its own entry after our base was loaded.
+    let mut racer = base.clone();
+    racer.managed.insert(
+        "racing-writer-skill".into(),
+        SkillManifestEntry {
+            checksum: checksum("racer content"),
+            deployed_at: "2026-08-05T00:00:00Z".into(),
+        },
+    );
+    let racer_dir = tgt.path().join("racing-writer-skill");
+    fs::create_dir_all(&racer_dir).unwrap();
+    fs::write(racer_dir.join("SKILL.md"), "racer content").unwrap();
+    racer.save(tgt.path()).unwrap();
+
+    // Our in-flight deploy: new content for every source skill is written to
+    // disk FIRST (as `deploy_one_file` does), then the ledger is saved against
+    // the now-stale `base`.
+    let mut ours = base.clone();
+    for stem in ["tm-doctor", "example-skill"] {
+        let content = format!("---\nname: {stem}\n---\n\nv2 content\n");
+        let dir = tgt.path().join(stem);
+        fs::write(dir.join("SKILL.md"), &content).unwrap();
+        fs::write(src.path().join(format!("{stem}.md")), &content).unwrap();
+        ours.managed.insert(
+            stem.to_string(),
+            SkillManifestEntry {
+                checksum: checksum(&content),
+                deployed_at: "2026-08-05T00:00:01Z".into(),
+            },
+        );
+    }
+    assert_eq!(
+        ours.save_merging(tgt.path(), &base).unwrap(),
+        SkillManifestSave::Merged
+    );
+
+    // Nothing is frozen on OUR side: the real deployer sees content it wrote,
+    // matching its recorded checksum — `unchanged`, never `skipped`.
+    let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+    assert!(
+        stats.skipped.is_empty(),
+        "a racing writer must freeze nothing: skipped={:?}",
+        stats.skipped
+    );
+    assert_eq!(stats.unchanged.len(), 2, "both skills must stay writable");
+
+    // Nothing is frozen on the RACER's side either: a blind save would have
+    // dropped its entry, leaving its file untracked and skipped from then on.
+    let final_manifest = SkillManifest::load(tgt.path());
+    assert!(
+        final_manifest.is_managed("racing-writer-skill"),
+        "the racing writer's entry must survive, or ITS file freezes instead"
+    );
+    assert!(final_manifest.checksum_matches("racing-writer-skill", "racer content"));
+}
+
+#[test]
+fn deploy_records_files_written_before_a_mid_loop_failure() {
+    // #4881 review (pre-existing, fixed here): the write loop's `?` sites can
+    // return AFTER earlier SKILL.md files are on disk. Propagating straight out
+    // skipped the manifest save, leaving those files unrecorded — and the next
+    // deploy then read them as hand-edits and skipped them forever. The ledger
+    // must be saved on the error path too.
+    //
+    // The failure is deterministic: `aaa-skill` sorts first and deploys, then
+    // `zzz-skill.md` holds invalid UTF-8, so `read_to_string` fails on it every
+    // run. Invalid bytes rather than a chmod, so the test behaves the same when
+    // the suite happens to run as root.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    fs::write(
+        src.path().join("aaa-skill.md"),
+        "---\nname: aaa-skill\n---\n\nfirst\n",
+    )
+    .unwrap();
+    fs::write(src.path().join("zzz-skill.md"), [0xff, 0xfe, 0xff]).unwrap();
+
+    let err = deploy_skills(src.path(), tgt.path());
+    assert!(err.is_err(), "an unreadable source must still fail the run");
+
+    // The file that DID get written is on disk...
+    let written = tgt.path().join("aaa-skill").join("SKILL.md");
+    assert!(written.exists(), "aaa-skill was written before the failure");
+    // ...and the ledger records it, so it is not orphaned.
+    let manifest = SkillManifest::load(tgt.path());
+    assert!(
+        manifest.is_managed("aaa-skill"),
+        "a file written before the failure must still be recorded"
+    );
+
+    // The proof that matters: a later deploy still owns it, rather than reading
+    // it as a hand-edit and skipping it forever.
+    fs::remove_file(src.path().join("zzz-skill.md")).unwrap();
+    let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+    assert!(
+        stats.skipped.is_empty(),
+        "nothing may be frozen by a mid-loop failure: skipped={:?}",
+        stats.skipped
+    );
+    assert!(stats.unchanged.contains(&"aaa-skill".to_string()));
 }
