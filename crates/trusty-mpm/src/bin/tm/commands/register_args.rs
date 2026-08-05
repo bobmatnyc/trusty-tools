@@ -31,19 +31,20 @@
 //! deriver whose leniency other callers depend on.
 //! Test: `register_args_tests.rs`.
 
-/// Host used for `owner/repo` shorthand.
+/// Host assumed for `owner/repo` shorthand, and the one host known to be flat.
 ///
-/// Why: #4912 — GitHub is assumed, matching `tm launch`'s existing
-/// `is_github_remote` gate. Other hosts need a full URL for now.
-const SHORTHAND_HOST: &str = "https://github.com";
+/// Why: #4912 — GitHub is assumed for shorthand, matching `tm launch`'s existing
+/// `is_github_remote` gate. Other hosts need a full URL for now. The same fact
+/// does double duty in [`non_repo_segment`]: GitHub has no nested groups, so any
+/// path past `owner/repo` on this host is a web-UI path.
+const GITHUB_HOST: &str = "github.com";
 
 /// Path segments that mean a URL points INTO a repo rather than AT one.
 ///
 /// Why: an optional alias invites pasting a browser URL, and the shared deriver
 /// takes the last two path segments — so `…/owner/repo/tree/main` derives
 /// `tree-main` and `…/owner/repo/pull/4914` derives `pull-4914`, both silently.
-/// What: matched only at path index ≥ 2 (after `owner/repo`) and only when a
-/// segment follows, so a repo legitimately NAMED `tree` still registers.
+/// What: used by [`non_repo_segment`] for hosts that may nest paths legitimately.
 /// Test: `browser_paste_shapes_are_rejected`, `repo_named_like_a_web_path_is_ok`.
 const NON_REPO_SEGMENTS: &[&str] = &[
     "tree", "blob", "pull", "pulls", "issues", "commit", "commits", "compare", "releases",
@@ -225,58 +226,85 @@ fn rejection(s: &str) -> anyhow::Error {
 /// rejects; it returns a best-effort slug for any string. So the rejecting
 /// happens here, at the CLI boundary, where a bad input still has a user in
 /// front of it.
-/// What: shorthand becomes `https://github.com/<owner>/<repo>`. A full URL has
-/// its fragment and query string stripped, then errors when it has no
-/// host-relative path (`https://example.com`, with or without a trailing slash)
-/// or points into a repo's web UI rather than at the repo.
+/// What: shorthand becomes `https://github.com/<owner>/<repo>`; a leading `~/`
+/// is expanded to a real path. A full URL has its fragment and query string
+/// stripped, then errors when it has no host-relative path
+/// (`https://example.com`, with or without a trailing slash) or points into a
+/// repo's web UI rather than at the repo. Finally a scheme-less host gains
+/// `https://`, because `git clone github.com/o/r` fails.
 /// Test: `shorthand_resolves_to_github`, `host_only_url_errors`,
-/// `browser_paste_shapes_are_rejected`, `query_and_fragment_are_stripped`.
+/// `browser_paste_shapes_are_rejected`, `github_tab_urls_are_rejected`,
+/// `query_and_fragment_are_stripped`, `scheme_less_host_gains_https`,
+/// `home_relative_path_is_expanded`.
 fn resolved_url(s: &str) -> anyhow::Result<String> {
-    let url = match classify(s) {
+    let url: String = match classify(s) {
         // #4912: GitHub is assumed for shorthand; the stored value must be
         // clone-able, so the host goes on here rather than at clone time.
         Positional::Shorthand { owner, repo } => {
-            return Ok(format!("{SHORTHAND_HOST}/{owner}/{repo}"));
+            return Ok(format!("https://{GITHUB_HOST}/{owner}/{repo}"));
         }
-        Positional::Url(url) => url,
+        // #4912: `clone_repo` (`core::standalone::load`) runs `git` with no
+        // shell, so a literal `~` never expands and the clone fails. Expand it
+        // here, through the same helper that resolves the managed root, which
+        // leaves the input equivalent to the absolute path it names.
+        Positional::Url(url) if url == "~" || url.starts_with("~/") => {
+            crate::commands::managed_root::expand_tilde(url)?
+                .to_string_lossy()
+                .into_owned()
+        }
+        // A `?query` or `#fragment` is never part of a clone URL, and both
+        // corrupt the derived alias (`…/o/r?tab=readme` → `o-rtabreadme`).
+        Positional::Url(url) => url.split(['#', '?']).next().unwrap_or(url).to_string(),
         _ => return Err(rejection(s)),
     };
 
-    // A `?query` or `#fragment` is never part of a clone URL, and both corrupt
-    // the derived alias (`…/o/r?tab=readme` → `o-rtabreadme`).
-    let normalised = url
-        .split('#')
-        .next()
-        .unwrap_or(url)
-        .split('?')
-        .next()
-        .unwrap_or(url);
-
-    let segments = path_segments(normalised);
+    let segments = path_segments(&url);
     if segments.is_empty() {
         return Err(anyhow::anyhow!(
             "'{s}' has no owner/repo path — it names a host, not a repository. \
              Pass <owner>/<repo>, or a full repository URL"
         ));
     }
-
-    // A web-UI path word after `owner/repo`, with something following it, means
-    // this is a browser paste rather than a clone URL. The final segment is
-    // exempt so a repo actually NAMED `tree` still registers.
-    let interior = segments.len().saturating_sub(3);
-    if let Some(bad) = segments
-        .iter()
-        .skip(2)
-        .take(interior)
-        .find(|seg| NON_REPO_SEGMENTS.contains(seg))
-    {
+    if let Some(bad) = non_repo_segment(&url, &segments) {
         return Err(anyhow::anyhow!(
             "'{s}' points inside a repository ('/{bad}/…'), not at it. \
              Pass the repository root, e.g. <owner>/<repo>"
         ));
     }
 
-    Ok(normalised.to_string())
+    // #4912: `github.com/owner/repo` classifies as a URL on its host-shaped
+    // first segment, but git needs a scheme — stored verbatim it failed at clone
+    // time with `repository '…' does not exist`, long after exit 0.
+    if !url.contains("://") && !url.starts_with("git@") && !url.starts_with('/') {
+        return Ok(format!("https://{url}"));
+    }
+    Ok(url)
+}
+
+/// Find the path segment proving a URL points INTO a repo rather than at it.
+///
+/// Why: two rules, because hosts differ. On GitHub any path past `owner/repo` is
+/// a web-UI path — GitHub has no nested groups — and that is the rule that
+/// catches the most-pasted shape of all, `…/owner/repo/issues`, whose keyword is
+/// the LAST segment and so escapes the interior rule. Other hosts nest
+/// legitimately (GitLab subgroups), so there a [`NON_REPO_SEGMENTS`] word counts
+/// only in an interior position, which leaves a repo actually NAMED `tree`
+/// registrable.
+/// What: returns the offending segment, or `None` when the URL names a repo root.
+/// Test: `github_tab_urls_are_rejected`, `browser_paste_shapes_are_rejected`,
+/// `repo_named_like_a_web_path_is_ok`.
+fn non_repo_segment<'a>(url: &str, segments: &[&'a str]) -> Option<&'a str> {
+    let (host, _, _) = split_host(url);
+    if host.eq_ignore_ascii_case(GITHUB_HOST) && segments.len() > 2 {
+        return Some(segments[2]);
+    }
+    let interior = segments.len().saturating_sub(3);
+    segments
+        .iter()
+        .skip(2)
+        .take(interior)
+        .find(|seg| NON_REPO_SEGMENTS.contains(seg))
+        .copied()
 }
 
 /// Derive the default `owner-repo` alias from a resolved repository URL.
@@ -324,17 +352,8 @@ fn derive_alias(url: &str) -> anyhow::Result<String> {
 /// Test: `path_segments_matches_every_url_shape`, `path_segments_host_only`,
 /// `path_segments_keeps_numeric_owner`.
 fn path_segments(url: &str) -> Vec<&str> {
-    let after_scheme = match url.find("://") {
-        Some(i) => &url[i + 3..],
-        None => url,
-    };
-    let after_creds = match after_scheme.find('@') {
-        Some(i) => &after_scheme[i + 1..],
-        None => after_scheme,
-    };
-    let host_end = after_creds.find(['/', ':']).unwrap_or(after_creds.len());
-    let host_ended_with_colon = after_creds.as_bytes().get(host_end) == Some(&b':');
-    let after_host = after_creds[host_end..].trim_start_matches([':', '/']);
+    let (_, rest, host_ended_with_colon) = split_host(url);
+    let after_host = rest.trim_start_matches([':', '/']);
 
     let mut segments: Vec<&str> = after_host.split('/').filter(|s| !s.is_empty()).collect();
     // `host:8080/owner/repo` leaves the port as the first segment.
@@ -346,6 +365,32 @@ fn path_segments(url: &str) -> Vec<&str> {
         segments.remove(0);
     }
     segments
+}
+
+/// Split a URL into its host and the remainder that follows it.
+///
+/// Why: [`non_repo_segment`] and [`path_segments`] must agree on where the host
+/// ends, or the GitHub rule would be applied against the wrong segments.
+/// What: drops the scheme and any `user@` credential, then cuts at the first `/`
+/// or `:`. The returned flag reports whether that terminator was a `:`, which is
+/// what tells a `:port` from scp-syntax further down.
+/// Test: `path_segments_matches_every_url_shape`, `github_tab_urls_are_rejected`.
+fn split_host(url: &str) -> (&str, &str, bool) {
+    let after_scheme = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => url,
+    };
+    let after_creds = match after_scheme.find('@') {
+        Some(i) => &after_scheme[i + 1..],
+        None => after_scheme,
+    };
+    let host_end = after_creds.find(['/', ':']).unwrap_or(after_creds.len());
+    let ended_with_colon = after_creds.as_bytes().get(host_end) == Some(&b':');
+    (
+        &after_creds[..host_end],
+        &after_creds[host_end..],
+        ended_with_colon,
+    )
 }
 
 #[cfg(test)]

@@ -353,7 +353,6 @@ crates/trusty-mpm/src/bin/tm/cli/actions/slack.rs	cli_parses_slack_start
 crates/trusty-mpm/src/bin/tm/cli/actions/telegram.rs	cli_parses_telegram_start
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_load_standalone
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_path_standalone
-crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_register
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_run_standalone
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_slack_start
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_statusline
@@ -387,7 +386,6 @@ crates/trusty-mpm/src/bin/tm/commands/prune.rs	build_plan_dry_run_has_no_side_ef
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_load
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_ls
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_path
-crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_register
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_run
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	test_rm_cmd_errors_on_unknown_alias
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	test_rm_cmd_leaves_claude_config_intact

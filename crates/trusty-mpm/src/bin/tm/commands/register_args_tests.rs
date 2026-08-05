@@ -137,12 +137,28 @@ fn relative_paths_are_never_shorthand() {
     }
 }
 
-/// Absolute and home-relative paths stay accepted as local clone sources — they
-/// worked before #4912 and are unambiguous, unlike the relative forms.
+/// Absolute paths stay accepted as local clone sources — they worked before
+/// #4912 and are unambiguous, unlike the relative forms. Home-relative paths are
+/// accepted too, but only because they are expanded first; see
+/// `home_relative_path_is_expanded` for what makes them clonable.
 #[test]
 fn absolute_and_home_paths_are_accepted() {
-    assert!(resolve_register_args("/srv/git/repo.git", Some("local")).is_ok());
+    let (alias, url) = resolve_register_args("/srv/git/repo.git", Some("local")).unwrap();
+    assert_eq!(alias, "local");
+    assert_eq!(url, "/srv/git/repo.git", "an absolute path is stored as-is");
     assert!(resolve_register_args("~/src/repo.git", Some("home")).is_ok());
+}
+
+/// `~/src/repo.git` was accepted and stored verbatim, but `clone_repo`
+/// (`core::standalone::load`) runs `git` with no shell, so `git clone
+/// '~/src/repo.git'` fails with "repository does not exist". Expand the tilde so
+/// the stored path is the absolute one the user meant.
+#[test]
+fn home_relative_path_is_expanded() {
+    let home = dirs::home_dir().expect("home directory");
+    let (_, url) = resolve_register_args("~/src/repo.git", Some("home")).unwrap();
+    assert_eq!(url, home.join("src/repo.git").to_string_lossy());
+    assert!(!url.contains('~'), "tilde must not survive: {url}");
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +247,8 @@ fn two_non_urls_error() {
 
 /// Every real URL shape derives the same HYPHEN-joined `owner-repo`. Full
 /// non-GitHub URLs keep working — only non-GitHub *shorthand* is deferred.
+/// A URL that already carries a scheme is stored verbatim; the scheme-less form
+/// is the one exception and has its own test.
 #[test]
 fn derives_from_every_url_shape() {
     let cases = [
@@ -240,7 +258,6 @@ fn derives_from_every_url_shape() {
         ("https://github.com/owner/repo.git/", "owner-repo"),
         ("git@github.com:owner/repo.git", "owner-repo"),
         ("git@github.com:owner/repo", "owner-repo"),
-        ("github.com/owner/repo", "owner-repo"),
         // Non-GitHub hosts derive identically — nothing here is GitHub-specific.
         ("https://gitlab.com/acme/widget.git", "acme-widget"),
         ("https://git.example.com/team/thing", "team-thing"),
@@ -254,6 +271,28 @@ fn derives_from_every_url_shape() {
         let (alias, got_url) = resolve_register_args(url, None).unwrap();
         assert_eq!(alias, want, "wrong alias for {url}");
         assert_eq!(got_url, url, "URL must be stored verbatim");
+    }
+}
+
+/// A scheme-less host classified as a URL and was stored verbatim — but
+/// `git clone github.com/bobmatnyc/trusty-tools` fails with `repository … does
+/// not exist`, long after `tm register` exited 0. Prepend the scheme so the
+/// stored string is one git can actually fetch.
+#[test]
+fn scheme_less_host_gains_https() {
+    let cases = [
+        (
+            "github.com/owner/repo",
+            "https://github.com/owner/repo",
+            "owner-repo",
+        ),
+        ("a.b/c", "https://a.b/c", "c"),
+        ("localhost/repo", "https://localhost/repo", "repo"),
+    ];
+    for (input, want_url, want_alias) in cases {
+        let (alias, url) = resolve_register_args(input, None).unwrap();
+        assert_eq!(url, want_url, "for {input}");
+        assert_eq!(alias, want_alias, "for {input}");
     }
 }
 
@@ -305,8 +344,40 @@ fn browser_paste_shapes_are_rejected() {
     }
 }
 
+/// The single-word GitHub tab URL is the most-pasted shape of all, and the
+/// interior rule alone never caught it: on a 3-segment path the keyword IS the
+/// last segment, which is exempt so a repo named `tree` survives. So
+/// `…/o/r/issues` registered `r-issues → https://github.com/o/r/issues` at exit
+/// 0 — unclonable, and `r-issues` never collides with the canonical `o-r`, so
+/// nothing later signals it. On GitHub any path past `owner/repo` is a web-UI
+/// path, which catches these regardless of the keyword list.
+#[test]
+fn github_tab_urls_are_rejected() {
+    let cases = [
+        "https://github.com/owner/repo/issues",
+        "https://github.com/owner/repo/pulls",
+        "https://github.com/owner/repo/releases",
+        "https://github.com/owner/repo/wiki",
+        "https://github.com/owner/repo/actions",
+        // Not in NON_REPO_SEGMENTS at all — the host rule still refuses it.
+        "https://github.com/owner/repo/settings",
+        // Scheme-less and SSH forms resolve to the same host.
+        "github.com/owner/repo/issues",
+        "git@github.com:owner/repo/issues",
+    ];
+    for url in cases {
+        let err = resolve_register_args(url, None).unwrap_err().to_string();
+        assert!(
+            err.contains("points inside a repository"),
+            "{url} must be refused, got: {err}"
+        );
+        assert!(err.contains("repository root"), "no remedy in: {err}");
+    }
+}
+
 /// The web-path words are only refused in an interior position — a repo actually
-/// NAMED `tree` (or a GitLab subgroup path ending in one) still works.
+/// NAMED `tree` (or a GitLab subgroup path ending in one) still works. The
+/// GitHub host rule must not cost this precision.
 #[test]
 fn repo_named_like_a_web_path_is_ok() {
     let (alias, _) = resolve_register_args("https://github.com/owner/tree", None).unwrap();
