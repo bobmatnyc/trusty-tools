@@ -7,8 +7,8 @@ implementation is a defect: fixes land N times, security patches miss copies, an
 silent behavioral drift emerges. Before writing `Command::new(...)`, `reqwest::Client`,
 `std::env::var()` for a concern used in multiple crates, search for an existing
 entry point (`git grep`, then trusty-common source tree) and extend it. See the
-common-entry-point principle and domain consolidation audit in
-[CLAUDE.md](../../CLAUDE.md).
+common-entry-point principle in [CLAUDE.md](../../CLAUDE.md) and the per-domain
+status in [domain-consolidation-audit.md](domain-consolidation-audit.md).
 
 🔴 **Using `unwrap()` in library crates** — the compiler does not stop you, but
 it violates the project's hard rule. Use `?` with `thiserror` error types in

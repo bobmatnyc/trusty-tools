@@ -43,7 +43,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-init` | pm-workflow | yes | Initialize or intelligently refresh a project for trusty-mpm — analyze the repo and scaffold or update CLAUDE.md (project instructions), register the project with the daemon, and offer update/context/catchup modes |
 | `tm-issues-prune` | pm-workflow | yes | Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred) |
 | `tm-postmortem` | pm-workflow | yes | Analyze session errors captured across trusty-* daemons and route them through the bug-reporting pipeline |
-| `tm-pr-workflow` | pm-workflow | no | Branch protection, trusty-review gate, squash-merge, and worktree discipline for landing work on main |
+| `tm-pr-workflow` | pm-workflow | no | Branch protection, per-PR changelog fragment requirement (changelog.d file format and category line), trusty-review merge gate, squash-merge, and worktree discipline for landing work on main |
 | `tm-session-management` | pm-workflow | yes | PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration |
 | `tm-session-pause` | pm-workflow | yes | Pause the current PM session — snapshot todos, git state, and context to a project-local session file, prune stale worktrees, and print the resume path |
 | `tm-session-resume` | pm-workflow | yes | Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context |
