@@ -54,6 +54,13 @@ fn register_project_index_never_bypasses_sensitive_path_denylist() {
         trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV,
         data_dir.path(),
     );
+    // #4255: this test asserts on the wire body, so the POST must actually
+    // happen — the guard that otherwise suppresses daemon writes under a test
+    // harness has to be opted out of. Safe here because the override above
+    // points discovery at this test's OWN loopback socket, never the
+    // operator's daemon. Restored by the guard's `Drop`.
+    let _allow_production =
+        EnvVarGuard::set_str(trusty_common::test_harness::ALLOW_PRODUCTION_ENV, "1");
 
     // Fake daemon: accept one connection, capture the request body, answer
     // 200, then close the listener so the follow-up reindex calls fail fast
