@@ -82,7 +82,9 @@ mod tests {
 
     // #3711: the shared lock + guard for the WHOLE embedder module tree,
     // including the sibling `provider_tests`. See `test_env`'s docs.
-    use super::test_env::{ENV_LOCK, EnvVarGuard};
+    // #4940: `env_lock()` rather than the raw static — see its doc for why a
+    // poisoned lock must not cascade one failure into seven.
+    use super::test_env::{EnvVarGuard, env_lock};
 
     /// Why: GH #58 — launchd runs trusty-memory with a read-only `TMPDIR`,
     /// and fastembed's default `./.fastembed_cache` is also unwritable from
@@ -97,7 +99,7 @@ mod tests {
     /// Test: this test.
     #[test]
     fn resolve_fastembed_cache_dir_prefers_env_vars() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
 
         let prev_dir = std::env::var("FASTEMBED_CACHE_DIR").ok();
         let prev_path = std::env::var("FASTEMBED_CACHE_PATH").ok();
@@ -157,7 +159,7 @@ mod tests {
     /// Test: this test.
     #[test]
     fn cuda_options_default_limit() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", None);
         let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", None);
         assert_eq!(
@@ -170,7 +172,7 @@ mod tests {
 
     #[test]
     fn cuda_options_bytes_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", Some("8589934592"));
         let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", None);
         assert_eq!(
@@ -182,7 +184,7 @@ mod tests {
 
     #[test]
     fn cuda_options_mb_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", None);
         let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", Some("4096"));
         assert_eq!(
@@ -194,7 +196,7 @@ mod tests {
 
     #[test]
     fn cuda_options_bytes_takes_precedence() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", Some("1073741824"));
         let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", Some("4096"));
         assert_eq!(
@@ -206,7 +208,7 @@ mod tests {
 
     #[test]
     fn cuda_options_ignores_malformed() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         {
             let _b = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_BYTES", Some("not-a-number"));
             let _m = EnvVarGuard::apply("TRUSTY_GPU_MEM_LIMIT_MB", Some("2048"));
@@ -243,7 +245,7 @@ mod tests {
     /// the two build-variant assertions.
     #[test]
     fn ort_threading_defaults() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _i = EnvVarGuard::apply("TRUSTY_ORT_INTRA_THREADS", None);
         let _e = EnvVarGuard::apply("TRUSTY_ORT_INTER_THREADS", None);
         let _s = EnvVarGuard::apply("TRUSTY_ORT_ALLOW_SPINNING", None);
@@ -309,7 +311,7 @@ mod tests {
     /// Test: this test.
     #[test]
     fn ort_threading_reads_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _i = EnvVarGuard::apply("TRUSTY_ORT_INTRA_THREADS", Some("4"));
         let _e = EnvVarGuard::apply("TRUSTY_ORT_INTER_THREADS", Some("2"));
         let _s = EnvVarGuard::apply("TRUSTY_ORT_ALLOW_SPINNING", None);
@@ -333,7 +335,7 @@ mod tests {
     /// Test: this test.
     #[test]
     fn ort_threading_ignores_malformed() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _i = EnvVarGuard::apply("TRUSTY_ORT_INTRA_THREADS", Some("not-a-number"));
         let _e = EnvVarGuard::apply("TRUSTY_ORT_INTER_THREADS", Some("0"));
         let _s = EnvVarGuard::apply("TRUSTY_ORT_ALLOW_SPINNING", None);
@@ -358,7 +360,7 @@ mod tests {
     /// Test: this test.
     #[test]
     fn ort_threading_spinning_truthy() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _i = EnvVarGuard::apply("TRUSTY_ORT_INTRA_THREADS", None);
         let _e = EnvVarGuard::apply("TRUSTY_ORT_INTER_THREADS", None);
 
@@ -380,7 +382,7 @@ mod tests {
 
     #[test]
     fn resolve_expected_provider_forces_cpu() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _d = EnvVarGuard::apply("TRUSTY_DEVICE", Some("CPU"));
         assert_eq!(resolve_expected_provider(), ExecutionProvider::Cpu);
     }
@@ -390,7 +392,7 @@ mod tests {
     /// activates just because `TRUSTY_DEVICE` is unset.
     #[test]
     fn resolve_expected_provider_default_matches_platform() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _d = EnvVarGuard::apply("TRUSTY_DEVICE", None);
         let _u = EnvVarGuard::apply("TRUSTY_COREML_COMPUTE_UNITS", None);
 
@@ -415,7 +417,7 @@ mod tests {
     #[cfg(not(feature = "embedder-cuda"))]
     #[test]
     fn resolve_expected_provider_coreml_units() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         {
             let _d = EnvVarGuard::apply("TRUSTY_DEVICE", None);
             let _u = EnvVarGuard::apply("TRUSTY_COREML_COMPUTE_UNITS", Some("all"));
@@ -445,7 +447,7 @@ mod tests {
     #[test]
     fn resolve_default_embedding_model_defaults_to_fp32() {
         use crate::embedder::fast_embedder::resolve_default_embedding_model;
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", None);
         assert_eq!(
             resolve_default_embedding_model(),
@@ -462,7 +464,7 @@ mod tests {
     #[test]
     fn resolve_default_embedding_model_int8_opt_in() {
         use crate::embedder::fast_embedder::resolve_default_embedding_model;
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         for spelling in ["int8", "INT8", "quantized", "Quantized", "q", "Q"] {
             let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", Some(spelling));
             assert_eq!(
@@ -480,7 +482,7 @@ mod tests {
     #[test]
     fn resolve_default_embedding_model_ignores_unknown() {
         use crate::embedder::fast_embedder::resolve_default_embedding_model;
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", Some("not-a-real-model"));
         assert_eq!(
             resolve_default_embedding_model(),
@@ -538,7 +540,7 @@ mod tests {
     #[test]
     fn trusty_device_cpu_disables_coreml_on_apple_silicon() {
         use crate::embedder::fast_embedder::FastEmbedder as FE;
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let prev = std::env::var("TRUSTY_DEVICE").ok();
         unsafe { std::env::set_var("TRUSTY_DEVICE", "cpu") };
 
@@ -567,7 +569,7 @@ mod tests {
     #[test]
     fn default_apple_silicon_uses_cpu() {
         use crate::embedder::fast_embedder::FastEmbedder as FE;
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
 
         let prev_device = std::env::var("TRUSTY_DEVICE").ok();
         let prev_units = std::env::var("TRUSTY_COREML_COMPUTE_UNITS").ok();
@@ -603,7 +605,7 @@ mod tests {
     #[test]
     fn coreml_compute_units_all_opt_in() {
         use crate::embedder::fast_embedder::FastEmbedder as FE;
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
 
         let prev_device = std::env::var("TRUSTY_DEVICE").ok();
         let prev_units = std::env::var("TRUSTY_COREML_COMPUTE_UNITS").ok();
@@ -639,7 +641,7 @@ mod tests {
     #[test]
     fn trusty_device_gpu_enables_coreml_on_apple_silicon() {
         use crate::embedder::fast_embedder::FastEmbedder as FE;
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
 
         let prev_device = std::env::var("TRUSTY_DEVICE").ok();
         let prev_units = std::env::var("TRUSTY_COREML_COMPUTE_UNITS").ok();
@@ -715,7 +717,7 @@ mod tests {
         use crate::embedder::fast_embedder::{
             DEFAULT_COREML_INIT_TIMEOUT_SECS, coreml_init_timeout,
         };
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let _t = EnvVarGuard::apply("TRUSTY_COREML_INIT_TIMEOUT_SECS", None);
         assert_eq!(
             coreml_init_timeout(),
@@ -734,7 +736,7 @@ mod tests {
         use crate::embedder::fast_embedder::{
             DEFAULT_COREML_INIT_TIMEOUT_SECS, coreml_init_timeout,
         };
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         {
             let _t = EnvVarGuard::apply("TRUSTY_COREML_INIT_TIMEOUT_SECS", Some("120"));
             assert_eq!(coreml_init_timeout(), std::time::Duration::from_secs(120));
