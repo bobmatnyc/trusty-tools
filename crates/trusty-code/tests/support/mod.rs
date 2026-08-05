@@ -223,6 +223,14 @@ impl StdioSession {
     ) -> Self {
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tcode"));
         cmd.arg("serve");
+        // #4255: the child is `target/<profile>/tcode`, not a `deps/` test
+        // binary, so it cannot detect the harness from its own path — and
+        // `tcode serve` warms its working project into whatever trusty-search
+        // daemon it discovers. Without this the e2e suite registered one
+        // `$TMPDIR/.tmpXXXXXX` fixture root per target in the operator's live
+        // registry. Setting `HOME` is not enough: on macOS `data_local_dir()`
+        // goes through NSFileManager, which ignores `$HOME`.
+        cmd.env(trusty_common::test_harness::FORCE_ENV, "1");
         for (key, value) in extra_envs {
             cmd.env(key, value);
         }
@@ -378,6 +386,10 @@ pub async fn spawn_http_daemon_with_env(
         .arg("--project")
         .arg(project)
         .args(["--http", "--port", "0"]);
+    // #4255: same reason as `spawn_inner` — the spawned `tcode` cannot detect
+    // the test harness from its own path, and would warm `project` (a
+    // `tempfile` fixture) into the operator's live trusty-search registry.
+    cmd.env(trusty_common::test_harness::FORCE_ENV, "1");
     for (key, value) in envs {
         cmd.env(key, value);
     }

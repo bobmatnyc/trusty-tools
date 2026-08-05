@@ -15,18 +15,21 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::palace::RoomType;
 use trusty_common::memory_core::retrieval::{
-    recall, recall_across_palaces, recall_deep, RememberOptions,
+    list_drawers_in_wing, recall_across_palaces, recall_deep_scoped, recall_scoped, scope_admits,
+    PalaceHandle, RecallScope, RememberOptions,
 };
 use trusty_common::memory_core::timeouts;
 use uuid::Uuid;
+
+use super::wing_ops::resolve_wing_arg;
 
 use super::bm25::{
     bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_into_recall, serialize_recall,
 };
 use super::helpers::{
     attach_mcp_attribution, blocklist_gate, content_gate, dedup_gate, mcp_remember_opts,
-    open_palace_handle, parse_room, parse_tags, resolve_palace, room_label, skipped_envelope,
-    write_drawer, WriteDrawerParams,
+    open_palace_handle, parse_tags, resolve_palace, room_label, skipped_envelope, write_drawer,
+    WriteDrawerParams,
 };
 
 pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
@@ -94,7 +97,12 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
             ));
         }
     };
-    let room = parse_room(args.get("room").and_then(|v| v.as_str()));
+    // ADR-0027 T3: one room parser for every transport (`RoomType::parse`).
+    let room = args
+        .get("room")
+        .and_then(|v| v.as_str())
+        .map(RoomType::parse)
+        .unwrap_or(RoomType::General);
     let mut tags = parse_tags(&args);
     // Submission-logging Part B: attach `creator:*` attribution so every
     // MCP-origin drawer carries the writer identity (client =
@@ -140,6 +148,14 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
         }
     }
     let room_label_for_kg = room_label(&room);
+    // ADR-0027 T9: optional wing scope. Absent (the overwhelmingly common
+    // case) means the palace's default wing, which is byte-identical to the
+    // pre-wing write path. Present means this room belongs to that wing, so
+    // `engineer`/`Planning` and `pm`/`Planning` are two different rooms.
+    // Without this the write path could never reach a non-default wing and
+    // wing-scoped recall would be permanently empty outside the default.
+    let wing_handle = open_palace_handle(state, palace)?;
+    let wing_id = resolve_wing_arg(&wing_handle, &args, "memory_remember")?;
     let drawer_id = write_drawer(
         state,
         WriteDrawerParams {
@@ -148,7 +164,10 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
             tags,
             room,
             importance: 0.5,
-            opts: mcp_remember_opts(force, defer_embedding, allow_secret_like),
+            opts: RememberOptions {
+                wing_id,
+                ..mcp_remember_opts(force, defer_embedding, allow_secret_like)
+            },
             room_label_for_kg,
         },
     )
@@ -238,6 +257,18 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
             ));
         }
     }
+    // ADR-0027 T5 (#4804): the pin to `General` is lifted. `memory_note` takes
+    // the same optional `room` as `memory_remember`, through the same single
+    // parser (`RoomType::parse`, ADR-0027 D4.1), and still defaults to
+    // `General` — so a caller that passes nothing is unaffected.
+    let room = args
+        .get("room")
+        .and_then(|v| v.as_str())
+        .map(RoomType::parse)
+        .unwrap_or(RoomType::General);
+    // Mirror the resolved room for the KG extractor so the auto-extracted
+    // triples carry the same room label as the drawer.
+    let room_label_for_kg = room_label(&room);
     // note() preset skips the token threshold; we keep the default
     // filter for noise patterns. No MCP-stricter min_tokens override
     // is needed because `enforce_min_tokens = false`.
@@ -247,16 +278,13 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
             palace_id: palace,
             content,
             tags,
-            room: RoomType::General,
+            room,
             importance: 1.0,
             opts: RememberOptions {
                 defer_embedding,
                 ..RememberOptions::note()
             },
-            // memory_note is pinned to the General room; mirror that for
-            // the KG extractor so the auto-extracted triples carry the
-            // same room label as the drawer.
-            room_label_for_kg: Some("General".to_string()),
+            room_label_for_kg,
         },
     )
     .await
@@ -281,6 +309,10 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
 /// dependency), hydrates any BM25-only hits via `bm25_hits_to_recall_results`,
 /// merges without duplicating drawers already present, re-sorts by score
 /// descending, and truncates to `top_k`.
+/// ADR-0027 T7: `room` scopes the lexical lane here for the same reason it
+/// scopes L2/L3 — a caller who narrowed to one room must never be handed
+/// another room's drawer just because the daemon happened to be warming. L0/L1
+/// are deliberately left unfiltered, matching `retrieval::recall_in_room`.
 /// Test: `recall_falls_back_to_bm25_and_l0_l1_while_warming`,
 /// `recall_deep_falls_back_to_bm25_and_l0_l1_while_warming`.
 async fn recall_without_embedder(
@@ -288,11 +320,21 @@ async fn recall_without_embedder(
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
     palace: &str,
     query: &str,
+    scope: &RecallScope,
     top_k: usize,
 ) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
     let mut results = trusty_common::memory_core::retrieval::retrieve_l0_l1(handle);
+    // ADR-0027 T7 filtered this lane by room; T9 (#4809) widens it to the whole
+    // scope so a WING-scoped recall issued while the embedder is warming is
+    // filtered too. Without that, the warming path would return unscoped
+    // results — a scope boundary failing open, which is a leak, not a
+    // degraded result.
+    let allowed = scope.allowed_room_ids(&handle.kg);
     if let Some(bm25_hits) = bm25_search_optional(state, palace, query, top_k).await {
         for hydrated in bm25_hits_to_recall_results(handle, &bm25_hits) {
+            if !scope_admits(&allowed, hydrated.drawer.room_id) {
+                continue;
+            }
             if !results.iter().any(|r| r.drawer.id == hydrated.drawer.id) {
                 results.push(hydrated);
             }
@@ -307,6 +349,53 @@ async fn recall_without_embedder(
     results
 }
 
+/// The optional `room` scope on a recall call.
+///
+/// Why (ADR-0027 T7 / #4806): `retrieve_l2` has enforced a room filter since
+/// #3274, but the MCP recall schema never carried the argument, so room-scoped
+/// recall was reachable only through `memory_list` or the HTTP `/recall` route.
+/// Parsing it in one helper keeps `memory_recall` and `memory_recall_deep`
+/// from drifting into two spellings of the same option (ADR-0027 D4.1).
+/// What: `RoomType::parse` over `args["room"]`; `None` means every room.
+/// Test: `dispatch_recall_room_filter_scopes_results`.
+fn recall_room_filter(args: &Value) -> Option<RoomType> {
+    args.get("room")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(RoomType::parse)
+}
+
+/// Combine the optional `room` (T7) and `wing` (T9) arguments into one scope.
+///
+/// Why (ADR-0027 #4806 + #4809): a room is a topic and a wing is an owner, so
+/// the two arguments are different axes and every read path must agree on what
+/// they mean together. Resolving them in ONE helper is what keeps
+/// `memory_recall`, `memory_recall_deep`, and `memory_list` from drifting into
+/// three spellings of the same option (ADR-0027 D4.1).
+/// What: `RecallScope::Wing` when `wing` is present, `RecallScope::Room` when
+/// only `room` is, `RecallScope::All` when neither. Supplying BOTH is an error
+/// — "that topic inside that scope" is a real query this ticket does not
+/// implement, and honouring one while dropping the other is exactly the
+/// invisible failure ADR-0027 exists to remove. An unknown wing errors here
+/// too, via `resolve_wing_arg`.
+/// Test: `recall_rejects_wing_and_room_together`,
+/// `recall_rejects_an_unknown_wing`.
+fn recall_scope(handle: &PalaceHandle, args: &Value, tool: &str) -> Result<RecallScope> {
+    let room = recall_room_filter(args);
+    match resolve_wing_arg(handle, args, tool)? {
+        Some(wing_id) => {
+            if room.is_some() {
+                return Err(anyhow!(
+                    "{tool}: 'wing' and 'room' together are not supported yet — \
+                     pass one or the other"
+                ));
+            }
+            Ok(RecallScope::Wing(wing_id))
+        }
+        None => Ok(RecallScope::from_room_filter(room)),
+    }
+}
+
 pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "memory_recall")?;
     let query = args
@@ -316,12 +405,17 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     let handle = open_palace_handle(state, &palace)?;
+    // ADR-0027 T7 + T9: resolved BEFORE the warming short-circuit below, so a
+    // wing- or room-scoped recall is filtered on every path. Resolving it after
+    // that early return would let a scoped recall issued during embedder warmup
+    // come back unfiltered.
+    let scope = recall_scope(&handle, &args, "memory_recall")?;
 
     // Issue #1970: while the embedder is still warming up, return BM25 +
     // L0/L1 results immediately instead of blocking/erroring on embedder
     // state.
     if state.readiness() == DaemonReadiness::Warming {
-        let results = recall_without_embedder(state, &handle, &palace, query, top_k).await;
+        let results = recall_without_embedder(state, &handle, &palace, query, &scope, top_k).await;
         return Ok(serialize_recall(&palace, query, results));
     }
 
@@ -331,7 +425,13 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // When the daemon is unavailable or the env var is unset, the
     // helper returns `None` and we return the vector-only results
     // verbatim — zero behavioural change for existing deployments.
-    let vector_fut = recall(&handle, embedder.as_ref(), query, top_k);
+    // ADR-0027 T7: the BM25 lane needs no scope filter of its own here —
+    // `fuse_bm25_into_recall` only *boosts* drawers already present in the
+    // vector list (it never appends BM25-only hits), and that list is already
+    // scoped, so no out-of-scope drawer can enter through the lexical
+    // lane. The warming path above is different: it hydrates BM25-only hits,
+    // which is why it filters explicitly.
+    let vector_fut = recall_scoped(&handle, embedder.as_ref(), query, &scope, top_k);
     let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
     let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
     let mut results = vector_res.context("recall")?;
@@ -350,15 +450,19 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     let handle = open_palace_handle(state, &palace)?;
+    // ADR-0027 T7 + T9: deep recall is no longer the odd one out — it takes the
+    // same `room`/`wing` scope as `memory_recall`, resolved before the warming
+    // short-circuit so no path can return unscoped results.
+    let scope = recall_scope(&handle, &args, "memory_recall_deep")?;
 
     // Issue #1970: same warming-fallback posture as memory_recall.
     if state.readiness() == DaemonReadiness::Warming {
-        let results = recall_without_embedder(state, &handle, &palace, query, top_k).await;
+        let results = recall_without_embedder(state, &handle, &palace, query, &scope, top_k).await;
         return Ok(serialize_recall(&palace, query, results));
     }
 
     let embedder = state.embedder().await?;
-    let results = recall_deep(&handle, embedder.as_ref(), query, top_k)
+    let results = recall_deep_scoped(&handle, embedder.as_ref(), query, &scope, top_k)
         .await
         .context("recall_deep")?;
     Ok(serialize_recall(&palace, query, results))
@@ -367,16 +471,19 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
 pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "memory_list")?;
     let handle = open_palace_handle(state, &palace)?;
-    let room = args
-        .get("room")
-        .and_then(|v| v.as_str())
-        .map(|s| parse_room(Some(s)));
     let tag = args
         .get("tag")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-    let drawers = handle.list_drawers(room, tag, limit);
+    // ADR-0027 T9: `wing` narrows to one scope's rooms; absent, this is the
+    // unchanged pre-wing listing. Same shared resolver the recall paths use, so
+    // all three agree on what `wing` and `room` mean together.
+    let drawers = match recall_scope(&handle, &args, "memory_list")? {
+        RecallScope::Wing(wing_id) => list_drawers_in_wing(&handle, wing_id, tag, limit),
+        RecallScope::Room(room) => handle.list_drawers(Some(room), tag, limit),
+        RecallScope::All => handle.list_drawers(None, tag, limit),
+    };
     let payload: Vec<Value> = drawers
         .iter()
         .map(|d| {
@@ -434,7 +541,9 @@ async fn recall_all_without_embedder(
     let mut merged = Vec::new();
     for handle in handles {
         let palace_id = handle.id.as_str().to_string();
-        let hits = recall_without_embedder(state, handle, &palace_id, query, top_k).await;
+        let hits =
+            recall_without_embedder(state, handle, &palace_id, query, &RecallScope::All, top_k)
+                .await;
         merged.extend(hits.into_iter().map(|result| {
             trusty_common::memory_core::retrieval::CrossPalaceResult {
                 palace_id: palace_id.clone(),

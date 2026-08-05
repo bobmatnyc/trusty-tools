@@ -99,7 +99,8 @@ fn bundle_install_pass_never_touches_the_compiled_prompt() {
     // artifact did target that name.
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    let compiled = trusty_mpm::core::instruction_pipeline::compiled_prompt_path(dir.path());
+    let compiled =
+        trusty_mpm::core::instruction_pipeline::compiled_prompt_path(dir.path(), "sess-1");
     std::fs::create_dir_all(compiled.parent().unwrap()).unwrap();
     const SENTINEL: &str = "SENTINEL-NOT-WRITTEN-BY-THE-BUNDLE-PASS";
     std::fs::write(&compiled, SENTINEL).unwrap();

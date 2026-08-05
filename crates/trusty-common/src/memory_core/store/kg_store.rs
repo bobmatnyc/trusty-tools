@@ -56,6 +56,50 @@ pub const ACTIVE_SUBJECT_COUNTS: TableDefinition<&[u8], &[u8]> =
 /// Test: `round_trip_drawer_record`.
 pub const DRAWERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("drawers");
 
+/// Room registry (ADR-0027 D1.1).
+///
+/// Why: rooms are stored in the SAME database as the drawers they index — not
+/// a JSON sidecar — because the redb open path recreates an unreadable file
+/// empty, and a surviving sidecar would then authoritatively describe rooms
+/// whose drawers are gone. Rooms and drawers corrupt, snapshot, and recover as
+/// one unit.
+/// What: Key = room uuid bytes (`[u8; 16]`); the nil uuid is reserved for the
+/// `RoomSchemaMarker` row. Value = postcard-encoded
+/// [`crate::memory_core::store::rooms::RoomRecord`].
+/// Test: `store::room_backfill::tests::room_insert_is_insert_only`.
+pub const ROOMS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rooms");
+
+/// Canonical-key index over [`ROOMS`] (ADR-0027 D1.3).
+///
+/// Why: a write names a room by label, not by id. Lowercasing the key while
+/// the record keeps the first-seen spelling means `Decisions` and `decisions`
+/// resolve to one room. Ids are READ from here, never recomputed.
+/// What: Key = `"<wing_uuid>\x1f<normalized_label>"`. Value = room uuid bytes.
+/// Test: `store::room_backfill::tests::room_key_lookup_returns_registered_id`.
+pub const ROOM_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("room_keys");
+
+/// Wing registry (ADR-0027 D2 / ticket T9).
+///
+/// Why: a Wing is the scope/ownership axis over rooms — the "who" to a Room's
+/// "what". It lives in the same database as the rooms it scopes for the same
+/// corruption-recovery reason [`ROOMS`] does: a surviving sidecar would
+/// authoritatively describe wings whose rooms are gone.
+/// What: Key = wing uuid bytes (`[u8; 16]`); the nil uuid is reserved for the
+/// `WingSchemaMarker` row. Value = postcard-encoded
+/// [`crate::memory_core::store::wings::WingRecord`].
+/// Test: `store::wings::tests::default_wing_is_seeded_once`.
+pub const WINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wings");
+
+/// Canonical-key index over [`WINGS`] (ADR-0027 T9).
+///
+/// Why: a caller names a wing by label, not by id, and `Engineer`/`engineer`
+/// must be one wing. Ids are READ from here, never recomputed — which is also
+/// what pins the default wing to the `DEFAULT_WING_ID` every room row already
+/// carries instead of minting a second one.
+/// What: Key = the trimmed, lowercased label. Value = wing uuid bytes.
+/// Test: `store::wings::tests::wing_create_is_idempotent`.
+pub const WING_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("wing_keys");
+
 /// Payload store (for `open-mpm`'s `TrustyBackedMemoryStore`).
 ///
 /// Why: Payloads are namespaced by segment and addressed by id; share the
@@ -521,6 +565,10 @@ mod tests {
             TRIPLES_BY_PREDICATE.name(),
             ACTIVE_SUBJECT_COUNTS.name(),
             DRAWERS.name(),
+            ROOMS.name(),
+            ROOM_KEYS.name(),
+            WINGS.name(),
+            WING_KEYS.name(),
             PAYLOADS.name(),
             SESSIONS.name(),
             RECALL_LOG.name(),

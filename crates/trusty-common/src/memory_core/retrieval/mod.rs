@@ -13,6 +13,8 @@
 mod embedder;
 mod handle;
 mod layers;
+// ADR-0027 T9: room/wing recall scoping, shared by L2 and the list paths.
+mod scope;
 mod types;
 
 #[cfg(test)]
@@ -35,9 +37,13 @@ pub use types::{
 // Palace handle
 pub use handle::PalaceHandle;
 
+// Recall scoping (ADR-0027 T9)
+pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};
+
 // Layer functions
 pub use layers::{
     expand_query, recall, recall_across_palaces, recall_across_palaces_with_default_embedder,
-    recall_deep, recall_deep_with_default_embedder, recall_with_default_embedder,
-    rescore_l1_by_similarity, retrieve_l0_l1, retrieve_l2, retrieve_l3,
+    recall_deep, recall_deep_in_room, recall_deep_scoped, recall_deep_with_default_embedder,
+    recall_in_room, recall_scoped, recall_with_default_embedder, rescore_l1_by_similarity,
+    retrieve_l0_l1, retrieve_l2, retrieve_l2_scoped, retrieve_l3, retrieve_l3_scoped,
 };

@@ -7,7 +7,10 @@
 //! `GLIBC_2.39 not found` (issue #1992). The release pipeline (#2037) already
 //! ships a portable `x86_64-linux-al2023` load-dynamic asset for exactly these
 //! hosts, but the installer never selected it — so a low-glibc host silently
-//! downloaded a binary that could not run.
+//! downloaded a binary that could not run. #2533 follow-up to PR #4822: the
+//! `aarch64-unknown-linux-gnu` asset turns out to have the same 2.39 floor
+//! (measured: exit 127 on AL2023 aarch64), so the same routing now applies on
+//! arm64 via the new `aarch64-linux-al2023` asset.
 //!
 //! What: [`host_glibc_version`] probes the running host's glibc via
 //! `ldd --version`. [`select_asset_suffix`] is a pure, hermetic decision:
@@ -35,20 +38,25 @@ use super::platform::{TARGET_LINUX_ARM64, TARGET_LINUX_X86_64};
 /// Test: `tests::select_*` exercise both members and a non-member.
 pub const ORT_CRATES: [&str; 2] = ["trusty-search", "trusty-analyze"];
 
-/// Minimum glibc `(major, minor)` the native x86_64 Linux ORT asset requires.
+/// Minimum glibc `(major, minor)` the native Linux ORT assets require.
 ///
-/// Why: The native asset is built on `ubuntu-latest` (Ubuntu 24.04 / glibc
-/// 2.39); the bundled static ONNX Runtime additionally needs glibc ≥ 2.38. The
-/// binding constraint is the runner glibc, so 2.39 is the effective floor a host
-/// must meet to run the native asset.
+/// Why: The native assets are built on GitHub's Ubuntu 24.04 runners — amd64 on
+/// `ubuntu-latest`, arm64 on `ubuntu-24.04-arm` — both glibc 2.39; the bundled
+/// static ONNX Runtime additionally needs glibc ≥ 2.38. The binding constraint
+/// is the runner glibc, so 2.39 is the effective floor a host must meet to run
+/// either native asset. #2533 follow-up: this floor was measured on arm64 too
+/// (PR #4822 ran the arm64 gnu asset on `amazonlinux:2023`, glibc 2.34, and got
+/// exit 127 on `libmvec.so.1`), so it is no longer x86_64-specific.
 ///
-/// What: `(2, 39)` — hosts below this must use the AL2023 asset instead.
+/// What: `(2, 39)` — hosts below this must use the AL2023 asset for their
+/// architecture instead.
 ///
 /// Test: `tests::select_prefers_al2023_below_floor` /
-/// `tests::select_keeps_native_at_floor`.
+/// `tests::select_keeps_native_at_floor` /
+/// `tests::select_arm64_prefers_al2023_below_floor`.
 pub const NATIVE_LINUX_GLIBC_FLOOR: (u32, u32) = (2, 39);
 
-/// Asset suffix for the portable AL2023 load-dynamic ORT build.
+/// Asset suffix for the portable amd64 AL2023 load-dynamic ORT build.
 ///
 /// Why: Centralise the literal so the URL builders and the selection logic never
 /// drift from the name the release workflow publishes.
@@ -57,6 +65,20 @@ pub const NATIVE_LINUX_GLIBC_FLOOR: (u32, u32) = (2, 39);
 ///
 /// Test: `tests::select_prefers_al2023_below_floor`.
 pub const AL2023_ASSET_SUFFIX: &str = "x86_64-linux-al2023";
+
+/// Asset suffix for the portable arm64 AL2023 load-dynamic ORT build.
+///
+/// Why: #2533 follow-up to PR #4822. Until that leg existed, a below-floor arm64
+/// host (Graviton on Amazon Linux 2023 being the confirmed real one) had nowhere
+/// to go: this selector handed it the native `aarch64-unknown-linux-gnu` asset,
+/// which #4822 proved by execution cannot even load there. Producing the asset
+/// in CI without teaching the selector its name would leave it downloaded by
+/// nobody, so the two land together.
+///
+/// What: `aarch64-linux-al2023` (matches `release.yml`'s `asset_suffix`).
+///
+/// Test: `tests::select_arm64_prefers_al2023_below_floor`.
+pub const AL2023_ARM64_ASSET_SUFFIX: &str = "aarch64-linux-al2023";
 
 /// The chosen release asset for a crate on the running host.
 ///
@@ -145,8 +167,10 @@ fn parse_major_minor(token: &str) -> Option<(u32, u32)> {
 /// - on `x86_64-unknown-linux-gnu` with a probed glibc **below**
 ///   [`NATIVE_LINUX_GLIBC_FLOOR`], selects [`AL2023_ASSET_SUFFIX`]
 ///   (`load_dynamic = true`);
-/// - on `aarch64-unknown-linux-gnu`, keeps the arm64 suffix but flags
-///   `load_dynamic = true` (that asset dlopen()s ONNX Runtime);
+/// - on `aarch64-unknown-linux-gnu` with a probed glibc **below** the same
+///   floor, selects [`AL2023_ARM64_ASSET_SUFFIX`] (#2533 follow-up);
+/// - on `aarch64-unknown-linux-gnu` otherwise, keeps the arm64 suffix but still
+///   flags `load_dynamic = true` (that asset dlopen()s ONNX Runtime too);
 /// - otherwise (macOS, or x86_64 with glibc ≥ floor, or unknown glibc) keeps the
 ///   native `target` suffix (`load_dynamic = false`).
 ///
@@ -157,7 +181,10 @@ fn parse_major_minor(token: &str) -> Option<(u32, u32)> {
 ///
 /// Test: `tests::select_prefers_al2023_below_floor`,
 /// `tests::select_keeps_native_at_floor`, `tests::select_unknown_glibc_keeps_native`,
-/// `tests::select_arm64_ort_is_load_dynamic`, `tests::select_non_ort_never_switches`.
+/// `tests::select_arm64_ort_is_load_dynamic`,
+/// `tests::select_arm64_prefers_al2023_below_floor`,
+/// `tests::select_arm64_unknown_glibc_keeps_native`,
+/// `tests::select_non_ort_never_switches`.
 pub fn select_asset_suffix(
     crate_name: &str,
     target: &str,
@@ -180,12 +207,25 @@ pub fn select_asset_suffix(
             },
             _ => native,
         },
-        // The arm64 Linux ORT asset is a load-dynamic build (issue #2037): it
-        // ships with the native `aarch64-unknown-linux-gnu` suffix but still
-        // dlopen()s ONNX Runtime, so it needs the ORT_DYLIB_PATH note.
-        TARGET_LINUX_ARM64 => AssetChoice {
-            suffix: TARGET_LINUX_ARM64.to_owned(),
-            load_dynamic: true,
+        // The arm64 Linux ORT asset is a load-dynamic build (issue #2037) in
+        // BOTH branches below, so `load_dynamic` is unconditionally true here —
+        // unlike x86_64, where the native asset statically bundles ONNX Runtime.
+        // Only the glibc floor differs between the two arm64 assets.
+        //
+        // #2533 follow-up to PR #4822: the native arm64 asset is built on
+        // `ubuntu-24.04-arm` and carries that runner's glibc 2.39 floor plus an
+        // OpenSSL 3 dependency. #4822 verified by running it that it exits 127
+        // on `amazonlinux:2023` aarch64 — so a below-floor arm64 host must get
+        // the AL2023 asset for its architecture, exactly as x86_64 does above.
+        TARGET_LINUX_ARM64 => match host_glibc {
+            Some(glibc) if glibc < NATIVE_LINUX_GLIBC_FLOOR => AssetChoice {
+                suffix: AL2023_ARM64_ASSET_SUFFIX.to_owned(),
+                load_dynamic: true,
+            },
+            _ => AssetChoice {
+                suffix: TARGET_LINUX_ARM64.to_owned(),
+                load_dynamic: true,
+            },
         },
         _ => native,
     }
@@ -311,14 +351,49 @@ mod tests {
     }
 
     /// Why: The arm64 Linux ORT asset is load-dynamic regardless of glibc, so the
-    /// ORT_DYLIB_PATH note must fire even though the suffix stays native.
-    /// What: trusty-search on aarch64 Linux → native suffix, load_dynamic = true.
+    /// ORT_DYLIB_PATH note must fire even when the suffix stays native.
+    /// What: trusty-search on aarch64 Linux at the floor → native suffix,
+    /// load_dynamic = true.
     /// Test: This is the test.
     #[test]
     fn select_arm64_ort_is_load_dynamic() {
-        let choice = select_asset_suffix("trusty-search", TARGET_LINUX_ARM64, Some((2, 35)));
+        let choice = select_asset_suffix("trusty-search", TARGET_LINUX_ARM64, Some((2, 39)));
         assert_eq!(choice.suffix, TARGET_LINUX_ARM64);
         assert!(choice.load_dynamic);
+    }
+
+    /// Why: #2533 follow-up to PR #4822 — the native arm64 ORT asset carries a
+    /// glibc 2.39 floor and was measured exiting 127 on AL2023 aarch64 (glibc
+    /// 2.34). A below-floor arm64 host must therefore be routed to the arm64
+    /// AL2023 asset, not handed a binary that cannot load.
+    /// What: trusty-search on aarch64 Linux with glibc 2.34 → `aarch64-linux-al2023`.
+    /// Test: This is the test.
+    #[test]
+    fn select_arm64_prefers_al2023_below_floor() {
+        let choice = select_asset_suffix("trusty-search", TARGET_LINUX_ARM64, Some((2, 34)));
+        assert_eq!(choice.suffix, AL2023_ARM64_ASSET_SUFFIX);
+        assert!(choice.load_dynamic);
+    }
+
+    /// Why: An unprobeable glibc must not force the extra ORT_DYLIB_PATH setup of
+    /// a different asset — same conservative rule the x86_64 branch follows.
+    /// What: trusty-search on aarch64 Linux with `None` glibc → native suffix.
+    /// Test: This is the test.
+    #[test]
+    fn select_arm64_unknown_glibc_keeps_native() {
+        let choice = select_asset_suffix("trusty-search", TARGET_LINUX_ARM64, None);
+        assert_eq!(choice.suffix, TARGET_LINUX_ARM64);
+        assert!(choice.load_dynamic);
+    }
+
+    /// Why: The two AL2023 suffixes must never drift from what `release.yml`
+    /// publishes; a typo here silently 404s every below-floor install.
+    /// What: Asserts both constants match the workflow's `asset_suffix` values.
+    /// Test: This is the test.
+    #[test]
+    fn al2023_suffixes_match_release_workflow() {
+        assert_eq!(AL2023_ASSET_SUFFIX, "x86_64-linux-al2023");
+        assert_eq!(AL2023_ARM64_ASSET_SUFFIX, "aarch64-linux-al2023");
     }
 
     /// Why: macOS ORT assets are static; no glibc routing applies there.

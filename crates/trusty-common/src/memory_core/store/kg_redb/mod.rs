@@ -14,9 +14,13 @@
 
 mod import;
 mod read_ops;
+// ADR-0027 T1: ROOMS / ROOM_KEYS accessors (insert-only writes).
+mod room_ops;
 mod store;
 mod tests;
 mod types;
+// ADR-0027 T9: WINGS / WING_KEYS accessors. Insert-only except the rename pair.
+mod wing_ops;
 mod write_ops;
 
 pub use store::KgStoreRedb;

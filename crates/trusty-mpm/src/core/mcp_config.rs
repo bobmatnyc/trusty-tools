@@ -456,8 +456,7 @@ pub fn resolve_conditional_mcp_toggles(
     project_dir: &Path,
 ) -> (bool, bool) {
     let catalog_root = crate::content::catalog_root_for(&fw.root);
-    let sources =
-        crate::core::manifest::ManifestSources::resolve(project_dir, &fw.root, &catalog_root);
+    let sources = crate::core::manifest::ManifestSources::resolve(project_dir, &catalog_root);
     let manifest = crate::core::manifest::resolve_manifest(&sources);
     let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
     (plan.inject_trusty_memory, plan.inject_trusty_search)

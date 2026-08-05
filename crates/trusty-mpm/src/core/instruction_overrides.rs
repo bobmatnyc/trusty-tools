@@ -437,9 +437,12 @@ pub(crate) fn assemble_sections(
 /// THE ROSTER-PRECEDENCE NOTE, slotted between the doctrine and the roster,
 /// resolves two ambiguities the append creates, both raised in review.
 ///
-/// (1) PRECEDENCE. The retained asset contradicts the roster on concrete points
-/// — it calls the generic `ops` agent DEPRECATED while the roster lists `ops`,
-/// and it advertises agents the roster may not carry. Reconciling the asset is
+/// (1) PRECEDENCE. The retained asset can advertise agents the roster does not
+/// carry — since #4760 the `platform` and stack-gated agents deploy only where a
+/// marker is present, so a routing table naming `vercel-ops` is correct guidance
+/// on a Vercel project and a dead name everywhere else. (The asset's older
+/// `ops`-is-DEPRECATED contradiction is gone: #4765 deleted both halves — the
+/// agent from the bundle and the claim from the asset.) Reconciling the asset is
 /// #4183's job; until then the PM needs one unambiguous tie-break rule.
 ///
 /// (2) LOADABILITY. The roster is the UNION of three tiers, but no launch mode

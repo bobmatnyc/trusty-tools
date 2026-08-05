@@ -16,6 +16,8 @@
 use crate::core::registry::IndexId;
 use crate::service::reindex::{ReindexProgress, ReindexStatus};
 use crate::service::server::SearchAppState;
+// #4393: the shutdown window and the per-index grants it mints.
+use crate::service::shutdown_budget::{FlushDeadline, ShutdownBudget};
 use dashmap::DashMap;
 use std::sync::Arc;
 
@@ -23,7 +25,21 @@ use std::sync::Arc;
 /// empty snapshot (issue #2922 — the prior flat 10 s default was far too
 /// short for anything beyond a trivial index; filesystem/lock-acquisition
 /// overhead alone can exceed 10 s on a loaded host).
-const MIN_FLUSH_TIMEOUT_SECS: u64 = 30;
+/// #4393: this floor exceeded EVERY termination window in the system (launchd's
+/// measured 5 s `ExitTimeOut` default, `stop`'s 5 s, the reaper's 3 s), so a
+/// flush with real work to do was SIGKILLed before it finished on every path.
+/// The floor itself is right; what was missing was any relationship between it
+/// and how long the process actually lives. See
+/// [`crate::service::shutdown_budget`] — deadlines are now clamped to the
+/// remaining window, and the window itself is declared to launchd via
+/// `ExitTimeOut`.
+///
+/// `pub` rather than `pub(crate)`: the `trusty-search` BIN re-exports the lib's
+/// modules into its own `crate::` namespace (see `main.rs`), so the CLI-side
+/// gates in `commands::stop` and `commands::start::reap_orphans` that assert
+/// their termination windows cover this floor are, to the compiler, a different
+/// crate.
+pub const MIN_FLUSH_TIMEOUT_SECS: u64 = 30;
 
 /// Conservative disk-write throughput floor (MB/s) used to scale the flush
 /// deadline from the on-disk HNSW snapshot's current size — a cheap proxy for
@@ -175,21 +191,35 @@ fn shutdown_flush_concurrency() -> usize {
 ///    essentially no protection there either, on any reindex large enough to
 ///    matter).
 ///
-/// What: iterates `state.registry.list()`, applying the above five mitigations
+/// 6. **Bounded by the process's actual remaining life** (#4393): every
+///    per-index deadline is minted by the caller-supplied [`ShutdownBudget`],
+///    which clamps the size-scaled value to the time left before SIGKILL and
+///    refuses to grant anything once the window is spent. Mitigations 1–5 all
+///    assumed the process would still be alive to enforce them; it usually was
+///    not, because the 30 s floor exceeded every termination window in the
+///    system. A sweep that runs out of window now stops at an index boundary,
+///    logging how many indexes kept their last incremental checkpoint, instead
+///    of being cut off mid-write at an arbitrary point.
+///
+/// What: iterates `state.registry.list()`, applying the above six mitigations
 /// per index, running up to `shutdown_flush_concurrency()` flushes at a time.
 /// Test: `shutdown_flush_empty_registry_returns_immediately`,
 /// `shutdown_flush_skips_index_with_reindex_in_progress`,
-/// `shutdown_flush_proceeds_when_reindex_complete` in this module.
-pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState) {
+/// `shutdown_flush_proceeds_when_reindex_complete`,
+/// `shutdown_flush_skips_every_index_when_the_window_is_spent` in this module.
+pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState, budget: ShutdownBudget) {
     let ids = state.registry.list();
     if ids.is_empty() {
         return;
     }
     tracing::info!(
-        "shutdown: flushing {} index snapshot(s) before exit (concurrency={})",
+        "shutdown: flushing {} index snapshot(s) before exit (concurrency={}, \
+         window={:?} remaining, #4393)",
         ids.len(),
-        shutdown_flush_concurrency()
+        shutdown_flush_concurrency(),
+        budget.remaining(),
     );
+    let skipped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(shutdown_flush_concurrency()));
     let tasks: Vec<_> = ids
         .into_iter()
@@ -197,30 +227,56 @@ pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState) {
             let state_registry = state.registry.clone();
             let reindex_progress = state.reindex_progress.clone();
             let semaphore = semaphore.clone();
+            let skipped = skipped.clone();
             async move {
                 // Issue #2922: bound how many indexes flush at once so a
                 // fleet of large indexes can't all saturate disk I/O / the
                 // blocking thread pool simultaneously. `acquire_owned` is
                 // dropped (releasing the permit) when this future completes.
                 let _permit = semaphore.acquire_owned().await;
-                flush_one_index_on_shutdown(&state_registry, &reindex_progress, id).await;
+                // #4393: the budget is re-checked here, after the permit wait,
+                // so indexes queued behind a slow one discover the spent window
+                // immediately rather than each starting a flush they cannot
+                // finish.
+                if !flush_one_index_on_shutdown(&state_registry, &reindex_progress, id, budget)
+                    .await
+                {
+                    skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         })
         .collect();
     futures::future::join_all(tasks).await;
+    let skipped = skipped.load(std::sync::atomic::Ordering::Relaxed);
+    if skipped > 0 {
+        tracing::warn!(
+            "shutdown: {skipped} index(es) were not flushed — the {}s termination window \
+             ran out (#4393). Each keeps its last incremental checkpoint; raise \
+             {} to widen the window.",
+            trusty_common::shutdown::termination_grace().as_secs(),
+            trusty_common::shutdown::TERMINATION_GRACE_ENV,
+        );
+    }
 }
 
 /// Flush a single index's HNSW + chunk corpus to disk during shutdown,
 /// applying the reindex-in-progress skip, the external-volume skip, and the
 /// size-scaled bounded timeout. Extracted from [`flush_all_indexes_on_shutdown`]
 /// so that function can run one of these per index concurrently (issue #2922).
+///
+/// Returns `false` only when `budget` refused to mint a deadline because the
+/// #4393 termination window was already spent — the one skip reason that says
+/// something about the shutdown as a whole rather than about this index. Every
+/// other early return (missing handle, live reindex, external volume,
+/// unresolvable path) is an index-specific decision and reports `true`.
 async fn flush_one_index_on_shutdown(
     registry: &crate::core::registry::IndexRegistry,
     reindex_progress: &Arc<DashMap<IndexId, Arc<ReindexProgress>>>,
     id: crate::core::registry::IndexId,
-) {
+    budget: ShutdownBudget,
+) -> bool {
     let Some(handle) = registry.get(&id) else {
-        return;
+        return true;
     };
 
     // Issue #1717: never publish a shutdown flush while a background reindex
@@ -286,7 +342,7 @@ async fn flush_one_index_on_shutdown(
              persist.",
             id.0,
         );
-        return;
+        return true;
     }
 
     // Fix #874 (3): skip indexes on external volumes to avoid TCC I/O stalls.
@@ -298,7 +354,7 @@ async fn flush_one_index_on_shutdown(
             id.0,
             handle.root_path.display(),
         );
-        return;
+        return true;
     }
 
     // Fix #874 (2): derive paths inside a short read-lock scope, then drop
@@ -319,7 +375,7 @@ async fn flush_one_index_on_shutdown(
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("shutdown: chunks path unresolvable for '{}': {e}", id.0);
-                return;
+                return true;
             }
         }
     };
@@ -331,7 +387,7 @@ async fn flush_one_index_on_shutdown(
                     "shutdown: colocated hnsw path unresolvable for '{}': {e}",
                     id.0
                 );
-                return;
+                return true;
             }
         }
     } else {
@@ -339,7 +395,7 @@ async fn flush_one_index_on_shutdown(
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("shutdown: hnsw path unresolvable for '{}': {e}", id.0);
-                return;
+                return true;
             }
         }
     };
@@ -348,7 +404,19 @@ async fn flush_one_index_on_shutdown(
     // rather than a flat constant, so a tiny index isn't held to a needlessly
     // long budget and a huge one isn't cut off before it can finish an atomic
     // write. Computed once per index, before spawning the flush task.
-    let flush_deadline = shutdown_flush_deadline_for(&hnsw_path);
+    //
+    // #4393: and clamped by the budget to what the process actually has left.
+    // `None` means the window is spent: start nothing, so this index keeps the
+    // snapshot its last incremental persist wrote instead of being SIGKILLed
+    // partway through a fresh one.
+    let Some(flush_deadline) = budget.flush_deadline_for(&hnsw_path) else {
+        tracing::warn!(
+            "shutdown: skipping flush for '{}' — the termination window is spent \
+             (#4393). On-disk state is from the last incremental persist.",
+            id.0,
+        );
+        return false;
+    };
 
     // Fix #874 (2): derive paths inside a short read-lock scope above,
     // then hold the indexer read-lock across the flush I/O below.
@@ -370,6 +438,9 @@ async fn flush_one_index_on_shutdown(
         // Issue #28: `flush_corpus_to_disk` writes to redb when a `CorpusStore`
         // is wired (final consistency sweep, no full JSON rewrite) and falls
         // back to the legacy `chunks.json` snapshot otherwise.
+        // #4226: both calls below are no-ops on a write-quarantined index —
+        // this was the last durable-write path a #4122-quarantined index still
+        // took, and it wrote its empty in-memory corpus over `chunks.json`.
         if let Err(e) = indexer.flush_corpus_to_disk(&chunks_path).await {
             tracing::warn!(
                 "shutdown: failed to flush chunk corpus for '{}': {e}",
@@ -395,6 +466,7 @@ async fn flush_one_index_on_shutdown(
     // own consistent rename or block behind — and safely lose to — a fresher
     // save that started after it; it can never interleave with one.
     flush_index_bounded(&id.0, flush_deadline, flush_future).await;
+    true
 }
 
 /// Run a single index's flush future to completion under a hard deadline,
@@ -420,10 +492,16 @@ async fn flush_one_index_on_shutdown(
 /// worker without depending on tokio's runtime teardown.
 /// Test: `flush_bounded_returns_on_blocking_work` and
 /// `flush_bounded_completes_fast_path` in the `tests` submodule.
-async fn flush_index_bounded<F>(index_id: &str, deadline: std::time::Duration, flush: F)
+///
+/// #4393: the deadline is a [`FlushDeadline`], not a bare `Duration`. This
+/// function is the only place a flush is given a wall-clock budget, and
+/// `FlushDeadline` can only be minted by [`ShutdownBudget::flush_deadline_for`],
+/// so no call site can hand it a budget the process will not live to honour.
+async fn flush_index_bounded<F>(index_id: &str, deadline: FlushDeadline, flush: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    let deadline = deadline.as_duration();
     let task = tokio::spawn(flush);
     let abort = task.abort_handle();
     match tokio::time::timeout(deadline, task).await {
@@ -448,6 +526,18 @@ where
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    /// A [`FlushDeadline`] of roughly `millis`, minted the only way one can be
+    /// (#4393): from a [`ShutdownBudget`] whose window is that long plus the
+    /// cleanup reserve. There is deliberately no constructor from a bare
+    /// `Duration` — that is the whole point of the type.
+    fn deadline_of(millis: u64) -> FlushDeadline {
+        let window = std::time::Duration::from_millis(millis)
+            + crate::service::shutdown_budget::CLEANUP_RESERVE;
+        ShutdownBudget::from_window(window)
+            .flush_deadline_for(std::path::Path::new("/nonexistent/hnsw.usearch"))
+            .expect("a positive window grants a deadline")
+    }
 
     /// Why: `shutdown_flush_timeout_override` must parse the env var and
     /// return `None` when absent, letting size-based scaling take over.
@@ -559,7 +649,11 @@ mod tests {
             crate::core::registry::IndexRegistry::new(),
         );
         let start = std::time::Instant::now();
-        flush_all_indexes_on_shutdown(&state).await;
+        flush_all_indexes_on_shutdown(
+            &state,
+            ShutdownBudget::from_window(std::time::Duration::from_secs(65)),
+        )
+        .await;
         // SAFETY: same serial guarantee as above.
         unsafe { std::env::remove_var("TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS") };
         assert!(
@@ -589,7 +683,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn flush_bounded_returns_on_blocking_work() {
         let start = std::time::Instant::now();
-        flush_index_bounded("blocking", std::time::Duration::from_millis(200), async {
+        flush_index_bounded("blocking", deadline_of(200), async {
             // Simulate usearch's synchronous save FFI: blocks the worker
             // thread and ignores async cancellation.
             std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -624,7 +718,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn flush_bounded_survives_single_worker_when_blocking_work_is_offloaded() {
         let start = std::time::Instant::now();
-        flush_index_bounded("offloaded", std::time::Duration::from_millis(200), async {
+        flush_index_bounded("offloaded", deadline_of(200), async {
             // Mirrors `UsearchStore::save`: the actual blocking work runs
             // on the blocking thread pool, not the sole async worker, so
             // that worker stays free to drive the outer timeout's timer.
@@ -650,7 +744,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn flush_bounded_completes_fast_path() {
         let start = std::time::Instant::now();
-        flush_index_bounded("fast", std::time::Duration::from_secs(10), async {}).await;
+        flush_index_bounded("fast", deadline_of(10_000), async {}).await;
         assert!(
             start.elapsed() < std::time::Duration::from_secs(1),
             "a completed flush must return immediately; elapsed: {:?}",
@@ -753,7 +847,13 @@ mod tests {
         // in-flight state this test needs.
         reindex_progress.insert(id.clone(), std::sync::Arc::new(ReindexProgress::new()));
 
-        flush_one_index_on_shutdown(&registry, &reindex_progress, id).await;
+        flush_one_index_on_shutdown(
+            &registry,
+            &reindex_progress,
+            id,
+            ShutdownBudget::from_window(std::time::Duration::from_secs(65)),
+        )
+        .await;
 
         let hnsw_after = std::fs::read(&hnsw_path).expect("read hnsw after guarded flush");
         assert_eq!(
@@ -821,7 +921,13 @@ mod tests {
         progress.status.store(ReindexStatus::Complete);
         reindex_progress.insert(id.clone(), std::sync::Arc::new(progress));
 
-        flush_one_index_on_shutdown(&registry, &reindex_progress, id).await;
+        flush_one_index_on_shutdown(
+            &registry,
+            &reindex_progress,
+            id,
+            ShutdownBudget::from_window(std::time::Duration::from_secs(65)),
+        )
+        .await;
 
         use crate::core::store::VectorStore as _;
         let reloaded = crate::core::store::UsearchStore::load_from(&hnsw_path)
@@ -835,6 +941,80 @@ mod tests {
              (correct, smaller) state — the skip must not be permanent"
         );
 
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+    }
+
+    // ── #4393 regression — the sweep must fit the termination window ────────
+
+    /// Why (#4393 — the reachable damage this issue reports): the flush budget
+    /// floored at 30 s per index while every terminator granted 3–5 s, so the
+    /// sweep was SIGKILLed partway through whichever index it happened to be
+    /// writing. The fix is that a spent window produces a clean skip at an index
+    /// boundary instead: nothing is started that cannot finish, and the on-disk
+    /// snapshot stays at its last incremental checkpoint. Reverting
+    /// `flush_one_index_on_shutdown`'s budget check to the unconditional
+    /// `shutdown_flush_deadline_for` call makes this fail — the flush runs, the
+    /// 500-vector in-memory state is published over the seeded 2,000, and the
+    /// bytes change.
+    /// What: seeds a complete on-disk snapshot, registers a handle holding a
+    /// legitimately different (smaller, fully-explained) state, and flushes with
+    /// a budget whose window closed ten minutes ago. Asserts the on-disk file is
+    /// byte-for-byte unchanged and the call reports the window as spent.
+    /// Test: this IS the test.
+    #[tokio::test]
+    #[serial]
+    async fn shutdown_flush_skips_every_index_when_the_window_is_spent() {
+        // SAFETY: `#[serial]`.
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        // SAFETY: `#[serial]`.
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+        let root_dir = tempfile::tempdir().expect("tempdir");
+
+        let hnsw_path =
+            crate::service::persistence::hnsw_path("shutdown-4393-spent").expect("hnsw_path");
+        let seed = store_with_vectors(2000).await;
+        seed.save(&hnsw_path).await.expect("seed save");
+        let hnsw_before = std::fs::read(&hnsw_path).expect("read seeded hnsw");
+
+        // A legitimately shrunk store, so nothing OTHER than the spent window
+        // could be what stops the write (the #1717 shrink guard would otherwise
+        // refuse it and the test would pass for the wrong reason).
+        {
+            use crate::core::store::VectorStore as _;
+            for i in 0..1500 {
+                seed.remove(&format!("chunk:{i}")).await.unwrap();
+            }
+        }
+        let (id, hnsw_path, handle) =
+            build_test_handle("shutdown-4393-spent", root_dir.path(), seed);
+
+        let registry = crate::core::registry::IndexRegistry::new();
+        registry.register(handle);
+        let reindex_progress: std::sync::Arc<
+            dashmap::DashMap<crate::core::registry::IndexId, std::sync::Arc<ReindexProgress>>,
+        > = std::sync::Arc::new(dashmap::DashMap::new());
+
+        let spent = ShutdownBudget::from_window_at(
+            std::time::Instant::now() - std::time::Duration::from_secs(600),
+            std::time::Duration::from_secs(60),
+        );
+        let window_open =
+            flush_one_index_on_shutdown(&registry, &reindex_progress, id, spent).await;
+
+        assert!(
+            !window_open,
+            "a spent window must be reported as such so the sweep can log how \
+             many indexes kept their checkpoint"
+        );
+        let hnsw_after = std::fs::read(&hnsw_path).expect("read hnsw after skipped flush");
+        assert_eq!(
+            hnsw_after, hnsw_before,
+            "with the termination window spent the flush must not start at all — \
+             starting one the process cannot finish is the #4393 defect"
+        );
+
+        // SAFETY: `#[serial]`.
         unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
     }
 }

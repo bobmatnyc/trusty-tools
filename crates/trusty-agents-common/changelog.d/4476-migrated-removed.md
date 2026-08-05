@@ -1,3 +1,0 @@
-Removed
-
-- `agents::manifest::repair_stale_tmp` ([#4409](https://github.com/bobmatnyc/trusty-tools/issues/4409)). It derived ONE scratch path from a target (`path.with_extension("tmp")`), which only holds while staging uses a single fixed name per target. With the per-process, per-attempt scratch names below there is no such thing as "the temp path for X", so the function was a silent no-op — and it made `tm repair deploy` report removing orphans it had left on disk, because `with_extension` strips only the last dot-segment and the round-trip never reconstructed the real name. Orphan cleanup is a `*.tmp` directory scan now, which needs no target-to-temp derivation.

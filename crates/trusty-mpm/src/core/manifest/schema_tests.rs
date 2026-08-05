@@ -6,6 +6,14 @@
 
 use super::*;
 
+/// A [`GatedAgent`] fixture — stem plus its declared markers (#4765).
+fn gated(stem: &str, markers: &[&str]) -> GatedAgent {
+    GatedAgent {
+        stem: stem.to_string(),
+        markers: markers.iter().map(|m| (*m).to_string()).collect(),
+    }
+}
+
 #[test]
 fn manifest_roundtrip() {
     // A fully-populated manifest must survive a serialize → parse round-trip
@@ -17,6 +25,16 @@ fn manifest_roundtrip() {
             exclude: vec!["*-ops".into()],
             ignore_staleness: vec!["engineer".into()],
             source: ContentSource::Catalog,
+        }),
+        agent_categories: Some(AgentCategories {
+            universal: vec!["qa".into()],
+            language: vec![gated("rust-engineer", &["Cargo.toml"])],
+            framework: vec![gated("react-engineer", &["package.json::\"react\""])],
+            platform: vec![gated("vercel-ops", &["vercel.json"])],
+            deprecated: vec!["ops".into()],
+        }),
+        skill_categories: Some(SkillCategories {
+            universal: vec!["tm".into()],
         }),
         skills: Some(SkillSet {
             include: vec!["example-skill".into()],
@@ -415,4 +433,117 @@ fn mcp_servers_merge_unions_custom() {
         other => panic!("expected Stdio, got {other:?}"),
     }
     assert!(merged.custom.contains_key("lower-only"));
+}
+
+#[test]
+fn agent_categories_roundtrip() {
+    // #4760: the framework tier's five category lists must survive a TOML
+    // round-trip through the SAME parser every other manifest layer uses —
+    // that shared parser is the whole point of extending `manifest.toml`
+    // rather than inventing a second format. #4765: each gated entry now
+    // carries its own markers, in the array-of-tables form the shipped asset
+    // uses.
+    let raw = r#"
+version = 1
+
+[agent_categories]
+universal = ["qa"]
+deprecated = ["ops"]
+
+[[agent_categories.language]]
+stem = "rust-engineer"
+markers = ["Cargo.toml"]
+
+[[agent_categories.platform]]
+stem = "vercel-ops"
+markers = ["vercel.json", ".vercelignore"]
+
+[skill_categories]
+universal = ["tm"]
+"#;
+    let parsed = HarnessManifest::from_toml(raw).expect("parses");
+    let cats = parsed.agent_categories.clone().expect("section present");
+    assert_eq!(cats.universal, vec!["qa".to_string()]);
+    assert_eq!(cats.deprecated, vec!["ops".to_string()]);
+    assert_eq!(cats.language, vec![gated("rust-engineer", &["Cargo.toml"])]);
+    assert_eq!(
+        cats.platform,
+        vec![gated("vercel-ops", &["vercel.json", ".vercelignore"])]
+    );
+    assert_eq!(
+        parsed
+            .skill_categories
+            .clone()
+            .expect("skill section present")
+            .universal,
+        vec!["tm".to_string()]
+    );
+
+    let round =
+        HarnessManifest::from_toml(&parsed.to_toml().expect("serializes")).expect("re-parses");
+    assert_eq!(round, parsed);
+}
+
+#[test]
+fn skill_categories_roundtrip() {
+    // #4765: the skill roster is a manifest section like any other — it parses
+    // through the shared parser and survives a serialize round-trip. Absent, it
+    // stays `None` so every non-framework layer is unaffected.
+    let raw = "[skill_categories]\nuniversal = [\"tm\", \"tm-doctor\"]\n";
+    let parsed = HarnessManifest::from_toml(raw).expect("parses");
+    let skills = parsed
+        .skill_categories
+        .clone()
+        .expect("section present")
+        .universal;
+    assert_eq!(skills, vec!["tm".to_string(), "tm-doctor".to_string()]);
+
+    let round =
+        HarnessManifest::from_toml(&parsed.to_toml().expect("serializes")).expect("re-parses");
+    assert_eq!(round, parsed);
+
+    let without = HarnessManifest::from_toml("[agents]\ninclude = [\"qa\"]\n").expect("parses");
+    assert!(
+        without.skill_categories.is_none(),
+        "the section is additive — every other layer omits it"
+    );
+}
+
+#[test]
+fn agent_categories_absent_parses_as_none() {
+    // Every other manifest layer omits `[agent_categories]`; that must stay a
+    // clean parse, not an error, so the new section is genuinely additive.
+    let parsed = HarnessManifest::from_toml("[agents]\ninclude = [\"qa\"]\n").expect("parses");
+    assert!(parsed.agent_categories.is_none());
+}
+
+#[test]
+fn agent_categories_merge_is_whole_section() {
+    // A higher layer's section replaces the lower one outright, matching the
+    // documented merge mode for the list-like sections.
+    let lower = HarnessManifest {
+        agent_categories: Some(AgentCategories {
+            universal: vec!["qa".into()],
+            ..AgentCategories::default()
+        }),
+        ..HarnessManifest::default()
+    };
+    let higher = HarnessManifest {
+        agent_categories: Some(AgentCategories {
+            universal: vec!["engineer".into()],
+            ..AgentCategories::default()
+        }),
+        ..HarnessManifest::default()
+    };
+    let merged = lower.clone().merge(higher);
+    assert_eq!(
+        merged.agent_categories.unwrap().universal,
+        vec!["engineer".to_string()]
+    );
+    // An absent higher section inherits the lower one.
+    let inherited = lower.merge(HarnessManifest::default());
+    assert_eq!(
+        inherited.agent_categories.unwrap().universal,
+        vec!["qa".to_string()]
+    );
 }

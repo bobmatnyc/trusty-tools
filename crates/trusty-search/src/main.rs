@@ -486,7 +486,15 @@ enum Commands {
         ///
         /// Precedence: CLI flag > `TRUSTY_NO_AUTO_DISCOVER` env var > default
         /// (auto-discover enabled).
-        #[arg(long, env = "TRUSTY_NO_AUTO_DISCOVER")]
+        ///
+        /// Accepted env values: `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`
+        /// (case-insensitive). Before #4823 this was a bare `bool`, which under
+        /// clap means the CLI flag is a presence flag but the env var goes
+        /// through strict `FromStr<bool>` — so the `=1` spelling documented
+        /// everywhere else was rejected and the daemon refused to boot.
+        // #4823: accept the documented `=1` spelling instead of only
+        // `true`/`false`, which aborted startup from a launchd unit.
+        #[arg(long, env = "TRUSTY_NO_AUTO_DISCOVER", num_args = 0..=1, require_equals = true, default_value_t = false, default_missing_value = "true", value_parser = commands::service_unit::parse_truthy_bool)]
         no_auto_discover: bool,
 
         /// Cap on how many per-index searches run concurrently within a single
@@ -1146,6 +1154,8 @@ enum IntentArg {
 /// What: `max(available_parallelism, 16)` workers. Blocking pool unchanged (512).
 /// Test: `worker_thread_count_at_least_16` in tests_state.rs.
 fn main() {
+    // #4764: panic payloads reach the log stream via the hook that
+    // `trusty_common::init_tracing*` installs — see `trusty_common::panic_hook`.
     let cpu_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);

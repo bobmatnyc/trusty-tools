@@ -64,14 +64,21 @@ fn bundled_delegation_appends_deployed_roster() {
         "a deployed agent absent from the static asset must reach the prompt"
     );
     assert!(
-        prompt.contains("Handles ticketing work."),
-        "the agent's own description must reach the prompt"
+        prompt.contains("**Model:** sonnet"),
+        "the roster's own value — the model hint — must reach the prompt"
+    );
+    assert!(
+        !prompt.contains("Handles ticketing work."),
+        "the agent `description` is already published by the harness's Agent-type \
+         catalog; re-emitting it as `Handles:` made the roster a second copy"
     );
 
-    // The bundled routing doctrine is APPENDED to, never replaced: the
-    // roster carries no make/mise or keyword routing rules.
+    // The bundled routing doctrine is APPENDED to, never replaced: the roster
+    // carries no make/mise or keyword routing rules, which live in the single
+    // Routing Table the six former routing surfaces were collapsed into.
     assert!(prompt.contains("# Agent Delegation Routing"));
-    assert!(prompt.contains("## Make / Mise Command Routing"));
+    assert!(prompt.contains("## Routing Table"));
+    assert!(prompt.contains("every `make` and `mise run` target"));
 
     // Review HIGH-2 / MEDIUM-2: the two blocks contradict each other on
     // concrete points, and the roster is a tier UNION that no single launch

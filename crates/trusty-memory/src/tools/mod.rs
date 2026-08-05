@@ -16,8 +16,14 @@
 //! - `palace_create(name, description?)`           -> PalaceId
 //! - `palace_list()`                                -> Vec<PalaceId>
 //! - `palace_info(palace)`                          -> palace metadata + stats
+//! - `room_list(palace)`                            -> Vec<RoomSummary>
+//! - `room_create(palace, label, description?)`     -> room_id (idempotent)
+//! - `room_rename(palace, room, new_label)`         -> renamed room
 //! - `kg_assert(palace, subject, predicate, object, confidence?, provenance?)` -> ()
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
+//! - `wing_list(palace)`                            -> Vec<WingSummary>
+//! - `wing_create(palace, label)`                   -> wing_id (idempotent)
+//! - `wing_rename(palace, wing, new_label)`         -> WingSummary
 
 pub mod bm25;
 pub mod chat_definitions;
@@ -28,8 +34,14 @@ pub mod helpers;
 pub mod kg_ops;
 pub mod memory_ops;
 pub mod palace_ops;
+pub mod room_definitions;
+pub mod room_ops;
 pub mod task_definitions;
 pub mod task_ops;
+// ADR-0027 T9 (#4809): the wing surface ships WITH the wing entity — a level
+// nobody reads is the defect the ADR exists to correct.
+pub mod wing_definitions;
+pub mod wing_ops;
 
 // Re-export the public + cross-module surface so external call sites
 // (`crate::tools::X`) and the `super::*` glob in `tools::tests` keep
@@ -68,7 +80,9 @@ use palace_ops::{
     handle_palace_compact, handle_palace_create, handle_palace_delete, handle_palace_info,
     handle_palace_list, handle_palace_update,
 };
+use room_ops::{handle_room_create, handle_room_list, handle_room_rename};
 use task_ops::{handle_task_add, handle_task_complete, handle_task_list};
+use wing_ops::{handle_wing_create, handle_wing_list, handle_wing_rename};
 
 /// Dispatch a tool call by name to its real handler.
 ///
@@ -120,6 +134,15 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "task_add" => handle_task_add(state, args).await,
         "task_list" => handle_task_list(state, args).await,
         "task_complete" => handle_task_complete(state, args).await,
+        // ADR-0027 T6 (#4805): the room surface — discovery, idempotent
+        // creation, and the rename that repairs an `unresolved-*` label.
+        "room_list" => handle_room_list(state, args).await,
+        "room_create" => handle_room_create(state, args).await,
+        "room_rename" => handle_room_rename(state, args).await,
+        // ADR-0027 T9 (#4809): the wing surface — the scope axis over rooms.
+        "wing_list" => handle_wing_list(state, args).await,
+        "wing_create" => handle_wing_create(state, args).await,
+        "wing_rename" => handle_wing_rename(state, args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }

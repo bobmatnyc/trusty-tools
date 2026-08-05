@@ -18,13 +18,29 @@ use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_tagent");
 
+/// Spawn the built binary with the ambient project-dir hint cleared (#4826).
+///
+/// Why: `Command` inherits the parent environment, so a `TAGENT_PROJECT_DIR`
+/// exported in the shell running `cargo test` reaches the child and — now that
+/// an explicit hint outranks exe-path inference — overrides the isolated
+/// `$HOME`/cwd this file relies on, writing state into a real directory while
+/// the assertions still pass. Routing every spawn through here keeps a future
+/// spawn in this file from reintroducing the gap.
+/// Test: `system_status_json_has_expected_top_level_keys`.
+fn tagent() -> Command {
+    let mut cmd = Command::new(BIN);
+    cmd.env_remove("TAGENT_PROJECT_DIR")
+        .env_remove("OPEN_MPM_PROJECT_DIR");
+    cmd
+}
+
 /// Why: `--json` must emit parseable JSON carrying every top-level key the
 /// tool/CLI contract promises, even when every daemon is unreachable.
 /// Test: itself.
 #[test]
 fn system_status_json_has_expected_top_level_keys() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let out = Command::new(BIN)
+    let out = tagent()
         .args(["system", "status", "--json"])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())
@@ -78,7 +94,7 @@ fn system_status_json_has_expected_top_level_keys() {
 #[test]
 fn system_status_text_mode_prints_every_section() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let out = Command::new(BIN)
+    let out = tagent()
         .args(["system", "status"])
         .current_dir(tmp.path())
         .env("HOME", tmp.path())

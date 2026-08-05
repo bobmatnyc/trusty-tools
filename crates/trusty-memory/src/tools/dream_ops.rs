@@ -19,7 +19,8 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::dream::{consolidate_scoped, detect_fading};
 
-use super::helpers::{open_palace_handle, parse_room, resolve_palace};
+use super::helpers::{open_palace_handle, resolve_palace};
+use trusty_common::memory_core::palace::RoomType;
 
 /// Default age window: only consolidate facts older than this many days.
 const DEFAULT_MAX_AGE_DAYS: i64 = 7;
@@ -48,7 +49,8 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
         .get("room")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
-    let room = room_arg.map(|s| parse_room(Some(s)));
+    // ADR-0027 T3: one room parser for every transport (`RoomType::parse`).
+    let room = room_arg.map(RoomType::parse);
     let max_age_days = args
         .get("max_age_days")
         .and_then(|v| v.as_i64())

@@ -1438,10 +1438,25 @@ pub(super) async fn front_gate_or_escalate(
 /// resume defensively re-applies [`crate::core::session_launch::ensure_status_line`]
 /// — the ONE prep step confirmed idempotent/non-clobbering by its own doc
 /// comment — so such a session self-heals the next time it is resumed. The
-/// broader prep pipeline (agent/skill redeploy, CLAUDE.md merge, MCP injection)
-/// is intentionally NOT re-run here: those steps are not all confirmed safe to
-/// repeat against an already-running workspace, so re-running them on every
-/// resume risks a different class of bug for a narrower payoff.
+/// broader prep pipeline is only PARTLY skipped here — see the next paragraph.
+///
+/// #4873 correction. This comment used to claim that "agent/skill redeploy,
+/// CLAUDE.md merge, MCP injection" were all intentionally NOT re-run on
+/// resume. Two thirds of that was false, and it misled a defect report into
+/// blaming this function for stale skills. `resume_managed` calls no
+/// `prepare_session*` itself, true — but it calls `adapter.spawn_resume`, and
+/// `ClaudeCodeAdapter::spawn_resume` calls
+/// `runtime::claude_code::prepare_managed_config`, which runs the agent
+/// redeploy AND the skill redeploy (via
+/// [`crate::core::managed_config::ensure_managed_config_dir`]) and re-runs
+/// every MCP injector. Agents, skills, and MCP entries therefore DO refresh on
+/// every resume, satisfying the deploy-on-every-run ruling.
+///
+/// What is genuinely not re-run is the per-WORKSPACE half of `prepare_session`
+/// — the `CLAUDE.md` merge and the project-tier `.claude/` payload — because
+/// those steps are not all confirmed safe to repeat against an already-running
+/// workspace. `ensure_deployment_complete` below still repairs that tier when
+/// it is MISSING files, just not when it is merely stale.
 ///
 /// #2647 worktree/upstream sync: before the statusline self-heal, every
 /// resume also calls
@@ -1502,9 +1517,9 @@ pub async fn resume_managed(
     }
 
     // #4752: the resume path never runs `prepare_session*`, so the compiled PM
-    // prompt is refreshed here — fatal, exactly as on the start path. See
-    // `session_prep::refresh_compiled_prompt_for_resume`.
-    if let Err(msg) = super::session_prep::refresh_compiled_prompt_for_resume(&workspace) {
+    // prompt is refreshed here — fatal, exactly as on the start path; #4832
+    // scopes it to this session's id. See `session_prep`'s own doc.
+    if let Err(msg) = super::session_prep::refresh_resume_compiled_prompt(&workspace, &record.id) {
         warn!(id = %record.id, "resume_managed: refusing to resume: {msg}");
         let _ = mgr.mark_errored(&record.id, &msg).await;
         return Err(ResumeManagedError::Other(msg));

@@ -726,3 +726,26 @@ fn data_dir_respects_trusty_data_dir_env_var() {
         "data_dir() should ensure the directory exists"
     );
 }
+
+/// Issue #4255: isolating tests must not have moved production too.
+///
+/// Why: `default_data_dir` now branches on a runtime test-harness check. The
+/// isolation tests prove the test branch is taken; nothing proved the OTHER
+/// branch still points where the daemon's data actually lives. A silent
+/// regression there would strand every existing index on the next release.
+/// What: calls the production resolver directly (bypassing the branch) and
+/// asserts it equals the well-known user location.
+/// Test: this test.
+#[test]
+fn production_data_dir_is_the_real_user_location() {
+    let Some(expected) = dirs::data_local_dir().map(|b| b.join("trusty-search")) else {
+        // `dirs::data_local_dir()` unavailable — that is the issue #718
+        // fallback path, covered by `data_dir_home_fallback_path_is_absolute`.
+        return;
+    };
+    let dir = production_data_dir().expect("production data dir must resolve");
+    assert_eq!(
+        dir, expected,
+        "the production data dir must stay the operator's real location"
+    );
+}

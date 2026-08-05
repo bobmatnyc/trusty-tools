@@ -54,7 +54,7 @@ use crate::core::skill_manifest::SkillManifest;
 fn reconstruct_plan(fw: &FrameworkPaths) -> HarnessPlan {
     let project_dir = fw.claude_home_dir();
     let catalog_root = crate::content::catalog_root_for(&fw.root);
-    let sources = ManifestSources::resolve(&project_dir, &fw.root, &catalog_root);
+    let sources = ManifestSources::resolve(&project_dir, &catalog_root);
     let manifest = resolve_manifest(&sources);
     HarnessPlan::from_manifest(&manifest, fw, &catalog_root)
 }
@@ -176,7 +176,8 @@ mod tests {
     }
 
     fn write_project_manifest(fw: &FrameworkPaths, project_dir: &Path, toml: &str) {
-        let dir = project_dir.join(".trusty-mpm");
+        // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
+        let dir = project_dir.join(".trusty-mpm").join("framework");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("manifest.toml"), toml).unwrap();
         // `for_managed_workspace`-style paths already point `claude_home_dir()`
@@ -228,16 +229,17 @@ mod tests {
     }
 
     #[test]
-    fn user_level_manifest_exclude_is_honored() {
-        // The exact real-world scenario reported against a live launch: an
-        // operator's USER-level `~/.trusty-mpm/manifest.toml` (not a
-        // per-project `.trusty-mpm/manifest.toml` override) excludes the
-        // generic `engineer` catch-all. `ManifestSources::resolve` reads this
-        // layer from `fw.root.join("manifest.toml")` — `fw.root` is the real
-        // global framework root (`~/.trusty-mpm` in production) for EVERY
-        // workspace on the machine, not something scoped per-project — so the
-        // expected set must reflect it exactly as `prepare_session_inner`
-        // would when deploying.
+    fn user_level_manifest_is_ignored() {
+        // #4832 (owner ruling 2026-08-04): the USER manifest layer
+        // (`~/.trusty-mpm/manifest.toml`) is REMOVED. Instructions and their
+        // manifest are per-project and always deployed locally, so there is no
+        // user-level surface left. This inverts the former
+        // `user_level_manifest_exclude_is_honored`: the removal is a ruling,
+        // not a bug fix, and it needs a test of its own so the layer cannot
+        // silently return.
+        //
+        // FAILS BEFORE THIS CHANGE: `ManifestSources::resolve` read
+        // `fw.root.join("manifest.toml")`, so `engineer` was excluded.
         let tmp = TempDir::new().unwrap();
         let workspace = tmp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -245,8 +247,6 @@ mod tests {
         fw.trusty_mpm_root = None;
         seed_agent_source(&fw, &["engineer", "rust-engineer", "python-engineer"]);
 
-        // Write directly to `fw.root/manifest.toml` — the USER layer, no
-        // project-level `.trusty-mpm/manifest.toml` involved at all.
         std::fs::create_dir_all(&fw.root).unwrap();
         std::fs::write(
             fw.root.join("manifest.toml"),
@@ -256,10 +256,9 @@ mod tests {
 
         let mut expected = expected_agent_stems(&fw, None);
         expected.sort();
-        assert_eq!(
-            expected,
-            vec!["python-engineer".to_string(), "rust-engineer".to_string()],
-            "a user-level (~/.trusty-mpm/manifest.toml) exclude must be honored, not just a project-level override"
+        assert!(
+            expected.contains(&"engineer".to_string()),
+            "a user-level manifest must no longer be read: {expected:?}"
         );
     }
 

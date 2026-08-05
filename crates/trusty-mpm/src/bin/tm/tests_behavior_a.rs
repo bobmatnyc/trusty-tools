@@ -25,18 +25,25 @@ use crate::formatters::session::{event_summary, print_compression_stats};
 
 #[test]
 fn project_init_scaffolds_dotdir() {
-    // `project init` must create `.trusty-mpm/{config.toml,sessions/}`
-    // with a config skeleton naming the project after its directory.
+    // `project init` must create `.trusty-mpm/{config.toml,sessions/,framework/}`
+    // with a config skeleton naming the project after its directory. #4832
+    // added `framework/`, the project-stable config layer the manifest override
+    // now lives in.
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("my-app");
     std::fs::create_dir_all(&project).unwrap();
     let report = scaffold_project_dir(&project).unwrap();
-    assert_eq!(report.len(), 2);
+    assert_eq!(report.len(), 3);
 
     let config = project.join(".trusty-mpm/config.toml");
     let sessions = project.join(".trusty-mpm/sessions");
+    let framework = project.join(".trusty-mpm/framework");
     assert!(config.exists());
     assert!(sessions.is_dir());
+    assert!(
+        framework.is_dir(),
+        "#4832: the framework/ config layer is seeded"
+    );
     let contents = std::fs::read_to_string(&config).unwrap();
     assert!(contents.contains("name = \"my-app\""));
     assert!(contents.contains("[agents]"));

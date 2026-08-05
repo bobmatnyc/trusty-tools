@@ -2728,6 +2728,135 @@ async fn auto_prune_keeps_record_whose_parent_directory_is_unreachable() {
     handle.abort();
 }
 
+/// #4872: `git worktree remove` deletes the leaf, its parent AND its
+/// grandparent in one operation, so the parent-only probe left four dead records
+/// permanently stuck — never pruned, and never even marked in
+/// `auto-prune-seen.json`, so repeated `tm ls` could not advance them.
+///
+/// What: the two shapes actually observed on 2026-08-05 —
+/// `.claude/worktrees/critic-4850/crates/trusty-mpm` and
+/// `.base/.worktrees/qa-4850/crates/trusty-mpm` — with the worktree ROOT
+/// (`.claude/worktrees`, `.base/.worktrees`) still present and everything below
+/// it removed. That root surviving is what proves the removal was a deletion,
+/// not an unmount.
+///
+/// Fails before the fix: `workspace_verified_gone` returned `false` because the
+/// immediate parent (`crates/`) was gone too, so `pruned` stayed 0 forever.
+#[tokio::test]
+async fn auto_prune_clears_record_whose_worktree_root_survived_the_removal() {
+    for (marker_dir, container, worktree) in [
+        (".claude", "worktrees", "critic-4850"),
+        (".base", ".worktrees", "qa-4850"),
+    ] {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let marker_path = root.path().join("seen.json");
+        let worktree_root = root.path().join(marker_dir).join(container);
+        std::fs::create_dir_all(&worktree_root).expect("create worktree root");
+        // The worktree itself, and every level under it, is gone.
+        let removed = worktree_root
+            .join(worktree)
+            .join("crates")
+            .join("trusty-mpm");
+        let (url, captured, handle) = spawn_recording_decommission_stub().await;
+        let client = reqwest::Client::new();
+
+        let first = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![stopped_session_at("tm-deadrt40493-01", &removed)],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(first.pruned, 0, "{container}: first sighting never prunes");
+        assert_eq!(
+            first.pending, 1,
+            "{container}: the record must be RECORDED as dead — a record that \
+             never reaches `pending` never gets a marker, which is why #4872's \
+             four records could not advance across repeated `tm ls` calls"
+        );
+
+        backdate_sightings(&marker_path, 11);
+        let second = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![stopped_session_at("tm-deadrt40493-01", &removed)],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(
+            second.pruned, 1,
+            "{container}: a removed worktree whose ROOT still exists is \
+             verifiably deleted, not unmounted, and must be cleared"
+        );
+        assert!(second.kept.is_empty(), "{container}: nothing left to keep");
+        assert_eq!(
+            captured.lock().expect("capture lock").len(),
+            1,
+            "{container}: exactly one decommission call"
+        );
+
+        handle.abort();
+    }
+}
+
+/// #4872, the safety half: the guard's ORIGINAL purpose must survive the fix. An
+/// unmounted volume answers `Ok(false)` for every path under it, including the
+/// worktree root — so nothing is corroborated and nothing may be cleared.
+///
+/// What: the same two worktree shapes, but the whole checkout sits under a
+/// directory that does not exist. The tempdir ABOVE it does exist, standing in
+/// for `/Volumes` — which survives every unmount. A fix that settled for "some
+/// ancestor exists" would pass the sibling test above and mass-tombstone here;
+/// this test is what rules that implementation out.
+#[tokio::test]
+async fn auto_prune_keeps_record_when_the_worktree_root_itself_is_gone() {
+    for (marker_dir, container, worktree) in [
+        (".claude", "worktrees", "critic-4850"),
+        (".base", ".worktrees", "qa-4850"),
+    ] {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let marker_path = root.path().join("seen.json");
+        // `root` exists; `unmounted-volume` and everything below it does not.
+        let removed = root
+            .path()
+            .join("unmounted-volume")
+            .join(marker_dir)
+            .join(container)
+            .join(worktree)
+            .join("crates")
+            .join("trusty-mpm");
+        let (url, captured, handle) = spawn_recording_decommission_stub().await;
+        let client = reqwest::Client::new();
+
+        for round in 0..3 {
+            let outcome = auto_prune_dead_records_at(
+                &client,
+                &url,
+                vec![stopped_session_at("on-the-volume", &removed)],
+                &marker_path,
+                Some(HashSet::new()),
+            )
+            .await;
+            assert_eq!(
+                outcome.pruned, 0,
+                "{container} round {round}: an absent worktree ROOT means the \
+                 filesystem is unreachable, not that the worktree was removed"
+            );
+            if marker_path.exists() {
+                backdate_sightings(&marker_path, 11);
+            }
+        }
+        assert!(
+            captured.lock().expect("capture lock").is_empty(),
+            "{container}: no decommission may be issued for an unreachable volume"
+        );
+
+        handle.abort();
+    }
+}
+
 /// Change 3, second half (PR #4725 review): the daemon's `unresumable` verdict
 /// alone must NOT clear a record whose parent is unreachable.
 ///

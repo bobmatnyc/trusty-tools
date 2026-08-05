@@ -239,52 +239,22 @@ pub(crate) fn mcp_remember_opts(
     }
 }
 
-/// Reverse of `parse_room`: produce a stable label for KG `in-room`
+/// Reverse of `RoomType::parse`: produce a stable label for KG `in-room`
 /// extraction.
 ///
 /// Why: The auto-extractor wants the same friendly label the caller passed
 /// (`"Backend"`, `"General"`, …) so the graph stays consistent across
 /// remember calls regardless of how the MCP client spelled the argument.
-/// What: Returns the canonical enum-name string for the built-in variants
-/// and the inner string for `Custom`.
+/// ADR-0027 T3: the projection itself now lives in `trusty-common`
+/// (`room_identity::room_label`) so the room registry and the KG extractor
+/// cannot drift apart on what a room is called; this stays as the
+/// `Option`-shaped adapter the extractor call sites expect.
+/// What: Delegates to the shared projection — the canonical enum-name string
+/// for the built-in variants, the inner string for `Custom`.
 /// Test: Indirect — `auto_kg_extraction_hooks_into_memory_remember`
 /// round-trips a known room label.
 pub(crate) fn room_label(room: &RoomType) -> Option<String> {
-    let label = match room {
-        RoomType::Frontend => "Frontend",
-        RoomType::Backend => "Backend",
-        RoomType::Testing => "Testing",
-        RoomType::Planning => "Planning",
-        RoomType::Documentation => "Documentation",
-        RoomType::Research => "Research",
-        RoomType::Configuration => "Configuration",
-        RoomType::Meetings => "Meetings",
-        RoomType::General => "General",
-        RoomType::Custom(s) => return Some(s.clone()),
-    };
-    Some(label.to_string())
-}
-
-/// Parse a `RoomType` from an optional string (`"Backend"`, `"Frontend"`,
-/// etc.) — falls back to `RoomType::General` when unset or unknown.
-///
-/// Why: MCP arguments are JSON; we accept the friendly enum-name forms so
-/// callers don't have to learn an internal serialization.
-/// What: Match-on-string returning the corresponding `RoomType`.
-/// Test: Indirectly via `dispatch_remember_then_recall`.
-pub(crate) fn parse_room(s: Option<&str>) -> RoomType {
-    match s.unwrap_or("General") {
-        "Frontend" => RoomType::Frontend,
-        "Backend" => RoomType::Backend,
-        "Testing" => RoomType::Testing,
-        "Planning" => RoomType::Planning,
-        "Documentation" => RoomType::Documentation,
-        "Research" => RoomType::Research,
-        "Configuration" => RoomType::Configuration,
-        "Meetings" => RoomType::Meetings,
-        "General" => RoomType::General,
-        other => RoomType::Custom(other.to_string()),
-    }
+    Some(trusty_common::memory_core::room_identity::room_label(room))
 }
 
 /// Resolve (or lazily open) the palace handle for a tool call.

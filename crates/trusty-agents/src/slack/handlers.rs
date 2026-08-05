@@ -5,12 +5,8 @@
 //! behavior; isolating them from the socket lifecycle, RBAC, pairing, and
 //! formatting keeps each file focused and under the 500-line cap.
 //! What: `handle_command`, `handle_message`, and the `post_message` /
-//! `send_long_message` HTTP senders. Also `record_listener_event` (#3852
-//! hybrid architecture): mirrors every inbound plain message onto the
-//! harness-wide eventstream (`crate::listeners::store::EventStore` +
-//! `Event::ListenerEventReceived`) IN ADDITION TO the direct
-//! dispatch/reply path below, which is unchanged — see that function's doc
-//! comment and the #3852 ADR (`docs/adr/`) for the fork rationale.
+//! `send_long_message` HTTP senders. The #3852 eventstream mirror lives in
+//! the sibling `events` module and is re-exported here.
 //! Test: Exercised indirectly; the pure helpers they call are unit-tested in
 //! `slack::tests`.
 
@@ -24,23 +20,16 @@ use tracing::{info, warn};
 
 use super::format::{MAX_SLACK_MESSAGE, markdown_to_mrkdwn, split_message};
 use super::pairing::{
-    PAIRING_CODE_TTL, PairOutcome, PendingPairs, SENTINEL_PAIRING_CHANNEL_ID, verify_pair_attempt,
+    PAIRING_CODE_TTL, PairOutcome, PendingPairs, SENTINEL_PAIRING_CHANNEL_ID, save_paired_channels,
+    should_auto_pair, verify_pair_attempt,
 };
 use super::rbac::{SlackRbacConfig, VIRTUAL_CTO_MESSAGE, identity_from_slack_user};
 use super::{ChannelId, ChatSession, PairedChannels, SessionMap};
+// #4853: `record_listener_event` moved to `events.rs` when this file crossed
+// the 500-SLOC cap. Re-exported here so the #3852 call site and its tests keep
+// referring to it by the path they always have.
+pub(super) use super::events::record_listener_event;
 use crate::ctrl::{self, ConversationTurn};
-use crate::listeners::store::{EventStore, StoredEvent};
-
-/// Fixed listener id used for every Slack-gateway event mirrored onto the
-/// eventstream (#3852). Unlike Gmail (one `ListenerConfig` per configured
-/// mailbox), the Socket-Mode gateway is a single process-wide connection —
-/// there is no per-workspace listener config to derive an id from.
-const SLACK_LISTENER_ID: &str = "slack";
-
-/// Max chars of message text folded into a `ListenerEventReceived` summary
-/// line (#3852) — mirrors the "one glanceable line" contract
-/// `listeners::poll::listener_event_summary` documents for Gmail.
-const SLACK_SNIPPET_MAX_CHARS: usize = 140;
 
 /// Record a Slack slash command as a human turn, behind the same two gates
 /// `handle_message` records behind (#4683).
@@ -81,6 +70,40 @@ pub(super) fn note_command_turn(
     )
 }
 
+/// Promote an unpaired channel to paired when the headless auto-pair rule
+/// allows it, persisting the result (#4854).
+///
+/// Why: Both inbound paths (`handle_command`, `handle_message`) must apply the
+/// identical rule — a divergence between them is exactly the class of bug that
+/// makes a security gate meaningless. Composed once here and called from both.
+/// The security decision itself lives in the pure `should_auto_pair`; this
+/// wrapper is only the side effects.
+/// What: Returns the channel's paired state after the attempt. Persists via
+/// `save_paired_channels` on transition only (once per channel per boot), so a
+/// DM does not rewrite the state file on every message. Log-and-continue on IO
+/// error: an unwritable state file must not deny an authorized user service.
+/// Test: `auto_pair_*` cover the decision; `slack_paired_state_round_trip`
+/// covers the persistence this calls.
+async fn ensure_paired(
+    channel: &ChannelId,
+    paired: &PairedChannels,
+    paired_state_path: &std::path::Path,
+    sender_is_known_to_rbac: bool,
+) -> bool {
+    if paired.read().await.contains_key(channel) {
+        return true;
+    }
+    if !should_auto_pair(channel, sender_is_known_to_rbac) {
+        return false;
+    }
+    paired.write().await.insert(channel.clone(), Instant::now());
+    info!(channel = %channel, "slack: DM from known RBAC user auto-paired (#4854)");
+    if let Err(e) = save_paired_channels(paired, paired_state_path).await {
+        warn!(channel = %channel, error = %e, "failed to persist auto-pair");
+    }
+    true
+}
+
 /// Slash command dispatch.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_command(
@@ -92,6 +115,7 @@ pub(super) async fn handle_command(
     sessions: SessionMap,
     project_path: Arc<PathBuf>,
     paired: PairedChannels,
+    paired_state_path: Arc<PathBuf>,
     pending: PendingPairs,
     rbac: Arc<SlackRbacConfig>,
     // #4703: injected by `run_slack_bot`, not resolved here. The inline
@@ -102,7 +126,16 @@ pub(super) async fn handle_command(
     // Gate every command except /slack-start and /slack-pair behind the
     // pairing check. Unpaired channels get a uniform prompt.
     let is_unauthenticated = matches!(command.as_str(), "/slack-start" | "/slack-pair");
-    let is_paired = paired.read().await.contains_key(&channel);
+    // #4854: a DM from a user already in the RBAC table pairs itself. Without
+    // this, standalone `--slack` mode (no REPL, so no code can ever be minted)
+    // leaves the gate permanently shut.
+    let is_paired = ensure_paired(
+        &channel,
+        &paired,
+        &paired_state_path,
+        rbac.user(&user_id).is_some(),
+    )
+    .await;
     if !is_unauthenticated && !is_paired {
         return post_message(
             bot_token,
@@ -134,14 +167,26 @@ pub(super) async fn handle_command(
     match command.as_str() {
         "/slack-start" => {
             info!(channel = %channel, "Slack /slack-start received");
-            let text = concat!(
-                ":lock: *Pairing required*\n\n",
-                "To link this Slack channel, go to your trusty-agents REPL and run:\n\n",
-                "  `/slack pair`\n\n",
-                "Then send the code here: `/slack-pair <code>`\n\n",
-                "(Codes expire in 5 minutes.)"
-            );
-            post_message(bot_token, &channel, text, None).await
+            // #4854: the old text unconditionally told the user to run
+            // `/slack pair` in a REPL — impossible under the launchd gateway,
+            // which has no REPL. Describe what this channel can actually do.
+            let text = if is_paired {
+                ":white_check_mark: *This channel is already paired.* Just send a message."
+                    .to_string()
+            } else if super::pairing::is_dm_channel(&channel) {
+                // A DM that is still unpaired means the sender is not in the
+                // RBAC table, so no self-service path exists — by design.
+                ":lock: *Not authorized.*\n\nThis assistant is limited to configured team members. \
+                 Ask an operator to add your Slack user id to the bot's access list."
+                    .to_string()
+            } else {
+                ":lock: *Pairing required*\n\nShared channels must be paired explicitly. \
+                 Ask an operator to run `/slack pair` in a trusty-agents REPL and send you the code, \
+                 then run `/slack-pair <code>` here. (Codes expire in 5 minutes.)\n\n\
+                 Or just DM me directly — no pairing step is needed there."
+                    .to_string()
+            };
+            post_message(bot_token, &channel, &text, None).await
         }
         "/slack-pair" => {
             let provided = arg.trim().to_string();
@@ -186,6 +231,13 @@ pub(super) async fn handle_command(
                 PairOutcome::Success => {
                     pending.lock().await.remove(&matched_key);
                     paired.write().await.insert(channel.clone(), now);
+                    // #4853: persist so the pairing survives a restart. Mirrors
+                    // the Telegram #467 handler: log-and-continue on IO error,
+                    // because losing persistence is recoverable on the next
+                    // save and must not block the user's confirmation.
+                    if let Err(e) = save_paired_channels(&paired, &paired_state_path).await {
+                        warn!(channel = %channel, error = %e, "failed to persist paired-channels state");
+                    }
                     info!(channel = %channel, "Slack channel paired successfully");
                     post_message(
                         bot_token,
@@ -336,13 +388,23 @@ pub(super) async fn handle_message(
     sessions: SessionMap,
     project_path: Arc<PathBuf>,
     paired: PairedChannels,
+    paired_state_path: Arc<PathBuf>,
     rbac: Arc<SlackRbacConfig>,
     // #4703: injected by `run_slack_bot`. This handler used the
     // `$HOME`-resolving `note_turn`, so no test could observe its hook.
     attendance_root: crate::attendance::AttendanceRoot,
 ) -> Result<()> {
-    // Gate behind pairing.
-    if !paired.read().await.contains_key(&channel) {
+    // Gate behind pairing. #4854: a DM from a known RBAC user pairs itself —
+    // see `should_auto_pair` for why that grants no capability RBAC does not
+    // already grant. Every other channel still requires an explicit code.
+    if !ensure_paired(
+        &channel,
+        &paired,
+        &paired_state_path,
+        rbac.user(&user_id).is_some(),
+    )
+    .await
+    {
         return post_message(
             bot_token,
             &channel,
@@ -496,91 +558,6 @@ pub(super) async fn handle_message(
     }
 
     send_result
-}
-
-/// Mirror one inbound Slack message onto the harness-wide listener
-/// eventstream (#3852 hybrid architecture).
-///
-/// Why: The Socket-Mode gateway already answers Slack DMs directly —
-/// `handle_message` above dispatches to `ctrl::run_pm_task_with_persona` and
-/// replies via `chat.postMessage`, unchanged by this function. This
-/// ADDITIONALLY makes the message visible to the Events pane / filterable
-/// eventstream (`GET /api/listener-events`), mirroring EXACTLY the
-/// append-then-filter order `listeners::poll::poll_once` uses for Gmail:
-/// append the event (best-effort — a failure is logged, NOT fatal to the
-/// rest of this function, matching `poll_once`'s own log-and-continue
-/// posture at `listeners/poll.rs:326-331` rather than early-returning),
-/// THEN consult `EventStore::is_event_type_included` for the CURRENT filter
-/// state, THEN publish `Event::ListenerEventReceived` carrying that
-/// `included` flag REGARDLESS of whether the append succeeded — a
-/// persistence hiccup must not also blind the LIVE Events pane, which reads
-/// the SSE mirror, not the on-disk log. Deliberately does NOT call
-/// `listeners::wake` — direct dispatch already answers the message; waking a
-/// bound agent here too would make it reply twice (see the #3852 ADR for the
-/// fork rationale).
-/// What: Takes owned `String`s (not `&str`) so callers can `tokio::spawn`
-/// this directly — see the call site in `handle_message`, which detaches it
-/// exactly like the sibling `relay_event` spawn so a slow disk append never
-/// delays the Slack reply. `listener_id` is the fixed `SLACK_LISTENER_ID`
-/// (no per-workspace `ListenerConfig` exists for the Socket-Mode gateway the
-/// way Gmail has one per mailbox); `event_type` is `"message.{channel_type}"`
-/// (e.g. `message.im`, `message.mpim`); `id` is `"slack:{channel}:{ts}"` —
-/// stable and idempotent per Slack message, mirroring Gmail's
-/// `"{listener_id}:{message_id}"`.
-/// Test: `slack_listener_event_appends_and_respects_filter`,
-/// `slack_listener_event_excluded_type_still_appended`,
-/// `slack_listener_event_publishes_even_when_append_fails`.
-pub(super) async fn record_listener_event(
-    channel: String,
-    ts: String,
-    channel_type: String,
-    from_display: String,
-    text: String,
-) {
-    let event_type = format!("message.{channel_type}");
-    let event = StoredEvent {
-        id: format!("slack:{channel}:{ts}"),
-        listener_id: SLACK_LISTENER_ID.to_string(),
-        provider: "slack".to_string(),
-        event_type: event_type.clone(),
-        ts: chrono::Utc::now().to_rfc3339(),
-        from: Some(from_display),
-        subject: None,
-        snippet: Some(truncated_snippet(&text)),
-        included: true,
-    };
-    if let Err(e) = EventStore::append(&event).await {
-        warn!(
-            channel = %channel,
-            error = %e,
-            "slack: failed to persist listener event (non-fatal); still publishing SSE mirror"
-        );
-        // Fall through, deliberately — see the doc comment above and
-        // `listeners::poll::poll_once`, which does the same on an append
-        // error: a persistence failure must not also suppress the live SSE
-        // mirror the Events pane reads from.
-    }
-    let included = EventStore::is_event_type_included(&event_type).await;
-    crate::events::publish(crate::events::Event::ListenerEventReceived {
-        listener_id: event.listener_id.clone(),
-        provider: event.provider.clone(),
-        event_type: event.event_type.clone(),
-        summary: format!("{channel}: {}", truncated_snippet(&text)),
-        included,
-    });
-}
-
-/// Char-boundary-safe truncation of Slack message text to
-/// `SLACK_SNIPPET_MAX_CHARS`, for the `StoredEvent::snippet` and
-/// `ListenerEventReceived::summary` fields (#3852).
-fn truncated_snippet(text: &str) -> String {
-    let mut chars = text.chars();
-    let head: String = chars.by_ref().take(SLACK_SNIPPET_MAX_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{head}…")
-    } else {
-        head
-    }
 }
 
 /// Post a single message via `chat.postMessage`.

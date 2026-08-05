@@ -34,9 +34,31 @@
 #   versioned glibc stubs), so it changes nothing about which sources get
 #   compiled or which Cargo features are active — the resulting binary lands
 #   in the SAME `target/<triple>/release/` directory a plain `cargo build`
-#   would use, just linked against an older glibc baseline. This same
-#   mechanism cross-compiles `aarch64-unknown-linux-gnu` from the x86_64
-#   runner with no separate arm64 runner or Docker `cross` toolchain needed.
+#   would use, just linked against an older glibc baseline.
+#
+# 2533: LINUX ARM64 IS BUILT NATIVELY, NOT CROSS-COMPILED.
+#   #2037 originally cross-compiled `aarch64-unknown-linux-gnu` from the
+#   x86_64 runner via zig. That works for pure-Rust crates, but breaks for any
+#   crate whose graph reaches a `-sys` crate that asks pkg-config where a
+#   system library lives: `openssl-sys` (reached via fastembed → hf-hub →
+#   native-tls, and via git2/libgit2-sys) aborts the build with
+#
+#       pkg-config has not been configured to support cross-compilation
+#       Could not find directory of OpenSSL installation
+#
+#   because the x86_64 host's pkg-config cannot answer questions about arm64
+#   target libraries, and there is no arm64 sysroot on the runner. That is why
+#   no `aarch64-unknown-linux-gnu` asset ever shipped for trusty-search (last
+#   confirmed: run 30910233376 / job 91994983751, v0.42.0).
+#
+#   Fix: the leg now runs on GitHub's NATIVE `ubuntu-24.04-arm` runner (public
+#   repositories get these at no cost), so HOST == TARGET and every `-sys`
+#   build script resolves against the runner's own arm64 `libssl-dev` exactly
+#   the way the x86_64 leg resolves against its amd64 one. Cross-compilation —
+#   the actual root difficulty — is removed rather than worked around. zig is
+#   still used on this leg, but ONLY to pin the glibc floor (below), never to
+#   cross-compile. Alternatives considered and rejected are recorded in the PR
+#   for #2533.
 #
 #   CAVEAT — ORT-bundling crates (trusty-search, trusty-analyze), discovered
 #   via a real workflow_dispatch dry-run CI validation while building #2037:
@@ -58,18 +80,44 @@
 #   crates (see the matrix-generation step below) — proven working in CI,
 #   since it never links ONNX Runtime at build time either.
 #
-#   The Linux arm64 leg is marked `best_effort` (continue-on-error, like the
-#   existing AL2023 leg) because it is new and has not yet been validated by
-#   an actual tagged release — see the PR for #2037 for the target-triple /
-#   asset-name coordination with the companion install.sh issue (#2038).
+# 2533: THE ARM64 LINUX LEG IS BLOCKING, AND MISSING ASSETS ARE AUDITED.
+#   The arm64 leg used to be `best_effort` (continue-on-error). Because a
+#   `best_effort` leg's failure does not change the run's conclusion, the
+#   workflow reported `success` for four releases in a row while shipping no
+#   arm64 Linux binary at all — a partial release that looked clean. Two
+#   changes close that:
+#     1. The arm64 Linux leg is no longer `best_effort`. It is a supported
+#        target (Graviton, arm64 containers), so its failure now turns the run
+#        red like any other required leg.
+#     2. The `release-completeness-audit` job below compares the assets that
+#        were actually produced against the build matrix that was requested,
+#        and reports every dropped leg in the run summary — as a hard failure
+#        for required legs, and as a loud `::warning` annotation for the one
+#        remaining `best_effort` leg (AL2023). No matrix leg can now go
+#        missing without saying so somewhere a reader will look.
+#   See also #4087 and #4125 — the same "real failure reported as success"
+#   shape in other subsystems.
 #
 # ASSET NAMING CONVENTION (matches INSTALL-CONVENTION.md / PR #891):
 #   <crate>-<version>-<target>.tar.gz           (standard variants, e.g.
 #                                                 x86_64-unknown-linux-gnu,
 #                                                 aarch64-unknown-linux-gnu,
 #                                                 aarch64-apple-darwin)
-#   <crate>-<version>-x86_64-linux-al2023.tar.gz  (AL2023 load-dynamic variant)
+#   <crate>-<version>-x86_64-linux-al2023.tar.gz   (AL2023 load-dynamic, amd64)
+#   <crate>-<version>-aarch64-linux-al2023.tar.gz  (AL2023 load-dynamic, arm64
+#                                                 — 2533 follow-up to PR #4822)
 #   <crate>-<version>-<target>.tar.gz.sha256    (paired checksum)
+#
+# 2533 follow-up: WHY AN aarch64 AL2023 LEG EXISTS AT ALL.
+#   PR #4822 made the `aarch64-unknown-linux-gnu` leg build natively and turned
+#   it blocking, then verified by EXECUTION that the resulting trusty-search
+#   binary carries a glibc 2.39 floor and needs OpenSSL 3 — it runs on Ubuntu
+#   24.04 arm64 and exits 127 (`libmvec.so.1`) on `amazonlinux:2023` arm64.
+#   That is the same limitation the `x86_64-unknown-linux-gnu` asset has always
+#   had, and this workflow's existing answer on amd64 is the separate
+#   `x86_64-linux-al2023` load-dynamic asset built inside the AL2023 container.
+#   Amazon Linux 2023 on Graviton is a confirmed deployment target, so arm64
+#   now gets the symmetric answer rather than the deferral #4822 recorded.
 
 name: Binary Release
 
@@ -444,12 +492,12 @@ jobs:
       # linux-zigbuild variants (issue #2037 — portable glibc 2.17 baseline,
       # built via `cargo zigbuild --target <triple>.2.17`; see the file-header
       # comment for the full rationale):
-      #   { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu,  variant: linux-zigbuild, best_effort: false }
-      #   { runner: ubuntu-latest, target: aarch64-unknown-linux-gnu, variant: linux-zigbuild, best_effort: true  }
-      #   (aarch64 is cross-compiled from the x86_64 runner by zig/cargo-zigbuild;
-      #    for ORT-bundling crates it uses the load-dynamic feature set, same as
-      #    the AL2023 variant below, since bundled-ort has no aarch64 build-time
-      #    binary to download)
+      #   { runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  variant: linux-zigbuild, best_effort: false }
+      #   { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, variant: linux-zigbuild, best_effort: false }
+      #   (2533: aarch64 builds NATIVELY on an arm64 runner — it is no longer
+      #    cross-compiled and no longer best-effort; for ORT-bundling crates it
+      #    uses the load-dynamic feature set, same as the AL2023 variant below,
+      #    since bundled-ort has no aarch64 build-time binary to download)
       #
       # AL2023 variant (ORT crates only):
       #   { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu,  variant: al2023   }
@@ -503,6 +551,17 @@ jobs:
           # runs on effectively every glibc Linux distro still in service.
           ZIG_GLIBC = "2.17"
 
+          # 2533: each Linux leg builds on a runner of its OWN architecture —
+          # amd64 targets on `ubuntu-latest`, arm64 targets on
+          # `ubuntu-24.04-arm` — so HOST == TARGET and pkg-config-dependent
+          # `-sys` build scripts (openssl-sys) work. `host_multiarch` is the
+          # runner's Debian multiarch directory name, consumed by HOST_CFLAGS
+          # in the build step; it tracks the RUNNER's arch, not the target's.
+          LINUX_RUNNERS = {
+              "x86_64-unknown-linux-gnu":  ("ubuntu-latest",   "x86_64-linux-gnu"),
+              "aarch64-unknown-linux-gnu": ("ubuntu-24.04-arm", "aarch64-linux-gnu"),
+          }
+
           def linux_zigbuild_entry(target, best_effort, use_al2023_features):
               # For ORT-bundling crates (al2023 True), the aarch64 leg reuses
               # the load-dynamic feature set instead of default bundled-ort:
@@ -512,9 +571,11 @@ jobs:
               # builds regardless of target arch (see file-header comment).
               entry_features = al_feats if use_al2023_features else feats
               entry_no_def   = al_no_def if use_al2023_features else no_def
+              runner, host_multiarch = LINUX_RUNNERS[target]
               return {
                   **common,
-                  "runner": "ubuntu-latest",
+                  "runner": runner,
+                  "host_multiarch": host_multiarch,
                   "target": target,
                   "variant": "linux-zigbuild",
                   "asset_suffix": target,
@@ -527,22 +588,27 @@ jobs:
                   "al2023_features": "",
               }
 
-          def native_linux_entry(target):
-              # Original (pre-#2037) native x86_64 build: plain `cargo build`
-              # on ubuntu-latest, no zig. Reserved for ORT-bundling crates'
-              # x86_64 leg (see comment below) — NOT a regression, this is
-              # exactly what shipped before this issue.
+          def native_linux_entry(target, use_al2023_features=False):
+              # Original (pre-#2037) native build: plain `cargo build` with the
+              # runner's own GCC, no zig. Used by ORT-bundling crates for BOTH
+              # Linux legs (see the comments at each call site) — NOT a
+              # regression on x86_64, this is exactly what shipped before
+              # #2037.
+              entry_features = al_feats if use_al2023_features else feats
+              entry_no_def   = al_no_def if use_al2023_features else no_def
+              runner, _ = LINUX_RUNNERS[target]
               return {
                   **common,
-                  "runner": "ubuntu-latest",
+                  "runner": runner,
+                  "host_multiarch": "",
                   "target": target,
                   "variant": "standard",
                   "asset_suffix": target,
                   "container": "",
                   "zig_target": "",
                   "best_effort": False,
-                  "cargo_features": feats,
-                  "no_default_features": no_def,
+                  "cargo_features": entry_features,
+                  "no_default_features": entry_no_def,
                   "al2023_no_default": False,
                   "al2023_features": "",
               }
@@ -570,9 +636,46 @@ jobs:
               else linux_zigbuild_entry("x86_64-unknown-linux-gnu", best_effort=False, use_al2023_features=False)
           )
 
+          # 2533: aarch64 Linux mirrors the x86_64 leg's toolchain choice for
+          # the same crate, on a native arm64 runner.
+          #
+          #   ORT-bundling crates (al2023 True) -> plain `cargo build` with the
+          #   runner's GCC. These crates pull in `numkong` (usearch's SIMD
+          #   backend), whose build.rs probes CPU features by compiling C
+          #   probe files with whatever compiler cc-rs is handed. Under zig's
+          #   clang those probes disagree with the sources they gate: clang
+          #   rejects GCC's `__attribute__((target("neon")))` spelling on
+          #   AArch64, so the baseline NEON probe reports NK_TARGET_NEON=0
+          #   while the dependent NK_TARGET_NEONSDOT / NK_TARGET_SVE* probes
+          #   still report 1 — and those code paths need the `arm_neon.h`
+          #   include that only the NEON path pulls in. The build then dies on
+          #   ~20 `call to undeclared function 'vdupq_n_s32'` errors (observed:
+          #   run 30941401868, job 92100578898). This is the same probe/source
+          #   desync already documented for AL2023's GCC 11 below, and the
+          #   available zig workaround — forcing NK_TARGET_*=0 — would compile
+          #   the arm64 binary with the SIMD paths of a vector search engine
+          #   switched off. Using the platform GCC avoids the whole class.
+          #
+          #   All other crates keep the glibc-2.17 zigbuild leg, which is
+          #   unaffected (no numkong in their graph) and is now a NATIVE zig
+          #   build rather than a cross build.
+          #
+          # Consequence, stated plainly: for ORT-bundling crates the
+          # `aarch64-unknown-linux-gnu` asset carries the runner's glibc floor
+          # (Ubuntu 24.04 / 2.39) — the SAME floor its `x86_64-unknown-linux-gnu`
+          # sibling has always carried, not a new class of limitation. An
+          # `aarch64-linux-al2023` counterpart to the existing x86_64 AL2023
+          # asset is the portable-arm64 follow-up; it is deliberately NOT
+          # bundled into this fix.
+          aarch64_entry = (
+              native_linux_entry("aarch64-unknown-linux-gnu", use_al2023_features=True) if al2023
+              else linux_zigbuild_entry("aarch64-unknown-linux-gnu", best_effort=False, use_al2023_features=False)
+          )
+
           includes = [
               {**common,
                "runner": "macos-14",
+               "host_multiarch": "",
                "target": "aarch64-apple-darwin",
                "variant": "standard",
                "asset_suffix": "aarch64-apple-darwin",
@@ -584,31 +687,61 @@ jobs:
                "al2023_no_default": False,
                "al2023_features": ""},
               x86_64_entry,
-              # aarch64 Linux — NEW (issue #2037), best-effort/non-blocking
-              # until validated by a real tagged-release CI run. For
-              # ORT-bundling crates this reuses the load-dynamic feature set
-              # (see linux_zigbuild_entry) — proven working in CI, since it
-              # never links ONNX Runtime at build time and so never hits the
-              # libstdc++-ABI problem above.
-              linux_zigbuild_entry("aarch64-unknown-linux-gnu", best_effort=True, use_al2023_features=al2023),
+              # aarch64 Linux (issue #2037). 2533: built natively on
+              # `ubuntu-24.04-arm` and BLOCKING (best_effort=False) — see the
+              # file-header comment and the aarch64_entry comment above. For
+              # ORT-bundling crates it still uses the load-dynamic feature set,
+              # since bundled-ort has no aarch64 build-time binary to download.
+              aarch64_entry,
           ]
 
+          # AL2023 load-dynamic legs — one per architecture.
+          #
+          # 2533 follow-up: the `aarch64-linux-al2023` entry is the arm64
+          # counterpart PR #4822 identified as the missing piece and explicitly
+          # deferred. Its `aarch64-unknown-linux-gnu` sibling above is built on
+          # Ubuntu 24.04 arm64 and therefore carries a glibc 2.39 floor plus an
+          # OpenSSL 3 runtime dependency — #4822 verified by execution that it
+          # exits 127 (`libmvec.so.1`) on `amazonlinux:2023` aarch64. Graviton
+          # on AL2023 is a confirmed deployment target, so it needs the same
+          # answer x86_64 already has: build inside the AL2023 container itself,
+          # against that distro's own glibc 2.34 and its own OpenSSL.
+          #
+          # Everything about the arm64 entry mirrors the x86_64 one except the
+          # runner (native `ubuntu-24.04-arm`, so the multi-arch
+          # `amazonlinux:2023` manifest resolves to the arm64 image and
+          # HOST == TARGET, exactly as #4822 established for the gnu leg).
+          #
+          # `best_effort: True` is deliberately mirrored too: AL2023's GCC 11 is
+          # the oldest toolchain in this matrix and the reason the x86_64 leg is
+          # non-blocking, so the arm64 leg inherits the same classification
+          # rather than inventing a stricter one. A drop is NOT silent — the
+          # `release-completeness-audit` job derives its expected asset name
+          # from this very matrix, so a missing arm64 AL2023 asset produces a
+          # `::warning` annotation and a `DROPPED` row automatically.
+          AL2023_RUNNERS = {
+              "x86_64-unknown-linux-gnu":  ("ubuntu-latest",    "x86_64-linux-al2023"),
+              "aarch64-unknown-linux-gnu": ("ubuntu-24.04-arm", "aarch64-linux-al2023"),
+          }
+
           if al2023:
-              includes.append({
-                  **common,
-                  "runner": "ubuntu-latest",
-                  "target": "x86_64-unknown-linux-gnu",
-                  "variant": "al2023",
-                  "asset_suffix": "x86_64-linux-al2023",
-                  # Use the AL2023-specific build flags (load-dynamic, no bundled-ort)
-                  "cargo_features": al_feats,
-                  "no_default_features": al_no_def,
-                  "container": "amazonlinux:2023",
-                  "zig_target": "",
-                  "best_effort": True,
-                  "al2023_no_default": al_no_def,
-                  "al2023_features": al_feats,
-              })
+              for al_target, (al_runner, al_suffix) in AL2023_RUNNERS.items():
+                  includes.append({
+                      **common,
+                      "runner": al_runner,
+                      "host_multiarch": "",
+                      "target": al_target,
+                      "variant": "al2023",
+                      "asset_suffix": al_suffix,
+                      # Use the AL2023-specific build flags (load-dynamic, no bundled-ort)
+                      "cargo_features": al_feats,
+                      "no_default_features": al_no_def,
+                      "container": "amazonlinux:2023",
+                      "zig_target": "",
+                      "best_effort": True,
+                      "al2023_no_default": al_no_def,
+                      "al2023_features": al_feats,
+                  })
 
           matrix = {"include": includes}
           result = json.dumps(matrix)
@@ -773,15 +906,15 @@ jobs:
     if: needs.setup.outputs.bundled != 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    # Why: `best_effort` legs (AL2023, and the new Linux aarch64 leg from
-    # issue #2037) are allowed to fail without sinking the whole build matrix.
-    # AL2023 uses GCC 11 which rejects newer SIMD probe flags emitted by
-    # numkind (needs GCC 12+); the aarch64-linux-gnu leg is new/CI-unverified
-    # (cross-compiled via zig — see #2037 PR for what remains to be validated
-    # by a real tagged release). Neither is required for Homebrew (Tier-1:
-    # macOS arm64 + linux x86_64-gnu, unchanged). The release job is
-    # conditioned to run when the Tier-1 legs succeed regardless of a
-    # best_effort leg's outcome.
+    # Why: `best_effort` legs are allowed to fail without sinking the whole
+    # build matrix. 2533: the ONLY remaining `best_effort` legs are the two
+    # AL2023 ones (amd64 and, as of the #4822 follow-up, arm64), whose GCC 11
+    # rejects newer SIMD probe flags emitted by numkind (needs
+    # GCC 12+); the aarch64-linux-gnu leg is now required like every other
+    # target. AL2023 is not required for Homebrew (Tier-1: macOS arm64 + linux
+    # x86_64-gnu, unchanged), and the release job is conditioned to run when
+    # the Tier-1 legs succeed regardless of its outcome — but a dropped leg is
+    # no longer invisible: `release-completeness-audit` below reports it.
     continue-on-error: ${{ matrix.best_effort == true }}
 
     strategy:
@@ -809,30 +942,34 @@ jobs:
         run: |
           dnf install -y --allowerasing \
             gcc gcc-c++ make openssl-devel perl \
-            curl tar gzip pkg-config findutils binutils
+            curl tar gzip pkg-config findutils binutils file
 
       # ── Linux runners (linux-zigbuild): install system deps ─────────────────
       # Same base toolchain as before; zigbuild only replaces the final linker,
       # so build-essential/pkg-config/libssl-dev are still needed for crates
       # whose build.rs shells out to a C compiler or pkg-config directly.
       - name: Install build prerequisites (Ubuntu)
-        # `standard` here means the ORT-bundling-crate native x86_64 leg
-        # (see native_linux_entry in the matrix-generation step) — the only
-        # `standard`-variant entry that runs on ubuntu-latest; the OTHER
-        # `standard` entry is macOS (guarded out by the runner check).
-        if: matrix.variant == 'linux-zigbuild' || (matrix.variant == 'standard' && matrix.runner == 'ubuntu-latest')
+        # `standard` here means an ORT-bundling-crate native Linux leg (see
+        # native_linux_entry in the matrix-generation step); the OTHER
+        # `standard` entry is macOS, which the runner check guards out.
+        # 2533: keyed off the runner PREFIX, not the literal `ubuntu-latest`,
+        # so the arm64 runner (`ubuntu-24.04-arm`) is covered too — matching on
+        # the exact string silently skipped apt on the whole arm64 leg.
+        if: matrix.container == '' && startsWith(matrix.runner, 'ubuntu')
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev binutils curl
+            build-essential pkg-config libssl-dev binutils curl file
 
       # ── zig + cargo-zigbuild (issue #2037) ──────────────────────────────────
       # cargo-zigbuild wraps `cargo build`, routing the link step through
       # `zig cc`/`zig c++`/`zig ar` for the target in `matrix.zig_target`
       # (e.g. `x86_64-unknown-linux-gnu.2.17`), which pins the glibc symbol
-      # baseline instead of whatever the build host happens to ship. It also
-      # cross-links `aarch64-unknown-linux-gnu` from this x86_64 runner with
-      # no separate arm64 runner or Docker `cross` toolchain required.
+      # baseline instead of whatever the build host happens to ship.
+      #
+      # 2533: on the aarch64 leg zig is now doing ONLY that glibc pinning —
+      # the leg runs on a native arm64 runner, so nothing is cross-compiled.
+      # Both actions below resolve an arm64 Linux build of their tool.
       - name: Install zig (linux-zigbuild variant)
         if: matrix.variant == 'linux-zigbuild'
         uses: mlugg/setup-zig@v1
@@ -877,10 +1014,18 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: al2023-1.91-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
+          # 2533 follow-up: the cache key MUST carry the target. There are now
+          # two AL2023 legs (amd64 and arm64) whose only difference is
+          # architecture; without this they share one key, so whichever leg
+          # saves first hands the other its `target/` — including host-compiled
+          # build-script binaries of the wrong architecture. Keeping the old
+          # unqualified `al2023-1.91-` restore-key would reintroduce exactly
+          # that cross-arch restore through the fallback path, so the fallbacks
+          # are target-scoped too.
+          key: al2023-1.91-${{ matrix.target }}-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            al2023-1.91-${{ matrix.crate }}-
-            al2023-1.91-
+            al2023-1.91-${{ matrix.target }}-${{ matrix.crate }}-
+            al2023-1.91-${{ matrix.target }}-
 
       - name: Cache cargo registry + artefacts (standard + linux-zigbuild)
         if: matrix.variant == 'standard' || matrix.variant == 'linux-zigbuild'
@@ -899,9 +1044,20 @@ jobs:
         shell: bash
         env:
           ORT_VERSION: "1.20.1"
+          TARGET: ${{ matrix.target }}
         run: |
+          # 2533 follow-up: the tarball name is architecture-specific. This step
+          # hardcoded `linux-x64` while the only AL2023 leg was x86_64; the new
+          # aarch64 AL2023 leg needs `linux-aarch64`, and a wrong-arch download
+          # would fail late and confusingly (ORT_DYLIB_PATH set to a library the
+          # loader rejects) rather than here. Upstream publishes both under the
+          # same v1.20.1 tag.
+          case "${TARGET}" in
+            aarch64-*) ORT_ARCH="aarch64" ;;
+            *)         ORT_ARCH="x64" ;;
+          esac
           ORT_DIR="/opt/onnxruntime-${ORT_VERSION}"
-          ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
+          ORT_TARBALL="onnxruntime-linux-${ORT_ARCH}-${ORT_VERSION}.tgz"
           ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
 
           echo "Downloading ORT ${ORT_VERSION} from ${ORT_URL}"
@@ -969,7 +1125,12 @@ jobs:
         # no shellcheck warnings, and the value is validated at workflow parse time.
         env:
           SKIP_UI_BUILD: ${{ matrix.skip_ui_build && '1' || '' }}
-          HOST_CFLAGS: ${{ matrix.variant == 'linux-zigbuild' && '-I/usr/include/x86_64-linux-gnu' || '' }}
+          # 2533: the multiarch include dir tracks the RUNNER's architecture,
+          # not the target's — this override exists for HOST-targeted compiles
+          # (see the paragraph above), and the arm64 leg now runs on an arm64
+          # runner where the path is /usr/include/aarch64-linux-gnu. Hardcoding
+          # x86_64 here would silently point at a non-existent directory.
+          HOST_CFLAGS: ${{ matrix.host_multiarch != '' && format('-I/usr/include/{0}', matrix.host_multiarch) || '' }}
           RUSTFLAGS: ${{ matrix.variant == 'linux-zigbuild' && '-C link-arg=-lstdc++' || '' }}
           # numkong (usearch's SIMD backend — a mandatory, non-optional
           # dependency of trusty-search, unrelated to the bundled-ort /
@@ -990,10 +1151,52 @@ jobs:
           # An empty string (non-al2023 legs) is treated by numkong's
           # build.rs as "no override" (falls through to normal probing), so
           # this is a no-op for every other variant.
+          #
+          # 2533 follow-up — SIMD on the aarch64 AL2023 leg, stated explicitly:
+          # these four names live in numkong's X86_PROBES table only, so on the
+          # aarch64 AL2023 leg build.rs never reads them and they are inert.
+          # AArch64 SIMD is NOT disabled there. numkong probes NEON by
+          # compiling `probes/arm_neon.c` with `-march=armv8-a+simd`, which
+          # AL2023's GCC 11 accepts — unlike the zig/clang path #4822 hit,
+          # where `__attribute__((target("neon")))` was rejected and would have
+          # forced the choice between a broken build and NK_TARGET_*=0 across
+          # the board (i.e. shipping a vector search engine with SIMD off).
+          # Using a real GCC in the container avoids that wholesale trade:
+          # baseline NEON stays ON, the ISA extensions GCC 11 genuinely
+          # predates (SVE2p1, SME*, fp8, bf16) probe false and compile out as
+          # the mechanism intends, and exactly ONE extension has to be forced
+          # off by hand — see NK_TARGET_NEONSDOT immediately below. Read from
+          # the build log's `cargo:warning=NK_TARGET_*` lines rather than
+          # assumed; the full enabled/disabled list is in the PR body.
           NK_TARGET_SAPPHIREAMX: ${{ matrix.variant == 'al2023' && '0' || '' }}
           NK_TARGET_GRANITEAMX: ${{ matrix.variant == 'al2023' && '0' || '' }}
           NK_TARGET_DIAMOND: ${{ matrix.variant == 'al2023' && '0' || '' }}
           NK_TARGET_SIERRA: ${{ matrix.variant == 'al2023' && '0' || '' }}
+          # 2533 follow-up — the ONE AArch64 counterpart of the same GCC-11
+          # probe/source desync, found by running the build, not by reasoning:
+          # numkong's NEONSDOT probe compiles cleanly with
+          # `-march=armv8.2-a+dotprod`, so NK_TARGET_NEONSDOT=1 — but
+          # `include/numkong/maxsim/neonsdot.h` is the single ARM header that
+          # gates its body with the BARE `#pragma GCC target("+dotprod")` form
+          # instead of the `arch=armv8.2-a+dotprod` form its five sibling
+          # neonsdot headers use. GCC 11 accepts that pragma without actually
+          # enabling the feature, so the `vdotq_s32` intrinsic then fails as
+          # `inlining failed in call to 'always_inline' 'vdotq_s32': target
+          # specific option mismatch` (observed: run 30948527782, job
+          # 92124822938, compiling c/dispatch_f32.c). GCC 13 on the Ubuntu
+          # runners handles it, which is why only the AL2023 arm64 leg needs
+          # this.
+          #
+          # SCOPE OF WHAT THIS COSTS, stated rather than buried: it disables
+          # the NEON int8 dot-product kernels only. Baseline NEON, NEONHALF,
+          # NEONFHM, SVE, SVEHALF, SVE2 and SVESDOT all still probe TRUE on
+          # this leg and stay enabled — this is not a scalar build. int8 work
+          # keeps an SVE dot-product path on SVE-capable Graviton; f32/f16
+          # (what trusty-search actually indexes with by default) is
+          # untouched. The alternative, raising the whole leg's baseline to
+          # `-march=armv8.2-a+dotprod`, was rejected: it would trade a
+          # narrow kernel loss for a SIGILL on any pre-Armv8.2 host.
+          NK_TARGET_NEONSDOT: ${{ (matrix.variant == 'al2023' && startsWith(matrix.target, 'aarch64')) && '0' || '' }}
         run: |
           CARGO_ARGS="-p ${{ matrix.cargo_pkg }} --release"
 
@@ -1024,7 +1227,8 @@ jobs:
       #   macOS:        trusty-analyze-0.5.0-aarch64-apple-darwin.tar.gz
       #   Linux x86_64: trusty-analyze-0.5.0-x86_64-unknown-linux-gnu.tar.gz  (glibc 2.17 baseline)
       #   Linux arm64:  trusty-analyze-0.5.0-aarch64-unknown-linux-gnu.tar.gz (glibc 2.17 baseline, best-effort — issue #2037)
-      #   AL2023:       trusty-analyze-0.5.0-x86_64-linux-al2023.tar.gz
+      #   AL2023 amd64: trusty-analyze-0.5.0-x86_64-linux-al2023.tar.gz
+      #   AL2023 arm64: trusty-analyze-0.5.0-aarch64-linux-al2023.tar.gz  (2533 follow-up)
       - name: Strip, package, and checksum
         id: package
         shell: bash
@@ -1045,6 +1249,27 @@ jobs:
               echo "ERROR: expected binary not found: ${BIN_PATH}"
               exit 1
             fi
+            # 2533: an asset named `…-aarch64-unknown-linux-gnu.tar.gz` that
+            # actually contains an x86_64 binary is worse than a missing
+            # asset — it fails at exec time on the user's machine with no
+            # explanation. Assert the ELF/Mach-O machine type matches the
+            # target triple before the binary can be packaged under that name.
+            if command -v file >/dev/null 2>&1; then
+              case "${TARGET}" in
+                aarch64-*) EXPECT_ARCH='aarch64|arm64' ;;
+                x86_64-*)  EXPECT_ARCH='x86-64|x86_64' ;;
+                *)         EXPECT_ARCH='' ;;
+              esac
+              ARCH_DESC="$(file -b "${BIN_PATH}")"
+              if [[ -n "${EXPECT_ARCH}" ]] && ! grep -Eqi "${EXPECT_ARCH}" <<<"${ARCH_DESC}"; then
+                echo "::error::Architecture mismatch for ${BIN}: target is ${TARGET} but the built binary reports '${ARCH_DESC}'. Refusing to package a mislabelled asset."
+                exit 1
+              fi
+              echo "Arch check OK (${TARGET}): ${ARCH_DESC}"
+            else
+              echo "::warning::'file' unavailable — skipping the ${TARGET} architecture assertion for ${BIN}."
+            fi
+
             strip "${BIN_PATH}" || true   # strip may not be available on all hosts; non-fatal
             cp "${BIN_PATH}" "${STAGING_DIR}/"
             echo "Packaged: ${BIN}"
@@ -1122,6 +1347,111 @@ jobs:
             ${{ steps.package.outputs.asset_checksum }}
           retention-days: 7
           if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2a: release-completeness-audit (issue #2533)
+  #
+  # WHY: for four consecutive trusty-search releases this workflow reported
+  #   conclusion `success` while shipping no arm64 Linux binary at all. The
+  #   arm64 leg was `continue-on-error`, so its failure never reached the run
+  #   conclusion, and nothing else compared "assets we asked for" against
+  #   "assets we got". The only way to notice was to open the release page and
+  #   spot an absent file. #2533 makes the arm64 leg blocking; this job closes
+  #   the general case, so no FUTURE leg can be dropped silently either —
+  #   including the AL2023 legs, which stay deliberately non-blocking.
+  #
+  #   2533 follow-up: this job needs NO change to cover the new
+  #   `aarch64-linux-al2023` leg. It derives each expected asset name from
+  #   `needs.setup.outputs.matrix` (`{crate}-{version}-{asset_suffix}.tar.gz`)
+  #   rather than from a hardcoded platform list, so adding a matrix entry
+  #   registers it with the audit automatically — a silent drop of the arm64
+  #   AL2023 asset produces a `::warning` + `DROPPED` row exactly as the amd64
+  #   one does — confirmed by the audit table in the follow-up's dry run, which
+  #   lists five legs where #4822's listed four.
+  #
+  # WHAT: re-derives the expected asset filename for every entry in the build
+  #   matrix, checks it against the artifacts the build job actually produced,
+  #   and writes a per-leg table to the run summary. A missing REQUIRED leg
+  #   fails this job (red run). A missing `best_effort` leg is not a failure —
+  #   it emits a `::warning` annotation and is marked DROPPED in the summary,
+  #   so the release is still visibly partial rather than clean.
+  #
+  # `!cancelled()` (not the implicit `success()`) is required so this job runs
+  #   precisely when it matters — after a build leg has failed. Same mechanism
+  #   as the `release` job's condition; see the #3540 comment there.
+  # ─────────────────────────────────────────────────────────────────────────────
+  release-completeness-audit:
+    name: Release completeness audit (issue #2533)
+    needs: [setup, build]
+    if: >-
+      !cancelled() &&
+      needs.setup.outputs.bundled != 'true' &&
+      needs.build.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # continue-on-error: with zero artifacts (every leg failed) the download
+      # action errors out; that is the loudest case of all and must be
+      # REPORTED by the audit step below, not swallowed as an action failure
+      # with no summary.
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Compare produced assets against the requested build matrix
+        shell: python3 {0}
+        env:
+          MATRIX:       ${{ needs.setup.outputs.matrix }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          import json, os, pathlib, sys
+
+          entries = json.loads(os.environ["MATRIX"])["include"]
+          root = pathlib.Path("release-assets")
+          produced = {p.name for p in root.rglob("*.tar.gz")} if root.is_dir() else set()
+
+          rows, missing_required, dropped_best_effort = [], [], []
+          for e in entries:
+              asset = f"{e['crate']}-{e['version']}-{e['asset_suffix']}.tar.gz"
+              required = not e["best_effort"]
+              if asset in produced:
+                  rows.append(("OK", asset, "required" if required else "best-effort"))
+              elif required:
+                  missing_required.append(asset)
+                  rows.append(("MISSING", asset, "required"))
+              else:
+                  dropped_best_effort.append(asset)
+                  rows.append(("DROPPED", asset, "best-effort"))
+
+          summary = ["## Release completeness audit (issue #2533)", "",
+                     f"`build` job result: **{os.environ['BUILD_RESULT']}**", "",
+                     "| Status | Asset | Leg |", "| --- | --- | --- |"]
+          summary += [f"| {s} | `{a}` | {k} |" for s, a, k in rows]
+          for asset in dropped_best_effort:
+              print(f"::warning::Release is PARTIAL — best-effort leg produced no asset: {asset}. "
+                    "The run is not failed for this, but the release will be missing that platform. "
+                    "Open the corresponding build job log for the real failure.")
+          for asset in missing_required:
+              print(f"::error::Required release asset missing: {asset}. "
+                    "The corresponding build leg failed — see its job log.")
+
+          if dropped_best_effort:
+              summary += ["", "> One or more **best-effort** legs produced no asset. "
+                              "This release is PARTIAL — see the warning annotations."]
+          if missing_required:
+              summary += ["", "> **FAILED** — a required leg produced no asset. "
+                              "A partial release must not report success (issue #2533)."]
+          elif not dropped_best_effort:
+              summary += ["", "All requested assets were produced."]
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("\n".join(summary) + "\n")
+          print("\n".join(summary))
+
+          sys.exit(1 if missing_required else 0)
 
   # ─────────────────────────────────────────────────────────────────────────────
   # JOB 2b: publish-dry-run (issue #3366)

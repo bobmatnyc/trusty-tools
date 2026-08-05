@@ -15,10 +15,12 @@ use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::filter::{FilterReject, check_secret, classify};
 use crate::memory_core::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
+use crate::memory_core::room_identity::DEFAULT_WING_ID;
 use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::kg::KnowledgeGraph;
 use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::palace_store::PalaceStore;
+use crate::memory_core::store::rooms::resolve_or_create_room_in_wing;
 use crate::memory_core::store::vector::{UsearchStore, VectorStore};
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
@@ -89,6 +91,10 @@ pub struct PalaceHandle {
     /// Why: Closets accelerate L2 by mapping topic keywords to candidate drawer
     /// ids without touching the vector store. The map is updated by
     /// `dream::Dreamer::dream_cycle` via NLP-only tokenization (no LLM calls).
+    /// NOT a hierarchy level (ADR-0027 D3): the palace model is
+    /// Palace -> Wing -> Room -> Drawer, and this index is many-to-many — one
+    /// drawer appears under every closet keyword its content contains, whereas
+    /// a level requires exactly one parent.
     /// What: `Arc<RwLock<HashMap<String, Vec<Uuid>>>>` so reads can run
     /// concurrently with the (rare) dream-time rebuild.
     /// Test: `dream::tests::closet_refresh_builds_index`.
@@ -577,10 +583,15 @@ impl PalaceHandle {
             check_secret(&content).map_err(|reject: FilterReject| anyhow::anyhow!("{reject}"))?;
         }
 
-        // Encode RoomType into the room_id deterministically by hashing the
-        // debug repr. Until we wire a real Room table, this keeps the room
-        // signal recoverable for `list_drawers` filtering.
-        let room_id = super::layers::room_to_uuid(&room);
+        // ADR-0027 T4/D4.2: the room id comes from the ROOMS registry — a
+        // lookup that creates the row when absent — never from hashing a
+        // `Debug` string. Fail-open: a registry error falls back to the legacy
+        // fold so a room problem can never fail a memory write.
+        // ADR-0027 T9: `opts.wing_id` is `None` for every caller that predates
+        // wings, which resolves in the default wing — byte-identically to the
+        // line this replaced.
+        let wing_id = opts.wing_id.unwrap_or(DEFAULT_WING_ID);
+        let room_id = resolve_or_create_room_in_wing(&self.kg, &room, wing_id).await;
 
         let mut drawer = Drawer::new(room_id, content.clone());
         drawer.tags = tags;
@@ -847,8 +858,14 @@ impl PalaceHandle {
         tag: Option<String>,
         limit: usize,
     ) -> Vec<Drawer> {
+        // ADR-0027 D1.3: ids are read from the ROOMS table, never recomputed.
+        // Resolved BEFORE the drawer read guard is taken: this is a redb read
+        // transaction, and holding a lock across I/O would stall every writer
+        // (`remember` / `forget` take `drawers.write()`) for its duration.
+        let target_room_id = room
+            .as_ref()
+            .map(|r| crate::memory_core::store::rooms::resolve_room_filter_id(&self.kg, r));
         let drawers = self.drawers.read();
-        let target_room_id = room.as_ref().map(super::layers::room_to_uuid);
         let mut filtered: Vec<Drawer> = drawers
             .iter()
             .filter(|d| match &target_room_id {

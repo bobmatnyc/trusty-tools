@@ -64,6 +64,9 @@ pub mod remove;
 pub mod search;
 pub mod serve;
 pub mod service;
+// #4823: reading/preserving an already-installed launchd unit so regeneration
+// does not silently discard deliberate operator configuration.
+pub mod service_unit;
 pub mod setup;
 pub mod start;
 pub mod start_restore;

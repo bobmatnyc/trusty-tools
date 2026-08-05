@@ -6,8 +6,10 @@
 //! types. Absorbed into `trusty-common` (issue #5 phase 2d) so the trusty-*
 //! toolchain links a single internal library and we ship one fewer
 //! published crate.
-//! What: Re-exports the palace hierarchy (`Palace`, `Wing`, `Room`,
-//! `Drawer`), the registry, and the retrieval handle. Gated behind the
+//! What: Re-exports the palace hierarchy (`Palace` -> `Wing` -> `Room` ->
+//! `Drawer`), the registry, and the retrieval handle. "Closet" is not a level
+//! in that hierarchy — it is the keyword -> drawer-ids inverted index on
+//! `PalaceHandle` (ADR-0027 D3). Gated behind the
 //! `memory-core` feature because it pulls in heavy storage deps
 //! (`usearch`, `redb`, `postcard`, `tiktoken-rs`, `git2`).
 //! Test: Each submodule keeps its existing unit tests; `cargo test -p
@@ -22,16 +24,24 @@ pub mod filter;
 pub mod git;
 pub mod palace;
 pub mod registry;
+// ADR-0027 T1: pure room identity (canonical keys, UUIDv5 minting, the legacy
+// fold kept as the migration oracle). No I/O — see `store::rooms` for storage.
 pub mod retrieval;
+pub mod room_identity;
 pub mod semantic_consolidation;
 pub mod store;
 pub mod timeouts;
+// ADR-0027 T9: pure wing identity (canonical keys, UUIDv5 minting). No I/O —
+// see `store::wings` for storage and policy.
+pub mod wing_identity;
 
 pub use community::{KnowledgeGap, find_communities};
 pub use palace::{Drawer, DrawerType, Palace, PalaceId, Room, RoomType, Wing};
 pub use registry::PalaceRegistry;
 pub use retrieval::PalaceHandle;
+pub use room_identity::{DEFAULT_WING_ID, canonical_room_key, mint_room_id, room_to_uuid};
 pub use semantic_consolidation::{
     ConsolidationAction, ConsolidationResult, MockInference, OllamaInference, OpenRouterInference,
     SemanticConsolidationConfig, SemanticConsolidator, inference_available,
 };
+pub use wing_identity::{DEFAULT_WING_LABEL, canonical_wing_key, mint_wing_id};

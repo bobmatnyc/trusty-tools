@@ -482,8 +482,41 @@ impl PalaceRegistry {
         // (`Writer`) a second live instance holding the lock makes this fail
         // loud rather than returning a snapshot-mode (read-only) handle.
         let handle = PalaceHandle::open_with_intent(&palace, self.open_intent)?;
+        // ADR-0027 T2: name the rooms this palace's drawers already sit in.
+        Self::backfill_rooms(&handle);
         self.register_arc(handle.clone());
         Ok(handle)
+    }
+
+    /// Register a `ROOMS` row for every room the palace's drawers already use.
+    ///
+    /// Why (ADR-0027 T2): this is the one place every palace-open path funnels
+    /// through, and `registry.rs` had the SLOC headroom that
+    /// `retrieval/handle.rs` (484/500) does not. Hooking here also keeps the
+    /// backfill off the hot write path — it runs once per open, over a drawer
+    /// vector `PalaceHandle::open_with_intent` has already materialised, with
+    /// no extra I/O beyond at most a few dozen inserts.
+    /// What: snapshots the in-memory drawer table and delegates to the
+    /// additive, insert-only, fail-open backfill. Never writes to `DRAWERS`.
+    /// Test: `store::room_backfill::tests::backfill_changes_no_drawer_rows`;
+    /// `registry_tests::registry_create_and_open` opens through this path.
+    fn backfill_rooms(handle: &PalaceHandle) {
+        let drawers = handle.drawers.read().clone();
+        crate::memory_core::store::room_backfill::backfill_rooms_fail_open(
+            handle.id.as_str(),
+            &handle.kg,
+            &drawers,
+        );
+        // ADR-0027 T9: seed the default wing every room already points at.
+        // Ordered AFTER the room backfill only for log readability — the two
+        // are independent, because `RoomRecord::wing_id` has been
+        // `DEFAULT_WING_ID` since T1, so no room row needs rewriting for its
+        // wing to exist. This writes exactly one row and never touches
+        // `ROOMS` or `DRAWERS`.
+        crate::memory_core::store::wings::ensure_default_wing_fail_open(
+            handle.id.as_str(),
+            &handle.kg,
+        );
     }
 
     /// Resolve a palace-level alias, but ONLY when the requested palace is
@@ -538,6 +571,8 @@ impl PalaceRegistry {
         // daemon) so a freshly-created palace is opened under the same
         // fail-loud contract as a re-opened one.
         let handle = PalaceHandle::open_with_intent(&palace, self.open_intent)?;
+        // ADR-0027 T2: name the rooms this palace's drawers already sit in.
+        Self::backfill_rooms(&handle);
         self.register_arc(handle.clone());
         Ok(handle)
     }
@@ -586,7 +621,11 @@ impl PalaceRegistry {
             // behaviour while staying correct if a future caller hydrates a
             // writer registry.
             match PalaceHandle::open_with_intent(&palace, registry.open_intent) {
-                Ok(handle) => registry.register_arc(handle),
+                Ok(handle) => {
+                    // ADR-0027 T2: same additive backfill on the eager path.
+                    Self::backfill_rooms(&handle);
+                    registry.register_arc(handle);
+                }
                 Err(e) => {
                     tracing::warn!(palace = %palace.id, "skipping palace during registry open: {e:#}");
                 }

@@ -76,6 +76,16 @@ pub use shutdown::shutdown_signal;
 /// tail semantics, and layer capture.
 pub mod log_buffer;
 
+/// Process-wide panic hook that logs the panic payload through `tracing`.
+///
+/// Why (issue #4764): a macOS `.ips` crash report carries mangled symbols but
+/// not the panic message, so the literal cause of a daemon abort is otherwise
+/// unrecoverable in production.
+/// What: `install_panic_logger` wraps the existing hook, emitting payload,
+/// location, thread, and backtrace as one `tracing::error!` before delegating.
+/// Test: `cargo test -p trusty-common panic_hook`.
+pub mod panic_hook;
+
 /// Process RSS / CPU sampling and data-directory sizing for daemon health.
 ///
 /// Why: every trusty-* daemon's `/health` endpoint reports its own resident
@@ -247,8 +257,9 @@ pub mod symgraph;
 
 /// Memory Palace storage engine (formerly the `trusty-memory-core` crate).
 ///
-/// Why: Centralises the Memory Palace data model (`Palace` / `Wing` /
-/// `Room` / `Drawer`), storage backends (usearch vector index + SQLite
+/// Why: Centralises the Memory Palace data model (`Palace` -> `Wing` ->
+/// `Room` -> `Drawer`; "closet" is the keyword -> drawer-ids inverted index,
+/// not a level — ADR-0027 D3), storage backends (usearch vector index + SQLite
 /// knowledge graph + chat-session log + payload store), retrieval handle,
 /// and the dream / decay / analytics / git-history surfaces so every
 /// trusty-* binary that talks to a palace reuses the same types. Absorbed
@@ -630,6 +641,23 @@ pub mod slack_format;
 /// Test: `cargo test -p trusty-common -- data_dir::tests`.
 pub mod data_dir;
 
+/// Runtime "am I a `cargo test` process?" detection (issue #4255).
+///
+/// Why: every existing guard against a test run mutating the operator's live
+/// state was either compile-time (`cfg(test)`, which does not reach a crate's
+/// `tests/` or `[[bin]]` targets) or a per-test convention someone had to
+/// remember. Both were forgotten, and the live `indexes.toml` accumulated
+/// throwaway fixture roots as a result. A runtime check is the only one that
+/// also covers the cross-process case, where a test POSTs to a REAL daemon.
+/// Unconditional (not feature-gated) because trusty-search consumes it from a
+/// path that no feature flag governs.
+/// What: exposes [`test_harness::running_under_test_harness`] plus the
+/// [`test_harness::FORCE_ENV`] / [`test_harness::ALLOW_PRODUCTION_ENV`]
+/// override names.
+/// Test: `cargo test -p trusty-common -- test_harness::tests`.
+pub mod test_harness;
+pub use test_harness::running_under_test_harness;
+
 /// Cross-process locked read-modify-write for whole-file JSON documents.
 ///
 /// Why: `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s `tokens.json`
@@ -742,6 +770,9 @@ pub use daemon_addr::{
 
 // Health probe
 pub use health_probe::probe_health;
+
+// Panic logging (issue #4764)
+pub use panic_hook::install_panic_logger;
 
 // Tracing init
 #[cfg(feature = "bug-capture")]

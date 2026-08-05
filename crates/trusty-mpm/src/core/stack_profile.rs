@@ -12,7 +12,8 @@
 //! **Detected Project Stack** section folded into the per-project PM prompt at
 //! session-prepare time.
 //! What: [`stack_profile_section`] probes `project_dir` via the shared
-//! [`crate::core::manifest::project_lang::detected_engineers`] marker detection
+//! [`crate::core::manifest::framework::detected_stack_engineers`] marker
+//! detection
 //! (single source of truth, also used for agent-roster scoping) and renders a
 //! Markdown section — either the detected language engineers (route code work to
 //! them, use the project's own quality gate) or a neutral "not auto-detected"
@@ -24,7 +25,7 @@
 
 use std::path::Path;
 
-use crate::core::manifest::project_lang::detected_engineers;
+use crate::core::manifest::framework::detected_stack_engineers;
 
 /// Heading that delimits the auto-derived stack-profile block in the PM prompt.
 ///
@@ -43,17 +44,17 @@ pub const STACK_PROFILE_HEADING: &str = "## Detected Project Stack (auto-derived
 /// agent scoping keeps the delegation surface and the prose priming consistent,
 /// and guarantees an unknown project gets a neutral, detect-first profile instead
 /// of any language default (#1971).
-/// What: probes `project_dir` for language markers via [`detected_engineers`].
+/// What: probes `project_dir` for language markers via [`detected_stack_engineers`].
 /// When at least one matches, returns a section listing the matching
 /// `<lang>-engineer` stems (sorted, de-duplicated by the `BTreeSet`) and pointing
 /// the quality gate at the project's own configured checks. When none match,
 /// returns a NEUTRAL section that forbids assuming any stack and mandates a
 /// Research pass to detect it before routing. Pure and side-effect-free apart
-/// from the filesystem `exists()` probes performed by [`detected_engineers`].
+/// from the filesystem `exists()` probes performed by [`detected_stack_engineers`].
 /// Test: `detected_rust_lists_rust_engineer`, `detected_nextjs_lists_ts_family`,
 /// `detected_polyglot_lists_both_families`, `undetected_is_neutral_no_default`.
 pub fn stack_profile_section(project_dir: &Path) -> String {
-    let engineers = detected_engineers(project_dir);
+    let engineers = detected_stack_engineers(project_dir);
 
     if engineers.is_empty() {
         return format!(

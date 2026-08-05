@@ -123,8 +123,7 @@ pub fn apply_catalog<G: GitBackend>(
         .map_err(|e| ApplyError::Sync(e.to_string()))?;
 
     // 2. Resolve manifest + plan exactly as the launcher does.
-    let sources =
-        crate::core::manifest::ManifestSources::resolve(project_dir, &fw.root, &catalog_root);
+    let sources = crate::core::manifest::ManifestSources::resolve(project_dir, &catalog_root);
     let manifest = crate::core::manifest::resolve_manifest(&sources);
     let plan = HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
 

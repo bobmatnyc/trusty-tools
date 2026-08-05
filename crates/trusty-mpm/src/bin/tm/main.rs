@@ -29,6 +29,7 @@ use commands::{
     install::install,
     launch::{connect, launch},
     manager::manager,
+    memory::memory,
     misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
     project::project,
     projects::projects,
@@ -471,6 +472,7 @@ async fn main() -> anyhow::Result<()> {
                 hook(&client, &url).await
             }
         }
+        Some(Command::Memory { action }) => memory(action).await,
         Some(Command::Compress { tool }) => run_compress(&tool).await,
         Some(Command::Daemon {
             addr,

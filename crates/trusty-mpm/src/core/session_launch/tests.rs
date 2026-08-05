@@ -48,7 +48,9 @@ impl EnvVarGuard {
     /// `PathBuf` unnecessarily.
     /// What: snapshots the prior value and sets `key=value`; restored in `Drop`.
     /// Test: used by `inject_trusty_memory_mcp_override_env_wins`.
-    fn set_str(key: &'static str, value: &str) -> Self {
+    // #4255: `pub(super)` so the sibling `tests_search_index` module can opt
+    // into real daemon writes via `TRUSTY_ALLOW_PRODUCTION_STATE`.
+    pub(super) fn set_str(key: &'static str, value: &str) -> Self {
         let prev = std::env::var(key).ok();
         // SAFETY: serialized by `#[serial]`; restored in `Drop`.
         unsafe {
@@ -322,7 +324,7 @@ fn prepare_session_writes_the_compiled_prompt_before_returning() {
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
     const STALE: &str = "STALE-FROM-A-PREVIOUS-INSTALL";
-    let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project);
+    let compiled = compiled_for(project);
     std::fs::create_dir_all(compiled.parent().unwrap()).unwrap();
     std::fs::write(&compiled, STALE).unwrap();
 
@@ -368,10 +370,7 @@ fn prepare_session_fails_when_the_compiled_prompt_cannot_be_written() {
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    std::fs::create_dir_all(crate::core::instruction_pipeline::compiled_prompt_path(
-        project,
-    ))
-    .unwrap();
+    std::fs::create_dir_all(compiled_for(project)).unwrap();
 
     let err = prepare_session(&fw, project)
         .expect_err("a failed compiled-prompt write must abort the launch preparation");
@@ -384,7 +383,7 @@ fn prepare_session_fails_when_the_compiled_prompt_cannot_be_written() {
     match &err {
         PrepError::Instructions { path, .. } => assert_eq!(
             *path,
-            crate::core::instruction_pipeline::compiled_prompt_path(project),
+            compiled_for(project),
             "the error must name the compiled prompt path"
         ),
         other => panic!("expected PrepError::Instructions, got {other:?}"),
@@ -401,11 +400,92 @@ fn prepare_session_fails_when_the_compiled_prompt_cannot_be_written() {
     );
 }
 
+#[test]
+#[serial_test::serial]
+fn prepare_session_for_managed_writes_the_per_session_compiled_prompt() {
+    // Why (#4832): a managed provisioning caller HOLDS the session id, so the
+    // compiled prompt must land in that session's directory — not in the
+    // unmanaged `local` bucket the id-less entry points fall back to. If it
+    // did, the spawn (which knows the id) would refresh a different file and
+    // leave this one stale forever.
+    // FAILS BEFORE THIS CHANGE: there was one compiled prompt per project and
+    // no way to scope it to a session at all.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    let report =
+        prepare_session_for_managed(&fw, project, None, "sess-abc").expect("prep succeeds");
+
+    let expected = crate::core::instruction_pipeline::compiled_prompt_path(project, "sess-abc");
+    assert_eq!(
+        report.compiled_prompt, expected,
+        "the report must name this session's compiled path"
+    );
+    assert!(expected.exists(), "the compiled prompt must be on disk");
+    assert!(
+        expected
+            .to_string_lossy()
+            .contains("/.trusty-mpm/sessions/sess-abc/"),
+        "the layout is `.trusty-mpm/sessions/<id>/`: {}",
+        expected.display()
+    );
+    assert_ne!(
+        expected,
+        crate::core::instruction_pipeline::compiled_prompt_path(project, "sess-other"),
+        "a second session must not share this file"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn prepare_session_migrates_off_the_legacy_compiled_prompt() {
+    // Why (#4832): an upgraded install carries
+    // `<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md` from #4752.
+    // Nothing refreshes it any more, and it is the file an operator opens to
+    // answer "what is my session running" — a stale answer there is worse than
+    // no answer.
+    // FAILS BEFORE THIS CHANGE: the legacy file survived every launch.
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    let legacy = project
+        .join(".trusty-mpm")
+        .join("framework")
+        .join("INSTRUCTIONS-COMPILED.md");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, "OLD COMPILED PROMPT").unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    assert!(
+        !legacy.exists(),
+        "the pre-#4832 per-project compiled prompt must be retired: {}",
+        legacy.display()
+    );
+}
+
+/// The compiled-prompt path `prepare_session` writes for `project`.
+///
+/// Why (#4832): the file is per-session, and the id-less `prepare_session`
+/// entry points resolve their scope through
+/// [`crate::core::harness_root::session_scope`] — which reads
+/// `TM_MANAGED_SESSION_ID` when the test binary happens to run inside a managed
+/// pane. Re-deriving it the same way keeps these assertions about the WRITE,
+/// not about the developer's environment.
+fn compiled_for(project: &std::path::Path) -> std::path::PathBuf {
+    let scope = crate::core::harness_root::session_scope(None);
+    crate::core::instruction_pipeline::compiled_prompt_path(project, &scope)
+}
+
 /// The compiled-prompt path as it appears in an operator-facing message.
 fn compiled_display(project: &std::path::Path) -> String {
-    crate::core::instruction_pipeline::compiled_prompt_path(project)
-        .display()
-        .to_string()
+    compiled_for(project).display().to_string()
 }
 
 #[test]
@@ -429,10 +509,7 @@ fn compiled_write_failure_does_not_skip_the_mcp_injectors() {
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    std::fs::create_dir_all(crate::core::instruction_pipeline::compiled_prompt_path(
-        project,
-    ))
-    .unwrap();
+    std::fs::create_dir_all(compiled_for(project)).unwrap();
 
     // The compiled write fails, so preparation reports Err …
     prepare_session(&fw, project).expect_err("compiled write is expected to fail here");
@@ -2155,7 +2232,8 @@ fn prepare_session_manifest_filters_agent_set() {
     seed_bundled_agents(&fw);
 
     // Project override manifest: only deploy rust-engineer.
-    let manifest_dir = project.join(".trusty-mpm");
+    // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
+    let manifest_dir = project.join(".trusty-mpm").join("framework");
     std::fs::create_dir_all(&manifest_dir).unwrap();
     std::fs::write(
         manifest_dir.join("manifest.toml"),
@@ -2196,7 +2274,8 @@ fn prepare_session_manifest_disables_mcp_server() {
     let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     fw.trusty_mpm_root = None;
 
-    let manifest_dir = project.join(".trusty-mpm");
+    // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
+    let manifest_dir = project.join(".trusty-mpm").join("framework");
     std::fs::create_dir_all(&manifest_dir).unwrap();
     std::fs::write(
         manifest_dir.join("manifest.toml"),
@@ -2237,7 +2316,8 @@ fn prepare_session_manifest_sets_default_style() {
     let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     fw.trusty_mpm_root = None;
 
-    let manifest_dir = project.join(".trusty-mpm");
+    // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
+    let manifest_dir = project.join(".trusty-mpm").join("framework");
     std::fs::create_dir_all(&manifest_dir).unwrap();
     std::fs::write(
         manifest_dir.join("manifest.toml"),
@@ -2278,7 +2358,8 @@ fn prepare_session_config_style_overrides_manifest() {
         "[style]\nactive = \"trusty-mpm-teacher\"\n",
     )
     .unwrap();
-    let manifest_dir = project.join(".trusty-mpm");
+    // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
+    let manifest_dir = project.join(".trusty-mpm").join("framework");
     std::fs::create_dir_all(&manifest_dir).unwrap();
     std::fs::write(
         manifest_dir.join("manifest.toml"),

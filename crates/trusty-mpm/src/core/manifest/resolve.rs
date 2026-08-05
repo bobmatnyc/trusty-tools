@@ -1,19 +1,29 @@
 //! Precedence resolution for the harness manifest (HR-2 / DOC-17).
 //!
-//! Why: HR-2 mandates a single NORMATIVE precedence —
-//! **project override > user config > catalog manifest > compiled-in default** —
-//! and `prepare_session` must consume the *resolved* manifest. Centralizing the
-//! layer reads and the merge order here keeps that precedence in one auditable
-//! place and makes it testable without touching the real `~/.trusty-mpm`.
+//! Why: HR-2 mandates a single NORMATIVE precedence and `prepare_session` must
+//! consume the *resolved* manifest. Centralizing the layer reads and the merge
+//! order here keeps that precedence in one auditable place and makes it
+//! testable without touching the real `~/.trusty-mpm`.
+//!
+//! #4832 (owner ruling 2026-08-04) narrowed the precedence to
+//! **project override > catalog manifest > framework tier > compiled-in
+//! default**. The `~/.trusty-mpm/manifest.toml` USER layer is gone: instructions
+//! and their manifest are per-project and must always be deployed locally, so
+//! there is no user-level manifest surface. This REMOVES a working feature — an
+//! operator who kept a home-level `manifest.toml` loses it — and is a ruling,
+//! not a bug fix. The project layer also moved from
+//! `<project>/.trusty-mpm/manifest.toml` into the `framework/` subdirectory that
+//! now holds every project-stable config file.
 //! What: [`resolve_manifest`] starts from the compiled-in default
 //! ([`super::default::default_manifest`]) and overlays, in ascending precedence,
-//! the catalog manifest, the user-config manifest, then the project-override
+//! the framework tier, the catalog manifest, then the project-override
 //! manifest — each via [`HarnessManifest::merge`]. A missing or malformed layer
 //! is logged and skipped (never blocks a launch, per the HR-2 error contract).
 //! The canonical layer locations are resolved by [`ManifestSources::resolve`]
-//! from a project dir + framework root + catalog root.
+//! from a project dir + catalog root.
 //! Test: `resolve_uses_default_when_no_layers`, `resolve_project_wins`,
-//! `resolve_user_over_catalog`, `resolve_malformed_layer_is_skipped`.
+//! `resolve_catalog_over_default`, `resolve_malformed_layer_is_skipped`,
+//! `manifest_sources_resolve_canonical_paths`.
 
 use std::path::{Path, PathBuf};
 
@@ -33,27 +43,33 @@ pub const MANIFEST_FILE: &str = "manifest.toml";
 /// Why: `prepare_session` (and tests) need to point the resolver at specific
 /// files; bundling the three optional paths keeps the resolver signature small
 /// and lets tests construct an arbitrary layer set.
-/// What: the project-override path (highest precedence), the user-config path,
-/// and the catalog path (lowest of the three; the compiled-in default sits below
-/// all of them). A `None` field means "that layer is absent".
+/// What: the project-override path (highest precedence) and the catalog path
+/// (the compiled-in default and the framework tier sit below both). A `None`
+/// field means "that layer is absent". #4832 removed the user layer.
 /// Test: `manifest_sources_resolve_canonical_paths`.
 #[derive(Debug, Clone, Default)]
 pub struct ManifestSources {
-    /// `<project>/.trusty-mpm/manifest.toml` — highest precedence.
+    /// `<harness-root>/.trusty-mpm/framework/manifest.toml` — highest precedence.
     pub project: Option<PathBuf>,
-    /// `~/.trusty-mpm/manifest.toml` — user config.
-    pub user: Option<PathBuf>,
     /// `~/.trusty-mpm/catalog/repo/.claude/manifest.toml` — synced catalog.
     pub catalog: Option<PathBuf>,
-    /// Auto-detected per-project language agent scoping (#1941).
+    /// The framework tier's resolved agent selection (#1941, #4760).
     ///
-    /// Why: a Rust-only workspace should not receive the full polyglot roster.
-    /// [`ManifestSources::resolve`] fills this from
-    /// [`super::project_lang::language_agent_scope`]; [`resolve_manifest`] applies
+    /// Why: the bundled `framework-manifest.toml` declares WHICH agents always
+    /// deploy and which are gated on a detected language, framework, or
+    /// platform; composing that declaration with this project's detected markers
+    /// yields the framework-tier selection below every operator-authored layer.
+    /// That selection states its gate as an `exclude` list, deliberately — see
+    /// [`super::framework::agent_scope_from`] for why an `include` allowlist
+    /// would silently drop the `BASE-*` fragments and every catalog-only agent.
+    /// [`ManifestSources::resolve`] ALWAYS fills this from
+    /// [`super::framework::framework_agent_scope`]; [`resolve_manifest`] applies
     /// it as the lowest override layer (above the compiled default, below the
-    /// catalog/user/project manifests) so an explicit `[agents]` override always
-    /// wins. `None` means "no recognized language" → deploy everything (unchanged).
-    pub language_scope: Option<AgentSet>,
+    /// catalog/user/project manifests) so an explicit `[agents]` override still
+    /// wins, per ADR-0025 clause 16. `None` is reachable only by constructing
+    /// this struct by hand — it exists so the merge-precedence unit tests below
+    /// can isolate a single layer, and means "no framework tier applied".
+    pub framework_scope: Option<AgentSet>,
 }
 
 impl ManifestSources {
@@ -64,27 +80,29 @@ impl ManifestSources {
     /// one place keeps `prepare_session` from hard-coding the joins and lets the
     /// catalog source stay configurable (the caller passes whatever
     /// `CatalogSync` used as its catalog root).
-    /// What: builds `<project>/.trusty-mpm/manifest.toml`,
-    /// `<framework_root>/manifest.toml`, and
+    /// What: builds
+    /// `<harness-root>/.trusty-mpm/framework/manifest.toml` and
     /// `<catalog_root>/repo/.claude/manifest.toml`. Each path is recorded
     /// unconditionally; the resolver tolerates absent files.
     ///
-    /// Note: the USER manifest is `<framework_root>/manifest.toml` — a sibling of
-    /// `<framework_root>/config.toml` (i.e. `~/.trusty-mpm/manifest.toml` in
-    /// production). This co-location with `config.toml` is intentional: both are
-    /// user-level, framework-rooted files, so an operator finds them in one place.
+    /// #4832: the project layer moved into `framework/`, the project-stable
+    /// config directory, and the `framework_root` parameter went with the user
+    /// layer it resolved. The harness root — not `project_dir` — anchors the
+    /// project path, so a worktree reads (and an operator edits) the ONE
+    /// manifest the whole project shares.
     /// Test: `manifest_sources_resolve_canonical_paths`.
-    pub fn resolve(project_dir: &Path, framework_root: &Path, catalog_root: &Path) -> Self {
+    pub fn resolve(project_dir: &Path, catalog_root: &Path) -> Self {
         Self {
-            project: Some(project_dir.join(".trusty-mpm").join(MANIFEST_FILE)),
-            user: Some(framework_root.join(MANIFEST_FILE)),
+            project: Some(
+                crate::core::harness_root::framework_dir(project_dir).join(MANIFEST_FILE),
+            ),
             catalog: Some(
                 catalog_root
                     .join("repo")
                     .join(".claude")
                     .join(MANIFEST_FILE),
             ),
-            language_scope: super::project_lang::language_agent_scope(project_dir),
+            framework_scope: Some(super::framework::framework_agent_scope(project_dir)),
         }
     }
 }
@@ -95,45 +113,78 @@ impl ManifestSources {
 /// (today `prepare_session`, tomorrow HR-3's staleness check) resolves the
 /// manifest through here so the layer order can never drift.
 /// What: starts from [`default_manifest`] (the floor) and overlays, lowest-to-
-/// highest precedence, the catalog layer, the user layer, then the project layer.
+/// highest precedence, the framework tier, the catalog layer, then the project
+/// layer. #4832 removed the user layer.
 /// Each layer is read via [`read_layer`]; a missing file contributes nothing and
 /// a malformed file is logged and skipped (the launch never blocks — HR-2 error
 /// contract). The returned manifest always has every section populated because
 /// the default floor fills any section no layer overrode.
 /// Test: `resolve_uses_default_when_no_layers`, `resolve_project_wins`,
-/// `resolve_user_over_catalog`, `resolve_malformed_layer_is_skipped`.
+/// `resolve_catalog_over_default`, `resolve_malformed_layer_is_skipped`.
 pub fn resolve_manifest(sources: &ManifestSources) -> HarnessManifest {
     let mut manifest = default_manifest();
 
-    // Per-project language scoping (#1941): the lowest override layer, applied on
+    // The framework tier (#1941, #4760): the lowest override layer, applied on
     // top of the compiled default but below the catalog/user/project manifests so
-    // an explicit `[agents]` override always wins. Absent (unknown project type)
-    // → no scoping, deploy everything (zero-regression).
-    if let Some(scope) = &sources.language_scope {
+    // an explicit `[agents]` override always wins. This is where the bundled
+    // `framework-manifest.toml`'s declared always-deploy set — composed with this
+    // project's detected language/framework/platform markers — enters resolution.
+    if let Some(scope) = &sources.framework_scope {
         manifest = manifest.merge(HarnessManifest {
             agents: Some(scope.clone()),
             ..HarnessManifest::default()
         });
     }
 
-    // Lowest-to-highest precedence: catalog → user → project.
+    // Lowest-to-highest precedence: catalog → project. #4832 removed the user
+    // layer that sat between them.
     if let Some(path) = &sources.catalog
         && let Some(layer) = read_layer(path, "catalog")
     {
         manifest = manifest.merge(layer);
     }
-    if let Some(path) = &sources.user
-        && let Some(layer) = read_layer(path, "user")
-    {
-        manifest = manifest.merge(layer);
-    }
-    if let Some(path) = &sources.project
-        && let Some(layer) = read_layer(path, "project")
-    {
-        manifest = manifest.merge(layer);
+    if let Some(path) = &sources.project {
+        match read_layer(path, "project") {
+            Some(layer) => manifest = manifest.merge(layer),
+            None => {
+                if let Some(legacy) = stranded_legacy_manifest(path) {
+                    tracing::warn!(
+                        "{} is no longer read (#4832 moved the project manifest layer); \
+                         move it to {} for it to take effect",
+                        legacy.display(),
+                        path.display()
+                    );
+                }
+            }
+        }
     }
 
     manifest
+}
+
+/// A pre-#4832 `manifest.toml` sitting unread beside the new location.
+///
+/// Why: #4832 moved the project layer from `<project>/.trusty-mpm/manifest.toml`
+/// into `framework/`, and the file is operator-authored — moving it silently is
+/// worse than leaving it, so it is deliberately NOT migrated. But a layer that
+/// simply stops being read is invisible: [`read_layer`] logs nothing for an
+/// absent file, so an operator's overrides would go dark with no signal at all
+/// (#4841 review). Detection is split from the logging so the condition is
+/// assertable without capturing a subscriber.
+/// What: `Some(legacy_path)` only when the new path is absent AND the legacy
+/// sibling (`<new>/../../manifest.toml`) is a file; `None` otherwise — a present
+/// new layer means nothing is stranded, whatever else exists.
+/// Test: `stranded_legacy_manifest_is_detected`,
+/// `stranded_legacy_manifest_is_silent_once_moved`.
+fn stranded_legacy_manifest(new_path: &Path) -> Option<PathBuf> {
+    if new_path.exists() {
+        return None;
+    }
+    let legacy = new_path
+        .parent()
+        .and_then(Path::parent)?
+        .join(MANIFEST_FILE);
+    legacy.is_file().then_some(legacy)
 }
 
 /// Read and parse one manifest layer file, tolerating absence and corruption.
@@ -185,22 +236,78 @@ mod tests {
 
     #[test]
     fn manifest_sources_resolve_canonical_paths() {
-        let sources = ManifestSources::resolve(
-            Path::new("/proj"),
-            Path::new("/home/.trusty-mpm"),
-            Path::new("/home/.trusty-mpm/catalog"),
-        );
+        // #4832: the project layer lives in `framework/`, and there is no user
+        // layer left to resolve.
+        let sources =
+            ManifestSources::resolve(Path::new("/proj"), Path::new("/home/.trusty-mpm/catalog"));
         assert_eq!(
             sources.project.unwrap(),
-            PathBuf::from("/proj/.trusty-mpm/manifest.toml")
-        );
-        assert_eq!(
-            sources.user.unwrap(),
-            PathBuf::from("/home/.trusty-mpm/manifest.toml")
+            PathBuf::from("/proj/.trusty-mpm/framework/manifest.toml")
         );
         assert_eq!(
             sources.catalog.unwrap(),
             PathBuf::from("/home/.trusty-mpm/catalog/repo/.claude/manifest.toml")
+        );
+    }
+
+    #[test]
+    fn stranded_legacy_manifest_is_detected() {
+        // #4841 review: the operator's pre-#4832 file is deliberately not moved
+        // for them, so the ONE thing owed is a signal that it stopped being read.
+        let tmp = TempDir::new().unwrap();
+        let harness = tmp.path().join(".trusty-mpm");
+        let legacy = write(&harness, MANIFEST_FILE, "[agents]\n");
+        let new_path = harness.join("framework").join(MANIFEST_FILE);
+
+        assert_eq!(
+            stranded_legacy_manifest(&new_path),
+            Some(legacy),
+            "an unread legacy manifest must be detectable so it can be reported"
+        );
+    }
+
+    #[test]
+    fn stranded_legacy_manifest_is_silent_once_moved() {
+        // Once the file lives at the new path, the old one (if any) is history —
+        // warning on every launch forever would be noise, not a signal.
+        let tmp = TempDir::new().unwrap();
+        let harness = tmp.path().join(".trusty-mpm");
+        write(&harness, MANIFEST_FILE, "[agents]\n");
+        let new_path = write(&harness.join("framework"), MANIFEST_FILE, "[agents]\n");
+
+        assert_eq!(stranded_legacy_manifest(&new_path), None);
+    }
+
+    #[test]
+    fn stranded_legacy_manifest_is_silent_when_there_never_was_one() {
+        let tmp = TempDir::new().unwrap();
+        let new_path = tmp
+            .path()
+            .join(".trusty-mpm")
+            .join("framework")
+            .join(MANIFEST_FILE);
+
+        assert_eq!(stranded_legacy_manifest(&new_path), None);
+    }
+
+    #[test]
+    fn resolve_ignores_a_user_level_manifest() {
+        // #4832 (owner ruling): a `~/.trusty-mpm/manifest.toml` no longer
+        // participates. This is a removed feature, asserted so it cannot come
+        // back by accident.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        write(
+            &home,
+            "manifest.toml",
+            "[style]\nactive = \"trusty-mpm-teacher\"\n",
+        );
+        let sources = ManifestSources::resolve(&tmp.path().join("proj"), &tmp.path().join("cat"));
+        let m = resolve_manifest(&sources);
+        assert_ne!(
+            m.style.and_then(|s| s.active),
+            Some("trusty-mpm-teacher".to_string()),
+            "a user-level manifest must not be read"
         );
     }
 
@@ -211,27 +318,21 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let sources = ManifestSources {
             project: Some(tmp.path().join("p").join("manifest.toml")),
-            user: Some(tmp.path().join("u").join("manifest.toml")),
             catalog: Some(tmp.path().join("c").join("manifest.toml")),
-            language_scope: None,
+            framework_scope: None,
         };
         assert_eq!(resolve_manifest(&sources), default_manifest());
     }
 
     #[test]
     fn resolve_project_wins() {
-        // The project layer must override the user and catalog layers for the
-        // same section (style here).
+        // The project layer must override the catalog layer for the same
+        // section (style here).
         let tmp = TempDir::new().unwrap();
         let catalog = write(
             &tmp.path().join("c"),
             "manifest.toml",
             "[style]\nactive = \"trusty-mpm-research\"\n",
-        );
-        let user = write(
-            &tmp.path().join("u"),
-            "manifest.toml",
-            "[style]\nactive = \"trusty-mpm-teacher\"\n",
         );
         let project = write(
             &tmp.path().join("p"),
@@ -240,43 +341,14 @@ mod tests {
         );
         let sources = ManifestSources {
             project: Some(project),
-            user: Some(user),
             catalog: Some(catalog),
-            language_scope: None,
+            framework_scope: None,
         };
         let m = resolve_manifest(&sources);
         assert_eq!(
             m.style.and_then(|s| s.active),
             Some("trusty-mpm".to_string()),
-            "project layer must win over user and catalog"
-        );
-    }
-
-    #[test]
-    fn resolve_user_over_catalog() {
-        // When the project layer is absent, the user layer must win over the
-        // catalog layer.
-        let tmp = TempDir::new().unwrap();
-        let catalog = write(
-            &tmp.path().join("c"),
-            "manifest.toml",
-            "[style]\nactive = \"trusty-mpm-research\"\n",
-        );
-        let user = write(
-            &tmp.path().join("u"),
-            "manifest.toml",
-            "[style]\nactive = \"trusty-mpm-teacher\"\n",
-        );
-        let sources = ManifestSources {
-            project: Some(tmp.path().join("p").join("manifest.toml")), // absent
-            user: Some(user),
-            catalog: Some(catalog),
-            language_scope: None,
-        };
-        let m = resolve_manifest(&sources);
-        assert_eq!(
-            m.style.and_then(|s| s.active),
-            Some("trusty-mpm-teacher".to_string())
+            "project layer must win over catalog"
         );
     }
 
@@ -292,9 +364,8 @@ mod tests {
         );
         let sources = ManifestSources {
             project: None,
-            user: None,
             catalog: Some(catalog),
-            language_scope: None,
+            framework_scope: None,
         };
         let m = resolve_manifest(&sources);
         // The catalog disables search. Because `[mcp]` now merges FIELD-BY-FIELD
@@ -322,9 +393,8 @@ mod tests {
         );
         let sources = ManifestSources {
             project: Some(project),
-            user: None,
             catalog: None,
-            language_scope: None,
+            framework_scope: None,
         };
         let mcp = resolve_manifest(&sources).mcp.expect("mcp present");
         assert_eq!(mcp.trusty_search, Some(false));
@@ -340,66 +410,130 @@ mod tests {
         // A malformed layer must be skipped (logged), not abort resolution; the
         // lower layers (and ultimately the default) still apply.
         let tmp = TempDir::new().unwrap();
-        let user = write(
-            &tmp.path().join("u"),
+        let catalog = write(
+            &tmp.path().join("c"),
             "manifest.toml",
             "this is not toml {{{",
         );
         let sources = ManifestSources {
             project: None,
-            user: Some(user),
-            catalog: None,
-            language_scope: None,
+            catalog: Some(catalog),
+            framework_scope: None,
         };
-        // Malformed user layer skipped → result equals the default.
+        // Malformed catalog layer skipped → result equals the default.
         assert_eq!(resolve_manifest(&sources), default_manifest());
+    }
+
+    /// Selection outcome for `stem` under a fully resolved manifest.
+    ///
+    /// Why: the framework tier states its gate as an `exclude` list derived
+    /// from the declared categories, so asserting on list SHAPE would pin the
+    /// mechanism instead of the behaviour. These tests assert the behaviour:
+    /// is this agent selected for deploy?
+    fn selected(m: &HarnessManifest, stem: &str) -> bool {
+        let agents = m.agents.as_ref().expect("agents section present");
+        super::super::schema::selection_matches(stem, &agents.include, &agents.exclude)
     }
 
     #[test]
     fn resolve_scopes_agents_for_rust_project() {
-        // #1941: a project whose root has a Cargo.toml (and no manifest overrides)
-        // must resolve to an agent set that excludes the foreign-language engineers
-        // while keeping rust-engineer — driven purely by auto-detection.
+        // #1941 / #4760: a project whose root has a Cargo.toml (and no manifest
+        // overrides) selects rust-engineer, drops the foreign-language engineers,
+        // keeps every universal agent, and never selects the deprecated `ops`.
         let proj = TempDir::new().unwrap();
         std::fs::write(proj.path().join("Cargo.toml"), "[package]\n").unwrap();
-        let fw = TempDir::new().unwrap();
         let catalog = TempDir::new().unwrap();
 
-        let sources = ManifestSources::resolve(proj.path(), fw.path(), catalog.path());
+        let sources = ManifestSources::resolve(proj.path(), catalog.path());
         assert!(
-            sources.language_scope.is_some(),
-            "a Cargo project must be language-scoped"
+            sources.framework_scope.is_some(),
+            "resolve always applies the framework tier"
         );
 
         let m = resolve_manifest(&sources);
-        let agents = m.agents.expect("agents section present");
+        assert!(selected(&m, "rust-engineer"), "rust-engineer must survive");
         assert!(
-            !agents.exclude.contains(&"rust-engineer".to_string()),
-            "rust-engineer must survive scoping"
+            !selected(&m, "python-engineer"),
+            "python-engineer must be dropped from a Rust-only project"
+        );
+        assert!(selected(&m, "qa"), "universal agents are never stack-gated");
+        assert!(
+            !selected(&m, "elixir-engineer") && !selected(&m, "phoenix-engineer"),
+            "a Rust project gets neither the Elixir nor the Phoenix engineer"
         );
         assert!(
-            agents.exclude.contains(&"python-engineer".to_string()),
-            "python-engineer must be excluded from a Rust-only project: {:?}",
-            agents.exclude
+            !selected(&m, "vercel-ops"),
+            "a project with no Vercel marker gets no platform agent"
         );
     }
 
     #[test]
-    fn resolve_unknown_project_deploys_everything() {
-        // A project with no recognized language marker must NOT be scoped — the
-        // resolved manifest keeps the default's empty include/exclude (deploy all).
+    fn resolve_unknown_project_keeps_every_stack_engineer() {
+        // Zero-regression: a project with no recognized stack marker keeps every
+        // language and framework engineer, as before #4760. Platform agents have
+        // no such fallback, and the deprecated agent stays out either way.
         let proj = TempDir::new().unwrap();
         std::fs::write(proj.path().join("README.md"), "# hi\n").unwrap();
-        let fw = TempDir::new().unwrap();
         let catalog = TempDir::new().unwrap();
 
-        let sources = ManifestSources::resolve(proj.path(), fw.path(), catalog.path());
-        assert!(sources.language_scope.is_none());
-        let agents = resolve_manifest(&sources).agents.expect("agents present");
+        let sources = ManifestSources::resolve(proj.path(), catalog.path());
+        let m = resolve_manifest(&sources);
+        for stem in [
+            "rust-engineer",
+            "python-engineer",
+            "elixir-engineer",
+            "react-engineer",
+            "phoenix-engineer",
+            "tauri-engineer",
+            "engineer",
+            "qa",
+        ] {
+            assert!(
+                selected(&m, stem),
+                "{stem} must deploy to an unknown project"
+            );
+        }
         assert!(
-            agents.exclude.is_empty(),
-            "unknown project excludes nothing"
+            !selected(&m, "gcp-ops") && !selected(&m, "vercel-ops"),
+            "platform has no unknown-project fallback"
         );
-        assert!(agents.include.is_empty(), "unknown project includes all");
+    }
+
+    #[test]
+    fn resolve_selects_platform_agent_on_marker() {
+        // #4760: a Vercel marker adds vercel-ops, and only vercel-ops.
+        let proj = TempDir::new().unwrap();
+        std::fs::write(proj.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(proj.path().join("vercel.json"), "{}\n").unwrap();
+        let catalog = TempDir::new().unwrap();
+
+        let m = resolve_manifest(&ManifestSources::resolve(proj.path(), catalog.path()));
+        assert!(selected(&m, "vercel-ops"));
+        assert!(!selected(&m, "gcp-ops"));
+    }
+
+    #[test]
+    fn project_manifest_agents_override_still_wins() {
+        // ADR-0025 clause 16 is preserved: the framework tier is the LOWEST
+        // override layer, so a project `[agents]` section still replaces it.
+        let tmp = TempDir::new().unwrap();
+        let proj_dir = tmp.path().join("p");
+        std::fs::write(tmp.path().join("Cargo.toml"), "[package]\n").ok();
+        let project = write(
+            &proj_dir.join(".trusty-mpm"),
+            "manifest.toml",
+            "[agents]\ninclude = [\"engineer\"]\n",
+        );
+        let sources = ManifestSources {
+            project: Some(project),
+            catalog: None,
+            framework_scope: Some(super::super::schema::AgentSet {
+                include: vec!["qa".to_string()],
+                ..Default::default()
+            }),
+        };
+        let m = resolve_manifest(&sources);
+        assert!(selected(&m, "engineer"), "project include wins");
+        assert!(!selected(&m, "qa"), "framework tier is fully replaced");
     }
 }

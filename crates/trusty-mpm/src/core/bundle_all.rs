@@ -112,7 +112,6 @@ pub const ALL: &[BundledArtifact] = &[
     overwrite("agents/engineer.md", ENGINEER_AGENT),
     overwrite("agents/qa.md", QA_AGENT),
     overwrite("agents/research.md", RESEARCH_AGENT),
-    overwrite("agents/ops.md", OPS_AGENT),
     overwrite("agents/security.md", SECURITY_AGENT),
     overwrite("agents/documentation.md", DOCUMENTATION_AGENT),
     overwrite("agents/data-engineer.md", DATA_ENGINEER_AGENT),
@@ -133,6 +132,7 @@ pub const ALL: &[BundledArtifact] = &[
     overwrite("agents/api-qa.md", API_QA_AGENT),
     // --- Increment 3: remaining 14 agents ---
     overwrite("agents/javascript-engineer.md", JAVASCRIPT_ENGINEER_AGENT),
+    overwrite("agents/elixir-engineer.md", ELIXIR_ENGINEER_AGENT),
     overwrite("agents/phoenix-engineer.md", PHOENIX_ENGINEER_AGENT),
     overwrite("agents/dart-engineer.md", DART_ENGINEER_AGENT),
     overwrite("agents/dotnet-engineer.md", DOTNET_ENGINEER_AGENT),

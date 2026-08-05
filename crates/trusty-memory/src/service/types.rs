@@ -30,6 +30,29 @@ pub struct PalaceInfo {
     pub drawer_count: usize,
     pub vector_count: usize,
     pub kg_triple_count: usize,
+    /// Rooms registered in this palace's `ROOMS` table (ADR-0027, #4807).
+    ///
+    /// Why: this is the number the product always meant to show. It is read
+    /// from the registry rather than derived from the drawers so it agrees
+    /// with `room_list` — a room created but not yet written to is still a
+    /// room, and a UI that disagreed with the tool surface would be a new lie.
+    /// `0` when `cached` is false means unknown, exactly like the other counts.
+    /// Test: `palace_list_includes_richer_counts`.
+    #[serde(default)]
+    pub room_count: usize,
+    /// Wings registered in this palace's `WINGS` table (ADR-0027 T9, #4809).
+    ///
+    /// Why: this field reported a *room* count under a wing label until #4811
+    /// (ADR-0027 C3.4), then a hardcoded `1` while `DEFAULT_WING_ID` was the
+    /// only wing the model could hold. T9's `wing_create` made more than one
+    /// possible, so it is now read from the registry — the same source
+    /// `wing_list` uses, so the number and the tool surface cannot disagree.
+    /// `0` when `cached` is false means unknown, exactly like the other counts;
+    /// an open palace always reports at least `1` for its default wing.
+    ///
+    /// Note for readers: a wing is the scope/ownership axis. If you want "how
+    /// many topics does this palace have", that is `room_count`.
+    /// Test: `palace_list_includes_richer_counts`, `palace_info_reports_real_wings`.
     pub wing_count: usize,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_write_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -47,7 +70,8 @@ pub struct PalaceInfo {
     /// The full-registry list route no longer force-opens every palace — at
     /// 5,794 palaces that was ~90 minutes of cold disk I/O per request. When
     /// this is `false`, `drawer_count` / `vector_count` / `kg_triple_count` /
-    /// `wing_count` / `node_count` / `edge_count` / `community_count` are `0`
+    /// `room_count` / `wing_count` / `node_count` / `edge_count` /
+    /// `community_count` are `0`
     /// because they are **unknown**, not because they are empty; fetch
     /// `GET /api/v1/palaces/{id}` for live counts on a specific palace.
     /// `#[serde(default)]` keeps the field omissible for older clients.

@@ -10,7 +10,8 @@ use crate::memory_core::store::concurrent_open::{
     OpenIntent, OpenMode, backoff_sleep_ms, try_open_or_snapshot,
 };
 use crate::memory_core::store::kg_store::{
-    ACTIVE_SUBJECT_COUNTS, DRAWERS, TRIPLES, TRIPLES_BY_OBJECT, TRIPLES_BY_PREDICATE,
+    ACTIVE_SUBJECT_COUNTS, DRAWERS, ROOM_KEYS, ROOMS, TRIPLES, TRIPLES_BY_OBJECT,
+    TRIPLES_BY_PREDICATE, WING_KEYS, WINGS,
 };
 use anyhow::{Context, Result};
 use redb::Database;
@@ -152,6 +153,17 @@ impl KgStoreRedb {
                                 .open_table(ACTIVE_SUBJECT_COUNTS)
                                 .context("init active_subject_counts table")?;
                             let _ = wtx.open_table(DRAWERS).context("init drawers table")?;
+                            // ADR-0027 T1: the room registry is initialised in
+                            // the SAME transaction as DRAWERS so the schema is
+                            // always whole — a palace can never present drawers
+                            // without the tables that name their rooms.
+                            let _ = wtx.open_table(ROOMS).context("init rooms table")?;
+                            let _ = wtx.open_table(ROOM_KEYS).context("init room_keys table")?;
+                            // ADR-0027 T9: same whole-schema rule for the wing
+                            // registry — a palace can never present rooms
+                            // without the tables that scope them.
+                            let _ = wtx.open_table(WINGS).context("init wings table")?;
+                            let _ = wtx.open_table(WING_KEYS).context("init wing_keys table")?;
                         }
                         wtx.commit().context("commit init txn")?;
                     }

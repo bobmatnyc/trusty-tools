@@ -21,6 +21,36 @@ use super::super::store_config::{MmapServeMode, VectorQuant};
 use super::types::StoreKeyMap;
 use super::usearch_recover::SaveVerdict;
 
+/// Derive the staging path a snapshot is written to before it is renamed into
+/// place, scoped to THIS process (#4395).
+///
+/// Why: the staging name used to be deterministic — `hnsw.usearch.tmp` and
+/// `hnsw.keys.json.tmp` — and `hnsw.usearch` has no cross-process lock. The
+/// `save_lock` serialises two savers *inside one daemon*; it says nothing about
+/// two daemons. That case is not hypothetical: colocated indexes keep their
+/// snapshot in the project root (`<repo>/.trusty-search/`), OUTSIDE any data
+/// directory, so even two perfectly data-dir-isolated daemons indexing the same
+/// repo wrote to the identical staging file. One could truncate and rewrite the
+/// other's half-finished tmp and rename a spliced snapshot into place. Putting
+/// the pid in the name removes the collision instead of trying to coordinate
+/// through it — no lock to acquire, nothing to time out, and it holds for
+/// colocated stores where no daemon lock reaches.
+///
+/// What: `<path minus final extension>.<ext>.<pid>.tmp`. Callers pass the
+/// extension the finished file will carry (`usearch`, `json`) so the staging
+/// name still sorts and reads next to its target.
+///
+/// Residual, stated rather than papered over: a process SIGKILLed between the
+/// write and the rename leaves its staging file behind, and a per-pid name means
+/// a later process no longer overwrites it. That is one small file per
+/// (index, killed pid), and #4393's widened termination window is what makes the
+/// kill rare. The alternative — a shared name that IS overwritten — is the bug.
+///
+/// Test: `tests::test_staging_path_is_process_scoped`.
+pub(super) fn staging_path(path: &Path, ext: &str) -> PathBuf {
+    path.with_extension(format!("{ext}.{}.tmp", std::process::id()))
+}
+
 /// Initial reserved capacity for a new HNSW index. Grows geometrically on demand.
 ///
 /// Why (memory fix): we register one HNSW index per project, and the daemon
@@ -524,7 +554,7 @@ impl UsearchStore {
         // [`SHRINK_GUARD_RATIO_DIVISOR`] for the full rationale, including how
         // legitimate shrinkage (document deletion, pruning, a deliberate
         // reindex of a smaller corpus) stays unblocked.
-        let tmp_hnsw = hnsw_path.with_extension("usearch.tmp");
+        let tmp_hnsw = staging_path(hnsw_path, "usearch");
         let tmp_hnsw_str = tmp_hnsw
             .to_str()
             .ok_or_else(|| anyhow!("non-utf8 path: {}", tmp_hnsw.display()))?
@@ -612,8 +642,22 @@ impl UsearchStore {
                 removed_since_save.store(0, Ordering::Release);
                 Ok(SaveVerdict::Saved)
             })
-            .await
-            .map_err(|e| anyhow!("usearch save task panicked: {e}"))??;
+            .await;
+            // #4395: the staging file is now process-scoped, so nothing else
+            // will overwrite ours on the next save — clear it ourselves on
+            // every failure path rather than leaving it to be reclaimed by a
+            // collision that no longer happens.
+            let saved = match saved {
+                Ok(Ok(verdict)) => verdict,
+                Ok(Err(e)) => {
+                    let _ = std::fs::remove_file(&tmp_hnsw);
+                    return Err(e);
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp_hnsw);
+                    return Err(anyhow!("usearch save task panicked: {e}"));
+                }
+            };
             match saved {
                 SaveVerdict::Saved => {}
                 // #1717: a partial in-memory index may hold vectors the
@@ -645,10 +689,14 @@ impl UsearchStore {
                 }
             }
         }
-        std::fs::rename(&tmp_hnsw, hnsw_path).map_err(|e| anyhow!("rename hnsw snapshot: {e}"))?;
+        std::fs::rename(&tmp_hnsw, hnsw_path).map_err(|e| {
+            // #4395: as above — our staging file is ours alone to clean up.
+            let _ = std::fs::remove_file(&tmp_hnsw);
+            anyhow!("rename hnsw snapshot: {e}")
+        })?;
 
         let sidecar = hnsw_path.with_extension("keys.json");
-        let sidecar_tmp = sidecar.with_extension("json.tmp");
+        let sidecar_tmp = staging_path(&sidecar, "json");
         let json =
             serde_json::to_vec(&key_map).map_err(|e| anyhow!("serialize hnsw key map: {e}"))?;
         std::fs::write(&sidecar_tmp, &json)

@@ -849,3 +849,326 @@ fn evaluate_worktree_add_command_normalizes_dot_dot_traversal() {
         Some(WORKTREE_TMP_REASON)
     );
 }
+
+// ── #4837 review BLOCK 1(b): the agent-cost stop's persistence escape hatch ──
+
+#[test]
+fn command_is_persistence_only_accepts_commit_and_push() {
+    // Exactly the sequence a stopped agent needs to not lose its work.
+    for cmd in [
+        "git add -A",
+        "git commit -m 'fix: something'",
+        "git push origin HEAD",
+        "git status --short",
+        "git diff --stat",
+        // Composed, but every segment is still persistence.
+        "git add -A && git commit -m x && git push",
+        "git status; git diff",
+        // A trailing separator leaves an empty tail segment.
+        "git status && ",
+    ] {
+        assert!(
+            command_is_persistence_only(cmd),
+            "expected {cmd:?} to count as persistence"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_sees_past_git_global_flags() {
+    // Agents commit from a worktree with `git -C <path> …` constantly; the
+    // escape hatch is useless if it cannot see the subcommand behind that.
+    for cmd in [
+        "git -C /repo/wt commit -m x",
+        "git --git-dir=/repo/.git --work-tree=/repo add -A",
+        "git --work-tree /repo -C /repo status",
+        "git --no-pager diff --stat",
+    ] {
+        assert!(
+            command_is_persistence_only(cmd),
+            "expected {cmd:?} to resolve past its global flags"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_rejects_config_injection() {
+    // #4850 review HIGH, shape 1: `-c` sits in `GIT_GLOBAL_OPTS_WITH_ARG`, so
+    // the first cut consumed it with its value and resolved a clean `diff` —
+    // while `diff.external` runs whatever it names. The earlier suite asserted
+    // `git -c user.name=bot commit -m x` WAS persistence, which pinned the hole
+    // open by construction: any `-c <anything>` was accepted. `-c` is now
+    // rejected outright, so no value has to be judged.
+    for cmd in [
+        "git -c diff.external='cargo test' diff",
+        "git -c core.gitProxy=cargo fetch",
+        "git -c credential.helper='!cargo test' push",
+        "git -c alias.p='!cargo test' push",
+        // The benign spelling goes too — an agent persisting work does not
+        // need `-c`, and allow-listing values is the losing side of the bet.
+        "git -c user.name=bot commit -m x",
+        // Same class, other spellings: config from the environment, and the
+        // path git resolves its subcommand binaries from.
+        "git --config-env=user.name=EVIL commit -m x",
+        "git --exec-path=/tmp/evil status",
+        // Default-deny means an option nobody thought about is rejected too.
+        "git --totally-made-up-global status",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected as config injection"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_rejects_exec_options() {
+    // #4850 review HIGH, shape 3: these sit AFTER the subcommand, which the
+    // first cut never examined — `git_subcommand` had already answered "push"
+    // and stopped reading.
+    for cmd in [
+        "git push --receive-pack='cargo test' /tmp/repo HEAD",
+        "git push --receive-pack cargo /tmp/repo HEAD",
+        "git push --exec='cargo test' /tmp/repo HEAD",
+        "git push --upload-pack=cargo origin HEAD",
+        "git diff --ext-diff",
+        "git diff --textconv",
+        "git diff --output=/tmp/out.txt",
+        // Default-deny, not a `-pack` suffix rule: a name nobody has listed is
+        // denied because it is absent from SAFE_LONG_OPTS, not because it
+        // matched a pattern someone thought of.
+        "git push --future-pack=cargo origin HEAD",
+        "git push --brand-new-exec-thing=cargo origin HEAD",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected as an exec-capable option"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_rejects_abbreviated_exec_options() {
+    // #4850 second review, HIGH: git's parse-options accepts any unambiguous
+    // PREFIX of a long option, so `--exe` IS `--exec` and `--rece` IS
+    // `--receive-pack`. The deny list matched names exactly, so all three of
+    // these classified as persistence and all three executed the named program
+    // against a real bare remote. `--receive-pack` was not even on the list —
+    // it was riding the `-pack` SUFFIX rule, which an abbreviation strips off
+    // entirely, so no suffix rule could ever have covered it.
+    //
+    // These pass now because the long-option surface is default-deny: an
+    // abbreviation of a dangerous name is not in SAFE_LONG_OPTS. That is the
+    // property under test — not the three strings.
+    for cmd in [
+        "git push --rece=cargo /tmp/r HEAD",
+        "git push --exe=cargo /tmp/r HEAD",
+        "git push --exe cargo /tmp/r HEAD",
+        // The rest of the prefix chain, both families, both spellings.
+        "git push --r=cargo /tmp/r HEAD",
+        "git push --receiv=cargo /tmp/r HEAD",
+        "git push --receive-pac=cargo /tmp/r HEAD",
+        "git push --e cargo /tmp/r HEAD",
+        "git push --exec cargo /tmp/r HEAD",
+        "git push --uploa=cargo origin HEAD",
+        "git push --upl cargo origin HEAD",
+        // `--exec-path` and the diff-side exec filters abbreviate too.
+        "git status --exec-pat=/tmp/evil",
+        "git diff --ext",
+        "git diff --textc",
+        "git diff --outp=/tmp/out.txt",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected: an abbreviation IS the option"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_accepts_the_flags_agents_actually_use() {
+    // The other half of the default-deny flip: it must not strand the work the
+    // hatch exists to save. Everything a stopped agent needs to stage, commit,
+    // and push still classifies as persistence.
+    for cmd in [
+        "git add -A --force",
+        "git add -- src/lib.rs",
+        "git commit -m 'fix: thing' --amend --no-verify",
+        "git commit --message='fix: thing' --signoff --allow-empty",
+        "git commit -m x --no-gpg-sign --author='Bot <b@example.com>'",
+        "git push -u origin HEAD --force-with-lease",
+        "git push origin HEAD --tags --follow-tags --atomic",
+        "git push origin HEAD --dry-run --porcelain",
+        "git status --short --branch --untracked-files=all",
+        "git diff --stat --cached --name-only",
+        "git diff --unified=5 --ignore-all-space -- crates/",
+        "git diff HEAD~1 --no-ext-diff --no-textconv",
+    ] {
+        assert!(
+            command_is_persistence_only(cmd),
+            "expected {cmd:?} to survive the default-deny option surface"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_rejects_remote_helper_transport() {
+    // #4850 review HIGH, shape 2: `ext::` runs its argument as a shell command
+    // by design, and the form generalises to any `<transport>::<address>`
+    // remote helper. Rejecting the `::` token closes all of them, and the `-c`
+    // that enabled it is independently rejected.
+    for cmd in [
+        "git -c protocol.ext.allow=always push ext::sh -c 'cargo test' HEAD",
+        "git push ext::sh -c 'cargo test' HEAD",
+        "git push ext::cargo origin HEAD",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected as a remote-helper transport"
+        );
+    }
+    // An ordinary remote with a single colon is untouched.
+    assert!(command_is_persistence_only("git push origin HEAD:main"));
+}
+
+#[test]
+fn command_is_persistence_only_admits_the_attacker_chosen_repo_residual() {
+    // #4850 second review, LOW 1. The module's residual note used to scope the
+    // on-disk exec route to "the repository's own config", which is wrong: `-C`,
+    // `--git-dir`, and `--work-tree` are ALLOWED globals, so the repo whose
+    // config git reads is attacker-choosable inside the same command. The
+    // critic ran `git -C /tmp/evil diff` and it executed a `diff.external` from
+    // an attacker-chosen path.
+    //
+    // This asserts the residual EXISTS, deliberately. Closing it means reading
+    // and judging repo config from inside a PreToolUse hook, which is neither
+    // fast nor side-effect-free; the note now says so. If someone later closes
+    // it, this test fails and the note goes with it.
+    assert!(command_is_persistence_only("git -C /tmp/evil diff"));
+    assert!(command_is_persistence_only(
+        "git --git-dir=/tmp/evil/.git diff"
+    ));
+}
+
+#[test]
+fn command_is_persistence_only_rejects_process_substitution() {
+    // #4850 review HIGH, shape 4: `<(` is neither `$(` nor a backtick, and the
+    // redirection scan only ever looked at `>`, so this ran `cargo test` inside
+    // an "allowed" git call. Any unquoted metacharacter now disqualifies, so
+    // there is no spelling left to miss.
+    for cmd in [
+        "git diff <(cargo test)",
+        "git diff >(cargo test)",
+        "git add -A < /tmp/list",
+        "git commit -m x -F <(cargo test)",
+        "git status (cargo test)",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected as process substitution"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_allows_metacharacters_inside_quotes() {
+    // The metacharacter rule has to stay quote-aware or it strands exactly the
+    // work the hatch exists to save — commit messages are full of these.
+    for cmd in [
+        "git commit -m 'fix: handle (n>1) and $HOME'",
+        "git commit -m \"refactor: spec -> code\"",
+        "git commit -m 'closes #4850 (review)'",
+    ] {
+        assert!(
+            command_is_persistence_only(cmd),
+            "expected {cmd:?} to survive its quoted metacharacters"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_requires_a_bare_git_program() {
+    // An env-assignment prefix is an exec vector of its own
+    // (`GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `LD_PRELOAD`), and
+    // `sudo`/`env` re-exec. None is needed to persist, so the program token
+    // must be git itself.
+    for cmd in [
+        "GIT_SSH_COMMAND='cargo test' git push",
+        "GIT_EXTERNAL_DIFF=cargo git diff",
+        "env GIT_PAGER=cargo git diff",
+        "sudo git commit -m x",
+        // #4850 second review, MEDIUM: the check was `program.rsplit('/')`, a
+        // BASENAME test, so every one of these answered "git" and the critic
+        // executed a planted script by that name. Exposure needs a pre-existing
+        // write + chmod +x, but the module doc claimed the program was
+        // verified, and a basename verifies the file's name, not the program.
+        "./git commit -m x",
+        "/tmp/evil/git push origin HEAD",
+        "../../tmp/evil/git status",
+        "$HOME/evil/git add -A",
+        // The whole token must be `git`, so a path-qualified real git goes too.
+        // That is the trade: no fs resolution in a PreToolUse hook, and a bare
+        // `git` is always available as the fallback spelling.
+        "/usr/bin/git commit -m x",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected: the program must be git itself"
+        );
+    }
+    // The one spelling that survives.
+    assert!(command_is_persistence_only("git commit -m x"));
+}
+
+#[test]
+fn command_is_persistence_only_rejects_smuggled_work() {
+    // The whole risk of an allowlist: one allowed verb dragging real work in
+    // behind it. Every one of these must fail the WHOLE command.
+    for cmd in [
+        "git commit -m x && cargo test",
+        "cargo test && git commit -m x",
+        "git commit -m x | tee log",
+        "git commit -m x; rm -rf /",
+        // Not persistence: these mutate the tree or fetch work.
+        "git checkout main",
+        "git reset --hard",
+        "git worktree add /tmp/x",
+        "git rebase -i HEAD~3",
+        // Not git at all.
+        "echo hi",
+        "",
+        "   ",
+        // `git` reached through sudo: the program token is not git, and a
+        // program that re-execs is not persistence.
+        "sudo -u bob git commit -m x",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected as non-persistence"
+        );
+    }
+}
+
+#[test]
+fn command_is_persistence_only_rejects_substitution_and_redirection() {
+    // A substitution runs arbitrary code inside an "allowed" segment, and a
+    // redirection writes arbitrary files. Neither is needed to commit.
+    for cmd in [
+        "git commit -m \"$(cargo build 2>&1)\"",
+        "git commit -m `date`",
+        "git status > /tmp/out.txt",
+        "git diff >> notes.md",
+        // #4850: a discard sink used to be allowed here, on the strength of
+        // `has_file_write_redirection` telling a `/dev/null` write from a real
+        // one. That classifier is no longer in the trust path — keeping it
+        // meant keeping a hand-rolled redirection parser that had already
+        // missed `<`. Every unquoted redirection metacharacter now
+        // disqualifies, and an agent saving its work never needs one.
+        "git status 2>/dev/null",
+    ] {
+        assert!(
+            !command_is_persistence_only(cmd),
+            "expected {cmd:?} to be rejected"
+        );
+    }
+}

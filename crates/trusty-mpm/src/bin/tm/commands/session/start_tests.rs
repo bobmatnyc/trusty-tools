@@ -330,3 +330,80 @@ async fn session_start_posts_the_same_wire_shape_bare_tm_guided_default_sends() 
         "session start's protected-path request must match bare tm's launch_new_session_and_attach wire shape"
     );
 }
+
+// ── #4832: a launch outside any git repository is refused ──────────────────
+
+/// A directory that is not inside any git working tree must be refused, not
+/// deployed into.
+///
+/// Why (#4832): `resolve_dir(None)` returns the process cwd, a non-git
+/// directory routed to `start_session_in_place`, and `prepare_session` then
+/// wrote `.trusty-mpm/`, a `CLAUDE.md` stub and a `.claude/` tier wherever the
+/// operator's shell happened to be standing. Harness state belongs to a
+/// project; outside a repository there is no project to attach it to.
+///
+/// FAILS BEFORE THIS CHANGE: `start_session` fell through to the in-place path
+/// and the directory grew `.trusty-mpm/`.
+/// What: runs `start_session` against a plain temp directory with an
+/// unreachable daemon URL, and asserts (1) an error naming the directory and
+/// (2) that nothing was written into it.
+#[tokio::test]
+#[serial_test::serial]
+async fn session_start_refuses_a_non_git_directory() {
+    let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    let _home = set_home(tmp_home.path());
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let plain = tmp.path();
+
+    let client = reqwest::Client::new();
+    let err = start_session(
+        &client,
+        UNREACHABLE_URL,
+        Some(plain.to_string_lossy().to_string()),
+    )
+    .await
+    .expect_err("a non-git directory must be refused");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not inside a git repository"),
+        "must say why: {msg}"
+    );
+    assert!(msg.contains("git init"), "must point at a remedy: {msg}");
+    assert!(
+        !plain.join(".trusty-mpm").exists(),
+        "no harness state may be scattered into a non-project directory"
+    );
+    assert!(
+        !plain.join("CLAUDE.md").exists(),
+        "no CLAUDE.md stub may be seeded into a non-project directory"
+    );
+}
+
+/// The guard must not fire for a real repository — including one with no
+/// remote, which still routes to the in-place path.
+///
+/// Why: the refusal is about "no project", not "no GitHub remote". A guard
+/// that also rejected a remote-less repo would break the documented in-place
+/// case `start_session` preserves.
+/// What: asserts [`super::refuse_outside_a_git_project`] accepts a repo root,
+/// a subdirectory of it, and rejects a plain directory.
+#[test]
+fn session_start_accepts_a_git_directory() {
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    let sub = repo.join("src");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    super::refuse_outside_a_git_project(&repo).expect("a repo root is accepted");
+    super::refuse_outside_a_git_project(&sub).expect("a subdirectory is accepted");
+
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    assert!(
+        super::refuse_outside_a_git_project(&plain).is_err(),
+        "a non-git directory is refused"
+    );
+}

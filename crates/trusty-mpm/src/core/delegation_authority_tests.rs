@@ -319,7 +319,6 @@ fn generate_authority_nonempty() {
     let md = generate_authority(&agents);
     assert!(md.contains("## Delegation Authority"));
     assert!(md.contains("### engineer"));
-    assert!(md.contains("Implements features."));
     assert!(md.contains("base-agent → base-engineer → engineer"));
     assert!(md.contains("**Model:** sonnet"));
 }
@@ -451,7 +450,6 @@ fn generate_authority_omits_self_referential_lines() {
     let md = generate_authority(&agents);
 
     assert!(md.contains("### ticketing"));
-    assert!(md.contains("Files tickets."));
     assert!(
         !md.contains("**Role:**"),
         "role duplicating the heading must be omitted"
@@ -536,4 +534,147 @@ fn roster_from_dirs_ignores_missing_dirs() {
     let roster = roster_from_dirs(&[PathBuf::from("/nonexistent/agents")]);
     assert!(roster.is_empty());
     assert!(roster_from_dirs(&[]).is_empty());
+}
+
+// ── roster economy and block-scalar parsing ──────────────────────────────
+
+#[test]
+fn generate_authority_omits_the_harness_supplied_description() {
+    // The `Handles:` line re-emitted the agent's frontmatter `description`,
+    // which is byte-identical to the description the harness already publishes
+    // in its own Agent-type catalog for the same agent — a second copy of a
+    // list the session already has, paid for on every PM launch. `Role` and
+    // `Model` are what the harness does NOT supply, so they must survive.
+    let agents = vec![AgentSummary {
+        name: "api-qa".to_string(),
+        role: "qa".to_string(),
+        description: Some(
+            "Specialized API and backend testing for REST, GraphQL, and \
+             server-side functionality"
+                .to_string(),
+        ),
+        model: Some("sonnet".to_string()),
+        extends_chain: vec!["api-qa".to_string()],
+    }];
+    let md = generate_authority(&agents);
+
+    assert!(md.contains("### api-qa"));
+    assert!(
+        md.contains("**Role:** qa"),
+        "role is the roster's own value"
+    );
+    assert!(
+        md.contains("**Model:** sonnet"),
+        "model is the roster's own value"
+    );
+    assert!(
+        !md.contains("**Handles:**"),
+        "the harness-supplied description must not be re-emitted"
+    );
+    assert!(
+        !md.contains("Specialized API and backend testing"),
+        "the description text itself must not survive under another label"
+    );
+}
+
+#[test]
+fn generate_authority_renders_an_agent_with_neither_role_nor_model() {
+    // Dropping `Handles:` leaves the sparsest possible entry: a heading alone.
+    // It must still render as a well-formed, addressable roster row rather
+    // than a dangling heading glued to the next one.
+    let agents = vec![
+        AgentSummary {
+            name: "alpha".to_string(),
+            role: "alpha".to_string(),
+            description: Some("ignored".to_string()),
+            model: None,
+            extends_chain: vec!["alpha".to_string()],
+        },
+        AgentSummary {
+            name: "beta".to_string(),
+            role: "beta".to_string(),
+            description: None,
+            model: None,
+            extends_chain: vec!["beta".to_string()],
+        },
+    ];
+    let md = generate_authority(&agents);
+    assert!(md.contains("### alpha\n\n### beta\n"), "got: {md:?}");
+    assert!(!md.contains("(no description provided)"));
+}
+
+#[test]
+fn block_scalar_description_is_folded() {
+    // #4832-adjacent parse defect: five bundled writing agents author
+    // `description: >` (a YAML folded block scalar). The line parser returned
+    // the marker itself, so each rendered into the PM prompt as a bare ">".
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "copyeditor",
+        "---\nname: copyeditor\nmodel: sonnet\ndescription: >\n  \
+         Line/word-level copyedit pass.\n  Assumes structure is sound.\n---\n\n# Copyeditor\n",
+    );
+
+    let agents = scan_agents(tmp.path());
+    assert_eq!(agents.len(), 1);
+    assert_eq!(
+        agents[0].description.as_deref(),
+        Some("Line/word-level copyedit pass. Assumes structure is sound."),
+        "a folded scalar joins its lines with a space"
+    );
+    assert_eq!(agents[0].model.as_deref(), Some("sonnet"));
+}
+
+#[test]
+fn literal_block_scalar_description_keeps_its_line_breaks() {
+    // The same header family with `|` is LITERAL, not folded. Parsing it as
+    // folded would silently reflow an author's deliberate line structure.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "writer",
+        "---\nname: writer\ndescription: |-\n  first line\n  second line\nmodel: opus\n---\n",
+    );
+
+    let agents = scan_agents(tmp.path());
+    assert_eq!(
+        agents[0].description.as_deref(),
+        Some("first line\nsecond line")
+    );
+    assert_eq!(
+        agents[0].model.as_deref(),
+        Some("opus"),
+        "the key AFTER the block scalar must still parse"
+    );
+}
+
+#[test]
+fn block_scalar_body_stops_at_the_closing_fence() {
+    // The body is terminated by the first unindented line. `---` sits at
+    // column 0, so the fence must end the scalar without a special case and
+    // the document body must never be swallowed into the description.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "proofreader",
+        "---\nname: proofreader\ndescription: >\n  only this\n---\n\n# Proofreader\n\nBody prose.\n",
+    );
+
+    let agents = scan_agents(tmp.path());
+    assert_eq!(agents[0].description.as_deref(), Some("only this"));
+}
+
+#[test]
+fn a_plain_value_beginning_with_an_angle_bracket_is_not_a_block_scalar() {
+    // `is_block_scalar_header` must not eat an ordinary value that happens to
+    // start with `>` or `|` — only the bare header forms qualify.
+    assert!(is_block_scalar_header(">"));
+    assert!(is_block_scalar_header("|"));
+    assert!(is_block_scalar_header(">-"));
+    assert!(is_block_scalar_header("|+"));
+    assert!(is_block_scalar_header(">2"));
+    assert!(!is_block_scalar_header("> quoted prose"));
+    assert!(!is_block_scalar_header("|pipe|table|"));
+    assert!(!is_block_scalar_header("sonnet"));
 }
