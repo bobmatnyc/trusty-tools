@@ -295,6 +295,19 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                 }
             },
             {
+                "name": "palace_reembed",
+                "description": "#4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. Defaults to a dry run.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":  {"type": "string"},
+                        "dry_run": {"type": "boolean", "description": "Report only; do not embed. Default true."},
+                        "limit":   {"type": "integer", "description": "Cap repairs per run."}
+                    },
+                    "required": palace_compact_required,
+                }
+            },
+            {
                 "name": "add_alias",
                 "description": "Add a short→full alias (e.g. tga → trusty-git-analytics) to the prompt-facts surface. Asserts the alias as a hot KG triple and refreshes the session-init prompt cache.",
                 "inputSchema": {

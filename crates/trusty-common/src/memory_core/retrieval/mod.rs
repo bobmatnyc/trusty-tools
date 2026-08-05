@@ -10,6 +10,11 @@
 //! Test: `cargo test -p trusty-common --features memory-core retrieval::`
 //! exercises L0/L1 cache and L2 vector retrieval end-to-end.
 
+// #4906: the deferred-embed lane (retry + durable failure ledger) and the
+// vector-coverage health/repair surface that answers "which drawers have no
+// vector" and re-embeds them.
+mod deferred_embed;
+mod embed_repair;
 mod embedder;
 mod handle;
 mod layers;
@@ -19,6 +24,8 @@ mod scope;
 mod tier_c;
 mod types;
 
+#[cfg(test)]
+mod embed_repair_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -40,6 +47,12 @@ pub use types::{
 
 // Palace handle
 pub use handle::PalaceHandle;
+
+// #4906: vector-coverage health and the repair backfill. `RetryPolicy` is
+// public because a caller choosing to run a longer policy than the write-path
+// default is a legitimate operator decision.
+pub use deferred_embed::RetryPolicy;
+pub use embed_repair::{EmbedHealth, VectorBackfillOptions, VectorBackfillReport};
 
 // Recall scoping (ADR-0027 T9)
 pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};

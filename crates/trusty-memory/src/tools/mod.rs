@@ -78,7 +78,7 @@ use memory_ops::{
 };
 use palace_ops::{
     handle_palace_compact, handle_palace_create, handle_palace_delete, handle_palace_info,
-    handle_palace_list, handle_palace_update,
+    handle_palace_list, handle_palace_reembed, handle_palace_update,
 };
 use room_ops::{handle_room_create, handle_room_list, handle_room_rename};
 use task_ops::{handle_task_add, handle_task_complete, handle_task_list};
@@ -114,6 +114,8 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "memory_forget" => handle_memory_forget(state, args).await,
         "palace_info" => handle_palace_info(state, args).await,
         "palace_compact" => handle_palace_compact(state, args).await,
+        // #4906: report / repair drawers that have no vector.
+        "palace_reembed" => handle_palace_reembed(state, args).await,
         "kg_gaps" => handle_kg_gaps(state, args).await,
         "memory_recall_all" => handle_memory_recall_all(state, args).await,
         "get_prompt_context" => handle_get_prompt_context(state, args).await,

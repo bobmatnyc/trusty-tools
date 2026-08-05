@@ -9,6 +9,8 @@
 //! the full retrieval test suite in retrieval::tests.
 
 use super::embedder::shared_embedder;
+// #4906: the deferred-embed lane — retry, then durably record what was lost.
+use super::deferred_embed;
 // #4886: ADR-0028 Tier C admission + retire-on-write. Kept in its own module so
 // the write path's design rationale does not push this file over the SLOC cap.
 use super::tier_c;
@@ -643,9 +645,14 @@ impl PalaceHandle {
         // backfilled by a background task once the embedder resolves. Text
         // and KG indexing never depend on the embedder either way; this
         // branch only changes *when* the drawer becomes vector-searchable.
-        if opts.defer_embedding {
-            self.spawn_deferred_embed(id, content.clone());
-        } else {
+        //
+        // #4906: the deferred branch is SPAWNED BELOW, after the drawer reaches
+        // `self.drawers`. Spawning here raced the push: the background task
+        // refuses to record a failure for a drawer absent from that table, so a
+        // task that failed before the push wrote nothing for a drawer that was
+        // about to become durable and vector-less — the exact combination this
+        // lane exists to eliminate.
+        if !opts.defer_embedding {
             // Issue #906: both `shared_embedder()` (cold init path) and
             // `embed_batch` carry their own bounded timeouts — if the embedder
             // hangs mid-batch the remember call returns an error instead of
@@ -654,17 +661,22 @@ impl PalaceHandle {
                 .await
                 .context("acquire shared embedder for remember")?;
             let embed_timeout = timeouts::embed_batch_timeout();
-            let vecs = tokio::time::timeout(embed_timeout, embedder.embed_batch(&[content]))
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "embed_batch timed out after {:?} on remember path (issue #906); \
+            let vecs = tokio::time::timeout(
+                embed_timeout,
+                // `from_ref` rather than `&[content]`: the deferred branch below
+                // still needs `content`, so this borrows instead of moving.
+                embedder.embed_batch(std::slice::from_ref(&content)),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "embed_batch timed out after {:?} on remember path (issue #906); \
                          increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately \
                          take longer on this host",
-                        embed_timeout
-                    )
-                })?
-                .context("embed drawer content")?;
+                    embed_timeout
+                )
+            })?
+            .context("embed drawer content")?;
             if let Some(v) = vecs.into_iter().next() {
                 self.vector_store
                     .upsert(id, v)
@@ -692,6 +704,13 @@ impl PalaceHandle {
             drawers.push(drawer);
         }
 
+        // #4906: spawn the background embed only now. The drawer is in redb and
+        // in the in-memory table, so a failure arriving at any point from here
+        // on finds the drawer present and gets recorded. See the branch above.
+        if opts.defer_embedding {
+            self.spawn_deferred_embed(id, content);
+        }
+
         // L1 snapshot: re-sort the in-memory table and persist top-15.
         if let Some(data_dir) = self.data_dir.as_ref() {
             let snap = self.drawers.read().clone();
@@ -705,83 +724,39 @@ impl PalaceHandle {
         Ok(id)
     }
 
-    /// Fire-and-forget background embed + vector-store backfill for a
-    /// drawer written while the shared embedder was cold (issue #1970).
+    /// Background embed + vector-store backfill for a drawer written while the
+    /// shared embedder was cold (issue #1970).
     ///
-    /// Why: `memory_remember` / `memory_note` / `task_add` must not block
-    /// the caller behind a 30-120s CoreML/CUDA cold compile just to persist
-    /// a memory — the KG/redb write already completed synchronously by the
-    /// time this is called. This task's only job is to make the drawer's
-    /// vector show up in `retrieve_l2` / `retrieve_l3` once the shared
-    /// embedder resolves.
-    /// What: clones the `Arc<UsearchStore>` handle and spawns a detached
-    /// task that awaits `shared_embedder()` (retrying the cold init if
-    /// necessary), embeds `content` under the same bounded timeout the
-    /// synchronous path uses, and upserts the resulting vector under `id`.
-    /// Every failure mode (embedder init failure, embed timeout, upsert
-    /// error) is logged at `warn!` and dropped — the drawer is already
-    /// durable via KG/redb regardless of whether the vector backfill
-    /// succeeds.
-    /// Known limitation: if the drawer is forgotten before this task
-    /// completes, the backfilled vector becomes an orphaned entry in the
-    /// vector store. Acceptable for a best-effort background lane (mirrors
-    /// the existing best-effort tone of BM25 indexing and auto-KG
-    /// extraction elsewhere in this pipeline); tighten with an
-    /// existence check against `self.drawers` if this proves to matter in
-    /// practice.
-    /// Test: `deferred_embed_backfills_vector_once_embedder_ready` in
-    /// `retrieval::tests`.
+    /// Why: `memory_remember` / `memory_note` / `task_add` must not block the
+    /// caller behind a 30-120 s CoreML/CUDA cold compile just to persist a
+    /// memory — the KG/redb write already completed synchronously by the time
+    /// this is called. #4906: it must also not LOSE the failure. This used to
+    /// end every failure branch in a `warn!` and a bare return, which is how 39
+    /// of 1,241 live drawers ended up durable and permanently unfindable.
+    /// What: hands the job to [`deferred_embed::spawn`], which retries transient
+    /// failures with backoff and records a durable ledger row when it gives up.
+    /// The write path is still asynchronous; only the failure handling changed.
+    /// Known limitation (unchanged): a drawer forgotten before the task finishes
+    /// leaves an orphaned vector, reclaimed by `palace_compact`.
+    /// Test: `permanent_failure_writes_a_ledger_row` and
+    /// `retry_succeeds_after_transient_failures` in `embed_repair_tests`.
     fn spawn_deferred_embed(&self, id: Uuid, content: String) {
-        let vector_store = self.vector_store.clone();
-        let palace_id = self.id.clone();
-        tokio::spawn(async move {
-            let embedder = match shared_embedder().await {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(
-                        palace = %palace_id,
-                        drawer = %id,
-                        "deferred embed: shared embedder init failed (vector left unindexed): {e:#}"
-                    );
-                    return;
-                }
-            };
-            let embed_timeout = timeouts::embed_batch_timeout();
-            let vecs =
-                match tokio::time::timeout(embed_timeout, embedder.embed_batch(&[content])).await {
-                    Ok(Ok(v)) => v,
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            palace = %palace_id,
-                            drawer = %id,
-                            "deferred embed: embed_batch failed: {e:#}"
-                        );
-                        return;
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            palace = %palace_id,
-                            drawer = %id,
-                            "deferred embed: embed_batch timed out after {embed_timeout:?}"
-                        );
-                        return;
-                    }
-                };
-            if let Some(v) = vecs.into_iter().next() {
-                match vector_store.upsert(id, v).await {
-                    Ok(()) => tracing::info!(
-                        palace = %palace_id,
-                        drawer = %id,
-                        "deferred embed: vector backfill complete"
-                    ),
-                    Err(e) => tracing::warn!(
-                        palace = %palace_id,
-                        drawer = %id,
-                        "deferred embed: vector upsert failed: {e:#}"
-                    ),
-                }
-            }
-        });
+        deferred_embed::spawn(self.deferred_embed_ctx(), id, content);
+    }
+
+    /// The slice of this handle the background embed lane needs.
+    ///
+    /// Why: the spawned task outlives the `&self` borrow, so it takes owned
+    /// `Arc` clones rather than a reference.
+    /// What: palace id, vector store, drawer table, and data dir.
+    /// Test: exercised by every `embed_repair_tests` case.
+    pub(super) fn deferred_embed_ctx(&self) -> deferred_embed::DeferredEmbedCtx {
+        deferred_embed::DeferredEmbedCtx {
+            palace_id: self.id.clone(),
+            vector_store: self.vector_store.clone(),
+            drawers: self.drawers.clone(),
+            data_dir: self.data_dir.clone(),
+        }
     }
 
     /// Rebuild the closet keyword index from the current in-memory drawer table.

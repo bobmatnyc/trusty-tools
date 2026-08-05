@@ -210,7 +210,6 @@ crates/trusty-common/src/memory_core/dream/recall_benchmark.rs	dream_recall_benc
 crates/trusty-common/src/memory_core/registry.rs	evict_idle_skips_recently_accessed_handle
 crates/trusty-common/src/memory_core/registry.rs	open_hydrates_persisted_palaces
 crates/trusty-common/src/memory_core/retrieval/handle.rs	decay_applied_in_l2_score
-crates/trusty-common/src/memory_core/retrieval/handle.rs	deferred_embed_backfills_vector_once_embedder_ready
 crates/trusty-common/src/memory_core/retrieval/handle.rs	palace_handle_read_only_when_locked_by_another_process
 crates/trusty-common/src/memory_core/retrieval/handle.rs	remember_classifies_session_events
 crates/trusty-common/src/memory_core/semantic_consolidation/inference.rs	ollama_inference_new_stores_fields
