@@ -106,6 +106,38 @@ pub struct RememberOptions {
     /// Test: `wing_scoped_recall_returns_only_that_wing`,
     /// `unscoped_write_still_lands_in_the_default_wing`.
     pub wing_id: Option<uuid::Uuid>,
+    /// ADR-0028 D5 slot name this write claims (#4886).
+    ///
+    /// Why: naming a slot is what makes a write a Tier C ("current fact")
+    /// write. It is not a hint — writing an occupied slot atomically retires
+    /// the incumbent, which is what keeps the store self-limiting: fifty writes
+    /// of `pr:4818/state` leave one live fact, not fifty stale ones. The field
+    /// lives here rather than on a separate parameter so every existing caller
+    /// keeps today's behaviour by construction (`None` = no slot = Tier E) and
+    /// so the one enforcement point, `remember_with_options`, sees it.
+    /// What: `None` (the default) is not a Tier C request at all. `Some(key)`
+    /// runs the fail-closed admission gate
+    /// ([`crate::memory_core::retrieval::admit_tier_c`]): the key must match
+    /// `<domain>:<id>/<aspect>` and resolve a retirement condition, or the
+    /// drawer is written as an ordinary Tier E drawer with no slot.
+    /// Test: `tier_c_write_retires_the_prior_slot_occupant`,
+    /// `malformed_fact_key_degrades_to_tier_e`.
+    pub fact_key: Option<String>,
+    /// Explicit retirement instant for this write (ADR-0028 D4, condition 1).
+    ///
+    /// Why: `Drawer::expires_at` already existed and #4885 made it enforced at
+    /// read time, but no caller could set it — the write chain simply had no
+    /// parameter for it, so 99.6% of the estate's point-in-time drawers carry
+    /// no TTL at all. This is the missing half.
+    /// What: `None` with a `fact_key` takes the 24-hour Tier C default; `None`
+    /// without one leaves whatever policy `Drawer::with_type` applies (the
+    /// 7-day `SessionEvent` TTL), byte-identically to today. `Some(t)` sets the
+    /// drawer's TTL directly; combined with a `fact_key`, a `t` at or before
+    /// now is REFUSED rather than admitted, because a fact born expired
+    /// declares no live window.
+    /// Test: `explicit_expiry_is_honoured_without_a_fact_key`,
+    /// `already_elapsed_expiry_degrades_to_tier_e`.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Default for RememberOptions {
@@ -118,6 +150,10 @@ impl Default for RememberOptions {
             defer_embedding: false,
             allow_secret_like: false,
             wing_id: None,
+            // #4886: no slot and no TTL — an ordinary Tier E drawer, which is
+            // what every caller that predates ADR-0028 gets.
+            fact_key: None,
+            expires_at: None,
         }
     }
 }
@@ -142,6 +178,8 @@ impl RememberOptions {
             defer_embedding: false,
             allow_secret_like: false,
             wing_id: None,
+            fact_key: None,
+            expires_at: None,
         }
     }
 

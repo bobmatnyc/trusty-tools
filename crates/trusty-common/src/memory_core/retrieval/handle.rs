@@ -9,6 +9,9 @@
 //! the full retrieval test suite in retrieval::tests.
 
 use super::embedder::shared_embedder;
+// #4886: ADR-0028 Tier C admission + retire-on-write. Kept in its own module so
+// the write path's design rationale does not push this file over the SLOC cap.
+use super::tier_c;
 use super::types::{L1_CAP, RememberOptions};
 use crate::memory_core::analytics::{RecallEvent, RecallLog, query_hash};
 use crate::memory_core::decay::DecayConfig;
@@ -341,10 +344,15 @@ impl PalaceHandle {
         // retrieval layers filter on every read (ADR-0028 D4); this only keeps
         // the store from accumulating. It shares `is_expired_at` with the read
         // path so the two cannot disagree about what "expired" means.
+        //
+        // #4886: a Tier C fact is exempt. Its `expires_at` is the retirement
+        // condition D4 demanded at admission, not a lifetime — read-time expiry
+        // already stops it being served, and deleting the row would contradict
+        // D6's "demoted, never deleted". See `Drawer::is_tier_c`.
         let now = chrono::Utc::now();
         let mut pruned = 0usize;
         all_drawers.retain(|d| {
-            let expired = d.is_expired_at(now);
+            let expired = d.is_expired_at(now) && !d.is_tier_c();
             if expired {
                 if let Err(e) = kg.delete_drawer_sync(d.id) {
                     tracing::warn!(
@@ -614,6 +622,13 @@ impl PalaceHandle {
             None => classify(&content, DrawerType::Unknown),
         };
         drawer = drawer.with_type(final_type);
+
+        // #4886: ADR-0028 D3/D4 Tier C admission — the single enforcement
+        // point for the whole workspace. Runs after `with_type` so an admitted
+        // Tier C TTL overrides the `SessionEvent` type default, and fails
+        // closed, so a refusal leaves this drawer exactly as today's code would
+        // have written it. See `tier_c::apply_admission`.
+        tier_c::apply_admission(&mut drawer, &opts, &self.id);
         let id = drawer.id;
 
         // Embed and upsert. Use the process-wide shared embedder so we don't
@@ -660,13 +675,20 @@ impl PalaceHandle {
 
         // Persist drawer metadata BEFORE the in-memory push so a crash mid-op
         // cannot leave an in-memory drawer with no redb record backing it.
-        self.kg
-            .upsert_drawer(&drawer)
+        // #4886: when this drawer claims a `fact_key`, the same call retires
+        // the slot's prior occupant in the SAME redb transaction — the
+        // read-decide-write sequence runs entirely under the write guard taken
+        // above, so no concurrent writer on this palace can interleave with it.
+        let retired = tier_c::persist_with_retirement(self, &drawer)
             .await
             .context("persist drawer metadata")?;
 
         {
             let mut drawers = self.drawers.write();
+            // #4886: mirror the retirement under the SAME lock as the push, so
+            // a reader never sees the newcomer present while the displaced
+            // drawer still claims the slot.
+            tier_c::retire_in_memory(&mut drawers, retired);
             drawers.push(drawer);
         }
 
@@ -912,7 +934,12 @@ impl PalaceHandle {
     /// a palace whose sweep never runs still never serves an expired drawer. It
     /// remains worth calling because the read filter hides rows without freeing
     /// the storage or the vector slot they occupy.
-    /// Test: `purge_expired_drops_only_past_ttl`.
+    ///
+    /// #4886: Tier C drawers are skipped — for them `expires_at` is ADR-0028
+    /// D4's retirement condition rather than a lifetime, and D6 requires the
+    /// record survive its retirement. See `Drawer::is_tier_c`.
+    /// Test: `purge_expired_drops_only_past_ttl`,
+    /// `purge_expired_leaves_tier_c_drawers_alone`.
     pub async fn purge_expired(&self) -> Result<usize> {
         if self.is_read_only() {
             return Ok(0);
@@ -922,7 +949,7 @@ impl PalaceHandle {
             .drawers
             .read()
             .iter()
-            .filter(|d| d.is_expired_at(now))
+            .filter(|d| d.is_expired_at(now) && !d.is_tier_c())
             .map(|d| d.id)
             .collect();
         let count = expired_ids.len();

@@ -18,7 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::filter::{FilterConfig, MCP_MIN_TOKENS};
 use trusty_common::memory_core::palace::{PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::RememberOptions;
+use trusty_common::memory_core::retrieval::{admit_tier_c, RememberOptions, TierCAdmission};
 use uuid::Uuid;
 
 /// Look up the friendly palace name (Palace.name) from the in-memory cache,
@@ -236,6 +236,69 @@ pub(crate) fn mcp_remember_opts(
         defer_embedding,
         allow_secret_like,
         ..RememberOptions::default()
+    }
+}
+
+/// Resolve the ADR-0028 Tier C arguments and run the admission gate (#4886).
+///
+/// Why: the fail-closed degradation D4 requires has to be OBSERVABLE at the
+/// tool boundary. A write that asked for a slot and silently became an ordinary
+/// drawer teaches the author nothing, and they will keep writing keys that
+/// never take effect. Running the (pure) gate here lets the handler report the
+/// tier it actually got, and passing the RESOLVED values down means the library
+/// re-runs the same decision on already-valid input rather than re-deriving a
+/// default against a slightly later clock.
+/// What: reads `fact_key` and the RFC 3339 `expires_at` from `args` and returns
+/// the [`TierCAdmission`]. A malformed `expires_at` STRING is a hard error, not
+/// a degradation: an unparseable timestamp is a caller typo, and silently
+/// substituting the 24-hour default would hide it. Semantic refusals (a key
+/// that breaks the D5 grammar, a TTL that has already elapsed) degrade, because
+/// those are the cases D4 says must fall back to today's behaviour.
+/// Test: `dispatch_remember_admits_a_tier_c_slot`,
+/// `dispatch_remember_reports_a_refused_slot_as_tier_e`,
+/// `dispatch_remember_rejects_an_unparseable_expires_at`.
+pub(crate) fn resolve_tier_c(args: &Value, tool: &str) -> Result<TierCAdmission> {
+    let expires_at = match args.get("expires_at").and_then(|v| v.as_str()) {
+        Some(raw) => Some(
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .map(|t| t.with_timezone(&chrono::Utc))
+                .with_context(|| {
+                    format!("{tool}: 'expires_at' must be an RFC 3339 timestamp, got {raw:?}")
+                })?,
+        ),
+        None => None,
+    };
+    Ok(admit_tier_c(
+        args.get("fact_key").and_then(|v| v.as_str()),
+        expires_at,
+        chrono::Utc::now(),
+    ))
+}
+
+/// Fold an admission decision into the write options and the response envelope.
+///
+/// Why: both `memory_remember` and `memory_note` need the identical
+/// "carry the resolved slot down, report the tier back up" step; duplicating it
+/// is how the two tools would drift on what a refusal looks like.
+/// What: on admission, sets `opts.fact_key` / `opts.expires_at` to the resolved
+/// values. Otherwise leaves them unset so the library writes an ordinary
+/// drawer. Returns `(tier_label, refusal_reason)` for the JSON envelope.
+/// Test: same tests as [`resolve_tier_c`].
+pub(crate) fn apply_tier_c(
+    admission: &TierCAdmission,
+    opts: &mut RememberOptions,
+) -> (&'static str, Option<String>) {
+    match admission {
+        TierCAdmission::Admitted {
+            fact_key,
+            expires_at,
+        } => {
+            opts.fact_key = Some(fact_key.clone());
+            opts.expires_at = Some(*expires_at);
+            ("C", None)
+        }
+        TierCAdmission::Refused(refusal) => ("E", Some(refusal.to_string())),
+        TierCAdmission::NotRequested => ("E", None),
     }
 }
 
