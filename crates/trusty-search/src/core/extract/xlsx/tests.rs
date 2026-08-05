@@ -333,8 +333,55 @@ fn build_xlsx_zip_bomb(payload_bytes: usize) -> Vec<u8> {
     buf
 }
 
-/// Peak resident set size of the current process, in bytes.
+/// Peak resident set size of THIS process, in bytes.
+///
+/// #4894: on Linux this must not come from `getrusage(RUSAGE_SELF)`. `exec_mmap()`
+/// seeds the exec'ing task's `signal->maxrss` from the mm it is replacing —
+/// `setmax_mm_hiwater_rss(&tsk->signal->maxrss, old_mm)` in `fs/exec.c` — and
+/// `std::process::Command` reaches exec through glibc's `posix_spawn`, which
+/// clones with `CLONE_VM`. The mm being replaced is therefore the PARENT's, so a
+/// freshly spawned worker inherits the parent's high-water mark and reports at
+/// least that. Under `cargo test --workspace` the parent is the whole
+/// `trusty_search` test binary, which is how
+/// `test_zip_bomb_extraction_stays_within_memory_bound` read 303.2 MiB for an
+/// extraction that allocates ~12 MiB: the number was the test suite's memory,
+/// not the extraction's, and it moved with unrelated scheduling.
+///
+/// `/proc/self/status`'s `VmHWM` is the current mm's high-water mark alone and
+/// starts clean at exec, so it measures this process and nothing else. macOS and
+/// BSD carry no such inheritance, so `getrusage` stays the source there.
+/// Test: `test_child_peak_rss_excludes_the_parents_high_water_mark`.
 fn peak_rss_bytes() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(hwm) = vm_hwm_bytes() {
+            return hwm;
+        }
+    }
+    getrusage_max_rss_bytes()
+}
+
+/// `VmHWM` from `/proc/self/status`, in bytes — the current mm's high-water
+/// mark, uncontaminated by whatever process exec'd into this one.
+#[cfg(target_os = "linux")]
+fn vm_hwm_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kb: u64 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kb * 1024)
+}
+
+/// `ru_maxrss` from `getrusage(RUSAGE_SELF)`, normalised to bytes.
+///
+/// Kept as the macOS/BSD source and reported alongside [`peak_rss_bytes`] by the
+/// child worker, so a CI log shows both numbers and the inheritance above stays
+/// visible rather than having to be re-derived.
+fn getrusage_max_rss_bytes() -> u64 {
     // SAFETY: `usage` is a locally-owned, fully-zeroed `rusage`; getrusage
     // only writes into it and cannot retain the pointer.
     let usage = unsafe {
@@ -362,14 +409,99 @@ fn peak_rss_bytes() -> u64 {
 /// the parent's mark is already polluted by every sibling test. This runs
 /// as an ordinary (no-op) test in the normal suite and does the real work
 /// only when the parent re-invokes the test binary with the fixture path.
+///
+/// An EMPTY fixture value means "report memory, extract nothing" — that is
+/// the baseline `test_child_peak_rss_excludes_the_parents_high_water_mark`
+/// measures.
 #[test]
 fn zip_bomb_extraction_child_worker() {
     let Ok(fixture) = std::env::var(BOMB_FIXTURE_ENV) else {
         return;
     };
-    let result = extract(Path::new(&fixture));
-    println!("CHILD_RESULT_IS_ERR={}", result.is_err());
+    if !fixture.is_empty() {
+        let result = extract(Path::new(&fixture));
+        println!("CHILD_RESULT_IS_ERR={}", result.is_err());
+    }
     println!("CHILD_PEAK_RSS_BYTES={}", peak_rss_bytes());
+    println!("CHILD_GETRUSAGE_MAXRSS_BYTES={}", getrusage_max_rss_bytes());
+}
+
+/// Re-invoke this test binary to run `zip_bomb_extraction_child_worker` in a
+/// clean process, and return its stdout.
+fn run_child_worker(fixture: &std::ffi::OsStr) -> String {
+    let module = module_path!();
+    let test_name = module
+        .split_once("::")
+        .map(|(_crate_name, rest)| rest)
+        .unwrap_or(module);
+    let output =
+        std::process::Command::new(std::env::current_exe().expect("current test binary path"))
+            .args([
+                &format!("{test_name}::zip_bomb_extraction_child_worker"),
+                "--exact",
+                "--nocapture",
+            ])
+            .env(BOMB_FIXTURE_ENV, fixture)
+            .output()
+            .expect("spawn child worker");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "child worker failed: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout
+}
+
+/// Pull `CHILD_PEAK_RSS_BYTES` out of a worker's stdout.
+fn child_peak_rss_bytes(stdout: &str) -> u64 {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("CHILD_PEAK_RSS_BYTES="))
+        .unwrap_or_else(|| panic!("child did not report peak RSS; stdout: {stdout}"))
+        .trim()
+        .parse()
+        .expect("peak RSS is a number")
+}
+
+/// The worker must report ITS OWN peak, not the peak of the process that
+/// spawned it.
+///
+/// Why it earns its place: `getrusage(RUSAGE_SELF).ru_maxrss` in a
+/// `posix_spawn`ed child inherits the parent's high-water mark on Linux (see
+/// [`peak_rss_bytes`]), so a memory ceiling read that way measures the test
+/// suite instead of the extraction. It read 303.2 MiB on CI for an extraction
+/// that allocates ~12 MiB, and it had passed on the same code an hour earlier —
+/// a security bound whose value moves with unrelated test scheduling proves
+/// nothing in either direction. This raises the PARENT's mark past the ceiling
+/// on purpose and asserts the child stays under it; the whole zip-bomb
+/// assertion is only meaningful while this holds.
+#[test]
+fn test_child_peak_rss_excludes_the_parents_high_water_mark() {
+    // Touched page by page: a freshly allocated mapping is backed by the shared
+    // zero page until written, so an untouched `vec![0u8; n]` never becomes
+    // resident and would not raise the parent's mark at all.
+    let mut ballast = vec![0u8; BOMB_PEAK_RSS_CEILING as usize + 64 * 1024 * 1024];
+    for page in ballast.chunks_mut(4096) {
+        page[0] = 1;
+    }
+    assert!(
+        peak_rss_bytes() > BOMB_PEAK_RSS_CEILING,
+        "the parent must exceed the ceiling for this test to mean anything, \
+         got {} bytes",
+        peak_rss_bytes()
+    );
+
+    let stdout = run_child_worker(std::ffi::OsStr::new(""));
+    drop(ballast);
+
+    let peak = child_peak_rss_bytes(&stdout);
+    assert!(
+        peak < BOMB_PEAK_RSS_CEILING,
+        "a worker that allocated nothing reported {peak} bytes peak RSS, over the \
+         {BOMB_PEAK_RSS_CEILING} byte ceiling — it is reporting the parent's \
+         memory, so the zip-bomb bound is not being measured; stdout: {stdout}"
+    );
 }
 
 /// A zip bomb must be stopped by a SIZE bound, and the proof is memory —
@@ -396,35 +528,9 @@ fn test_zip_bomb_extraction_stays_within_memory_bound() {
 
     // Re-invoke this test binary to run the extraction in a clean process
     // whose peak-RSS mark reflects the extraction and nothing else.
-    let module = module_path!();
-    let test_name = module
-        .split_once("::")
-        .map(|(_crate_name, rest)| rest)
-        .unwrap_or(module);
-    let output =
-        std::process::Command::new(std::env::current_exe().expect("current test binary path"))
-            .args([
-                &format!("{test_name}::zip_bomb_extraction_child_worker"),
-                "--exact",
-                "--nocapture",
-            ])
-            .env(BOMB_FIXTURE_ENV, &path)
-            .output()
-            .expect("spawn child worker");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "child worker failed: {stdout}{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let stdout = run_child_worker(path.as_os_str());
 
-    let peak: u64 = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("CHILD_PEAK_RSS_BYTES="))
-        .unwrap_or_else(|| panic!("child did not report peak RSS; stdout: {stdout}"))
-        .trim()
-        .parse()
-        .expect("peak RSS is a number");
+    let peak: u64 = child_peak_rss_bytes(&stdout);
     println!(
         "zip-bomb extraction peak RSS: {peak} bytes ({:.1} MiB)",
         peak as f64 / (1024.0 * 1024.0)
@@ -700,6 +806,36 @@ fn test_non_zip_container_passes_preflight() {
 
     preflight_package_bounds(Cursor::new(&cfb[..]), MAX_WORKBOOK_UNCOMPRESSED_BYTES)
         .expect("a non-zip container has no decompression to bound");
+}
+
+/// A container that IS a zip but that this crate's zip cannot open must be
+/// REFUSED, not waved through to calamine.
+///
+/// Why it earns its place: the guard reads with `zip` 2.x and calamine parses
+/// the same bytes with its own `zip` 8.x, so an open failure here says nothing
+/// about whether calamine will open it. Passing that case through was a
+/// fail-open — every byte cap in this module is skipped and the package reaches
+/// calamine unbounded, which is the vector the module exists to close. No other
+/// test distinguishes "not a zip" from "a zip we could not read": both took the
+/// same `return Ok(())`.
+#[test]
+fn test_unparseable_zip_is_refused_rather_than_handed_to_calamine() {
+    // A local-file-header signature with no central directory behind it: the
+    // shape of a package crafted so one zip reader gives up and another does
+    // not.
+    let mut bytes = b"PK\x03\x04".to_vec();
+    bytes.extend_from_slice(&[0u8; 64]);
+    assert!(
+        zip::ZipArchive::new(Cursor::new(&bytes[..])).is_err(),
+        "fixture must be a zip this crate's reader refuses, to exercise the branch"
+    );
+
+    let err = preflight_package_bounds(Cursor::new(&bytes[..]), MAX_WORKBOOK_UNCOMPRESSED_BYTES)
+        .expect_err("a zip the guard cannot read must not reach calamine unbounded");
+    assert!(
+        err.to_string().contains("refusing to parse it unbounded"),
+        "expected the fail-closed refusal, got: {err}"
+    );
 }
 
 /// The bound must not break real files. A workbook that decompresses to

@@ -215,15 +215,28 @@ fn read_package_bytes(path: &Path) -> Result<Vec<u8>, ExtractError> {
 ///
 /// A non-zip container (`.xls` is CFB) is passed through untouched: there is
 /// no compression to bound, and reporting on malformed input stays calamine's
-/// job so error messages do not change.
+/// job so error messages do not change. A container that IS a zip but that this
+/// crate's zip cannot open is refused instead — see
+/// [`starts_with_zip_signature`] for why the two cases cannot share a branch.
 /// Test: `test_zip_bomb_rejected_with_cap_in_message`,
 /// `test_forged_central_directory_size_still_rejected`,
 /// `test_entry_count_cap_rejects_many_empty_entries`,
 /// `test_non_zip_container_passes_preflight`,
+/// `test_unparseable_zip_is_refused_rather_than_handed_to_calamine`,
 /// `test_large_legitimate_workbook_still_extracts`.
-fn preflight_package_bounds<R: Read + Seek>(reader: R, cap: u64) -> Result<(), ExtractError> {
-    let Ok(mut archive) = zip::ZipArchive::new(reader) else {
-        return Ok(());
+fn preflight_package_bounds<R: Read + Seek>(mut reader: R, cap: u64) -> Result<(), ExtractError> {
+    // #4894: fail CLOSED on a zip this crate cannot open — waving it through
+    // hands calamine's own, newer zip an unbounded package the guard never saw.
+    let container_is_zip = starts_with_zip_signature(&mut reader)?;
+    let mut archive = match zip::ZipArchive::new(reader) {
+        Ok(archive) => archive,
+        Err(_) if !container_is_zip => return Ok(()),
+        Err(e) => {
+            return Err(ExtractError::Xlsx(format!(
+                "zip package could not be read for size validation, \
+                 refusing to parse it unbounded: {e}"
+            )))
+        }
     };
 
     if archive.len() > MAX_WORKBOOK_ENTRIES {
@@ -256,6 +269,45 @@ fn preflight_package_bounds<R: Read + Seek>(reader: R, cap: u64) -> Result<(), E
         remaining -= drain_entry_bounded(entry, &name, remaining)?;
     }
     Ok(())
+}
+
+/// Does the container carry a zip signature (`PK`) in its first two bytes?
+///
+/// Why the guard needs this at all: it reads the package with this crate's
+/// `zip` 2.x while calamine parses the same bytes with its own `zip` 8.x
+/// (`cargo tree -p trusty-search -i zip@8.6.0`). Two independent zip readers
+/// over one file do not agree at the edges of the format, so "our reader could
+/// not open it" is NOT "calamine will not open it either". Treating an open
+/// failure as nothing-to-bound therefore fails OPEN: a package crafted to trip
+/// the older reader — a zip64 locator layout, an extra field, an EOCD variant
+/// it rejects — skips the guard entirely and reaches calamine with no bound at
+/// all, which is the exact vector this module exists to close.
+///
+/// The signature is what separates the two cases the guard must keep apart. An
+/// OOXML package always begins `PK\x03\x04`; `.xls` is CFB and begins
+/// `\xD0\xCF\x11\xE0`, and anything that is not a workbook in any format begins
+/// with neither. So: `PK` plus an open failure is a refusal, and no `PK` is a
+/// pass-through that leaves the diagnosis to calamine.
+///
+/// What: reads two bytes and rewinds, so the caller's reader is untouched.
+/// A container too short to hold a signature is not a zip.
+/// Test: `test_unparseable_zip_is_refused_rather_than_handed_to_calamine`,
+/// `test_non_zip_container_passes_preflight`, `test_not_a_workbook_errors`.
+fn starts_with_zip_signature<R: Read + Seek>(reader: &mut R) -> Result<bool, ExtractError> {
+    let mut magic = [0u8; 2];
+    let is_zip = match reader.read_exact(&mut magic) {
+        Ok(()) => &magic == b"PK",
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => false,
+        Err(e) => {
+            return Err(ExtractError::Xlsx(format!(
+                "reading the package signature: {e}"
+            )))
+        }
+    };
+    reader
+        .rewind()
+        .map_err(|e| ExtractError::Xlsx(format!("rewinding the package: {e}")))?;
+    Ok(is_zip)
 }
 
 /// Decompress a zip entry to nowhere, refusing to read past `budget` bytes,
