@@ -86,6 +86,21 @@
 //! both exemptions for the same reason the worktree guard does: both return
 //! ALLOW exactly when the caller IS a subagent, the only case the rule fires
 //! on. See that module's doc for the two markers it trusts and why.
+//! **Per-subagent context ceiling (issue #4837):** immediately after the
+//! fan-out check — and ahead of the same two exemptions, for the same reason —
+//! [`pm_guard`] measures the calling subagent's accumulated context via
+//! [`crate::commands::pm_guard_cost::evaluate_agent_cost`] and denies its next
+//! tool call once that context crosses `agent_cost.max_tokens`. The PM is
+//! never evaluated (the whole block is gated on `caller_is_subagent`) and
+//! every failure to measure fails OPEN. Two properties keep the stop from
+//! being worse than the overrun: the hard stop ships OFF (`max_tokens = 0`,
+//! opt-in) and, when an operator enables it,
+//! [`crate::commands::pm_guard_cost::is_persistence_escape`] keeps
+//! `SendMessage` and the git commit/push commands permitted so a stopped agent
+//! never loses work. The warning level ALLOWS and reaches the agent once, as
+//! `additionalContext` — see [`build_pretooluse_context_response`]. See
+//! [`trusty_mpm::core::agent_cost`] for the cost model and the thresholds'
+//! derivation from the measured transcript distribution.
 //! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
 //! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
 //! exemption, and JSON shape; the Bash-command classifier (composition and
@@ -103,9 +118,12 @@ use crate::commands::pm_guard_bash::{
     extract_shell_edit_target,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
+use crate::commands::pm_guard_cost;
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 use crate::commands::pm_guard_fanout;
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
+use trusty_mpm::core::agent_cost::{self, AgentCostConfig, BudgetStatus};
+use trusty_mpm::core::config::MpmConfig;
 
 /// Escape-hatch env var: `TRUSTY_MPM_PM_UNRESTRICTED=1` disables all PM
 /// enforcement for the invocation.
@@ -290,13 +308,59 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // It fails OPEN: `caller_is_subagent` reports false whenever neither the
     // payload's `agent_id` nor `CLAUDE_MPM_SUB_AGENT` is present, so an
     // unrecognised context allows the dispatch rather than blocking the PM.
-    if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(
-        tool_name,
-        pm_guard_fanout::caller_is_subagent(&payload),
-    ) {
+    let caller_is_subagent = pm_guard_fanout::caller_is_subagent(&payload);
+
+    if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(tool_name, caller_is_subagent) {
         audit_denied_tool(url, session_id, tool_name, reason).await;
         println!("{}", build_pretooluse_deny_response(reason));
         return Ok(());
+    }
+
+    // Text of a pending agent-cost notice, emitted at whichever subagent ALLOW
+    // exit this call reaches (Guard 1 or Guard 4). Deferred rather than printed
+    // where it is computed because a `PreToolUse` hook's stdout may carry
+    // exactly one object: printing it below and then falling through to Guard
+    // 4's persona gate could emit a second one. See `emit_cost_notice`.
+    let mut cost_notice: Option<String> = None;
+
+    // #4837: per-subagent context ceiling. Placed here for the same structural
+    // reason as the fan-out guard directly above — Guards 1 and 4 below
+    // early-return ALLOW precisely when the caller IS a subagent, which is the
+    // only case this rule fires on, so a check placed after either one would be
+    // a guaranteed no-op. Gated on `caller_is_subagent` so the PM never pays
+    // the config load or the transcript read, and can never be stopped by it.
+    // Fails OPEN throughout (see `core::agent_cost`): an unreadable transcript,
+    // a missing usage record, or a disabled config all reach `Ok`.
+    if caller_is_subagent {
+        let cost_config = MpmConfig::load_default().agent_cost;
+        let (status, tokens) = pm_guard_cost::evaluate_agent_cost(&payload, &cost_config).await;
+        match status {
+            // The stop keeps a narrow allowlist open so a stopped agent can
+            // still save and report what it has — see
+            // `pm_guard_cost::is_persistence_escape`. Without it the deny told
+            // the agent to report back through a channel the same deny closed.
+            BudgetStatus::Exceeded
+                if !pm_guard_cost::is_persistence_escape(tool_name, tool_input) =>
+            {
+                let reason = agent_cost::stop_reason(tokens, cost_config.max_tokens);
+                audit_denied_tool(url, session_id, tool_name, &reason).await;
+                println!("{}", build_pretooluse_deny_response(&reason));
+                return Ok(());
+            }
+            BudgetStatus::Warning => {
+                // ALLOW, and tell the AGENT — once, at the exit below.
+                // `additionalContext` is the field that makes that possible
+                // without touching the decision: Claude Code injects it next to
+                // the tool result, and because the object carries no
+                // `permissionDecision` the call still falls through the normal
+                // permission flow ("staying silent doesn't approve it").
+                // Emitting an explicit `allow` instead WOULD bypass that flow,
+                // which is why this is not that.
+                cost_notice = Some(agent_cost::warn_reason(tokens, &cost_config));
+                audit_agent_cost_warning(url, session_id, tool_name, tokens, &cost_config).await;
+            }
+            BudgetStatus::Exceeded | BudgetStatus::Ok => {}
+        }
     }
 
     // Guard 1: never block a nested MPM sub-agent for anything else — it is
@@ -308,6 +372,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // rationale; see Guards 2/3 above for why THOSE stayed in their original
     // position instead.
     if std::env::var_os(SUB_AGENT_ENV).is_some() {
+        emit_cost_notice(&payload, cost_notice);
         return Ok(());
     }
 
@@ -336,6 +401,7 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             tool_name,
             "pm_guard: allow — native sub-agent dispatch (agent_id present in PreToolUse payload)"
         );
+        emit_cost_notice(&payload, cost_notice);
         return Ok(());
     }
 
@@ -587,6 +653,58 @@ pub(crate) fn build_pretooluse_deny_response(reason: &str) -> serde_json::Value 
     })
 }
 
+/// Build a `hookSpecificOutput.additionalContext` body — a message TO the agent
+/// that changes no decision.
+///
+/// Why (#4837 review, HIGH): the agent-cost warning is addressed to the agent
+/// ("wrap up and report back"), but the only channel it had was an audit POST
+/// to the daemon, so no agent ever read it — the graduated warn-then-stop
+/// response did not exist from the agent's side. `additionalContext` is the
+/// channel that fixes it: Claude Code injects the string next to the tool
+/// result, and the object carries **no** `permissionDecision`, so the call
+/// still goes through the normal permission flow. Per the hooks reference
+/// (<https://code.claude.com/docs/en/hooks>, confirmed 2026-08-04): "Exit code
+/// 0 with no output means the hook has no decision to report, so the tool call
+/// continues through the normal permission flow… staying silent doesn't approve
+/// it", and `additionalContext` is listed for `PreToolUse` as appearing "next
+/// to the tool result". That is precisely the property the author needed and
+/// could not find: context reaches the agent, and an explicit `allow` — which
+/// WOULD bypass the permission flow — is never emitted.
+/// What: returns the `serde_json::Value` whose compact `Display` is the single
+/// stdout object; mirrors [`build_pretooluse_deny_response`]'s envelope.
+/// Test: `build_pretooluse_context_response_carries_no_decision`.
+pub(crate) fn build_pretooluse_context_response(context: &str) -> serde_json::Value {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": context
+        }
+    })
+}
+
+/// Emit a pending agent-cost notice at a subagent's ALLOW exit.
+///
+/// Why (#4837 review, HIGH): a `PreToolUse` hook's stdout may carry exactly one
+/// object, so the notice cannot be printed the moment it is computed — Guard 4's
+/// opt-in persona gate still runs after that point and may print a deny. Holding
+/// the text and emitting it only at the ALLOW exits keeps stdout single-object
+/// and keeps that gate's behaviour byte-for-byte unchanged. The once-per-agent
+/// claim happens HERE, not at composition time, so a notice that loses the race
+/// to a deny is not silently spent.
+/// What: no-op when `notice` is `None` or the agent has already been told;
+/// otherwise prints [`build_pretooluse_context_response`].
+/// Test: the claim is pinned by
+/// `pm_guard_cost::warn_notice_is_claimed_once_per_agent`; the JSON shape by
+/// `build_pretooluse_context_response_carries_no_decision`.
+fn emit_cost_notice(payload: &serde_json::Value, notice: Option<String>) {
+    let Some(text) = notice else {
+        return;
+    };
+    if pm_guard_cost::claim_warn_notice(payload) {
+        println!("{}", build_pretooluse_context_response(&text));
+    }
+}
+
 /// Best-effort audit POST recording a PM-guard denial to the daemon.
 ///
 /// Why: enforcement actions should be observable (dashboard / audit log), but
@@ -601,6 +719,57 @@ pub(crate) fn build_pretooluse_deny_response(reason: &str) -> serde_json::Value 
 /// Test: side-effect-only best-effort I/O — covered indirectly by the deny
 /// paths in `tests/tm_hook_pm_guard.rs` (which point at an unreachable daemon,
 /// proving the deny still emits despite the failed POST).
+///
+/// Best-effort audit POST recording an agent-cost WARNING to the daemon.
+///
+/// Why (#4837): the warning is delivered to the AGENT via
+/// [`build_pretooluse_context_response`]; this is the second, independent
+/// consumer — the daemon's event stream, where the PM and dashboard read it.
+/// Both are needed: the agent acts on the nudge, the PM sees which of its
+/// delegations are running expensive. Fire-and-forget with the same tight
+/// timeouts as [`audit_denied_tool`]: a down daemon costs the timeout and
+/// nothing else, and never changes the decision.
+/// What: POSTs `{session_id, event:"PreToolUse", payload:{cwd, tool,
+/// pm_guard_decision:"warn", agent_cost_tokens, agent_cost_max,
+/// pm_guard_reason}}` to `<url>/hooks` and drops any error.
+/// Test: side-effect-only best-effort I/O; the classification that reaches it
+/// is pinned by `core::agent_cost::warns_at_the_warn_threshold` and
+/// `pm_guard_cost::default_config_only_warns_on_the_same_transcript`.
+async fn audit_agent_cost_warning(
+    url: &str,
+    session_id: &str,
+    tool_name: &str,
+    tokens: u64,
+    config: &AgentCostConfig,
+) {
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_default();
+    // Same string the agent is shown, not a second copy that can drift from it.
+    let reason = agent_cost::warn_reason(tokens, config);
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "event": "PreToolUse",
+        "payload": {
+            "cwd": cwd,
+            "tool": tool_name,
+            "pm_guard_decision": "warn",
+            "agent_cost_tokens": tokens,
+            "agent_cost_max": config.max_tokens,
+            "pm_guard_reason": reason,
+        }
+    });
+    let Ok(client) = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    else {
+        return;
+    };
+    let _ = client.post(format!("{url}/hooks")).json(&body).send().await;
+}
+
 async fn audit_denied_tool(url: &str, session_id: &str, tool_name: &str, reason: &str) {
     let cwd = std::env::current_dir()
         .ok()
@@ -816,6 +985,22 @@ mod tests {
         assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
         assert_eq!(v["hookSpecificOutput"]["permissionDecisionReason"], "nope");
         // Display is compact single-line JSON (protocol: stdout is only the object).
+        assert!(!v.to_string().contains('\n'));
+    }
+
+    #[test]
+    fn build_pretooluse_context_response_carries_no_decision() {
+        // #4837 review HIGH: this is the channel that reaches the AGENT. The
+        // absence of `permissionDecision` is the whole safety property — with
+        // one, the object would approve the call and bypass the permission
+        // flow, which is exactly what the author declined to do.
+        let v = build_pretooluse_context_response("wrap up");
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "wrap up");
+        assert!(
+            v["hookSpecificOutput"].get("permissionDecision").is_none(),
+            "an explicit decision here would bypass the permission flow"
+        );
         assert!(!v.to_string().contains('\n'));
     }
 }

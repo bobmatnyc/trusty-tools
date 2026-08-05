@@ -484,7 +484,11 @@ pub(crate) async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
 /// Best-effort, bounded read of the last `max_bytes` of a transcript file.
 ///
 /// Why (#2610): the idle-parking detector needs the agent's final assistant
-/// message, which lives at the END of Claude Code's JSONL transcript. Reading
+/// message, which lives at the END of Claude Code's JSONL transcript. #4837
+/// added a second consumer with the same shape —
+/// [`super::pm_guard_cost::evaluate_agent_cost`] needs the newest `usage`
+/// block, also at the end — so this is `pub(crate)` rather than duplicated.
+/// Reading
 /// only the tail bounds both time and memory on a large session transcript, so
 /// the Stop/SubagentStop hook can never block the user's prompt. A tail read may
 /// slice mid-line; the detector tolerates a truncated leading line, so we accept
@@ -509,7 +513,7 @@ pub(crate) async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
 /// FIFO case returns promptly instead of hanging; also exercised end-to-end via
 /// [`detect_idle_parking_from_payload`]'s callers and the `core::idle_parking`
 /// unit tests that cover truncated tails.
-async fn read_transcript_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+pub(crate) async fn read_transcript_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     let meta = tokio::fs::metadata(path).await.ok()?;

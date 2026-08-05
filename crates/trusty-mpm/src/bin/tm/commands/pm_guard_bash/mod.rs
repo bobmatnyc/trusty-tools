@@ -18,13 +18,18 @@
 //! over-deep nesting) deny. `sed`/`awk`-family verbs are classified by the
 //! sibling [`sed_awk`] module, which is deny-by-default: a segment must prove
 //! it is narrowly read-only (no in-place flag, no external script load, no
-//! write/exec script construct, balanced quotes) to be allowed.
+//! write/exec script construct, balanced quotes) to be allowed. The sibling
+//! [`persistence`] module runs the one ALLOW-list here — the agent-cost stop's
+//! escape hatch (#4837) — and is default-deny in the opposite direction.
 //! Test: `evaluate_bash_command_*`, `split_shell_segments_*`, and
 //! `has_file_write_redirection_*` in this module's `tests` submodule;
 //! `sed_awk::tests` for the sed/awk-specific safety analysis.
 
+mod persistence;
 mod sed_awk;
 mod shell_lex;
+
+pub(crate) use persistence::command_is_persistence_only;
 
 use std::path::{Path, PathBuf};
 

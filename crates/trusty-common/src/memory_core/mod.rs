@@ -31,6 +31,9 @@ pub mod room_identity;
 pub mod semantic_consolidation;
 pub mod store;
 pub mod timeouts;
+// ADR-0027 T9: pure wing identity (canonical keys, UUIDv5 minting). No I/O —
+// see `store::wings` for storage and policy.
+pub mod wing_identity;
 
 pub use community::{KnowledgeGap, find_communities};
 pub use palace::{Drawer, DrawerType, Palace, PalaceId, Room, RoomType, Wing};
@@ -41,3 +44,4 @@ pub use semantic_consolidation::{
     ConsolidationAction, ConsolidationResult, MockInference, OllamaInference, OpenRouterInference,
     SemanticConsolidationConfig, SemanticConsolidator, inference_available,
 };
+pub use wing_identity::{DEFAULT_WING_LABEL, canonical_wing_key, mint_wing_id};

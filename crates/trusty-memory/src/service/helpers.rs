@@ -298,6 +298,26 @@ fn room_registry_count(handle: &Arc<PalaceHandle>) -> Option<usize> {
     }
 }
 
+/// Wings registered in this palace's `WINGS` table, or `None` on a read error.
+///
+/// Why (#4809 / ADR-0027 T9): `wing_count` reported a hardcoded `1` while
+/// `DEFAULT_WING_ID` was the only wing in the model — true then, and a lie the
+/// moment T9 let a palace hold more than one. This makes it a real count, from
+/// the same registry `wing_list` reads, so the two can never disagree.
+/// What: a scan of the (tiny) `WINGS` table. `None` lets the caller degrade to
+/// `1` — the default wing always exists once a palace has been opened — rather
+/// than to a `0` that #4637's contract reserves for "unknown".
+/// Test: `palace_list_includes_richer_counts`, `palace_info_reports_real_wings`.
+fn wing_registry_count(handle: &Arc<PalaceHandle>) -> Option<usize> {
+    match handle.kg.store().list_wings() {
+        Ok(wings) => Some(wings.len()),
+        Err(e) => {
+            tracing::warn!(palace = %handle.id, "wing_count unavailable: {e:#}");
+            None
+        }
+    }
+}
+
 pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> PalaceInfo {
     let (
         drawer_count,
@@ -316,9 +336,7 @@ pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> 
         // #4811 / ADR-0027 T8: `room_count` comes from the ROOMS registry so it
         // agrees with `room_list`; on a read failure it degrades to the rooms
         // the drawers are actually in, which is a lower bound rather than a
-        // zero that would read as "no rooms". `wing_count` is 1 — there is
-        // exactly one wing (DEFAULT_WING_ID) until T9 — and no longer the
-        // room count it used to report under a wing label.
+        // zero that would read as "no rooms".
         let rooms = room_registry_count(h).unwrap_or_else(|| {
             drawers
                 .iter()
@@ -326,12 +344,20 @@ pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> 
                 .collect::<HashSet<Uuid>>()
                 .len()
         });
+        // #4809 / ADR-0027 T9: `wing_count` is now a REAL count from the WINGS
+        // registry. T8 set it to a hardcoded 1 because DEFAULT_WING_ID was the
+        // only wing that could exist; that stopped being true when T9 shipped
+        // `wing_create`, and a constant standing in for a count is the same
+        // category of lie the field carried before T8. On a read failure it
+        // degrades to 1 — every opened palace has at least the default wing —
+        // preserving #4637's rule that 0 means unknown, never empty.
+        let wings = wing_registry_count(h).unwrap_or(1);
         (
             drawers.len(),
             h.vector_store.index_size(),
             h.kg.count_active_triples(),
             rooms,
-            1,
+            wings,
             last_write,
             h.kg.node_count() as u64,
             h.kg.edge_count() as u64,

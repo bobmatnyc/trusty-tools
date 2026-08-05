@@ -106,6 +106,13 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         "room_list" => &[MEMORY_READ],
         "room_create" | "room_rename" => &[MEMORY_WRITE],
 
+        // ADR-0027 T9 wing tools (#4809): a wing is a storage-scope boundary
+        // over memory, not a credential grant (ADR-0026), so it needs no new
+        // scope — listing one is a memory read, creating or renaming one
+        // mutates palace state.
+        "wing_list" => &[MEMORY_READ],
+        "wing_create" | "wing_rename" => &[MEMORY_WRITE],
+
         _ => &[],
     };
     s.iter().map(|x| (*x).to_string()).collect()

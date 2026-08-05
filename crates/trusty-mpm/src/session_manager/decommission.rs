@@ -585,7 +585,7 @@ impl SessionManager {
     /// | 1 | `graceful_terminate_runtime` — SIGTERM + `kill_session` the pane | no |
     /// | 2 | `remove_session_worktree` — `git worktree remove --force`, `fs::remove_dir_all` fallback, `git worktree prune`, `git branch -D` (dirty-gated, #4344) | no |
     /// | 3 | `fs::remove_dir_all` on an SM-owned workspace (containment-gated) | no |
-    /// | 4 | `delete_search_index_best_effort` — cross-daemon `DELETE /indexes/{id}` | no |
+    /// | 4 | `delete_search_index_best_effort` — cross-daemon `DELETE /indexes/{id}` (never from a test process, #4743) | no |
     /// | 5 | clears `workspace_path`/`workspace_owned` when nothing is on disk | store-only |
     /// | 6 | clears `pending_decision`/`proposed_default` (#4400) | store-only |
     /// | 7 | writes state `Decommissioned` | store-only |

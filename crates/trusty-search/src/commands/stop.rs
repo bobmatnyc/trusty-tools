@@ -8,13 +8,23 @@ use std::time::{Duration, Instant};
 /// Why: extracted from `main()`. Stopping involves PID-file lookup, SIGTERM,
 /// and a poll loop — clearer in its own function.
 /// What: reads `~/.local/share/trusty-search/daemon.lock` for the PID, sends
-/// SIGTERM, then waits up to 5 s for the daemon's port file to disappear.
+/// SIGTERM, then waits up to
+/// [`trusty_common::shutdown::termination_grace`] (#4393) for the daemon's port
+/// file to disappear.
 /// Additionally scans the process table for ANY other live `trusty-search`
 /// daemon processes (closes #81 — orphans left running when the lockfile
 /// went stale could consume unbounded RAM) and terminates them too.
+///
+/// #4395 scope note: `stop` deliberately keeps its stop-everything semantics —
+/// it is an explicit operator command whose documented contract since #81 is
+/// "nothing named trusty-search is left running". The IMPLICIT reaper inside
+/// `start` is the one that had to become ownership-aware, because nobody asked
+/// it to kill anything; see `commands::start::reap_orphans`.
+///
 /// Exits 1 only if NOTHING is killed (no lockfile + no orphans).
-/// Test: with a running daemon → "Daemon stopped" within 5 s. Spawn two
-/// `trusty-search start` instances; stop must reap both.
+/// Test: with a running daemon → "Daemon stopped" within the grace window. Spawn
+/// two `trusty-search start` instances; stop must reap both.
+/// `stop_window_covers_the_flush_floor` pins the window against the flush floor.
 pub async fn handle_stop() -> Result<()> {
     // The daemon writes its PID into the fs4 lockfile at startup
     // (see trusty-search-service/src/daemon.rs). Read the PID, send
@@ -83,9 +93,17 @@ pub async fn handle_stop() -> Result<()> {
         let _ = send_signal(*pid, "TERM");
     }
 
-    // Phase 2: poll up to 5 s for the lockfile-owning daemon to release the
-    // port file AND for every targeted PID to exit.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Phase 2: poll for the lockfile-owning daemon to release the port file AND
+    // for every targeted PID to exit.
+    //
+    // #4393: this window was 5 s, against a shutdown flush that floors at 30 s
+    // per index — so `trusty-search stop` SIGKILLed a daemon that was mid-flush
+    // on every stop that had real work to do. It now uses the same termination
+    // grace launchd's `ExitTimeOut` and the orphan reaper use, so the three
+    // paths cannot disagree about how long a daemon has to finish.
+    let grace = trusty_common::shutdown::termination_grace();
+    let deadline = Instant::now() + grace;
+    let mut last_notice = Instant::now();
     loop {
         std::thread::sleep(Duration::from_millis(100));
         let any_alive = targets.iter().any(|p| pid_alive(*p));
@@ -96,6 +114,15 @@ pub async fn handle_stop() -> Result<()> {
         }
         if Instant::now() >= deadline {
             break;
+        }
+        // A 60 s silent wait reads as a hang. Say what is being waited on.
+        if last_notice.elapsed() >= Duration::from_secs(5) {
+            last_notice = Instant::now();
+            println!(
+                "{} still flushing index snapshots… (up to {}s, #4393)",
+                "·".dimmed(),
+                grace.as_secs()
+            );
         }
     }
 
@@ -228,6 +255,29 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn pid_alive(_pid: u32) -> bool {
     true
+}
+
+#[cfg(test)]
+mod window_tests {
+    /// Why (#4393 — the mismatch, on the path the original filing missed
+    /// entirely): `stop` allowed 5 s before SIGKILL while the daemon's own
+    /// shutdown flush floors at 30 s per index, so a stop issued while an index
+    /// had real work to flush killed it mid-write. Every termination path has to
+    /// clear that floor or the flush is decorative.
+    /// What: asserts the grace window `handle_stop` waits for covers
+    /// `shutdown_flush::MIN_FLUSH_TIMEOUT_SECS`.
+    /// Test: this IS the test.
+    #[test]
+    fn stop_window_covers_the_flush_floor() {
+        let window = trusty_common::shutdown::termination_grace();
+        let floor =
+            std::time::Duration::from_secs(crate::service::shutdown_flush::MIN_FLUSH_TIMEOUT_SECS);
+        assert!(
+            window >= floor,
+            "`stop`'s SIGKILL window ({window:?}) must cover the daemon's per-index \
+             flush floor ({floor:?}) — 5 s against 30 s is the #4393 defect"
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

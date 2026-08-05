@@ -130,10 +130,13 @@ impl LaunchdConfig {
     /// (exe + args), `KeepAlive` (per [`KeepAlive`]), `ThrottleInterval`,
     /// `RunAtLoad`, `StandardOutPath`/`StandardErrorPath` under `log_dir`,
     /// `SoftResourceLimits` + `HardResourceLimits` dicts (when `fd_limit` is
-    /// `Some`), and an `EnvironmentVariables` dictionary when `env_vars` is
-    /// non-empty. All string values are XML-escaped.
+    /// `Some`), `ExitTimeOut` (#4393, from
+    /// [`crate::shutdown::TERMINATION_GRACE_SECS`]), and an
+    /// `EnvironmentVariables` dictionary when `env_vars` is non-empty. All
+    /// string values are XML-escaped.
     /// Test: `render_plist_contains_core_keys`, `render_plist_keepalive_*`,
-    /// `render_plist_escapes_xml`, `render_plist_includes_resource_limits`.
+    /// `render_plist_escapes_xml`, `render_plist_includes_resource_limits`,
+    /// `render_plist_declares_exit_timeout`.
     pub fn render_plist(&self) -> Result<String> {
         let exe = self
             .exe_path
@@ -186,6 +189,21 @@ impl LaunchdConfig {
         s.push_str(&format!(
             "  <integer>{}</integer>\n",
             self.throttle_interval
+        ));
+
+        // #4393: without this key launchd applies its "system-defined" default,
+        // measured at 5 s on macOS — SIGTERM, then SIGKILL 5 s later. Every
+        // termination path routes through it: `launchctl bootout`, `launchctl
+        // kickstart -k` (measured: SIGTERM first, SIGKILL at exactly the
+        // ExitTimeOut boundary), and logout/reboot. trusty-search's shutdown
+        // flush floors each index at 30 s, so it was cut off mid-write on all of
+        // them. Rendered from the shared constant rather than a per-agent field
+        // so the window a daemon PLANS for and the window launchd GRANTS cannot
+        // disagree.
+        s.push_str("  <key>ExitTimeOut</key>\n");
+        s.push_str(&format!(
+            "  <integer>{}</integer>\n",
+            crate::shutdown::TERMINATION_GRACE_SECS
         ));
 
         s.push_str("  <key>StandardOutPath</key>\n");
@@ -527,6 +545,40 @@ mod tests {
             !xml_no_limits.contains("HardResourceLimits"),
             "fd_limit=None must suppress HardResourceLimits"
         );
+    }
+
+    /// Why (#4393 — the regression this test exists for): the renderer emitted
+    /// no `ExitTimeOut` key at all, so launchd applied its "system-defined"
+    /// default, measured at 5 s on this host. A daemon whose shutdown flush
+    /// floors at 30 s per index was therefore SIGKILLed mid-write on every
+    /// launchd-mediated termination — `bootout`, `kickstart -k`, logout.
+    /// What: asserts the key is present, carries
+    /// [`crate::shutdown::TERMINATION_GRACE_SECS`], and that the rendered
+    /// window clears the measured 5 s default it replaces.
+    /// Test: itself.
+    #[test]
+    fn render_plist_declares_exit_timeout() {
+        let xml = sample(KeepAlive::Always).render_plist().unwrap();
+        assert!(
+            xml.contains("<key>ExitTimeOut</key>"),
+            "plist must declare ExitTimeOut or launchd applies its 5 s default (#4393)"
+        );
+        assert!(
+            xml.contains(&format!(
+                "<key>ExitTimeOut</key>\n  <integer>{}</integer>",
+                crate::shutdown::TERMINATION_GRACE_SECS
+            )),
+            "ExitTimeOut must carry the shared termination grace, got:\n{xml}"
+        );
+        // `const` block: the operands are compile-time constants, so a later
+        // edit that shortens the window back toward launchd's default fails the
+        // build rather than a test run.
+        const {
+            assert!(
+                crate::shutdown::TERMINATION_GRACE_SECS > 5,
+                "rendering the measured system default would leave #4393 unfixed"
+            );
+        }
     }
 
     #[test]
