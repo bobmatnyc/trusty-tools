@@ -25,7 +25,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, OnceCell, RwLock};
 use trusty_common::bm25_client::Bm25Client;
 use trusty_common::mcp::initialize_response;
-use trusty_common::memory_core::embed::FastEmbedder;
+use trusty_common::memory_core::embed::Embedder;
 use trusty_common::memory_core::{store::ChatSessionStore, PalaceRegistry};
 use trusty_common::ChatProvider;
 
@@ -272,17 +272,22 @@ pub fn resolve_palace_registry_dir(data_dir: PathBuf) -> PathBuf {
 /// Why: The stdio loop and HTTP server need the same handles to the registry,
 /// data root, and embedder so MCP tools can perform real reads/writes against
 /// the live trusty-memory core. The embedder is heavy (loads ONNX weights) so
-/// we hold it behind a `OnceCell` and initialize lazily on first use.
-/// What: `Clone`-able via `Arc` fields. The registry / data root are eager;
-/// `embedder` is `Arc<OnceCell<Arc<FastEmbedder>>>` so concurrent first-use
-/// races resolve to a single shared instance.
+/// it is resolved lazily through the process-wide singleton on first use.
+///
+/// #4836: this struct used to carry its own `Arc<OnceCell<Arc<FastEmbedder>>>`,
+/// a SECOND cell independent of `retrieval::shared_embedder()`. Startup warmed
+/// the shared cell and latched `daemon_readiness` off it, while every recall
+/// consumed the private cell — so the flag reported one embedder's state while
+/// the request path used another's. One cell removes the disagreement (and the
+/// duplicate ~90 MB ONNX session) by construction.
+/// What: `Clone`-able via `Arc` fields. The registry / data root are eager; the
+/// embedder is reached via [`AppState::embedder`].
 /// Test: `app_state_default_constructs` confirms construction without panic.
 #[derive(Clone)]
 pub struct AppState {
     pub version: String,
     pub registry: Arc<PalaceRegistry>,
     pub data_root: PathBuf,
-    pub embedder: Arc<OnceCell<Arc<FastEmbedder>>>,
     /// Optional default palace applied to MCP tool calls when the caller
     /// omits the `palace` argument. Set via `trusty-memory serve --palace`.
     pub default_palace: Option<String>,
@@ -636,7 +641,6 @@ impl AppState {
             // so operators can bound resident-palace RAM without a rebuild.
             registry: Arc::new(PalaceRegistry::from_env()),
             data_root,
-            embedder: Arc::new(OnceCell::new()),
             default_palace: None,
             chat_provider: Arc::new(OnceCell::new()),
             // #4639: bounded LRU (TRUSTY_MEMORY_MAX_OPEN_SESSION_STORES,
@@ -1167,9 +1171,17 @@ impl AppState {
     ///
     /// Why: tool handlers and the `/health` endpoint need a cheap, lock-free
     /// way to check whether the embedder has been initialised yet.
+    ///
     /// What: loads `daemon_readiness` with `Acquire` ordering so the caller
     /// sees all writes the startup task made before setting the state.
-    /// Test: `daemon_readiness_transitions_warming_to_ready`.
+    ///
+    /// #4836: the value read here is only as good as the writes that reach it.
+    /// It used to be written exactly once, by the startup warm-up task, so a
+    /// single failed attempt pinned the daemon at `Warming` for the rest of its
+    /// life. [`AppState::embedder`] now also flips it on success, which is the
+    /// signal that actually proves a vector search can run.
+    /// Test: `daemon_readiness_transitions_warming_to_ready`,
+    /// `resolving_the_embedder_marks_a_warming_daemon_ready`.
     pub fn readiness(&self) -> DaemonReadiness {
         DaemonReadiness::from_u8(self.daemon_readiness.load(Ordering::Acquire))
     }
@@ -1208,27 +1220,19 @@ impl AppState {
     /// warm-up task's own call, or a handler that skips the `readiness()`
     /// check). If this timeout fires the `OnceCell` is left in the unresolved
     /// state and the next call retries from scratch.
-    pub async fn embedder(&self) -> Result<Arc<FastEmbedder>> {
-        use trusty_common::memory_core::timeouts;
-        let cell = self.embedder.clone();
-        let timeout = timeouts::embedder_init_timeout();
-        let embedder = tokio::time::timeout(
-            timeout,
-            cell.get_or_try_init(|| async {
-                let e = FastEmbedder::new().await?;
-                Ok::<Arc<FastEmbedder>, anyhow::Error>(Arc::new(e))
-            }),
-        )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "AppState::embedder() timed out after {:?}; \
-                 the CoreML/CUDA model is taking unusually long to compile — \
-                 increase TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS if needed",
-                timeout
-            )
-        })??
-        .clone();
+    pub async fn embedder(&self) -> Result<Arc<dyn Embedder + Send + Sync>> {
+        // #4836: delegate to the ONE process-wide cell instead of a private
+        // second one, so initialising the embedder here is the same event the
+        // startup warm-up latches readiness off. `shared_embedder` already
+        // applies the bounded `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` init timeout
+        // and the CoreML auto-fallback, so no wrapper timeout is needed here.
+        let embedder = trusty_common::memory_core::retrieval::shared_embedder().await?;
+        // #4836: a resolved embedder is proof a vector search can run, so it is
+        // the authoritative readiness signal — not the startup task's one-shot
+        // attempt. Without this the daemon stays `Warming` forever whenever that
+        // single attempt failed, and every MCP recall serves the degraded
+        // L0/L1 fallback that ignores the query entirely.
+        self.set_ready();
         Ok(embedder)
     }
 }

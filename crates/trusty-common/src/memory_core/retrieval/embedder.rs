@@ -85,6 +85,23 @@ pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>> {
         .cloned()
 }
 
+/// Whether the process-wide shared embedder has been initialised.
+///
+/// Why (#4836): a daemon's readiness flag used to be a one-shot latch set by a
+/// single startup warm-up attempt. When that attempt failed the flag stayed
+/// `Warming` forever, even though the lazy path later initialised the embedder
+/// successfully — so every MCP recall took a degraded, query-independent
+/// fallback while the HTTP path served real vector results from the same
+/// process. Exposing the cell's true state lets readiness be *derived* from the
+/// embedder rather than latched alongside it, which is what makes it
+/// self-healing.
+/// What: `OnceCell::initialized()` on `SHARED_EMBEDDER`. Cheap and lock-free;
+/// monotonic (never returns `true` then `false`).
+/// Test: `shared_embedder_initialized_flips_after_seeding`.
+pub fn shared_embedder_initialized() -> bool {
+    SHARED_EMBEDDER.initialized()
+}
+
 /// Pre-seed the shared embedder with a `MockEmbedder` for offline tests.
 ///
 /// Why: CI environments cannot download the ~23 MB ONNX model from HuggingFace
