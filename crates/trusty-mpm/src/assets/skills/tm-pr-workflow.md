@@ -1,6 +1,6 @@
 ---
 name: tm-pr-workflow
-description: Branch protection, trusty-review gate, squash-merge, and worktree discipline for landing work on main
+description: Branch protection, per-PR changelog fragment requirement (changelog.d file format and category line), trusty-review merge gate, squash-merge, and worktree discipline for landing work on main
 user-invocable: false
 version: "1.0.0"
 category: pm-workflow

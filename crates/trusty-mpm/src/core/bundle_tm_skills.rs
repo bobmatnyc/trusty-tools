@@ -118,7 +118,8 @@ pub const TM_TEACHING_TEMPLATES: &str = include_str!("../assets/skills/tm-teachi
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_TICKETING: &str = include_str!("../assets/skills/tm-ticketing.md");
 
-/// Branch protection, trusty-review gate, squash-merge, worktree discipline.
+/// Branch protection, changelog fragments, trusty-review gate, squash-merge,
+/// worktree discipline.
 ///
 /// Why: SLIM per the portfolio design — native Claude Code already knows
 /// basic `gh pr create` mechanics; this keeps only the tm-specific layer.
