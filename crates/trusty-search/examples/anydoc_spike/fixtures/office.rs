@@ -30,15 +30,42 @@ fn package(parts: &[(&str, String)]) -> Vec<u8> {
     buf
 }
 
+/// `word/styles.xml` defining Heading1..Heading3.
+///
+/// Required for a fair comparison, not decoration: anydoc resolves a
+/// paragraph's heading level by looking `w:pStyle`'s id up in this part and
+/// matching its `w:name` against `heading N` (see anydoc's
+/// `formats::docx::styles::heading_level`), falling back to a direct
+/// `outlineLvl`. A fixture carrying `w:pStyle` with no styles part gives it
+/// nothing to resolve, and the resulting "anydoc recovered no headings" would
+/// be an artifact of the fixture rather than a property of the crate. Real
+/// Word documents always ship this part.
+fn styles_xml() -> String {
+    let styles: String = (1..=3)
+        .map(|lvl| {
+            format!(
+                r#"<w:style w:type="paragraph" w:styleId="Heading{lvl}"><w:name w:val="heading {lvl}"/><w:pPr><w:outlineLvl w:val="{}"/></w:pPr></w:style>"#,
+                lvl - 1
+            )
+        })
+        .collect();
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles {W_NS}>{styles}</w:styles>"#
+    )
+}
+
 fn docx_package(body: String) -> Vec<u8> {
     let document = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {W_NS}><w:body>{body}</w:body></w:document>"#
     );
-    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#;
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#;
     let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+    let doc_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
     package(&[
         ("[Content_Types].xml", content_types.to_string()),
         ("_rels/.rels", rels.to_string()),
+        ("word/_rels/document.xml.rels", doc_rels.to_string()),
+        ("word/styles.xml", styles_xml()),
         ("word/document.xml", document),
     ])
 }

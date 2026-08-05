@@ -71,7 +71,7 @@ pub fn run(corpus: &Corpus) {
 }
 
 fn chunk_count(name: &str, text: &str) -> usize {
-    trusty_search::core::chunker::types::chunk_text(name, text, WINDOW, STRIDE).len()
+    trusty_search::core::chunker::chunk_text(name, text, WINDOW, STRIDE).len()
 }
 
 /// Count the structural signals each extractor preserved.

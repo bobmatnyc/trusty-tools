@@ -26,6 +26,7 @@ mod bench;
 mod engines;
 mod fixtures;
 mod quality;
+mod real_corpus;
 mod xlsx_bugs;
 
 use std::path::{Path, PathBuf};
@@ -57,6 +58,16 @@ fn main() {
         "quality" => quality::run(&corpus),
         "adversarial" => adversarial::run(&corpus),
         "xlsx-bugs" => xlsx_bugs::run(&corpus),
+        "pdf-sweep" => pdf_sweep(&dir),
+        // Point at a directory of real documents:
+        //   … --example anydoc_spike -- real /path/to/docs
+        "real" => match args.get(1) {
+            Some(d) => real_corpus::run(Path::new(d)),
+            None => {
+                eprintln!("usage: real <directory>");
+                std::process::exit(2);
+            }
+        },
         "all" => {
             quality::run(&corpus);
             println!("\n---\n");
@@ -93,6 +104,40 @@ fn run_one(args: &[String]) {
         println!("CHECKSUM={checksum}");
     }
     println!("PEAK_RSS_BYTES={}", engines::peak_rss_bytes());
+}
+
+/// Isolate the multi-page PDF failure: sweep page count with the object
+/// layout held constant, so "anydoc cannot read this document" and "anydoc
+/// cannot read documents past N pages" stay distinguishable.
+///
+/// Each fixture is validated against poppler (`pdftotext`) as a third-party
+/// reference before either extractor's result is believed — a hand-built PDF
+/// that only one parser accepts would prove nothing about the other.
+fn pdf_sweep(dir: &Path) {
+    println!("## PDF page-count sweep\n");
+    println!("| pages | bytes | poppler pdftotext chars | native chars | anydoc |");
+    println!("|---:|---:|---:|---:|---|");
+    for pages in [1usize, 2, 3, 4, 5, 8, 16, 40] {
+        let path = dir.join(format!("sweep-{pages}p.pdf"));
+        std::fs::write(&path, fixtures::pdf::multi_page(pages)).expect("write sweep fixture");
+        let poppler = std::process::Command::new("pdftotext")
+            .arg(&path)
+            .arg("-")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().len())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|_| "n/a".to_string());
+        let native = Engine::Native.extract(&path);
+        let anydoc = Engine::Anydoc.extract(&path);
+        println!(
+            "| {} | {} | {} | {} | {} |",
+            pages,
+            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+            poppler,
+            native.text().trim().len(),
+            anydoc.summary()
+        );
+    }
 }
 
 /// Corpus root. `TRUSTY_ANYDOC_SPIKE_DIR` overrides it; otherwise a scratch
