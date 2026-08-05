@@ -139,11 +139,18 @@ pub(crate) async fn handle_add_alias(state: &AppState, args: Value) -> Result<Va
 }
 
 pub(crate) async fn handle_list_prompt_facts(state: &AppState, _args: Value) -> Result<Value> {
-    let triples = crate::prompt_facts::gather_hot_triples(state).await?;
-    let payload: Vec<Value> = triples
+    // #4890: each row carries `affirmed_at` so a caller reviewing the surface
+    // can see which rules are overdue without shelling out to `doctor`.
+    let facts = crate::prompt_facts::gather_hot_facts(state).await?;
+    let payload: Vec<Value> = facts
         .into_iter()
-        .map(|(subject, predicate, object)| {
-            json!({ "subject": subject, "predicate": predicate, "object": object })
+        .map(|f| {
+            json!({
+                "subject": f.subject,
+                "predicate": f.predicate,
+                "object": f.object,
+                "affirmed_at": f.affirmed_at.to_rfc3339(),
+            })
         })
         .collect();
     Ok(json!({ "facts": payload }))

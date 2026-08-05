@@ -2638,6 +2638,92 @@ async fn dispatch_kg_assert_retracted_fact_frees_a_slot() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #4890 — Tier S re-affirmation (ADR-0028 D8 point 4)
+// ---------------------------------------------------------------------------
+
+/// Why (#4890): this is the ticket's central semantic decision and the only
+/// place it can be proven. `affirmed_at` is derived from the active row's
+/// `valid_from` rather than stored, and the decision that re-asserting a rule
+/// **verbatim** counts as re-affirmation depends entirely on `assert`
+/// rewriting `valid_from` even when the object is byte-identical. Nothing in
+/// this crate owns that behaviour — it is `KgStoreRedb::assert`'s — so a change
+/// there (an "identical write is a no-op" optimisation, say) would silently
+/// turn the doctor check into a nag that no amount of re-affirmation could
+/// clear. This test is the tripwire for that.
+/// What: asserts a fact, records its `affirmed_at`, sleeps past the storage
+/// layer's millisecond resolution, re-asserts the SAME subject/predicate/object,
+/// and asserts the surface still holds one fact whose `affirmed_at` moved
+/// strictly forward.
+#[tokio::test]
+async fn reasserting_an_identical_fact_refreshes_affirmed_at() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "affirm"}))
+        .await
+        .expect("palace_create");
+
+    let write = json!({
+        "palace": "affirm",
+        "subject": "conv-1",
+        "predicate": "has_convention",
+        "object": "Write plainly",
+    });
+
+    dispatch_tool(&state, "kg_assert", write.clone())
+        .await
+        .expect("first assert");
+    let first = affirmed_at_of(&state, "conv-1").await;
+
+    // Timestamps persist at millisecond resolution, so two asserts inside the
+    // same millisecond would be indistinguishable and the comparison below
+    // would be measuring the clock rather than the behaviour.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    dispatch_tool(&state, "kg_assert", write)
+        .await
+        .expect("re-asserting the identical fact must be admitted");
+    let second = affirmed_at_of(&state, "conv-1").await;
+
+    assert!(
+        second > first,
+        "re-asserting a verbatim-identical rule must refresh affirmed_at \
+         (first={first}, second={second})",
+    );
+
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    assert_eq!(
+        listed["facts"].as_array().expect("facts array").len(),
+        1,
+        "a re-affirmation supersedes rather than adds: {listed}",
+    );
+}
+
+/// Read the `affirmed_at` of the single Tier S fact with the given subject.
+///
+/// Parses rather than string-compares: `to_rfc3339` emits 0, 3, 6, or 9
+/// fractional digits depending on the value, so two RFC 3339 strings do not
+/// order lexicographically (a whole-second timestamp emits no fraction at all,
+/// and `+` sorts before `.`).
+async fn affirmed_at_of(state: &AppState, subject: &str) -> chrono::DateTime<chrono::Utc> {
+    let listed = dispatch_tool(state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    let facts = listed["facts"].as_array().expect("facts array").clone();
+    let row = facts
+        .iter()
+        .find(|f| f["subject"] == subject)
+        .unwrap_or_else(|| panic!("no Tier S fact for {subject}: {listed}"))
+        .clone();
+    let raw = row["affirmed_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("affirmed_at missing or not a string: {row}"));
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .unwrap_or_else(|e| panic!("affirmed_at {raw:?} is not RFC 3339: {e}"))
+        .with_timezone(&chrono::Utc)
+}
+
 /// Why (#4888): 80 characters is the boundary and must be inclusive — a rule
 /// of exactly 80 chars is legal (ADR-0028 D2).
 #[tokio::test]

@@ -184,6 +184,25 @@ async fn list_prompt_facts_endpoint_returns_hot_triples() {
         !arr.iter().any(|r| r["predicate"] == "works_at"),
         "non-hot triple leaked into prompt facts: {arr:?}"
     );
+
+    // #4890: this endpoint is what `trusty-memory doctor`'s Tier S
+    // re-affirmation check reads, and it decodes the body straight into
+    // `Vec<TierSFact>`. Decoding it the same way here pins the wire contract the
+    // check depends on — a dropped or renamed `affirmed_at` would leave the
+    // check permanently reporting "could not determine" against a healthy
+    // daemon, which is exactly the kind of silent degradation nothing else
+    // would catch.
+    let facts: Vec<crate::prompt_facts::TierSFact> =
+        serde_json::from_slice(&bytes).expect("body must decode as the doctor decodes it");
+    let alias = facts
+        .iter()
+        .find(|f| f.subject == "ts")
+        .expect("ts alias present");
+    assert!(
+        (chrono::Utc::now() - alias.affirmed_at).num_seconds() < 60,
+        "affirmed_at must be the write time, got {}",
+        alias.affirmed_at,
+    );
 }
 
 /// Why (issue #42): `DELETE /api/v1/kg/prompt-facts` must retract the

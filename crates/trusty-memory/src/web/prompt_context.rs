@@ -149,13 +149,17 @@ pub(super) struct AddAliasRequest {
 /// Why: `list_prompt_facts` returns a structured array rather than the
 /// pre-formatted Markdown so dashboards and tooling can render their own
 /// views over the raw data.
-/// What: subject/predicate/object string trio matching the underlying KG row.
+/// What: subject/predicate/object string trio matching the underlying KG row,
+/// plus the RFC 3339 `affirmed_at` (#4890) that `trusty-memory doctor` reads to
+/// find rules overdue for re-affirmation. The field is purely additive — every
+/// pre-#4890 client keeps decoding the response unchanged.
 /// Test: `list_prompt_facts_endpoint_returns_hot_triples`.
 #[derive(Serialize)]
 pub(super) struct PromptFactRow {
     subject: String,
     predicate: String,
     object: String,
+    affirmed_at: String,
 }
 
 /// Query parameters for `DELETE /api/v1/kg/prompt-facts`.
@@ -275,22 +279,26 @@ pub(super) async fn add_alias_handler(
 /// Why: Mirrors the `list_prompt_facts` MCP tool. Returning the raw triples
 /// (rather than the formatted block) lets dashboards group, search, and
 /// edit them with their own UI.
-/// What: Calls `gather_hot_triples` over the live registry and serialises
-/// each row as `{subject, predicate, object}`.
+/// What: Calls `gather_hot_facts` over the live registry and serialises each
+/// row as `{subject, predicate, object, affirmed_at}`. This is the endpoint
+/// `trusty-memory doctor`'s Tier S re-affirmation check reads (#4890) — it goes
+/// through the daemon rather than opening 93 palace files directly, so a
+/// diagnostic never contends with the daemon's write lock.
 /// Test: `list_prompt_facts_endpoint_returns_hot_triples`.
 pub(super) async fn list_prompt_facts_handler(
     State(state): State<AppState>,
     Query(_q): Query<PromptFactsQuery>,
 ) -> Result<Json<Vec<PromptFactRow>>, ApiError> {
-    let triples = crate::prompt_facts::gather_hot_triples(&state)
+    let facts = crate::prompt_facts::gather_hot_facts(&state)
         .await
-        .map_err(|e| ApiError::internal(format!("gather_hot_triples: {e:#}")))?;
-    let rows: Vec<PromptFactRow> = triples
+        .map_err(|e| ApiError::internal(format!("gather_hot_facts: {e:#}")))?;
+    let rows: Vec<PromptFactRow> = facts
         .into_iter()
-        .map(|(subject, predicate, object)| PromptFactRow {
-            subject,
-            predicate,
-            object,
+        .map(|f| PromptFactRow {
+            subject: f.subject,
+            predicate: f.predicate,
+            object: f.object,
+            affirmed_at: f.affirmed_at.to_rfc3339(),
         })
         .collect();
     Ok(Json(rows))

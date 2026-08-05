@@ -6,12 +6,13 @@
 //! `~/Library/LaunchAgents`, `~/.cache/fastembed`, and the lock file by hand
 //! to figure out what's wrong. `doctor` runs the same checks in one shot and
 //! prints a human-readable pass/fail report so the user can act immediately.
-//! What: a one-shot CLI command that runs four checks:
+//! What: a one-shot CLI command that runs five checks:
 //!   1. fastembed cache directory exists and is readable
 //!   2. launchd plist exists at `~/Library/LaunchAgents/com.trusty.memory.plist`
 //!      and contains the `FASTEMBED_CACHE_PATH` env var (macOS only)
 //!   3. The HTTP daemon responds to `GET /health` on its configured port
 //!   4. No obvious stale palace lock sidecar files (`*.lock`) under the data dir
+//!   5. No Tier S standing rule is overdue for re-affirmation (#4890, `tier_s`)
 //!
 //! Each check prints a ✅ or ❌ line. The command exits 0 if all critical
 //! checks pass, 1 otherwise.
@@ -23,12 +24,14 @@
 
 mod audit;
 mod checks;
+mod tier_s;
 
 use audit::audit_palaces;
 pub use audit::{PalaceAuditEntry, PalaceAuditStatus};
 #[cfg(target_os = "macos")]
 use checks::check_launchd_plist;
 use checks::{check_daemon_health, check_fastembed_cache, check_stale_palace_locks};
+use tier_s::check_tier_s_reaffirmation;
 
 use anyhow::Result;
 use colored::Colorize;
@@ -273,6 +276,9 @@ pub async fn handle_doctor() -> Result<()> {
 
     // Check 4: stale palace locks.
     results.push(check_stale_palace_locks());
+
+    // Check 5 (#4890): Tier S facts overdue for re-affirmation. Report only.
+    results.push(check_tier_s_reaffirmation().await);
 
     for r in &results {
         r.print();
