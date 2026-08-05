@@ -241,7 +241,10 @@ fn repair_tier_locked(
     // folds in a writer that bypassed the lock rather than dropping it.
     if manifest_dirty {
         match manifest.save_merging(&tier.dir, &base) {
-            Ok(SkillManifestSave::Written) => {}
+            // `OverwroteUnreadable` is already reported by `save_merging` at
+            // error level — louder than this warn would be — so it needs no
+            // second line here. The ledger was published either way.
+            Ok(SkillManifestSave::Written | SkillManifestSave::OverwroteUnreadable) => {}
             Ok(SkillManifestSave::Merged) => tracing::warn!(
                 tier = tier.label,
                 "the skill manifest changed during repair — a writer bypassed the \

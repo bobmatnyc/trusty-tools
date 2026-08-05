@@ -5,9 +5,10 @@
 //!
 //! Why: moved verbatim from `manifest.rs`'s inline `#[cfg(test)] mod tests` —
 //! a behavior-preserving extraction, not a rewrite — plus the #4881 lock and
-//! compare-and-swap coverage.
+//! merging-save coverage.
 //! What: covers load-of-missing, round-trip save/load, checksum matching, the
-//! ledger lock's serialisation and release, and the stale-snapshot refusal.
+//! ledger lock's serialisation and release, and the merging save's handling of
+//! a concurrent writer, of this run's removals, and of an unreadable ledger.
 //! Test: this file IS the test module for `manifest`; run with
 //! `cargo test -p trusty-agents-common -- skills::manifest`.
 
@@ -244,4 +245,43 @@ fn skill_manifest_save_merging_writes_when_unchanged() {
     let on_disk = SkillManifest::load(dir);
     assert!(on_disk.is_managed("tm-doctor"));
     assert!(on_disk.is_managed("tm-workflow"));
+}
+
+#[test]
+fn skill_manifest_save_merging_over_a_corrupt_ledger_keeps_the_base() {
+    // #4881 review: `load` maps an UNPARSEABLE ledger to the empty default, so
+    // merging from it would publish only this run's delta and silently drop
+    // everything `base` holds — unreadable treated as absent, the same fail-open
+    // shape the merge exists to remove. The base's entries must survive.
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+
+    let mut base = SkillManifest::default();
+    for i in 0..9 {
+        base.managed.insert(format!("s{i}"), sample_entry());
+    }
+    base.save(dir).unwrap();
+
+    // The ledger becomes unparseable after this run loaded its base.
+    std::fs::write(dir.join(SKILL_MANIFEST_FILE), "{ not json").unwrap();
+
+    let mut ours = base.clone();
+    ours.managed.insert("ours".into(), sample_entry());
+
+    assert_eq!(
+        ours.save_merging(dir, &base).unwrap(),
+        SkillManifestSave::OverwroteUnreadable
+    );
+
+    let on_disk = SkillManifest::load(dir);
+    assert_eq!(
+        on_disk.managed.len(),
+        10,
+        "the base's 9 entries plus ours must survive, not just ours: {:?}",
+        on_disk.managed.keys().collect::<Vec<_>>()
+    );
+    for i in 0..9 {
+        assert!(on_disk.is_managed(&format!("s{i}")));
+    }
+    assert!(on_disk.is_managed("ours"));
 }

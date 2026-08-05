@@ -503,3 +503,49 @@ fn a_racing_writer_freezes_nothing_on_either_side() {
     );
     assert!(final_manifest.checksum_matches("racing-writer-skill", "racer content"));
 }
+
+#[test]
+fn deploy_records_files_written_before_a_mid_loop_failure() {
+    // #4881 review (pre-existing, fixed here): the write loop's `?` sites can
+    // return AFTER earlier SKILL.md files are on disk. Propagating straight out
+    // skipped the manifest save, leaving those files unrecorded — and the next
+    // deploy then read them as hand-edits and skipped them forever. The ledger
+    // must be saved on the error path too.
+    //
+    // The failure is deterministic: `aaa-skill` sorts first and deploys, then
+    // `zzz-skill.md` holds invalid UTF-8, so `read_to_string` fails on it every
+    // run. Invalid bytes rather than a chmod, so the test behaves the same when
+    // the suite happens to run as root.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    fs::write(
+        src.path().join("aaa-skill.md"),
+        "---\nname: aaa-skill\n---\n\nfirst\n",
+    )
+    .unwrap();
+    fs::write(src.path().join("zzz-skill.md"), [0xff, 0xfe, 0xff]).unwrap();
+
+    let err = deploy_skills(src.path(), tgt.path());
+    assert!(err.is_err(), "an unreadable source must still fail the run");
+
+    // The file that DID get written is on disk...
+    let written = tgt.path().join("aaa-skill").join("SKILL.md");
+    assert!(written.exists(), "aaa-skill was written before the failure");
+    // ...and the ledger records it, so it is not orphaned.
+    let manifest = SkillManifest::load(tgt.path());
+    assert!(
+        manifest.is_managed("aaa-skill"),
+        "a file written before the failure must still be recorded"
+    );
+
+    // The proof that matters: a later deploy still owns it, rather than reading
+    // it as a hand-edit and skipping it forever.
+    fs::remove_file(src.path().join("zzz-skill.md")).unwrap();
+    let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+    assert!(
+        stats.skipped.is_empty(),
+        "nothing may be frozen by a mid-loop failure: skipped={:?}",
+        stats.skipped
+    );
+    assert!(stats.unchanged.contains(&"aaa-skill".to_string()));
+}

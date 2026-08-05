@@ -208,8 +208,56 @@ fn deploy_skills_locked(
         );
     }
 
+    // #4881: the write loop's failure sites (an unreadable source file, a failed
+    // `atomic_write`) can return AFTER earlier `SKILL.md` files are already on
+    // disk. Propagating straight out would skip the save below, leaving those
+    // files unrecorded — bytes newer than any recorded checksum, which the
+    // classifier reads as a hand-edit and skips forever. So the loop's error is
+    // held, the ledger is saved either way, and the error propagates after.
+    // Pre-existing (it predates this issue's lock work) but fixed here because
+    // it violates the same invariant.
+    let write_result = deploy_selected(source, dest, &names, &now, &mut manifest, &mut stats);
+
+    let save_result = manifest.save_merging(dest, &base);
+
+    // The write error comes first: it is the more specific failure, and the save
+    // has already run by this point regardless of which one is reported.
+    write_result?;
+    if save_result? == SkillManifestSave::Merged {
+        tracing::warn!(
+            dest = %dest.display(),
+            "the skill manifest changed during this deploy — a writer bypassed the \
+             ledger lock; its entries were merged rather than dropped"
+        );
+    }
+
+    Ok(stats)
+}
+
+/// Write every selected skill and record it, stopping at the first I/O failure.
+///
+/// Why (#4881): split out of [`deploy_skills_locked`] so its `?` sites cannot
+/// bypass the manifest save. Files this function has already written are on disk
+/// whether it returns `Ok` or `Err`, so the caller must save the ledger on BOTH
+/// paths — a shape that is easy to get wrong while the loop and the save share
+/// one function body, and was wrong here before this change.
+/// What: for each name, writes `<dest>/<stem>/SKILL.md` plus any
+/// `references/*.md` siblings through [`deploy_one_file`], recording each in
+/// `manifest` and `stats`. Skills whose stem contains `mcp` are rejected before
+/// any I/O (#2186). Returns the first I/O error; `manifest` and `stats` still
+/// describe everything written up to that point.
+/// Test: `deploy_records_files_written_before_a_mid_loop_failure`, plus every
+/// `deploy_*` test through the public entry point.
+fn deploy_selected(
+    source: &Path,
+    dest: &Path,
+    names: &[String],
+    now: &str,
+    manifest: &mut SkillManifest,
+    stats: &mut DeployStats,
+) -> Result<()> {
     for filename in names {
-        let stem = skill_stem(&filename).to_string();
+        let stem = skill_stem(filename).to_string();
 
         // Claude Code ships a built-in `/mcp` slash command. A deployed skill
         // whose invocable name (the stem, i.e. the directory Claude Code
@@ -225,20 +273,13 @@ fn deploy_skills_locked(
             continue;
         }
 
-        let source_path = source.join(&filename);
+        let source_path = source.join(filename);
         let content = std::fs::read_to_string(&source_path)?;
         // Claude Code discovers skills from <dest>/<name>/SKILL.md.
         let skill_dir = dest.join(&stem);
         let target_path = skill_dir.join("SKILL.md");
 
-        deploy_one_file(
-            &mut manifest,
-            &stem,
-            &target_path,
-            &content,
-            &now,
-            &mut stats,
-        )?;
+        deploy_one_file(manifest, &stem, &target_path, &content, now, stats)?;
 
         // Mirror any reference files a multi-file skill carries alongside its
         // SKILL.md (issue #2903, ported from `trusty-mpm` PR #2915 —
@@ -263,32 +304,12 @@ fn deploy_skills_locked(
                 let ref_content = std::fs::read_to_string(refs_source_dir.join(&ref_name))?;
                 let ref_key = format!("{stem}/references/{ref_name}");
                 let ref_target = skill_dir.join("references").join(&ref_name);
-                deploy_one_file(
-                    &mut manifest,
-                    &ref_key,
-                    &ref_target,
-                    &ref_content,
-                    &now,
-                    &mut stats,
-                )?;
+                deploy_one_file(manifest, &ref_key, &ref_target, &ref_content, now, stats)?;
             }
         }
     }
 
-    // #4881: every file above is ALREADY on disk, so this save must publish —
-    // failing or refusing here would leave bytes newer than their recorded
-    // checksums, which is exactly what the classifier above reads as a hand-edit
-    // and skips forever. `save_merging` folds in anything an unlocked writer
-    // published mid-deploy rather than dropping it.
-    if manifest.save_merging(dest, &base)? == SkillManifestSave::Merged {
-        tracing::warn!(
-            dest = %dest.display(),
-            "the skill manifest changed during this deploy — a writer bypassed the \
-             ledger lock; its entries were merged rather than dropped"
-        );
-    }
-
-    Ok(stats)
+    Ok(())
 }
 
 /// Deploy one managed file (a skill's `SKILL.md` or one of its

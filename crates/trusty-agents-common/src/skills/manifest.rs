@@ -92,6 +92,9 @@ pub enum SkillManifestSave {
     /// A concurrent writer had published; its entries were folded in and the
     /// merged document written.
     Merged,
+    /// The on-disk manifest existed but did not parse, so nothing could be
+    /// merged from it; the caller's own ledger was published over it.
+    OverwroteUnreadable,
 }
 
 /// Current on-disk skill manifest schema version.
@@ -199,7 +202,23 @@ impl SkillManifest {
         target_dir: &Path,
         base: &SkillManifest,
     ) -> Result<SkillManifestSave> {
-        let on_disk = Self::load(target_dir);
+        // #4881 review: an UNPARSEABLE ledger is not an empty one. `load` maps
+        // both to the default, and merging from that default would publish only
+        // this run's delta — silently dropping every entry `base` holds, which
+        // is the same fail-open shape (unreadable treated as absent) this method
+        // exists to remove. Publishing `self` instead is exactly what a plain
+        // `save` does, so this path is never worse than before the merge landed,
+        // and the entries read at load time survive.
+        let Some(on_disk) = Self::read_parsed(target_dir)? else {
+            tracing::error!(
+                target = %target_dir.display(),
+                file = SKILL_MANIFEST_FILE,
+                "the skill manifest could not be parsed — publishing this run's \
+                 ledger over it; entries it may have held are unrecoverable"
+            );
+            self.save(target_dir)?;
+            return Ok(SkillManifestSave::OverwroteUnreadable);
+        };
         if on_disk == *base {
             self.save(target_dir)?;
             return Ok(SkillManifestSave::Written);
@@ -219,6 +238,26 @@ impl SkillManifest {
         }
         merged.save(target_dir)?;
         Ok(SkillManifestSave::Merged)
+    }
+
+    /// Read the on-disk manifest, distinguishing "absent" from "unparseable".
+    ///
+    /// Why (#4881 review): [`SkillManifest::load`] collapses both into the empty
+    /// default, which is right for a first-ever deploy and wrong for corruption
+    /// — a merge that starts from "empty" because it could not read the file
+    /// publishes a ledger missing everything the file held. Only
+    /// [`SkillManifest::save_merging`] needs the distinction, so this stays
+    /// private rather than adding a second public load API.
+    /// What: `Ok(Some(default))` when the file is absent (nothing was ever
+    /// deployed here), `Ok(Some(parsed))` when it reads, `Ok(None)` when it
+    /// exists but does not parse. A non-`NotFound` I/O error propagates.
+    /// Test: `skill_manifest_save_merging_over_a_corrupt_ledger_keeps_the_base`.
+    fn read_parsed(target_dir: &Path) -> Result<Option<SkillManifest>> {
+        match std::fs::read_to_string(target_dir.join(SKILL_MANIFEST_FILE)) {
+            Ok(raw) => Ok(serde_json::from_str(&raw).ok()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(Self::default())),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Whether `filename` is a trusty-mpm-managed skill file.
