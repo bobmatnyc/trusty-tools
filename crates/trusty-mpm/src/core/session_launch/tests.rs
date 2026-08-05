@@ -48,7 +48,9 @@ impl EnvVarGuard {
     /// `PathBuf` unnecessarily.
     /// What: snapshots the prior value and sets `key=value`; restored in `Drop`.
     /// Test: used by `inject_trusty_memory_mcp_override_env_wins`.
-    fn set_str(key: &'static str, value: &str) -> Self {
+    // #4255: `pub(super)` so the sibling `tests_search_index` module can opt
+    // into real daemon writes via `TRUSTY_ALLOW_PRODUCTION_STATE`.
+    pub(super) fn set_str(key: &'static str, value: &str) -> Self {
         let prev = std::env::var(key).ok();
         // SAFETY: serialized by `#[serial]`; restored in `Drop`.
         unsafe {
