@@ -136,8 +136,8 @@ pub struct RecoveryTally {
 ///
 /// Never deletes or deregisters: an index either returns to the registry or
 /// stays where it is.
-/// Test: `timeout_recovery_returns_a_timed_out_index_to_the_registry`,
-/// `timeout_recovery_leaves_deferred_entries_alone`.
+/// Test: `timed_out_index_is_driven_back_into_the_registry`,
+/// `recovery_pass_leaves_deferred_entries_alone`.
 pub async fn recover_timed_out_indexes(
     state: &Arc<SearchAppState>,
     attempts: &dashmap::DashMap<IndexId, u32>,

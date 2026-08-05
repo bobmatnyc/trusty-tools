@@ -34,7 +34,7 @@ use crate::service::SearchAppState;
 /// once-per-boot value turns `O(dead_entries × roots)` into `O(roots)`.
 /// What: the surviving candidate roots, already filtered for a populated
 /// `index.redb` and for roots claimed by a live entry.
-/// Test: `relocation_candidates_are_computed_once_for_the_whole_boot`.
+/// Test: `dead_entries_do_not_consume_the_live_index_budget`.
 pub(crate) struct RelocationCandidates {
     /// Unclaimed roots holding a non-empty colocated `index.redb`.
     roots: Vec<std::path::PathBuf>,
@@ -52,7 +52,7 @@ pub(crate) struct RelocationCandidates {
 /// What: [`Self::Ready`] carries the shared set; [`Self::Unavailable`] means
 /// salvage is disabled or its budget is spent, and a missing root is then
 /// skipped after its triage stat and nothing more.
-/// Test: `missing_root_entry_is_skipped_when_salvage_unavailable`.
+/// Test: `disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat`.
 #[derive(Clone)]
 pub(crate) enum RelocationScan {
     /// Candidates collected once for this boot; reused by every entry.
@@ -77,7 +77,7 @@ pub(crate) enum RelocationScan {
 /// `e.id != entry.id` self-exclusion the old code performed was a no-op for
 /// exactly this population — which is what makes one shared set correct rather
 /// than an approximation.
-/// Test: `relocation_candidates_are_computed_once_for_the_whole_boot`.
+/// Test: `dead_entries_do_not_consume_the_live_index_budget`.
 pub(crate) fn collect_relocation_candidates(
     all_entries: &[PersistedIndex],
     _grant: &SalvageGrant,

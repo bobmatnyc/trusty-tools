@@ -475,8 +475,8 @@ struct SalvageTally {
 /// refuses are left exactly as they are: registered, on-disk data untouched,
 /// retried next boot. Nothing here reaps a registration or deletes a corpus —
 /// a failed probe is not evidence about the corpus (#4846 operator note).
-/// Test: `missing_root_entry_is_skipped_when_salvage_unavailable`,
-/// `salvage_phase_walks_tracked_roots_once_for_the_whole_cohort`.
+/// Test: `dead_entries_do_not_consume_the_live_index_budget`,
+/// `disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat`.
 async fn salvage_missing_root_entries(
     state: &SearchAppState,
     embedder: &Arc<dyn crate::core::Embedder>,
