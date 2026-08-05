@@ -52,9 +52,19 @@
 //! agents deploy into, on both the daemon and the flag-less standalone `tm run`
 //! path, which is why provisioning the complete set here remains mandatory. It
 //! also still carries AUTH + TRUST isolation (keychain / `.credentials.json` /
-//! `.claude.json` keyed to this path). SKILLS are unchanged: they continue to
-//! deploy per-workspace via `prepare_session`, and this module's skill deploy
-//! remains belt-and-suspenders for the standalone path.
+//! `.claude.json` keyed to this path).
+//!
+//! SKILLS ride the same tier (corrected #4873). The older note here said they
+//! "continue to deploy per-workspace via `prepare_session`" and that this
+//! module's skill deploy was belt-and-suspenders. That predates
+//! `SETTING_SOURCES_FLAG_RELOCATED`: the managed spawn resolves `config_dir`
+//! to `Some`, so it launches with `--setting-sources user,project,local` and
+//! the `user` tier this directory relocates is read for skills exactly as it
+//! is for agents. The deploy below is load-bearing, not a backup — measured
+//! 2026-08-05, 49 of 52 skills under `$CLAUDE_CONFIG_DIR/skills/` were
+//! byte-identical to the running binary's bundled source, and all three
+//! exceptions were checksum-frozen hand edits the deployer is correct to
+//! decline.
 //!
 //! What: [`ensure_managed_config_dir`] (1) runs the canonical standalone
 //! scaffolding ([`ensure_global_config_dir`] — settings.json + the MPM hook
@@ -68,11 +78,14 @@
 //! [`crate::core::agent_source::autodeploy_agents_for`] — before that, only the
 //! manual `tm install` ever wrote `~/.trusty-mpm/framework/agents/`, so a
 //! merged, compiled-in `BASE-AGENT.md` change silently reached no running
-//! agent.
+//! agent. Since #4873 the SKILL half warns (once, bounded) about every file it
+//! declined to refresh — the deploy itself already ran on all three run paths;
+//! only the evidence of it was missing.
 //! Test: `ensure_managed_config_dir_deploys_full_roster`,
 //! `ensure_managed_config_dir_is_idempotent`,
 //! `ensure_managed_config_dir_refreshes_stale_bundled_agents`,
-//! `ensure_managed_config_dir_survives_an_unwritable_agent_target`.
+//! `ensure_managed_config_dir_survives_an_unwritable_agent_target`,
+//! `crates/trusty-mpm/src/core/managed_config_tests.rs`.
 
 use std::path::Path;
 
@@ -87,10 +100,12 @@ use crate::core::standalone::global_config::ensure_global_config_dir;
 /// the session an isolated, fully-scaffolded config home (auth, trust, MCP
 /// stubs, output-styles) plus the full framework roster/skills. The AGENT
 /// roster deployed here is load-bearing on BOTH the daemon and the standalone
-/// path (issue #4409 — see the module doc's corrected discovery note); the
-/// skill deploy stays belt-and-suspenders for the daemon, since skills still
-/// load from the per-workspace project tier. Runs on every spawn because it is
-/// cheap and idempotent, matching the standalone `tm run` contract.
+/// path (issue #4409 — see the module doc's corrected discovery note), and so
+/// is the SKILL deploy since the spawn began passing
+/// `--setting-sources user,project,local` (#4873 — the module doc's SKILLS
+/// paragraph retires the older "belt-and-suspenders" reading). Runs on every
+/// spawn, resume, and in-place relaunch because it is cheap and idempotent,
+/// matching the standalone `tm run` contract.
 /// What: resolves the framework layout from the daemon's fixed home-relative
 /// root ([`FrameworkPaths::default`]), then:
 /// 1. calls [`ensure_global_config_dir`]`(&fw.root, config_dir)` for the shared
@@ -124,10 +139,28 @@ pub fn ensure_managed_config_dir(config_dir: &Path) -> anyhow::Result<()> {
 /// What: performs the two-phase provisioning described on
 /// [`ensure_managed_config_dir`], using `fw` for both the `ensure_global_config_dir`
 /// managed-root argument (`fw.root`) and the full-roster source dirs.
+///
+/// #4873 — WHY THE SKILL HALF ALSO RUNS ON RESUME AND IN-PLACE RELAUNCH.
+/// This function is the choke point all THREE run paths share, because each
+/// reaches it through `runtime::claude_code::prepare_managed_config`:
+/// `ClaudeCodeAdapter::spawn` (fresh), `ClaudeCodeAdapter::spawn_resume`
+/// (`daemon::managed_routes::lifecycle::resume_managed`), and
+/// `runtime::claude_code::build_inplace_resume_command` (bare `tm` in a
+/// managed pane). So the skill deploy below already satisfies the "deploy on
+/// every run, not just `tm install`" ruling, exactly as the agent half does —
+/// what was missing was any SIGN of it: a skill the deployer declines is
+/// silent, which is why three checksum-frozen skills read as "deployment never
+/// runs". [`skill_skip_summary`] supplies that sign.
+///
 /// Test: `ensure_managed_config_dir_deploys_full_roster`,
 /// `ensure_managed_config_dir_is_idempotent`,
 /// `ensure_managed_config_dir_refreshes_stale_bundled_agents`,
-/// `ensure_managed_config_dir_survives_an_unwritable_agent_target`.
+/// `ensure_managed_config_dir_survives_an_unwritable_agent_target`,
+/// `ensure_managed_config_dir_refreshes_a_stale_managed_skill`,
+/// `ensure_managed_config_dir_skill_deploy_is_a_noop_when_unchanged`,
+/// `ensure_managed_config_dir_preserves_a_project_custom_skill`,
+/// `ensure_managed_config_dir_skips_a_frozen_skill`,
+/// `ensure_managed_config_dir_warns_when_a_frozen_skill_is_skipped`.
 pub fn ensure_managed_config_dir_with_root(
     fw: &FrameworkPaths,
     config_dir: &Path,
@@ -177,274 +210,59 @@ pub fn ensure_managed_config_dir_with_root(
     // reasoning — see that function's doc comment for why the project-custom
     // tier is naturally N/A at this destination).
     let skills_dest = config_dir.join("skills");
-    deploy_all_skill_tiers(
+    let skills = deploy_all_skill_tiers(
         &fw.skill_source_dir(),
         &fw.user_skill_source_dir(),
         &skills_dest,
         |_| true,
     )
     .map_err(|e| anyhow::anyhow!("failed to deploy full skill set into managed config dir: {e}"))?;
+    // #4873: a declined skill was SILENT, so a stale one looked like a deploy
+    // that never ran — see this function's doc for why that is the whole defect.
+    if let Some(line) = skill_skip_summary(&skills.stats.skipped) {
+        tracing::warn!("managed config dir: {line}");
+    }
 
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    /// Build a `FrameworkPaths` whose framework SOURCE dirs are populated from a
-    /// small but representative slice of the real bundled roster, so the deploy
-    /// assertions do not depend on a prior `tm install` or the git submodule.
-    fn seed_framework(base: &Path) -> FrameworkPaths {
-        let fw = FrameworkPaths::under(base);
-        std::fs::create_dir_all(&fw.agents).unwrap();
-        std::fs::create_dir_all(&fw.skills).unwrap();
-        // A minimal set spanning the roster's shape: a base to inherit from, a
-        // core specialist, and a couple of the agents #1996 called out.
-        let agents: &[(&str, &str)] = &[
-            (
-                "BASE-AGENT.md",
-                "---\nname: BASE-AGENT\ndescription: base\n---\n\nBase.\n",
-            ),
-            (
-                "engineer.md",
-                "---\nname: engineer\ndescription: implementation specialist\n---\n\nEngineer.\n",
-            ),
-            (
-                "rust-engineer.md",
-                "---\nname: rust-engineer\ndescription: rust specialist\n---\n\nRust.\n",
-            ),
-            (
-                "research.md",
-                "---\nname: research\ndescription: research specialist\n---\n\nResearch.\n",
-            ),
-            (
-                "qa.md",
-                "---\nname: qa\ndescription: quality specialist\n---\n\nQA.\n",
-            ),
-            (
-                "version-control.md",
-                "---\nname: version-control\ndescription: git specialist\n---\n\nVCS.\n",
-            ),
-            (
-                "ticketing.md",
-                "---\nname: ticketing\ndescription: ticketing specialist\n---\n\nTickets.\n",
-            ),
-        ];
-        for (name, body) in agents {
-            std::fs::write(fw.agents.join(name), body).unwrap();
-        }
-        std::fs::write(
-            fw.skills.join("tm-doctor.md"),
-            "---\nname: tm-doctor\ndescription: doctor\n---\n\nDoctor.\n",
-        )
-        .unwrap();
-        fw
+/// One bounded warning line for the skills a deploy declined to write, or
+/// `None` when it declined nothing.
+///
+/// Why: this closes for SKILLS the half of #4840 that PR #4848 closed for
+/// agents. `deploy_one_file` skips a checksum-frozen (hand-edited) or
+/// unmanaged skill and reports it only in the returned `DeployStats`, which
+/// every caller here discarded — so a skill frozen against the manifest stayed
+/// stale on every run, forever, with no warning anywhere. That silence is what
+/// #4873 was filed as: three frozen skills read as "skill deployment never
+/// runs on resume", when deployment had in fact run and correctly declined
+/// them. The skip itself is CORRECT and is deliberately left alone — a hand
+/// edit must survive, and `tm doctor --fix-skills --include-frozen` is the
+/// remedy the pointer names.
+/// What: a count plus a five-entry preview and that remedy pointer. Matches
+/// [`crate::core::agent_source::deploy_summary_lines`]'s policy (issue #2504:
+/// count + preview, never one line per file) because this runs on EVERY spawn,
+/// resume, and in-place relaunch and the frozen set is not reconciled until
+/// someone runs the doctor — one line per file would be permanent log spam.
+/// Pure — no I/O, no logging.
+/// Test: `skill_skip_summary_is_none_on_a_clean_deploy`,
+/// `skill_skip_summary_counts_and_previews`,
+/// `skill_skip_summary_elides_beyond_five`,
+/// `ensure_managed_config_dir_warns_when_a_frozen_skill_is_skipped`.
+fn skill_skip_summary(skipped: &[String]) -> Option<String> {
+    if skipped.is_empty() {
+        return None;
     }
-
-    #[test]
-    fn ensure_managed_config_dir_deploys_full_roster() {
-        let tmp = TempDir::new().unwrap();
-        let fw = seed_framework(tmp.path());
-        let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
-
-        ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
-
-        // Scaffolding landed.
-        assert!(config_dir.join("settings.json").exists());
-        assert!(config_dir.join(".mcp.json").exists());
-
-        // Every seeded specialist must be present AND spawnable (has a
-        // `description` in its deployed frontmatter).
-        let agents_dir = config_dir.join("agents");
-        for name in [
-            "engineer",
-            "rust-engineer",
-            "research",
-            "qa",
-            "version-control",
-            "ticketing",
-        ] {
-            let path = agents_dir.join(format!("{name}.md"));
-            assert!(path.exists(), "agent {name} must be deployed to config dir");
-            let body = std::fs::read_to_string(&path).unwrap();
-            assert!(
-                body.contains("description:"),
-                "deployed agent {name} must carry a description (spawnable)"
-            );
-        }
-
-        // Skills landed too.
-        assert!(
-            config_dir.join("skills/tm-doctor/SKILL.md").exists(),
-            "tm-* skills must be deployed to config dir"
-        );
-    }
-
-    #[test]
-    fn ensure_managed_config_dir_is_idempotent() {
-        let tmp = TempDir::new().unwrap();
-        let fw = seed_framework(tmp.path());
-        let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
-
-        ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
-        let first = std::fs::read_to_string(config_dir.join("agents/engineer.md")).unwrap();
-
-        // A second call must not fail and must leave the deployed roster intact.
-        ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
-        let second = std::fs::read_to_string(config_dir.join("agents/engineer.md")).unwrap();
-
-        assert_eq!(first, second, "re-provisioning must be idempotent");
-    }
-
-    #[test]
-    fn ensure_managed_config_dir_refreshes_stale_bundled_agents() {
-        // #4840: the exact measured shape — a framework agent source written by
-        // an older `tm install` sits on disk while the running binary embeds a
-        // newer one. Provisioning must close that gap with no manual step.
-        let tmp = TempDir::new().unwrap();
-        let fw = FrameworkPaths::under(tmp.path());
-        std::fs::create_dir_all(&fw.agents).unwrap();
-        std::fs::write(
-            fw.agents.join("BASE-AGENT.md"),
-            "---\nname: BASE-AGENT\ndescription: base\n---\n\nSTALE-SENTINEL-4840\n",
-        )
-        .unwrap();
-        let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
-
-        ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(fw.agents.join("BASE-AGENT.md")).unwrap(),
-            crate::core::bundle::BASE_AGENT,
-            "the bundled agent SOURCE must be re-materialized from the running binary"
-        );
-        let deployed = std::fs::read_to_string(config_dir.join("agents/BASE-AGENT.md")).unwrap();
-        assert!(
-            !deployed.contains("STALE-SENTINEL-4840"),
-            "the stale composition must not survive into the deploy target"
-        );
-    }
-
-    #[test]
-    fn ensure_managed_config_dir_survives_an_unwritable_agent_target() {
-        // Fail open (#4840): a broken agent deploy must never block a session.
-        // A regular file where `<config_dir>/agents` belongs makes every write
-        // under it impossible and cannot be repaired by `create_dir_all`.
-        let tmp = TempDir::new().unwrap();
-        let fw = FrameworkPaths::under(tmp.path());
-        let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::write(config_dir.join("agents"), "blocking file\n").unwrap();
-
-        ensure_managed_config_dir_with_root(&fw, &config_dir)
-            .expect("an undeployable agent roster must not fail provisioning");
-
-        assert!(
-            config_dir.join("settings.json").exists(),
-            "the rest of the config dir must still be provisioned"
-        );
-    }
-
-    #[test]
-    fn ensure_managed_config_dir_deploys_user_tier_skill() {
-        // PR #2818 review (round 3, MEDIUM decision): a user-custom skill
-        // (`fw.user_skill_source_dir()`, i.e. `<root>/skills`) must reach the
-        // tm-global roster, not just per-project deploys.
-        let tmp = TempDir::new().unwrap();
-        let fw = seed_framework(tmp.path());
-        std::fs::create_dir_all(&fw.user_skills).unwrap();
-        std::fs::write(
-            fw.user_skills.join("my-custom-skill.md"),
-            "---\nname: my-custom-skill\n---\n\nUSER CUSTOM.\n",
-        )
-        .unwrap();
-
-        let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
-        ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
-
-        assert!(
-            config_dir.join("skills/my-custom-skill/SKILL.md").exists(),
-            "user-custom skill must be deployed to the tm-global config dir"
-        );
-    }
-
-    /// Static verification against the REAL bundled roster (`src/assets/agents`,
-    /// `src/assets/skills`). Ignored by default because it composes and writes the
-    /// full ~40-agent set; run explicitly to prove the complete specialist roster
-    /// deploys and that every deployed agent is spawnable (carries a `description`):
-    ///
-    /// `cargo test -p trusty-mpm --lib manual_static_verify_full_roster -- --ignored --nocapture`
-    #[test]
-    #[ignore = "static verification — composes the full real roster; run explicitly"]
-    fn manual_static_verify_full_roster() {
-        let tmp = TempDir::new().unwrap();
-        let fw = FrameworkPaths::under(tmp.path());
-        std::fs::create_dir_all(&fw.agents).unwrap();
-        std::fs::create_dir_all(&fw.skills).unwrap();
-
-        // Copy the REAL bundled raw sources into the framework source dirs.
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        for (src, dst) in [
-            (manifest.join("src/assets/agents"), &fw.agents),
-            (manifest.join("src/assets/skills"), &fw.skills),
-        ] {
-            for entry in std::fs::read_dir(&src).unwrap() {
-                let entry = entry.unwrap();
-                if entry.path().extension().and_then(|e| e.to_str()) == Some("md") {
-                    std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
-                }
-            }
-        }
-
-        let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
-        ensure_managed_config_dir_with_root(&fw, &config_dir).unwrap();
-
-        // List every deployed agent and confirm each is spawnable.
-        let agents_dir = config_dir.join("agents");
-        let mut deployed: Vec<String> = std::fs::read_dir(&agents_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        deployed.sort();
-
-        println!("\n=== deployed agents ({}) ===", deployed.len());
-        let mut missing_desc = Vec::new();
-        for name in &deployed {
-            let body = std::fs::read_to_string(agents_dir.join(name)).unwrap();
-            let has_desc = body.contains("description:");
-            println!("  {name}  spawnable={has_desc}");
-            // BASE-*.md are inheritance templates (parents of `extends:` agents),
-            // intentionally without a `description` and never independently
-            // spawnable — exclude them from the spawnable requirement.
-            if !has_desc && !name.starts_with("BASE-") {
-                missing_desc.push(name.clone());
-            }
-        }
-
-        // The specialists #1996 and the task call out must all be present.
-        for required in [
-            "engineer.md",
-            "rust-engineer.md",
-            "research.md",
-            "qa.md",
-            "local-ops.md",
-            "version-control.md",
-            "ticketing.md",
-            "documentation.md",
-            "security.md",
-        ] {
-            assert!(
-                deployed.iter().any(|d| d == required),
-                "required agent {required} missing from deployed roster: {deployed:?}"
-            );
-        }
-        assert!(
-            missing_desc.is_empty(),
-            "these deployed agents are not spawnable (no description): {missing_desc:?}"
-        );
-    }
+    Some(format!(
+        "warning: {} skill file(s) were NOT refreshed — each is user-owned \
+         (hand-edited away from its recorded checksum, or never managed here), \
+         so the bundled version was withheld: {}. Run \
+         `tm doctor --fix-skills --include-frozen` to adopt them.",
+        skipped.len(),
+        crate::core::agent_source::preview(skipped, 5)
+    ))
 }
+
+#[cfg(test)]
+#[path = "managed_config_tests.rs"]
+mod tests;
