@@ -27,6 +27,17 @@ tracked as GitHub issue **#2611**.
 > §2 proposes the target design; §3 lists open questions requiring Bob's
 > decision before implementation starts. No code changes ship with this spec.
 
+> **Topology note (2026-08-05).** The `.base` bare-clone protected-clone
+> topology this spec is written against — a protected `.base` clone at
+> `~/trusty-mpm-projects/<owner>/<repo>/.base` with session worktrees nested
+> under `.base/.worktrees/<session-id>/` — is retired by owner ruling.
+> Worktrees now provision directly under `./.worktrees` at the project root,
+> with no protected `.base` intermediate clone. §1's findings are a dated
+> empirical snapshot (2026-07-14) of the topology as it stood then; §2's
+> `base` facet and `overlay_of` design predate the retirement and would need
+> reconciling against the current layout before implementation. This spec is
+> still Draft (see Status above) and no code has shipped against it.
+
 ---
 
 ## 0. Motivating directive (Bob, verbatim, 2026-07-14)
@@ -183,10 +194,13 @@ For any `RepoIdentity`, trusty-search should be able to enumerate its known
   before tm provisioned anything).
 - **`base`** — the tm-managed protected clone at
   `~/trusty-mpm-projects/<owner>/<repo>/.base` (or `…/<owner>/<repo>/` when
-  unworktreed — per DOC-34's FULL-SEGREGATION convention). This facet is
-  currently **never indexed at all** (§1.2) and should become the canonical
-  full index for a managed repo — the thing every worktree's delta is
-  computed against.
+  unworktreed — per DOC-34's FULL-SEGREGATION convention, since retired — see
+  the topology note above). This facet is currently **never indexed at all**
+  (§1.2) and should become the canonical full index for a managed repo — the
+  thing every worktree's delta is computed against. Post-retirement, the
+  equivalent full-index anchor would be the managed clone at
+  `~/trusty-mpm-projects/<owner>/<repo>/` directly, with worktrees as
+  `./.worktrees/<name>` siblings rather than a `.base`-nested shape.
 - **`worktree-delta`** — one per session worktree, computed against the
   `base` facet's HEAD, and delta-indexed for only the changed files (reusing
   the reconcile.rs git-diff-and-reindex mechanism, §1.5) — never a full walk

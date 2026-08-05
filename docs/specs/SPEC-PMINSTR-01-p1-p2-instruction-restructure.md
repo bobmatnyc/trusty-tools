@@ -516,7 +516,13 @@ load to the repo's root `CLAUDE.md`. The **exact mechanism**:
 1. `tm`'s managed-session provisioner
    (`crates/trusty-mpm/src/provisioner/workspace.rs::provision_in`) always
    nests the session worktree under the project root:
-   `project_dir/.base/.worktrees/<session-id>/`.
+   `project_dir/.base/.worktrees/<session-id>/` (the path shape at the time of
+   this investigation; the `.base` bare-clone topology is retired as of
+   2026-08 — worktrees now provision directly under `project_dir/.worktrees/`,
+   with no intermediate `.base` clone). This section's root-cause mechanism
+   (§1–§3 below) is unaffected by that topology change: any nested worktree
+   under the project root, `.base`-prefixed or not, still carries its own
+   git-tracked copy of the root `CLAUDE.md`.
 2. Because that worktree checks out the same branch as the main checkout, it
    carries its **own git-tracked copy** of the root `CLAUDE.md`.
 3. Claude Code's own native memory loader ascends parent directories and

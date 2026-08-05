@@ -96,7 +96,7 @@ regression.
 
 | # | Fix | Why |
 |---|---|---|
-| 1 | CI guard: fail if root `CLAUDE.md` is tracked; repair the stale `.base` checkout (on branch `pr-2236`, 423 commits behind — resurrects #2300 double-context-load in live sessions) | Live regression, 1-line fix |
+| 1 | CI guard: fail if root `CLAUDE.md` is tracked; repair the stale `.base` checkout (on branch `pr-2236`, 423 commits behind — resurrects #2300 double-context-load in live sessions; the `.base` bare-clone topology this item refers to is retired as of 2026-08 — worktrees now provision under `./.worktrees` at the project root) | Live regression, 1-line fix |
 | 2 | Sync branch protection to all 11 blocking checks (only 6 mechanically required today) | Cheapest gap-close found |
 | 3 | Scheduled `cargo audit` workflow — SECURITY.md falsely claims it runs in CI; 3 High advisories open with no re-triage trigger (#2433, #2434, #2437) | Doc/code contradiction on a security claim |
 | 4 | tm daemon origin guard: single handler → router-wide | Same #3268 pattern, known template |

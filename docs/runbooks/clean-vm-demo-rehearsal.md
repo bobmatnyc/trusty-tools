@@ -179,7 +179,7 @@ tm sessions attach <SESSION-ID>
 pwd
 ```
 
-**Expected:** Shows the worktree path (e.g., `.trusty-mpm-projects/<user>/<repo>/.base/.worktrees/<uuid>`).
+**Expected:** Shows the worktree path (e.g., `.trusty-mpm-projects/<user>/<repo>/.worktrees/<uuid>`).
 
 ---
 

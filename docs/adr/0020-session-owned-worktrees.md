@@ -6,6 +6,7 @@
 - **Reversibility Cost:** Low — purely additive (`#[serde(default)]` fields, a JSON sentinel payload replacing a zero-byte convention); no destructive migration, no schema break
 - **Decision Drivers:** worktree data-loss risk from unattributed reclamation, multiple independent worktree stores with no ownership concept, safe-default bias (never delete over accidentally deleting live work)
 - **Supersedes / Superseded by:** none (amended by ADR-0023, which promotes this ADR's git-list cross-check into an explicit existence-authority principle and adds a rebuildability requirement on the ownership registry; this ADR's sentinel, registry field, and owner-gating decisions remain in force)
+- **Topology note (2026-08-05):** The `.base` bare-clone worktree store described in Context/item 1 below is retired by owner ruling; worktrees now provision exclusively under `./.worktrees` at the project root, with no protected `.base` intermediate clone. Context, Decision, and Consequences below are left as originally accepted per the ADR immutability rule (`docs/adr/README.md`) and describe the topology as it stood on 2026-07-22; they are not an edit to that history. The sentinel/registry/owner-gating mechanism this ADR establishes is topology-agnostic and remains in force for the current `./.worktrees` shape.
 
 ## Context
 
