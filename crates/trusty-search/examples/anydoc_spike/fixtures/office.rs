@@ -12,8 +12,7 @@ use zip::write::FileOptions;
 use zip::ZipWriter;
 
 const W_NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
-const S_NS: &str =
-    r#"xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main""#;
+const S_NS: &str = r#"xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main""#;
 
 /// Zip a set of (path, contents) parts into an OOXML package.
 fn package(parts: &[(&str, String)]) -> Vec<u8> {
@@ -104,7 +103,11 @@ fn table(rows: usize, cols: usize, tag: &str) -> String {
 /// `n` plain paragraphs, no headings and no tables.
 pub fn docx_flat(n: usize) -> Vec<u8> {
     let body: String = (0..n)
-        .map(|i| para(&format!("Paragraph {i}: the quick brown fox jumps over the lazy dog.")))
+        .map(|i| {
+            para(&format!(
+                "Paragraph {i}: the quick brown fox jumps over the lazy dog."
+            ))
+        })
         .collect();
     docx_package(body)
 }
@@ -185,10 +188,8 @@ fn xlsx_package(sheets: Vec<(String, String)>) -> Vec<u8> {
     for (i, (_, xml)) in sheets.into_iter().enumerate() {
         parts.push((format!("xl/worksheets/sheet{}.xml", i + 1), xml));
     }
-    let borrowed: Vec<(&str, String)> = parts
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.clone()))
-        .collect();
+    let borrowed: Vec<(&str, String)> =
+        parts.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
     package(&borrowed)
 }
 
@@ -212,7 +213,9 @@ fn inline_cell(r: usize, c: usize, value: &str) -> String {
 }
 
 fn sheet_xml(inner: String) -> String {
-    format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet {S_NS}>{inner}</worksheet>"#)
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet {S_NS}>{inner}</worksheet>"#
+    )
 }
 
 /// `sheets` worksheets, each a dense `rows` x `cols` grid of inline strings.

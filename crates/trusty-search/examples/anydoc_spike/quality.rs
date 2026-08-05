@@ -87,7 +87,10 @@ fn structure_report(f: &Fixture) {
     println!("| signal | native | anydoc |");
     println!("|---|---:|---:|");
     for (label, count) in [
-        ("markdown heading lines (`#`)", count_headings as fn(&str) -> usize),
+        (
+            "markdown heading lines (`#`)",
+            count_headings as fn(&str) -> usize,
+        ),
         ("table delimiter rows (`| --- |`)", count_table_rules),
         ("table pipe characters", count_pipes),
     ] {
@@ -118,7 +121,9 @@ fn present(o: &Outcome, needle: &str) -> &'static str {
 }
 
 fn count_headings(s: &str) -> usize {
-    s.lines().filter(|l| l.trim_start().starts_with('#')).count()
+    s.lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .count()
 }
 
 fn count_table_rules(s: &str) -> usize {

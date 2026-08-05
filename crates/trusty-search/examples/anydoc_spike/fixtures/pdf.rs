@@ -34,11 +34,7 @@ fn assemble(objects: &[String]) -> Vec<u8> {
 }
 
 fn content_stream(ops: &str) -> String {
-    format!(
-        "<< /Length {} >>\nstream\n{}\nendstream",
-        ops.len(),
-        ops
-    )
+    format!("<< /Length {} >>\nstream\n{}\nendstream", ops.len(), ops)
 }
 
 /// Single page carrying one text-showing operator.

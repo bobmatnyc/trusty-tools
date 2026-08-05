@@ -123,13 +123,15 @@ pub fn run(dir: &Path) {
             cats.push((engine, msg.clone(), *n));
         }
     }
-    cats.sort_by(|a, b| b.2.cmp(&a.2));
+    cats.sort_by_key(|c| std::cmp::Reverse(c.2));
     for (engine, msg, n) in cats {
         println!("| {} | {} | {} |", engine, n, msg);
     }
 
     println!("\n### Per-file\n");
-    println!("| file | bytes | native chars | anydoc chars | native ms | anydoc ms | native | anydoc |");
+    println!(
+        "| file | bytes | native chars | anydoc chars | native ms | anydoc ms | native | anydoc |"
+    );
     println!("|---|---:|---:|---:|---:|---:|---|---|");
     for r in &rows {
         println!("{r}");
@@ -175,7 +177,9 @@ fn usable(o: &Outcome) -> bool {
 fn short(o: &Outcome) -> &'static str {
     match o {
         Outcome::Ok { text, .. } if text.trim().is_empty() => "empty",
-        Outcome::Ok { warning: Some(_), .. } => "ok+warn",
+        Outcome::Ok {
+            warning: Some(_), ..
+        } => "ok+warn",
         Outcome::Ok { .. } => "ok",
         Outcome::Err(_) => "err",
     }

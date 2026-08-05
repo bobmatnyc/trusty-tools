@@ -43,11 +43,7 @@ fn assess(name: &str, path: &std::path::Path) {
                 n.lines().filter(|l| !l.trim().is_empty()).count(),
                 a.lines().filter(|l| !l.trim().is_empty()).count()
             );
-            println!(
-                "| extracted chars | {} | {} |\n",
-                n.len(),
-                a.len()
-            );
+            println!("| extracted chars | {} | {} |\n", n.len(), a.len());
             println!(
                 "Index-level reading: the merge span is layout metadata. What reaches a chunk is \
                  the anchor's text either way, so a clipped span changes the rendered table shape \

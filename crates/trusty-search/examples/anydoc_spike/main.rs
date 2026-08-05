@@ -48,10 +48,21 @@ fn main() {
     eprintln!("corpus: {}", dir.display());
 
     println!("# anydoc spike measurements\n");
-    println!("- host: {} {}", std::env::consts::OS, std::env::consts::ARCH);
+    println!(
+        "- host: {} {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
     println!("- anydoc: 0.1.3");
     println!("- native: `trusty_search::core::extract::extract_text`");
-    println!("- profile: {}\n", if cfg!(debug_assertions) { "debug" } else { "release" });
+    println!(
+        "- profile: {}\n",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+    );
 
     match cmd {
         "bench" => bench::run(&corpus),
