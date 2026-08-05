@@ -1,32 +1,45 @@
 {
   "mcpServers": {
-    "trusty-search": {
-      "type": "stdio",
-      "command": "trusty-search",
-      "args": [
-        "serve"
-      ]
-    },
-    "trusty-mpm": {
-      "type": "stdio",
-      "command": "trusty-mpm",
-      "args": [
-        "serve",
-        "--stdio"
-      ]
+    "tickets-mcp": {
+      "args": [],
+      "command": "tickets-mcp",
+      "type": "stdio"
     },
     "trusty-memory": {
-      "type": "stdio",
-      "command": "trusty-memory",
       "args": [
         "serve",
         "--stdio"
-      ]
+      ],
+      "command": "trusty-memory",
+      "env": {
+        "TRUSTY_MEMORY_PALACE": "bobmatnyc-trusty-tools"
+      },
+      "type": "stdio"
     },
-    "tickets-mcp": {
-      "type": "stdio",
-      "command": "tickets-mcp",
-      "args": []
+    "trusty-mpm": {
+      "args": [
+        "serve",
+        "--stdio"
+      ],
+      "command": "trusty-mpm",
+      "type": "stdio"
+    },
+    "trusty-review": {
+      "args": [
+        "serve",
+        "--stdio"
+      ],
+      "command": "trusty-review",
+      "type": "stdio"
+    },
+    "trusty-search": {
+      "args": [
+        "serve",
+        "--index",
+        "tm-trusty-tools-04"
+      ],
+      "command": "trusty-search",
+      "type": "stdio"
     }
   }
 }
