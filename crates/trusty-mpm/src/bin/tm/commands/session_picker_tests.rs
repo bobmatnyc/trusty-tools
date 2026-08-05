@@ -118,7 +118,7 @@ fn parse_picker_choice_launch_new_uses_max_slot_after_reorder() {
     );
     assert_eq!(
         parse_picker_choice("32", &sessions, false),
-        PickerDecision::LaunchNew
+        PickerDecision::LaunchNew(None)
     );
 }
 
