@@ -2481,3 +2481,440 @@ async fn dispatch_palace_info_reports_room_count() {
     assert_eq!(info["room_count"], 2, "{info}");
     assert_eq!(info["drawer_count"], 2);
 }
+
+// ---------------------------------------------------------------------------
+// #4888 — Tier S admission control (ADR-0028 D2 / D8)
+//
+// Every test here drives the real MCP handler through `dispatch_tool`. The
+// gate is only worth anything at the surface a caller actually reaches, so
+// none of these call `check_tier_s_admission` directly.
+// ---------------------------------------------------------------------------
+
+/// Assert `count` distinct hot-predicate facts into `palace`, expecting each
+/// to be admitted. Panics with context on the first refusal.
+async fn fill_tier_s(state: &AppState, palace: &str, count: usize) {
+    for i in 0..count {
+        dispatch_tool(
+            state,
+            "kg_assert",
+            json!({
+                "palace": palace,
+                "subject": format!("rule-{i}"),
+                "predicate": "has_convention",
+                "object": format!("standing rule number {i}"),
+            }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("fact {i} should be admitted below the cap: {e:#}"));
+    }
+}
+
+/// Why (#4888): the cap is 20, so exactly 20 facts must be admitted. A gate
+/// that refused the 20th would be off-by-one in the direction that silently
+/// costs the user a slot.
+#[tokio::test]
+async fn dispatch_kg_assert_accepts_twenty_facts() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    assert_eq!(
+        listed["facts"].as_array().expect("facts array").len(),
+        crate::prompt_facts::TIER_S_MAX_FACTS,
+        "all 20 facts should be active on the surface",
+    );
+}
+
+/// Why (#4888): the 21st write must FAIL, not be silently dropped or
+/// truncated at read time. Fail-closed means the fact is absent from storage
+/// afterwards, not merely absent from the rendered block.
+#[tokio::test]
+async fn dispatch_kg_assert_rejects_twenty_first_fact() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let err = dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "one-too-many",
+            "predicate": "has_convention",
+            "object": "this rule arrives when the surface is already full",
+        }),
+    )
+    .await
+    .expect_err("the 21st fact must be rejected");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("Tier S is full"), "{msg}");
+
+    // Fail-closed: the write did not happen.
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    let facts = listed["facts"].as_array().expect("facts array");
+    assert_eq!(facts.len(), crate::prompt_facts::TIER_S_MAX_FACTS);
+    assert!(
+        !facts.iter().any(|f| f["subject"] == "one-too-many"),
+        "rejected fact must not be in storage: {listed}",
+    );
+}
+
+/// Why (#4888): "cap exceeded" alone is a dead end — the caller cannot act on
+/// it. The rejection must name the facts occupying the surface and name the
+/// tool that retires one, or the actionability requirement is unmet.
+#[tokio::test]
+async fn dispatch_kg_assert_rejection_names_existing_facts() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let err = dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "blocked",
+            "predicate": "is_fact",
+            "object": "rejected",
+        }),
+    )
+    .await
+    .expect_err("must be rejected at the cap");
+    let msg = format!("{err:#}");
+
+    // The retirement path is named explicitly.
+    assert!(msg.contains("remove_prompt_fact"), "{msg}");
+    // Every occupying fact is named, so the caller can choose one to retire.
+    for i in 0..crate::prompt_facts::TIER_S_MAX_FACTS {
+        assert!(
+            msg.contains(&format!("rule-{i} has_convention")),
+            "rejection must name existing fact rule-{i}: {msg}",
+        );
+        assert!(
+            msg.contains(&format!("standing rule number {i}")),
+            "rejection must show the object of rule-{i}: {msg}",
+        );
+    }
+}
+
+/// Why (#4888): an author who filled the surface must still be able to
+/// correct an existing rule. Re-asserting an active `(subject, predicate)`
+/// supersedes rather than adds, so occupancy is unchanged and the write is
+/// admitted even at the cap.
+#[tokio::test]
+async fn dispatch_kg_assert_allows_replacing_existing_fact_at_cap() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "rule-3",
+            "predicate": "has_convention",
+            "object": "corrected wording for rule three",
+        }),
+    )
+    .await
+    .expect("replacing an existing fact at the cap must be admitted");
+
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    let facts = listed["facts"].as_array().expect("facts array");
+    assert_eq!(
+        facts.len(),
+        crate::prompt_facts::TIER_S_MAX_FACTS,
+        "a replacement must not grow the surface",
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|f| f["object"] == "corrected wording for rule three"),
+        "replacement object should be live: {listed}",
+    );
+}
+
+/// Why (#4888): the cap is on ACTIVE facts. Retraction closes the interval
+/// (`valid_to` set) but leaves the row in storage, so a counting bug that
+/// walked raw rows instead of active ones would wedge the surface at 20
+/// forever with no way to recover.
+#[tokio::test]
+async fn dispatch_kg_assert_retracted_fact_frees_a_slot() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    // Confirm we really are wedged before retiring anything.
+    dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "successor",
+            "predicate": "has_convention",
+            "object": "waiting for a free slot",
+        }),
+    )
+    .await
+    .expect_err("cap must be enforced before retirement");
+
+    let removed = dispatch_tool(
+        &state,
+        "remove_prompt_fact",
+        json!({"subject": "rule-7", "predicate": "has_convention"}),
+    )
+    .await
+    .expect("remove_prompt_fact");
+    assert_eq!(removed["removed"], true, "{removed}");
+
+    // The retracted row is still on disk but must not consume a slot.
+    dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "successor",
+            "predicate": "has_convention",
+            "object": "admitted into the slot the retraction freed",
+        }),
+    )
+    .await
+    .expect("a retracted fact must free its slot");
+
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    let facts = listed["facts"].as_array().expect("facts array");
+    assert_eq!(facts.len(), crate::prompt_facts::TIER_S_MAX_FACTS);
+    assert!(
+        facts.iter().any(|f| f["subject"] == "successor"),
+        "{listed}"
+    );
+    assert!(
+        !facts.iter().any(|f| f["subject"] == "rule-7"),
+        "retracted fact must not be active: {listed}",
+    );
+}
+
+/// Why (#4888): 80 characters is the boundary and must be inclusive — a rule
+/// of exactly 80 chars is legal (ADR-0028 D2).
+#[tokio::test]
+async fn dispatch_kg_assert_accepts_object_at_char_limit() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "form"}))
+        .await
+        .expect("palace_create");
+
+    let exactly_80 = "x".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS);
+    assert_eq!(exactly_80.chars().count(), 80);
+
+    dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "form",
+            "subject": "boundary",
+            "predicate": "has_convention",
+            "object": exactly_80,
+        }),
+    )
+    .await
+    .expect("an 80-character object is within the form constraint");
+}
+
+/// Why (#4888): an 81-character object must be rejected, and the error must
+/// state the actual length and the limit so the author knows how much to cut.
+#[tokio::test]
+async fn dispatch_kg_assert_rejects_object_over_char_limit() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "form"}))
+        .await
+        .expect("palace_create");
+
+    let too_long = "x".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS + 1);
+    let err = dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "form",
+            "subject": "overlong",
+            "predicate": "has_convention",
+            "object": too_long,
+        }),
+    )
+    .await
+    .expect_err("an 81-character object must be rejected");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("81 characters"),
+        "actual length missing: {msg}"
+    );
+    assert!(msg.contains("limit is 80"), "limit missing: {msg}");
+
+    // Fail-closed: nothing was written.
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    assert!(
+        listed["facts"].as_array().expect("facts array").is_empty(),
+        "rejected over-long fact must not be stored: {listed}",
+    );
+}
+
+/// Why (#4888): `add_alias` writes `is_alias_for`, a hot predicate, so it
+/// consumes a Tier S slot and must be gated identically to `kg_assert`.
+/// Gating only the generic tool would leave a named bypass.
+#[tokio::test]
+async fn dispatch_add_alias_enforces_tier_s_cap() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let err = dispatch_tool(
+        &state,
+        "add_alias",
+        json!({"palace": "cap", "short": "tga", "full": "trusty-git-analytics"}),
+    )
+    .await
+    .expect_err("add_alias must respect the Tier S cap");
+    assert!(format!("{err:#}").contains("Tier S is full"), "{err:#}");
+}
+
+/// Why (#4888): `add_alias` must also enforce the form constraint — the
+/// object it writes is composed (`full (extra)`), so the length that matters
+/// is the composed one, not the raw `full` argument.
+#[tokio::test]
+async fn dispatch_add_alias_enforces_form_constraint_on_composed_object() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "form"}))
+        .await
+        .expect("palace_create");
+
+    let err = dispatch_tool(
+        &state,
+        "add_alias",
+        json!({
+            "palace": "form",
+            "short": "x",
+            "full": "y".repeat(60),
+            "extra": "z".repeat(60),
+        }),
+    )
+    .await
+    .expect_err("composed object over 80 chars must be rejected");
+    assert!(format!("{err:#}").contains("limit is 80"), "{err:#}");
+}
+
+/// Why (#4888): `discover_aliases` is the only path that can add many hot
+/// facts in one call, so it is where an ungated cap would leak worst. It must
+/// stop exactly at the cap, report what it refused, and leave the refused
+/// aliases unwritten — never overrun the budget, and never abort a bulk call
+/// so late that earlier aliases are stranded as partial state.
+#[tokio::test]
+async fn dispatch_discover_aliases_stops_at_tier_s_cap() {
+    skip_palace_enforcement();
+    let _tmp = tempfile::tempdir().expect("tempdir");
+    let root = _tmp.path().to_path_buf();
+    let state = AppState::new(root).with_default_palace(Some("disccap".to_string()));
+    dispatch_tool(&state, "palace_create", json!({"name": "disccap"}))
+        .await
+        .expect("palace_create");
+
+    // Leave exactly one free slot, then discover against the live workspace,
+    // which yields far more than one alias.
+    fill_tier_s(&state, "disccap", crate::prompt_facts::TIER_S_MAX_FACTS - 1).await;
+
+    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
+
+    let res = dispatch_tool(
+        &state,
+        "discover_aliases",
+        json!({"project_root": workspace_root.to_string_lossy()}),
+    )
+    .await
+    .expect("discover_aliases must not abort when the budget runs out");
+
+    assert_eq!(
+        res["new"].as_u64(),
+        Some(1),
+        "exactly the one free slot should be filled: {res}",
+    );
+    let rejected = res["rejected"].as_array().expect("rejected array");
+    assert!(
+        !rejected.is_empty(),
+        "refused aliases must be reported, not silently dropped: {res}",
+    );
+    let reason = res["rejected_reason"].as_str().expect("rejected_reason");
+    assert!(reason.contains("Tier S is full"), "{reason}");
+    assert!(reason.contains("remove_prompt_fact"), "{reason}");
+
+    // The cap held: the surface is at exactly 20, never above.
+    let facts = crate::prompt_facts::gather_hot_triples(&state)
+        .await
+        .expect("gather");
+    assert_eq!(
+        facts.len(),
+        crate::prompt_facts::TIER_S_MAX_FACTS,
+        "auto-discovery must never push the surface past the cap",
+    );
+    // A refused alias is genuinely absent from storage.
+    let refused = rejected[0]["short"].as_str().expect("short");
+    assert!(
+        !facts.iter().any(|(s, _, _)| s == refused),
+        "refused alias {refused} must not be written: {facts:?}",
+    );
+}
+
+/// Why (#4888): the cap governs the always-injected surface only. A cold
+/// predicate never reaches that surface, so a full Tier S must not block
+/// ordinary knowledge-graph writes — over-broad enforcement would break every
+/// non-prompt KG user.
+#[tokio::test]
+async fn dispatch_kg_assert_cap_does_not_apply_to_cold_predicates() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "alice",
+            "predicate": "works_at",
+            "object": "a description far longer than eighty characters, which is fine \
+                       because this predicate never reaches the always-injected surface",
+        }),
+    )
+    .await
+    .expect("cold predicates are unaffected by the Tier S budget");
+}
