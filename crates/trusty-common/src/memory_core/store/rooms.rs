@@ -13,11 +13,13 @@
 //! whose drawers are gone (ADR-0027 D1.1). Rooms and drawers corrupt and
 //! recover as one unit.
 //! Test: `room_record_round_trip`, `room_record_decodes_under_a_future_field`,
-//! `resolve_or_create_is_idempotent`, `filter_id_falls_back_to_legacy_fold`.
+//! `resolve_or_create_is_idempotent`, `filter_id_falls_back_to_legacy_fold`,
+//! plus the T6 surface in `surface_tests` (`create_room_is_idempotent`,
+//! `rename_changes_no_drawer_rows`).
 
 use crate::memory_core::palace::RoomType;
 use crate::memory_core::room_identity::{
-    DEFAULT_WING_ID, default_wing_key, mint_room_id, room_label, room_to_uuid,
+    DEFAULT_WING_ID, canonical_room_key, default_wing_key, mint_room_id, room_label, room_to_uuid,
     room_type_from_parts, room_type_tag,
 };
 use crate::memory_core::store::kg::KnowledgeGraph;
@@ -209,6 +211,120 @@ pub fn resolve_or_create_room_sync(store: &Arc<KgStoreRedb>, room: &RoomType) ->
     // A racing writer may have claimed the key first; the key is authoritative.
     Ok(store.lookup_room_id(&key)?.unwrap_or(id))
 }
+
+/// Every registered room, id-ordered, as the read-side view.
+///
+/// Why: `room_list` (ADR-0027 D6) is the discovery primitive the product has
+/// never had; giving it a typed projection here keeps the MCP handler free of
+/// `RoomRecord` decoding details.
+/// What: [`KgStoreRedb::list_rooms`] mapped through [`RoomRecord::summarize`].
+/// Test: `create_room_is_idempotent`, `rename_updates_label_and_key`.
+pub fn list_room_summaries(store: &Arc<KgStoreRedb>) -> Result<Vec<RoomSummary>> {
+    Ok(store
+        .list_rooms()?
+        .into_iter()
+        .map(|(id, record)| record.summarize(id))
+        .collect())
+}
+
+/// Create `room`, or return the room the canonical key already resolves to.
+///
+/// Why (ADR-0027 D6): `room_create` is documented idempotent — a caller that
+/// re-runs it, or two callers racing, must converge on one room rather than
+/// minting a second id for the same name. Idempotency comes from the
+/// insert-only write path, not from a check-then-write: the loser of a race
+/// reads the winner's id back out of `ROOM_KEYS`.
+/// What: looks up the canonical key; on a hit returns `(summary, false)`
+/// leaving the stored row (and its description) untouched; on a miss mints a
+/// UUIDv5, inserts, then re-reads the key so the winner's id is what is
+/// returned. `created` reflects whether THIS call wrote the row.
+/// Test: `create_room_is_idempotent`,
+/// `create_room_returns_the_winner_under_a_race`.
+pub fn create_room(
+    store: &Arc<KgStoreRedb>,
+    room: &RoomType,
+    description: Option<String>,
+) -> Result<(RoomSummary, bool)> {
+    let key = default_wing_key(room);
+    if let Some(id) = store.lookup_room_id(&key)?
+        && let Some(record) = store.get_room(id)?
+    {
+        return Ok((record.summarize(id), false));
+    }
+    let id = mint_room_id(&key);
+    let mut record = RoomRecord::new(room, chrono::Utc::now().timestamp_millis(), true);
+    record.description = description;
+    let inserted = store
+        .insert_room_if_absent(id, &key, &record)
+        .with_context(|| format!("create room {:?}", record.label))?;
+    // A racing writer may have claimed the key first; the key is authoritative.
+    let winner = store.lookup_room_id(&key)?.unwrap_or(id);
+    match store.get_room(winner)? {
+        Some(stored) => Ok((stored.summarize(winner), inserted && winner == id)),
+        None => Ok((record.summarize(winner), inserted)),
+    }
+}
+
+/// Resolve a caller-supplied room selector — a UUID or a label — to a room id.
+///
+/// Why: `room_rename` takes `room_id | label` because the repair path starts
+/// from a `room_list` row a human is reading, and the label is what they can
+/// type. Accepting both in one place keeps the MCP handler from growing a
+/// second, subtly different parser (ADR-0027 D4.1's lesson).
+/// What: a well-formed UUID that has a `ROOMS` row wins; otherwise the string
+/// is normalised into a canonical key and looked up in `ROOM_KEYS`. Errors
+/// when neither resolves, so a typo can never silently create a room.
+/// Test: `selector_resolves_by_id_and_by_label`.
+pub fn resolve_room_selector(store: &Arc<KgStoreRedb>, selector: &str) -> Result<Uuid> {
+    if let Ok(id) = Uuid::parse_str(selector.trim())
+        && store.get_room(id)?.is_some()
+    {
+        return Ok(id);
+    }
+    store
+        .lookup_room_id(&canonical_room_key(DEFAULT_WING_ID, selector))?
+        .ok_or_else(|| anyhow::anyhow!("no room matches {selector:?} in this palace"))
+}
+
+/// Rename room `id` to `new_label`, touching `ROOMS` / `ROOM_KEYS` only.
+///
+/// Why (ADR-0027 D6): this is the repair path for the `unresolved-<first8>`
+/// labels the backfill synthesises when it cannot invert a legacy id. It is
+/// also the reason a wrong label is cheap: a rename costs a name, whereas
+/// re-filing drawers would cost data — so this deliberately never writes to
+/// `DRAWERS`, and every drawer keeps the `room_id` it already carries.
+/// What: rewrites the row's `label`, re-derives `room_type` from `new_label`
+/// through the one parser (`RoomType::parse`, ADR-0027 D4.1) so renaming a
+/// room to `Backend` produces the built-in kind rather than a `Custom` body,
+/// marks it `resolved`, and moves the canonical key. Fails when the new name
+/// is already owned by a different room — merging is D5 and is deferred.
+/// Test: `rename_changes_no_drawer_rows`, `rename_updates_label_and_key`,
+/// `rename_rejects_a_key_owned_by_another_room`.
+pub fn rename_room(store: &Arc<KgStoreRedb>, id: Uuid, new_label: &str) -> Result<RoomSummary> {
+    let label = new_label.trim();
+    if label.is_empty() {
+        anyhow::bail!("room_rename: new_label must be non-empty");
+    }
+    let existing = store
+        .get_room(id)?
+        .ok_or_else(|| anyhow::anyhow!("no room row for {id}"))?;
+    let old_key = canonical_room_key(DEFAULT_WING_ID, &existing.label);
+    let new_key = canonical_room_key(DEFAULT_WING_ID, label);
+    let record = RoomRecord {
+        label: label.to_string(),
+        room_type: room_type_tag(&RoomType::parse(label)).to_string(),
+        resolved: true,
+        ..existing
+    };
+    store
+        .rename_room(id, &old_key, &new_key, &record)
+        .with_context(|| format!("rename room {id} to {label:?}"))?;
+    Ok(record.summarize(id))
+}
+
+#[cfg(test)]
+#[path = "rooms_surface_tests.rs"]
+mod surface_tests;
 
 #[cfg(test)]
 mod tests {

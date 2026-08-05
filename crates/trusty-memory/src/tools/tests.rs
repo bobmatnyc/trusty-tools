@@ -134,8 +134,9 @@ fn tool_definitions_lists_all_tools() {
         .get("tools")
         .and_then(|t| t.as_array())
         .expect("tools array");
-    // 34 original + 3 task tools (task_add, task_list, task_complete, issue #1722)
-    assert_eq!(tools.len(), 37);
+    // 34 original + 3 task tools (task_add, task_list, task_complete, issue
+    // #1722) + 3 room tools (room_list, room_create, room_rename, ADR-0027 T6)
+    assert_eq!(tools.len(), 40);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -179,6 +180,10 @@ fn tool_definitions_lists_all_tools() {
         "task_add",
         "task_list",
         "task_complete",
+        // ADR-0027 T6 (#4805):
+        "room_list",
+        "room_create",
+        "room_rename",
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
@@ -2100,4 +2105,374 @@ async fn mcp_room_parse_matches_http() {
             "room={spelling} must find the drawer written as room=backend; got {drawers:?}"
         );
     }
+}
+
+// ── ADR-0027 room surface (T5 #4804, T6 #4805, T7 #4806) ─────────────────
+
+/// Create a palace with one drawer per named room, and return its id.
+///
+/// Uses `memory_remember` (the real write path) so the drawers carry whatever
+/// `room_id` production would stamp on them — the point of every assertion
+/// below is that the room surface agrees with the write path. `force` is set
+/// because these are app-managed fixture writes that must land deterministically
+/// regardless of the length and dedup heuristics; it bypasses content-QUALITY
+/// gates only, exactly the case issue #2520 carved it out for.
+async fn palace_with_rooms(state: &AppState, palace: &str, rooms: &[(&str, &str)]) {
+    let _ = dispatch_tool(state, "palace_create", json!({"name": palace}))
+        .await
+        .expect("palace_create");
+    for (room, text) in rooms {
+        let res = dispatch_tool(
+            state,
+            "memory_remember",
+            json!({"palace": palace, "text": text, "room": room, "force": true}),
+        )
+        .await
+        .expect("memory_remember");
+        assert_eq!(res["status"], "stored", "fixture write was gated: {res}");
+    }
+}
+
+/// Why (ADR-0027 T5 / #4804): `memory_note` was hard-pinned to `General`, so a
+/// curated fact could not be filed anywhere else. The pin is lifted.
+/// What: a note written with `room` lands in that room; one written without it
+/// still lands in `General`.
+#[tokio::test]
+async fn dispatch_note_accepts_an_explicit_room() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "noteroom"}))
+        .await
+        .expect("palace_create");
+
+    for (room, content) in [
+        (
+            Some("decisions"),
+            "Deploy target is prod-east for this service",
+        ),
+        (None, "User prefers snake_case in generated identifiers"),
+    ] {
+        let mut args = json!({"palace": "noteroom", "content": content});
+        if let Some(r) = room {
+            args["room"] = json!(r);
+        }
+        let res = dispatch_tool(&state, "memory_note", args)
+            .await
+            .expect("memory_note");
+        assert_eq!(res["status"], "stored", "{res}");
+    }
+
+    let scoped = dispatch_tool(
+        &state,
+        "memory_list",
+        json!({"palace": "noteroom", "room": "decisions", "limit": 10}),
+    )
+    .await
+    .expect("memory_list");
+    let rows = scoped["drawers"].as_array().expect("drawers");
+    assert_eq!(rows.len(), 1, "exactly the note filed into `decisions`");
+    assert!(rows[0]["content"].as_str().unwrap().contains("prod-east"));
+
+    // The default is unchanged for a caller that passes nothing.
+    let general = dispatch_tool(
+        &state,
+        "memory_list",
+        json!({"palace": "noteroom", "room": "General", "limit": 10}),
+    )
+    .await
+    .expect("memory_list");
+    let rows = general["drawers"].as_array().expect("drawers");
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0]["content"].as_str().unwrap().contains("snake_case"));
+}
+
+/// Why (ADR-0027 T6 / #4805): `room_list` is the discovery primitive that did
+/// not exist — a caller could not find out a palace had a `decisions` room
+/// without already knowing the word.
+#[tokio::test]
+async fn dispatch_room_list_reports_rooms_with_drawer_counts() {
+    let (state, _tmp) = test_state();
+    palace_with_rooms(
+        &state,
+        "roomlist",
+        &[
+            (
+                "decisions",
+                "We chose redb over a JSON sidecar for room storage",
+            ),
+            (
+                "decisions",
+                "Room ids are read from the table, never recomputed",
+            ),
+            (
+                "Planning",
+                "The room surface ships before the wing entity does",
+            ),
+        ],
+    )
+    .await;
+
+    let res = dispatch_tool(&state, "room_list", json!({"palace": "roomlist"}))
+        .await
+        .expect("room_list");
+    let rooms = res["rooms"].as_array().expect("rooms array");
+    let by_label: std::collections::HashMap<&str, &serde_json::Value> = rooms
+        .iter()
+        .map(|r| (r["label"].as_str().unwrap(), r))
+        .collect();
+
+    assert_eq!(by_label["decisions"]["drawer_count"], 2);
+    assert_eq!(by_label["decisions"]["room_type"], "Custom");
+    assert_eq!(by_label["Planning"]["drawer_count"], 1);
+    assert_eq!(by_label["Planning"]["room_type"], "Planning");
+    for room in rooms {
+        assert_eq!(room["resolved"], true, "a live write is never unresolved");
+        assert!(room["room_id"].as_str().is_some());
+        assert!(room["wing_id"].as_str().is_some());
+    }
+}
+
+/// Why: wings are gated on ADR-0027 T9. Accepting a wing we cannot honour —
+/// by ignoring it, or by returning an empty list — would be an invisible
+/// failure, the exact class ADR-0027 exists to remove.
+#[tokio::test]
+async fn dispatch_room_list_rejects_an_unknown_wing() {
+    let (state, _tmp) = test_state();
+    palace_with_rooms(&state, "wingcheck", &[("Planning", "A drawer in planning")]).await;
+
+    let err = dispatch_tool(
+        &state,
+        "room_list",
+        json!({"palace": "wingcheck", "wing": Uuid::from_u128(7).to_string()}),
+    )
+    .await
+    .expect_err("an unknown wing must be rejected");
+    assert!(
+        format!("{err:#}").contains("not implemented yet"),
+        "{err:#}"
+    );
+
+    // The palace's own default wing is accepted.
+    let ok = dispatch_tool(
+        &state,
+        "room_list",
+        json!({
+            "palace": "wingcheck",
+            "wing": trusty_common::memory_core::room_identity::DEFAULT_WING_ID.to_string(),
+        }),
+    )
+    .await
+    .expect("default wing accepted");
+    assert!(!ok["rooms"].as_array().unwrap().is_empty());
+}
+
+/// Why: `room_create` is documented idempotent, including across case — two
+/// spellings of one intent must not become two rooms (ADR-0027 C3.2's defect).
+#[tokio::test]
+async fn dispatch_room_create_is_idempotent() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "roomcreate"}))
+        .await
+        .expect("palace_create");
+
+    let first = dispatch_tool(
+        &state,
+        "room_create",
+        json!({"palace": "roomcreate", "label": "Decisions", "description": "why we chose things"}),
+    )
+    .await
+    .expect("room_create");
+    assert_eq!(first["created"], true);
+    assert_eq!(
+        first["label"], "Decisions",
+        "the caller's spelling survives"
+    );
+
+    let second = dispatch_tool(
+        &state,
+        "room_create",
+        json!({"palace": "roomcreate", "label": "decisions"}),
+    )
+    .await
+    .expect("room_create again");
+    assert_eq!(second["created"], false);
+    assert_eq!(second["room_id"], first["room_id"]);
+
+    let listed = dispatch_tool(&state, "room_list", json!({"palace": "roomcreate"}))
+        .await
+        .expect("room_list");
+    let rooms = listed["rooms"].as_array().expect("rooms");
+    assert_eq!(rooms.len(), 1, "one room, not two: {rooms:?}");
+    assert_eq!(
+        rooms[0]["drawer_count"], 0,
+        "creating a room moves no drawer"
+    );
+    assert_eq!(rooms[0]["description"], "why we chose things");
+}
+
+/// Why (ADR-0027 D6): `room_rename` is the repair path, and its defining
+/// property is that it renames a room without touching a drawer. Proven here
+/// by reading every drawer back and checking the set is identical.
+#[tokio::test]
+async fn dispatch_room_rename_leaves_drawers_in_place() {
+    let (state, _tmp) = test_state();
+    palace_with_rooms(
+        &state,
+        "roomrename",
+        &[
+            ("checkpoint", "Session checkpoint after the registry landed"),
+            ("General", "Unrelated general memory that must not move"),
+        ],
+    )
+    .await;
+
+    let before = dispatch_tool(
+        &state,
+        "memory_list",
+        json!({"palace": "roomrename", "limit": 100}),
+    )
+    .await
+    .expect("memory_list before");
+
+    let renamed = dispatch_tool(
+        &state,
+        "room_rename",
+        json!({"palace": "roomrename", "room": "checkpoint", "new_label": "Session Checkpoints"}),
+    )
+    .await
+    .expect("room_rename");
+    assert_eq!(renamed["label"], "Session Checkpoints");
+
+    let after = dispatch_tool(
+        &state,
+        "memory_list",
+        json!({"palace": "roomrename", "limit": 100}),
+    )
+    .await
+    .expect("memory_list after");
+    assert_eq!(before, after, "a rename must not change any drawer");
+
+    // The drawer is reachable under the NEW name and not the old one.
+    let by_new = dispatch_tool(
+        &state,
+        "memory_list",
+        json!({"palace": "roomrename", "room": "Session Checkpoints", "limit": 10}),
+    )
+    .await
+    .expect("memory_list new name");
+    assert_eq!(by_new["drawers"].as_array().unwrap().len(), 1);
+
+    let listed = dispatch_tool(&state, "room_list", json!({"palace": "roomrename"}))
+        .await
+        .expect("room_list");
+    let labels: Vec<&str> = listed["rooms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["label"].as_str().unwrap())
+        .collect();
+    assert!(labels.contains(&"Session Checkpoints"), "{labels:?}");
+    assert!(!labels.contains(&"checkpoint"), "{labels:?}");
+}
+
+/// Why: merging two rooms is ADR-0027 D5 and deliberately deferred; folding
+/// one into the other silently would change which drawers a filter returns.
+#[tokio::test]
+async fn dispatch_room_rename_rejects_a_taken_name() {
+    let (state, _tmp) = test_state();
+    palace_with_rooms(
+        &state,
+        "roomclash",
+        &[
+            ("alpha", "A memory that belongs to the alpha room here"),
+            ("beta", "A memory that belongs to the beta room instead"),
+        ],
+    )
+    .await;
+
+    let err = dispatch_tool(
+        &state,
+        "room_rename",
+        json!({"palace": "roomclash", "room": "alpha", "new_label": "beta"}),
+    )
+    .await
+    .expect_err("must refuse to merge");
+    assert!(
+        format!("{err:#}").contains("already belongs to another room"),
+        "{err:#}"
+    );
+}
+
+/// Why (ADR-0027 T7 / #4806): room-scoped recall was reachable only through
+/// `memory_list` and the HTTP route — the MCP recall schema had no `room`.
+/// What: both recall tools, scoped to one room, must not return the other
+/// room's drawer at the search layer (L0/L1 are always-on grounding and stay).
+#[tokio::test]
+async fn dispatch_recall_room_filter_scopes_results() {
+    let (state, _tmp) = test_state();
+    palace_with_rooms(
+        &state,
+        "recallroom",
+        &[
+            (
+                "Backend",
+                "Rust is a systems programming language with ownership",
+            ),
+            (
+                "Frontend",
+                "Rust is a systems programming toolkit for the browser",
+            ),
+        ],
+    )
+    .await;
+
+    for tool in ["memory_recall", "memory_recall_deep"] {
+        let res = dispatch_tool(
+            &state,
+            tool,
+            json!({
+                "palace": "recallroom",
+                "query": "systems programming Rust",
+                "room": "Backend",
+                "top_k": 10,
+            }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{tool}: {e:#}"));
+        let leaked = res["results"]
+            .as_array()
+            .expect("results array")
+            .iter()
+            .any(|r| {
+                r["layer"].as_u64().unwrap_or(0) >= 2
+                    && r["content"].as_str().unwrap_or("").contains("browser")
+            });
+        assert!(
+            !leaked,
+            "{tool} returned a Frontend drawer under a Backend room filter: {res}"
+        );
+    }
+}
+
+/// Why (#4807): `palace_info` never reported how many rooms a palace has.
+#[tokio::test]
+async fn dispatch_palace_info_reports_room_count() {
+    let (state, _tmp) = test_state();
+    palace_with_rooms(
+        &state,
+        "infocount",
+        &[
+            (
+                "Planning",
+                "The room registry lands before the wing entity does",
+            ),
+            ("General", "A second memory that sits in the default room"),
+        ],
+    )
+    .await;
+
+    let info = dispatch_tool(&state, "palace_info", json!({"palace": "infocount"}))
+        .await
+        .expect("palace_info");
+    assert_eq!(info["room_count"], 2, "{info}");
+    assert_eq!(info["drawer_count"], 2);
 }

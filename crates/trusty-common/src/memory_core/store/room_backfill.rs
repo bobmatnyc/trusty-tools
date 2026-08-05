@@ -33,9 +33,9 @@ use crate::memory_core::room_identity::{
     DEFAULT_WING_ID, canonical_room_key, fold_debug_repr, room_label,
 };
 use crate::memory_core::store::kg::KnowledgeGraph;
+use crate::memory_core::store::room_plan::{RoomPlanAction, plan_rooms};
 use crate::memory_core::store::rooms::RoomRecord;
 use anyhow::{Context, Result};
-use std::collections::BTreeSet;
 use uuid::Uuid;
 
 /// Upper bound on KG subjects scanned for the step-3 dictionary.
@@ -119,43 +119,37 @@ pub fn backfill_rooms_fail_open(palace_id: &str, kg: &KnowledgeGraph, drawers: &
 ///
 /// Why: see the module doc — this is the additive half of ADR-0027, and its
 /// non-negotiable property is that it writes to `ROOMS` / `ROOM_KEYS` only.
-/// What: collects the distinct ids (a `BTreeSet`, so visit order — and hence
-/// which room wins a canonical-key collision — is deterministic), skips ids
-/// that already have a row, resolves a label for the rest, and inserts.
-/// Test: `backfill_changes_no_drawer_rows`, `backfill_is_idempotent`.
+/// What: executes exactly the plan [`plan_rooms`] computed — same ids, same
+/// deterministic order, same labels — so the `--dry-run` audit an operator
+/// reads (ticket T10) cannot describe a different write than the one that
+/// happens. Rows that already exist are skipped, never updated.
+/// Test: `backfill_changes_no_drawer_rows`, `backfill_is_idempotent`,
+/// `plan_matches_what_backfill_inserts`.
 pub fn backfill_rooms(kg: &KnowledgeGraph, drawers: &[Drawer]) -> Result<BackfillReport> {
-    let observed: BTreeSet<Uuid> = drawers.iter().map(|d| d.room_id).collect();
+    let plan = plan_rooms(kg, drawers)?;
     let mut report = BackfillReport {
-        observed: observed.len(),
+        observed: plan.len(),
         ..BackfillReport::default()
     };
-    if observed.is_empty() {
+    if plan.is_empty() {
         return Ok(report);
     }
 
     let store = kg.store();
     let now_ms = chrono::Utc::now().timestamp_millis();
-    // Step 3's dictionary is loaded lazily: most palaces resolve everything in
-    // steps 1-2 and never pay for the KG scan.
-    let mut dictionary: Option<Vec<String>> = None;
 
-    for id in observed {
-        if store
-            .get_room(id)
-            .with_context(|| format!("probe room row {id}"))?
-            .is_some()
-        {
+    for entry in &plan {
+        let RoomPlanAction::Insert { room, source } = &entry.action else {
             report.skipped += 1;
             continue;
-        }
-        let (room, source) = resolve_room_label(kg, id, &mut dictionary);
+        };
         // The recovered label is what we store; the id stays exactly what the
         // drawers already carry, which is the entire point.
-        let record = RoomRecord::new(&room, now_ms, source.is_resolved());
-        let key = canonical_room_key(DEFAULT_WING_ID, &room_label(&room));
+        let record = RoomRecord::new(room, now_ms, source.is_resolved());
+        let key = canonical_room_key(DEFAULT_WING_ID, &room_label(room));
         let inserted = store
-            .insert_room_if_absent(id, &key, &record)
-            .with_context(|| format!("register legacy room {id}"))?;
+            .insert_room_if_absent(entry.room_id, &key, &record)
+            .with_context(|| format!("register legacy room {}", entry.room_id))?;
         if inserted {
             report.inserted += 1;
             if !source.is_resolved() {
@@ -187,7 +181,7 @@ pub fn backfill_rooms(kg: &KnowledgeGraph, drawers: &[Drawer]) -> Result<Backfil
 /// Test: `backfill_resolves_builtin_rooms`,
 /// `backfill_inverts_short_custom_labels`, `backfill_uses_kg_dictionary`,
 /// `backfill_falls_back_to_unresolved`.
-fn resolve_room_label(
+pub(super) fn resolve_room_label(
     kg: &KnowledgeGraph,
     id: Uuid,
     dictionary: &mut Option<Vec<String>>,
