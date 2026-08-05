@@ -16,25 +16,41 @@ use anyhow::Context;
 
 use super::managed_root::ManagedPaths;
 
-/// Handle `tm register <alias> <url> [--force]`.
+/// Handle `tm register <url> [alias] [--force]`.
 ///
 /// Why: the register command is the first step of the standalone lifecycle —
 /// it persists the alias→URL mapping without cloning.
-/// What: validates the alias, calls `ManagedRegistry::add`, saves, and prints
-/// `registered <alias> → <url>` to stdout.
-/// Test: `cli_parses_register` in tests.rs; logic in registry tests.
+/// What: resolves the positionals via
+/// [`super::register_args::resolve_register_args`] (which accepts both the
+/// `<url> [alias]` and legacy `<alias> <url>` orders and derives an `owner-repo`
+/// alias when none was given), validates the alias, calls `ManagedRegistry::add`,
+/// saves, and prints `registered <alias> → <url>` to stdout. A derived alias that
+/// is already bound to a different URL refuses without touching the registry —
+/// `add` errors before mutating and `save` is never reached.
+/// Test: `register_args_tests.rs`; registry semantics in registry tests.
 pub(crate) fn register_cmd(
     paths: &ManagedPaths,
-    alias: &str,
-    url: &str,
+    first: &str,
+    second: Option<&str>,
     force: bool,
 ) -> anyhow::Result<()> {
+    // #4912: URL first, alias optional — and the legacy order still accepted.
+    let (alias, url) = super::register_args::resolve_register_args(first, second)?;
+    let derived = second.is_none();
+
     let root = &paths.root;
     let mut registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
         .with_context(|| format!("failed to load registry from {}", root.display()))?;
-    registry
-        .add(alias, url, force)
-        .with_context(|| format!("failed to register alias '{alias}'"))?;
+    registry.add(&alias, &url, force).with_context(|| {
+        if derived {
+            format!(
+                "failed to register alias '{alias}' (derived from '{url}') — \
+                 pass an explicit alias to register it under a different name"
+            )
+        } else {
+            format!("failed to register alias '{alias}'")
+        }
+    })?;
     registry.save().context("failed to save registry")?;
     println!("registered {alias} → {url}");
     Ok(())
@@ -100,7 +116,7 @@ pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
     if local_entries.is_empty() && fleet_entries.is_empty() {
         println!("No aliases registered.");
         println!("  Run `tm` from a git project to auto-register a local alias.");
-        println!("  Run `tm register <alias> <url>` to add a managed fleet alias.");
+        println!("  Run `tm register <url> [alias]` to add a managed fleet alias.");
         return Ok(());
     }
 

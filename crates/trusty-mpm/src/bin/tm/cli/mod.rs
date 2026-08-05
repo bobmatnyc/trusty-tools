@@ -783,18 +783,28 @@ pub(crate) enum Command {
         cmd: WatchCmd,
     },
 
-    /// Register a GitHub repo alias for the standalone managed driver (DOC-24).
+    /// Register a repo alias for the standalone managed driver (DOC-24).
     ///
     /// Why: declares an alias→URL mapping without cloning so users can register
     /// their fleet cheaply and `tm load <alias>` lazily.
-    /// What: persists `{alias, url}` to `<root>/registry.json` and
-    /// prints `registered <alias> → <url>`.
-    /// Test: `cli_parses_register`.
+    /// What: `tm register <url> [alias]`. With no alias, one is derived from the
+    /// URL as `owner-repo` (hyphen-joined, e.g.
+    /// `https://github.com/bobmatnyc/trusty-tools` → `bobmatnyc-trusty-tools`).
+    /// The legacy `tm register <alias> <url>` order still works — whichever
+    /// positional is URL-shaped is taken as the URL (#4912). Persists
+    /// `{alias, url}` to `<root>/registry.json` and prints
+    /// `registered <alias> → <url>`.
+    /// Test: `register_args_tests.rs`.
     Register {
-        /// Short alias identifier (e.g. `my-project`).
-        alias: String,
-        /// Clone-able GitHub URL (HTTPS or SSH).
+        /// Clone-able repo URL (HTTPS or SSH).
+        ///
+        /// #4912: this position also accepts the legacy alias-first form; the
+        /// URL is detected by shape, so `tm register <alias> <url>` still works.
         url: String,
+        /// Short alias identifier (e.g. `my-project`).
+        ///
+        /// Optional — defaults to `owner-repo` derived from the URL.
+        alias: Option<String>,
         /// Overwrite an existing alias with a different URL.
         #[arg(long)]
         force: bool,
