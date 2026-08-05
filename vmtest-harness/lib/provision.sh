@@ -243,3 +243,165 @@ provision_guest() {
     fi
     log "provisioning OK (rustc_version ${rustc_ver})"
 }
+
+# --- pattern (b) GitHub credential propagation (#4924) ---------------------
+
+# provision_github_token <vm_name> — 0, or dies 40.
+#
+# #4924: gives the GUEST the host's $GITHUB_TOKEN so pattern (b)'s `git clone` of
+# `repo_url` is AUTHENTICATED rather than anonymous, which is what takes the run
+# off the anonymous github.com rate limit the host and every concurrent guest
+# share on one egress IP.
+#
+# ===========================================================================
+# TWO FINDINGS THAT COST HOURS TO REDISCOVER. DO NOT "IMPROVE" PAST EITHER.
+#
+# 1. `credential.helper store` DOES NOTHING HERE. Git consults a credential
+#    helper only AFTER a 401, and github.com serves a PUBLIC repository with
+#    200 — no challenge, so no helper call, ever. Verified with a tripwire
+#    helper that logged every invocation: `git ls-remote` exited 0 with an EMPTY
+#    log, and a deliberately INVALID token in the credential store still cloned
+#    successfully. The mechanism looks like it works while delivering exactly
+#    zero rate-limit relief. `http.<url>.extraheader` is used instead because it
+#    is sent PREEMPTIVELY on every request to that URL prefix.
+#
+# 2. THE PINNED BASE IMAGE FIGHTS THIS. `tahoe-base` ships a `~/.gitconfig`
+#    wiring Git Credential Manager on top of the Command Line Tools'
+#    `osxkeychain`. GCM is INTERACTIVE. Without clearing that chain first,
+#    (a) writing the header yields `error: cannot overwrite multiple values with
+#    a single value` (git config exit 5), and (b) a credential GitHub REJECTS
+#    makes guest `git ls-remote` HANG — no output, still running at 3 minutes —
+#    because the 401 reaches an interactive helper in a headless VM. Git's own
+#    documented empty-value reset, run FIRST, turns that hang into a sub-second
+#    `terminal prompts disabled` failure. That matters most on exactly the run
+#    where the operator's token has expired. (The base image's gitconfig is a
+#    property of the pin, not of this harness; see #4924's note on it.)
+# ===========================================================================
+#
+# THE LEAK SURFACE, AND WHY EVERY OBVIOUS DESIGN IS WRONG:
+#   - $VMTEST_GUEST_ENV (the channel CARGO_TARGET_DIR rides, §7.3) is composed
+#     ONCE and prefixed onto EVERY subsequent guest command — the token would sit
+#     in host `ps` output for the run's whole duration. Never that.
+#   - a `vmtest.defaults` / CONF_KEYS entry is printed verbatim by
+#     `print_banner` on every run, --dry-run included. Only the BOOLEAN is a key.
+#   - embedding it in `repo_url` leaks it twice: `install-branch.sh` logs
+#     `repo_url` verbatim on SUCCESS, and `tail -40`s the clone log on failure.
+#   - a `vm_exec`/`vm_exec_raw` argument becomes the `/bin/sh -c "<string>"` of a
+#     host process, i.e. host argv.
+# What is left is STDIN, which is the same channel and the same reasoning as the
+# `toolchain.tsv` write above. The secret crosses on stdin and nowhere else; the
+# only thing that ever appears in a command string is the include FILE'S PATH.
+provision_github_token() {
+    local vm="$1"
+    local guest_home inc_path repo_url token header rc
+
+    # #4924: THE PATTERN GATE, AND IT IS DELIBERATELY THE FIRST STATEMENT IN THE
+    # FUNCTION. Only pattern (b) ever contacts github.com; (a) installs from
+    # crates.io and (c) streams the host worktree over the exec channel, and both
+    # succeed today with ZERO credential dependency. Every branch below can
+    # `die`, so gating only the verification step would let an expired host token
+    # hard-fail `vmtest run local` and `vmtest run released` — a regression this
+    # placement makes structurally impossible rather than merely unlikely given
+    # today's code shape. If a `git+` source ever enters Cargo.lock and (a)/(c)
+    # start contacting github.com, widening this gate must come with a NON-FATAL
+    # outcome for them; never a hard fail on a pattern that had no credential
+    # dependency before.
+    case "${VMTEST_PATTERN:-}" in
+        branch) ;;
+        *) return 0 ;;
+    esac
+
+    # Fail-safe direction is WITHHOLD: only the exact string `true` propagates.
+    # `preflight_config` has already refused anything but `true`/`false`, so this
+    # is the second of two independent gates, not the only one.
+    if [ "$(conf_get propagate_github_token)" != 'true' ]; then
+        log "GITHUB_TOKEN propagation is OFF (propagate_github_token=$(conf_get propagate_github_token)); the guest clone will be anonymous."
+        return 0
+    fi
+
+    # Read from the HOST PROCESS ENVIRONMENT, never through conf_get: config keys
+    # are printed by `print_banner`.
+    token="${GITHUB_TOKEN:-}"
+    if [ -z "$token" ]; then
+        # NOT AN ERROR AND NOT A WARNING. The run proceeds exactly as it did
+        # before this function existed, so this is `log`, not `warn`: an operator
+        # who never had a token must not be told they have a problem.
+        log 'no GITHUB_TOKEN in the harness environment — the guest clone proceeds ANONYMOUSLY, exactly as it always has. This is not an error.'
+        return 0
+    fi
+
+    guest_home=$(conf_get guest_home)
+    repo_url=$(conf_get repo_url)
+    inc_path="${guest_home}/.vmtest/github-auth.gitconfig"
+
+    log 'GITHUB_TOKEN is present in the harness environment — propagating it to the guest as a preemptive github.com Authorization header (the value is never logged, never a config key, and never enters a command string)'
+
+    # The value reaches `base64` ON STDIN and never in its argv. `printf` is a
+    # bash BUILTIN, so no process carrying the token is ever created and nothing
+    # here can appear in `ps`.
+    #
+    # `tr -d '\n'` IS LOAD-BEARING, not tidiness: a fine-grained
+    # `github_pat_...` token is long enough that a base64 implementation which
+    # wraps (GNU coreutils wraps at 76 columns; BSD/macOS does not) would split
+    # the header, and a wrapped header is a BROKEN header. Stripping
+    # unconditionally makes the result independent of which base64 is on PATH.
+    header=$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n') \
+        || die 40 'could not base64-encode the GitHub credential header on the host'
+    [ -n "$header" ] \
+        || die 40 'the base64-encoded GitHub credential header came out empty'
+
+    # FINDING 2, FIRST AND UNCONDITIONALLY. Git's own documented empty-value
+    # reset: setting a multi-valued key to the empty string CLEARS the inherited
+    # list, so the base image's interactive GCM chain cannot be consulted. Doing
+    # this AFTER the header write is not a smaller version of this step — it is
+    # the hang.
+    vm_exec "$vm" "git config --global --replace-all credential.helper ''" >/dev/null 2>&1 \
+        || die 40 "could not clear the guest's inherited credential.helper chain (git config --global --replace-all credential.helper ''). The base image wires in an INTERACTIVE Git Credential Manager; leaving it in place makes a rejected credential hang \`git ls-remote\` in a headless guest instead of failing."
+
+    # `umask 077` FIRST, so the file is CREATED at 0600 — never written and then
+    # chmod'ed, which leaves a window in which the credential exists at a looser
+    # mode. `rm -f` first so a pre-existing file's mode cannot survive the
+    # truncation (unreachable today: every run gets a fresh guest).
+    printf '[http "https://github.com/"]\n\textraheader = Authorization: Basic %s\n' "$header" \
+        | vm_exec_stdin "$vm" "umask 077 && mkdir -p ${guest_home}/.vmtest && rm -f ${inc_path} && cat > ${inc_path}" \
+        || die 40 "could not write the guest credential include at ${inc_path}"
+
+    # The PATH is the git-config argument, so the secret never enters a command
+    # string — that is the whole reason this is an include rather than a direct
+    # `git config http.https://github.com/.extraheader <value>`.
+    #
+    # KNOWN GAP, CARRIED FORWARD DELIBERATELY: `--add` is NOT idempotent — a
+    # second provisioning of the SAME guest would append a duplicate
+    # `include.path` line. Unreachable today because every run clones a fresh
+    # guest, so it is left alone rather than fixed speculatively. Do NOT switch to
+    # `--replace-all`: that is the right change only if guest reuse across runs is
+    # ever introduced, and making it now would be a change with no reachable
+    # defect behind it.
+    vm_exec "$vm" "git config --global --add include.path ${inc_path}" >/dev/null 2>&1 \
+        || die 40 "could not include ${inc_path} from the guest's global git configuration"
+
+    # AN ACTUAL NETWORK PROOF, NOT A CONFIGURATION ECHO. Reading the header back
+    # would prove only that a write succeeded; `git ls-remote` proves github.com
+    # ACCEPTED the credential. `GIT_TERMINAL_PROMPT=0` is belt-and-braces on top
+    # of the helper reset — between them a rejected credential fails in under a
+    # second instead of blocking.
+    #
+    # 60 s, built in. DOC-2 §10.3 requires a timeout message to name the
+    # vmtest.defaults key that changes it, and §8.2 defines NO key for this
+    # budget — so the message says that none exists, exactly as `vm_clone` does.
+    # Naming a key that does not exist would be worse than naming none.
+    rc=0
+    run_watchdog 60 "$VMTEST_TMPDIR/github-auth-verify.log" \
+        vm_exec "$vm" "GIT_TERMINAL_PROMPT=0 git ls-remote ${repo_url} HEAD" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        # Safe to echo: this log holds git's diagnostics and, on success, ref
+        # lines. The credential is in a request header, never in this output.
+        sed 's/^/    | /' "$VMTEST_TMPDIR/github-auth-verify.log" >&2 || :
+        if [ "$rc" -eq 124 ]; then
+            die 40 "the in-guest \`git ls-remote ${repo_url}\` credential proof exceeded its 60 s budget (no vmtest.defaults key exists for this budget). A hang here means the guest's interactive credential-helper chain was NOT cleared. No retry, ever (DOC-2 §10.3)."
+        fi
+        die 40 "the in-guest \`git ls-remote ${repo_url}\` credential proof exited ${rc}: github.com did not accept the propagated GITHUB_TOKEN (expired, revoked, or without read access to this repository). The token value is never logged. Re-run with VMTEST_PROPAGATE_GITHUB_TOKEN=false to clone anonymously as before."
+    fi
+
+    log "GitHub credential propagated and PROVEN: in-guest \`git ls-remote ${repo_url}\` succeeded with the preemptive Authorization header from ${inc_path} (mode 0600)"
+}

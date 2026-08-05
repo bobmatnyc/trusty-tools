@@ -133,6 +133,19 @@ source_deliver_local() {
 # the run log is 0), which is why nothing on this path may borrow
 # `source_deliver_local`'s vocabulary.
 #
+# #4924 QUALIFIES §6.2'S PARENTHESIS — "the repo is public, so no credential
+# plumbing is needed" — WITHOUT CHANGING ANYTHING BELOW. That clause is still
+# true of CORRECTNESS and was never true of RATE LIMITS: an anonymous clone
+# shares one github.com quota with the host and every concurrent guest on the
+# same egress IP. `provision_github_token` (lib/provision.sh) therefore wires a
+# preemptive Authorization header into the guest's git configuration BEFORE this
+# function runs, when the host has a $GITHUB_TOKEN and pattern (b) is the pattern
+# under test. This function is unchanged by that and must stay so: the credential
+# lives in the guest's own `~/.gitconfig` include, so `repo_url` carries NO
+# credential and neither does any command string here. Never embed one — this
+# file logs `repo_url` verbatim and `tail`s the clone log on failure. An absent
+# token still clones anonymously, exactly as before.
+#
 # NO NEW MECHANISM (plan §A). Pattern (b) reuses pattern (c)'s scaffolding
 # entirely: the same `lib/vm.sh` exec boundary, the same `run_watchdog`, the same
 # `install_from_path` install step, the same oracle. Only the acquisition of the
