@@ -1,19 +1,149 @@
 //! Tests for `tm register` positional resolution and alias derivation (#4912).
 //!
-//! Why: three things must be pinned or they regress silently. The legacy
-//! `<alias> <url>` order must still resolve correctly. The derived alias must be
-//! HYPHEN-joined `owner-repo` for every real URL shape. And — the #4912 review's
-//! HIGH — a lone argument that is NOT a clone-able URL must be REJECTED, because
-//! `owner/repo` shorthand otherwise registers an unclonable URL under the wrong
-//! alias with exit 0, and does not even collide with the later correct
-//! registration.
-//! What: unit tests over [`super::resolve_register_args`], the URL-shape test,
+//! Why: four things must be pinned or they regress silently.
+//! - `owner/repo` is the primary form and must resolve to the GitHub URL with
+//!   the canonical `owner-repo` alias. Before the review it registered the
+//!   literal string as a URL whose host was `owner` — unclonable, alias
+//!   `trusty-tools`, exit 0, and no collision with the later correct entry.
+//! - The legacy `<alias> <url>` order must still resolve correctly.
+//! - The derived alias must be HYPHEN-joined `owner-repo` for every URL shape.
+//! - The shapes that should NOT resolve — relative paths, host-only URLs,
+//!   browser pastes — must still be refused rather than swept into shorthand.
+//!
+//! What: unit tests over [`super::classify`], [`super::resolve_register_args`],
 //! and the boundary path splitter, plus end-to-end tests through
-//! `standalone::register_cmd` proving a collision refuses without mutating
-//! `registry.json`.
+//! `standalone::register_cmd` proving a refusal never touches `registry.json`.
 //! Test: this file.
 
-use super::{looks_like_url, path_segments, resolve_register_args};
+use super::{Positional, classify, looks_like_repo, path_segments, resolve_register_args};
+
+// ---------------------------------------------------------------------------
+// Classification
+// ---------------------------------------------------------------------------
+
+/// Every shape lands in exactly one case. The order of the arms is load-bearing:
+/// `./repo` must be caught as a path BEFORE the host-shape test, which it would
+/// otherwise pass on the `.` in `.`.
+#[test]
+fn classify_sorts_every_shape() {
+    // Full URLs.
+    for s in [
+        "https://github.com/owner/repo",
+        "git@github.com:owner/repo.git",
+        "ssh://git@git.example.com:2222/team/thing.git",
+        "github.com/owner/repo",
+        "localhost:3000/owner/repo",
+        "/srv/git/repo.git",
+        "~/src/repo.git",
+    ] {
+        assert!(matches!(classify(s), Positional::Url(_)), "{s} not a URL");
+    }
+
+    // GitHub shorthand — the primary form.
+    assert_eq!(
+        classify("bobmatnyc/trusty-tools"),
+        Positional::Shorthand {
+            owner: "bobmatnyc",
+            repo: "trusty-tools"
+        }
+    );
+    assert_eq!(
+        classify("123/repo"),
+        Positional::Shorthand {
+            owner: "123",
+            repo: "repo"
+        }
+    );
+    // A repo name may carry a dot; an owner may not, which is what keeps
+    // `github.com/o/r` on the URL side without a host list.
+    assert_eq!(
+        classify("owner/repo.js"),
+        Positional::Shorthand {
+            owner: "owner",
+            repo: "repo.js"
+        }
+    );
+
+    // Relative paths — never shorthand.
+    for s in ["./repo", "../repo", ".", ".."] {
+        assert_eq!(classify(s), Positional::RelativePath, "{s} misclassified");
+    }
+
+    // Neither.
+    for s in ["my-alias", "owner/", "a/b/c", "owner/re po", "owner:repo"] {
+        assert_eq!(classify(s), Positional::Other, "{s} misclassified");
+    }
+}
+
+/// Aliases are `^[a-z0-9][a-z0-9._-]*$` — none can be read as a repo, so the
+/// two-positional routing can never mistake one for the other.
+#[test]
+fn looks_like_repo_rejects_aliases() {
+    for alias in ["my-alias", "proj", "a.b-c", "repo123", "owner-repo"] {
+        assert!(!looks_like_repo(alias), "{alias} misread as a repo");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GitHub shorthand — the primary form
+// ---------------------------------------------------------------------------
+
+/// THE #4912 PRIMARY FORM. `owner/repo` resolves to the GitHub URL and derives
+/// the canonical `owner-repo` alias. GitHub is assumed, matching the
+/// `is_github_remote` gate `tm launch` already applies.
+#[test]
+fn shorthand_resolves_to_github() {
+    let (alias, url) = resolve_register_args("bobmatnyc/trusty-tools", None).unwrap();
+    assert_eq!(url, "https://github.com/bobmatnyc/trusty-tools");
+    assert_eq!(alias, "bobmatnyc-trusty-tools");
+
+    // The alias must match what the full URL derives — one derivation path.
+    let (from_url, _) =
+        resolve_register_args("https://github.com/bobmatnyc/trusty-tools", None).unwrap();
+    assert_eq!(alias, from_url);
+}
+
+/// An all-numeric owner is valid shorthand, and the port-drop in the path
+/// splitter must not eat it.
+#[test]
+fn shorthand_numeric_owner() {
+    let (alias, url) = resolve_register_args("123/repo", None).unwrap();
+    assert_eq!(url, "https://github.com/123/repo");
+    assert_eq!(alias, "123-repo");
+}
+
+/// Shorthand with an explicit alias, in both positional orders.
+#[test]
+fn shorthand_with_explicit_alias() {
+    let (alias, url) = resolve_register_args("owner/repo", Some("shiny")).unwrap();
+    assert_eq!(alias, "shiny");
+    assert_eq!(url, "https://github.com/owner/repo");
+
+    let (alias, url) = resolve_register_args("shiny", Some("owner/repo")).unwrap();
+    assert_eq!(alias, "shiny");
+    assert_eq!(url, "https://github.com/owner/repo");
+}
+
+/// Relative paths are paths, not shorthand — they resolve against the process
+/// cwd but would be cloned from elsewhere. Each shape refused explicitly.
+#[test]
+fn relative_paths_are_never_shorthand() {
+    for s in ["./repo", "../repo", "./owner/repo", "../a/b"] {
+        let err = resolve_register_args(s, None).unwrap_err().to_string();
+        assert!(
+            err.contains("relative path"),
+            "{s} must be refused as a path, got: {err}"
+        );
+    }
+}
+
+/// Absolute and home-relative paths stay accepted as local clone sources — they
+/// worked before #4912 and are unambiguous, unlike the relative forms.
+#[test]
+fn absolute_and_home_paths_are_accepted() {
+    assert!(resolve_register_args("/srv/git/repo.git", Some("local")).is_ok());
+    assert!(resolve_register_args("~/src/repo.git", Some("home")).is_ok());
+}
 
 // ---------------------------------------------------------------------------
 // Positional order
@@ -54,98 +184,53 @@ fn one_arg_derives() {
     assert_eq!(url, "https://github.com/owner/repo");
 }
 
-/// A single non-URL positional is a usage error, not a half-registration.
+/// A lone argument naming nothing is a usage error, not a half-registration.
+/// The message must show both accepted forms.
 #[test]
-fn one_arg_non_url_errors() {
-    let err = resolve_register_args("my-alias", None)
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("is not a repository URL"), "unexpected: {err}");
-}
-
-/// THE #4912 REVIEW HIGH. `gh`-style `owner/repo` shorthand must be REJECTED,
-/// not silently read as `host/repo`. Before the fix this registered alias
-/// `trusty-tools` → URL `bobmatnyc/trusty-tools` with exit 0, and did not even
-/// collide with the later correct `bobmatnyc-trusty-tools` registration.
-///
-/// It is rejected rather than expanded on purpose: expanding `owner/repo` to
-/// `https://github.com/owner/repo` is a product decision about defaulting to
-/// GitHub, and is out of scope for #4912.
-#[test]
-fn one_arg_shorthand_is_rejected() {
-    for shorthand in ["bobmatnyc/trusty-tools", "owner/repo", "a/b/c"] {
-        let err = resolve_register_args(shorthand, None)
-            .unwrap_err()
-            .to_string();
+fn one_arg_non_repo_errors() {
+    for s in ["my-alias", "owner/", "a/b/c"] {
+        let err = resolve_register_args(s, None).unwrap_err().to_string();
         assert!(
-            err.contains("is not a repository URL"),
-            "{shorthand} must be rejected, got: {err}"
+            err.contains("does not name a repository"),
+            "{s}: unexpected {err}"
         );
-        // The message must show the way out, not just the failure.
-        assert!(err.contains("https://github.com/"), "no remedy in: {err}");
+        assert!(err.contains("<owner>/<repo>"), "no remedy in: {err}");
     }
 }
 
-/// Two URL-shaped arguments are ambiguous — refuse rather than guess.
+/// Two repo-shaped arguments are ambiguous — refuse rather than guess.
 #[test]
 fn two_urls_error() {
-    let err = resolve_register_args("https://github.com/a/b", Some("https://github.com/c/d"))
+    for (a, b) in [
+        ("https://github.com/a/b", "https://github.com/c/d"),
+        ("owner/repo", "other/repo"),
+    ] {
+        let err = resolve_register_args(a, Some(b)).unwrap_err().to_string();
+        assert!(
+            err.contains("both arguments name a repository"),
+            "({a}, {b}): unexpected {err}"
+        );
+    }
+}
+
+/// Two alias-shaped arguments mean no repo was supplied at all.
+#[test]
+fn two_non_urls_error() {
+    let err = resolve_register_args("alpha", Some("beta"))
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("both arguments look like URLs"),
+        err.contains("neither argument names a repository"),
         "unexpected: {err}"
     );
 }
 
-/// Two alias-shaped arguments mean no URL was supplied at all. Since the review
-/// fix, `owner/repo` shorthand lands here too rather than being taken as a URL.
-#[test]
-fn two_non_urls_error() {
-    for (a, b) in [("alpha", "beta"), ("mine", "owner/repo")] {
-        let err = resolve_register_args(a, Some(b)).unwrap_err().to_string();
-        assert!(
-            err.contains("neither argument looks like a repository URL"),
-            "unexpected for ({a}, {b}): {err}"
-        );
-    }
-}
-
-/// The shape test must never classify a valid alias as a URL, and vice versa.
-#[test]
-fn looks_like_url_accepts_url_shapes() {
-    assert!(looks_like_url("https://github.com/owner/repo"));
-    assert!(looks_like_url("git@github.com:owner/repo.git"));
-    assert!(looks_like_url("github.com/owner/repo"));
-    assert!(looks_like_url("ssh://git@example.com:2222/owner/repo.git"));
-    assert!(looks_like_url("localhost:3000/owner/repo"));
-    // Local clone sources stay acceptable — they were before #4912.
-    assert!(looks_like_url("/srv/git/repo.git"));
-    assert!(looks_like_url("~/src/repo.git"));
-}
-
-/// Aliases are `^[a-z0-9][a-z0-9._-]*$` — none of them can look like a URL.
-#[test]
-fn looks_like_url_rejects_aliases() {
-    for alias in ["my-alias", "proj", "a.b-c", "repo123", "owner-repo"] {
-        assert!(!looks_like_url(alias), "{alias} misread as a URL");
-    }
-}
-
-/// A `/` alone is not enough: without a host-shaped first segment this is
-/// `gh` shorthand, not a URL (#4912 review HIGH).
-#[test]
-fn looks_like_url_rejects_gh_shorthand() {
-    for s in ["owner/repo", "bobmatnyc/trusty-tools", "a/b/c", "owner/"] {
-        assert!(!looks_like_url(s), "{s} misread as a URL");
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Alias derivation
+// Alias derivation from full URLs
 // ---------------------------------------------------------------------------
 
-/// Every real URL shape derives the same HYPHEN-joined `owner-repo`.
+/// Every real URL shape derives the same HYPHEN-joined `owner-repo`. Full
+/// non-GitHub URLs keep working — only non-GitHub *shorthand* is deferred.
 #[test]
 fn derives_from_every_url_shape() {
     let cases = [
@@ -163,25 +248,25 @@ fn derives_from_every_url_shape() {
             "ssh://git@git.example.com:2222/team/thing.git",
             "team-thing",
         ),
+        ("git@bitbucket.org:team/thing.git", "team-thing"),
     ];
     for (url, want) in cases {
         let (alias, got_url) = resolve_register_args(url, None).unwrap();
         assert_eq!(alias, want, "wrong alias for {url}");
-        assert_eq!(got_url, url);
+        assert_eq!(got_url, url, "URL must be stored verbatim");
     }
 }
 
-/// No discernible owner → fall back to the repo segment alone (the stated
-/// #4912 decision; erroring would reject valid self-hosted single-segment
-/// paths).
+/// No discernible owner → fall back to the repo segment alone (erroring would
+/// reject valid self-hosted single-segment paths).
 #[test]
 fn no_owner_falls_back_to_repo() {
     let (alias, _) = resolve_register_args("https://example.com/repo", None).unwrap();
     assert_eq!(alias, "repo");
 }
 
-/// A host-only URL yields nothing to name. BOTH forms must error — the
-/// no-trailing-slash one silently derived `examplecom` before the #4912 review.
+/// A host-only URL names nothing. BOTH forms must error — the no-trailing-slash
+/// one silently derived `examplecom` before the review.
 #[test]
 fn host_only_url_errors() {
     for url in [
@@ -193,13 +278,13 @@ fn host_only_url_errors() {
         let err = resolve_register_args(url, None).unwrap_err().to_string();
         assert!(
             err.contains("no owner/repo path"),
-            "{url} must be rejected, got: {err}"
+            "{url} must be refused, got: {err}"
         );
     }
 }
 
 /// Browser pastes point INTO a repo and derive nonsense from the last two path
-/// segments (`tree-main`, `pull-4914`). Reject with the repo-root form named.
+/// segments (`tree-main`, `pull-4914`). Refuse with the repo-root form named.
 #[test]
 fn browser_paste_shapes_are_rejected() {
     let cases = [
@@ -214,14 +299,14 @@ fn browser_paste_shapes_are_rejected() {
         let err = resolve_register_args(url, None).unwrap_err().to_string();
         assert!(
             err.contains("points inside a repository"),
-            "{url} must be rejected, got: {err}"
+            "{url} must be refused, got: {err}"
         );
         assert!(err.contains("repository root"), "no remedy in: {err}");
     }
 }
 
-/// The web-path words are only rejected in an interior position — a repo
-/// actually NAMED `tree` (or a GitLab subgroup path ending in one) still works.
+/// The web-path words are only refused in an interior position — a repo actually
+/// NAMED `tree` (or a GitLab subgroup path ending in one) still works.
 #[test]
 fn repo_named_like_a_web_path_is_ok() {
     let (alias, _) = resolve_register_args("https://github.com/owner/tree", None).unwrap();
@@ -231,28 +316,26 @@ fn repo_named_like_a_web_path_is_ok() {
 }
 
 /// A query string or fragment is never part of a clone URL, and both corrupt the
-/// derived alias. Strip them from the stored URL rather than storing an
-/// unclonable string.
+/// derived alias. Strip them rather than storing an unclonable string.
 #[test]
 fn query_and_fragment_are_stripped() {
-    let (alias, url) =
-        resolve_register_args("https://github.com/owner/repo?tab=readme-ov-file", None).unwrap();
-    assert_eq!(alias, "owner-repo");
-    assert_eq!(url, "https://github.com/owner/repo");
-
-    let (alias, url) = resolve_register_args("https://github.com/owner/repo#readme", None).unwrap();
-    assert_eq!(alias, "owner-repo");
-    assert_eq!(url, "https://github.com/owner/repo");
+    for input in [
+        "https://github.com/owner/repo?tab=readme-ov-file",
+        "https://github.com/owner/repo#readme",
+    ] {
+        let (alias, url) = resolve_register_args(input, None).unwrap();
+        assert_eq!(alias, "owner-repo", "for {input}");
+        assert_eq!(url, "https://github.com/owner/repo", "for {input}");
+    }
 }
 
 /// The `a/b-c` vs `a-b/c` flattening ambiguity: both derive the SAME alias.
-/// That is accepted, not special-cased — the second registration is caught by
-/// the ordinary different-URL collision refusal (see
-/// `collision_refuses_and_leaves_registry_untouched`).
+/// Accepted, not special-cased — the second registration is caught by the
+/// ordinary different-URL collision refusal.
 #[test]
 fn hyphen_flattening_ambiguity_is_accepted_and_collides() {
-    let (a, _) = resolve_register_args("https://github.com/a/b-c", None).unwrap();
-    let (b, _) = resolve_register_args("https://github.com/a-b/c", None).unwrap();
+    let (a, _) = resolve_register_args("a/b-c", None).unwrap();
+    let (b, _) = resolve_register_args("a-b/c", None).unwrap();
     assert_eq!(a, "a-b-c");
     assert_eq!(b, "a-b-c");
 }
@@ -262,7 +345,7 @@ fn hyphen_flattening_ambiguity_is_accepted_and_collides() {
 // ---------------------------------------------------------------------------
 
 /// The local validator must agree with the shared deriver on where the host
-/// ends, for every shape both see — otherwise a rejection fires on a URL the
+/// ends, for every shape both see — otherwise a refusal fires on a URL the
 /// deriver would have handled, or vice versa.
 #[test]
 fn path_segments_matches_every_url_shape() {
@@ -287,8 +370,9 @@ fn path_segments_matches_every_url_shape() {
     }
 }
 
-/// The port-drop must key off the `:` host terminator, not "the first segment
-/// is digits" — otherwise an all-numeric owner is silently swallowed.
+/// The port-drop must key off the `:` host terminator, not "the first segment is
+/// digits" — otherwise an all-numeric owner is swallowed. That matters more now
+/// that `123/repo` is valid shorthand.
 #[test]
 fn path_segments_keeps_numeric_owner() {
     assert_eq!(
@@ -323,15 +407,12 @@ fn collision_refuses_and_leaves_registry_untouched() {
     let paths = crate::commands::managed_root::ManagedPaths::from_root(dir.path().to_path_buf());
 
     // First registration derives `a-b-c` from `a/b-c`.
-    crate::commands::standalone::register_cmd(&paths, "https://github.com/a/b-c", None, false)
-        .unwrap();
+    crate::commands::standalone::register_cmd(&paths, "a/b-c", None, false).unwrap();
     let registry_path = dir.path().join("registry.json");
     let before = std::fs::read(&registry_path).unwrap();
 
     // `a-b/c` flattens to the same alias but is a different URL.
-    let err =
-        crate::commands::standalone::register_cmd(&paths, "https://github.com/a-b/c", None, false)
-            .unwrap_err();
+    let err = crate::commands::standalone::register_cmd(&paths, "a-b/c", None, false).unwrap_err();
     let msg = format!("{err:#}");
     assert!(
         msg.contains("already registered"),
@@ -345,35 +426,53 @@ fn collision_refuses_and_leaves_registry_untouched() {
     );
 }
 
-/// A rejected URL must not create a registry file at all — the refusal happens
-/// before any load or save.
+/// A refused argument must not create a registry file at all — the refusal
+/// happens before any load or save.
 #[test]
 fn rejected_url_writes_nothing() {
     let dir = tempfile::TempDir::new().unwrap();
     let paths = crate::commands::managed_root::ManagedPaths::from_root(dir.path().to_path_buf());
-    assert!(
-        crate::commands::standalone::register_cmd(&paths, "bobmatnyc/trusty-tools", None, false)
-            .is_err()
-    );
+    for bad in ["./repo", "https://example.com", "a/b/c"] {
+        assert!(
+            crate::commands::standalone::register_cmd(&paths, bad, None, false).is_err(),
+            "{bad} must be refused"
+        );
+    }
     assert!(
         !dir.path().join("registry.json").exists(),
-        "a rejected URL must not write a registry"
+        "a refused argument must not write a registry"
     );
 }
 
-/// Re-registering the SAME url under the same derived alias is idempotent, not
-/// an error — nothing is being rebound.
+/// Shorthand registers end to end and stores the resolved GitHub URL.
 #[test]
-fn same_url_reregistration_is_idempotent() {
+fn shorthand_registers_end_to_end() {
     let dir = tempfile::TempDir::new().unwrap();
     let paths = crate::commands::managed_root::ManagedPaths::from_root(dir.path().to_path_buf());
-    let url = "https://github.com/owner/repo";
-    crate::commands::standalone::register_cmd(&paths, url, None, false).unwrap();
-    crate::commands::standalone::register_cmd(&paths, url, None, false).unwrap();
+    crate::commands::standalone::register_cmd(&paths, "bobmatnyc/trusty-tools", None, false)
+        .unwrap();
 
     let registry =
         trusty_mpm::core::standalone::registry::ManagedRegistry::load(dir.path()).unwrap();
     let entries = registry.list();
     assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].alias, "bobmatnyc-trusty-tools");
+    assert_eq!(entries[0].url, "https://github.com/bobmatnyc/trusty-tools");
+}
+
+/// Re-registering the SAME repo is idempotent, and the shorthand and full-URL
+/// forms are the same registration — not two.
+#[test]
+fn same_url_reregistration_is_idempotent() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let paths = crate::commands::managed_root::ManagedPaths::from_root(dir.path().to_path_buf());
+    crate::commands::standalone::register_cmd(&paths, "owner/repo", None, false).unwrap();
+    crate::commands::standalone::register_cmd(&paths, "https://github.com/owner/repo", None, false)
+        .unwrap();
+
+    let registry =
+        trusty_mpm::core::standalone::registry::ManagedRegistry::load(dir.path()).unwrap();
+    let entries = registry.list();
+    assert_eq!(entries.len(), 1, "shorthand and full URL are one repo");
     assert_eq!(entries[0].alias, "owner-repo");
 }

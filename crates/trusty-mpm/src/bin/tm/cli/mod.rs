@@ -787,28 +787,28 @@ pub(crate) enum Command {
     ///
     /// Why: declares an alias→URL mapping without cloning so users can register
     /// their fleet cheaply and `tm load <alias>` lazily.
-    /// What: `tm register <url> [alias]`. With no alias, one is derived from the
-    /// URL as `owner-repo` (hyphen-joined, e.g.
-    /// `https://github.com/bobmatnyc/trusty-tools` → `bobmatnyc-trusty-tools`).
-    /// The legacy `tm register <alias> <url>` order still works — whichever
-    /// positional is URL-shaped is taken as the URL (#4912). A FULL URL is
-    /// required: `gh`-style `owner/repo` shorthand is rejected, not expanded,
-    /// and so are browser paths into a repo (`.../tree/main`, `.../pull/123`).
+    /// What: `tm register <owner/repo> [alias]`. `owner/repo` is the primary
+    /// form and GitHub is assumed, so `tm register bobmatnyc/trusty-tools`
+    /// registers `https://github.com/bobmatnyc/trusty-tools`. A full URL is the
+    /// alternative form and any host works there. With no alias, one is derived
+    /// as hyphen-joined `owner-repo` (`bobmatnyc-trusty-tools`). The legacy
+    /// `tm register <alias> <url>` order still works — whichever positional
+    /// names a repo is taken as the repo (#4912). Browser paths into a repo
+    /// (`.../tree/main`, `.../pull/123`) and relative paths are refused.
     /// Persists `{alias, url}` to `<root>/registry.json` and prints
     /// `registered <alias> → <url>`.
     /// Test: `register_args_tests.rs`.
     Register {
-        /// Clone-able repo URL (HTTPS or SSH) — e.g.
-        /// `https://github.com/<owner>/<repo>` or
-        /// `git@github.com:<owner>/<repo>.git`. `owner/repo` shorthand is NOT
-        /// accepted.
+        /// Repo to register: `<owner>/<repo>` (GitHub assumed), or a full URL
+        /// such as `https://github.com/<owner>/<repo>` or
+        /// `git@github.com:<owner>/<repo>.git` for any host.
         ///
         /// #4912: this position also accepts the legacy alias-first form; the
-        /// URL is detected by shape, so `tm register <alias> <url>` still works.
+        /// repo is detected by shape, so `tm register <alias> <url>` still works.
         url: String,
         /// Short alias identifier (e.g. `my-project`).
         ///
-        /// Optional — defaults to `owner-repo` derived from the URL.
+        /// Optional — defaults to `owner-repo` derived from the repo.
         alias: Option<String>,
         /// Overwrite an existing alias with a different URL.
         #[arg(long)]

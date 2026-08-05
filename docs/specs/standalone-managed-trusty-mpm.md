@@ -136,11 +136,13 @@ reusing the provisioner, session-launch, and registry machinery underneath.
 
 #### Behavior Contract (WHAT)
 
-- **Inputs:** `tm register <github-url> [alias]`. `<github-url>` is any clone-able GitHub URL
-  (https or ssh form); `[alias]` is an optional short stable identifier
-  (`^[a-z0-9][a-z0-9._-]*$`) that defaults to the URL's hyphen-joined `owner-repo` slug
-  (issue #4912). The legacy `tm register <alias> <github-url>` order is still accepted — the
-  URL positional is detected by shape, so existing invocations are not silently reinterpreted.
+- **Inputs:** `tm register <owner/repo> [alias]`. `<owner/repo>` is the primary form and GitHub
+  is assumed; a full clone URL (https or ssh, any host) is the accepted alternative. `[alias]` is
+  an optional short stable identifier (`^[a-z0-9][a-z0-9._-]*$`) that defaults to the repo's
+  hyphen-joined `owner-repo` slug (issue #4912). The legacy `tm register <alias> <url>` order is
+  still accepted — the repo positional is detected by shape. Non-GitHub shorthand is deferred;
+  arguments naming no repository (relative paths, host-only URLs, browser paths into a repo) are
+  refused rather than registered.
 - **Outputs:** the `(alias → {url, default_branch?, created_at})` mapping is persisted to the
   standalone-driver registry (a TOML/JSON file under the trusty-mpm config root, e.g.
   `~/.trusty-mpm/registry.toml`, distinct from `~/.claude*`). Prints a one-line confirmation

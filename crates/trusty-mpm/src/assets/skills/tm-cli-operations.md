@@ -364,7 +364,7 @@ the secret — safe to include in a `tm doctor`-style report.
 
 ```bash
 tm install [--force]               # deploy bundled framework artifacts to ~/.trusty-mpm/framework/
-tm register <url> [alias] [--force]# map a repo alias → URL (no clone; alias defaults to owner-repo)
+tm register <owner/repo> [alias]   # map a repo alias → URL (no clone; GitHub assumed; alias defaults to owner-repo)
 tm load <alias>                    # clone/refresh + deploy managed config
 tm run <alias> [--task …]          # launch an interactive claude session for an alias
 tm path <alias>                    # print the stable repo path (IDE-attach / cd)

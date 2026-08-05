@@ -89,7 +89,7 @@ pub enum RegistryError {
     },
     /// The alias was not found in the registry.
     // #4912: the canonical form is URL-first with an optional alias.
-    #[error("alias '{alias}' is not registered; run `tm register <url> {alias}` first")]
+    #[error("alias '{alias}' is not registered; run `tm register <owner/repo> {alias}` first")]
     NotFound {
         /// The alias that was looked up.
         alias: String,

@@ -18,7 +18,7 @@ use anyhow::Context;
 
 use super::managed_root::ManagedPaths;
 
-/// Handle `tm register <url> [alias] [--force]`.
+/// Handle `tm register <owner/repo> [alias] [--force]`.
 ///
 /// Why: the register command is the first step of the standalone lifecycle —
 /// it persists the alias→URL mapping without cloning.
@@ -118,7 +118,7 @@ pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
     if local_entries.is_empty() && fleet_entries.is_empty() {
         println!("No aliases registered.");
         println!("  Run `tm` from a git project to auto-register a local alias.");
-        println!("  Run `tm register <url> [alias]` to add a managed fleet alias.");
+        println!("  Run `tm register <owner/repo>` to add a managed fleet alias.");
         return Ok(());
     }
 
