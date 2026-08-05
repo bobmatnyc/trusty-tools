@@ -366,10 +366,14 @@ pub(crate) async fn confirm_and_delete(
                 );
             } else {
                 // Managed sessions are soft-deleted (#2012 marker): marked
-                // `--deleted--` and kept in the list, not dropped.
+                // `--deleted--` and kept in the STORE, not dropped. It is NOT
+                // still listed — `is_live_session_state` hides a soft-deleted
+                // record from the default view, so the old "still listed"
+                // wording sent operators looking for a row that is not there.
                 eprintln!(
                     "tm: '{name}' [was {prior_state}] marked --deleted-- \
-                     (still listed; `tm sessions prune --state deleted` to remove)."
+                     (hidden from the list; `tm sessions ls --all` to see it, \
+                     `tm sessions prune --state deleted` to remove it for good)."
                 );
             }
             Ok(true)

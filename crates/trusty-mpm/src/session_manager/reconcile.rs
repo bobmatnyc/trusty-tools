@@ -10,9 +10,11 @@
 //! What: [`SessionManager::reconcile_on_boot`] lists live tmux sessions,
 //! cross-references them against the persisted store (live → `Active`, gone →
 //! `Stopped`, unknown-to-the-store → adopted as an external `Active` record),
-//! and optionally auto-resumes every session it marked `Stopped`.
+//! skipping every TERMINAL record (`Decommissioned`/`Deleted`), and optionally
+//! auto-resumes every session it marked `Stopped`.
 //! Test: `manager_reconcile_gone_tmux_yields_stopped`,
-//! `manager_reconcile_adopts_new_prefix_session` in `tests.rs`.
+//! `manager_reconcile_adopts_new_prefix_session` in `tests.rs`;
+//! `reconcile_preserves_deleted_record` in `delete_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
@@ -32,12 +34,17 @@ impl SessionManager {
     /// What: lists all tmux sessions, filters to managed names (current `tm-`
     /// or legacy `tmpm-`/`trusty-mpm-`, issue #1955) via
     /// [`crate::core::names::is_managed_session_name`], cross-references
-    /// against the store: live → `Active`; gone → `Stopped` (unless already
-    /// `Decommissioned`). External managed sessions unknown to the store are
-    /// adopted as `Active`.
+    /// against the store: live → `Active`; gone → `Stopped`. A record in a
+    /// TERMINAL state (`Decommissioned` or `Deleted`, per
+    /// [`ManagedSessionState::is_terminal`]) is skipped entirely, so a boot can
+    /// never resurrect a tombstone. External managed sessions unknown to the
+    /// store are adopted as `Active`.
     /// When `auto_resume` is true, all `Stopped` sessions are immediately resumed.
     /// Test: `manager_reconcile_gone_tmux_yields_stopped`,
-    /// `manager_reconcile_adopts_new_prefix_session`.
+    /// `manager_reconcile_adopts_new_prefix_session`,
+    /// `reconcile_preserves_deleted_record` /
+    /// `reconcile_preserves_decommissioned_record` /
+    /// `reconcile_still_activates_stopped_record_with_live_tmux`.
     pub async fn reconcile_on_boot(
         &self,
         auto_resume: bool,
@@ -71,8 +78,17 @@ impl SessionManager {
 
         // Reconcile store records against live sessions.
         for mut record in all_records {
-            // Decommissioned tombstones are never touched by reconciliation.
-            if matches!(record.state, ManagedSessionState::Decommissioned) {
+            // TERMINAL tombstones are never touched by reconciliation. Asking
+            // the enum (`is_terminal`) rather than hand-rolling
+            // `matches!(.., Decommissioned)` is load-bearing: the inline check
+            // this replaced covered ONLY `Decommissioned`, so every
+            // soft-`Deleted` record was silently rewritten to `Stopped`/`Active`
+            // on each daemon boot — `guard.upsert` here writes straight to the
+            // store, bypassing the `is_terminal()` guard `stop`/`resume`
+            // already enforce. That is the exact hazard
+            // `ManagedSessionState::is_terminal`'s doc warns about ("a new
+            // terminal variant (like `Deleted`) would silently slip past").
+            if record.state.is_terminal() {
                 continue;
             }
 

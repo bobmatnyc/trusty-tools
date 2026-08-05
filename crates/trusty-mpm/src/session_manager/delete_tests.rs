@@ -9,9 +9,13 @@
 //! fix to the SAME guard (a real tmux liveness probe, not a persisted-state
 //! check) is covered separately in `liveness_tests.rs` to keep this file
 //! focused and both files under the SLOC cap.
-//! What: four tests exercising [`super::manager::SessionManager::delete_record`]
+//! What: tests exercising [`super::manager::SessionManager::delete_record`]
 //! — the `--deleted--` soft-delete mark, the running-guard refusal, the
-//! `--force` bypass, and proof that the workspace directory is never touched.
+//! `--force` bypass, and proof that the workspace directory is never touched —
+//! plus the boot-reconcile durability of the soft-delete: a `Deleted` record
+//! must SURVIVE `reconcile_on_boot` unchanged, because before the
+//! `is_terminal()` guard landed in `reconcile.rs` every soft-deleted record was
+//! silently rewritten to `Stopped`/`Active` on each daemon boot.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
 use tempfile::TempDir;
@@ -156,5 +160,122 @@ async fn delete_record_never_touches_workspace_dir() {
     assert!(
         ws.exists(),
         "workspace directory must NOT be removed by delete_record (store-only op)"
+    );
+}
+
+/// A soft-`Deleted` record SURVIVES `reconcile_on_boot` unchanged.
+///
+/// Why: `reconcile_on_boot` rewrites every non-skipped record to `Active` or
+/// `Stopped` and persists it with a bare `guard.upsert`, bypassing the
+/// `is_terminal()` guard `stop`/`resume` enforce. Its skip-list used to be an
+/// inline `matches!(state, Decommissioned)`, which `Deleted` — equally terminal
+/// — slipped straight past, so EVERY `d<N>` delete was undone by the next
+/// daemon boot (the record came back as `Stopped`, or `Active` if its pane was
+/// still alive). Never observed in the field precisely because no record ever
+/// stayed in state `deleted` long enough to be seen.
+/// What: soft-deletes a `Stopped` record via `delete_record`, runs
+/// `reconcile_on_boot(false)`, and asserts the record is STILL `Deleted` and
+/// appears in neither the `adopted` nor the `stopped` report list.
+/// Test: this function IS the test. Reverting the `is_terminal()` guard in
+/// `reconcile.rs` to the old `matches!(.., Decommissioned)` turns this red.
+#[tokio::test]
+async fn reconcile_preserves_deleted_record() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, false).await;
+
+    mgr.delete_record(&id, false).await.expect("delete");
+    assert_eq!(
+        mgr.get(&id).await.expect("record present").state,
+        ManagedSessionState::Deleted,
+        "test invariant: the record must be Deleted before reconcile runs"
+    );
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    let after = mgr.get(&id).await.expect("record must still exist");
+    assert_eq!(
+        after.state,
+        ManagedSessionState::Deleted,
+        "a soft-deleted record must survive a daemon boot as Deleted — \
+         reconcile must never resurrect a terminal tombstone (report: {report:?})"
+    );
+    assert!(
+        !report.stopped.contains(&id.to_string()),
+        "a Deleted tombstone must not be reported as stopped; report: {report:?}"
+    );
+    assert!(
+        !report.adopted.contains(&format!("tmpm-seed-{id}")),
+        "a Deleted tombstone must not be re-adopted; report: {report:?}"
+    );
+}
+
+/// A `Decommissioned` record still survives `reconcile_on_boot` (no regression).
+///
+/// Why: swapping the inline `matches!(.., Decommissioned)` skip for
+/// `state.is_terminal()` must WIDEN the exclusion, never move it — the
+/// pre-existing tombstone guarantee has to hold unchanged. Pinned here next to
+/// the `Deleted` case so the two terminal variants are covered by the same
+/// module (`tests.rs` also has `manager_reconcile_skips_decommissioned`, which
+/// exercises the hand-built-record path).
+/// What: seeds a `Decommissioned` record, runs `reconcile_on_boot(false)`, and
+/// asserts the state is unchanged.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_preserves_decommissioned_record() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Decommissioned, false).await;
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        mgr.get(&id).await.expect("record must still exist").state,
+        ManagedSessionState::Decommissioned,
+        "a decommissioned tombstone must survive reconcile unchanged (report: {report:?})"
+    );
+    assert!(!report.stopped.contains(&id.to_string()));
+    assert!(!report.adopted.contains(&format!("tmpm-seed-{id}")));
+}
+
+/// Reconcile STILL does its job: a `Stopped` record with a live tmux session
+/// becomes `Active`.
+///
+/// Why: the terminal-state skip must not be over-broad. This is the
+/// counterweight to the two tombstone tests — proof the guard excludes only
+/// terminal records and that the ordinary live-session re-adoption path is
+/// untouched.
+/// What: seeds a `Stopped` record, registers a LIVE tmux session under the
+/// record's `tmpm-seed-<id>` name (which `is_managed_session_name` accepts via
+/// the legacy prefix), runs `reconcile_on_boot(false)`, and asserts the record
+/// is now `Active` and named in `report.adopted`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_still_activates_stopped_record_with_live_tmux() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, false).await;
+
+    // `seed_record` only registers a live tmux session for Active/Provisioning
+    // states, so register one explicitly for this Stopped record.
+    let tmux_name = format!("tmpm-seed-{id}");
+    mgr.tmux
+        .create_session(&tmux_name, &dir.path().to_string_lossy())
+        .expect("register live tmux session");
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        mgr.get(&id).await.expect("record present").state,
+        ManagedSessionState::Active,
+        "a Stopped record whose tmux session is live must be re-adopted as \
+         Active (report: {report:?})"
+    );
+    assert!(
+        report.adopted.contains(&tmux_name),
+        "the live session must be reported adopted; report: {report:?}"
     );
 }
