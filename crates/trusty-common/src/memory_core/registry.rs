@@ -507,6 +507,16 @@ impl PalaceRegistry {
             &handle.kg,
             &drawers,
         );
+        // ADR-0027 T9: seed the default wing every room already points at.
+        // Ordered AFTER the room backfill only for log readability — the two
+        // are independent, because `RoomRecord::wing_id` has been
+        // `DEFAULT_WING_ID` since T1, so no room row needs rewriting for its
+        // wing to exist. This writes exactly one row and never touches
+        // `ROOMS` or `DRAWERS`.
+        crate::memory_core::store::wings::ensure_default_wing_fail_open(
+            handle.id.as_str(),
+            &handle.kg,
+        );
     }
 
     /// Resolve a palace-level alias, but ONLY when the requested palace is

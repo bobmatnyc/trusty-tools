@@ -136,7 +136,8 @@ fn tool_definitions_lists_all_tools() {
         .expect("tools array");
     // 34 original + 3 task tools (task_add, task_list, task_complete, issue
     // #1722) + 3 room tools (room_list, room_create, room_rename, ADR-0027 T6)
-    assert_eq!(tools.len(), 40);
+    // + 3 wing tools (wing_list, wing_create, wing_rename, ADR-0027 T9 / #4809)
+    assert_eq!(tools.len(), 43);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -184,6 +185,10 @@ fn tool_definitions_lists_all_tools() {
         "room_list",
         "room_create",
         "room_rename",
+        // ADR-0027 T9 (#4809) — the wing surface ships with the wing entity:
+        "wing_list",
+        "wing_create",
+        "wing_rename",
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }

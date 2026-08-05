@@ -228,20 +228,23 @@ pub(crate) async fn handle_palace_info(state: &AppState, args: Value) -> Result<
         .data_dir
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
-    // ADR-0027 D6 / #4807: report how many rooms the palace has. `wing_count`
-    // is deliberately absent here rather than reported as 1 — this tool never
-    // carried it, and adding a field whose only truthful value is a constant
-    // would be new dead surface. It arrives with the Wing entity (T9).
+    // ADR-0027 D6 / #4807: report how many rooms the palace has. #4809 (T9)
+    // adds `wing_count` alongside it — #4807 left it out rather than report a
+    // constant, and the Wing entity it was waiting for is now here, so this is
+    // a real count from the `WINGS` registry.
     let store = handle.kg.store();
-    let room_count = tokio::task::spawn_blocking(move || store.list_rooms().map(|r| r.len()))
-        .await
-        .context("join palace_info room count")?
-        .context("count rooms")?;
+    let (room_count, wing_count) = tokio::task::spawn_blocking(move || {
+        anyhow::Ok((store.list_rooms()?.len(), store.list_wings()?.len()))
+    })
+    .await
+    .context("join palace_info counts")?
+    .context("count rooms and wings")?;
     Ok(json!({
         "id": handle.id.as_str(),
         "name": handle.id.as_str(),
         "drawer_count": drawer_count,
         "room_count": room_count,
+        "wing_count": wing_count,
         "data_dir": data_dir,
     }))
 }
