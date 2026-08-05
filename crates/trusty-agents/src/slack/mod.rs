@@ -17,6 +17,7 @@
 //! - `rbac.rs` — per-user RBAC config + Virtual-CTO gating
 //! - `pairing.rs` — pairing state machine + REPL-issued codes
 //! - `handlers.rs` — slash/plain-text handlers + `chat.postMessage` senders
+//! - `events.rs` — #3852 eventstream mirror for inbound messages
 //! - `format.rs` — mrkdwn conversion + 3000-char chunking
 //! - `tests.rs` — unit tests for the pure helpers above
 //!
@@ -24,6 +25,7 @@
 //! markdown_to_mrkdwn, generate_pairing_code, verify_pair_attempt, sentinel
 //! flow). Live verification requires a Slack workspace + app tokens.
 
+mod events;
 mod format;
 mod handlers;
 mod pairing;
@@ -161,7 +163,10 @@ pub async fn run_slack_bot(
 
     let project_path = Arc::new(project_path);
     let sessions: SessionMap = Arc::new(Mutex::new(HashMap::new()));
-    let paired: PairedChannels = Arc::new(RwLock::new(HashMap::new()));
+    // #4853: restore pairings from disk instead of starting empty. Before
+    // this, every restart of the launchd gateway un-paired every channel.
+    let paired_state_path = Arc::new(pairing::paired_channels_state_path());
+    let paired: PairedChannels = pairing::load_paired_channels(&paired_state_path).await;
     let dedup: Arc<Mutex<VecDeque<String>>> =
         Arc::new(Mutex::new(VecDeque::with_capacity(ENVELOPE_DEDUP_CAP)));
     // #4703: resolve the attendance root ONCE here, then inject it down to
@@ -189,6 +194,7 @@ pub async fn run_slack_bot(
             Arc::clone(&project_path),
             Arc::clone(&sessions),
             Arc::clone(&paired),
+            Arc::clone(&paired_state_path),
             Arc::clone(&pending),
             Arc::clone(&dedup),
             Arc::clone(&rbac),
@@ -217,6 +223,7 @@ async fn open_socket_and_run(
     project_path: Arc<PathBuf>,
     sessions: SessionMap,
     paired: PairedChannels,
+    paired_state_path: Arc<PathBuf>,
     pending: PendingPairs,
     dedup: Arc<Mutex<VecDeque<String>>>,
     rbac: Arc<SlackRbacConfig>,
@@ -280,6 +287,7 @@ async fn open_socket_and_run(
                 let project_path = Arc::clone(&project_path);
                 let sessions = Arc::clone(&sessions);
                 let paired = Arc::clone(&paired);
+                let paired_state_path = Arc::clone(&paired_state_path);
                 let pending = Arc::clone(&pending);
                 let rbac = Arc::clone(&rbac);
                 let attendance_root = attendance_root.clone();
@@ -290,6 +298,7 @@ async fn open_socket_and_run(
                         project_path,
                         sessions,
                         paired,
+                        paired_state_path,
                         pending,
                         rbac,
                         attendance_root,
@@ -364,6 +373,7 @@ async fn dispatch_envelope(
     project_path: Arc<PathBuf>,
     sessions: SessionMap,
     paired: PairedChannels,
+    paired_state_path: Arc<PathBuf>,
     pending: PendingPairs,
     rbac: Arc<SlackRbacConfig>,
     attendance_root: crate::attendance::AttendanceRoot,
@@ -437,6 +447,7 @@ async fn dispatch_envelope(
                 sessions,
                 project_path,
                 paired,
+                paired_state_path,
                 rbac,
                 attendance_root,
             )
@@ -474,6 +485,7 @@ async fn dispatch_envelope(
                 sessions,
                 project_path,
                 paired,
+                paired_state_path,
                 pending,
                 rbac,
                 attendance_root,
