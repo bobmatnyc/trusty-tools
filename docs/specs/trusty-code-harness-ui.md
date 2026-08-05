@@ -1498,7 +1498,7 @@ This struct is an illustrative sketch only — the actual response shape, field 
 
 **Requirement — a read-only project-info panel:**
 
-1. **Inferred stack** — language/toolchain detected via trusty-mpm's marker-table logic (reuse `project_lang::LANGUAGE_ENGINEERS` + `stack_profile.rs`, issue #3182).
+1. **Inferred stack** — language/toolchain detected via trusty-mpm's marker logic (reuse `manifest::framework::detected_stack_engineers` + `stack_profile.rs`, issue #3182). The markers themselves are declared in the bundled `framework-manifest.toml`, not in a Rust table (#4765) — read them from there rather than re-deriving them.
 2. **Instruction summaries** — short prose summary of `CLAUDE.md` and `AGENTS.md` (if present), with an **edit link** (§7C.1).
 3. **Service status** — read from §7B aggregation.
 

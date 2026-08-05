@@ -108,11 +108,12 @@ pub async fn try_install_prebuilt(crate_name: &str, install_dir: &std::path::Pat
         }
     };
 
-    // Step 3: Pick the glibc-aware asset suffix. On a low-glibc x86_64 Linux
-    // host the native ORT asset would crash with `GLIBC_2.39 not found`, so an
-    // ORT crate is routed to the portable `x86_64-linux-al2023` load-dynamic
-    // asset instead (issue #1992). Non-ORT crates and adequate hosts keep the
-    // native target suffix.
+    // Step 3: Pick the glibc-aware asset suffix. On a low-glibc Linux host the
+    // native ORT asset would crash with `GLIBC_2.39 not found`, so an ORT crate
+    // is routed to the portable AL2023 load-dynamic asset for its architecture
+    // instead — `x86_64-linux-al2023` (issue #1992) or, since the #2533
+    // follow-up to PR #4822, `aarch64-linux-al2023`. Non-ORT crates and adequate
+    // hosts keep the native target suffix.
     let choice = glibc::select_asset_suffix(crate_name, target, glibc::host_glibc_version());
     let suffix = choice.suffix.as_str();
 

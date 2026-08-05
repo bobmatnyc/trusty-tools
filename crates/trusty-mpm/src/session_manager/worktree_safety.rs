@@ -680,7 +680,7 @@ pub(super) fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// removed from the child environment.
 /// Test: `git_command_strips_repository_redirecting_env`,
 /// `git_command_pins_untracked_and_excludes_config`.
-pub(super) fn git_command(dir: &Path, args: &[&str]) -> Command {
+pub(crate) fn git_command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.args(GIT_PINNED_GLOBAL_ARGS)
         .arg("-C")

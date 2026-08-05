@@ -22,7 +22,6 @@ fn constants_are_non_empty() {
     assert!(!ENGINEER_AGENT.trim().is_empty());
     assert!(!QA_AGENT.trim().is_empty());
     assert!(!RESEARCH_AGENT.trim().is_empty());
-    assert!(!OPS_AGENT.trim().is_empty());
     assert!(!SECURITY_AGENT.trim().is_empty());
     assert!(!DOCUMENTATION_AGENT.trim().is_empty());
     assert!(!DATA_ENGINEER_AGENT.trim().is_empty());
@@ -43,6 +42,7 @@ fn constants_are_non_empty() {
     assert!(!API_QA_AGENT.trim().is_empty());
     // Increment 3 agents
     assert!(!JAVASCRIPT_ENGINEER_AGENT.trim().is_empty());
+    assert!(!ELIXIR_ENGINEER_AGENT.trim().is_empty());
     assert!(!PHOENIX_ENGINEER_AGENT.trim().is_empty());
     assert!(!DART_ENGINEER_AGENT.trim().is_empty());
     assert!(!DOTNET_ENGINEER_AGENT.trim().is_empty());
@@ -407,6 +407,11 @@ fn bundle_table_is_complete() {
     // Issue #4761 (+/-0): tm-slack-canvas-delivery's entry (#4447) is swapped
     //   1-for-1 for tm-slack — same flat-file shape, general Slack delivery
     //   coverage replacing canvas-only scope. Count unchanged at 178.
+    // Issue #4760 (+/-0): `agents/ops.md` is DELETED (deprecated in delegation
+    //   prose since long before it had any code-level effect, superseded by
+    //   `local-ops`), and `agents/elixir-engineer.md` is ADDED (Phoenix's
+    //   `mix.exs` gate narrowed to Phoenix-only, which would otherwise leave
+    //   plain Elixir with no engineer). -1 +1, count unchanged at 178.
     assert_eq!(ALL.len(), 178);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
@@ -456,7 +461,6 @@ fn new_concrete_agents_are_in_bundle() {
         // Increment 1 agents
         "agents/qa.md",
         "agents/research.md",
-        "agents/ops.md",
         "agents/security.md",
         "agents/documentation.md",
         "agents/data-engineer.md",
@@ -479,6 +483,7 @@ fn new_concrete_agents_are_in_bundle() {
         "agents/api-qa.md",
         // Increment 3 agents
         "agents/javascript-engineer.md",
+        "agents/elixir-engineer.md",
         "agents/phoenix-engineer.md",
         "agents/dart-engineer.md",
         "agents/dotnet-engineer.md",
@@ -509,7 +514,6 @@ fn new_concrete_agents_have_extends_in_frontmatter() {
         // Increment 1 agents
         ("qa", QA_AGENT),
         ("research", RESEARCH_AGENT),
-        ("ops", OPS_AGENT),
         ("security", SECURITY_AGENT),
         ("documentation", DOCUMENTATION_AGENT),
         ("data-engineer", DATA_ENGINEER_AGENT),
@@ -532,6 +536,7 @@ fn new_concrete_agents_have_extends_in_frontmatter() {
         ("api-qa", API_QA_AGENT),
         // Increment 3 agents
         ("javascript-engineer", JAVASCRIPT_ENGINEER_AGENT),
+        ("elixir-engineer", ELIXIR_ENGINEER_AGENT),
         ("phoenix-engineer", PHOENIX_ENGINEER_AGENT),
         ("dart-engineer", DART_ENGINEER_AGENT),
         ("dotnet-engineer", DOTNET_ENGINEER_AGENT),
@@ -575,7 +580,6 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
         // Increment 1 agents
         "qa",
         "research",
-        "ops",
         "security",
         "documentation",
         "data-engineer",
@@ -598,6 +602,7 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
         "api-qa",
         // Increment 3 agents
         "javascript-engineer",
+        "elixir-engineer",
         "phoenix-engineer",
         "dart-engineer",
         "dotnet-engineer",

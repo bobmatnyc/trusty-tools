@@ -70,4 +70,3 @@ Before accepting the critic output:
 <!-- TODO: Add examples of well-formed vs poorly-formed findings -->
 <!-- TODO: Add guidance on how PM should evaluate suspiciously clean APPROVE verdicts -->
 <!-- TODO: Add patterns for multi-file implementations (how to cite cross-file issues) -->
-<!-- TODO: Add notes on the optional Phase 2 design critic pass (interface review before Stage 3) -->

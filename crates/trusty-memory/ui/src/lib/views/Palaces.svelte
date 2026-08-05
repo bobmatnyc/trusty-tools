@@ -1,7 +1,8 @@
 <script>
   /*
    * Why: The Palaces view is the operator's window into the memory hierarchy
-   * — Palace → Wing → Room → Drawer. With many palaces (88+ on the author's
+   * — Palace → Wing → Room → Drawer (a "closet" is a keyword index over
+   * drawers, not a level — ADR-0027 D3). With many palaces (88+ on the author's
    * machine), browsing requires filtering, sorting, and project grouping so
    * operators can find recently-active palaces or jump to a specific
    * project's namespace.

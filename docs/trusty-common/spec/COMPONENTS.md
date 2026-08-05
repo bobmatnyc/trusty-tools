@@ -203,7 +203,8 @@ client (the dream subprocess calls it directly).
 dream/decay/analytics surfaces. Absorbed from `trusty-memory-core` (#5 phase 2d).
 
 **Key types/modules.**
-- **Model:** `Palace`/`Wing`/`Room`/`Drawer` + `PalaceId` (`palace.rs`),
+- **Model:** `Palace` → `Wing` → `Room` → `Drawer` + `PalaceId` (`palace.rs`);
+  a *closet* is a keyword index over drawers, not a level (ADR-0027 D3),
   `PalaceRegistry` (`registry.rs`).
 - **Retrieval:** `PalaceHandle` — 4-layer progressive retrieval L0→L3
   (`retrieval.rs`); process-wide shared `FastEmbedder` `OnceCell` (#57).

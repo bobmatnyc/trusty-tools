@@ -11,13 +11,20 @@
 //! could silently diverge.
 //! What: [`render`] lists every bundled skill with its description, category,
 //! and whether it is user-invocable (`/skill-name`) or agent-reference-only.
+//! Since #4765 the ROSTER is the bundled `framework-manifest.toml`'s
+//! `[skill_categories]` declaration, not this renderer's own filter — the
+//! manifest is the authority for which skills are bundled, and
+//! `parse_framework_skills` makes an undeclared bundled skill a hard error, so
+//! the two cannot disagree.
 //! Test: `skills_render_contains_known_skill`,
-//! `skills_render_excludes_reference_files`.
+//! `skills_render_excludes_reference_files`,
+//! `skills_render_matches_the_declared_roster`.
 
 use std::fmt::Write as _;
 
 use trusty_agents_common::agents::frontmatter::parse_kv_line;
 use trusty_mpm::core::bundle::ALL;
+use trusty_mpm::core::manifest::framework_skill_categories;
 
 /// One bundled skill's frontmatter fields relevant to the catalog.
 struct SkillMeta {
@@ -82,14 +89,29 @@ pub(super) fn is_top_level_skill(rel_path: &str) -> bool {
 ///
 /// Why: an operator/agent choosing which skill to load needs the exact
 /// description + invocability without opening every bundled `.md` file.
-/// What: filters `ALL` to top-level `skills/*.md` entries, sorts by stem,
-/// and renders one row per skill.
+/// What: filters `ALL` to the top-level `skills/*.md` entries the manifest
+/// DECLARES, sorts by stem, and renders one row per skill. An unusable manifest
+/// falls back to the unfiltered bundle so a documentation regeneration degrades
+/// to "renders everything" rather than to "renders nothing"; the declaration is
+/// enforced by `bundled_skill_roster_is_valid`, which fails the build first.
 /// Test: `skills_render_contains_known_skill`,
-/// `skills_render_excludes_reference_files`.
+/// `skills_render_excludes_reference_files`,
+/// `skills_render_matches_the_declared_roster`.
 pub(crate) fn render() -> String {
+    let declared = framework_skill_categories()
+        .map(|categories| categories.universal.into_iter().collect::<Vec<_>>())
+        .ok();
     let mut skills: Vec<(String, SkillMeta)> = ALL
         .iter()
         .filter(|a| is_top_level_skill(a.rel_path))
+        .filter(|a| match &declared {
+            Some(list) => a
+                .rel_path
+                .strip_prefix("skills/")
+                .and_then(|s| s.strip_suffix(".md"))
+                .is_some_and(|stem| list.iter().any(|d| d == stem)),
+            None => true,
+        })
         .map(|a| {
             let stem = a
                 .rel_path
@@ -105,8 +127,11 @@ pub(crate) fn render() -> String {
     let mut out = String::new();
     out.push_str("# Skill Catalog Reference\n\n");
     out.push_str(
-        "Generated from `bundle::ALL` (filtered to top-level `skills/*.md` \
-         entries) + a shared frontmatter line parser. Regenerate with \
+        "Generated from the bundled `framework-manifest.toml`'s \
+         `[skill_categories]` roster — the authority for which skills are \
+         bundled — joined to `bundle::ALL` for each skill\'s frontmatter via a \
+         shared line parser. Every declared skill is `universal`: it deploys to \
+         every project, with no detection. Regenerate with \
          `tm generate capabilities`.\n\n",
     );
     let _ = writeln!(out, "{} bundled skills.\n", skills.len());
@@ -132,6 +157,24 @@ mod tests {
         let rendered = render();
         assert!(rendered.contains("`tm`"), "{rendered}");
         assert!(rendered.contains("`systematic-debugging`"), "{rendered}");
+    }
+
+    #[test]
+    fn skills_render_matches_the_declared_roster() {
+        // #4765: the rendered roster is the manifest's declaration, one row per
+        // declared stem — not a second filter that could drift from it.
+        let declared = framework_skill_categories().expect("bundled roster must be valid");
+        let rendered = render();
+        assert!(
+            rendered.contains(&format!("{} bundled skills.", declared.universal.len())),
+            "headline count must equal the declared roster size:\n{rendered}"
+        );
+        for stem in &declared.universal {
+            assert!(
+                rendered.contains(&format!("| `{stem}` |")),
+                "declared skill `{stem}` is missing from the rendered catalog"
+            );
+        }
     }
 
     #[test]

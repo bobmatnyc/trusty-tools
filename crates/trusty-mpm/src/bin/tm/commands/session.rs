@@ -176,11 +176,10 @@ pub(crate) async fn session(
         SessionAction::Instructions { dir } => {
             // Pure local computation — no daemon round-trip needed.
             let path = resolve_dir(dir)?;
-            let fw = trusty_mpm::core::paths::FrameworkPaths::default();
             // `resolved_prompt` is the same text written to the stash and
             // passed to `claude --append-system-prompt-file` — the single
             // source of truth for what Claude received (issue #382).
-            let (resolved_prompt, _output, _stash) = compose_session_instructions(&fw, &path)?;
+            let (resolved_prompt, _output, _stash) = compose_session_instructions(&path)?;
             print!("{resolved_prompt}");
         }
         SessionAction::Events { id_or_name } => {
@@ -596,6 +595,8 @@ async fn info_from_managed_store(
 /// from what Claude received, which is exactly the divergence issue #382 describes.
 /// The single source of truth for "what claude receives" is `resolve_pm_prompt`;
 /// the display and the stash must both come from it.
+/// #4832: `fw` is gone — the pipeline no longer reads a framework path, so the
+/// parameter had no remaining use.
 /// What: builds a [`PipelineInput`] and runs [`build_instructions`] to ensure
 /// `CLAUDE.md` is seeded (the side-effect we still need); resolves the PM prompt
 /// via [`crate::core::instruction_overrides::resolve_pm_prompt`]; writes it to
@@ -604,7 +605,6 @@ async fn info_from_managed_store(
 /// Test: `compose_session_instructions_display_matches_stash`,
 /// `compose_session_instructions_display_matches_live_prompt`.
 pub(crate) fn compose_session_instructions(
-    fw: &trusty_mpm::core::paths::FrameworkPaths,
     project_dir: &std::path::Path,
 ) -> anyhow::Result<(
     String,
@@ -616,7 +616,6 @@ pub(crate) fn compose_session_instructions(
     // Run the legacy pipeline for its side-effects: seed CLAUDE.md if absent
     // and populate the metadata flags (agent_count, claude_md_created, …).
     let input = PipelineInput {
-        framework_instructions_path: fw.framework_instructions_path(),
         // #4588: the roster is resolved from the project by the one shared
         // resolver, not from a directory named here — naming one tier is what
         // made the printed count disagree with the delivered roster.
@@ -636,7 +635,9 @@ pub(crate) fn compose_session_instructions(
     // `build_system_prompt_for` keeps display, stash, and launch identical
     // regardless of Claude Code version.
     let resolved_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project_dir);
-    let stash_dir = project_dir.join(".trusty-mpm");
+    // #4832: the harness ROOT, not `project_dir` — a worktree must never grow
+    // its own `.trusty-mpm/`.
+    let stash_dir = trusty_mpm::core::harness_root::harness_dir(project_dir);
     std::fs::create_dir_all(&stash_dir)?;
     let stash = stash_dir.join("last-instructions.md");
     std::fs::write(&stash, &resolved_prompt)?;

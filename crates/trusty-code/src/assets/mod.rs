@@ -262,7 +262,9 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     EmbeddedAgent::Composed {
         name: "nextjs-engineer",
     },
-    EmbeddedAgent::Composed { name: "ops" },
+    EmbeddedAgent::Composed {
+        name: "elixir-engineer",
+    },
     EmbeddedAgent::Composed {
         name: "phoenix-engineer",
     },
@@ -358,7 +360,7 @@ const JAVA_ENGINEER_MD: &str = include_str!("agents/java-engineer.md");
 const JAVASCRIPT_ENGINEER_MD: &str = include_str!("agents/javascript-engineer.md");
 const LOCAL_OPS_MD: &str = include_str!("agents/local-ops.md");
 const NEXTJS_ENGINEER_MD: &str = include_str!("agents/nextjs-engineer.md");
-const OPS_MD: &str = include_str!("agents/ops.md");
+const ELIXIR_ENGINEER_MD: &str = include_str!("agents/elixir-engineer.md");
 const PHOENIX_ENGINEER_MD: &str = include_str!("agents/phoenix-engineer.md");
 const PHP_ENGINEER_MD: &str = include_str!("agents/php-engineer.md");
 const PROMPT_ENGINEER_MD: &str = include_str!("agents/prompt-engineer.md");
@@ -421,7 +423,7 @@ pub const EMBEDDED_TM_AGENT_SOURCES: &[(&str, &str)] = &[
     ("javascript-engineer.md", JAVASCRIPT_ENGINEER_MD),
     ("local-ops.md", LOCAL_OPS_MD),
     ("nextjs-engineer.md", NEXTJS_ENGINEER_MD),
-    ("ops.md", OPS_MD),
+    ("elixir-engineer.md", ELIXIR_ENGINEER_MD),
     ("phoenix-engineer.md", PHOENIX_ENGINEER_MD),
     ("php-engineer.md", PHP_ENGINEER_MD),
     ("prompt-engineer.md", PROMPT_ENGINEER_MD),

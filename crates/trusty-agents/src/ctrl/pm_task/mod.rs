@@ -30,6 +30,11 @@ pub(crate) use helpers::match_any_glob;
 #[cfg(test)]
 pub(crate) use helpers::extract_name_from_input;
 
+// #4788: `ctrl::ctrl_turn::dispatch` (the standalone ctrl REPL route) recovers
+// from a failed LOCAL model call with the SAME decision as the PM route, so the
+// policy module is reachable crate-wide rather than duplicated per path.
+pub(crate) use dispatch::local_fallback;
+
 // Public surface — the `run_pm_task_*` API consumed by ctrl/mod.rs re-exports.
 pub use dispatch::{run_pm_task_with_history, run_pm_task_with_persona};
 pub use helpers::run_pm_task_with_session;

@@ -457,7 +457,7 @@ mod tests {
             "javascript-engineer",
             "local-ops",
             "nextjs-engineer",
-            "ops",
+            "elixir-engineer",
             "phoenix-engineer",
             "php-engineer",
             "prompt-engineer",

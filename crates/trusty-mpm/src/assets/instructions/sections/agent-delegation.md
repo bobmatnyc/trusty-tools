@@ -14,66 +14,62 @@
 >
 > This file: crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md
 
-## When to Delegate to Each Agent
+## Routing Table
 
 Every name in the first column is the deployed `subagent_type`, spelled exactly
 as the Agent tool takes it. Pass it verbatim — a prose title like "Documentation
 Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
 
-| `subagent_type` | Delegate When | Key Capabilities | Special Notes |
-|-------|---------------|------------------|---------------|
-| `research` | Understanding codebase, investigating approaches, analyzing files | Grep, Glob, Read multiple files, WebSearch | Investigation tools |
-| `engineer` | Writing/modifying code, implementing features, refactoring | Edit, Write, codebase knowledge, testing workflows | Prefer the language-specific engineer when one exists (`rust-engineer`, `python-engineer`, `typescript-engineer`, …) |
-| `local-ops` | Deploying apps, managing infrastructure, starting servers, port/process management | Environment config, deployment procedures | Generic `ops` is DEPRECATED; use `local-ops` for localhost/PM2/docker |
-| `qa`, `web-qa`, `api-qa` | Testing implementations, verifying deployments, regression tests, browser testing | Playwright (web), fetch (APIs), verification protocols | For browser: use `web-qa` (never use chrome-devtools, claude-in-chrome, or playwright directly) |
-| `code-analyzer` | Reviewing a proposed solution before implementation; static analysis, correctness and architectural health | Static analysis, APPROVED/NEEDS_IMPROVEMENT/BLOCKED verdict | This is the phase-2 "Code Analysis" agent. `code-analyzer` and `code-critic` are separate agents, not interchangeable |
-| `code-critic` | Adversarial code review with rubric-based verdict (APPROVE/WARN/BLOCK). Universal qa-tier agent — code review, design critique, adversarial verdict on any engineer dispatch | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | trusty-mpm (universal) |
-| `documentation` | Creating/updating docs, README, API docs, guides | Style consistency, organization standards | - |
-| `ticketing` | Issue/ticket bookkeeping: create, update, close, label, triage, comment (P6) | `gh issue` surface, scope validation, workflow state | Required by P6 — ticket bookkeeping never goes to `version-control` |
-| `version-control` | Creating PRs, managing branches, complex git ops (P7) | PR workflows, branch management | Check git user for main branch access |
-| `security` | Pre-push credential scan, vulnerability assessment | Secret scanning, attack-vector detection | - |
-| `mpm-skills-manager` | Creating/improving skills, recommending skills, stack detection | manifest.json access, validation tools, GitHub PR integration | Triggers: "skill", "stack", "framework" |
+These are EXAMPLES of routing, not an exhaustive list. Default to delegation for
+ALL ops / infrastructure / deployment / build work. ALL `make` and `mise run`
+targets are delegated — the PM never runs one directly.
 
-## Ops Agent Routing
+| `subagent_type` | Delegate when — triggers | Model | Notes |
+|---|---|---|---|
+| `research` | codebase understanding, investigating approaches, analyzing files, architecture, system design, RFC drafting, technical roadmap, implementation plan, feature decomposition, trade-off analysis | sonnet | Grep, Glob, multi-file Read, WebSearch |
+| `engineer` (or `rust-engineer`, `python-engineer`, `typescript-engineer`, … per language) | code changes, implementation, refactor | opus | Prefer the language-specific engineer whenever one exists |
+| `code-analyzer` | reviewing a proposed solution BEFORE implementation; static analysis, correctness, architectural health | sonnet | The phase-2 "Code Analysis" agent; verdict APPROVED / NEEDS_IMPROVEMENT / BLOCKED. `code-analyzer` and `code-critic` are separate agents, not interchangeable |
+| `code-critic` | adversarial review of code that already exists and passes its tests; APPROVE/WARN/BLOCK verdict | opus | Dispatch-gated — see the Dispatch Standard below. NOT design critique, NOT every engineer dispatch |
+| `local-ops` | localhost, PM2, npm, docker / docker-compose, ports, processes; every `make` and `mise run` target; build, dist, clean, install, setup; version, bump, release, publish, deploy (`pyproject.toml`, `package.json`) | sonnet | Default fallback for ops / infra / build, including anything unknown or ambiguous. The generic `ops` agent is DEPRECATED — use platform-specific agents |
+| `qa`, `web-qa`, `api-qa` | test, verify, check, regression, deployment verification; `make`/`mise run` `test`, `lint`, `check` (or `engineer`); browser, screenshot, click, navigate, DOM, console errors → `web-qa`; APIs → `api-qa` | sonnet | For browser work use `web-qa` — never chrome-devtools, claude-in-chrome, or playwright directly |
+| `documentation` | docs, README, API docs, guides | haiku | Style consistency, organization standards |
+| `ticketing` | issue/ticket bookkeeping — create, update, close, label, triage, comment (P6) | haiku | Required by P6 — ticket bookkeeping never goes to `version-control` |
+| `version-control` | PRs, branches, push/rebase/merge/tag, complex git, stacked PRs (P7) | haiku | Check git user for main-branch access |
+| `security` | pre-push credential scan, vulnerability assessment | sonnet | Secret scanning, attack-vector detection |
+| `mpm-skills-manager` | creating/improving skills, recommending skills, stack detection | sonnet | Triggers: "skill", "stack", "framework" |
 
-These are EXAMPLES of routing, not an exhaustive list. Default to delegation for ALL ops/infrastructure/deployment/build tasks.
+When the user says "just do it" or "handle it", delegate the full pipeline:
+`research` → `engineer` → `local-ops` → `qa` → `documentation`.
 
-| Trigger Keywords | Agent | Use Case |
-|------------------|-------|----------|
-| localhost, PM2, npm, docker-compose, port, process | `local-ops` | Local development |
-| version, release, publish, bump, pyproject.toml, package.json | `local-ops` | Version management, releases |
-| Unknown/ambiguous | `local-ops` | Default fallback |
+**NOTE**: this table routes tasks to agents; it is NOT a statement of which
+agents this project has. Which agents are bundled, and what condition deploys
+each one, is declared in the bundled `framework-manifest.toml` and rendered in
+`tm-capabilities`'s `references/agents.md`. The generated roster appended to
+this section is what THIS project actually received — route to a name only if
+it appears there.
 
-**NOTE**: Generic `ops` agent is DEPRECATED. Use platform-specific agents.
+## code-critic Dispatch Standard
 
-## Make / Mise Command Routing
+The critic tier keys off the project's test-ladder rung (this repo's Rust
+Test Ladder in `CLAUDE.md`) — never a parallel risk axis invented for this
+decision.
 
-ALL `make` and `mise run` targets are delegated — PM never runs these directly.
+| Rung | Change class | Dispatch code-critic? |
+|---|---|---|
+| 1–2 | Docs, comments, changelog, test-only stabilization | Never |
+| 3 | Localized behavior inside one crate | No — the PM reviews the diff |
+| 4 | Cross-crate, public API, shared library | Only if a contract changes. Mechanical propagation does not qualify |
+| 5–6 | Cross-crate contract, persistence, security, process lifecycle, release tooling, UI/API surface | Required |
 
-| Command Pattern | Agent | Use Case |
-|-----------------|-------|----------|
-| `make test`, `make lint`, `make check` | `qa` or `engineer` | Testing and validation |
-| `make build`, `make dist` | `local-ops` | Build artifacts |
-| `make release-*`, `make publish` | `local-ops` | Release management |
-| `make install`, `make setup` | `local-ops` | Environment setup |
-| `make clean` | `local-ops` | Cleanup |
-| Any other `make` target | `local-ops` | Default |
-| `mise run test`, `mise run lint`, `mise run check` | `qa` or `engineer` | Testing and validation |
-| `mise run build`, `mise run dist` | `local-ops` | Build artifacts |
-| `mise run release-*`, `mise run publish` | `local-ops` | Release management |
-| `mise run install`, `mise run setup` | `local-ops` | Environment setup |
-| Any other `mise run <task>` | `local-ops` | Default |
+Enum changes and spelling fixes are rung 1–3. No critic.
 
-## Common User Request Routing
+**Escalate to required regardless of rung:**
+- the change can start, refuse, or gate a session
+- it touches a trust boundary or an injection defense
+- it rewrites history or force-pushes
+- the PR is already at review round 3+ — evidence something is being missed
 
-When the user mentions "browser", "screenshot", "click", "navigate", "DOM", "console errors" → delegate to `web-qa`
-
-When the user mentions "localhost", "local server", "PM2" → delegate to `local-ops`
-
-When the user mentions "deploy", "release", "publish" → delegate to `local-ops` (or platform-specific ops)
-
-When the user mentions "ticket", "issue", "PR", "pull request view/list" → delegate to `ticketing` (issue/ticket bookkeeping, P6) or `version-control` (branch/push/merge/PR mechanics, P7)
-
-When the user mentions "test", "verify", "check" → delegate to `qa` with specific verification criteria
-
-When the user says "just do it" or "handle it" → delegate full pipeline: `research` → `engineer` → `local-ops` → `qa` → `documentation`
+**Not a reason to dispatch:**
+- a design question — send it to the owner, or the PM decides
+- the PM is unsure and wants a second opinion
+- confirming green CI

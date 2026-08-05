@@ -1,6 +1,0 @@
-Fixed
-
-- Worktree teardown no longer deletes worktrees git refused to delete (closes [#4732](https://github.com/bobmatnyc/trusty-tools/issues/4732))
-  - `remove_session_worktree` fell through to `std::fs::remove_dir_all` on ANY non-zero `git worktree remove --force` exit. Git exits 128 for every fatal condition, so `git worktree lock` — the operator's only "do not remove this" — was exactly what caused deletion. A stale worktree pointer, an unreadable `.git`, and a repository git merely declined to read all produced the same outcome, with uncommitted work in the worktree.
-  - Every git failure is now classified into three states — git holds state here / git positively holds nothing here / git could not be asked — and only the middle one permits a raw removal. Locked, stale-pointer, broken-`.git`, and unrecognized-message cases are refused. Reachable from `tm session decommission`, `tm sessions prune --state stopped`, the age-based reaper, `prune_orphaned_worktrees`, and the `--merged-prs` reclaim pass.
-  - The refusal reason is now returned to the caller instead of buried in a log line: `tm session prune-worktrees --merged-prs` reports `removal_failed` entries as `"<path>: <reason>"`.

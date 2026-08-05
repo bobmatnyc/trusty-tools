@@ -1502,9 +1502,9 @@ pub async fn resume_managed(
     }
 
     // #4752: the resume path never runs `prepare_session*`, so the compiled PM
-    // prompt is refreshed here — fatal, exactly as on the start path. See
-    // `session_prep::refresh_compiled_prompt_for_resume`.
-    if let Err(msg) = super::session_prep::refresh_compiled_prompt_for_resume(&workspace) {
+    // prompt is refreshed here — fatal, exactly as on the start path; #4832
+    // scopes it to this session's id. See `session_prep`'s own doc.
+    if let Err(msg) = super::session_prep::refresh_resume_compiled_prompt(&workspace, &record.id) {
         warn!(id = %record.id, "resume_managed: refusing to resume: {msg}");
         let _ = mgr.mark_errored(&record.id, &msg).await;
         return Err(ResumeManagedError::Other(msg));

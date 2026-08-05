@@ -119,7 +119,6 @@ fn write_roster_agent(dir: &Path, name: &str) {
 /// `TempDir`.
 fn input_in(tiers: &RosterTiers) -> PipelineInput {
     PipelineInput {
-        framework_instructions_path: tiers.tmp.path().join("INSTRUCTIONS.md"),
         project_dir: tiers.project(),
         claude_md_path: tiers.project().join("CLAUDE.md"),
     }
@@ -128,60 +127,43 @@ fn input_in(tiers: &RosterTiers) -> PipelineInput {
 #[serial_test::serial]
 #[test]
 fn pipeline_full() {
-    // All inputs present → merged output contains the two framework
-    // sections in the documented 3 → 4 order. The project CLAUDE.md is
-    // deliberately NOT folded into `merged` (dead code removed — Claude
-    // Code loads CLAUDE.md natively and the real launch prompt never
-    // read this field for that content).
+    // The pipeline reports the roster it resolved and leaves an existing
+    // CLAUDE.md alone. #4832 removed the `merged` text this used to assert on.
     let tiers = RosterTiers::new();
     let input = input_in(&tiers);
 
-    write_file(
-        &input.framework_instructions_path,
-        "# Framework\n\nFRAMEWORK SECTION\n",
-    );
     write_roster_agent(&tiers.project_tier(), "engineer");
     write_file(&input.claude_md_path, "# Project\n\nPROJECT SECTION\n");
 
     let out = build_instructions(&input).unwrap();
-    assert!(out.instructions_loaded);
     assert_eq!(out.agent_count, 1);
     assert!(
         !out.claude_md_created,
         "existing CLAUDE.md is not recreated"
     );
-
-    let fw = out.merged.find("FRAMEWORK SECTION").expect("framework");
-    let auth = out
-        .merged
-        .find("## Delegation Authority")
-        .expect("authority");
-    assert!(fw < auth, "framework precedes delegation authority");
-    assert!(out.merged.contains("### engineer"));
-    assert!(
-        !out.merged.contains("PROJECT SECTION"),
-        "project CLAUDE.md content must not be folded into merged: {}",
-        out.merged
-    );
 }
 
 #[serial_test::serial]
 #[test]
-fn pipeline_missing_instructions() {
-    // INSTRUCTIONS.md absent → pipeline still succeeds, instructions_loaded
-    // is false, and section 4 is still present.
+fn pipeline_does_not_read_the_retired_framework_instructions() {
+    // Why (#4832): `build_instructions` used to read
+    // `<framework_root>/instructions/INSTRUCTIONS.md`, and ANY error other than
+    // `NotFound` — a directory planted at that path is the cheapest one to
+    // produce — became `PrepError::Instructions`, the sole fatal variant. The
+    // content was never used, so a session died over unread bytes.
+    // FAILS BEFORE THIS CHANGE: the read returned `IsADirectory` and the
+    // pipeline returned `Err`.
     let tiers = RosterTiers::new();
     let input = input_in(&tiers);
-    // No INSTRUCTIONS.md written.
+    let retired =
+        crate::core::paths::FrameworkPaths::under(tiers.tmp.path()).framework_instructions_path();
+    fs::create_dir_all(&retired).expect("plant a directory at the retired path");
     write_roster_agent(&tiers.project_tier(), "qa");
     write_file(&input.claude_md_path, "# Project\n\nPROJECT NOTES\n");
 
-    let out = build_instructions(&input).unwrap();
-    assert!(!out.instructions_loaded);
-    assert!(out.merged.contains("## Delegation Authority"));
-    assert!(!out.merged.contains("PROJECT NOTES"));
-    // No dangling separator at the very start.
-    assert!(!out.merged.starts_with("---"));
+    let out =
+        build_instructions(&input).expect("an unreadable retired path must not fail the pipeline");
+    assert_eq!(out.agent_count, 1);
 }
 
 #[serial_test::serial]
@@ -192,7 +174,6 @@ fn pipeline_creates_claude_md() {
     // is NOT folded into `merged` (dead code removed).
     let tiers = RosterTiers::new();
     let input = input_in(&tiers);
-    write_file(&input.framework_instructions_path, "# Framework\n");
 
     assert!(!input.claude_md_path.exists());
     let out = build_instructions(&input).unwrap();
@@ -209,11 +190,6 @@ fn pipeline_creates_claude_md() {
         on_disk.contains("🤖🤖🤖 Generated with trusty-mpm"),
         "seeded stub must carry the attribution footer: {on_disk}"
     );
-    assert!(
-        !out.merged.contains("# Project Instructions"),
-        "stub content must not be folded into merged: {}",
-        out.merged
-    );
 }
 
 #[serial_test::serial]
@@ -227,7 +203,6 @@ fn pipeline_claude_md_left_byte_identical() {
     // (dead code removed).
     let tiers = RosterTiers::new();
     let input = input_in(&tiers);
-    write_file(&input.framework_instructions_path, "# Framework\n");
     let custom = "# My Project\n\nCUSTOM HAND-WRITTEN CONTENT\n";
     write_file(&input.claude_md_path, custom);
 
@@ -242,11 +217,7 @@ fn pipeline_claude_md_left_byte_identical() {
         !on_disk.contains(DELEGATION_BLOCK_BEGIN),
         "no delegation-directive block may be injected: {on_disk}"
     );
-    assert!(
-        !out.merged.contains("CUSTOM HAND-WRITTEN CONTENT"),
-        "project CLAUDE.md content must not be folded into merged: {}",
-        out.merged
-    );
+    let _ = out;
 }
 
 #[test]
@@ -424,41 +395,36 @@ fn assemble_system_prompt_contains_all_sections() {
 
 #[test]
 fn compiled_prompt_path_is_project_local() {
-    // Why (#4752, owner ruling 2026-08-04): the compiled prompt belongs to the
-    // PROJECT whose session runs it. FAILS BEFORE THIS CHANGE — the path was
-    // `FrameworkPaths::instructions_compiled()`, one global file under
-    // `~/.trusty-mpm/framework/`.
-    // What: pins `<project>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`.
+    // Why (#4752, then #4832): the compiled prompt belongs to the PROJECT whose
+    // session runs it, under that session's own directory.
+    // What: pins `<project>/.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md`.
+    // `/some/project` is not a git repo, so the harness root is the path itself.
     let project = Path::new("/some/project");
     assert_eq!(
-        compiled_prompt_path(project),
-        Path::new("/some/project/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md")
+        compiled_prompt_path(project, "sess-1"),
+        Path::new("/some/project/.trusty-mpm/sessions/sess-1/INSTRUCTIONS-COMPILED.md")
     );
 }
 
 #[test]
-fn compiled_prompt_path_is_beside_the_session_stash() {
-    // Why: the ruling put the file in the project's own `.trusty-mpm/` — the
-    // directory that already holds `last-instructions.md` and `sessions/` and
-    // that `tm` writes on every launch. That co-location is the whole basis for
-    // making the write fatal, so pin it.
+fn compiled_prompt_path_is_per_session() {
+    // Why (#4832): project-scoping still let two concurrent sessions in ONE
+    // project overwrite each other's compiled prompt. FAILS BEFORE THIS CHANGE
+    // — `compiled_prompt_path` took only the project and returned one path.
     let project = Path::new("/some/project");
-    let stash_dir = project.join(".trusty-mpm");
-    assert!(
-        compiled_prompt_path(project).starts_with(&stash_dir),
-        "the compiled prompt must live under the project's own .trusty-mpm/"
+    assert_ne!(
+        compiled_prompt_path(project, "sess-a"),
+        compiled_prompt_path(project, "sess-b"),
+        "two sessions in one project must not share one compiled-prompt file"
     );
 }
 
 #[test]
 fn compiled_prompt_path_never_collides_across_projects() {
-    // Why (#4752 review, MEDIUM 4): the defect was that ONE global file served
-    // every project, so concurrent sessions overwrote each other. FAILS BEFORE
-    // THIS CHANGE — `FrameworkPaths::instructions_compiled()` returned the same
-    // path for both projects (it resolved from the shared managed root, and
-    // `for_managed_workspace` from the real `$HOME`).
-    let a = compiled_prompt_path(Path::new("/projects/alpha"));
-    let b = compiled_prompt_path(Path::new("/projects/beta"));
+    // Why (#4752 review, MEDIUM 4): ONE global file used to serve every
+    // project, so concurrent sessions overwrote each other.
+    let a = compiled_prompt_path(Path::new("/projects/alpha"), "s");
+    let b = compiled_prompt_path(Path::new("/projects/beta"), "s");
     assert_ne!(
         a, b,
         "two projects must not share one compiled-prompt file — that was the collision"
@@ -466,14 +432,142 @@ fn compiled_prompt_path_never_collides_across_projects() {
 }
 
 #[test]
+fn compiled_prompt_path_never_lands_inside_a_worktree() {
+    // Why (#4832, owner ruling): a worktree carries code, config and docs —
+    // never harness state. FAILS BEFORE THIS CHANGE: the path was
+    // `<worktree>/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md`.
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let repo = tmp.path().join("proj");
+    let wt = tmp.path().join("wt");
+    init_git_repo_with_worktree(&repo, &wt);
+
+    let compiled = compiled_prompt_path(&wt, "sess-1");
+    let wt_canon = std::fs::canonicalize(&wt).unwrap();
+    assert!(
+        !compiled.starts_with(&wt_canon) && !compiled.starts_with(&wt),
+        "the compiled prompt must not be written inside the worktree: {}",
+        compiled.display()
+    );
+    assert!(
+        compiled.starts_with(std::fs::canonicalize(&repo).unwrap()),
+        "it belongs to the main checkout: {}",
+        compiled.display()
+    );
+}
+
+/// Build a committed repo at `repo` plus a linked worktree at `wt`.
+///
+/// Why: the worktree assertions above are only meaningful against a REAL git
+/// worktree — a plain temp directory cannot reproduce the shape.
+fn init_git_repo_with_worktree(repo: &Path, wt: &Path) {
+    let run = |dir: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    fs::create_dir_all(repo).unwrap();
+    run(repo, &["init", "-q", "-b", "main"]);
+    run(repo, &["config", "user.email", "t@example.com"]);
+    run(repo, &["config", "user.name", "T"]);
+    fs::write(repo.join("README.md"), "# t\n").unwrap();
+    run(repo, &["add", "-A"]);
+    run(repo, &["commit", "-qm", "init"]);
+    run(
+        repo,
+        &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+    );
+}
+
+#[test]
 fn compiled_prompt_path_is_not_the_bundled_instructions_path() {
     // The original #4752 defect: the compiled OUTPUT must not share a path with
-    // the bundled INPUT `build_instructions` reads.
+    // the bundled INPUT the pipeline used to read.
     let tmp = TempDir::new().unwrap();
     let paths = crate::core::paths::FrameworkPaths::under(tmp.path());
     assert_ne!(
-        compiled_prompt_path(tmp.path()),
+        compiled_prompt_path(tmp.path(), "s"),
         paths.framework_instructions_path()
+    );
+}
+
+// ── #4832: migration off the pre-#4832 per-project path ────────────────────
+
+#[test]
+fn migrate_removes_a_legacy_compiled_prompt() {
+    // Why (#4832): an upgraded install keeps the old file forever with no
+    // writer left to refresh it, and it is exactly the file an operator opens
+    // to answer "what is my session running".
+    let tmp = TempDir::new().unwrap();
+    let legacy = tmp
+        .path()
+        .join(".trusty-mpm")
+        .join("framework")
+        .join(COMPILED_PROMPT_FILE);
+    write_file(&legacy, "OLD COMPILED PROMPT");
+
+    assert!(
+        remove_legacy_compiled_prompt(tmp.path()).expect("removal succeeds"),
+        "an existing legacy file must be reported as removed"
+    );
+    assert!(!legacy.exists());
+    assert!(
+        !legacy.parent().unwrap().exists(),
+        "the now-empty framework/ directory goes with it"
+    );
+}
+
+#[test]
+fn migrate_keeps_a_sibling_manifest() {
+    // The operator-authored `manifest.toml` now LIVES in `framework/`, so the
+    // migration must never take the directory with it when it is non-empty.
+    let tmp = TempDir::new().unwrap();
+    let framework = tmp.path().join(".trusty-mpm").join("framework");
+    write_file(&framework.join(COMPILED_PROMPT_FILE), "OLD");
+    write_file(&framework.join("manifest.toml"), "[style]\n");
+
+    remove_legacy_compiled_prompt(tmp.path()).expect("removal succeeds");
+    assert!(
+        framework.join("manifest.toml").exists(),
+        "an operator's manifest override must survive the migration"
+    );
+}
+
+#[test]
+fn migrate_is_a_noop_when_absent() {
+    let tmp = TempDir::new().unwrap();
+    assert!(
+        !remove_legacy_compiled_prompt(tmp.path()).expect("absence is not an error"),
+        "nothing was removed, so the call must report false"
+    );
+}
+
+#[test]
+fn migrate_keeps_an_empty_framework_dir_when_nothing_migrated() {
+    // #4841 review: `tm project init` seeds an empty `framework/` and this
+    // migration runs on EVERY launch. Ungated, init created the directory and
+    // the next launch deleted it.
+    let tmp = TempDir::new().unwrap();
+    let framework = tmp
+        .path()
+        .join(crate::core::harness_root::HARNESS_DIR)
+        .join(crate::core::harness_root::FRAMEWORK_DIR);
+    std::fs::create_dir_all(&framework).unwrap();
+
+    assert!(
+        !remove_legacy_compiled_prompt(tmp.path()).expect("absence is not an error"),
+        "there was no legacy prompt to migrate"
+    );
+    assert!(
+        framework.is_dir(),
+        "a scaffolded, empty framework/ must survive a launch that migrated nothing"
     );
 }
 
@@ -534,7 +628,7 @@ fn remove_stale_bundled_instructions_deletes_a_leftover() {
     );
     assert!(!stale.exists(), "the stale leftover must be gone");
     // The compiled prompt is a DIFFERENT, project-local file.
-    assert_ne!(stale, compiled_prompt_path(tmp.path()));
+    assert_ne!(stale, compiled_prompt_path(tmp.path(), "s"));
 }
 
 #[test]
@@ -573,7 +667,7 @@ fn compiled_prompt_write_is_the_full_assembled_prompt_never_a_stub() {
     // What: writes the bundled assembly to a project's compiled path and
     // asserts it is neither empty nor the historical stub.
     let tmp = TempDir::new().unwrap();
-    let dest = compiled_prompt_path(tmp.path());
+    let dest = compiled_prompt_path(tmp.path(), "s");
     write_compiled_prompt_to(&dest, &assemble_system_prompt()).expect("write succeeds");
 
     let on_disk = fs::read_to_string(&dest).unwrap();
@@ -666,15 +760,16 @@ fn primary_directive_mandate_not_duplicated_across_channels() {
 #[serial_test::serial]
 #[test]
 fn pipeline_no_agents_still_succeeds() {
-    // Every tier empty yields a zero agent_count and the "no agents"
-    // delegation section, but the pipeline still produces merged output.
+    // Every tier empty yields a zero agent_count, and the delegation section
+    // the PM receives says so. #4832: the section is asserted through the
+    // resolver that renders it, since the pipeline no longer returns text.
     let tiers = RosterTiers::new();
     let input = input_in(&tiers);
-    write_file(&input.framework_instructions_path, "# Framework\n");
 
     let out = build_instructions(&input).unwrap();
     assert_eq!(out.agent_count, 0);
-    assert!(out.merged.to_lowercase().contains("no delegatable agents"));
+    let authority = crate::core::delegation_authority::generate_authority(&[]);
+    assert!(authority.to_lowercase().contains("no delegatable agents"));
 }
 
 #[serial_test::serial]
@@ -701,11 +796,9 @@ fn session_start_count_matches_the_delivered_delegation_roster() {
     write_roster_agent(&tiers.generic_tier(), "qa");
 
     let input = PipelineInput {
-        framework_instructions_path: tiers.tmp.path().join("INSTRUCTIONS.md"),
         project_dir: tiers.project(),
         claude_md_path: tiers.project().join("CLAUDE.md"),
     };
-    write_file(&input.framework_instructions_path, "# Framework\n");
 
     let out = build_instructions(&input).expect("pipeline");
     let delivered = crate::core::delegation_authority::deployed_roster_section(&tiers.project())
@@ -732,17 +825,17 @@ fn refresh_compiled_prompt_writes_the_project_local_file() {
     // paths now route through — fresh start, daemon resume, and the bare-`tm`
     // in-place relaunch that round 3 missed entirely. Pinning it directly means
     // the guarantee is asserted on the implementation, not only through the
-    // daemon's thin `refresh_compiled_prompt_for_resume` delegate.
+    // daemon's thin `refresh_resume_compiled_prompt` delegate.
     //
     // FIXTURE: a stale sentinel is pre-seeded so "the file exists" cannot pass;
     // only a real refresh overwrites it.
     let tmp = TempDir::new().expect("tempdir");
-    let dest = compiled_prompt_path(tmp.path());
+    let dest = compiled_prompt_path(tmp.path(), "sess-1");
     fs::create_dir_all(dest.parent().expect("has a parent")).expect("create parent");
     const STALE: &str = "STALE-FROM-A-PREVIOUS-LAUNCH";
     fs::write(&dest, STALE).expect("seed stale");
 
-    refresh_compiled_prompt(tmp.path()).expect("refresh must succeed");
+    refresh_compiled_prompt(tmp.path(), "sess-1").expect("refresh must succeed");
 
     let on_disk = fs::read_to_string(&dest).expect("readable");
     assert_ne!(
@@ -769,10 +862,10 @@ fn refresh_compiled_prompt_reports_an_actionable_failure() {
     // FIXTURE: a directory planted at the exact destination, so only this write
     // fails and nothing else in the compose path does.
     let tmp = TempDir::new().expect("tempdir");
-    let dest = compiled_prompt_path(tmp.path());
+    let dest = compiled_prompt_path(tmp.path(), "sess-1");
     fs::create_dir_all(&dest).expect("plant a directory at the compiled path");
 
-    let msg = refresh_compiled_prompt(tmp.path())
+    let msg = refresh_compiled_prompt(tmp.path(), "sess-1")
         .expect_err("a failed compiled write must be reported as an error");
     assert!(
         msg.contains(&dest.display().to_string()),

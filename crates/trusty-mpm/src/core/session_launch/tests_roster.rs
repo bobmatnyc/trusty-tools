@@ -49,7 +49,7 @@ fn prepare_session_continues_after_agent_deploy_failure() {
     )
     .unwrap();
 
-    let report = prepare_session_inner(&fw, project, None, true, None)
+    let report = prepare_session_inner(&fw, project, None, true, None, None)
         .expect("a roster-deploy failure must not fail the whole preparation");
 
     assert_eq!(
@@ -106,7 +106,7 @@ fn prepare_session_continues_after_skill_deploy_failure() {
     std::fs::create_dir_all(&skills_dir).unwrap();
     std::fs::write(skills_dir.join("tm-doctor"), b"not a directory").unwrap();
 
-    let report = prepare_session_inner(&fw, project, None, true, None)
+    let report = prepare_session_inner(&fw, project, None, true, None, None)
         .expect("a roster-deploy failure must not fail the whole preparation");
 
     assert_eq!(

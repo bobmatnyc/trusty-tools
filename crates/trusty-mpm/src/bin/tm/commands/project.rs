@@ -159,15 +159,25 @@ pub(crate) fn trust_cmd(dir: Option<String>, revoke: bool) -> anyhow::Result<()>
 /// Why: `project init` must give the operator an editable, version-controllable
 /// project config; doing it in a testable helper keeps it covered without a
 /// live daemon.
-/// What: creates `.trusty-mpm/sessions/` and writes `config.toml` (only when
-/// absent — never clobbering an edited config); returns a per-path report.
+/// #4832: the directory is created under the project's HARNESS ROOT — the
+/// checkout that owns the project — so running `tm project init` from a
+/// worktree scaffolds the project's one `.trusty-mpm/`, not a per-branch copy.
+/// It also seeds `framework/`, the project-stable config layer the manifest
+/// override now lives in.
+/// What: creates `.trusty-mpm/sessions/` and `.trusty-mpm/framework/`, and
+/// writes `config.toml` (only when absent — never clobbering an edited
+/// config); returns a per-path report.
 /// Test: `project_init_scaffolds_dotdir`, `project_init_keeps_existing_config`.
 pub(crate) fn scaffold_project_dir(project: &std::path::Path) -> anyhow::Result<Vec<String>> {
     let mut report = Vec::new();
-    let dotdir = project.join(".trusty-mpm");
+    let dotdir = trusty_mpm::core::harness_root::harness_dir(project);
     let sessions = dotdir.join("sessions");
     std::fs::create_dir_all(&sessions)?;
     report.push(format!("\u{2713} {}", sessions.display()));
+
+    let framework = dotdir.join(trusty_mpm::core::harness_root::FRAMEWORK_DIR);
+    std::fs::create_dir_all(&framework)?;
+    report.push(format!("\u{2713} {}", framework.display()));
 
     let config = dotdir.join("config.toml");
     if config.exists() {

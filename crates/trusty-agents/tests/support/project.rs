@@ -93,6 +93,11 @@ impl Project {
         let mut child = Command::new(&self.binary)
             .current_dir(self.root.path())
             .env("HOME", self.home.path())
+            // #4826: an inherited `TAGENT_PROJECT_DIR` now outranks exe-path
+            // inference, so without clearing it the child would resolve a real
+            // directory instead of this fixture's tempdir — silently.
+            .env_remove("TAGENT_PROJECT_DIR")
+            .env_remove("OPEN_MPM_PROJECT_DIR")
             .arg("--workflow")
             .arg(workflow)
             .arg("--task")
@@ -140,6 +145,10 @@ impl Project {
         let output = Command::new(&self.binary)
             .current_dir(self.root.path())
             .env("HOME", self.home.path())
+            // #4826: see `run_task` — clear the inherited project-dir hint so
+            // the fixture tempdir stays the resolved project.
+            .env_remove("TAGENT_PROJECT_DIR")
+            .env_remove("OPEN_MPM_PROJECT_DIR")
             .arg("inspect")
             .arg("--task")
             .arg(task)

@@ -76,6 +76,16 @@ pub use shutdown::shutdown_signal;
 /// tail semantics, and layer capture.
 pub mod log_buffer;
 
+/// Process-wide panic hook that logs the panic payload through `tracing`.
+///
+/// Why (issue #4764): a macOS `.ips` crash report carries mangled symbols but
+/// not the panic message, so the literal cause of a daemon abort is otherwise
+/// unrecoverable in production.
+/// What: `install_panic_logger` wraps the existing hook, emitting payload,
+/// location, thread, and backtrace as one `tracing::error!` before delegating.
+/// Test: `cargo test -p trusty-common panic_hook`.
+pub mod panic_hook;
+
 /// Process RSS / CPU sampling and data-directory sizing for daemon health.
 ///
 /// Why: every trusty-* daemon's `/health` endpoint reports its own resident
@@ -247,8 +257,9 @@ pub mod symgraph;
 
 /// Memory Palace storage engine (formerly the `trusty-memory-core` crate).
 ///
-/// Why: Centralises the Memory Palace data model (`Palace` / `Wing` /
-/// `Room` / `Drawer`), storage backends (usearch vector index + SQLite
+/// Why: Centralises the Memory Palace data model (`Palace` -> `Wing` ->
+/// `Room` -> `Drawer`; "closet" is the keyword -> drawer-ids inverted index,
+/// not a level — ADR-0027 D3), storage backends (usearch vector index + SQLite
 /// knowledge graph + chat-session log + payload store), retrieval handle,
 /// and the dream / decay / analytics / git-history surfaces so every
 /// trusty-* binary that talks to a palace reuses the same types. Absorbed
@@ -742,6 +753,9 @@ pub use daemon_addr::{
 
 // Health probe
 pub use health_probe::probe_health;
+
+// Panic logging (issue #4764)
+pub use panic_hook::install_panic_logger;
 
 // Tracing init
 #[cfg(feature = "bug-capture")]

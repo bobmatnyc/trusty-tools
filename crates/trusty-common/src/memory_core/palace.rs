@@ -1,9 +1,15 @@
-//! Memory Palace data model: Palace -> Wing -> Room -> Closet -> Drawer.
+//! Memory Palace data model: Palace -> Wing -> Room -> Drawer.
 //!
-//! Why: A 5-level spatial hierarchy is the load-bearing concept for trusty-memory's
+//! Why: A 4-level spatial hierarchy is the load-bearing concept for trusty-memory's
 //! progressive retrieval; modeling it as Rust types keeps the rest of the system
 //! compiler-checked.
 //! What: Defines `PalaceId`, `Palace`, `Wing`, `RoomType`, `Room`, and `Drawer`.
+//! A *closet* is NOT a hierarchy level: it is the cross-cutting keyword ->
+//! drawer-ids inverted index held on `PalaceHandle::closets`
+//! (`retrieval/handle.rs`), rebuilt on write and worth a small topical boost
+//! during L2/L3 scoring. A drawer belongs to exactly one room and to every
+//! closet whose keyword its content contains, so it cannot be a level
+//! (ADR-0027 D3).
 //! Test: `cargo test -p trusty-memory-core palace::` constructs each type and
 //! verifies serde round-trips.
 

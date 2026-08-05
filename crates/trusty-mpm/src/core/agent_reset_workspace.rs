@@ -748,7 +748,8 @@ mod tests {
         let workspace = TempDir::new().unwrap();
         make_linked_worktree(workspace.path());
         seed_legacy_workspace_roster(&fw_root, workspace.path());
-        let project_manifest_dir = workspace.path().join(".trusty-mpm");
+        // #4832: the project manifest layer lives in `.trusty-mpm/framework/`.
+        let project_manifest_dir = workspace.path().join(".trusty-mpm").join("framework");
         fs::create_dir_all(&project_manifest_dir).unwrap();
         fs::write(
             project_manifest_dir.join("manifest.toml"),

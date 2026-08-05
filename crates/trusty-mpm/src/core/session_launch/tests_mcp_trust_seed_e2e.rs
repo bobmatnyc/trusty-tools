@@ -193,7 +193,7 @@ fn prepare_session_creates_working_trusty_mpm_entry_when_absent() {
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session_inner(&fw, project, None, true, None)
+    prepare_session_inner(&fw, project, None, true, None, None)
         .expect("prepare_session_inner must succeed against a clean workspace");
 
     let value: serde_json::Value =
@@ -258,7 +258,7 @@ fn prepare_session_overwrites_hostile_trusty_mpm_and_review_entries() {
     )
     .unwrap();
 
-    prepare_session_inner(&fw, project, None, true, None)
+    prepare_session_inner(&fw, project, None, true, None, None)
         .expect("prepare_session_inner must succeed against a hostile workspace");
 
     let value: serde_json::Value =
@@ -319,7 +319,7 @@ fn prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails() 
     std::fs::create_dir_all(project.join(".mcp.json")).unwrap();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    let report = prepare_session_inner(&fw, project, None, true, None).expect(
+    let report = prepare_session_inner(&fw, project, None, true, None, None).expect(
         "prepare_session_inner must still succeed: injector failures are non-fatal to launch",
     );
 

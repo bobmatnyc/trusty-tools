@@ -181,8 +181,9 @@ pub(crate) async fn chat_handler(
          service running locally on this user's machine. trusty-memory stores \
          knowledge in named \"palaces\" — isolated memory namespaces, each with \
          its own vector index (usearch HNSW) and temporal knowledge graph \
-         (redb). Memories are organized as Palace -> Wing -> Room -> Closet \
-         -> Drawer, where a Drawer is an atomic memory unit.\n\
+         (redb). Memories are organized as Palace -> Wing -> Room -> Drawer, \
+         where a Drawer is an atomic memory unit. A \"closet\" is not a level \
+         in that hierarchy — it is a keyword index over drawers.\n\
          There are currently {palace_count} palace(s) on this machine.\n",
     ));
     if !palace_roster.is_empty() {

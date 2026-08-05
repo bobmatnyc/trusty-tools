@@ -6,6 +6,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.0] — 2026-08-04
+
+### Added
+
+- **`tctl sign trusty-agents`** — extended the Developer-ID codesign single source of truth (`macos_signing::SIGNABLE_BINARIES`, [#2558](https://github.com/bobmatnyc/trusty-tools/issues/2558)) with a new `AGENTS_SET` covering the `tagent` CLI binary (`com.trusty.tagent`), so `cargo install --path crates/trusty-agents`'s ad-hoc-signed binary can get a stable Developer ID identity the same way `trusty-search`/`trusty-mpm` already do, fixing macOS re-prompting a TCC category on every rebuild ([#4277](https://github.com/bobmatnyc/trusty-tools/issues/4277)). `tctl sign`'s `<TARGET>` now accepts `trusty-agents` alongside `trusty-search`/`trusty-mpm`, and `AGENTS_SET` joins `MPM_SET` on the always-Hardened-Runtime side of `use_hardened_runtime` (`tagent` loads no ONNX dylib, so the library-validation concern that keeps `trusty-search` off it does not apply).
+- New public `probe_http` module: an HTTP `/health` probe local to trusty-installer, replacing the old CLI-verb probe ([#4246](https://github.com/bobmatnyc/trusty-tools/pull/4246), [#4381](https://github.com/bobmatnyc/trusty-tools/pull/4381)).
+
+### Fixed
+
+- On an arm64 Linux host with glibc below 2.39, `trusty-search` / `trusty-analyze` installs now download the new `aarch64-linux-al2023` release asset instead of the `aarch64-unknown-linux-gnu` one, which is built on Ubuntu 24.04 and cannot load there (Amazon Linux 2023 on Graviton being the confirmed case). Mirrors the existing x86_64 routing (follow-up to [#2533](https://github.com/bobmatnyc/trusty-tools/issues/2533), predecessor [#4822](https://github.com/bobmatnyc/trusty-tools/pull/4822)).
+- **`launchctl bootstrap` no longer reports success when a foreign process already holds the daemon's port** ([#4470](https://github.com/bobmatnyc/trusty-tools/issues/4470)). Root cause: `bootstrap` exits 0 regardless of whether the job it loads can actually bind, so an unsupervised orphan — typically an older binary — kept serving the port while the documented `bootout → install → bootstrap` restart convention completed cleanly. A fresh signed install plus behavioural verification could all pass while shipping nothing ([#4230](https://github.com/bobmatnyc/trusty-tools/issues/4230) records the near-miss on the 1.2.3 deploy). [#4466](https://github.com/bobmatnyc/trusty-tools/pull/4466) detected the state after the fact via `tm doctor`'s `daemon_orphan` check but nothing intercepted the bootstrap itself.
+  - New `port_guard` module refuses a bootstrap whenever the member's port is held by a PID that launchd does not report running for that label. The refusal names the offending PID, the port, and the `lsof` / `kill -TERM` recipe to clear it, and `tctl install` exits non-zero with `all_ok: false` rather than reporting a refused member as a success.
+  - It **fails closed**: an unreadable port probe, or a `launchctl` query that cannot be answered, is a refusal — not a pass. Because a non-root `lsof` only reports the caller's own processes, an empty `lsof` result is cross-checked with a real bind, so another user's (or a root-owned) listener is reported as an unidentifiable holder rather than a free port. `TCTL_ALLOW_FOREIGN_PORT=1` is the single documented operator override; it requires an affirmative value (so `=0` cannot switch the bypass *on*), is named in every refusal message, and logs loudly when used.
+  - All **four** bootstrap-issuing sites route through the one shared check: `tctl install`'s service bootstrap (both the fresh-install and the [#3841](https://github.com/bobmatnyc/trusty-tools/issues/3841) already-present-plist repair branch), the verify tail's second-layer repair, `tctl start` / `tctl restart`, and the trusty-mpm supervisor plist bootstrap. A new `bootstrap_sites` test enumerates the bootstrap sites actually present in the source and fails on any that is unaccounted for, so a fifth site cannot silently bypass the guard.
+  - Every gate runs **before** any bootout or filesystem write, so a refusal never stops a running daemon and then declines to bring it back, and never leaves a half-written plist behind.
+  - The port checked is the member's recorded `http_addr` when it has one. Otherwise a daemon that auto-walks (trusty-memory walks `7070..=7079`) is checked across its whole range and refused only when every candidate is unavailable, so an unrelated listener on the default port no longer blocks an install that would have succeeded.
+  - `launchctl list` observations now distinguish "launchd says no such label" from "launchd could not be asked" — the conflation [#4466](https://github.com/bobmatnyc/trusty-tools/pull/4466) identified as a HIGH on the trusty-mpm side — and carry the running PID, off the same single parser the existing down-state diagnosis uses.
+- **`tctl install` could SIGKILL-restart healthy daemons mid-flush** ([#4246](https://github.com/bobmatnyc/trusty-tools/issues/4246)). Root cause: the health probe shelled out to `<binary> health --json`, a contract no daemon implements, so healthy daemons falsely reported `down` and drove `needs_kickstart`. Fixed by replacing it with an HTTP `/health` probe local to trusty-installer ([#4381](https://github.com/bobmatnyc/trusty-tools/pull/4381)). Fixes the reported symptom; #4246 stays open pending root-cause confirmation.
+- **Follow-up hardening from code review of the above** ([#4388](https://github.com/bobmatnyc/trusty-tools/pull/4388)): the regression-guard tests used a TOCTOU-racy ephemeral port for their "connection refused" fixture, making them latently flaky — replaced with a fixed privileged loopback port that verifies the refusal before returning; a probe test's timeout bounds were inverted (connect budget longer than the total request budget), leaving the `silent`/read-path-timeout case ambiguous — reordered so connect and read-path timeouts are unambiguously distinct; and the `health_string()` / `is_confirmed_down()` asymmetry — a display-only "down" string must never authorise a kickstart — is now documented on both methods and pinned by a new test asserting the confirmed-down set is a strict, non-empty subset of the down-rendering set.
+
+([`bd28002`](https://github.com/bobmatnyc/trusty-tools/commit/bd2800216c2999bbcfb72373a2f81e837b2ab93a), [`6078b21`](https://github.com/bobmatnyc/trusty-tools/commit/6078b21c091b7d4b1ea7d5d05eb96cd49801cfec))
+
+### Changed
+
+- **`detect_does_not_hang_on_an_unresponsive_shadowing_binary` now runs on
+  Tokio's paused clock** — 10.01s to 0.00s. The hanging `sleep 30` shadowing
+  binary is still really spawned and still really never answers; only the
+  health gate's 10s probe timeout moves to the virtual clock. That the child
+  is genuinely spawned under a paused clock was verified by measurement (a
+  spawn marker written by the fake binary was present on 3 of 3 runs), and a
+  new elapsed-time assertion keeps it honest: if `shadowing_version: None`
+  ever came from an early probe failure instead of the timeout expiring, the
+  test fails rather than passing green on deleted coverage. Reverting the
+  probe to the un-timed-out `installed_version` call still fails the test.
+
+---
+
 ## [0.4.10] — 2026-07-26
 
 ### Fixed

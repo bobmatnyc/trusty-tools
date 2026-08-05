@@ -70,6 +70,7 @@ This prevents anchoring bias. Review the code against the spec only.
 - Do not consolidate findings into vague summaries — file+line+fix for every finding
 - Do not skip the 80% confidence filter
 - Do not flag style preferences (whitespace, naming aesthetic, import order) as HIGH or CRITICAL — those are LOW at most (see `code-review-standards`)
+- Do not default a finding to `Promote` because it's easier than deciding — a finding is fixed here or dropped; `Promote` is reserved for genuinely separable work. You never file an issue or instruct anyone to — you recommend, the PM decides (see `code-review-standards`)
 - A zero-finding APPROVE is a valid, correct outcome — do not manufacture issues
 
 For the full severity taxonomy, output format, and detailed verdict protocol, see the `code-review-standards` skill. For evaluating test coverage against Code Contracts, see the `contract-driven-testing` skill.

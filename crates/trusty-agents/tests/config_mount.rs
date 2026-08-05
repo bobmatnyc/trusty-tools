@@ -16,9 +16,27 @@ use std::process::Command;
 /// tests). Using it guarantees we exercise the real mounted CLI, not a stub.
 const BIN: &str = env!("CARGO_BIN_EXE_tagent");
 
+/// Spawn the built binary with the ambient project-dir hint cleared (#4826).
+///
+/// Why: `Command` inherits the parent's environment, so a `TAGENT_PROJECT_DIR`
+/// exported in the shell that ran `cargo test` reaches the child. Since that
+/// hint now outranks exe-path inference, it would steer the child's project
+/// root — and every write under it — out of this test's tempdir and into a real
+/// directory, silently, with the test still green. Constructing every spawn
+/// through here rather than clearing the vars at each call site means a future
+/// spawn added to this file cannot forget it.
+/// Test: `config_help_advertises_keys_feature`, `config_keys_list_runs_offline`,
+/// `profile_show_then_set_round_trips`.
+fn tagent() -> Command {
+    let mut cmd = Command::new(BIN);
+    cmd.env_remove("TAGENT_PROJECT_DIR")
+        .env_remove("OPEN_MPM_PROJECT_DIR");
+    cmd
+}
+
 #[test]
 fn config_help_advertises_keys_feature() {
-    let out = Command::new(BIN)
+    let out = tagent()
         .args(["config", "--help"])
         .output()
         .expect("spawn `config --help`");
@@ -36,7 +54,7 @@ fn config_help_advertises_keys_feature() {
 
 #[test]
 fn config_keys_list_runs_offline() {
-    let out = Command::new(BIN)
+    let out = tagent()
         .args(["config", "keys", "list"])
         .output()
         .expect("spawn `config keys list`");
@@ -64,7 +82,7 @@ fn config_keys_list_runs_offline() {
 fn profile_show_then_set_round_trips() {
     let home = tempfile::tempdir().expect("tempdir for isolated HOME");
 
-    let before = Command::new(BIN)
+    let before = tagent()
         .args(["config", "profile", "show"])
         .env("HOME", home.path())
         .output()
@@ -76,7 +94,7 @@ fn profile_show_then_set_round_trips() {
         "expected 'not set' before any profile exists; got:\n{before_stdout}"
     );
 
-    let set = Command::new(BIN)
+    let set = tagent()
         .args([
             "config",
             "profile",
@@ -99,7 +117,7 @@ fn profile_show_then_set_round_trips() {
         String::from_utf8_lossy(&set.stderr)
     );
 
-    let after = Command::new(BIN)
+    let after = tagent()
         .args(["config", "profile", "show"])
         .env("HOME", home.path())
         .output()

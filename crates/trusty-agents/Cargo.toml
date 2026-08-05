@@ -159,6 +159,8 @@ aws-smithy-types = "1"
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
 teloxide = { version = "0.17", features = ["macros"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+# #4825: needed by `tls::install_crypto_provider` — see the workspace entry.
+rustls = { workspace = true }
 flate2 = "1"
 rand = "0.8"
 similar = { version = "2", features = ["text"] }
