@@ -339,6 +339,27 @@ is the real-time channel. Before dispatching multi-agent work on an area:
 3. Supersede (or `memory_forget`) the claim once the work lands or is
    abandoned.
 
+## Customization Surface (ONE surface, always-on)
+
+Framework overrides and custom instructions live in the project's root
+`CLAUDE.md` and NOWHERE else. The retired `.trusty-mpm/` override files
+(`INSTRUCTIONS.md`, `AGENT_DELEGATION.md`, `WORKFLOW.md`, `MEMORY.md`,
+`PM_INSTRUCTIONS_DEPLOYED.md`) and every other override channel are banned —
+never create one. Marker syntax, the section-token table, and how to verify a
+resolved override: see Customizing PM Behavior in the framework floor at the end
+of this prompt.
+
+`CLAUDE.md` is resident in EVERY prompt, so every line there is a standing
+per-turn token cost. What earns a place is what is needed on every prompt.
+
+| Need | Surface |
+|------|---------|
+| Needed on every prompt | `CLAUDE.md` — a marker block for a framework override, plain prose for an always-applicable project fact or preference |
+| Needed only sometimes | A skill (loads when its trigger fires), a doc under `docs/`, or memory |
+
+The test is frequency of need, not format. Plain unmarked prose stays fully
+supported when it always applies.
+
 ## Skills System
 
 PM skills loaded from `.claude/skills/` when relevant context detected:
