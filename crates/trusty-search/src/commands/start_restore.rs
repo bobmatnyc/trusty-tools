@@ -19,56 +19,85 @@ use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::persistence::PersistedIndex;
 use crate::service::persistence_loader::build_indexer_from_entry;
 use crate::service::warm_boot::{
-    canonicalize_best_effort, derive_warm_boot_stages, WarmBootInputs,
+    canonicalize_best_effort, derive_warm_boot_stages, SalvageGrant, WarmBootInputs,
 };
 use crate::service::SearchAppState;
 
-/// Attempt to locate a moved project root for a colocated index (issue #484).
+/// The relocation candidate set for one warm boot, computed once (#4846).
 ///
-/// Why: when a project is moved (e.g. `mv projA projA-moved`), the daemon
-/// restarts with a stale `root_path` in `indexes.toml`. Without relocation
-/// detection, `build_indexer_from_entry` calls `colocated_storage_dir` which
-/// calls `create_dir_all` on the non-existent old path, silently producing an
-/// empty ghost directory and a 0-chunk index. This function intercepts that
-/// case before any disk mutation.
+/// Why: `try_locate_moved_root` used to run
+/// `scan_roots_for_colocated_indexes` itself, so every dead entry paid a fresh
+/// depth-5 walk of every tracked root. The walk's inputs (`roots.toml`, the
+/// on-disk `.trusty-search/` layout) and its result are identical for all of
+/// them within a single boot — measured at 9.5–10.5 s per call over the
+/// reporting machine's 248 roots, recomputed 55 times. Hoisting it to a
+/// once-per-boot value turns `O(dead_entries × roots)` into `O(roots)`.
+/// What: the surviving candidate roots, already filtered for a populated
+/// `index.redb` and for roots claimed by a live entry.
+/// Test: `relocation_candidates_are_computed_once_for_the_whole_boot`.
+pub(crate) struct RelocationCandidates {
+    /// Unclaimed roots holding a non-empty colocated `index.redb`.
+    roots: Vec<std::path::PathBuf>,
+}
+
+/// Whether a missing-root entry may still be salvaged on this boot (#4846).
 ///
-/// What: scans all tracked roots for `.trusty-search/` directories containing
-/// a populated `index.redb`. Filters out roots already claimed by another live
-/// entry in `indexes.toml`. Returns the new root path ONLY when exactly one
-/// candidate exists (ambiguous = skip, zero = skip). If a unique candidate is
-/// found, updates `indexes.toml` atomically so subsequent restarts are instant.
+/// Why: the pre-fix code had no way to express "do not walk the filesystem for
+/// this entry" — the walk was unconditional inside `try_locate_moved_root`, so
+/// a caller could not opt out and, more to the point, could not accidentally be
+/// spared. Deliberately there is NO variant meaning "compute it yourself": the
+/// only way to get candidates is to have paid for the shared scan once, so no
+/// future edit can reintroduce the per-entry walk without adding a variant a
+/// reviewer has to confront.
+/// What: [`Self::Ready`] carries the shared set; [`Self::Unavailable`] means
+/// salvage is disabled or its budget is spent, and a missing root is then
+/// skipped after its triage stat and nothing more.
+/// Test: `missing_root_entry_is_skipped_when_salvage_unavailable`.
+#[derive(Clone)]
+pub(crate) enum RelocationScan {
+    /// Candidates collected once for this boot; reused by every entry.
+    Ready(std::sync::Arc<RelocationCandidates>),
+    /// No salvage this boot — skip missing roots without touching the disk.
+    Unavailable,
+}
+
+/// Collect the boot's relocation candidates, paying the tracked-root walk once.
 ///
-/// Test: `restore_moved_colocated_index_relinks_unique_candidate`,
-/// `restore_missing_root_with_no_candidate_skips`,
-/// `restore_missing_root_with_ambiguous_candidates_skips` in `start.rs` tests.
-pub(crate) fn try_locate_moved_root(
-    entry: &PersistedIndex,
+/// Why: this is the expensive operation #4846 is about, so it takes a
+/// [`SalvageGrant`] — a token only `SalvageBudget::try_grant` can mint. The
+/// budget therefore gates the walk at the type level rather than by a
+/// convention the caller has to remember.
+/// What: loads `roots.toml`, walks each tracked root for `.trusty-search/`
+/// directories, and keeps those with a non-empty `index.redb` that no live
+/// entry already claims. Reads only — nothing is written, moved, or removed.
+///
+/// On the `claimed` filter: it excludes roots owned by entries whose own
+/// `root_path` still exists. Every entry that reaches relocation has a MISSING
+/// root, so no such entry can appear in `claimed` and the per-entry
+/// `e.id != entry.id` self-exclusion the old code performed was a no-op for
+/// exactly this population — which is what makes one shared set correct rather
+/// than an approximation.
+/// Test: `relocation_candidates_are_computed_once_for_the_whole_boot`.
+pub(crate) fn collect_relocation_candidates(
     all_entries: &[PersistedIndex],
-) -> Option<std::path::PathBuf> {
+    _grant: &SalvageGrant,
+) -> RelocationCandidates {
     use crate::service::colocated_storage::COLOCATED_DIR_NAME;
     use crate::service::fs_discovery::{scan_roots_for_colocated_indexes, DEFAULT_SCAN_DEPTH};
     use crate::service::roots_registry::load_roots;
 
-    // Only attempt relocation for colocated indexes with a missing root.
-    if !entry.colocated || entry.root_path.exists() {
-        return None;
-    }
-
-    // Collect root paths that are already claimed by other live entries so
-    // we don't accidentally steal their `.trusty-search/` directory.
     let claimed: std::collections::HashSet<std::path::PathBuf> = all_entries
         .iter()
-        .filter(|e| e.id != entry.id && e.root_path.exists())
+        .filter(|e| e.root_path.exists())
         .map(|e| e.root_path.clone())
         .collect();
 
-    // Scan tracked roots for colocated index directories.
     let tracked_roots: Vec<std::path::PathBuf> = match load_roots() {
         Ok(r) => r.into_iter().map(|r| r.path).collect(),
-        Err(_) => return None,
+        Err(_) => return RelocationCandidates { roots: Vec::new() },
     };
     if tracked_roots.is_empty() {
-        return None;
+        return RelocationCandidates { roots: Vec::new() };
     }
 
     let discovered = scan_roots_for_colocated_indexes(&tracked_roots, DEFAULT_SCAN_DEPTH);
@@ -76,7 +105,7 @@ pub(crate) fn try_locate_moved_root(
     // A candidate must:
     //   1. Have a populated index.redb (not just an empty .trusty-search/ dir).
     //   2. Not be already claimed by another entry.
-    let candidates: Vec<std::path::PathBuf> = discovered
+    let roots: Vec<std::path::PathBuf> = discovered
         .into_iter()
         .filter(|c| {
             if claimed.contains(&c.root_path) {
@@ -90,6 +119,39 @@ pub(crate) fn try_locate_moved_root(
         })
         .map(|c| c.root_path)
         .collect();
+
+    RelocationCandidates { roots }
+}
+
+/// Attempt to locate a moved project root for a colocated index (issue #484).
+///
+/// Why: when a project is moved (e.g. `mv projA projA-moved`), the daemon
+/// restarts with a stale `root_path` in `indexes.toml`. Without relocation
+/// detection, `build_indexer_from_entry` calls `colocated_storage_dir` which
+/// calls `create_dir_all` on the non-existent old path, silently producing an
+/// empty ghost directory and a 0-chunk index. This function intercepts that
+/// case before any disk mutation.
+///
+/// What: reads the boot's shared [`RelocationCandidates`] (#4846 — it no
+/// longer runs the scan itself) and returns the new root path ONLY when exactly
+/// one candidate exists (ambiguous = defer to the reaper, zero = skip). If a
+/// unique candidate is found, updates `indexes.toml` atomically so subsequent
+/// restarts are instant. The decision rules are unchanged; only where the
+/// candidates come from changed.
+///
+/// Test: `restore_moved_colocated_index_relinks_unique_candidate`,
+/// `restore_missing_root_with_no_candidate_skips`,
+/// `restore_missing_root_with_ambiguous_candidates_skips` in `start.rs` tests.
+pub(crate) fn try_locate_moved_root(
+    entry: &PersistedIndex,
+    candidates: &RelocationCandidates,
+) -> Option<std::path::PathBuf> {
+    // Only attempt relocation for colocated indexes with a missing root.
+    if !entry.colocated || entry.root_path.exists() {
+        return None;
+    }
+
+    let candidates: Vec<std::path::PathBuf> = candidates.roots.clone();
 
     match candidates.len() {
         1 => {
@@ -160,12 +222,15 @@ pub(crate) fn try_locate_moved_root(
 /// should use `restore_one_index_bounded` instead of calling this directly.
 /// Issue #954: HNSW alloc failures (OOM) are propagated as a skip rather than
 /// a panic so the daemon can still serve the remaining indexes.
+/// #4846: `relocation` carries the boot's shared candidate set instead of this
+/// function triggering a fresh tracked-root walk per entry.
 /// Test: covered by the warm-boot integration tests and the
 /// `restore_moved_colocated_index_*` unit tests in `start.rs`.
 pub(crate) async fn restore_one_index(
     state: &SearchAppState,
     embedder: &Arc<dyn crate::core::Embedder>,
     mut entry: PersistedIndex,
+    relocation: RelocationScan,
 ) {
     let id = IndexId::new(entry.id.clone());
     if state.registry.get(&id).is_some() {
@@ -178,14 +243,26 @@ pub(crate) async fn restore_one_index(
     // calls `create_dir_all` on the (now-dead) path, silently creating an empty
     // ghost dir and loading 0 chunks. Block that here.
     if !entry.root_path.exists() {
-        // For colocated indexes: attempt relocation scan.
+        // For colocated indexes: consult the boot's shared relocation set.
         if entry.colocated {
-            // Collect all current registry entries so the scan can exclude
-            // already-claimed roots.  Best-effort: an empty vec is safe —
-            // it just disables the claimed-root filter.
-            let all_entries =
-                crate::service::persistence::load_index_registry().unwrap_or_default();
-            match try_locate_moved_root(&entry, &all_entries) {
+            // #4846: this used to re-read `indexes.toml` from disk AND re-walk
+            // every tracked root, per entry. Both are now done once per boot and
+            // handed in; `Unavailable` means the salvage budget is spent or
+            // disabled, so the entry is skipped without any filesystem walk. The
+            // registration and its on-disk corpus are left untouched either way.
+            let RelocationScan::Ready(candidates) = &relocation else {
+                tracing::warn!(
+                    "warm-boot: skipping index '{}' — root_path {} no longer exists and the \
+                     warm-boot salvage budget is spent or disabled, so no relocation scan was \
+                     run for it (issue #4846). The registration and its on-disk index data are \
+                     untouched; it is retried on the next boot, or fix it now with \
+                     `trusty-search index <path>`.",
+                    entry.id,
+                    entry.root_path.display(),
+                );
+                return;
+            };
+            match try_locate_moved_root(&entry, candidates) {
                 Some(new_root) => {
                     entry.root_path = new_root;
                 }
