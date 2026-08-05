@@ -1030,8 +1030,12 @@ verify_daemon_liveness() {
     # and `stack doctor` has reported it on every run. It was absent from a
     # HARDCODED FOUR-NAME LIST in this function, transcribed from §1.3's
     # four-shape table. Deriving the set removes the transcription and the drift
-    # with it — `trusty-console` is a `stable_set` daemon too and is correctly
-    # excluded here, by the intersection, because the TSV marks it out of scope.
+    # with it — and `trusty-console` is the proof that it worked. It is a
+    # `stable_set` daemon that this intersection EXCLUDED for as long as the TSV
+    # marked it out of scope, and that it now INCLUDES because the TSV marks it
+    # in scope. Not one line of this function changed to move it across; the
+    # scope decision lives in the expectation table alone, which is exactly what
+    # deriving the set was for.
     daemons=$(_verify_doctor_json "$vm" | jq -r '.members[].member' 2>/dev/null \
         | grep -x -F -f <(tsv_scope_packages) | tr '\n' ' ') || :
     daemons=${daemons% }

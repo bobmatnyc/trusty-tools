@@ -75,7 +75,7 @@ so `cargo search` against the registry index is the evidence of record.)
 **The consequence.** `trusty-mpm` **is** installable by `cargo install trusty-mpm
 --locked` and is therefore **coverable by pattern (a)**. The "documented gap" this
 decision used to record **does not exist and is dissolved.** Pattern (a) covers the
-full eight-crate stack (D3), and the harness makes the same claim for all three
+full nine-crate stack (D3), and the harness makes the same claim for all three
 patterns.
 
 What survives the reversal is the *rule*, not the exception it was invented for:
@@ -94,7 +94,7 @@ count match. That rule now costs nothing, because nothing needs excluding.
 > keeping: a claim about publish status is checkable in one command, and this one
 > was never run until now.
 
-#### D3 — The stack is eight crates
+#### D3 — The stack is nine crates
 
 | # | Crate (workspace directory) | crates.io package | In pattern (a)? |
 |---|---|---|---|
@@ -106,10 +106,11 @@ count match. That rule now costs nothing, because nothing needs excluding.
 | 6 | `trusty-git-analytics` | **`tga`** | yes |
 | 7 | `trusty-installer` | `trusty-installer` | yes |
 | 8 | `trusty-review` | `trusty-review` (v0.10.1, verified 2026-07-31) | yes — **amended**, see below |
+| 9 | `trusty-console` | `trusty-console` (v0.4.0, verified 2026-08-05) | yes — **amended**, see below |
 
-So **all three patterns cover all eight crates.** Row 5 previously read
+So **all three patterns cover all nine crates.** Row 5 previously read
 "— (`publish = false`)" / "**no** — D2"; that is corrected per the D2 reversal
-above. Row 8 is an addition, recorded immediately below.
+above. Rows 8 and 9 are additions, each recorded immediately below.
 
 > **Amendment, 2026-07-31 — D3 widened to eight crates; `trusty-review` added.**
 > This is a **product-owner decision**, not a correction of a false premise — D3 as
@@ -142,6 +143,51 @@ above. Row 8 is an addition, recorded immediately below.
 > the D2 reversal was: a design whose settled decisions quietly change is a design
 > nobody can audit. What is being reversed here is narrower than D2 — an omission
 > deliberately flagged as an omission, closed on purpose.
+
+> **Amendment, 2026-08-05 — D3 widened to nine crates; `trusty-console` added.**
+> This is a **product-owner decision**, not a correction of a false premise — D3 as
+> amended on 2026-07-31 was accurate about the crates it named, it simply did not
+> name this one.
+>
+> **What was open.** `trusty-console` carried `in_scope=no` in
+> `expected-binaries.tsv` faithfully to D3, alongside a note in
+> `lib/verify.sh` recording that it is a `stable_set()` daemon the liveness
+> intersection excluded *only* because the table put it out of scope. **It is now
+> decided: `trusty-console` is IN scope.**
+>
+> **Verified before deciding, 2026-08-05.** `crates.io` returns
+> `max_version = "0.4.0"`, `yanked = false`, and the published 0.4.0 manifest
+> declares exactly **one** `[[bin]]` target — `name = "trusty-console"`,
+> `path = "src/main.rs"`, no `required-features` — so it adds one binary, not a
+> sidecar set, and no Single-Install gate of its own (§7.4). Its `/health` route
+> exists at `crates/trusty-console/src/server/mod.rs:318` and returns
+> `{"status":"ok","version":…}`. `stable_set()` marks it `daemon: true`,
+> `required: false` (`stable_set.rs:180`), so it joins §1.3's liveness set by
+> derivation — no oracle code changed to admit it.
+>
+> **Note the published/working-tree version gap.** The registry has **0.4.0**; the
+> working tree is **0.5.0**. This is the same shape of gap `trusty-review` carries
+> and is accounted for the same way — DOC-2 §1.2's version cross-check applies only
+> to patterns (b) and (c) — but here the gap is **not** cosmetic, which is the next
+> paragraph.
+>
+> **Known consequence, accepted knowingly: pattern (a) is RED on this decision.**
+> `tctl start` bootstraps a launchd member by invoking `<binary> service install`.
+> The `Service` subcommand was added to `trusty-console` after 0.4.0 was cut and is
+> **unreleased**; published 0.4.0 exposes only `Serve` and `Port`. So under pattern
+> (a) the console never starts, never writes its discovery file, and §1.3's liveness
+> probe fails it — verified by a real run on 2026-08-05 (`vmtest run released`,
+> exit 60, VM `vmtest-20260805T133202Z-41266`), which passed every other gate
+> including `verify_binaries` 14/14. Pattern (c) passes end to end on the same
+> table (`vmtest run local`, exit 0, six daemons live). **The red is a release-skew
+> defect in the product, tracked separately, not a defect in this decision** — and
+> it is recorded here rather than worked around, because narrowing the table to
+> make a gate green is precisely what §9.6 and the oracle's own scoping notes
+> forbid. It clears when `trusty-console` > 0.4.0 is published.
+>
+> It is recorded as a dated amendment rather than a silent edit for the same reason
+> the D2 reversal and the 2026-07-31 D3 amendment were: a design whose settled
+> decisions quietly change is a design nobody can audit.
 
 Note the package-name discontinuity on row 6: the workspace directory is
 `crates/trusty-git-analytics`, the published package name and the binary are both
@@ -537,7 +583,7 @@ per crate. No host→guest source transfer occurs; the host repository is not re
 
 #### 6.3 Pattern (a) — released
 
-`cargo install <crate> --locked` from crates.io, for all eight publishable crates in
+`cargo install <crate> --locked` from crates.io, for all nine publishable crates in
 D3. `--locked` is mandatory — it is what makes the run reproducible against the
 published lockfile rather than against whatever the resolver feels like today.
 
@@ -804,7 +850,7 @@ dominates every other tuning knob examined.
 
 **Rule:** full-stack runs set a single shared `CARGO_TARGET_DIR` across all crates.
 
-**Rationale:** the eight crates share a large fraction of their dependency graphs.
+**Rationale:** the nine crates share a large fraction of their dependency graphs.
 Per-crate target directories would rebuild those shared dependencies once per
 crate. This is the assumption underlying the full-stack extrapolation in §9, and
 it is the reason that extrapolation is far below 7 × single-crate time.

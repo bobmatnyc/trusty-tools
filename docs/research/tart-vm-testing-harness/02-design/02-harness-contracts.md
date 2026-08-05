@@ -1621,9 +1621,9 @@ which is a further argument for keying on package name.
 #### 9.3 Seed content
 
 Enumerated from the workspace manifests. **27** explicit `[[bin]]` targets across 20
-manifests, plus one implicit target (§9.4) — **28** rows in total. **Thirteen** rows
-are in scope; DOC-1 D3's **eight** crates produce **thirteen** binaries, not eight.
-The eight in-scope `crate_dir` values are the eight D3 directories — see §12.5 and
+manifests, plus one implicit target (§9.4) — **28** rows in total. **Fourteen** rows
+are in scope; DOC-1 D3's **nine** crates produce **fourteen** binaries, not nine.
+The nine in-scope `crate_dir` values are the nine D3 directories — see §12.5 and
 the plan's §F-3 on why the loop over them must deduplicate.
 
 > **Correction, 2026-07-31 — the explicit count read 26.** The prose said "26

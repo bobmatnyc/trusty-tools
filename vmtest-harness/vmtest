@@ -209,7 +209,7 @@ _tsv_rows() {
 # invalidate DOC-1 §7.4's Single-Install gate — it would not; repeated
 # `cargo install --path` reinstalls the package's full binary set and the end
 # state is identical — but because P5's checkpoint COUNTS installs (one per
-# value) and thirteen installs of eight crates is waste and noise.
+# value) and fourteen installs of nine crates is waste and noise.
 #
 # The genuine hazard §F-3 does point at is a PER-BINARY install: `cargo install
 # --path <dir> --bin <binary>` defeats the gate silently and with a green
@@ -1157,7 +1157,7 @@ END {
     for (k in DK) if ((k in AK) && D[k] != A[k]) CHANGED[k] = 1
 
     for (k in ADDED)
-        printf "ADDED    package=%s binary=%s  %s  — a [[bin]] target the workspace declares and this table does not. Add the row (in_scope=no unless it belongs to one of DOC-1 D3'\''s eight packages).\n", \
+        printf "ADDED    package=%s binary=%s  %s  — a [[bin]] target the workspace declares and this table does not. Add the row (in_scope=no unless it belongs to one of DOC-1 D3'\''s nine packages).\n", \
                APKG[k], ABIN[k], A[k]
     for (k in REMOVED)
         printf "REMOVED  package=%s binary=%s  %s  — this table declares it and the workspace has no such [[bin]] target.\n", \
@@ -1250,7 +1250,7 @@ cmd_check_table() {
     # --- step 6 -------------------------------------------------------------
     if [ "$nfindings" -gt 0 ]; then
         while IFS= read -r _line; do out "$_line"; done < "$findings"
-        die 60 "${nfindings} finding(s) between expected-binaries.tsv and the workspace's actual [[bin]] targets. --check-table DOES NOT AUTO-FIX: edit the table by hand, in a PR, because that edit is the review step (DOC-2 §9.6). Do not widen DOC-1 D3's scope as a side effect — a genuinely new binary is in_scope=no unless it belongs to one of D3's eight packages."
+        die 60 "${nfindings} finding(s) between expected-binaries.tsv and the workspace's actual [[bin]] targets. --check-table DOES NOT AUTO-FIX: edit the table by hand, in a PR, because that edit is the review step (DOC-2 §9.6). Do not widen DOC-1 D3's scope as a side effect — a genuinely new binary is in_scope=no unless it belongs to one of D3's nine packages."
     fi
     log 'check-table OK: no ADDED, REMOVED or CHANGED findings'
     return 0

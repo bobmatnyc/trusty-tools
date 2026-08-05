@@ -29,7 +29,7 @@ echo "exit=$?"                              # 0 means everything passed
 ```
 
 `run local` clones the base image, boots it, provisions a Rust toolchain, streams
-your **working tree** into the guest, installs all eight in-scope crates from it,
+your **working tree** into the guest, installs all nine in-scope crates from it,
 runs the assertion oracle, and deletes the VM. Expect **9–16 minutes**.
 
 Try `vmtest-harness/vmtest run local --dry-run` first: it runs preflight and prints
@@ -229,8 +229,8 @@ The six steps:
 ## What a green run proves — and what it does not
 
 A `vmtest run <pattern>` exiting 0 proves: the stack **built from that source**,
-**all thirteen in-scope binaries landed**, no multi-binary package installed a
-partial set, the installed tool versions are internally consistent, and the four
+**all fourteen in-scope binaries landed**, no multi-binary package installed a
+partial set, the installed tool versions are internally consistent, and the six
 in-scope daemons **answered `/health`**. On a machine with none of your state on it.
 
 It does **not** prove the following, and each of these is a known, recorded gap
@@ -272,8 +272,10 @@ rather than an oversight:
 - **`--dir` mounts were never measured**, in either direction. See rule 2 above.
 - ~~**`trusty-analyze` is a daemon the oracle does NOT probe.**~~ **CLOSED
   2026-08-04 — and it was a real gap, not a cosmetic one.** The liveness probe now
-  covers **all five** in-scope daemons: `trusty-search`, `trusty-memory`,
-  `trusty-analyze`, `trusty-mpm`, `trusty-review`.
+  covers **all six** in-scope daemons: `trusty-search`, `trusty-memory`,
+  `trusty-analyze`, `trusty-mpm`, `trusty-review`, `trusty-console`.
+  *(`trusty-console` joined the set when the expectation table brought it in
+  scope; the derived intersection picked it up with no change to this function.)*
 
   **The earlier framing here understated it, and the correction is worth stating
   plainly.** It was tempting to call this a logging inaccuracy on the grounds that

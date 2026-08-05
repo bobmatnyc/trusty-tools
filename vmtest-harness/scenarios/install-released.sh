@@ -22,8 +22,9 @@
 #
 # Under the SUPERSEDED D2 this pattern covered SIX crates and asserted `tm`
 # KNOWN-ABSENT, on the premise that `trusty-mpm` was unpublished. Both halves
-# were wrong. It now covers EIGHT — seven after the D2 reversal restored
-# `trusty-mpm`, eight after the D3 amendment added `trusty-review` — and asserts
+# were wrong. It now covers NINE — seven after the D2 reversal restored
+# `trusty-mpm`, eight after the D3 amendment added `trusty-review`, nine after
+# the owner brought `trusty-console` in scope — and asserts
 # `tm` **PRESENT**. A run that does not find `tm` is a FAILURE, where under the
 # superseded D2 it was the expected result.
 #
@@ -37,7 +38,7 @@
 # never `tsv_scope_crate_dirs` — `crates/trusty-git-analytics/` publishes as
 # **`tga`**, and `cargo install trusty-git-analytics --locked` does not exist
 # (DOC-2 §9.2, DOC-1 D3). This is the ONE place the two accessors are not
-# interchangeable, and both emit eight values, so the mistake is invisible to a
+# interchangeable, and both emit nine values, so the mistake is invisible to a
 # count. `install_assert_install_count` is therefore passed the accessor and
 # asserts SET equality.
 #
@@ -60,8 +61,8 @@ scenario_install_released() {
     source_deliver_released
 
     # 2. Install each in-scope PACKAGE from crates.io — `cargo install <pkg>
-    #    --locked`, once per package (EIGHT today), never once per binary
-    #    (THIRTEEN today) and never `--bin` (DOC-2 §12.2).
+    #    --locked`, once per package (NINE today), never once per binary
+    #    (FOURTEEN today) and never `--bin` (DOC-2 §12.2).
     #
     #    Install order is TSV row order (§F-10(b)); `trusty-installer` precedes
     #    N2 in row order already, which is what N2 needs.
@@ -93,9 +94,16 @@ scenario_install_released() {
 
     # 4. Expectations that follow from those steps (DOC-1 §3.6).
     #
-    #    `expect_a` is `present` on all THIRTEEN in-scope rows — including `tm`
+    #    `expect_a` is `present` on all FOURTEEN in-scope rows — including `tm`
     #    and `trusty-mpm`. That is the D2 reversal, asserted rather than
     #    described.
+    #
+    #    `trusty-console`'s `present` is the newest of these and rests on the
+    #    same kind of evidence: crates.io carries `trusty-console` 0.4.0 and its
+    #    published manifest declares `[[bin]] name = "trusty-console"`, so the
+    #    registry install yields the binary. The working tree is ahead at 0.5.0,
+    #    which is exactly the (a)-vs-source skew §1.2's cross-check is exempted
+    #    for — it is not a reason to expect the binary absent.
     verify_binaries "$VMTEST_VM" a
 
     #    DOC-1 §7.4's Single-Install Convention gate, once per MULTI-BINARY
