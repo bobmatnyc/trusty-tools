@@ -160,6 +160,11 @@ pdf-extract = { workspace = true }
 calamine = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
+# SPIKE-ONLY, optional, default-off. Activated solely by the `anydoc-spike`
+# feature, which nothing except `examples/anydoc_spike` turns on. The shipped
+# `trusty-search` / `trusty-embedderd` binaries never link it and
+# `core::extract` never references it.
+anydoc = { workspace = true, optional = true }
 
 # ── Tree-sitter grammars (ABI 15) ──────────────────────────────────────────
 # Upgraded to tree-sitter 0.26 to align with open-mpm (issue #116) so that
@@ -330,3 +335,20 @@ candle = [
     "dep:hf-hub",
     "dep:tokenizers",
 ]
+# Throwaway measurement harness for the anydoc evaluation spike. Gates BOTH
+# the optional `anydoc` dependency and the `anydoc_spike` example, so nothing
+# on the default build path — the library, the two binaries, `cargo test`,
+# `cargo clippy --all-targets` — compiles or links anydoc. Run the harness
+# with `cargo run -p trusty-search --features anydoc-spike --example
+# anydoc_spike -- <subcommand>`. Delete this feature, the `[[example]]` block
+# below, and the optional dependency together when the spike is retired.
+anydoc-spike = ["dep:anydoc"]
+
+# Why `required-features`: without it `cargo clippy --all-targets` and
+# `cargo build --examples` would compile the harness (and therefore anydoc)
+# on a default feature set, which is exactly the inertness the spike promised
+# not to break.
+[[example]]
+name = "anydoc_spike"
+path = "examples/anydoc_spike/main.rs"
+required-features = ["anydoc-spike"]
