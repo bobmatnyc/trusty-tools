@@ -15,6 +15,8 @@ pub mod dedup;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
+// #4743: the single capability every destructive index DELETE must hold.
+mod index_delete_guard;
 pub mod injection_status;
 pub mod manager;
 pub mod naming;
@@ -48,6 +50,11 @@ pub mod worktree_safety;
 
 #[cfg(test)]
 mod tests;
+
+// #4743: the destructive index-DELETE guard, asserted against a live,
+// accepting loopback daemon rather than a dead port.
+#[cfg(test)]
+mod search_gc_guard_tests;
 
 #[cfg(test)]
 mod restart_tests;
