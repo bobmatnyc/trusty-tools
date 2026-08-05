@@ -196,38 +196,35 @@ pub fn plan_skill_tiers(
 /// List the deployable skill stems in a source directory.
 ///
 /// Why: the planner works over stem sets; the orchestrator must translate a
-/// source directory into that set using the EXACT SAME file filter and stem
-/// derivation `deploy_skills_filtered` uses. A second, independently-written
-/// rule here previously used a repeated `trim_end_matches(".md")` strip
-/// against the deployer's single `strip_suffix(".md")` (PR #2818 review,
-/// MEDIUM): for a pathological `foo.md.md` source file the planner would
-/// derive stem `foo` while the deployer's own `select` predicate — driven by
-/// [`crate::skills::deployer::skill_stem`] — expects `foo.md`, so the
-/// planner would greenlight a stem the deployer then silently rejected and the
-/// skill never deployed. Reusing the deployer's own [`is_skill_file`] and
-/// [`skill_stem`] helpers makes that drift structurally impossible.
-/// What: returns the stem (per [`skill_stem`]) of every file directly under
-/// `dir` that [`is_skill_file`] accepts. A missing or non-directory path
-/// yields an empty set (an absent tier is not an error). Errors reading an
-/// existing directory propagate.
-/// Test: `list_source_stems_reads_md_files`, `list_source_stems_missing_empty`.
+/// source directory into that set using the EXACT SAME scan
+/// `deploy_skills_filtered` uses. A second, independently-written rule here
+/// previously used a repeated `trim_end_matches(".md")` strip against the
+/// deployer's single `strip_suffix(".md")` (PR #2818 review, MEDIUM): for a
+/// pathological `foo.md.md` source file the planner would derive stem `foo`
+/// while the deployer expected `foo.md`, so the planner would greenlight a stem
+/// the deployer then silently rejected and the skill never deployed. Calling
+/// the deployer's own scan makes that drift structurally impossible — and #4949
+/// proved the point again from the other direction, where the two copies were
+/// identically blind to directory-shaped skills.
+/// What: returns the stem of every skill
+/// [`crate::skills::source_scan::scan_skill_sources`] finds in `dir` — the flat
+/// `<stem>.md` form and, since #4949, the directory `<stem>/SKILL.md` form. A
+/// missing or non-directory path yields an empty set (an absent tier is not an
+/// error). Errors reading an existing directory propagate.
+/// Test: `list_source_stems_reads_md_files`, `list_source_stems_missing_empty`,
+/// `list_source_stems_reads_directory_skills`.
 pub fn list_source_stems(dir: &Path) -> Result<BTreeSet<String>> {
-    use crate::skills::deployer::{is_skill_file, skill_stem};
-
-    let mut stems = BTreeSet::new();
-    if !dir.is_dir() {
-        return Ok(stems);
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if is_skill_file(&name) && entry.file_type()?.is_file() {
-            stems.insert(skill_stem(&name).to_string());
-        }
-    }
-    Ok(stems)
+    // #4949: delegate rather than re-derive. This function previously carried
+    // its own `is_skill_file(&name) && entry.file_type()?.is_file()` copy of the
+    // deployer's scan, so it inherited the same blindness to directory-shaped
+    // skills — and a planner that greenlights a different stem set than the
+    // deployer acts on is exactly the drift PR #2818's review caught once
+    // already.
+    Ok(crate::skills::source_scan::scan_skill_sources(dir)?
+        .skills
+        .into_iter()
+        .map(|skill| skill.stem)
+        .collect())
 }
 
 /// List the project-custom skill stems already present in the deploy target.
