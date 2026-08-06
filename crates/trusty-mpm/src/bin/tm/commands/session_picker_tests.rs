@@ -492,3 +492,63 @@ fn restart_confirm_hint_disowns_n_as_no() {
         "`n`'s real effect unstated: {hint}"
     );
 }
+
+// ── #5007: the degraded-store banner every listing surface prints ───────────
+
+/// Why (#5007): on 2026-08-06 `tm ls` printed a normal-looking fleet while the
+/// store was corrupt and every write was failing. The banner is what makes that
+/// impossible — but a banner that fired on healthy listings would be noise on
+/// every invocation, so the healthy case has to be silent.
+/// What: a response with no `store_health` field produces no banner.
+/// Test: this test.
+#[test]
+fn store_banner_is_absent_for_a_healthy_listing() {
+    assert_eq!(
+        super::store_degradation_banner(r#"{"sessions":[]}"#),
+        None,
+        "a healthy listing must print nothing"
+    );
+}
+
+/// Why: a body this client cannot parse is not evidence that the STORE is
+/// broken, and claiming so would send an operator to repair the wrong thing.
+/// What: unparseable input produces no banner.
+/// Test: this test.
+#[test]
+fn store_banner_is_absent_for_an_unparseable_body() {
+    assert_eq!(super::store_degradation_banner("not json"), None);
+}
+
+/// Why: the corrupt case is the incident. The banner has to say the list is a
+/// stale in-memory copy AND carry the daemon's message, which is what names the
+/// file, the byte offset, and the repair command.
+/// What: asserts both halves appear.
+/// Test: this test.
+#[test]
+fn store_banner_names_corruption_and_the_repair_command() {
+    let raw = r#"{"sessions":[],"store_health":{"message":"/x/sessions.json is corrupt: trailing characters (line 3755, column 2); a complete JSON document ends at byte 145090 of 146201, followed by 1111 trailing byte(s). Repair with `tm repair session-store`","corrupt":true,"observed_at":"2026-08-06T09:01:17Z"}}"#;
+    let banner = super::store_degradation_banner(raw).expect("a corrupt store must warn");
+    assert!(banner.contains("CORRUPT"), "{banner}");
+    assert!(
+        banner.contains("every write to the store is failing"),
+        "{banner}"
+    );
+    assert!(banner.contains("byte 145090"), "{banner}");
+    assert!(banner.contains("tm repair session-store"), "{banner}");
+}
+
+/// Why: a transient read failure is genuinely different — the fallback may
+/// already have cleared by the next listing — so the banner must say "stale",
+/// not "corrupt", or it would send an operator to repair a healthy file.
+/// What: asserts the non-corrupt wording.
+/// Test: this test.
+#[test]
+fn store_banner_marks_a_transient_read_failure_as_stale_not_corrupt() {
+    let raw = r#"{"sessions":[],"store_health":{"message":"session store I/O error: nfs hiccup","corrupt":false,"observed_at":"2026-08-06T09:01:17Z"}}"#;
+    let banner = super::store_degradation_banner(raw).expect("a degraded store must warn");
+    assert!(banner.contains("may be stale"), "{banner}");
+    assert!(
+        !banner.contains("CORRUPT"),
+        "a transient failure must not be called corruption: {banner}"
+    );
+}

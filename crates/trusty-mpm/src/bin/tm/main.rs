@@ -522,6 +522,11 @@ async fn main() -> anyhow::Result<()> {
                 RepairAction::PushGuard { path, dry_run } => {
                     commands::push_guard::repair_push_guard(path, dry_run)
                 }
+                RepairAction::SessionStore {
+                    path,
+                    dry_run,
+                    force,
+                } => commands::repair_session_store::repair_session_store(path, dry_run, force),
             }
         }
         Some(Command::Auth { action }) => {

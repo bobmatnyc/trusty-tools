@@ -17,6 +17,7 @@ use tokio::fs;
 use tracing::{debug, warn};
 
 use super::record::{ManagedSessionId, SessionRecord};
+use super::store_integrity::{StoreIntegrity, analyze};
 
 /// Errors that can arise from store I/O or serialization.
 ///
@@ -35,9 +36,67 @@ pub enum StoreError {
     #[error("session store serialization error: {0}")]
     Serialize(String),
 
+    /// The backing file exists but its bytes are not a single valid document.
+    ///
+    /// Why (#5007): before this variant, a corrupt store surfaced as
+    /// `session store serialization error: trailing characters at line 3755
+    /// column 2` — which names neither the file nor a byte offset, and reads
+    /// like a transient hiccup rather than the permanently wedged store it
+    /// actually was. Corruption is a distinct failure class: it never clears on
+    /// its own, and it blocks every write (`upsert` reloads before saving), so
+    /// callers must be able to tell it apart from an I/O blip.
+    /// What: wraps the full
+    /// [`StoreIntegrity`](super::store_integrity::StoreIntegrity) diagnosis;
+    /// its `Display` is [`StoreIntegrity::diagnostic`], which names the file,
+    /// the byte offset where the valid document ends, the size of the trailing
+    /// junk, and the repair command.
+    /// Test: `load_reports_a_trailing_tail_as_corruption_with_a_byte_offset`.
+    #[error("{}", .0.diagnostic())]
+    Corrupt(Box<StoreIntegrity>),
+
     /// The requested session id was not found in the store.
     #[error("session not found: {0}")]
     NotFound(String),
+}
+
+impl StoreError {
+    /// Whether this error means the file on disk is unusable, not merely
+    /// unavailable.
+    ///
+    /// Why (#5007): the manager's read paths fall back to their last-known
+    /// in-memory set on a reload error, which is right for a transient I/O
+    /// failure and disastrous as a silent policy for corruption — it made a
+    /// store that could not accept a single write look perfectly healthy in
+    /// `tm ls`. The fallback stays; what changes is that a corrupt store is
+    /// reported as such instead of being absorbed.
+    /// What: `true` for [`StoreError::Corrupt`] and [`StoreError::Serialize`],
+    /// `false` for I/O and not-found.
+    /// Test: `corruption_is_distinguished_from_transient_io`.
+    pub fn is_corruption(&self) -> bool {
+        matches!(self, Self::Corrupt(_) | Self::Serialize(_))
+    }
+}
+
+/// A read failure the store is currently papering over with cached data.
+///
+/// Why (#5007): `SessionManager::list` logs a warning and serves the last-known
+/// set when a reload fails. Nothing else recorded that this happened, so a
+/// totally wedged store was indistinguishable from a healthy one at every
+/// surface an operator actually looks at. Recording the failure on the store
+/// itself lets the list endpoint, `tm ls`, and `tm doctor` all report the same
+/// degradation without any of them re-reading the file.
+/// What: the rendered error, whether it was corruption, and when it was
+/// observed.
+/// Test: `store_records_and_clears_a_reload_failure`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreDegradation {
+    /// The rendered reload error.
+    pub message: String,
+    /// Whether the file is corrupt (permanent) rather than unreadable
+    /// (possibly transient).
+    pub corrupt: bool,
+    /// When the failure was observed.
+    pub observed_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// In-memory representation of the serialized store file.
@@ -73,6 +132,33 @@ struct FileSig {
     len: u64,
 }
 
+/// The private staging path a store instance renames over `path` on save.
+///
+/// Why (#5007): `save` used to stage through `path.with_extension("json.tmp")`
+/// — one fixed name shared by every writer of that store, in every process.
+/// The rename is atomic, but the staging write is not exclusive: two writers
+/// each open that one name with truncate, each stream their own serialization
+/// into it, and the file that gets renamed into place has the length of the
+/// longer document and the head of the shorter one. That is the exact shape
+/// #5007 reports — a complete document followed by a stale tail whose length
+/// equals the difference between the two serializations. Making the staging
+/// name private to one store instance removes the shared resource entirely.
+/// What: `<path>.tmp.<pid>.<uuid>` — the pid separates processes, the uuid
+/// separates instances within one process (tests routinely hold two stores over
+/// one directory, and `agent_reset_workspace` builds its own alongside the
+/// daemon's).
+/// Test: `two_stores_over_one_path_do_not_share_a_staging_file`,
+/// `staging_path_is_a_sibling_of_the_store`.
+fn staging_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    path.with_file_name(name)
+}
+
 /// Async, file-backed store for [`SessionRecord`]s.
 ///
 /// Why: the session manager must be able to reload all known sessions after a
@@ -104,6 +190,25 @@ pub struct SessionStore {
     /// What: the (mtime, len) pair captured from the file's metadata.
     /// Test: `store_reload_picks_up_external_write`.
     last_sig: Option<FileSig>,
+    /// Private staging path this instance renames over `path` on every save.
+    ///
+    /// Why (#5007): every `SessionStore` used to stage through the SAME
+    /// `sessions.json.tmp`. The rename is atomic; the staging write is not
+    /// exclusive, so two processes saving concurrently both truncate that one
+    /// name to zero and then stream their own bytes into it — leaving a file
+    /// whose length is the longer document's and whose head is the shorter
+    /// one's. That is precisely the corruption shape #5007 was filed for. A
+    /// per-instance name removes the shared resource.
+    /// What: `sessions.json.tmp.<pid>.<nonce>`, fixed for the life of the
+    /// store so at most one stray staging file can survive a crash per store.
+    /// Test: `two_stores_over_one_path_do_not_share_a_staging_file`.
+    tmp_path: PathBuf,
+    /// The most recent reload failure this store papered over, if any.
+    ///
+    /// Why: see [`StoreDegradation`].
+    /// What: `Some` from the moment a reload fails until one succeeds.
+    /// Test: `store_records_and_clears_a_reload_failure`.
+    degradation: Option<StoreDegradation>,
 }
 
 impl SessionStore {
@@ -118,11 +223,48 @@ impl SessionStore {
     pub async fn load(data_dir: &Path) -> Result<Self, StoreError> {
         let path = data_dir.join("sessions.json");
         let (data, last_sig) = Self::read_file(&path).await?;
+        let tmp_path = staging_path(&path);
         Ok(Self {
             data,
             path,
             last_sig,
+            tmp_path,
+            degradation: None,
         })
+    }
+
+    /// The backing file this store reads and writes.
+    ///
+    /// Why (#5007): `tm doctor` and the repair command have to name the exact
+    /// file, and re-deriving `<data_dir>/sessions.json` at each of those call
+    /// sites is how two of them end up disagreeing.
+    /// What: the absolute path to `sessions.json`.
+    /// Test: `store_exposes_its_backing_path`.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The reload failure this store is currently serving cached data over.
+    ///
+    /// Why: see [`StoreDegradation`] — this is what makes a wedged store
+    /// visible at `tm ls`, the list endpoint, and `tm doctor` instead of
+    /// silently absorbed.
+    /// What: `Some` while the last reload attempt failed; `None` once one
+    /// succeeds.
+    /// Test: `store_records_and_clears_a_reload_failure`.
+    pub fn degradation(&self) -> Option<&StoreDegradation> {
+        self.degradation.as_ref()
+    }
+
+    /// The private staging file this store renames over `path` on save.
+    ///
+    /// Why: the #5007 fix is that no two stores share one — an invariant that
+    /// can only be asserted by looking at the actual paths. Test-only, because
+    /// nothing in production has any business knowing this name.
+    /// Test: `two_stores_over_one_path_do_not_share_a_staging_file`.
+    #[cfg(test)]
+    pub(crate) fn staging_path_for_test(&self) -> &Path {
+        &self.tmp_path
     }
 
     /// Stat `path` and return its freshness fingerprint, or `None` if absent.
@@ -163,19 +305,38 @@ impl SessionStore {
     /// Test: `store_reload_picks_up_external_write`, `store_load_save_round_trip`,
     /// `store_read_file_sig_matches_post_read_bytes`.
     async fn read_file(path: &Path) -> Result<(StoredData, Option<FileSig>), StoreError> {
-        match fs::read_to_string(path).await {
-            Ok(raw) => {
-                let data = serde_json::from_str::<StoredData>(&raw)
-                    .map_err(|e| StoreError::Serialize(e.to_string()))?;
-                // Stat AFTER the read so the signature matches the bytes we parsed.
-                let sig = Self::sig_of(path).await.unwrap_or_default();
-                Ok((data, Some(sig)))
-            }
-            Err(_) => {
+        let raw = match fs::read_to_string(path).await {
+            Ok(raw) => raw,
+            // ONLY a genuinely absent file means "fresh store" (#5007). Before
+            // this split, EVERY read error took this branch — a permissions
+            // failure, a non-UTF-8 file, an EIO — so the store silently became
+            // empty, and the next `save()` would have written that emptiness
+            // over the operator's whole fleet.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 debug!(path = %path.display(), "no session store file found; starting fresh");
-                Ok((StoredData::default(), None))
+                return Ok((StoredData::default(), None));
             }
-        }
+            // `read_to_string` rejects non-UTF-8 bytes as `InvalidData`. That is
+            // a property of the file's contents, not of the I/O, so it is
+            // reported as corruption — with no serde error to derive offsets
+            // from, hence the synthesised diagnosis.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(StoreError::Corrupt(Box::new(StoreIntegrity {
+                    path: path.to_path_buf(),
+                    total_bytes: fs::metadata(path).await.map(|m| m.len() as usize).unwrap_or(0),
+                    valid_prefix_bytes: None,
+                    detail: e.to_string(),
+                    line: 0,
+                    column: 0,
+                })));
+            }
+            Err(e) => return Err(StoreError::Io(e)),
+        };
+        let data = serde_json::from_str::<StoredData>(&raw)
+            .map_err(|e| StoreError::Corrupt(Box::new(analyze(path, &raw, &e))))?;
+        // Stat AFTER the read so the signature matches the bytes we parsed.
+        let sig = Self::sig_of(path).await.unwrap_or_default();
+        Ok((data, Some(sig)))
     }
 
     /// Reload the in-memory map from disk if the backing file changed.
@@ -202,9 +363,24 @@ impl SessionStore {
         if unchanged {
             return Ok(());
         }
-        let (data, sig) = Self::read_file(&self.path).await?;
+        // #5007: record the failure before propagating it. Callers that fall
+        // back to the cached map (see `SessionManager::list`) otherwise leave no
+        // trace that they did, which is what let a fully wedged store read as
+        // healthy for an unknown period.
+        let (data, sig) = match Self::read_file(&self.path).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.degradation = Some(StoreDegradation {
+                    message: e.to_string(),
+                    corrupt: e.is_corruption(),
+                    observed_at: chrono::Utc::now(),
+                });
+                return Err(e);
+            }
+        };
         self.data = data;
         self.last_sig = sig;
+        self.degradation = None;
         debug!(path = %self.path.display(), "session store reloaded after external change");
         Ok(())
     }
@@ -232,9 +408,17 @@ impl SessionStore {
             .map_err(|e| StoreError::Serialize(e.to_string()))?;
         // Atomic swap: write to a temp sibling then rename over the target so a
         // concurrent reader in another process never sees a torn file.
-        let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, json).await?;
-        fs::rename(&tmp, &self.path).await?;
+        // #5007: the staging name is PER STORE INSTANCE, not the shared
+        // `sessions.json.tmp` it used to be — see `tmp_path`'s doc for why a
+        // shared one produces exactly the corruption this issue was filed for.
+        let tmp = &self.tmp_path;
+        fs::write(tmp, json).await?;
+        if let Err(e) = fs::rename(tmp, &self.path).await {
+            // Do not leave the staging file behind on a failed swap; it is
+            // named after this process and nothing else will ever clean it up.
+            let _ = fs::remove_file(tmp).await;
+            return Err(StoreError::Io(e));
+        }
         // Record the fingerprint of the bytes we just wrote so a subsequent
         // `reload_if_changed` treats our own write as "unchanged" and does not
         // pointlessly re-read the file we just authored (#1219).

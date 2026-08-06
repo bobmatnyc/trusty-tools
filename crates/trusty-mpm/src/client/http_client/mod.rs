@@ -40,6 +40,7 @@ pub use types::{
     FleetProjectGroupWire, HealthSnapshot, LastSeen, LlmChatOutcome, ManagedActivityResponse,
     ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
     ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
+    ManagedStoreHealth,
     ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
     OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
 };
