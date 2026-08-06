@@ -21,6 +21,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
+use tracing::warn;
 
 use super::{parse_id, record_to_summary};
 use crate::daemon::state::DaemonState;
@@ -75,6 +76,13 @@ pub async fn rename_managed_session(
         Err(ManagedError::InvalidState(_, reason)) => {
             (StatusCode::BAD_REQUEST, reason).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => {
+            // #5001: the body already carried this message, but nothing logged
+            // it — a 500 here left NO daemon-side trace, so diagnosing one meant
+            // correlating unrelated log spam. The unmapped remainder is by
+            // definition the case nobody anticipated; log it where it happens.
+            warn!(id = %id_str, error = %e, "rename failed with an unmapped error");
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
     }
 }
