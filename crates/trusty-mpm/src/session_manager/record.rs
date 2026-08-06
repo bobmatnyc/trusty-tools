@@ -406,6 +406,57 @@ pub struct SessionRecord {
     /// explicit human action (zero-migration by design — see ADR-0020).
     #[serde(default)]
     pub worktree_owner: Option<ManagedSessionId>,
+
+    /// When this record ENTERED a terminal state (`Decommissioned`/`Deleted`).
+    ///
+    /// Why: the record-retention sweep
+    /// ([`super::retention`](super::retention)) evicts terminal records once
+    /// they age out, and needs the moment the record died — not
+    /// [`created_at`](Self::created_at), which says when the session was born
+    /// and is routinely months earlier. A session created in January,
+    /// decommissioned today, is a one-day-old tombstone, and a retention clock
+    /// keyed off `created_at` would delete it immediately.
+    ///
+    /// Written at exactly one place — [`Self::enter_terminal_state`] — so a
+    /// future terminal transition cannot silently skip stamping it.
+    ///
+    /// `#[serde(default)]` (→ `None`) keeps every pre-retention record
+    /// deserializable. `None` on a terminal record means UNKNOWN, not "old":
+    /// the sweep stamps it with the current time and starts the window there
+    /// rather than guessing from `created_at`/`last_activity_at`. That is
+    /// deliberately the safe direction — the auto-prune (#4384/#4702)
+    /// decommissions long-idle records, so a record whose last activity is
+    /// ancient may have become terminal seconds ago, and inferring its death
+    /// from activity would evict it on the first sweep with no retention at
+    /// all.
+    #[serde(default)]
+    pub terminal_at: Option<DateTime<Utc>>,
+}
+
+impl SessionRecord {
+    /// Move this record into a terminal state and stamp when that happened.
+    ///
+    /// Why: the single mutation point for [`Self::terminal_at`]. Three call
+    /// sites transition a record into a tombstone (`decommission`'s full
+    /// teardown and its record-only variant, and `delete`'s soft-delete); each
+    /// setting `state` by hand left the retention clock one forgotten
+    /// assignment away from never starting.
+    /// What: sets `state` and, when `state` is terminal, sets `terminal_at` to
+    /// `now`. Re-entering a terminal state the record already holds does NOT
+    /// refresh the stamp — a repeated decommission must not extend the
+    /// retention window. A non-terminal `state` clears the stamp, so a record
+    /// resurrected out of a tombstone does not carry a stale death time.
+    /// Test: `enter_terminal_state_stamps_once`,
+    /// `enter_terminal_state_clears_stamp_on_revival` in `record_tests.rs`.
+    pub fn enter_terminal_state(&mut self, state: ManagedSessionState, now: DateTime<Utc>) {
+        let was_terminal = self.state.is_terminal();
+        self.state = state;
+        if !self.state.is_terminal() {
+            self.terminal_at = None;
+        } else if !was_terminal || self.terminal_at.is_none() {
+            self.terminal_at = Some(now);
+        }
+    }
 }
 
 /// Error types for session record operations.

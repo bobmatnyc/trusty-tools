@@ -57,6 +57,7 @@ fn record_serde_round_trip() {
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -94,6 +95,7 @@ fn stopped_state_survives_serde() {
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -129,6 +131,7 @@ fn decommissioned_state_survives_serde() {
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -189,6 +192,7 @@ fn record_round_trips_tcode_runtime() {
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     };
     record.runtime = crate::runtime::RuntimeKind::Tcode;
     let json = serde_json::to_string(&record).expect("serialize");
@@ -253,6 +257,7 @@ fn record_round_trips_ephemeral_true() {
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -347,6 +352,7 @@ fn record_round_trips_scrollback_fields() {
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -386,6 +392,7 @@ fn record_round_trips_workspace_owned_true() {
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -453,6 +460,7 @@ fn record_round_trips_deliverable_id() {
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -517,6 +525,7 @@ fn record_round_trips_worktree_owner() {
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: Some(owner),
+        terminal_at: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -554,4 +563,79 @@ fn from_wire_round_trips_every_variant() {
     }
     assert_eq!(ManagedSessionState::from_wire("bogus"), None);
     assert_eq!(ManagedSessionState::from_wire(""), None);
+}
+
+/// Build a minimal Active record for the `enter_terminal_state` cases.
+fn terminal_fixture() -> SessionRecord {
+    SessionRecord {
+        id: ManagedSessionId::new(),
+        tmux_name: "tm-terminal-fixture".into(),
+        cwd: PathBuf::from("/tmp"),
+        task: "t".into(),
+        state: ManagedSessionState::Active,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
+        source_id: None,
+        claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: Default::default(),
+        worktree_owner: None,
+        terminal_at: None,
+    }
+}
+
+/// Why: a second decommission of an already-tombstoned record must not push its
+/// eviction date forward — that would let a repeatedly-touched record outlive
+/// the retention window indefinitely.
+/// What: stamps once, then re-enters the same terminal state at a later instant
+/// and asserts the original stamp survives.
+/// Test: this test.
+#[test]
+fn enter_terminal_state_stamps_once() {
+    let mut r = terminal_fixture();
+    let first = Utc::now();
+    r.enter_terminal_state(ManagedSessionState::Decommissioned, first);
+    assert_eq!(r.state, ManagedSessionState::Decommissioned);
+    assert_eq!(r.terminal_at, Some(first));
+
+    let later = first + chrono::Duration::days(3);
+    r.enter_terminal_state(ManagedSessionState::Decommissioned, later);
+    assert_eq!(
+        r.terminal_at,
+        Some(first),
+        "re-entering a terminal state must not extend retention"
+    );
+}
+
+/// Why: a record moved back to a live state carries no death time — leaving a
+/// stale one would make a resurrected session evictable.
+/// What: stamps, revives to `Stopped`, asserts the stamp is cleared; then a
+/// fresh terminal transition stamps again.
+/// Test: this test.
+#[test]
+fn enter_terminal_state_clears_stamp_on_revival() {
+    let mut r = terminal_fixture();
+    let died = Utc::now();
+    r.enter_terminal_state(ManagedSessionState::Decommissioned, died);
+    r.enter_terminal_state(
+        ManagedSessionState::Stopped,
+        died + chrono::Duration::hours(1),
+    );
+    assert_eq!(r.terminal_at, None, "a revived record has no death time");
+
+    let again = died + chrono::Duration::days(2);
+    r.enter_terminal_state(ManagedSessionState::Deleted, again);
+    assert_eq!(r.terminal_at, Some(again), "a fresh death restamps");
 }

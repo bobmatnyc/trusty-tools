@@ -28,6 +28,8 @@ pub mod record;
 pub mod rename;
 pub mod restart_ops;
 pub(crate) mod resume_workdir;
+/// Age-based eviction of terminal records and the slot numbers they hold.
+pub mod retention;
 pub mod search_gc;
 pub mod session_guard;
 pub mod slots;
@@ -136,6 +138,9 @@ pub use injection_status::InjectionStatus;
 pub use manager::{ManagedError, ManagedTmuxDriver, ReconcileReport, SessionManager};
 pub use prune::{MAX_EPHEMERAL_AGE_HOURS, PruneAction, PruneFilter, PruneOutcome, PrunedSession};
 pub use record::{ManagedSessionId, ManagedSessionState, RecordError, SessionRecord};
+pub use retention::{
+    RetentionOutcome, RetentionVerdict, TERMINAL_RECORD_RETENTION_DAYS, retention_verdict,
+};
 pub use session_guard::TmuxSessionGuard;
 pub use slots::{NumberedSlot, SlotRegistry};
 pub use store::{SessionStore, StoreError};

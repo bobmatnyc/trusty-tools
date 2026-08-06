@@ -311,6 +311,7 @@ impl SessionManager {
             // parameter through every `create_with_id`/`create_with_reserved_name`
             // call site.
             worktree_owner: None,
+            terminal_at: None,
         };
 
         // Persist the record. On failure the freshly-created tmux session has

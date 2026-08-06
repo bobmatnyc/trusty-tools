@@ -591,6 +591,27 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 break;
             }
             _ = tick.tick() => {
+                // Record retention runs FIRST, before the tmux probe below can
+                // `continue` past it. It needs no tmux and no live pane data —
+                // gating a store-only sweep on tmux being discoverable would
+                // silently disable it on any machine without tmux. Its window is
+                // 7 days, so a sweep skipped for a tick costs nothing; a sweep
+                // that never runs costs the whole feature.
+                {
+                    let mgr = state.session_manager().await;
+                    let retention = chrono::Duration::days(
+                        crate::session_manager::TERMINAL_RECORD_RETENTION_DAYS,
+                    );
+                    match mgr.sweep_terminal_records(chrono::Utc::now(), retention).await {
+                        Ok(outcome) if !outcome.is_empty() => info!(
+                            stamped = outcome.stamped,
+                            evicted = outcome.evicted.len(),
+                            "record retention sweep"
+                        ),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("record retention sweep failed: {e}"),
+                    }
+                }
                 let Ok(driver) = tmux::TmuxDriver::discover() else {
                     continue;
                 };

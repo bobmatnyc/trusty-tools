@@ -83,7 +83,9 @@ impl SessionManager {
         // persist. The record stays in the store — visible in the master list —
         // rather than being dropped outright.
         let mut updated = record.clone();
-        updated.state = ManagedSessionState::Deleted;
+        // Stamps `terminal_at` as well as `state` — the retention sweep's clock
+        // starts here, not at `created_at`.
+        updated.enter_terminal_state(ManagedSessionState::Deleted, Utc::now());
         updated.last_activity_at = Some(Utc::now());
         // #4400: `Deleted` is terminal — same reasoning as `decommission`'s
         // clear (`decommission.rs`): no human will ever act on a

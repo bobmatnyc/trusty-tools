@@ -104,6 +104,7 @@ fn base_record(id: ManagedSessionId, state: ManagedSessionState, cwd: PathBuf) -
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     }
 }
 

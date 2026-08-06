@@ -393,6 +393,7 @@ mod tests {
             pane_id: None,
             injection_status: Default::default(),
             worktree_owner: Some(id),
+            terminal_at: None,
         };
         mgr.store
             .write()
@@ -546,6 +547,7 @@ mod tests {
             pane_id: None,
             injection_status: Default::default(),
             worktree_owner: None, // registry field unset — must fall back
+            terminal_at: None,
         };
 
         assert_eq!(mgr.known_owner_of(&record), Some(sentinel_owner));

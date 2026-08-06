@@ -202,7 +202,7 @@ pub(crate) async fn fetch_managed_raw(
 /// Bob's #3034 directive requires it to render at its ORIGINAL position in the
 /// numbered listing, not wherever a liveness sort would relocate it, so an
 /// operator scanning the table top-to-bottom sees the exact gap where a
-/// session used to be. `[`render_session_table`](super::managed::render_session_table)
+/// session used to be. `[`render_session_table`](super::managed_render::render_session_table)
 /// and the picker menu both label each row with its own `slot` field (not a
 /// recomputed position), so this is not merely cosmetic — a sink-to-bottom
 /// move for tombstones would visually separate a deleted slot from its live
@@ -1114,7 +1114,7 @@ pub(crate) async fn run_ls_connector(
     if !should_show_picker(stdin_tty, stdout_tty, json, all, sessions.len()) {
         // 0 sessions on a TTY: print the static "no managed sessions" line rather
         // than an empty picker.
-        super::managed::render_session_table(&sessions, sid.as_deref());
+        super::managed_render::render_session_table(&sessions, sid.as_deref());
         return Ok(());
     }
 

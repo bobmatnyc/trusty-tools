@@ -219,6 +219,7 @@ impl SessionManager {
                     pane_id: self.tmux.get_pane_id(name),
                     injection_status: Default::default(),
                     worktree_owner: None,
+                    terminal_at: None,
                 };
                 if let Some(path) = resolved_cwd {
                     newly_resolved.push((id, path));

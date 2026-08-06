@@ -1,0 +1,417 @@
+//! Coverage for [`super`] — the terminal-record retention sweep.
+//!
+//! Why: this is the only path that hard-deletes a session record without an
+//! operator naming it, so every guard that decides NOT to delete needs a test
+//! as much as the deletion itself does. Two of them are load-bearing beyond
+//! the display bug this feature exists for: the workspace-still-on-disk guard
+//! keeps the record in `prune_orphaned_worktrees`'s protected set, and the
+//! undated-record guard stops a legacy tombstone being evicted the first time
+//! the new code sees it.
+//! What: pure [`super::retention_verdict`] cases, then end-to-end sweeps
+//! through a real `SessionManager` covering eviction, slot release and reuse,
+//! the no-duplicate-`NUM` invariant across that cycle, and a filesystem
+//! no-touch assertion.
+//! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
+
+use std::path::PathBuf;
+
+use chrono::{Duration, Utc};
+use tempfile::TempDir;
+
+use super::super::record::{ManagedSessionState, SessionRecord};
+use super::super::tests::make_manager;
+use super::{RetentionVerdict, TERMINAL_RECORD_RETENTION_DAYS, retention_verdict};
+
+/// The window the daemon actually applies. Pinned so a silent change to the
+/// constant fails a test rather than quietly shortening retention.
+#[test]
+fn retention_window_is_seven_days() {
+    assert_eq!(TERMINAL_RECORD_RETENTION_DAYS, 7);
+}
+
+fn window() -> Duration {
+    Duration::days(TERMINAL_RECORD_RETENTION_DAYS)
+}
+
+/// A terminal record with no workspace, dated `age_days` ago.
+fn terminal_record(state: ManagedSessionState, age_days: i64) -> SessionRecord {
+    let mut r = base_record();
+    r.state = state;
+    r.terminal_at = Some(Utc::now() - Duration::days(age_days));
+    r
+}
+
+fn base_record() -> SessionRecord {
+    SessionRecord {
+        id: super::super::record::ManagedSessionId::new(),
+        tmux_name: "tm-retention-test".into(),
+        cwd: PathBuf::from("/tmp"),
+        task: "t".into(),
+        state: ManagedSessionState::Active,
+        created_at: Utc::now() - Duration::days(365),
+        last_activity_at: None,
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
+        source_id: None,
+        claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: Default::default(),
+        worktree_owner: None,
+        terminal_at: None,
+    }
+}
+
+/// Why: a `stopped` session is resumable with its workspace intact, and an
+/// `active` one is running right now. Age must never bring either into scope,
+/// however ancient `created_at` is (the fixture's is a year old).
+#[test]
+fn retention_verdict_keeps_live_states() {
+    for state in [
+        ManagedSessionState::Provisioning,
+        ManagedSessionState::Active,
+        ManagedSessionState::Stopped,
+        ManagedSessionState::Errored,
+    ] {
+        let mut r = base_record();
+        r.state = state.clone();
+        r.terminal_at = Some(Utc::now() - Duration::days(400));
+        assert_eq!(
+            retention_verdict(&r, false, Utc::now(), window()),
+            RetentionVerdict::Keep,
+            "{state} must never be evicted"
+        );
+    }
+}
+
+/// Why: THE guard that keeps a record-only eviction from becoming a filesystem
+/// deletion by proxy. `prune_orphaned_worktrees` protects a worktree by finding
+/// its path among the store's `workspace_path`s; dropping the record drops the
+/// path from every read of that set at once.
+#[test]
+fn retention_verdict_keeps_record_whose_workspace_still_exists() {
+    let mut r = terminal_record(ManagedSessionState::Decommissioned, 400);
+    r.workspace_path = Some(PathBuf::from("/tmp/some-worktree"));
+    assert_eq!(
+        retention_verdict(&r, true, Utc::now(), window()),
+        RetentionVerdict::Keep,
+        "a record whose worktree is still on disk keeps protecting it"
+    );
+    // Same record, directory gone: now it is safe to evict.
+    assert_eq!(
+        retention_verdict(&r, false, Utc::now(), window()),
+        RetentionVerdict::Evict
+    );
+}
+
+/// Why: every record written before this feature has `terminal_at == None`.
+/// Inferring a death time from `created_at`/`last_activity_at` would evict the
+/// whole legacy backlog on the first sweep with zero retention.
+#[test]
+fn retention_verdict_stamps_undated_terminal_record() {
+    for state in [
+        ManagedSessionState::Decommissioned,
+        ManagedSessionState::Deleted,
+    ] {
+        let mut r = base_record();
+        r.state = state;
+        r.terminal_at = None;
+        assert_eq!(
+            retention_verdict(&r, false, Utc::now(), window()),
+            RetentionVerdict::Stamp
+        );
+    }
+}
+
+/// Why: #3034's tombstone must survive the whole window — this is the case
+/// where the retention change must be invisible.
+#[test]
+fn retention_verdict_keeps_record_inside_window() {
+    for age in [0, 1, 6] {
+        let r = terminal_record(ManagedSessionState::Decommissioned, age);
+        assert_eq!(
+            retention_verdict(&r, false, Utc::now(), window()),
+            RetentionVerdict::Keep,
+            "{age}-day-old tombstone is inside the window"
+        );
+    }
+}
+
+#[test]
+fn retention_verdict_evicts_record_outside_window() {
+    for state in [
+        ManagedSessionState::Decommissioned,
+        ManagedSessionState::Deleted,
+    ] {
+        let mut r = terminal_record(state.clone(), 8);
+        assert_eq!(
+            retention_verdict(&r, false, Utc::now(), window()),
+            RetentionVerdict::Evict,
+            "{state} 8 days past terminal is evictable"
+        );
+        // Exactly at the boundary evicts too — `now - at >= retention`.
+        r.terminal_at = Some(Utc::now() - window());
+        assert_eq!(
+            retention_verdict(&r, false, Utc::now(), window()),
+            RetentionVerdict::Evict
+        );
+    }
+}
+
+/// Seed a manager with one session, force it into `state`, and date its
+/// `terminal_at` `age_days` ago. Returns the record's id.
+async fn seed_terminal(
+    mgr: &super::super::manager::SessionManager,
+    task: &str,
+    state: ManagedSessionState,
+    age_days: i64,
+) -> super::super::record::ManagedSessionId {
+    let rec = mgr
+        .create(task.into(), None, None, None, None, None)
+        .await
+        .expect("create");
+    let mut updated = mgr.get(&rec.id).await.expect("get");
+    updated.state = state;
+    updated.terminal_at = Some(Utc::now() - Duration::days(age_days));
+    // Clear any provisioned workspace so the on-disk guard is not what the
+    // eviction assertions are actually measuring.
+    updated.workspace_path = None;
+    mgr.store
+        .write()
+        .await
+        .upsert(updated)
+        .await
+        .expect("seed terminal record");
+    rec.id
+}
+
+/// Why: the core promise — a record inside the window survives, one outside it
+/// does not, and a live session is untouched by either.
+#[tokio::test]
+async fn sweep_evicts_only_records_past_the_window() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let fresh = seed_terminal(&mgr, "fresh", ManagedSessionState::Decommissioned, 1).await;
+    let stale = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+    let deleted_stale = seed_terminal(&mgr, "gone", ManagedSessionState::Deleted, 9).await;
+    let live = mgr
+        .create("live".into(), None, None, None, None, None)
+        .await
+        .expect("create live");
+
+    let outcome = mgr
+        .sweep_terminal_records(Utc::now(), window())
+        .await
+        .expect("sweep");
+
+    assert_eq!(outcome.evicted.len(), 2, "{outcome:?}");
+    assert!(outcome.evicted.contains(&stale));
+    assert!(outcome.evicted.contains(&deleted_stale));
+    assert!(
+        mgr.get(&fresh).await.is_ok(),
+        "in-window tombstone survives"
+    );
+    assert!(mgr.get(&live.id).await.is_ok(), "live session untouched");
+    assert!(mgr.get(&stale).await.is_err(), "stale record is gone");
+}
+
+/// Why: an in-window terminal record must still render as a `-- deleted --`
+/// tombstone at its original slot — #3034's guarantee, unchanged inside the
+/// window. The tombstone appears once the record leaves the store, so this
+/// drives the real `compact_record` path for the in-window record and asserts
+/// the sweep did not disturb the slot.
+#[tokio::test]
+async fn sweep_preserves_the_in_window_tombstone_slot() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let fresh = seed_terminal(&mgr, "fresh", ManagedSessionState::Decommissioned, 1).await;
+    let snap = mgr.numbered_snapshot(&mgr.list().await).await;
+    let slot = snap
+        .iter()
+        .find(|s| s.record.as_ref().map(|r| r.id) == Some(fresh))
+        .expect("observed")
+        .slot;
+
+    // An explicit compaction (the `tm sessions prune` path) removes the record
+    // while the slot stays reserved — the tombstone #3034 specifies.
+    mgr.compact_record(&fresh).await.expect("compact");
+    mgr.sweep_terminal_records(Utc::now(), window())
+        .await
+        .expect("sweep");
+
+    let after = mgr.numbered_snapshot(&mgr.list().await).await;
+    let row = after
+        .iter()
+        .find(|s| s.slot == slot)
+        .expect("slot still present");
+    assert!(
+        row.record.is_none(),
+        "renders as a tombstone, not a session"
+    );
+}
+
+/// Why: releasing the slot is what makes `NUM` fall. This pins the release, the
+/// reuse, and the no-duplicate invariant across the whole cycle.
+#[tokio::test]
+async fn sweep_releases_the_evicted_slot() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let stale = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+    let keeper = mgr
+        .create("keeper".into(), None, None, None, None, None)
+        .await
+        .expect("create keeper");
+
+    let before = mgr.numbered_snapshot(&mgr.list().await).await;
+    let stale_slot = before
+        .iter()
+        .find(|s| s.record.as_ref().map(|r| r.id) == Some(stale))
+        .expect("stale observed")
+        .slot;
+    let keeper_slot = before
+        .iter()
+        .find(|s| s.record.as_ref().map(|r| r.id) == Some(keeper.id))
+        .expect("keeper observed")
+        .slot;
+
+    mgr.sweep_terminal_records(Utc::now(), window())
+        .await
+        .expect("sweep");
+
+    let after = mgr.numbered_snapshot(&mgr.list().await).await;
+    assert!(
+        after.iter().all(|s| s.slot != stale_slot),
+        "evicted slot leaves the listing entirely — no phantom tombstone row"
+    );
+    assert_eq!(
+        after
+            .iter()
+            .find(|s| s.record.as_ref().map(|r| r.id) == Some(keeper.id))
+            .expect("keeper still listed")
+            .slot,
+        keeper_slot,
+        "a surviving session's NUM never shifts"
+    );
+
+    // The freed number is available again, and nothing ends up sharing a NUM.
+    let fresh = mgr
+        .create("fresh".into(), None, None, None, None, None)
+        .await
+        .expect("create fresh");
+    let reused = mgr.numbered_snapshot(&mgr.list().await).await;
+    assert_eq!(
+        reused
+            .iter()
+            .find(|s| s.record.as_ref().map(|r| r.id) == Some(fresh.id))
+            .expect("fresh listed")
+            .slot,
+        stale_slot,
+        "the released slot is reusable"
+    );
+    let mut slots: Vec<u32> = reused.iter().map(|s| s.slot).collect();
+    let total = slots.len();
+    slots.sort_unstable();
+    slots.dedup();
+    assert_eq!(slots.len(), total, "no duplicate NUM after reallocation");
+}
+
+/// Why: the hard requirement. Eviction is a record-store operation; a retention
+/// sweep that reached the filesystem would be a data-loss defect. This seeds a
+/// stale terminal record whose workspace directory still exists and asserts BOTH
+/// that the sweep leaves the directory alone AND that it declines to evict the
+/// record while the directory is there — the guard that keeps
+/// `prune_orphaned_worktrees`'s protected set intact.
+#[tokio::test]
+async fn sweep_never_touches_the_filesystem() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let workspace = TempDir::new().expect("workspace");
+    let canary = workspace.path().join("unsaved-work.txt");
+    std::fs::write(&canary, b"do not delete me").expect("write canary");
+
+    let id = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 400).await;
+    let mut rec = mgr.get(&id).await.expect("get");
+    rec.workspace_path = Some(workspace.path().to_path_buf());
+    mgr.store.write().await.upsert(rec).await.expect("re-seed");
+
+    let outcome = mgr
+        .sweep_terminal_records(Utc::now(), window())
+        .await
+        .expect("sweep");
+
+    assert!(
+        outcome.evicted.is_empty(),
+        "a record whose workspace is still on disk is never evicted: {outcome:?}"
+    );
+    assert!(workspace.path().exists(), "workspace directory survives");
+    assert!(canary.exists(), "file inside the workspace survives");
+    assert_eq!(
+        std::fs::read(&canary).expect("read canary"),
+        b"do not delete me",
+        "file contents untouched"
+    );
+    assert!(mgr.get(&id).await.is_ok(), "record itself survives too");
+}
+
+/// Why: a legacy record (no `terminal_at`) must be dated, not deleted — and the
+/// stamp must persist so the window survives a daemon restart. A second sweep
+/// immediately afterwards must still not evict it.
+#[tokio::test]
+async fn sweep_stamps_legacy_records_instead_of_evicting_them() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let rec = mgr
+        .create("legacy".into(), None, None, None, None, None)
+        .await
+        .expect("create");
+    let mut legacy = mgr.get(&rec.id).await.expect("get");
+    legacy.state = ManagedSessionState::Decommissioned;
+    legacy.created_at = Utc::now() - Duration::days(400);
+    legacy.last_activity_at = Some(Utc::now() - Duration::days(400));
+    legacy.terminal_at = None;
+    legacy.workspace_path = None;
+    mgr.store.write().await.upsert(legacy).await.expect("seed");
+
+    let first = mgr
+        .sweep_terminal_records(Utc::now(), window())
+        .await
+        .expect("first sweep");
+    assert_eq!(first.stamped, 1, "{first:?}");
+    assert!(
+        first.evicted.is_empty(),
+        "a year-old created_at must not shorten retention: {first:?}"
+    );
+    let stamped = mgr.get(&rec.id).await.expect("still present");
+    assert!(stamped.terminal_at.is_some(), "stamp persisted");
+
+    let second = mgr
+        .sweep_terminal_records(Utc::now(), window())
+        .await
+        .expect("second sweep");
+    assert!(
+        second.is_empty(),
+        "already stamped, still inside: {second:?}"
+    );
+    assert!(mgr.get(&rec.id).await.is_ok());
+
+    // Only once the stamped window has elapsed does it go.
+    let later = mgr
+        .sweep_terminal_records(Utc::now() + window(), window())
+        .await
+        .expect("later sweep");
+    assert_eq!(later.evicted, vec![rec.id]);
+}
