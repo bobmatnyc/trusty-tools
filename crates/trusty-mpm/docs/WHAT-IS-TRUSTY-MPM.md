@@ -132,3 +132,33 @@ a leftover `claude_mpm` value) or a missing file means the session is **not**
 running under trusty-mpm's instructions at all — run `tm run`/`tm load` to
 rewrite the setting correctly, or fix it by hand. See DOC-28 §6 for the full
 detection contract and its limitations.
+
+## Selecting a style
+
+Run `/config` and pick under **Output style**, or set the `outputStyle` key in
+a settings file directly:
+
+```json
+{
+  "outputStyle": "trusty-mpm"
+}
+```
+
+The three bundled ids are `trusty-mpm` (default), `trusty-mpm-teacher`, and
+`trusty-mpm-research`. Output style is part of the system prompt, which Claude
+Code reads once at session start, so a change takes effect after `/clear` or on
+the next session.
+
+The standalone `/output-style` command was removed in Claude Code v2.1.91 — if
+a runbook or note still tells you to run it, that guidance is stale.
+
+Every bundled style sets `keep-coding-instructions: true`. Claude Code strips
+its own built-in software-engineering instructions — how to scope a change,
+write comments, verify work — from any custom style that omits the field, since
+it defaults to `false`. These are PM-orchestration styles layered on top of
+normal coding behavior, not replacements for it, so all three opt back in.
+
+**Do not edit the bundled style files to change your own behavior.** They are
+refreshed from the compiled bundle on deploy, so local edits are overwritten. To
+get different behavior, write your own style file under `~/.claude/output-styles/`
+(or the project's `.claude/output-styles/`) and select that instead.

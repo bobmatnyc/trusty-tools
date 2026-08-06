@@ -1222,3 +1222,103 @@ fn rust_build_performance_declared_by_rust_family_agents() {
         );
     }
 }
+
+#[test]
+fn output_styles_keep_claude_code_coding_instructions() {
+    // Claude Code strips its built-in software-engineering instructions (how to
+    // scope changes, write comments, verify work) from any custom output style
+    // unless `keep-coding-instructions` is true — the field defaults to FALSE.
+    // All three bundled styles are PM-orchestration styles layered ON TOP of
+    // normal coding behaviour, so all three must opt back in.
+    for style in OUTPUT_STYLES {
+        let frontmatter = style
+            .content
+            .split("---")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{} must open with a YAML frontmatter block", style.id));
+        assert!(
+            frontmatter.contains("keep-coding-instructions: true"),
+            "{} frontmatter must set `keep-coding-instructions: true`, or Claude \
+             Code silently drops its built-in coding instructions",
+            style.id
+        );
+    }
+}
+
+#[test]
+fn output_styles_mirror_the_pm_prose_rules() {
+    // #2647: the output style is the only channel that survives a manual
+    // `claude` launch with no tm-appended system prompt, so the PM prose rules
+    // in `assets/instructions/sections/core.md` are MIRRORED here rather than
+    // referenced. Guard every load-bearing rule plus the #2647 rationale, so a
+    // future edit cannot quietly drop the mirror back to a dangling reference.
+    const REQUIRED: &[&str] = &[
+        "## Communication — Write Plainly",
+        "issue #2647",
+        "**No praise for the user.**",
+        "**Delete the framing opener; lead with the fact.**",
+        "**Do not embellish.**",
+        "the banned word \"honest\"",
+        "**Ticket and PR bodies**",
+        "never whether it is said",
+    ];
+    for style in OUTPUT_STYLES {
+        for needle in REQUIRED {
+            assert!(
+                style.content.contains(needle),
+                "{} is missing mirrored prose rule {needle:?} (#2647)",
+                style.id
+            );
+        }
+        // The superseded lighter rule set must be FOLDED IN, not left alongside
+        // the mirrored rules as a second overlapping statement of the same thing.
+        assert!(
+            !style.content.contains("**Tone**: Professional, neutral"),
+            "{}: the old Communication block must be folded into the mirrored \
+             prose rules, not duplicated beside them",
+            style.id
+        );
+    }
+}
+
+#[test]
+fn base_agent_graduated_verbosity_survives_composition() {
+    // Output styles do NOT apply to subagents (they run their own system
+    // prompt), so the sparse-on-success rule has to reach agents through
+    // BASE-AGENT.md composition instead. Assert it lands in a composed agent,
+    // and that it did not weaken the raw-output evidence rule it sits beside.
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("assets")
+        .join("agents");
+
+    let composed =
+        compose_agent("version-control", &assets_dir).expect("compose_agent must succeed");
+
+    assert!(
+        composed.contains("Verbosity scales with what went wrong"),
+        "composed agent is missing the graduated-verbosity rule"
+    );
+    assert!(
+        composed.contains("A long report about a clean run"),
+        "composed agent is missing the sparse-on-success rule"
+    );
+    // The evidence floor must survive verbatim next to it.
+    assert!(
+        composed.contains("Show raw output. Never summarise test results in your own words."),
+        "graduated verbosity must not weaken the raw-output rule"
+    );
+    assert!(
+        composed.contains("Sparse-on-success governs the"),
+        "composed agent is missing the evidence-rule carve-out"
+    );
+    // "Caveman" is taken: hooks/optimizer.toml uses it for an unrelated
+    // tool-output compression level. The prose rule must not collide with it.
+    assert!(
+        !composed.contains("Caveman"),
+        "graduated-verbosity rule must not reuse the optimizer's `Caveman` term"
+    );
+}
