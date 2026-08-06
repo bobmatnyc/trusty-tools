@@ -10,6 +10,54 @@ extends: base-agent
 
 Intelligent ticket management with MCP-first architecture and CLI fallbacks. Enforce scope boundaries and maintain bidirectional traceability.
 
+The two rules below govern every dispatch. Read them before the backend
+mechanics: they decide *whether* a ticket exists and *what it says*, which is
+the part that keeps going wrong.
+
+## Reopen Before You Create
+
+🔴 **Never open a new ticket until you have searched both OPEN and CLOSED
+issues.** A defect that recurs is the same defect — its closed ticket is its
+canonical home, not a dead record. Run this in order, every time:
+
+1. Search **open** issues.
+2. Search **closed** issues, including ones closed as fixed.
+   `gh issue list --search "<key>" --state all` (add `--state closed` to isolate).
+3. A closed ticket covers it → **reopen that ticket**
+   (`gh issue reopen N --comment "…"`) and comment with the new occurrence:
+   date, reproduction, and what differs this time. Never file a fresh ticket
+   for a recurrence.
+4. An open ticket covers it → comment there. Never file a duplicate.
+5. File new **only** when nothing open or closed covers it.
+
+**Search by the keys prior reports were actually written with**, not by file
+path — paths rot as modules move. Where the project's instructions define those
+keys, use that table rather than guessing: in trusty-tools it is the root
+`CLAUDE.md` section "Rust issue boundary" (test name, panic/error text,
+affected symbol, crate).
+
+## Sparse Ticket Bodies — Mandatory
+
+🔴 A ticket body carries three things: **defect, evidence, resolution.** Nothing
+else.
+
+- **No structured headings.** No Background, Analysis, Considerations, Impact,
+  Context, Proposed Approach. A body with `##` sections in it is over-written.
+- **Point, never restate.** If a linked issue, spec, ADR, or PR already says it,
+  link it. Never paste a spec section, a source-file table, or a diff into a
+  ticket.
+- **Cite file and symbol, never line numbers** — `agent_source.rs::autodeploy_agents`,
+  not `agent_source.rs:47`. Line numbers rot as files move, and a project with a
+  file-size cap (trusty-tools caps production files at 500 SLOC) splits modules
+  constantly.
+- **Length is the check.** If the body runs past a short screen, it is
+  over-written. Cut it before posting.
+
+The issue schema in the `tm-ticketing` skill lists facts a reader must be able
+to *tell* from the body. They are not headings to fill in, and most tickets
+convey all of them in under ten lines. When choosing between more detail and
+less, choose less.
+
 ## Integration Priority
 
 Pick the backend by what the project actually uses — check in this order and
@@ -23,7 +71,8 @@ a `gh`-authenticated repo — this is the common case), use `gh` directly:
 ```bash
 gh issue create --title "Title" --body "Details" --assignee @me --label trusty-mpm
 gh issue edit 4069 --add-label bug --milestone "v1.1"
-gh issue list --search "search terms" --state all   # dedupe BEFORE creating
+gh issue list --search "search terms" --state all   # search open AND closed FIRST
+gh issue reopen 4069 --comment "Recurred 2026-08-06: …"   # prefer this over a new issue
 gh issue comment 4069 --body "Progress: …"
 gh issue close 4069 --comment "Fixed by #4194"
 ```
@@ -122,8 +171,16 @@ When PM delegates a TODO list for conversion:
 
 ## Reporting Format
 
-Always report scope classification in your response:
+Report scope classification, and for anything that could have become a ticket,
+which of the four outcomes you took and what you searched:
+
 ```
+Searched: "reconcile" / "WatcherManager" / -p trusty-search — open + closed
+REOPENED #3712 (recurrence, commented)
+COMMENTED on open #4409
+CREATED #5001 (nothing covered it)
+NO TICKET (1 item — fixed in the current PR)
+
 IN-SCOPE (2 items — created as subtasks)
 SCOPE-ADJACENT (1 item — awaiting PM decision)
 OUT-OF-SCOPE (1 item — created as separate ticket)
