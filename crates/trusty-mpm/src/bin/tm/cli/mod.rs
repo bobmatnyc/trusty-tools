@@ -438,6 +438,33 @@ pub(crate) enum Command {
         #[arg(long)]
         reconcile_skills: bool,
     },
+    /// Redeploy the bundled agents and skills to EVERY deploy destination,
+    /// and optionally reinstall the binary.
+    ///
+    /// Why: an asset change reaches a running session only after both deploy
+    /// hops have run into the directory that session reads from, and different
+    /// launchers read from different directories — `tm install` writes the
+    /// tm-managed config dir and `~/.claude/skills`, a daemon-managed session
+    /// additionally writes the project's `.claude/skills`, and the standalone
+    /// driver (`tm run`/`load`/`login`) writes `~/.trusty-mpm/claude-config/`
+    /// and never refreshes the source at all (issue #4849). So "I reinstalled"
+    /// has meant "one of them is current". This makes it mean all of them, and
+    /// reports per destination what was deployed, repaired, preserved, and
+    /// failed.
+    ///
+    /// Ownership is unchanged from the deployers: a framework-owned file that
+    /// drifted or was corrupted is repaired (issue #4408), a file you own or
+    /// edited is preserved. `--force` is the explicit clobber, and backs every
+    /// file up before overwriting it.
+    ///
+    /// The binary is NOT touched unless `--binary` is passed, and even then the
+    /// route is decided by install provenance (issue #4033): a crates.io
+    /// install upgrades through the shared update path, a `cargo install
+    /// --path` install rebuilds from its recorded source directory, and
+    /// anything unclassifiable REFUSES rather than guessing.
+    ///
+    /// Test: `cli_parses_reinstall`, `cli_parses_reinstall_binary`.
+    Reinstall(ReinstallArgs),
     /// Handle a Claude Code lifecycle hook (PreToolUse / PostToolUse / Stop).
     ///
     /// Why: `tm install` registers `trusty-mpm hook` as Claude Code's
@@ -1274,4 +1301,27 @@ pub struct DoctorFlags {
     /// What: promotes `DriftedFrozen` findings into the repair set.
     #[arg(long, requires = "repair")]
     pub include_frozen: bool,
+}
+
+/// Flags for [`Command::Reinstall`].
+///
+/// Why: a struct variant with three fields makes the `main.rs` dispatch arm
+/// wrap onto three lines, and that file sits against the 500-SLOC production
+/// cap — `tm shell-init` (#4986) and this command each adding one line took it
+/// over. Carrying the flags in a `clap::Args` struct keeps the arm to ONE line
+/// and stops the next subcommand paying the same tax.
+/// What: the three `tm reinstall` flags, flattened by clap so the parsed CLI
+/// surface is identical to the inline struct-variant form it replaces.
+/// Test: `cli_parses_reinstall`, `cli_parses_reinstall_binary`.
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct ReinstallArgs {
+    /// Overwrite files you own or edited, backing each one up first.
+    #[arg(long)]
+    pub(crate) force: bool,
+    /// Also reinstall the `tm` binary, routed by install provenance.
+    #[arg(long)]
+    pub(crate) binary: bool,
+    /// Skip the `--binary` confirmation prompt.
+    #[arg(long, requires = "binary")]
+    pub(crate) yes: bool,
 }

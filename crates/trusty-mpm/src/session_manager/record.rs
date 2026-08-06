@@ -406,6 +406,68 @@ pub struct SessionRecord {
     /// explicit human action (zero-migration by design — see ADR-0020).
     #[serde(default)]
     pub worktree_owner: Option<ManagedSessionId>,
+
+    /// When this record ENTERED a terminal state (`Decommissioned`/`Deleted`).
+    ///
+    /// Why: the record-retention sweep
+    /// ([`super::retention`](super::retention)) evicts terminal records once
+    /// they age out, and needs the moment the record died — not
+    /// [`created_at`](Self::created_at), which says when the session was born
+    /// and is routinely months earlier. A session created in January,
+    /// decommissioned today, is a one-day-old tombstone, and a retention clock
+    /// keyed off `created_at` would delete it immediately.
+    ///
+    /// Written at exactly one place — [`Self::set_lifecycle_state`] — which
+    /// every transition INTO a terminal state goes through. That is the
+    /// enforced half, and the one the retention sweep depends on.
+    ///
+    /// Leaving a terminal state is NOT enforced. `mark_reactivated`, the only
+    /// production path out, routes through the setter and so clears the stamp;
+    /// `mark_errored` and `set_workspace` assign a live state directly and
+    /// would not. Neither is reachable on a tombstone today, and a stale stamp
+    /// on a live record is inert in any case: [`super::retention_verdict`]
+    /// short-circuits on `!is_terminal()`, and the next terminal transition
+    /// restamps rather than trusting the old value.
+    ///
+    /// `#[serde(default)]` (→ `None`) keeps every pre-retention record
+    /// deserializable. `None` on a terminal record is backfilled on the next
+    /// sweep from [`super::retention::inferred_terminal_at`] — the record's
+    /// latest evidence of life — not from the current time, which would
+    /// grandfather the entire pre-existing backlog for another full window.
+    #[serde(default)]
+    pub terminal_at: Option<DateTime<Utc>>,
+}
+
+impl SessionRecord {
+    /// Set this record's lifecycle state, keeping [`Self::terminal_at`]
+    /// consistent with it.
+    ///
+    /// Why: the single mutation point for `terminal_at`. Four call sites cross
+    /// the terminal boundary — `decommission`'s full teardown and its
+    /// record-only variant, `delete`'s soft-delete, and `mark_reactivated`'s
+    /// `Decommissioned -> Active` revival. Each assigning `state` by hand left
+    /// the retention clock one forgotten assignment away from never starting in
+    /// one direction, and from surviving a revival in the other. Only the
+    /// entering half is enforced — see [`Self::terminal_at`] for what that does
+    /// and does not promise about live-state assignments elsewhere.
+    /// What: sets `state` and, when `state` is terminal, sets `terminal_at` to
+    /// `now`. Re-entering a terminal state the record already holds does NOT
+    /// refresh the stamp — a repeated decommission must not extend the
+    /// retention window. A non-terminal `state` clears the stamp, so a record
+    /// resurrected out of a tombstone does not carry a stale death time.
+    /// Test: `set_lifecycle_state_stamps_once`,
+    /// `set_lifecycle_state_clears_stamp_on_revival` in `record_tests.rs`;
+    /// the live revival path by `mark_reactivated_clears_the_terminal_stamp`
+    /// in `reactivate_tests.rs`.
+    pub fn set_lifecycle_state(&mut self, state: ManagedSessionState, now: DateTime<Utc>) {
+        let was_terminal = self.state.is_terminal();
+        self.state = state;
+        if !self.state.is_terminal() {
+            self.terminal_at = None;
+        } else if !was_terminal || self.terminal_at.is_none() {
+            self.terminal_at = Some(now);
+        }
+    }
 }
 
 /// Error types for session record operations.

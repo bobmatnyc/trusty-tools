@@ -234,6 +234,7 @@ impl SessionManager {
             pane_id: pane_id.clone(),
             injection_status: Default::default(),
             worktree_owner: None,
+            terminal_at: None,
         };
 
         // ── Guard 1: collision check (+ the no-collision persist) — the
@@ -440,6 +441,7 @@ mod tests {
             pane_id: None,
             injection_status: Default::default(),
             worktree_owner: None,
+            terminal_at: None,
         }
     }
 
@@ -469,6 +471,7 @@ mod tests {
             pane_id: None,
             injection_status: Default::default(),
             worktree_owner: None,
+            terminal_at: None,
         }
     }
 

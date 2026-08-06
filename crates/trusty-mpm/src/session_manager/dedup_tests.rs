@@ -75,6 +75,7 @@ fn rec(
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     }
 }
 

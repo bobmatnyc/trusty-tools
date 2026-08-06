@@ -112,6 +112,19 @@ pub struct DeployResult {
     /// processing continues with the next agent.
     /// Test: `deploy_isolates_single_malformed_agent_failure`.
     pub failed: Vec<String>,
+    /// Framework-owned files that had drifted from their recorded checksum and
+    /// were rewritten from the bundle — the #4408 corruption-repair branch.
+    ///
+    /// Why: `tm reinstall` reports per destination what it deployed, preserved,
+    /// repaired, and failed, and "repaired" is the outcome an operator most
+    /// needs to see — it means a managed file had been corrupted (invalid
+    /// frontmatter, a truncated stub) and was recovered. Until now that branch
+    /// only emitted a `tracing::warn!` and the file landed in `deployed`,
+    /// indistinguishable from an ordinary refresh.
+    /// What: always a subset of [`deployed`](Self::deployed). Empty when no
+    /// managed file had drifted.
+    /// Test: `deploy_redeploys_corrupted_bundled_file`.
+    pub repaired: Vec<String>,
 }
 
 /// Whether a source filename names an agent to compose.
@@ -359,6 +372,10 @@ fn deploy_agents_locked(
                      re-deploying the bundled composition over it (framework-owned \
                      files are refreshed, not preserved; issue #4408)"
                 );
+                // The write below records this in `deployed`; also record it
+                // here so a caller can distinguish a corruption REPAIR from an
+                // ordinary refresh (`tm reinstall`'s per-destination report).
+                result.repaired.push(filename.clone());
             } else {
                 // Managed but user-owned (Origin::User / Registry — the
                 // seed-once tier) and edited → preserve their changes.
