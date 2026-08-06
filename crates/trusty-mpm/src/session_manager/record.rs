@@ -418,10 +418,16 @@ pub struct SessionRecord {
     /// keyed off `created_at` would delete it immediately.
     ///
     /// Written at exactly one place — [`Self::set_lifecycle_state`] — which
-    /// every transition INTO or OUT OF a terminal state goes through. A
-    /// transition between two live states may still assign `state` directly:
-    /// a live record's `terminal_at` is already `None`, which is precisely what
-    /// that setter's clearing branch guarantees.
+    /// every transition INTO a terminal state goes through. That is the
+    /// enforced half, and the one the retention sweep depends on.
+    ///
+    /// Leaving a terminal state is NOT enforced. `mark_reactivated`, the only
+    /// production path out, routes through the setter and so clears the stamp;
+    /// `mark_errored` and `set_workspace` assign a live state directly and
+    /// would not. Neither is reachable on a tombstone today, and a stale stamp
+    /// on a live record is inert in any case: [`super::retention_verdict`]
+    /// short-circuits on `!is_terminal()`, and the next terminal transition
+    /// restamps rather than trusting the old value.
     ///
     /// `#[serde(default)]` (→ `None`) keeps every pre-retention record
     /// deserializable. `None` on a terminal record means UNKNOWN, not "old":
@@ -445,7 +451,9 @@ impl SessionRecord {
     /// record-only variant, `delete`'s soft-delete, and `mark_reactivated`'s
     /// `Decommissioned -> Active` revival. Each assigning `state` by hand left
     /// the retention clock one forgotten assignment away from never starting in
-    /// one direction, and from surviving a revival in the other.
+    /// one direction, and from surviving a revival in the other. Only the
+    /// entering half is enforced — see [`Self::terminal_at`] for what that does
+    /// and does not promise about live-state assignments elsewhere.
     /// What: sets `state` and, when `state` is terminal, sets `terminal_at` to
     /// `now`. Re-entering a terminal state the record already holds does NOT
     /// refresh the stamp — a repeated decommission must not extend the

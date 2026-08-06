@@ -234,7 +234,9 @@ impl SessionManager {
     /// `sweep_releases_the_evicted_slot`,
     /// `sweep_never_touches_the_filesystem`,
     /// `sweep_stamps_legacy_records_instead_of_evicting_them`,
-    /// `sweep_revalidates_before_deleting_a_reactivated_record` in
+    /// `sweep_spares_a_record_reactivated_between_sweeps` (which the debounce
+    /// and phase 1 protect — phase 3's own arms are covered by
+    /// [`Self::revalidate_for_eviction`]'s `revalidate_*` tests) in
     /// `super::retention_tests`.
     pub async fn sweep_terminal_records(
         &self,
@@ -277,25 +279,10 @@ impl SessionManager {
         let confirmed = debounce.confirm(&candidates);
 
         // Phase 3 — re-validate against the CURRENT store immediately before
-        // deleting. `get` reloads from disk, so this sees another process's
-        // write; a record that has since been reactivated or resurrected now
-        // says `Keep` and survives.
-        let mut evicted: Vec<ManagedSessionId> = Vec::new();
-        for id in confirmed {
-            match self.get(&id).await {
-                Ok(fresh)
-                    if self.verdict_for(&fresh, now, retention) == RetentionVerdict::Evict =>
-                {
-                    evicted.push(id);
-                }
-                Ok(_) => warn!(
-                    id = %id,
-                    "retention: candidate changed between snapshot and delete; leaving it in place"
-                ),
-                // Already gone (a concurrent prune won the race) — nothing to do.
-                Err(_) => {}
-            }
-        }
+        // deleting.
+        let evicted = self
+            .revalidate_for_eviction(confirmed, now, retention)
+            .await;
 
         if !evicted.is_empty() {
             self.store.write().await.remove_many(&evicted).await?;
@@ -314,6 +301,59 @@ impl SessionManager {
             stamped: n,
             evicted,
         })
+    }
+
+    /// Drop any confirmed candidate that no longer deserves eviction, reading
+    /// the CURRENT store rather than the sweep's snapshot.
+    ///
+    /// Why: `confirmed` was derived from a snapshot taken earlier in the sweep,
+    /// and by the time it reaches here that snapshot is stale — this sweep's own
+    /// `upsert_many` has landed, and another process may have reactivated
+    /// (`mark_reactivated`) or removed a record in between. Deleting straight
+    /// from the snapshot is the mistake `prune_orphaned_worktrees` already fixed
+    /// once (#1845 item 9); this is the same re-read, immediately before the
+    /// destructive step.
+    ///
+    /// It is a separate method so it is REACHABLE from a test. Inside the full
+    /// sweep it is not: phase 1 re-derives candidates from scratch every tick,
+    /// so a record that changed between ticks is dropped there and never
+    /// reaches here — meaning an end-to-end test of "reactivate between sweeps"
+    /// exercises the debounce, not this guard, however it is named. Taking the
+    /// candidate list as a plain argument is not a test hook: a list computed
+    /// from an older view of the store IS the stale snapshot this defends
+    /// against, and passing one directly is the only way to observe the two
+    /// non-evicting arms fire.
+    /// What: for each id, re-reads the record (`get` reloads from disk, so it
+    /// sees another process's write) and re-runs [`Self::verdict_for`] with a
+    /// fresh existence probe. Keeps only ids that still say `Evict`; a changed
+    /// record is left in place and logged, and one already gone is silently
+    /// skipped — a concurrent prune beating us to it is not an error.
+    /// Test: `revalidate_keeps_a_still_evictable_record`,
+    /// `revalidate_drops_a_record_reactivated_after_the_snapshot`,
+    /// `revalidate_drops_a_record_a_concurrent_prune_already_removed`.
+    async fn revalidate_for_eviction(
+        &self,
+        confirmed: Vec<ManagedSessionId>,
+        now: DateTime<Utc>,
+        retention: Duration,
+    ) -> Vec<ManagedSessionId> {
+        let mut evicted = Vec::new();
+        for id in confirmed {
+            match self.get(&id).await {
+                Ok(fresh)
+                    if self.verdict_for(&fresh, now, retention) == RetentionVerdict::Evict =>
+                {
+                    evicted.push(id);
+                }
+                Ok(_) => warn!(
+                    id = %id,
+                    "retention: candidate changed between snapshot and delete; leaving it in place"
+                ),
+                // Already gone (a concurrent prune won the race) — nothing to do.
+                Err(_) => {}
+            }
+        }
+        evicted
     }
 
     /// [`Self::sweep_terminal_records`] against the wall clock and the shipped

@@ -520,16 +520,20 @@ fn debounce_disarms_a_candidate_that_lapses() {
     assert_eq!(gate.confirm(&[id]), vec![id], "two in a row confirms");
 }
 
-/// Why: the phase-1 snapshot is stale by the time the delete runs — this
-/// sweep's own `upsert_many` has landed, and another process may have
-/// reactivated the record in between. `prune_orphaned_worktrees` re-reads the
-/// store immediately before deleting for exactly this reason (#1845 item 9).
+/// Why: an armed candidate that gets reactivated before the deleting sweep must
+/// survive. Be precise about WHICH guard saves it, because the name this test
+/// first carried claimed the wrong one: phase 1 re-derives candidates from
+/// scratch every tick, so a record reactivated BETWEEN sweeps is classified
+/// `Keep` there and never reaches phase 3's re-validation at all — verified
+/// with a marker in the phase-3 loop, which this test does not reach. The
+/// debounce plus phase 1 is what protects it here. Phase 3's own arms are
+/// covered by the `revalidate_*` tests below.
 /// What: arms the gate on a stale terminal record, reactivates it through the
 /// real `mark_reactivated` path between the two sweeps, then asserts the second
-/// sweep re-reads, finds it live, and leaves it alone.
+/// sweep leaves it alone with its stamp cleared.
 /// Test: this test.
 #[tokio::test]
-async fn sweep_revalidates_before_deleting_a_reactivated_record() {
+async fn sweep_spares_a_record_reactivated_between_sweeps() {
     let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
     let workspace = TempDir::new().expect("workspace");
@@ -562,5 +566,96 @@ async fn sweep_revalidates_before_deleting_a_reactivated_record() {
     assert_eq!(
         live.terminal_at, None,
         "reactivation clears the retention stamp"
+    );
+}
+
+// ── phase 3: re-validation against the current store ────────────────────────
+//
+// These reach `revalidate_for_eviction` directly. They have to: inside the full
+// sweep, phase 1 re-derives candidates every tick, so anything that changes
+// between ticks is dropped there and the phase-3 loop body never executes —
+// confirmed by instrumenting the loop. The candidate list is a plain `Vec<Id>`,
+// exactly what phase 2 produces, and handing it one computed from an older view
+// of the store IS the stale snapshot these arms defend against.
+
+/// Why: the passing arm — re-validation must not become a blanket refusal to
+/// delete. If this went green while the two below also went green, the guard
+/// would be indistinguishable from "never evict anything".
+/// What: a candidate that is still terminal, still stale, and still has no
+/// workspace survives re-validation.
+/// Test: this test.
+#[tokio::test]
+async fn revalidate_keeps_a_still_evictable_record() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let stale = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+
+    let survivors = mgr
+        .revalidate_for_eviction(vec![stale], Utc::now(), window())
+        .await;
+    assert_eq!(
+        survivors,
+        vec![stale],
+        "an unchanged candidate still evicts"
+    );
+}
+
+/// Why: THE stale-snapshot guard. A record reactivated after the snapshot was
+/// taken — by another process, or by this daemon between the phases — must not
+/// be deleted on the strength of a reading that is no longer true. This drives
+/// the `Ok(_)` arm that leaves the record in place.
+/// What: builds a candidate list from a record that IS evictable, then
+/// reactivates it through the real `mark_reactivated` path before calling
+/// re-validation, standing in for a write that landed after the snapshot.
+/// Test: this test.
+#[tokio::test]
+async fn revalidate_drops_a_record_reactivated_after_the_snapshot() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let workspace = TempDir::new().expect("workspace");
+
+    let id = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+    // The snapshot said Evict…
+    assert_eq!(
+        mgr.revalidate_for_eviction(vec![id], Utc::now(), window())
+            .await,
+        vec![id]
+    );
+
+    // …then the reactivation lands. `mark_reactivated` needs a real directory.
+    let mut rec = mgr.get(&id).await.expect("get");
+    rec.workspace_path = Some(workspace.path().to_path_buf());
+    mgr.store.write().await.upsert(rec).await.expect("re-seed");
+    mgr.mark_reactivated(&id).await.expect("reactivate");
+
+    let survivors = mgr
+        .revalidate_for_eviction(vec![id], Utc::now(), window())
+        .await;
+    assert!(
+        survivors.is_empty(),
+        "a candidate that went live after the snapshot must not be deleted: {survivors:?}"
+    );
+    assert!(mgr.get(&id).await.is_ok(), "and it is still in the store");
+}
+
+/// Why: the other non-evicting arm. A concurrent prune removing the record
+/// first is a race we lose harmlessly, not an error — but it must drop out of
+/// the delete list rather than being counted as evicted, or the sweep reports
+/// and releases a slot for something it never removed.
+/// What: passes an id that is not in the store at all.
+/// Test: this test.
+#[tokio::test]
+async fn revalidate_drops_a_record_a_concurrent_prune_already_removed() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+    mgr.compact_record(&id).await.expect("concurrent prune");
+
+    let survivors = mgr
+        .revalidate_for_eviction(vec![id], Utc::now(), window())
+        .await;
+    assert!(
+        survivors.is_empty(),
+        "an already-removed id is not something this sweep evicted: {survivors:?}"
     );
 }
