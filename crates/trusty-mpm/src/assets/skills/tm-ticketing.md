@@ -80,6 +80,13 @@ assignee + `trusty-mpm` label mark which issues a trusty-mpm session owns;
 `ws/<session-name>` tracks which workstream is driving it (a label, never a
 milestone — see `PM_INSTRUCTIONS.md`).
 
+These two are the harness defaults, not the whole label set. Type,
+component/crate, and conditional priority are required on top of them, and the
+milestone stays unset unless the issue is being scheduled into an open release.
+That is specified once, in the agent asset (`assets/agents/ticketing.md`,
+"Label at Creation" and "Milestones Are Release Slots") — the agent applies it,
+so do not restate it in a delegation brief.
+
 ## Ticket-Promotion Gate
 
 **A finding is not automatically a ticket.** Most findings belong to the work

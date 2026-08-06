@@ -97,3 +97,35 @@ Turning an observed error into a filed, deduplicated issue.
 Reference: `references/mcp-tools.md` (`list_recent_errors`,
 `preview_bug_report`, `report_bug`), `tm-bug-reporting` / `tm-postmortem`
 skills.
+
+## 5. Asset Deployment Lifecycle
+
+What a redeploy actually does to an already-deployed agent or skill. Relocated
+here from the always-loaded PM prompt (#4574): a PM never runs a deploy, so the
+lifecycle is a lookup, not a resident rule. `references/framework.md` carries
+the directories and tier precedence this section assumes.
+
+1. **Tier collisions.** On a name collision the highest-precedence source wins
+   — project-custom, then user-custom (`~/.trusty-mpm/skills/`), then bundled.
+   Lower-tier copies of that name are skipped and logged, so a shadowed skill
+   is visible in the deploy log rather than silently absent.
+2. **Hand-edit freeze.** A deployed file whose checksum no longer matches its
+   source is treated as user-owned and skipped on every later redeploy, never
+   clobbered. A project-custom skill gets the same protection structurally: it
+   is absent from `.trusty-mpm-skills-manifest.json`, so the deployer never
+   claims ownership of it. The freeze is not logged as a tier collision —
+   there is no competing source to name.
+3. **Orphaned copies are never retracted.** Removing a skill's source from
+   `~/.trusty-mpm/skills/` does NOT delete the copies already deployed into
+   projects; they stay until pruned. A removed bundled skill behaves the same
+   way. This is deliberate — deployment adds, it does not reconcile.
+4. **`mcp`-slugged skills never deploy.** A skill whose slug contains `mcp`
+   would shadow Claude Code's built-in `/mcp`, so it is excluded outright.
+5. **The managed tier reaches every session.** User-custom skills deploy into
+   the shared `CLAUDE_CONFIG_DIR` too, so a skill authored once in
+   `~/.trusty-mpm/skills/` is available to daemon-managed and standalone
+   `tm run` sessions alike, not only per-project ones. The project-custom tier
+   is naturally absent there — nothing hand-places a skill into the config dir.
+
+Reference: `references/framework.md` (install layout, agent tier precedence,
+skill deploy tiers), `tm-agent-architecture` (the agent compose chain).
