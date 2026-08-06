@@ -941,8 +941,14 @@ pub(crate) enum Command {
     /// `CLAUDE_CONFIG_DIR=<root>/claude-config`.
     ///
     /// Reusing an existing managed checkout FAILS LOUD when its `origin` names
-    /// a different repository, or when its tree is dirty and so cannot be
-    /// refreshed. Neither case is auto-fixed.
+    /// a different repository — trusty-mpm never re-points a remote. A DIRTY
+    /// checkout is not an error: the fast-forward is skipped, a warning naming
+    /// the path and what is uncommitted is printed, and the session starts
+    /// anyway. Its branch is cut from a freshly-fetched
+    /// `origin/<default-branch>`, so it does not inherit the checkout's state.
+    ///
+    /// `--root` applies to the alias form only. The managed checkout's location
+    /// is set by `TRUSTY_MPM_REPOS_ROOT` / `TRUSTY_MPM_WORKSPACE_ROOT`.
     /// Test: `cli_parses_run_standalone`, `run_target_tests.rs`.
     Run {
         /// `<owner>/<repo>` (GitHub assumed), a full repository URL, or a
@@ -951,11 +957,16 @@ pub(crate) enum Command {
         /// Optional initial task to pre-seed (currently unused by MVP).
         #[arg(long)]
         task: Option<String>,
-        /// Override the managed root (default: `~/.trusty-mpm`).
+        /// Override the managed root (default: `~/.trusty-mpm`). ALIAS FORM ONLY.
         ///
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
         /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
         /// default `~/.trusty-mpm`.
+        ///
+        /// With an `<owner>/<repo>` target this root is not consulted — the
+        /// managed checkout lives under `TRUSTY_MPM_REPOS_ROOT` /
+        /// `TRUSTY_MPM_WORKSPACE_ROOT` instead — so passing it there warns
+        /// rather than being silently ignored.
         ///
         /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
         #[arg(long)]

@@ -82,6 +82,30 @@ fn classify_resolves_full_urls() {
     );
 }
 
+/// An absolute local path is a clone source, and its identity comes from the
+/// last TWO path segments.
+///
+/// Why: `classify` sorts a leading `/` as a `Url`, so `tm run
+/// /Users/me/code/app` is accepted and clones from that local repo. The
+/// identity is then `code/app` — `owner` is the PARENT DIRECTORY name, not a
+/// GitHub owner — so the managed checkout lands at
+/// `<repos_root>/code/app`. That is deterministic and harmless, but it is
+/// surprising enough to pin: a future change to the fallback order would
+/// silently relocate an existing operator's checkout.
+/// Test: itself.
+#[test]
+fn absolute_path_derives_identity_from_the_last_two_segments() {
+    let target = classify_run_target("/Users/me/code/app").expect("absolute path classifies");
+    assert_eq!(
+        target,
+        RunTarget::Repo {
+            owner: "code".into(),
+            repo: "app".into(),
+            clone_url: "/Users/me/code/app".into(),
+        }
+    );
+}
+
 /// AGREEMENT: for shorthand, the identity primitive this module uses matches
 /// the one derived from the resolved URL.
 ///

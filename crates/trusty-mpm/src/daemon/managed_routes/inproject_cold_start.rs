@@ -39,11 +39,17 @@
 //! both `warn!`-logged and returned to the caller in
 //! [`ManagedCheckout::refresh_skipped`] so the CLI can print it.
 //!
-//! Either way the refresh still runs through
+//! Either way the refresh is still ATTEMPTED through
 //! [`super::inproject_hygiene::run_hygiene_for_base`] — the crate's single
-//! non-destructive base-clone refresh. Its fetch is unconditional (which is
-//! what keeps `origin/<default>` current) and only its fast-forward is gated,
-//! matching ADR-0030 §4 exactly.
+//! non-destructive base-clone refresh — which fetches and then gates only the
+//! fast-forward, matching ADR-0030 §4. One exception: a checkout carrying the
+//! `inproject_hygiene::HYGIENE_OPT_OUT_MARKER` file
+//! (`.trusty-mpm-no-hygiene`) skips the sweep entirely, fetch included. That is
+//! the marker's whole purpose, and the session is still unaffected — its start
+//! point does its own fetch (#4957).
+//!
+//! The reported skip is one-sided: `Some` means no fast-forward, `None` does
+//! not mean there was one. See [`ManagedCheckout::refresh_skipped`].
 //!
 //! Test: `inproject_cold_start_tests.rs` (pure canonicalization, the
 //! remote-mismatch refusal, and the dirty warn-and-proceed path against real
@@ -123,8 +129,15 @@ pub enum ColdStartError {
 /// which is the `pull_ff_only` failure mode. Returning it makes the CLI able to
 /// print it in normal output.
 /// What: the absolute `<repos_root>/<owner>/<repo>` path, `reused`, and
-/// `refresh_skipped` — `Some(reason)` when the fast-forward was declined, in a
-/// form suitable for printing directly after the path.
+/// `refresh_skipped`, in a form suitable for printing directly after the path.
+///
+/// 🔴 `refresh_skipped` is ONE-SIDED, and reading it as a fast-forward receipt
+/// is wrong. `Some(reason)` is a reliable "the fast-forward did not happen".
+/// `None` means only that the dirty gate did not predict a skip — see
+/// [`fast_forward_skip_reason`] for the five other conditions under which
+/// `inproject_hygiene::decide_update` declines, and the gitignored-collision
+/// refusal after it, none of which this field reports. A clean checkout sitting
+/// on a non-default branch produces `None` and no fast-forward.
 /// Test: `dirty_existing_checkout_warns_and_proceeds`,
 /// `clean_matching_checkout_is_reused_and_refreshed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,9 +146,10 @@ pub struct ManagedCheckout {
     pub base_path: PathBuf,
     /// `true` when an existing checkout was verified and reused rather than cloned.
     pub reused: bool,
-    /// Why the fast-forward was skipped, when it was. `None` means it was not.
+    /// A predicted reason the fast-forward will be skipped, when one is known.
     ///
-    /// The caller MUST surface this in normal output. See the type-level doc.
+    /// `Some` implies no fast-forward; `None` does NOT imply one happened. See
+    /// the type-level doc. The caller MUST surface a `Some` in normal output.
     pub refresh_skipped: Option<String>,
 }
 
@@ -165,10 +179,12 @@ pub fn ensure_managed_checkout(
 /// What: when `base_path/.git` is absent, clones. When it is present, the
 /// remote check runs FIRST and can refuse; then the fast-forward gate is
 /// evaluated ([`fast_forward_skip_reason`]) and reported rather than enforced;
-/// then the refresh runs through
-/// [`super::inproject_hygiene::run_hygiene_for_base`], whose fetch is
-/// unconditional and whose fast-forward is gated by the same conditions. Either
-/// way it finishes through [`super::inproject::ensure_base_clone`], so a reused
+/// then the refresh is attempted through
+/// [`super::inproject_hygiene::run_hygiene_for_base`], which fetches and gates
+/// the fast-forward on a SUPERSET of the conditions checked here — so it can
+/// decline when nothing was reported. It skips wholesale, fetch included, when
+/// the checkout carries `inproject_hygiene::HYGIENE_OPT_OUT_MARKER`. Either way
+/// it finishes through [`super::inproject::ensure_base_clone`], so a reused
 /// checkout gets the same `.worktrees/` exclusion invariant a fresh clone does.
 ///
 /// ORDERING IS THE POINT. The identity check runs BEFORE anything writes to the
@@ -205,11 +221,11 @@ pub fn ensure_managed_checkout_at(
             );
         }
 
-        // Runs either way. The fetch is what keeps `origin/<default>` current,
-        // and that ref — not the local HEAD — is what the session branch is cut
-        // from (#4957), which is exactly why a declined fast-forward is
-        // reportable rather than fatal. Only the fast-forward is gated, matching
-        // ADR-0030 §4.
+        // Attempted either way. The fetch keeps `origin/<default>` current, and
+        // that ref — not the local HEAD — is what the session branch is cut from
+        // (#4957), which is why a declined fast-forward is reportable rather
+        // than fatal. Only the fast-forward is gated (ADR-0030 §4) — except
+        // under the `HYGIENE_OPT_OUT_MARKER`, which skips the sweep whole.
         inproject_hygiene::run_hygiene_for_base(base_path).map_err(ColdStartError::Provision)?;
     }
 
@@ -274,6 +290,18 @@ fn verify_remote_matches(base_path: &Path, requested: &str) -> Result<(), ColdSt
 /// an unreadable checkout is never assumed clean, and the hygiene sweep's own
 /// gate declines the fast-forward in that case too, so predicting a skip
 /// matches what actually happens.
+///
+/// 🔴 PARTIAL PREDICTOR, deliberately. It mirrors two of the conditions
+/// `inproject_hygiene::decide_update` checks, not all of them. That function
+/// also declines on a detached HEAD, a checked-out branch that is not the
+/// default branch, an unknown ahead-count, and unpushed commits; and
+/// `update_to_origin` refuses separately when the update would clobber a
+/// gitignored path (#4961). None of those produce a `Some` here, so a clean
+/// checkout on a feature branch returns `None` and is still not fast-forwarded.
+/// Widening this to a full receipt means either duplicating those gates or
+/// having the sweep report its own decision, which is a change to
+/// `inproject_hygiene`'s contract — out of scope while the consequence is only
+/// a missing notice. The session is unaffected either way (#4957).
 /// Test: `dirty_existing_checkout_warns_and_proceeds`,
 /// `clean_matching_checkout_is_reused_and_refreshed`.
 fn fast_forward_skip_reason(base_path: &Path) -> Option<String> {

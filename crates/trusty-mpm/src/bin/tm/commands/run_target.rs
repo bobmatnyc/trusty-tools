@@ -106,9 +106,17 @@ pub(crate) fn classify_run_target(spec: &str) -> anyhow::Result<RunTarget> {
 /// Why: one command, two subsystems. Keeping the branch here rather than in
 /// `main.rs` keeps the dispatch table flat and gives the routing decision a
 /// testable home.
-/// What: warns about the unimplemented `--task`, classifies the target, and
+/// What: warns about flags that do not apply, classifies the target, and
 /// dispatches — alias to `core::standalone`'s driver (unchanged), repo to
 /// [`run_managed`].
+///
+/// Two flags reach an arm that cannot use them, and BOTH warn rather than being
+/// dropped silently. `--task` is unimplemented on either arm. `--root` selects
+/// the DOC-24 managed root, which the daemon-managed arm never consults: its
+/// checkout location comes from `repos_root()` (`TRUSTY_MPM_REPOS_ROOT` >
+/// `TRUSTY_MPM_WORKSPACE_ROOT` > config > `~/trusty-mpm-projects`), a different
+/// setting entirely. A user passing `--root` there is trying to relocate the
+/// checkout and would otherwise get no hint that it had no effect.
 /// Test: `classify_sorts_alias_from_repo` covers the routing decision; the
 /// managed arm's checkout half is covered by
 /// `daemon::managed_routes::inproject_cold_start` tests.
@@ -138,7 +146,16 @@ pub(crate) async fn run(
             owner,
             repo,
             clone_url,
-        } => run_managed(client, url, &owner, &repo, &clone_url).await,
+        } => {
+            if let Some(r) = &root {
+                eprintln!(
+                    "warning: --root '{r}' does not apply to a <owner>/<repo> target and will \
+                     be ignored. It selects the standalone managed root; the managed checkout \
+                     location comes from TRUSTY_MPM_REPOS_ROOT / TRUSTY_MPM_WORKSPACE_ROOT."
+                );
+            }
+            run_managed(client, url, &owner, &repo, &clone_url).await
+        }
     }
 }
 
@@ -150,11 +167,13 @@ pub(crate) async fn run(
 /// What: (1) ensures the managed base clone at
 /// `<repos_root>/<owner>/<repo>` via
 /// [`trusty_mpm::daemon::managed_routes::inproject_cold_start::ensure_managed_checkout`],
-/// which clones when absent and fails loud on a mismatched remote or a dirty
-/// tree; (2) hands that directory to [`super::launch::launch`], the existing
-/// daemon-managed launch path — which registers the project alias, provisions
-/// the per-session worktree, prepares the session, registers the session with
-/// the daemon, creates the tmux host, and attaches.
+/// which clones when absent and fails loud on a mismatched remote — a dirty
+/// tree is NOT a failure there, it reports a skipped fast-forward through
+/// `ManagedCheckout::refresh_skipped`, which this function prints; (2) hands
+/// that directory to [`super::launch::launch`], the existing daemon-managed
+/// launch path — which registers the project alias, provisions the per-session
+/// worktree, prepares the session, registers the session with the daemon,
+/// creates the tmux host, and attaches.
 ///
 /// Step 2 is a HANDOFF, not a reimplementation: everything after the checkout
 /// exists already and is shared with `tm launch`, so a managed session started
