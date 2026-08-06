@@ -1,0 +1,18 @@
+
+The core design idea: instead of giving the model a curated toolbox (a file-edit tool, a shell tool, a sub-agent-spawning tool, etc.), Prime Agent gives it one primitive — a persistent IPython kernel that stays alive across the whole session — and everything else is just code the model writes and runs inside that kernel.
+
+**1. Sub-agents are just function calls, not a separate orchestration layer**
+Spinning up a sub-agent is done by calling a function (something like `rlm("sub-task")`) that launches a completely independent child session, complete with its own model instance, its own kernel, and its own history. Notably, that call returns as soon as the child session is accepted/spawned — not once the child finishes its work — so the parent session is never stuck waiting on it. The child's eventual output comes back asynchronously through a separate messaging function. To keep things contained, messages can only flow between a parent, its direct children, or sibling sessions (no arbitrary cross-talk). To save resources, a sub-agent that's been idle for 30 minutes gets evicted from memory, and its state is reloaded from disk automatically the next time something addresses it.
+
+**2. The harness can rewrite its own configuration mid-run**
+The harness's internal state is expressed as a formal tuple covering four components: the system prompt, the active sub-agents, available skills, and memory. A "refine" operation looks back over the session's trajectory and decides on the smallest possible adjustment to make (rather than a wholesale rewrite), and every such refinement is logged along with what triggered it and what changed. Importantly, the foundational system prompt itself is never altered — it's treated as immutable — and any refinement can be reverted by its ID if it turns out to hurt performance.
+
+**3. Reported benchmark results**
+On the ARC-AGI-3 benchmark, running with an "Opus 5" model, the harness is reported to hit a 95.5% Best-of-1 score across three trial runs (95.0%, 95.2%, 95.5%), which the post claims edges past a cited human-expert baseline of 95.4%. Using a Best-of-3 measure, it reportedly reaches 99.97% and completes all 183 levels in the set. Separately, on a long-context evaluation suite run with the open-weights GLM-5.2 model, Prime Agent is said to outperform a comparison system referred to as "Pi-mono" on 8 of 9 individual evaluations.
+
+**Linked sources from the post:**
+- **Full analysis** → [marktechpost.com write-up](https://www.marktechpost.com/2026/08/06/prime-intellect-releases-prime-agent/) — likely the original detailed article this Reddit post is summarizing.
+- **GitHub Repo** → [github.com/PrimeIntellect-ai/prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) — the open-source code for the harness.
+- **Technical details** → [primeintellect.ai/blog/prime-agent](https://www.primeintellect.ai/blog/prime-agent) — Prime Intellect's own blog post, presumably with deeper technical documentation.
+
+If you'd like, I can open any of those three pages and pull more specifics from them directly.
