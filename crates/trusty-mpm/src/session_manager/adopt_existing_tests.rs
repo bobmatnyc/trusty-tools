@@ -229,6 +229,7 @@ fn bare_record(
         pane_id: pane_id.map(str::to_string),
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     }
 }
 

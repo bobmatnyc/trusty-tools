@@ -2246,6 +2246,13 @@ async fn isolated_managed_state_uses_fake_driver_never_creates_real_tmux_session
 /// same "with_root_isolated_managed must NOT point at the production" prefix).
 /// Test: this function IS the test.
 #[tokio::test]
+// #4993: this test reads `dirs::home_dir()` TWICE — once here and once inside
+// the guard — and every read resolves `$HOME` afresh. The eight `HomeGuard`
+// tests above override `$HOME` process-wide; `#[serial]` only serialises them
+// against each OTHER, so without this attribute a guard boundary could land
+// between the two reads, leaving them disagreeing about the production path.
+// `assert_ne!` then passes, nothing panics, and this `should_panic` test fails.
+#[serial_test::serial]
 #[should_panic(expected = "with_root_isolated_managed must NOT point at the production")]
 async fn isolated_managed_state_guard_panics_on_production_root() {
     let home = match dirs::home_dir() {
