@@ -334,7 +334,7 @@ fn picker_filter_excludes_decommissioned_keeps_active() {
         ]))
         .expect("test data must deserialize");
 
-    let filtered = filter_live_sessions(sessions);
+    let filtered = filter_live_sessions(sessions, &std::collections::HashSet::new());
 
     // Exactly 3 of the 5 sessions survive the filter.
     assert_eq!(
@@ -376,7 +376,7 @@ fn picker_filter_all_live_sessions_unchanged() {
         ]))
         .expect("test data must deserialize");
 
-    let filtered = filter_live_sessions(sessions);
+    let filtered = filter_live_sessions(sessions, &std::collections::HashSet::new());
     assert_eq!(
         filtered.len(),
         3,
@@ -395,7 +395,7 @@ fn picker_filter_all_decommissioned_returns_empty() {
         ]))
         .expect("test data must deserialize");
 
-    let filtered = filter_live_sessions(sessions);
+    let filtered = filter_live_sessions(sessions, &std::collections::HashSet::new());
     assert!(
         filtered.is_empty(),
         "all-decommissioned input must produce empty list"
@@ -418,7 +418,7 @@ fn picker_filter_keeps_slot_tombstone_hides_soft_deleted_record() {
         ]))
         .expect("test data must deserialize");
 
-    let filtered = filter_live_sessions(sessions);
+    let filtered = filter_live_sessions(sessions, &std::collections::HashSet::new());
 
     assert_eq!(
         filtered.len(),
@@ -435,33 +435,37 @@ fn picker_filter_keeps_slot_tombstone_hides_soft_deleted_record() {
     );
 }
 
-// ── #4994: dead (`unresumable`) records are hidden from the DEFAULT view ──────
+// ── #4994: the default view hides what the SWEEP classified dead ─────────────
+//
+// 🔴 Read `classified_dead` literally in every assertion below: it is the
+// listing-time prune's own verdict, never the wire's `unresumable` flag. The
+// two differ on a live session — see `picker_filter_keeps_a_live_row_flagged_
+// unresumable`, which is the case that made PR #4995's first cut a CRITICAL.
 
 #[test]
-fn is_live_session_state_hides_unresumable_record() {
+fn is_live_session_state_hides_a_record_the_prune_classified_dead() {
     // Why (#4994): the reported defect. A record whose tmux pane is gone AND
-    // whose workspace directory no longer exists anywhere on disk is flagged
-    // `unresumable` by the daemon and rendered `[dead]`, yet still took the
-    // catch-all `true` arm into the default `tm ls`. Six such rows sat in the
-    // owner's list. `unresumable` is the ONLY input that differs between these
-    // two assertions, so a filter that ignored the flag fails here.
+    // whose workspace directory no longer exists anywhere on disk is classified
+    // dead by the sweep and rendered `[dead]`, yet still took the catch-all
+    // `true` arm into the default `tm ls`. Six such rows sat in the owner's
+    // list. `classified_dead` is the ONLY input that differs between these
+    // assertions and `is_live_session_state_keeps_resumable_stopped_record`.
     assert!(
         !is_live_session_state("stopped", false, true),
-        "a dead (unresumable) stopped record must be hidden from the default view"
+        "a stopped record the sweep classified dead must be hidden from the default view"
     );
     assert!(
         !is_live_session_state("errored", false, true),
-        "a dead (unresumable) errored record must be hidden from the default view"
+        "an errored record the sweep classified dead must be hidden from the default view"
     );
 }
 
 #[test]
 fn is_live_session_state_keeps_resumable_stopped_record() {
-    // 🔴 The regression guard for the hiding rule above. `unresumable` is
-    // computed daemon-side for exactly the stopped/errored class, and MOST
-    // stopped records are legitimately resumable — 15 on the reporting machine
-    // against 6 dead ones. Hiding a stopped record on its STATE rather than on
-    // the flag would take those 15 with it.
+    // 🔴 The regression guard for the hiding rule above. MOST stopped records
+    // are legitimately resumable — 18 on the reporting machine against 6 dead
+    // ones. Hiding a stopped record on its STATE rather than on the sweep's
+    // verdict would take those 18 with it.
     assert!(
         is_live_session_state("stopped", false, false),
         "a stopped record with an intact workspace is resumable and must stay visible"
@@ -477,45 +481,79 @@ fn is_live_session_state_keeps_resumable_stopped_record() {
 }
 
 #[test]
-fn is_live_session_state_keeps_slot_tombstone_even_when_unresumable() {
+fn is_live_session_state_keeps_slot_tombstone_even_when_classified_dead() {
     // Why (#3034 × #4994): the two rules meet on one row. A slot tombstone is a
     // rendering placeholder for a slot whose record left the store, and Bob's
     // #3034 directive keeps it visible at its slot unconditionally. The
-    // `unresumable` arm therefore sits BELOW the `"deleted"` arm — reordering
-    // them would silently un-do #3034 for any tombstone the daemon happened to
-    // flag.
+    // `classified_dead` arm therefore sits BELOW the `"deleted"` arm —
+    // reordering them would silently un-do #3034.
     assert!(
         is_live_session_state("deleted", true, true),
-        "a #3034 slot tombstone must stay visible regardless of the unresumable flag"
+        "a #3034 slot tombstone must stay visible regardless of the dead classification"
     );
-    // The soft-deleted-record and decommissioned rules are likewise unmoved by
-    // the new input.
+    // The soft-deleted-record and decommissioned rules are unmoved by the new
+    // input.
     assert!(!is_live_session_state("deleted", false, false));
     assert!(!is_live_session_state("decommissioned", false, false));
 }
 
 #[test]
-fn picker_filter_hides_dead_records_keeps_resumable_stopped() {
-    // The list-level mirror of the three predicate tests: a mixed fleet where
-    // the two stopped rows differ ONLY by `unresumable`, so "the row is absent"
-    // can only be explained by the flag.
+fn picker_filter_hides_only_what_the_prune_classified_dead() {
+    // The list-level mirror: a mixed fleet where the two stopped rows differ
+    // ONLY by membership in `dead_ids`, so "the row is absent" can only be
+    // explained by the sweep's verdict.
     let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
         serde_json::from_value(serde_json::json!([
             { "id": "a1", "name": "sess-active",   "state": "active" },
-            { "id": "b2", "name": "sess-alive",    "state": "stopped", "unresumable": false },
-            { "id": "c3", "name": "sess-dead",     "state": "stopped", "unresumable": true },
-            { "id": "d4", "name": "sess-dead-err", "state": "errored", "unresumable": true },
+            { "id": "b2", "name": "sess-alive",    "state": "stopped" },
+            { "id": "c3", "name": "sess-dead",     "state": "stopped" },
+            { "id": "d4", "name": "sess-dead-err", "state": "errored" },
             { "id": "",   "name": "",              "state": "deleted", "slot": 5, "deleted": true },
         ]))
         .expect("test data must deserialize");
 
-    let filtered = filter_live_sessions(sessions);
+    let dead: std::collections::HashSet<String> =
+        ["c3".to_string(), "d4".to_string()].into_iter().collect();
+    let filtered = filter_live_sessions(sessions, &dead);
 
     assert_eq!(
         filtered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
         vec!["a1", "b2", ""],
-        "exactly the active row, the RESUMABLE stopped row, and the slot \
-         tombstone must survive"
+        "exactly the active row, the stopped row the sweep left alone, and the \
+         slot tombstone must survive"
+    );
+}
+
+#[test]
+fn picker_filter_keeps_a_live_row_flagged_unresumable() {
+    // 🔴 CRITICAL regression guard (PR #4995 review). `unresumable` is computed
+    // daemon-side from a record's PERSISTED state; `reconcile_live_state` then
+    // overwrites the DISPLAY state without recomputing it, so the wire really
+    // does ship `state: "active"` with `unresumable: true` for a session whose
+    // pane is running — proven by `critic_proof_4995_live_pane_can_ship_active_
+    // plus_unresumable`. The sweep refuses to reap such a row
+    // (`auto_prune_never_touches_a_running_record`,
+    // `auto_prune_never_touches_an_errored_record_with_a_live_detached_pane`),
+    // so hiding it would leave a running agent hidden AND unreapable.
+    //
+    // Both rows below carry `unresumable: true` and neither is in `dead_ids`.
+    // A filter that consults the flag fails here; one that consults the sweep's
+    // verdict passes.
+    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "a1", "name": "live-pane", "state": "active",  "unresumable": true },
+            { "id": "b2", "name": "detached",  "state": "errored", "unresumable": true },
+        ]))
+        .expect("test data must deserialize");
+
+    let filtered = filter_live_sessions(sessions, &std::collections::HashSet::new());
+
+    assert_eq!(
+        filtered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        vec!["a1", "b2"],
+        "a row carrying the raw `unresumable` flag that the sweep did NOT \
+         classify dead must stay visible — hiding it makes a live session \
+         unreachable through `tm`"
     );
 }
 
@@ -531,14 +569,15 @@ fn scope_for_display_all_keeps_dead_record_visible() {
     let raw = serde_json::json!({
         "sessions": [
             { "id": "a1", "name": "sess-active", "state": "active",  "slot": 1 },
-            { "id": "c3", "name": "sess-dead",   "state": "stopped", "slot": 2, "unresumable": true },
+            { "id": "c3", "name": "sess-dead",   "state": "stopped", "slot": 2 },
         ]
     })
     .to_string();
     let sessions = parse_managed_sessions(&raw).expect("parse must succeed");
+    let dead: std::collections::HashSet<String> = ["c3".to_string()].into_iter().collect();
 
     assert_eq!(
-        scope_for_display(sessions.clone(), true)
+        scope_for_display(sessions.clone(), true, &dead)
             .iter()
             .map(|s| s.id.as_str())
             .collect::<Vec<_>>(),
@@ -546,7 +585,7 @@ fn scope_for_display_all_keeps_dead_record_visible() {
         "--all must keep the dead record"
     );
     assert_eq!(
-        scope_for_display(sessions, false)
+        scope_for_display(sessions, false, &dead)
             .iter()
             .map(|s| s.id.as_str())
             .collect::<Vec<_>>(),

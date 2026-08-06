@@ -202,10 +202,15 @@ pub(crate) fn parse_managed_sessions(raw: &str) -> anyhow::Result<Vec<ManagedSes
 /// Why: the static table and the picker share one filtering/sorting policy so
 /// the two views never diverge (#1809/#1841).
 /// What: when `all` is false, drops decommissioned records, soft-deleted
-/// records, and (#4994) dead `unresumable` records via [`filter_live_sessions`]
-/// (a `"deleted"` slot tombstone, #3034, is NOT a decommissioned record and
-/// always passes through this branch too — see
+/// records, and (#4994) records the listing-time sweep classified dead, via
+/// [`filter_live_sessions`] (a `"deleted"` slot tombstone, #3034, is NOT a
+/// decommissioned record and always passes through this branch too — see
 /// [`super::managed::is_live_session_state`]'s doc).
+///
+/// 🔴 `dead_ids` must be the set the sweep that just ran over THIS list
+/// produced — never the wire's `unresumable` flag re-derived here. See
+/// [`super::managed::is_live_session_state`] for the live session that
+/// distinction keeps visible.
 /// When `all` is true, keeps every row — live, decommissioned, dead, AND
 /// tombstoned — but stable-sorts ONLY `"decommissioned"` records to the end.
 ///
@@ -237,9 +242,10 @@ pub(crate) fn parse_managed_sessions(raw: &str) -> anyhow::Result<Vec<ManagedSes
 pub(crate) fn scope_for_display(
     sessions: Vec<ManagedSessionSummary>,
     all: bool,
+    dead_ids: &std::collections::HashSet<String>,
 ) -> Vec<ManagedSessionSummary> {
     if !all {
-        return filter_live_sessions(sessions);
+        return filter_live_sessions(sessions, dead_ids);
     }
     // Sink ONLY soft-retired "decommissioned" records — never "deleted"
     // slot tombstones, which must stay in their original slot position
@@ -477,8 +483,10 @@ pub(crate) async fn fetch_live_sessions(
 ) -> anyhow::Result<Vec<ManagedSessionSummary>> {
     let raw = fetch_managed_raw(client, url, source_id).await?;
     let fetched = parse_managed_sessions(&raw)?;
-    let kept = super::session_picker_prune::prune_and_report(client, url, fetched).await;
-    Ok(scope_for_display(kept, all))
+    // `!all` is exactly whether this call will drop the dead rows, which is what
+    // decides the banner's "hidden" suffix (#4994).
+    let listing = super::session_picker_prune::prune_and_report(client, url, fetched, !all).await;
+    Ok(scope_for_display(listing.sessions, all, &listing.dead_ids))
 }
 
 /// Find the 0-based position in `sessions` whose stable `slot` equals `n`

@@ -178,6 +178,36 @@ pub(crate) struct AutoPruneOutcome {
     /// 2026-07-30 follow-up — this must fold in here or the reported count
     /// under-represents exactly the batch that gate is protecting).
     pub(crate) pending: usize,
+    /// Ids WITHIN [`kept`](Self::kept) that [`is_dead_record`] classified dead
+    /// but the sweep could not clear this call (#4994).
+    ///
+    /// 🔴 This — not the wire's `unresumable` flag — is what the default `tm ls`
+    /// view hides. The two are not the same set, and the difference is a live
+    /// session. `unresumable` is computed daemon-side from a record's PERSISTED
+    /// state; `reconcile_live_state` then overwrites the DISPLAY state without
+    /// recomputing it, so the wire can ship `state: "active"` alongside
+    /// `unresumable: true` for a session whose pane is running right now. The
+    /// prune already refuses to touch such a row ([`is_clearable_state`]'s
+    /// `stopped|errored` gate, and the `live_tmux_names` guard from PR #4725
+    /// round 2), so hiding on the raw flag would have made it hidden AND
+    /// unreapable — the exact "running agent unreachable through `tm`" outcome
+    /// those guards were built to prevent. Keying off this field instead makes
+    /// `hidden ⟺ prunable` true by construction, and makes the hidden set
+    /// exactly what [`pending`](Self::pending) counts.
+    pub(crate) dead_ids: HashSet<String>,
+}
+
+/// What one listing-time prune hands its caller (#4994).
+///
+/// Why: the display scoping needs BOTH halves — the surviving rows and which of
+/// them the sweep classified dead — and they must come from the same call, or
+/// the view is scoped against a classification some other invocation computed.
+pub(crate) struct PrunedListing {
+    /// Every session surviving the sweep, dead-but-unreaped ones included.
+    pub(crate) sessions: Vec<ManagedSessionSummary>,
+    /// The subset of `sessions` the sweep classified dead — see
+    /// [`AutoPruneOutcome::dead_ids`].
+    pub(crate) dead_ids: HashSet<String>,
 }
 
 /// Everything the prune needs from its environment, resolved once per
@@ -265,8 +295,16 @@ pub(crate) async fn prune_and_report(
     client: &reqwest::Client,
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
-) -> Vec<ManagedSessionSummary> {
-    prune_and_report_at(client, url, sessions, &PruneContext::production()).await
+    hides_dead_rows: bool,
+) -> PrunedListing {
+    prune_and_report_at(
+        client,
+        url,
+        sessions,
+        &PruneContext::production(),
+        hides_dead_rows,
+    )
+    .await
 }
 
 /// [`prune_and_report`] with an injected [`PruneContext`] — the testable core.
@@ -282,7 +320,8 @@ pub(crate) async fn prune_and_report_at(
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
     ctx: &PruneContext,
-) -> Vec<ManagedSessionSummary> {
+    hides_dead_rows: bool,
+) -> PrunedListing {
     let outcome = auto_prune_dead_records_at(
         client,
         url,
@@ -299,16 +338,24 @@ pub(crate) async fn prune_and_report_at(
         );
     }
     if outcome.pending > 0 {
-        // #4994: these rows are no longer in the default table, so the count has
-        // to say where they went — otherwise it reports a number the operator
-        // cannot reconcile against anything on screen.
+        // #4994: the suffix is conditional because `--json` and `--all` PRINT
+        // these rows. Claiming they are hidden where they are visibly listed
+        // sends the operator looking for a view they are already in.
+        let suffix = if hides_dead_rows {
+            " (hidden; `tm ls --all` to see them)"
+        } else {
+            ""
+        };
         eprintln!(
-            "tm: {} more dead record{} pending confirmation (hidden; `tm ls --all` to see them)",
+            "tm: {} more dead record{} pending confirmation{suffix}",
             outcome.pending,
             if outcome.pending == 1 { "" } else { "s" }
         );
     }
-    outcome.kept
+    PrunedListing {
+        sessions: outcome.kept,
+        dead_ids: outcome.dead_ids,
+    }
 }
 
 /// The workdir candidates a LISTED session carries on the wire (#4702).
@@ -636,6 +683,10 @@ pub(crate) async fn auto_prune_dead_records_at(
             kept: sessions,
             pruned: 0,
             pending: 0,
+            // No liveness signal means no classification, so nothing is hidden
+            // either — the fail-closed contract now covers the view as well as
+            // the sweep (#4994).
+            dead_ids: HashSet::new(),
         };
     };
 
@@ -650,6 +701,10 @@ pub(crate) async fn auto_prune_dead_records_at(
             kept.push(s);
         }
     }
+
+    // #4994: the classification the default view hides is captured HERE, from
+    // the same partition the sweep acts on — never re-derived from the wire.
+    let mut dead_ids: HashSet<String> = dead.iter().map(|s| s.id.clone()).collect();
 
     let mut seen = load_seen(marker_path);
     let mut changed = false;
@@ -670,6 +725,7 @@ pub(crate) async fn auto_prune_dead_records_at(
             kept,
             pruned: 0,
             pending: 0,
+            dead_ids,
         };
     }
 
@@ -726,6 +782,9 @@ pub(crate) async fn auto_prune_dead_records_at(
                 DecommissionOutcome::Pruned => {
                     pruned += 1;
                     seen.remove(&s.id);
+                    // It is gone from `kept`, so it must leave `dead_ids` too —
+                    // the set describes rows still on screen.
+                    dead_ids.remove(&s.id);
                     changed = true;
                 }
                 DecommissionOutcome::Failed => kept.push(s),
@@ -767,6 +826,7 @@ pub(crate) async fn auto_prune_dead_records_at(
         kept,
         pruned,
         pending,
+        dead_ids,
     }
 }
 

@@ -95,6 +95,7 @@ fn scope_for_display_all_keeps_tombstone_in_slot_order() {
     let sessions = scope_for_display(
         parse_managed_sessions(&raw).expect("parse must succeed"),
         true,
+        &std::collections::HashSet::new(),
     );
 
     // All 4 rows survive `--all` (nothing dropped, unlike the default view).

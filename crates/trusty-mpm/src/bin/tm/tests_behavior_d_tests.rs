@@ -1836,18 +1836,25 @@ async fn fetch_raw_live(
     crate::commands::session_picker::parse_managed_sessions(&raw).expect("parse")
 }
 
-/// Fetch what a DEFAULT (non-`--all`) `tm ls` would actually render, without
-/// running the auto-prune (#4994).
+/// Scope a list the way a DEFAULT (non-`--all`) `tm ls` does, given an EMPTY
+/// dead set — i.e. exactly the pre-#4994 filter: state and slot-tombstone only.
 ///
-/// Why: [`fetch_raw_live`] deliberately returns every wire row so a test can see
-/// a dead record BEFORE the sweep clears it. The post-prune assertions need the
-/// opposite question answered — "is this row still in the operator's default
-/// view?" — which since #4994 is a different set: it drops decommissioned rows
-/// (the prune's own outcome) and dead `unresumable` rows alike.
-fn default_view(
+/// 🔴 The empty set is the point, not a shortcut. `seed_dead_session` fixtures
+/// carry `unresumable: true`, so a filter keyed on that flag would drop the
+/// record whether or not the prune ever reached the daemon, and the three
+/// registry-teardown assertions below would pass under a
+/// `decommission_dead_record` that contacts nothing (critic HIGH, PR #4995
+/// review). With no dead ids the ONLY thing that can hide the record is the
+/// daemon actually flipping it to `decommissioned` — which is what those
+/// assertions exist to prove.
+fn default_view_pre_4994(
     sessions: Vec<trusty_mpm::client::ManagedSessionSummary>,
 ) -> Vec<trusty_mpm::client::ManagedSessionSummary> {
-    crate::commands::session_picker::scope_for_display(sessions, false)
+    crate::commands::session_picker::scope_for_display(
+        sessions,
+        false,
+        &std::collections::HashSet::new(),
+    )
 }
 
 /// A FIRST sighting of an `unresumable` record is never pruned — only
@@ -1967,7 +1974,7 @@ async fn auto_prune_dead_records_removes_confirmed_unresumable_records() {
     // The daemon's own record must have been torn down for real (not merely
     // dropped client-side) — decommission tombstones it, which the default
     // view hides.
-    let refetched = default_view(fetch_raw_live(&client, &server.url).await);
+    let refetched = default_view_pre_4994(fetch_raw_live(&client, &server.url).await);
     assert!(
         !refetched.iter().any(|s| s.id == id.to_string()),
         "the decommissioned record must no longer appear in the default listing"
@@ -2646,7 +2653,7 @@ async fn session_ls_prunes_dead_records_on_piped_invocation() {
     let ctx = hermetic_prune_ctx(&marker_path);
     ls(&ctx).await;
 
-    let live = default_view(fetch_raw_live(&client, &server.url).await);
+    let live = default_view_pre_4994(fetch_raw_live(&client, &server.url).await);
     assert!(
         !live.iter().any(|s| s.id == id.to_string()),
         "a non-TTY `tm ls` must clear a confirmed dead record from the registry"
@@ -2686,7 +2693,7 @@ async fn session_ls_json_passthrough_prunes_dead_records() {
     backdate_sightings(&marker_path, 11);
     ls_json(&hermetic_prune_ctx(&marker_path)).await;
 
-    let live = default_view(fetch_raw_live(&client, &server.url).await);
+    let live = default_view_pre_4994(fetch_raw_live(&client, &server.url).await);
     assert!(
         !live.iter().any(|s| s.id == id.to_string()),
         "`tm ls --json` must clear a confirmed dead record from the registry"

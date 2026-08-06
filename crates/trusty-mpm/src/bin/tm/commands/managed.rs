@@ -95,72 +95,84 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
 /// to or restart any `"decommissioned"`/`"deleted"` session before any daemon
 /// round-trip. Both guards key off the session's own state/flags, not off
 /// whether this predicate decided to show or hide the row.
-/// #4994 adds the third input, `unresumable`. Until it did, this predicate
+/// #4994 adds the third input, `classified_dead`. Until it did, this predicate
 /// consulted lifecycle state alone and never asked whether the session still
 /// existed: a record with `state == "stopped"` whose tmux pane is gone AND whose
 /// workspace directory no longer exists anywhere on disk took the catch-all
-/// `true` arm into the default view. The daemon already detects that exactly
-/// (`session_manager::resume_workdir::is_unresumable`) and ships the verdict as
-/// [`ManagedSessionSummary::unresumable`], which
-/// [`render_session_table`] has been printing as `[dead]` all along — the
-/// detection was right, the filter simply never acted on it. Six such rows sat
-/// in the owner's default `tm ls`. Hiding them is a VISIBILITY change only; the
-/// records are untouched and `tm ls --all` still lists every one.
+/// `true` arm into the default view. Six such rows sat in the owner's default
+/// `tm ls`, each already rendered `[dead]`. Hiding them is a VISIBILITY change
+/// only; the records are untouched and `tm ls --all` still lists every one.
 ///
-/// The `unresumable` arm sits deliberately BELOW the `"deleted"` arm, so a
-/// #3034 slot tombstone still renders at its slot no matter what the flag says.
+/// 🔴 `classified_dead` is the listing-time sweep's own verdict
+/// ([`AutoPruneOutcome::dead_ids`](crate::commands::session_picker_prune::AutoPruneOutcome::dead_ids)),
+/// NEVER the wire's `unresumable` flag. The flag is computed daemon-side from a
+/// record's PERSISTED state and `reconcile_live_state` then overwrites the
+/// DISPLAY state without recomputing it, so the wire ships `state: "active"`
+/// with `unresumable: true` for a session whose pane is running right now —
+/// reachable any time a daemon restart resets records to persisted `Stopped`
+/// and this repo's own post-merge `git worktree remove` takes the workspace
+/// while the pane survives. Hiding on the flag would hide that session, and the
+/// prune would then refuse to reap it (`is_clearable_state`'s `stopped|errored`
+/// gate; the `live_tmux_names` guard from PR #4725 round 2) — hidden AND
+/// unreapable, which is precisely the "running agent unreachable through `tm`"
+/// outcome those guards exist to prevent. Keying off the classification instead
+/// makes `hidden ⟺ prunable` hold by construction.
+///
+/// The `classified_dead` arm sits deliberately BELOW the `"deleted"` arm, so a
+/// #3034 slot tombstone still renders at its slot regardless.
 /// What: returns `false` for `"decommissioned"` (always hidden), for
 /// `"deleted"` when `is_slot_tombstone` is `false` (a soft-deleted,
-/// still-in-store record), and for any other state when `unresumable` is `true`
-/// (#4994); returns `true` otherwise — including for `"deleted"` when
+/// still-in-store record), and for any other state when `classified_dead` is
+/// `true` (#4994); returns `true` otherwise — including for `"deleted"` when
 /// `is_slot_tombstone` is `true` (a #3034 numbered-slot tombstone).
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
 /// `is_live_session_state_excludes_soft_deleted_record`,
 /// `is_live_session_state_keeps_slot_tombstone_visible`,
-/// `is_live_session_state_hides_unresumable_record`,
+/// `is_live_session_state_hides_a_record_the_prune_classified_dead`,
 /// `is_live_session_state_keeps_resumable_stopped_record`,
-/// `is_live_session_state_keeps_slot_tombstone_even_when_unresumable` in
+/// `is_live_session_state_keeps_slot_tombstone_even_when_classified_dead` in
 /// `tests_behavior_e_tests.rs`.
 pub(crate) fn is_live_session_state(
     state: &str,
     is_slot_tombstone: bool,
-    unresumable: bool,
+    classified_dead: bool,
 ) -> bool {
     match state {
         "decommissioned" => false,
         "deleted" => is_slot_tombstone,
-        // #4994: no pane, no workspace on disk — genuinely unrecoverable, so it
-        // is hidden from the default view exactly like `decommissioned`.
-        _ => !unresumable,
+        // #4994: the sweep confirmed no pane and no workspace on disk, so this
+        // row is hidden from the default view exactly like `decommissioned`.
+        _ => !classified_dead,
     }
 }
 
 /// Filter a session list to only live sessions for display in the picker (#1809).
 ///
 /// Why: the picker must never show decommissioned tombstones (or a
-/// soft-deleted, still-in-store record, or — since #4994 — a dead
-/// `unresumable` record) by default; the `--all` opt-in re-enables them for
-/// `tm session ls` via this module's path. A #3034 numbered-slot tombstone
-/// (`ManagedSessionSummary::deleted == true`) is deliberately kept regardless —
-/// see [`is_live_session_state`]'s doc.
+/// soft-deleted, still-in-store record, or — since #4994 — a record the
+/// listing-time sweep classified dead) by default; the `--all` opt-in
+/// re-enables them for `tm session ls` via this module's path. A #3034
+/// numbered-slot tombstone (`ManagedSessionSummary::deleted == true`) is
+/// deliberately kept regardless — see [`is_live_session_state`]'s doc.
 ///
-/// 🔴 This runs AFTER the listing-time auto-prune, never before it (#4994) —
-/// see [`crate::commands::session_picker::scope_for_display`]. Dropping a dead
-/// row upstream of
-/// [`prune_and_report_at`](crate::commands::session_picker_prune::prune_and_report_at)
-/// would starve the sweep of the exact records it exists to reap, so they would
-/// accumulate in the store forever, now invisibly.
-/// What: retains only sessions whose `(state, deleted, unresumable)` triple
-/// passes [`is_live_session_state`].
+/// 🔴 `dead_ids` must come from the SAME sweep that just ran over this list —
+/// see [`crate::commands::session_picker::scope_for_display`]. That forces two
+/// things at once: the filter runs AFTER the prune (dropping a dead row
+/// upstream would starve the sweep of the records it exists to reap, so they
+/// would accumulate in the store forever, now invisibly), and it hides only
+/// what the sweep is willing to reap.
+/// What: retains only sessions whose `(state, deleted, dead_ids-membership)`
+/// triple passes [`is_live_session_state`].
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
-/// `picker_filter_hides_dead_records_keeps_resumable_stopped` in
-/// `tests_behavior_e_tests.rs`.
+/// `picker_filter_hides_only_what_the_prune_classified_dead`,
+/// `picker_filter_keeps_a_live_row_flagged_unresumable`.
 pub(crate) fn filter_live_sessions(
     sessions: Vec<ManagedSessionSummary>,
+    dead_ids: &std::collections::HashSet<String>,
 ) -> Vec<ManagedSessionSummary> {
     sessions
         .into_iter()
-        .filter(|s| is_live_session_state(&s.state, s.deleted, s.unresumable))
+        .filter(|s| is_live_session_state(&s.state, s.deleted, dead_ids.contains(&s.id)))
         .collect()
 }
 
@@ -235,7 +247,7 @@ pub(crate) async fn session_ls(
 /// Test: `session_ls_prunes_dead_records_on_piped_invocation`,
 /// `session_ls_json_passthrough_prunes_dead_records`,
 /// `session_ls_json_never_refetches_after_pruning`; the scoping half by
-/// `picker_filter_hides_dead_records_keeps_resumable_stopped` and
+/// `picker_filter_hides_only_what_the_prune_classified_dead` and
 /// `scope_for_display_all_keeps_dead_record_visible`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_ls_at(
@@ -259,17 +271,26 @@ pub(crate) async fn session_ls_at(
         // byte-for-byte. #4702: prune as a side effect, then echo the body we
         // ALREADY have. No re-GET — see this function's doc.
         if let Ok(sessions) = parsed {
-            crate::commands::session_picker_prune::prune_and_report_at(client, url, sessions, ctx)
-                .await;
+            // `--json` echoes the raw body, dead rows included, so the banner
+            // must not claim anything was hidden (#4994).
+            crate::commands::session_picker_prune::prune_and_report_at(
+                client, url, sessions, ctx, false,
+            )
+            .await;
         }
         println!("{raw}");
         return Ok(());
     }
-    let sessions =
-        crate::commands::session_picker_prune::prune_and_report_at(client, url, parsed?, ctx).await;
-    // #4994: scope AFTER the prune, never before — the default view now hides
-    // exactly the dead rows the prune exists to reap.
-    let sessions = crate::commands::session_picker::scope_for_display(sessions, all);
+    let listing =
+        crate::commands::session_picker_prune::prune_and_report_at(client, url, parsed?, ctx, !all)
+            .await;
+    // #4994: scope AFTER the prune, never before — and against that sweep's own
+    // verdict, so the rows hidden here are exactly the rows it will reap.
+    let sessions = crate::commands::session_picker::scope_for_display(
+        listing.sessions,
+        all,
+        &listing.dead_ids,
+    );
     let mut sessions =
         crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_deref());
     crate::commands::session_picker::sort_sessions(&mut sessions, sort);
