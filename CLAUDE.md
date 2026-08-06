@@ -316,98 +316,11 @@ When publishing a crate to crates.io:
 
 ## Parallel Worktree Discipline
 
-**CRITICAL RULES FOR CONCURRENT SESSIONS:**
-
-🔴 **SOURCE OF TRUTH = `origin/main:HEAD`.** Local `main` may be stale. **Always `git fetch origin main` and branch worktrees off `origin/main`** (not local main). Stale local main has caused lost commits and missed features. This is not optional.
-
-🔴 **The main checkout is inspection-only.** From the repo root
-(`/path/to/trusty-tools/`), the only allowed operations are read-only: `git status`,
-`git log`, `git diff`, `git show`, file reads. **FORBIDDEN**: edits, `git reset --hard`,
-`git checkout .`, `git stash`, `git restore .`, `cargo build`/`cargo test`,
-`sed`/`awk`/`patch`, or any command that mutates the working tree, index, or `target/`.
-
-🔴 **All write-side work happens in a dedicated git worktree branched off
-`origin/main`.** Provision one before starting any edit, build, or test:
-
-```bash
-git fetch origin main
-git worktree add -b <feature-or-fix-branch> \
-                  .claude/worktrees/<dirname> origin/main
-cd .claude/worktrees/<dirname>
-# … edit, build, test, commit, push from here …
-```
-
-**End-to-end delivery chain:** accepted outcome → optional issue → worktree
-branch → one cohesive PR → applicable Rust gates → trusty-review gate →
-squash-merge → worktree cleanup. The framework skill `tm-pr-workflow` owns the
-full sequence and the optional-issue rule; this file adds only the Rust-specific
-gates (see the Rust Test Ladder above). *(This project-instruction host was
-`.trusty-mpm/INSTRUCTIONS.md` until #4286 retired it; the delivery chain itself
-now lives in `tm-pr-workflow`.)*
-
-🔴 **A worktree is a writer; the branch is the workstream.** The durable unit is
-the **branch** — one branch per workstream, and a session owns exactly one
-workstream. A worktree is only the checkout that lets you write to that branch:
-ephemeral, disposable, and recreatable at any time with `git worktree add`.
-Never treat a worktree as the thing being preserved; losing one loses nothing
-the branch does not still hold.
-
-What follows from that:
-
-- **One branch and worktree per independently reviewable PR outcome** — not per
-  ticket, per refactor step, or per experiment. Several related tickets may
-  share one worktree when a single coherent change satisfies them
-  (`Closes #A`, `Closes #B`).
-- **Everything that outcome owes stays in the same worktree and PR:** the
-  implementation, its regression tests, necessary local refactoring, docs, the
-  changelog fragment, and in-scope review fixes. Do not open a second worktree
-  for the tests you still owe the first one.
-- **Experiments stay session-local.** Promote an experiment to a branch and
-  worktree only once its result is accepted for implementation.
-- **Cleanup:** `git worktree remove --force <path>` once the PR has merged, then
-  `git branch -D <branch>` and `git push origin --delete <branch>` — the branch
-  goes last, because until the squash-merge has landed it is the only durable
-  copy of the workstream.
-
-🟡 **If you absolutely must run a command from the main checkout** — for
-example `cargo install --path crates/<name> --locked` after a merge —
-stash first, operate, then restore:
-
-```bash
-git -C /path/to/main-checkout stash push -u \
-    -m "claude: pre-op-safety $(date +%s)"
-# … do the op …
-git -C /path/to/main-checkout stash pop
-```
-
-Surface the stash name in your report if popping fails so the human can
-restore manually.
-
-🟡 **`cargo install` from a worktree, not the main checkout.** The preferred
-pattern for installing a freshly-built binary onto your PATH is:
-
-```bash
-cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked
-```
-
-Cargo writes atomically to a temp file and renames into `~/.cargo/bin/`,
-which keeps the macOS kernel's cdhash cache consistent (see the
-release-workflow note above). The main checkout never needs to be involved.
-
-🟢 **Subagents inherit these rules.** Every `Agent`/`Task` dispatch prompt
-**must** name the exact worktree path the agent should operate from and forbid
-leaving that worktree into the main checkout, `git reset --hard`, `git checkout .`,
-and `git stash` against the main checkout, and touching files outside the assigned worktree.
-
-The pattern of instructing an agent to "operate from the main checkout" is banned.
-QA agents get their own worktree (`.claude/worktrees/qa-<ticket-or-pass>`) just
-like engineering agents.
-
-🟢 **Worktree cleanup is safe.** `git worktree remove --force <path>` deletes
-the worktree directory but never the main checkout. Use `git branch -D <branch>`
-and `git push origin --delete <branch>` to clean up refs after a squash-merge.
-
-> **Extended discipline rationale and cleanup details:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
+🔴 Checkout/worktree discipline (main checkout is inspection-only, branch off
+`origin/main`, one worktree per PR outcome, subagent confinement, cleanup
+order) lives in the `tm-pr-workflow` skill's "Worktree Discipline" section.
+Rust/macOS-specific hazards (the `cargo install` cdhash cache, install-from-
+worktree commands) are in [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
 
 ## Abbreviations & Aliases
 

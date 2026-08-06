@@ -89,11 +89,9 @@ else.
 
 ## Worktree Discipline (Mandatory Before Any Edit)
 
-Per root `CLAUDE.md`: the main checkout is **inspection-only** (read-only
-`git status`/`log`/`diff`/`show`, file reads — no edits, no builds or test
-runs (whatever the project's gate is — `cargo build`/`test`, `npm run
-build`/`test`, `pytest`, ...), no destructive git ops). All write-side work
-happens in a dedicated worktree branched off `origin/main`:
+**Source of truth is `origin/main:HEAD`, not local `main`.** Local main can go
+stale — always fetch before branching, and provision a dedicated worktree
+before any edit, build, or test run:
 
 ```bash
 git fetch origin main
@@ -102,11 +100,57 @@ git worktree add -b <feature-or-fix-branch> \
 cd .claude/worktrees/<dirname>
 ```
 
-Every subagent dispatch must name the exact worktree path it is confined to
-and must never leave it into the main checkout, `git reset --hard`, `git
-checkout .`, or `git stash` against main. Clean up after merge with `git
-worktree remove --force <path>` and `git branch -D <branch>` — this never
-touches the main checkout.
+**The main checkout is inspection-only.** Read-only operations only —
+`git status`/`log`/`diff`/`show`, file reads. Forbidden against it: any edit;
+any build or test run (whatever the project's gate is — `cargo build`/`test`,
+`npm run build`/`test`, `pytest`, ...); any destructive git operation (`git
+reset --hard`, `git checkout .`, `git stash`, `git restore .`); any
+file-mutating command (`sed`/`awk`/`patch`) — or anything else that mutates
+the working tree, index, or build output.
+
+**A worktree is a writer; the branch is the workstream.** The durable unit is
+the branch — one branch per workstream, one session per workstream. A
+worktree is only the checkout that lets you write to that branch: ephemeral,
+disposable, recreatable at any time with `git worktree add`. Losing a
+worktree loses nothing the branch does not still hold.
+
+**One branch and worktree per independently reviewable PR outcome** — not per
+ticket, per refactor step, or per experiment. Several related tickets may
+share one worktree when a single coherent change satisfies them (`Closes #A`,
+`Closes #B`); see "One Outcome, One PR" above for everything that outcome owes
+and keeps bundled in that same worktree and PR. Experiments stay
+session-local — promote one to a branch and worktree only once its result is
+accepted for implementation.
+
+**Cleanup, in order:** `git worktree remove --force <path>` once the PR has
+merged, then `git branch -D <branch>` and `git push origin --delete <branch>`
+— the branch goes last, because until the squash-merge lands it is the only
+durable copy of the workstream. `git worktree remove` deletes only the
+worktree directory; it never touches the main checkout or any other worktree.
+
+**A command that genuinely must run from the main checkout** (a post-merge
+install step, say) stashes first, operates, then restores:
+
+```bash
+git -C /path/to/main-checkout stash push -u -m "claude: pre-op-safety $(date +%s)"
+# … do the op …
+git -C /path/to/main-checkout stash pop
+```
+
+Surface the stash name in your report if popping fails, so the human can
+restore manually. This is a narrow exception, not license for routine edits
+from the main checkout.
+
+**Every subagent dispatch must name the exact worktree path it is confined
+to**, and must never leave it: no operating from the main checkout, no `git
+reset --hard` / `git checkout .` / `git stash` against main, no touching
+files outside the assigned worktree. "Operate from the main checkout" is a
+banned instruction pattern in any dispatch prompt — QA agents get their own
+worktree (e.g. `.claude/worktrees/qa-<ticket-or-pass>`) exactly like
+engineering agents.
+
+Project-specific worktree hazards (binary-install caveats, code-signing
+caches, and the like) belong in the project's own reference docs, not here.
 
 ## Branch Protection
 

@@ -29,3 +29,38 @@ These operations touch only refs, never working trees.
 
 Deleting a worktree does NOT delete the main checkout or any other worktree.
 A worktree is disposable — all durable state lives in git objects and refs.
+
+For the generic discipline (main checkout inspection-only, branch off
+`origin/main`, one branch per PR outcome, subagent worktree confinement,
+cleanup order), see the "Worktree Discipline" section of the `tm-pr-workflow`
+skill — this page carries only what is specific to this repo's Cargo/macOS
+toolchain.
+
+## Installing a Freshly Built Binary
+
+Prefer installing from the worktree, never the main checkout:
+
+```bash
+cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked
+```
+
+Cargo writes atomically to a temp file and renames into `~/.cargo/bin/`,
+which keeps the macOS kernel's cdhash cache consistent — see
+[release-workflow.md](release-workflow.md) for the full cdhash hazard (why a
+bare `cp` over an on-PATH binary SIGKILLs the next exec, and the TCC-grant
+consequences). The main checkout never needs to be involved.
+
+If a command genuinely must run from the main checkout — for example
+`cargo install --path crates/<name> --locked` right after a merge lands —
+stash first, operate, then restore:
+
+```bash
+git -C /path/to/main-checkout stash push -u \
+    -m "claude: pre-op-safety $(date +%s)"
+# … do the op …
+git -C /path/to/main-checkout stash pop
+```
+
+Surface the stash name in the report if popping fails, so the change can be
+restored manually. This is the narrow exception the `tm-pr-workflow` worktree
+rules call out — it does not license routine edits from the main checkout.
