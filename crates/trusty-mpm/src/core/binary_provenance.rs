@@ -331,9 +331,12 @@ pub fn provenance_report(
 /// What: compares canonicalised paths when both canonicalise (i.e. both exist),
 /// otherwise falls back to a literal comparison. A path that cannot be
 /// canonicalised is not silently treated as equal.
+/// #4033 follow-up: `pub(crate)` so `core::binary_reinstall` decides the
+/// same-file question with this exact implementation rather than a second copy
+/// that could drift on the symlink case.
 /// Test: `unknown_when_running_binary_is_not_the_cargo_install`,
 /// `ok_for_a_matching_registry_install`.
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
@@ -341,7 +344,10 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// Render an [`InstallSource`] for an operator-facing message.
-fn describe(source: &InstallSource) -> String {
+///
+/// `pub(crate)` so `core::binary_reinstall`'s refusal messages describe the
+/// same ledger with the same words this module's doctor verdict does.
+pub(crate) fn describe(source: &InstallSource) -> String {
     match source {
         InstallSource::Registry => "crates.io".to_string(),
         InstallSource::Git(rev) => format!("git ({rev})"),

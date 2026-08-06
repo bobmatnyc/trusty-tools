@@ -469,6 +469,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
+        Some(Command::Reinstall(args)) => commands::reinstall::run(args).await,
         Some(Command::Hook { pm_guard }) => {
             if pm_guard {
                 commands::pm_guard::pm_guard(&url).await
