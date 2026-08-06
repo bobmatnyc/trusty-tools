@@ -121,6 +121,7 @@ fn retention_verdict_keeps_record_whose_workspace_still_exists() {
 /// whole legacy backlog on the first sweep with zero retention.
 #[test]
 fn retention_verdict_stamps_undated_terminal_record() {
+    let now = Utc::now();
     for state in [
         ManagedSessionState::Decommissioned,
         ManagedSessionState::Deleted,
@@ -128,9 +129,11 @@ fn retention_verdict_stamps_undated_terminal_record() {
         let mut r = base_record();
         r.state = state;
         r.terminal_at = None;
+        r.last_activity_at = Some(now - Duration::days(90));
         assert_eq!(
-            retention_verdict(&r, false, Utc::now(), window()),
-            RetentionVerdict::Stamp
+            retention_verdict(&r, false, now, window()),
+            RetentionVerdict::Stamp(now - Duration::days(90)),
+            "the stamp carries the inferred date, not `now`"
         );
     }
 }
@@ -377,11 +380,18 @@ async fn sweep_never_touches_the_filesystem() {
     assert!(mgr.get(&id).await.is_ok(), "record itself survives too");
 }
 
-/// Why: a legacy record (no `terminal_at`) must be dated, not deleted — and the
-/// stamp must persist so the window survives a daemon restart. A second sweep
-/// immediately afterwards must still not evict it.
+/// Why: the backlog this feature exists to clear is entirely legacy records —
+/// 76 of 116 on the reporting machine. Stamping them `now` would grandfather
+/// every one for a further seven days, so the owner would install the fix and
+/// still see the same `NUM`. An old record must be dated from its own history
+/// and become eligible on the very next sweep.
+/// What: seeds a legacy record whose last activity was 400 days ago, asserts
+/// sweep 1 backfills that date rather than deleting outright (so the inference
+/// is on disk before anything acts on it), then that the record goes through
+/// the ordinary arm-and-evict path with no wait.
+/// Test: this test.
 #[tokio::test]
-async fn sweep_stamps_legacy_records_instead_of_evicting_them() {
+async fn sweep_backfills_an_old_legacy_record_and_evicts_it_without_waiting() {
     let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
@@ -405,25 +415,253 @@ async fn sweep_stamps_legacy_records_instead_of_evicting_them() {
     assert_eq!(first.stamped, 1, "{first:?}");
     assert!(
         first.evicted.is_empty(),
-        "a year-old created_at must not shorten retention: {first:?}"
+        "the inferred date is written before anything acts on it: {first:?}"
     );
-    let stamped = mgr.get(&rec.id).await.expect("still present");
-    assert!(stamped.terminal_at.is_some(), "stamp persisted");
+    let stamped = mgr.get(&rec.id).await.expect("still present").terminal_at;
+    let age = Utc::now() - stamped.expect("stamped");
+    assert!(
+        age > Duration::days(399),
+        "backfilled from the record's own history, not from `now`: {stamped:?}"
+    );
 
+    // Already past the window, so it arms on the next sweep and goes on the one
+    // after — no seven-day wait.
     let second = mgr
         .sweep_terminal_records(Utc::now(), window(), &mut gate)
         .await
         .expect("second sweep");
-    assert!(
-        second.is_empty(),
-        "already stamped, still inside: {second:?}"
+    assert!(second.evicted.is_empty(), "armed only: {second:?}");
+    let third = mgr
+        .sweep_terminal_records(Utc::now(), window(), &mut gate)
+        .await
+        .expect("third sweep");
+    assert_eq!(
+        third.evicted,
+        vec![rec.id],
+        "evicted without waiting a window"
     );
-    assert!(mgr.get(&rec.id).await.is_ok());
+}
 
-    // Only once the stamped window has elapsed does it go — and only on the
-    // SECOND sweep past that point, per the debounce.
-    let later = sweep_twice(&mgr, Utc::now() + window()).await;
+/// Why: the inference must not sweep away a session decommissioned yesterday
+/// just because it also predates the field. A recent legacy record keeps its
+/// full window, which is the #3034 tombstone guarantee.
+/// What: seeds a legacy record active two days ago, asserts it is backfilled to
+/// that date and survives repeated sweeps, then that it goes once the window
+/// has genuinely elapsed.
+/// Test: this test.
+#[tokio::test]
+async fn sweep_gives_a_recent_legacy_record_its_full_window() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let rec = mgr
+        .create("recent".into(), None, None, None, None, None)
+        .await
+        .expect("create");
+    let mut legacy = mgr.get(&rec.id).await.expect("get");
+    legacy.state = ManagedSessionState::Decommissioned;
+    legacy.created_at = Utc::now() - Duration::days(2);
+    legacy.last_activity_at = Some(Utc::now() - Duration::days(2));
+    legacy.terminal_at = None;
+    legacy.workspace_path = None;
+    mgr.store.write().await.upsert(legacy).await.expect("seed");
+
+    let mut gate = RetentionDebounce::new();
+    for pass in 0..3 {
+        let outcome = mgr
+            .sweep_terminal_records(Utc::now(), window(), &mut gate)
+            .await
+            .expect("sweep");
+        assert!(
+            outcome.evicted.is_empty(),
+            "a 2-day-old tombstone must survive (pass {pass}): {outcome:?}"
+        );
+    }
+    assert!(mgr.get(&rec.id).await.is_ok(), "still in the store");
+
+    // …and it does go once its own window has actually elapsed.
+    let later = sweep_twice(&mgr, Utc::now() + Duration::days(6)).await;
     assert_eq!(later.evicted, vec![rec.id]);
+}
+
+/// Why: a timestamp in the future is not evidence of anything — clock skew, or
+/// a corrupt record. Dating from it would compute a negative age; worse, any
+/// scheme that treated "unusable" as "old" would delete on the strength of a
+/// value that cannot be true. Such a record gets `now` and a full window.
+/// What: seeds a legacy record whose `created_at` and `last_activity_at` are
+/// both a year ahead, asserts the stamp is `now` (not the future value) and
+/// that it is not evicted.
+/// Test: this test.
+#[tokio::test]
+async fn sweep_stamps_now_when_a_legacy_record_has_no_usable_signal() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let rec = mgr
+        .create("skewed".into(), None, None, None, None, None)
+        .await
+        .expect("create");
+    let mut legacy = mgr.get(&rec.id).await.expect("get");
+    legacy.state = ManagedSessionState::Decommissioned;
+    legacy.created_at = Utc::now() + Duration::days(365);
+    legacy.last_activity_at = Some(Utc::now() + Duration::days(365));
+    legacy.terminal_at = None;
+    legacy.workspace_path = None;
+    mgr.store.write().await.upsert(legacy).await.expect("seed");
+
+    let now = Utc::now();
+    let mut gate = RetentionDebounce::new();
+    let first = mgr
+        .sweep_terminal_records(now, window(), &mut gate)
+        .await
+        .expect("first sweep");
+    assert_eq!(first.stamped, 1);
+    assert_eq!(
+        mgr.get(&rec.id).await.expect("present").terminal_at,
+        Some(now),
+        "an unusable signal falls back to `now`, not to the future value"
+    );
+
+    let second = mgr
+        .sweep_terminal_records(now, window(), &mut gate)
+        .await
+        .expect("second sweep");
+    assert!(second.evicted.is_empty(), "and it gets a full window");
+}
+
+/// Why: the backfill must not open a path around the workspace guard. An old
+/// legacy record whose directory still exists is exactly the shape that guard
+/// exists for — its `workspace_path` is what keeps `prune_orphaned_worktrees`
+/// from deleting the worktree — and the inference gives it a date old enough to
+/// evict if the guard were checked in the wrong order.
+/// What: seeds a 400-day legacy record with a real directory and a canary file,
+/// sweeps three times, and asserts nothing is stamped or evicted and the
+/// directory survives intact.
+/// Test: this test.
+#[tokio::test]
+async fn sweep_backfill_still_spares_a_legacy_record_whose_workspace_exists() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let workspace = TempDir::new().expect("workspace");
+    let canary = workspace.path().join("unsaved-work.txt");
+    std::fs::write(&canary, b"do not delete me").expect("write canary");
+
+    let rec = mgr
+        .create("legacy-with-workspace".into(), None, None, None, None, None)
+        .await
+        .expect("create");
+    let mut legacy = mgr.get(&rec.id).await.expect("get");
+    legacy.state = ManagedSessionState::Decommissioned;
+    legacy.created_at = Utc::now() - Duration::days(400);
+    legacy.last_activity_at = Some(Utc::now() - Duration::days(400));
+    legacy.terminal_at = None;
+    legacy.workspace_path = Some(workspace.path().to_path_buf());
+    mgr.store.write().await.upsert(legacy).await.expect("seed");
+
+    let mut gate = RetentionDebounce::new();
+    for pass in 0..3 {
+        let outcome = mgr
+            .sweep_terminal_records(Utc::now(), window(), &mut gate)
+            .await
+            .expect("sweep");
+        assert!(
+            outcome.is_empty(),
+            "the workspace guard runs BEFORE the backfill (pass {pass}): {outcome:?}"
+        );
+    }
+    assert!(mgr.get(&rec.id).await.is_ok(), "record survives");
+    assert!(canary.exists(), "and so does the work inside its workspace");
+}
+
+// ── phase 3: re-validation against the current store ────────────────────────
+//
+// These reach `revalidate_for_eviction` directly. They have to: inside the full
+// sweep, phase 1 re-derives candidates every tick, so anything that changes
+// between ticks is dropped there and the phase-3 loop body never executes —
+// confirmed by instrumenting the loop. The candidate list is a plain `Vec<Id>`,
+// exactly what phase 2 produces, and handing it one computed from an older view
+// of the store IS the stale snapshot these arms defend against.
+
+/// Why: the passing arm — re-validation must not become a blanket refusal to
+/// delete. If this went green while the two below also went green, the guard
+/// would be indistinguishable from "never evict anything".
+/// What: a candidate that is still terminal, still stale, and still has no
+/// workspace survives re-validation.
+/// Test: this test.
+#[tokio::test]
+async fn revalidate_keeps_a_still_evictable_record() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let stale = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+
+    let survivors = mgr
+        .revalidate_for_eviction(vec![stale], Utc::now(), window())
+        .await;
+    assert_eq!(
+        survivors,
+        vec![stale],
+        "an unchanged candidate still evicts"
+    );
+}
+
+/// Why: THE stale-snapshot guard. A record reactivated after the snapshot was
+/// taken — by another process, or by this daemon between the phases — must not
+/// be deleted on the strength of a reading that is no longer true. This drives
+/// the `Ok(_)` arm that leaves the record in place.
+/// What: builds a candidate list from a record that IS evictable, then
+/// reactivates it through the real `mark_reactivated` path before calling
+/// re-validation, standing in for a write that landed after the snapshot.
+/// Test: this test.
+#[tokio::test]
+async fn revalidate_drops_a_record_reactivated_after_the_snapshot() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let workspace = TempDir::new().expect("workspace");
+
+    let id = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+    // The snapshot said Evict…
+    assert_eq!(
+        mgr.revalidate_for_eviction(vec![id], Utc::now(), window())
+            .await,
+        vec![id]
+    );
+
+    // …then the reactivation lands. `mark_reactivated` needs a real directory.
+    let mut rec = mgr.get(&id).await.expect("get");
+    rec.workspace_path = Some(workspace.path().to_path_buf());
+    mgr.store.write().await.upsert(rec).await.expect("re-seed");
+    mgr.mark_reactivated(&id).await.expect("reactivate");
+
+    let survivors = mgr
+        .revalidate_for_eviction(vec![id], Utc::now(), window())
+        .await;
+    assert!(
+        survivors.is_empty(),
+        "a candidate that went live after the snapshot must not be deleted: {survivors:?}"
+    );
+    assert!(mgr.get(&id).await.is_ok(), "and it is still in the store");
+}
+
+/// Why: the other non-evicting arm. A concurrent prune removing the record
+/// first is a race we lose harmlessly, not an error — but it must drop out of
+/// the delete list rather than being counted as evicted, or the sweep reports
+/// and releases a slot for something it never removed.
+/// What: passes an id that is not in the store at all.
+/// Test: this test.
+#[tokio::test]
+async fn revalidate_drops_a_record_a_concurrent_prune_already_removed() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+    mgr.compact_record(&id).await.expect("concurrent prune");
+
+    let survivors = mgr
+        .revalidate_for_eviction(vec![id], Utc::now(), window())
+        .await;
+    assert!(
+        survivors.is_empty(),
+        "an already-removed id is not something this sweep evicted: {survivors:?}"
+    );
 }
 
 /// Why: `Path::exists()` collapses "cannot determine" into "not there", and
@@ -569,93 +807,55 @@ async fn sweep_spares_a_record_reactivated_between_sweeps() {
     );
 }
 
-// ── phase 3: re-validation against the current store ────────────────────────
-//
-// These reach `revalidate_for_eviction` directly. They have to: inside the full
-// sweep, phase 1 re-derives candidates every tick, so anything that changes
-// between ticks is dropped there and the phase-3 loop body never executes —
-// confirmed by instrumenting the loop. The candidate list is a plain `Vec<Id>`,
-// exactly what phase 2 produces, and handing it one computed from an older view
-// of the store IS the stale snapshot these arms defend against.
+// ── the one-time backfill's inferred timestamp ──────────────────────────────
 
-/// Why: the passing arm — re-validation must not become a blanket refusal to
-/// delete. If this went green while the two below also went green, the guard
-/// would be indistinguishable from "never evict anything".
-/// What: a candidate that is still terminal, still stale, and still has no
-/// workspace survives re-validation.
+/// Why: the inference decides how long a legacy record's window is, so which
+/// signal it picks — and in which direction it errs — is the whole behaviour.
+/// Taking the LATEST evidence keeps it as conservative as the data allows.
+/// What: `last_activity_at` wins when set; `created_at` is the fallback; and an
+/// implausibly early `last_activity_at` never drags the date before
+/// `created_at`.
 /// Test: this test.
-#[tokio::test]
-async fn revalidate_keeps_a_still_evictable_record() {
-    let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, _fake) = make_manager(&dir).await;
-    let stale = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+#[test]
+fn inferred_terminal_at_uses_the_latest_evidence_of_life() {
+    let now = Utc::now();
+    let mut r = base_record();
 
-    let survivors = mgr
-        .revalidate_for_eviction(vec![stale], Utc::now(), window())
-        .await;
+    r.created_at = now - Duration::days(400);
+    r.last_activity_at = Some(now - Duration::days(30));
     assert_eq!(
-        survivors,
-        vec![stale],
-        "an unchanged candidate still evicts"
+        super::inferred_terminal_at(&r, now),
+        now - Duration::days(30),
+        "activity is the better signal when present"
+    );
+
+    r.last_activity_at = None;
+    assert_eq!(
+        super::inferred_terminal_at(&r, now),
+        now - Duration::days(400),
+        "creation is the fallback"
+    );
+
+    // A record whose recorded activity predates its own creation is incoherent;
+    // never take the earlier of the two, which would shorten the window.
+    r.last_activity_at = Some(now - Duration::days(900));
+    assert_eq!(
+        super::inferred_terminal_at(&r, now),
+        now - Duration::days(400),
+        "never earlier than creation"
     );
 }
 
-/// Why: THE stale-snapshot guard. A record reactivated after the snapshot was
-/// taken — by another process, or by this daemon between the phases — must not
-/// be deleted on the strength of a reading that is no longer true. This drives
-/// the `Ok(_)` arm that leaves the record in place.
-/// What: builds a candidate list from a record that IS evictable, then
-/// reactivates it through the real `mark_reactivated` path before calling
-/// re-validation, standing in for a write that landed after the snapshot.
+/// Why: a future timestamp is clock skew or corruption, not evidence. Dating
+/// from it must not happen in either direction — neither trusting it nor
+/// treating "unusable" as "old".
+/// What: both timestamps a year ahead resolve to `now`.
 /// Test: this test.
-#[tokio::test]
-async fn revalidate_drops_a_record_reactivated_after_the_snapshot() {
-    let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, _fake) = make_manager(&dir).await;
-    let workspace = TempDir::new().expect("workspace");
-
-    let id = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
-    // The snapshot said Evict…
-    assert_eq!(
-        mgr.revalidate_for_eviction(vec![id], Utc::now(), window())
-            .await,
-        vec![id]
-    );
-
-    // …then the reactivation lands. `mark_reactivated` needs a real directory.
-    let mut rec = mgr.get(&id).await.expect("get");
-    rec.workspace_path = Some(workspace.path().to_path_buf());
-    mgr.store.write().await.upsert(rec).await.expect("re-seed");
-    mgr.mark_reactivated(&id).await.expect("reactivate");
-
-    let survivors = mgr
-        .revalidate_for_eviction(vec![id], Utc::now(), window())
-        .await;
-    assert!(
-        survivors.is_empty(),
-        "a candidate that went live after the snapshot must not be deleted: {survivors:?}"
-    );
-    assert!(mgr.get(&id).await.is_ok(), "and it is still in the store");
-}
-
-/// Why: the other non-evicting arm. A concurrent prune removing the record
-/// first is a race we lose harmlessly, not an error — but it must drop out of
-/// the delete list rather than being counted as evicted, or the sweep reports
-/// and releases a slot for something it never removed.
-/// What: passes an id that is not in the store at all.
-/// Test: this test.
-#[tokio::test]
-async fn revalidate_drops_a_record_a_concurrent_prune_already_removed() {
-    let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, _fake) = make_manager(&dir).await;
-    let id = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
-    mgr.compact_record(&id).await.expect("concurrent prune");
-
-    let survivors = mgr
-        .revalidate_for_eviction(vec![id], Utc::now(), window())
-        .await;
-    assert!(
-        survivors.is_empty(),
-        "an already-removed id is not something this sweep evicted: {survivors:?}"
-    );
+#[test]
+fn inferred_terminal_at_falls_back_to_now_for_a_future_timestamp() {
+    let now = Utc::now();
+    let mut r = base_record();
+    r.created_at = now + Duration::days(365);
+    r.last_activity_at = Some(now + Duration::days(365));
+    assert_eq!(super::inferred_terminal_at(&r, now), now);
 }

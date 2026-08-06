@@ -430,14 +430,10 @@ pub struct SessionRecord {
     /// restamps rather than trusting the old value.
     ///
     /// `#[serde(default)]` (→ `None`) keeps every pre-retention record
-    /// deserializable. `None` on a terminal record means UNKNOWN, not "old":
-    /// the sweep stamps it with the current time and starts the window there
-    /// rather than guessing from `created_at`/`last_activity_at`. That is
-    /// deliberately the safe direction — the auto-prune (#4384/#4702)
-    /// decommissions long-idle records, so a record whose last activity is
-    /// ancient may have become terminal seconds ago, and inferring its death
-    /// from activity would evict it on the first sweep with no retention at
-    /// all.
+    /// deserializable. `None` on a terminal record is backfilled on the next
+    /// sweep from [`super::retention::inferred_terminal_at`] — the record's
+    /// latest evidence of life — not from the current time, which would
+    /// grandfather the entire pre-existing backlog for another full window.
     #[serde(default)]
     pub terminal_at: Option<DateTime<Utc>>,
 }

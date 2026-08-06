@@ -16,6 +16,12 @@
 //! evicted record's slot so the number becomes available again.
 //! [`retention_verdict`] is the pure decision function it drives.
 //!
+//! Records written before `terminal_at` existed — the whole pre-existing
+//! backlog, which is what put `NUM` in three digits — are backfilled from
+//! [`inferred_terminal_at`] rather than from the current time, so one already
+//! weeks past the window is eligible on the next sweep instead of seven days
+//! after this ships.
+//!
 //! Scope, and the reason it is drawn this tightly: this sweep touches
 //! `sessions.json` and nothing else. It never removes a worktree, a workspace
 //! directory, a git branch, or any other file — see [`retention_verdict`]'s
@@ -48,17 +54,61 @@ pub const TERMINAL_RECORD_RETENTION_DAYS: i64 = 7;
 /// Why: keeping the decision separate from the store and slot mutations makes
 /// every branch — including the two that must never delete — testable without
 /// a store, a daemon, or a clock.
-/// What: `Keep` (leave it alone), `Stamp` (terminal but never dated: start its
-/// clock now), `Evict` (terminal, dated, and past the window).
+/// What: `Keep` (leave it alone), `Stamp(when)` (terminal but never dated:
+/// backfill `terminal_at` with the carried time), `Evict` (terminal, dated, and
+/// past the window).
 /// Test: `retention_verdict_*` in `retention_tests.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionVerdict {
     /// Leave the record in the store.
     Keep,
-    /// Terminal with no `terminal_at`: stamp it and start the window now.
-    Stamp,
+    /// Terminal with no `terminal_at`: backfill it with this inferred time.
+    ///
+    /// Carries the value rather than letting the caller pick, so
+    /// [`inferred_terminal_at`]'s choice cannot be quietly overridden at the
+    /// one call site that acts on it.
+    Stamp(DateTime<Utc>),
     /// Terminal, dated, and older than the retention window: evict.
     Evict,
+}
+
+/// Best estimate of when a record without [`SessionRecord::terminal_at`]
+/// entered its terminal state.
+///
+/// Why: every record written before `terminal_at` existed lacks it, and that is
+/// the entire pre-existing backlog — 76 of 116 records on the reporting
+/// machine, holding 76 of the slot numbers that put `NUM` in three digits.
+/// Stamping those with `now` would grandfather them for a further seven days,
+/// so the fix the owner asked for would not arrive until a week after he
+/// installed it. Clearing that backlog is the point, and a record whose last
+/// sign of life was two months ago has had its retention window many times
+/// over.
+///
+/// The earlier reasoning against inference was right about the mechanism and
+/// wrong about the goal: yes, the auto-prune (#4384/#4702) decommissions
+/// long-idle records, so this can date a record earlier than it truly died —
+/// but only for records that predate the field, and only in the direction of
+/// clearing a backlog that is already weeks old.
+///
+/// What: the LATEST evidence the record carries that it was alive —
+/// `last_activity_at` when set, else `created_at`, never earlier than
+/// `created_at`. Taking the latest, not the earliest, keeps the inference as
+/// conservative as the available data allows. A timestamp in the FUTURE is not
+/// evidence of anything (clock skew, or a corrupt record); it falls back to
+/// `now`, so such a record gets a full window rather than being deleted on the
+/// strength of a value that cannot be true.
+///
+/// This is inherently one-time: every terminal transition from here on stamps a
+/// real `terminal_at` via [`SessionRecord::set_lifecycle_state`], so no record
+/// created after this ships reaches this function.
+/// Test: `inferred_terminal_at_uses_the_latest_evidence_of_life`,
+/// `inferred_terminal_at_falls_back_to_now_for_a_future_timestamp`.
+pub fn inferred_terminal_at(record: &SessionRecord, now: DateTime<Utc>) -> DateTime<Utc> {
+    let latest = record
+        .last_activity_at
+        .unwrap_or(record.created_at)
+        .max(record.created_at);
+    if latest > now { now } else { latest }
 }
 
 /// Decide the fate of one record.
@@ -84,20 +134,19 @@ pub enum RetentionVerdict {
 ///    and therefore the protection, alive for exactly as long as there is a
 ///    directory to protect.
 ///
-/// 3. **`terminal_at == None` means UNKNOWN, not old.** It is stamped, not
-///    evicted. Guessing the death time from `last_activity_at`/`created_at`
-///    would be wrong in the common direction: the auto-prune (#4384/#4702)
-///    decommissions long-idle records, so a record whose last activity is a
-///    month old may have become terminal seconds ago, and inferring from
-///    activity would evict it on the first sweep with no retention at all.
-///    Stamping costs one write and one retention window, once, per legacy
-///    record.
+/// 3. **`terminal_at == None` is backfilled, never evicted directly.** A record
+///    predating the field is dated from [`inferred_terminal_at`] and written
+///    back; only a LATER sweep can evict it. That ordering is deliberate: the
+///    inferred date lands on disk before anything acts on it, so an operator
+///    can see what date a record was assigned rather than discovering it by its
+///    absence. It also means an old legacy record still passes through the
+///    two-observation debounce and phase-3 re-validation like any other.
 ///
 /// What: `Keep` unless the record is terminal AND its workspace is not on
-/// disk; then `Stamp` when undated, `Evict` when `now - terminal_at >=
-/// retention`, `Keep` otherwise. `workspace_on_disk` is supplied by the caller
-/// (via [`workspace_present`], which resolves an undetermined path to `true`)
-/// so this function stays pure and does no I/O.
+/// disk; then `Stamp(inferred)` when undated, `Evict` when `now - terminal_at
+/// >= retention`, `Keep` otherwise. `workspace_on_disk` is supplied by the
+/// caller (via [`workspace_present`], which resolves an undetermined path to
+/// `true`) so this function stays pure and does no I/O.
 /// Test: `retention_verdict_keeps_live_states`,
 /// `retention_verdict_keeps_record_whose_workspace_still_exists`,
 /// `retention_verdict_stamps_undated_terminal_record`,
@@ -113,7 +162,7 @@ pub fn retention_verdict(
         return RetentionVerdict::Keep;
     }
     match record.terminal_at {
-        None => RetentionVerdict::Stamp,
+        None => RetentionVerdict::Stamp(inferred_terminal_at(record, now)),
         Some(at) if now - at >= retention => RetentionVerdict::Evict,
         Some(_) => RetentionVerdict::Keep,
     }
@@ -233,7 +282,10 @@ impl SessionManager {
     /// Test: `sweep_evicts_only_records_past_the_window`,
     /// `sweep_releases_the_evicted_slot`,
     /// `sweep_never_touches_the_filesystem`,
-    /// `sweep_stamps_legacy_records_instead_of_evicting_them`,
+    /// `sweep_backfills_an_old_legacy_record_and_evicts_it_without_waiting`,
+    /// `sweep_gives_a_recent_legacy_record_its_full_window`,
+    /// `sweep_stamps_now_when_a_legacy_record_has_no_usable_signal`,
+    /// `sweep_backfill_still_spares_a_legacy_record_whose_workspace_exists`,
     /// `sweep_spares_a_record_reactivated_between_sweeps` (which the debounce
     /// and phase 1 protect — phase 3's own arms are covered by
     /// [`Self::revalidate_for_eviction`]'s `revalidate_*` tests) in
@@ -255,9 +307,9 @@ impl SessionManager {
         for record in all {
             match self.verdict_for(&record, now, retention) {
                 RetentionVerdict::Keep => {}
-                RetentionVerdict::Stamp => {
+                RetentionVerdict::Stamp(inferred) => {
                     let mut dated = record;
-                    dated.terminal_at = Some(now);
+                    dated.terminal_at = Some(inferred);
                     stamped.push(dated);
                 }
                 RetentionVerdict::Evict => candidates.push(record.id),
@@ -269,8 +321,9 @@ impl SessionManager {
             self.store.write().await.upsert_many(stamped).await?;
             info!(
                 stamped = n,
-                "retention: dated {n} terminal record(s) that predate `terminal_at`; \
-                 they become evictable in {} day(s)",
+                "retention: backfilled `terminal_at` on {n} record(s) that predate the field, \
+                 from their last evidence of life; any already older than {} day(s) become \
+                 evictable on the next sweep",
                 retention.num_days()
             );
         }
