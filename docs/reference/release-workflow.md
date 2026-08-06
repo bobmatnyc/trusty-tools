@@ -182,10 +182,25 @@ other apps' `$HOME` containers (Claude config dirs, tmux state), so macOS
 re-prompts `'trusty-mpm' would like to access data from other apps` after
 every ad-hoc-signed rebuild, for the same cdhash-identity reason FDA does.
 
-**Do not cross the two:** granting `trusty-search` Full Disk Access does
+🔴 **"No FDA" is not "no signing" — do not read the first bullet as an
+exemption from the rest of this section.** Until 2026-08-06 that bullet was
+the only mention of `trusty-memory` here, and its absence from
+`SIGNABLE_BINARIES` was easy to mistake for a decision it never was. FDA is
+one TCC category out of several. `trusty-memory` needs no FDA *and* needs a
+stable Developer-ID identity, because `trusty-memory setup` and
+`trusty-memory migrate` walk `$HOME` to depth 8 looking for
+`.claude/settings*.json` (`trusty_common::claude_config::discover_claude_settings`)
+and rewrite the ones they find. That walk skips `Library` and `Applications`
+but not `~/Desktop`, `~/Documents`, or `~/Downloads` — the macOS
+Files-and-Folders categories, keyed by cdhash exactly like FDA and App Data.
+Its own store under `~/Library/Application Support/trusty-memory/` is NOT the
+reason; an application's own data directory is not TCC-protected. See
+[Signed Install: trusty-memory](#signed-install-trusty-memory) below.
+
+**Do not cross the categories:** granting `trusty-search` Full Disk Access does
 nothing for the `trusty-mpm` App-Data prompt, and `trusty-mpm` never needs —
 and should never be granted — Full Disk Access. Re-signing with a stable
-Developer-ID identity (below) fixes both categories permanently, each for
+Developer-ID identity (below) fixes every category permanently, each for
 the binary that actually needs it.
 
 ### The Problem
@@ -251,13 +266,17 @@ context rather than always-on, to preserve BOTH pre-PR behaviors exactly:
 | `trusty-search` / `trusty-embedderd` | **off** (pre-PR hook behavior) | **on** (pre-PR script behavior) |
 | `trusty-mpm` | **on** | **on** |
 | `trusty-agents` (`tagent`) | N/A — not a `tctl install` member (#4277) | **on** |
+| `trusty-memory` + `trusty-bm25-daemon` + `trusty-memory-mcp-bridge` | **off** (same ONNX exposure as trusty-search) | **on** |
 
 trusty-search/embedderd load an ONNX runtime dylib, and Hardened Runtime's
 library-validation restriction has not yet been empirically verified safe for
 that load path — flipping the automatic hook to hardened-by-default risked
 silently breaking `tctl install trusty-search` on every machine with a
-Developer ID cert already installed. trusty-mpm loads no dylibs, so it is
-hardened unconditionally. **This split does not affect TCC grant stability** —
+Developer ID cert already installed. trusty-memory takes the same conservative
+side of the split: it links `ort`/`fastembed` through `trusty-common`'s
+`memory-core` feature (`cargo tree -p trusty-memory -i fastembed`), so it
+carries the identical unverified exposure. trusty-mpm and tagent load no
+dylibs, so they are hardened unconditionally. **This split does not affect TCC grant stability** —
 that depends on `--identifier` + Team ID, not `--options runtime` — only on
 notarization eligibility and dylib-validation strictness. See the tracking
 issue linked from PR #2657 for lifting this split once ONNX-under-Hardened-
@@ -431,6 +450,65 @@ Already have `tagent` on PATH and just want to (re-)sign it? Skip straight to:
 ```bash
 tctl sign trusty-agents
 ```
+
+### Signed Install: trusty-memory
+
+Owner ruling 2026-08-06. `trusty-memory` was missing from `SIGNABLE_BINARIES`
+for no recorded reason — no comment, doc, ADR, or commit message ever gave
+one. The table grew one reported symptom at a time (#2558 search, #2721 `tm`,
+#2951 the GUI, #4277 `tagent`) and nobody filed the trusty-memory case.
+
+The TCC surface is the `$HOME` walk, not the palace store. `trusty-memory
+setup` and `trusty-memory migrate` call
+`trusty_common::claude_config::discover_claude_settings`, which recurses
+`$HOME` to depth 8 for `.claude/settings*.json` and rewrites what it finds;
+the skip-list covers `Library` and `Applications` but not `~/Desktop`,
+`~/Documents`, or `~/Downloads`. Every `cargo install` mints a fresh cdhash
+and revokes whatever was approved.
+
+`cargo install --path crates/trusty-memory` produces THREE binaries and all
+three are signed — #2721 is the recorded lesson that signing part of an
+install set leaves the rest ad-hoc while the prompt keeps recurring:
+
+| Binary | Identifier |
+|---|---|
+| `trusty-memory` | `com.trusty.trusty-memory` |
+| `trusty-bm25-daemon` | `com.trusty.trusty-bm25-daemon` |
+| `trusty-memory-mcp-bridge` | `com.trusty.trusty-memory-mcp-bridge` |
+
+```bash
+# From the repo root (or any worktree) — installs all three and signs them
+scripts/install-trusty-memory-signed.sh
+# or
+make install-memory-signed
+# dry-run (prints every cargo/tctl command without executing):
+scripts/install-trusty-memory-signed.sh --dry-run
+```
+
+Already have the binaries on PATH and just want to (re-)sign them:
+
+```bash
+tctl sign trusty-memory
+```
+
+Like `install-trusty-agents-signed.sh`, the script delegates the signing step
+to `tctl sign` rather than duplicating `codesign` flags, and a missing
+Developer ID certificate is a warning, not a hard failure.
+
+🟡 **Hardened Runtime is applied on explicit signing only** — the same split
+trusty-search gets, and for the same reason. `trusty-memory` links
+`ort`/`fastembed` through `trusty-common`'s `memory-core` feature
+(`cargo tree -p trusty-memory -i fastembed`), and ONNX dylib loading under
+Hardened Runtime's library validation has not been empirically verified. So
+`tctl sign trusty-memory` and the script sign with `--options runtime
+--timestamp`; the automatic `tctl install` hook would not. TCC grant
+stability depends on `--identifier` + Team ID, never on `--options runtime`,
+so the split costs nothing here.
+
+🟡 **No automatic post-install hook.** `tctl install trusty-memory` does not
+sign, matching `trusty-agents` (#4277) — `post_install_search` /
+`post_install_mpm` are the only hooks `commands::install` calls. Run the
+script or `tctl sign trusty-memory` after a local-source install.
 
 ### TRUSTY_SIGN_IDENTITY Override
 

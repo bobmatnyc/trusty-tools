@@ -71,12 +71,19 @@ fn identifier_map_covers_all_signable_binaries() {
 /// produced by `binaries_for_set` for EVERY known set has a real
 /// (non-fallback) identifier, i.e. the two views of the table can never
 /// silently disagree.
-/// What: For each of `SEARCH_SET`/`MPM_SET`, asserts every member binary's
-/// identifier is not the `"com.trusty.unknown"` fallback.
+///
+/// The set list used to be the hardcoded array `[SEARCH_SET, MPM_SET,
+/// AGENTS_SET]`, which made this vacuous for exactly the case it was meant to
+/// catch: a set added to the table but not to the array was never iterated, so
+/// the test passed without checking it. It now reads the set names out of
+/// `SIGNABLE_BINARIES` itself, so a new row is covered the moment it lands.
+///
+/// What: For every distinct set name appearing in `SIGNABLE_BINARIES`, asserts
+/// every member binary's identifier is not the `"com.trusty.unknown"` fallback.
 /// Test: This is the test.
 #[test]
 fn every_set_member_has_a_real_identifier() {
-    for set in [SEARCH_SET, MPM_SET, AGENTS_SET] {
+    for set in declared_sets() {
         for binary in binaries_for_set(set) {
             assert_ne!(
                 codesign_identifier(binary),
@@ -87,21 +94,189 @@ fn every_set_member_has_a_real_identifier() {
     }
 }
 
+/// Every distinct set name declared in `SIGNABLE_BINARIES`, in table order.
+///
+/// Why: Several guards below must cover EVERY set, and a hardcoded list is the
+/// vacuity trap described on `every_set_member_has_a_real_identifier` — a set
+/// the list forgets is a set nothing checks. Deriving the list from the table
+/// makes forgetting impossible.
+/// What: Walks `SIGNABLE_BINARIES`, collecting each set name the first time it
+/// appears.
+/// Test: Used by `every_set_member_has_a_real_identifier`,
+/// `every_declared_set_is_a_named_constant`,
+/// `signing_persistence_tip_names_every_signable_set`,
+/// `every_sign_target_arg_resolves_to_a_real_set`.
+fn declared_sets() -> Vec<&'static str> {
+    let mut sets: Vec<&'static str> = Vec::new();
+    for (_, set, _) in SIGNABLE_BINARIES {
+        if !sets.contains(set) {
+            sets.push(set);
+        }
+    }
+    sets
+}
+
+/// Why: A typo in a table row's set field (`"trusty-momery"`) silently creates
+/// a fourth "set" that no `tctl sign` target and no post-install hook can ever
+/// name, so the binary is never signed and nothing reports it. Pinning the
+/// declared sets against the exported constants catches that at compile-and-
+/// test time rather than on someone's machine months later.
+/// What: Asserts the distinct set names in `SIGNABLE_BINARIES` are exactly the
+/// four exported set constants, in table order.
+/// Test: This is the test.
+#[test]
+fn every_declared_set_is_a_named_constant() {
+    assert_eq!(
+        declared_sets(),
+        vec![SEARCH_SET, MPM_SET, AGENTS_SET, MEMORY_SET]
+    );
+}
+
+/// Why: This table decides which binaries get a stable macOS designated
+/// requirement and which stay ad-hoc, losing their TCC grant on every
+/// `cargo install`. Every prior gap in it (#2721 `tm`, #2951 the GUI, #4277
+/// `tagent`, `trusty-memory` under the 2026-08-06 owner ruling) was a silent
+/// omission, never a wrong value — so the guard that matters is one that fails
+/// when a row goes MISSING, which a per-binary spot check cannot do. Pinning
+/// the whole table is deliberate brittleness: changing it should require
+/// stating the change here.
+/// What: Asserts `SIGNABLE_BINARIES` equals the expected `(binary, set,
+/// identifier)` triples exactly, including order.
+/// Test: This is the test.
+#[test]
+fn signable_binaries_table_is_pinned() {
+    assert_eq!(
+        SIGNABLE_BINARIES,
+        &[
+            ("trusty-search", SEARCH_SET, "com.trusty.trusty-search"),
+            (
+                "trusty-embedderd",
+                SEARCH_SET,
+                "com.trusty.trusty-embedderd"
+            ),
+            ("trusty-mpm", MPM_SET, "com.trusty.trusty-mpm"),
+            ("tm", MPM_SET, "com.trusty.tm"),
+            ("trusty-mpm-gui", MPM_SET, "com.trusty.trusty-mpm.gui"),
+            ("tagent", AGENTS_SET, "com.trusty.tagent"),
+            ("trusty-memory", MEMORY_SET, "com.trusty.trusty-memory"),
+            (
+                "trusty-bm25-daemon",
+                MEMORY_SET,
+                "com.trusty.trusty-bm25-daemon"
+            ),
+            (
+                "trusty-memory-mcp-bridge",
+                MEMORY_SET,
+                "com.trusty.trusty-memory-mcp-bridge"
+            ),
+        ]
+    );
+}
+
+/// Why (owner ruling 2026-08-06): `cargo install --path crates/trusty-memory`
+/// installs THREE binaries and #2721 is the recorded lesson that signing only
+/// the primary one leaves the rest ad-hoc while the prompt keeps recurring.
+/// Order matters for the same reason it does for `MPM_SET`: `first()` is the
+/// binary any guidance text names.
+/// What: Asserts `MEMORY_SET` resolves to `trusty-memory`,
+/// `trusty-bm25-daemon`, and `trusty-memory-mcp-bridge` in that order, each
+/// with its canonical `com.trusty.<binary>` identifier.
+/// Test: This is the test.
+#[test]
+fn binaries_for_set_covers_memory() {
+    assert_eq!(
+        binaries_for_set(MEMORY_SET),
+        vec![
+            "trusty-memory",
+            "trusty-bm25-daemon",
+            "trusty-memory-mcp-bridge"
+        ]
+    );
+    assert_eq!(
+        codesign_identifier("trusty-memory"),
+        "com.trusty.trusty-memory"
+    );
+    assert_eq!(
+        codesign_identifier("trusty-bm25-daemon"),
+        "com.trusty.trusty-bm25-daemon"
+    );
+    assert_eq!(
+        codesign_identifier("trusty-memory-mcp-bridge"),
+        "com.trusty.trusty-memory-mcp-bridge"
+    );
+}
+
+/// Why: `SignTargetArg` — not `binaries_for_set` — is the real gate on
+/// `tctl sign <target>`: clap rejects any value the enum does not list before
+/// `commands::sign::run` is ever called. A set added to `SIGNABLE_BINARIES`
+/// without a matching variant is therefore signable in principle and
+/// unreachable in practice, which is a silent no-op rather than an error.
+/// What: Asserts every `SignTargetArg` variant's `as_set_name()` resolves to a
+/// non-empty set, and that the variants cover every set the table declares.
+/// Test: This is the test.
+#[test]
+fn every_sign_target_arg_resolves_to_a_real_set() {
+    use crate::cli::SignTargetArg;
+    use clap::ValueEnum;
+
+    let mut from_cli: Vec<&'static str> = SignTargetArg::value_variants()
+        .iter()
+        .map(|v| v.as_set_name())
+        .collect();
+    for set in &from_cli {
+        assert!(
+            !binaries_for_set(set).is_empty(),
+            "`tctl sign {set}` names a set with no binaries in SIGNABLE_BINARIES"
+        );
+    }
+
+    let mut declared = declared_sets();
+    from_cli.sort_unstable();
+    declared.sort_unstable();
+    assert_eq!(
+        from_cli, declared,
+        "every SIGNABLE_BINARIES set needs a SignTargetArg variant and vice versa"
+    );
+}
+
+/// Why: The tip names the valid `tctl sign` targets in prose, and prose goes
+/// stale — it still said `<trusty-search|trusty-mpm>` long after #4277 shipped
+/// `trusty-agents`. Checking it against the table turns a hand-maintained
+/// string into one that cannot silently fall behind.
+/// What: Asserts the tip mentions every set declared in `SIGNABLE_BINARIES`.
+/// Test: This is the test.
+#[test]
+fn signing_persistence_tip_names_every_signable_set() {
+    let tip = signing_persistence_tip();
+    for set in declared_sets() {
+        assert!(
+            tip.contains(set),
+            "signing_persistence_tip omits the '{set}' target: {tip}"
+        );
+    }
+}
+
 /// Why: The PM decision (PR #2657 review HIGH) is a precise per-set,
 /// per-context split — pin the truth table so a future edit cannot
 /// silently flip either preserved pre-PR behavior. #4277 added `AGENTS_SET`
 /// to the always-hardened side (no dylib-loading concern, same as MPM_SET).
 /// What: explicit=true is always hardened (all sets); explicit=false is
-/// hardened only for MPM_SET and AGENTS_SET.
+/// hardened only for MPM_SET and AGENTS_SET. `MEMORY_SET` sits on the
+/// SEARCH_SET side (owner ruling 2026-08-06): `trusty-memory` links
+/// `ort`/`fastembed` via `trusty-common`'s `memory-core`, so it carries the
+/// same unverified ONNX-dylib-under-library-validation exposure that keeps
+/// trusty-search off automatic Hardened Runtime.
 /// Test: This is the test.
 #[test]
 fn hardened_runtime_policy() {
     assert!(use_hardened_runtime(SEARCH_SET, true));
     assert!(use_hardened_runtime(MPM_SET, true));
     assert!(use_hardened_runtime(AGENTS_SET, true));
+    assert!(use_hardened_runtime(MEMORY_SET, true));
     assert!(!use_hardened_runtime(SEARCH_SET, false));
     assert!(use_hardened_runtime(MPM_SET, false));
     assert!(use_hardened_runtime(AGENTS_SET, false));
+    assert!(!use_hardened_runtime(MEMORY_SET, false));
 }
 
 /// Why: The migration notice must actually fire when the on-disk

@@ -70,6 +70,23 @@
 //!   bundler (or the install script's best-effort `codesign --deep` pass over
 //!   an already-built bundle) instead — see that script for both paths.
 //!
+//! - Owner ruling 2026-08-06: `trusty-memory` joins as its own signable set
+//!   ([`MEMORY_SET`]). Its absence was never a decision — no comment, doc, ADR,
+//!   or commit ever gave a reason for it. The table simply grew one reported
+//!   symptom at a time (#2558 search, #2721 `tm`, #2951 the GUI, #4277
+//!   `tagent`) and nobody filed the trusty-memory one. It has the same TCC
+//!   surface the others were added for: `trusty-memory setup` and
+//!   `trusty-memory migrate` walk `$HOME` to depth 8 via
+//!   `trusty_common::claude_config::discover_claude_settings` and rewrite other
+//!   projects' `.claude/settings*.json`. That walk's skip-list excludes
+//!   `Library`/`Applications` but NOT `~/Desktop`, `~/Documents`, or
+//!   `~/Downloads`, so a `read_dir` on each is attempted — the macOS
+//!   Files-and-Folders TCC categories, keyed by cdhash exactly like FDA and App
+//!   Data. Unlike [`AGENTS_SET`], `trusty-memory` links `ort`/`fastembed`
+//!   through `trusty-common`'s `memory-core`, so it takes [`SEARCH_SET`]'s
+//!   conservative Hardened-Runtime policy (explicit signing only), not
+//!   [`MPM_SET`]'s always-on one — see [`use_hardened_runtime`].
+//!
 //! What: [`binaries_for_set`] and [`codesign_identifier`] are both derived from
 //! the single [`SIGNABLE_BINARIES`] table (binary, set, identifier) so set
 //! membership and identifier mapping can never drift apart again.
@@ -120,6 +137,25 @@ pub const MPM_SET: &str = "trusty-mpm";
 /// deliberate deviation from the `trusty-mpm-gui` precedent.
 pub const AGENTS_SET: &str = "trusty-agents";
 
+/// The `trusty-memory` signable set: every binary `cargo install --path
+/// crates/trusty-memory` produces — `trusty-memory`, the bundled
+/// `trusty-bm25-daemon`, and the deprecated `trusty-memory-mcp-bridge` shim.
+///
+/// Why (owner ruling 2026-08-06): same cdhash-instability class as
+/// #873/#2721/#4277. `trusty-memory setup` and `trusty-memory migrate` walk
+/// `$HOME` to depth 8 looking for `.claude/settings*.json` and rewrite the ones
+/// they find; that walk skips `Library` and `Applications` but not `~/Desktop`,
+/// `~/Documents`, or `~/Downloads`, so macOS's Files-and-Folders TCC categories
+/// are in play and every `cargo install` mints a fresh cdhash that revokes
+/// whatever was granted. All three binaries are listed, not just the primary
+/// one: #2721 is the recorded lesson that signing part of an install set leaves
+/// the rest ad-hoc and the prompt still recurring.
+///
+/// Its own store (`~/Library/Application Support/trusty-memory/`) is NOT the
+/// reason — an app's own data directory is not TCC-protected. The `$HOME` walk
+/// is.
+pub const MEMORY_SET: &str = "trusty-memory";
+
 /// The master table: every signable binary → (its set, its codesign identifier).
 ///
 /// Why: PR #2657 review (MEDIUM) — `binaries_for_set` and `codesign_identifier`
@@ -165,6 +201,26 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
     // `cargo install --path crates/trusty-agents`. Own set ([`AGENTS_SET`]) —
     // see that constant's doc for why it is not folded into `MPM_SET`.
     ("tagent", AGENTS_SET, "com.trusty.tagent"),
+    // `trusty-memory` (owner ruling 2026-08-06): all three binaries `cargo
+    // install --path crates/trusty-memory` produces. `trusty-memory` is listed
+    // first so `binaries_for_set(MEMORY_SET).first()` — the binary any guidance
+    // text names — stays the primary one, matching the MPM_SET ordering rule.
+    // `trusty-memory-mcp-bridge` is a deprecated re-exec shim slated for
+    // removal; it costs nothing to carry here because
+    // `post_install_signed_set`/`sign_set_strict` skip any binary that is not
+    // on disk, and omitting it would leave an installed binary ad-hoc for
+    // exactly the #2721 reason.
+    ("trusty-memory", MEMORY_SET, "com.trusty.trusty-memory"),
+    (
+        "trusty-bm25-daemon",
+        MEMORY_SET,
+        "com.trusty.trusty-bm25-daemon",
+    ),
+    (
+        "trusty-memory-mcp-bridge",
+        MEMORY_SET,
+        "com.trusty.trusty-memory-mcp-bridge",
+    ),
 ];
 
 /// Resolve the binaries that make up a named Developer-ID-signable set.
@@ -235,12 +291,21 @@ pub fn codesign_identifier(binary: &str) -> &'static str {
 /// ONNX/embedding runtime — that's trusty-search/trusty-embedderd's job), so
 /// it joins [`MPM_SET`] in always being hardened, same reasoning.
 ///
+/// [`MEMORY_SET`] goes the other way, and this is the one place where adding
+/// it required a decision rather than a table row: `trusty-memory` links
+/// `ort`/`fastembed` through `trusty-common`'s `memory-core` feature
+/// (`cargo tree -p trusty-memory -i fastembed`), so it has the same
+/// unverified ONNX-dylib-under-library-validation exposure that keeps
+/// [`SEARCH_SET`] off automatic Hardened Runtime. It therefore takes no
+/// special case at all — falling through to plain `explicit` gives it exactly
+/// [`SEARCH_SET`]'s policy.
+///
 /// What: `explicit` (the operator directly ran `tctl sign <target>`, or the
 /// wrapper script which shells out to it) → always `true`. Automatic
 /// (`tctl install`'s fail-soft hook, `explicit = false`) → `true` for
-/// [`MPM_SET`] and [`AGENTS_SET`]; `false` for [`SEARCH_SET`] until
-/// ONNX-under-Hardened-Runtime is verified (see the tracking issue referenced
-/// in PR #2657).
+/// [`MPM_SET`] and [`AGENTS_SET`]; `false` for [`SEARCH_SET`] and
+/// [`MEMORY_SET`] until ONNX-under-Hardened-Runtime is verified (see the
+/// tracking issue referenced in PR #2657).
 ///
 /// Test: `tests::hardened_runtime_policy`.
 pub fn use_hardened_runtime(set: &str, explicit: bool) -> bool {
@@ -550,7 +615,7 @@ impl std::fmt::Display for SignSetError {
         match self {
             SignSetError::UnknownSet(set) => write!(
                 f,
-                "unknown signable set '{set}' (expected 'trusty-search', 'trusty-mpm', or 'trusty-agents')"
+                "unknown signable set '{set}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', or 'trusty-agents')"
             ),
             SignSetError::NoCertificate => {
                 write!(f, "no Developer ID Application certificate found")
@@ -742,11 +807,18 @@ pub fn app_data_guidance(binary_path: &str, existed_before: bool) -> String {
 /// `TRUSTY_SIGN_IDENTITY` tip inside every component's block; a two-component
 /// install (trusty-search + trusty-mpm) printed it twice back to back.
 ///
-/// Test: `tests::signing_persistence_tip_mentions_sign_identity_and_tctl_sign`.
+/// The target list was hand-maintained and had already gone stale — it still
+/// named only search and mpm after [`AGENTS_SET`] shipped in #4277.
+/// `tests::signing_persistence_tip_names_every_signable_set` now derives the
+/// expected names from [`SIGNABLE_BINARIES`], so a new set cannot be added
+/// without this string being updated with it.
+///
+/// Test: `tests::signing_persistence_tip_mentions_sign_identity_and_tctl_sign`,
+/// `tests::signing_persistence_tip_names_every_signable_set`.
 pub fn signing_persistence_tip() -> &'static str {
     "Tip: install a Developer ID Application certificate (or set TRUSTY_SIGN_IDENTITY) \
-     and run `tctl sign <trusty-search|trusty-mpm>` to make these grants persist across \
-     every future reinstall."
+     and run `tctl sign <trusty-search|trusty-mpm|trusty-memory|trusty-agents>` to make \
+     these grants persist across every future reinstall."
 }
 
 /// Run the fail-soft post-install signing hook for a named set.
