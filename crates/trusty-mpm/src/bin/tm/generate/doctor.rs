@@ -150,7 +150,7 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     ),
     (
         "binary_provenance",
-        "Where the RUNNING binary came from and whether that source still exists: reads cargo's own `$CARGO_HOME/.crates2.json` install ledger and compares it against the running executable. Fails when the same binary is provided by more than one install, when the ledger's recorded version disagrees with what is running, or when a `cargo install --path` source directory has been reaped (no provenance, no upgrade path). Warns for a live path/git install, which is invisible to registry update detection. Reports UNKNOWN — never `Ok` — when the ledger is unreadable or does not cover the binary (a prebuilt-installer or package-manager install). Read-only; never installs, moves, or deletes (issue #4033, ADR-0021).",
+        "Where the RUNNING binary came from and whether that source still exists: reads cargo's own `$CARGO_HOME/.crates2.json` install ledger and compares it against the running executable. Fails when the same binary is provided by more than one install, when the running binary is OLDER than the ledger's record for that same file or the two cannot be ordered as semver, or when a `cargo install --path` source directory has been reaped (no provenance, no upgrade path). Warns for a live path/git install, which is invisible to registry update detection. Reports UNKNOWN — never `Ok` — when the ledger is unreadable, does not cover the binary (a prebuilt-installer or package-manager install), or records a version OLDER than what is running, which means the ledger no longer describes the file on disk (issue #4964). Read-only; never installs, moves, or deletes (issue #4033, ADR-0021).",
     ),
 ];
 

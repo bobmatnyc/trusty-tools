@@ -36,21 +36,38 @@
 //! downloader placed at the exact path a stale ledger record describes. Cargo
 //! writes no metadata for it, so the record still names the previous version.
 //!
-//! Cargo updates its ledger whenever it writes a binary, so a ledger/binary
-//! version disagreement at the same path can only mean a non-cargo writer
-//! replaced the file. Which of the two is NEWER decides what that means, and the
-//! two directions carry opposite operator consequences:
+//! A version disagreement at the same path means the ledger record does not
+//! describe the binary on disk. It does NOT identify who wrote that binary.
+//! Cargo normally rewrites its ledger whenever it writes, so a non-cargo writer
+//! is the common cause — but `cargo install --no-track --force` writes the
+//! binary and by design neither reads nor updates the ledger, and cargo renames
+//! a binary into place BEFORE saving the tracker, so an interrupted or failed
+//! `tracker.save()` leaves the same state. Every such path lands on the same
+//! side, the running binary being the newer file, so the verdict below is
+//! honest for all of them; the explanation must not name a downloader as the
+//! only possibility. Which of the two is NEWER is what the check can determine,
+//! and the two directions carry opposite operator consequences:
 //!
 //! | State | Verdict | Why |
 //! |---|---|---|
-//! | running NEWER than the ledger record | `Unknown` | the ledger is stale; the running binary is the current one. Same substance as the same file sitting in `~/.local/bin`, which already reports `Unknown` — so the verdict does not change when #4964 Phase 3 flips the destination |
+//! | running NEWER than the ledger record | `Unknown` | the ledger does not describe what is on disk, and the binary is the newer file. Same substance as that file sitting in `~/.local/bin`, which already reports `Unknown` — so the verdict does not change when #4964 Phase 3 flips the destination |
 //! | running OLDER than the ledger record | `Fail` | an older binary overwrote a newer install: the upgrade the operator believes landed is not what executes. This is the #4033 defect class verbatim and keeps its severity |
 //! | the two cannot be ordered as semver | `Fail` | conservative — an unverifiable mismatch is still a mismatch |
 //!
-//! Known limit, stated rather than papered over: when the downloader places the
-//! SAME version cargo last recorded, the check reports `Ok`. It cannot tell the
-//! two writers apart in that case and does not need to — its claim is that the
-//! running version agrees with cargo's record, and that claim holds.
+//! Known limits, stated rather than papered over:
+//!
+//! - When a non-cargo writer places the SAME version cargo last recorded, the
+//!   check reports `Ok`. It cannot tell the two writers apart there and does not
+//!   need to — its claim is that the running version agrees with cargo's record,
+//!   and that claim holds.
+//! - A DELIBERATE downgrade placed by the prebuilt installer reports `Fail`.
+//!   `tctl install --force` documents exactly that rollback
+//!   (`trusty-installer/src/cli.rs:236`), and after #4964 Phase 3 it lands in
+//!   `$CARGO_HOME/bin` where an older-than-the-record binary is indistinguishable
+//!   from the #4033 defect. `Fail` is the deliberate choice — an older binary on
+//!   top of a newer record is worth flagging, and a rollback is rare and
+//!   explicit — but it IS a residual false positive in that one case, and it is
+//!   named here so nobody reads it as corruption.
 //!
 //! Test: the `tests` module below covers every source classification and every
 //! verdict branch.
@@ -345,20 +362,23 @@ pub fn provenance_report(
 
 /// Which of the ledger record and the running binary is the newer one.
 ///
-/// Why (#4964): the running binary and cargo's record sit at the SAME path, and
-/// cargo rewrites its ledger whenever it writes — so a version disagreement can
-/// only mean a non-cargo writer replaced the file. That is a defect in one
-/// direction and a sanctioned install in the other, and a single `Fail` cannot
-/// say which. Ordering the two versions is what separates them.
+/// Why (#4964): the running binary and cargo's record sit at the SAME path, so
+/// a version disagreement means the ledger does not describe the file on disk.
+/// That is a defect in one direction and a sanctioned install in the other, and
+/// a single `Fail` cannot say which. Ordering the two versions is what separates
+/// them — see the module header for why the ordering, not the writer's identity,
+/// is what this check can actually determine.
 /// What: three states, named for which side is stale.
 /// Test: `skew_is_ledger_stale_when_running_is_newer`,
 /// `skew_is_running_stale_when_ledger_is_newer`,
 /// `skew_is_unordered_for_unparseable_versions`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VersionSkew {
-    /// The running binary is NEWER than cargo's record: a writer that keeps no
-    /// cargo metadata (the prebuilt installer, a package manager, a manual
-    /// copy) replaced the file, and the ledger has not caught up.
+    /// The running binary is NEWER than cargo's record: the ledger has not
+    /// caught up with what is on disk. Usually a writer that keeps no cargo
+    /// metadata (the prebuilt installer, a package manager, a manual copy), but
+    /// `cargo install --no-track --force` and an interrupted install produce it
+    /// too.
     LedgerStale,
     /// The running binary is OLDER than cargo's record: something overwrote a
     /// newer install with an older binary.
@@ -397,7 +417,7 @@ pub(crate) fn classify_version_skew(ledger_version: &str, running_version: &str)
 /// The verdict for a running binary whose version disagrees with cargo's record
 /// at the same path.
 ///
-/// Why (#4964): before consolidation this was one `Fail`, because the only way
+/// Why (#4964): before consolidation this was one `Fail`, because the usual way
 /// to reach it was a non-cargo writer clobbering the cargo bin directory. After
 /// #4964 Phase 3 the prebuilt downloader writes there BY DESIGN, and reporting
 /// its clean, successful, cargo-free upgrade as `Fail` would manufacture a
@@ -429,11 +449,13 @@ fn version_skew_verdict(
             CheckStatus::Unknown,
             format!(
                 "the running `{bin_name}` is version {running_version}, NEWER than the {recorded} \
-                 cargo's ledger records for that same file `{}`. Cargo rewrites its ledger \
-                 whenever it writes, so this binary was placed by a writer that keeps no cargo \
-                 metadata — the prebuilt installer (`tctl install` / `tctl upgrade`), a package \
-                 manager, or a manual copy. The binary is NOT stale; what cannot be verified \
-                 from here is where it came from, and `cargo install --list` will keep reporting \
+                 cargo's ledger records for that same file `{}` — cargo's record does not \
+                 describe the binary on disk. Usually that means a writer keeping no cargo \
+                 metadata placed it (the prebuilt installer `tctl install` / `tctl upgrade`, a \
+                 package manager, or a manual copy), but `cargo install --no-track --force` and \
+                 an install interrupted before it saved its tracker leave the same state. The \
+                 binary is NOT stale; what cannot be verified from here is where it came from, \
+                 and `cargo install --list` will keep reporting \
                  {}{where_from} (issues #4033, #4964, ADR-0021)",
                 installed.display(),
                 record.version,

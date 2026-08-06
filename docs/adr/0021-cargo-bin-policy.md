@@ -105,7 +105,7 @@ it just replaced.
 | Class | Written by | Ledger presence | `tm doctor` `binary_provenance` |
 |---|---|---|---|
 | **Registry install** | `cargo install <crate>` | accurate record, `registry+` source | `Ok` when the versions agree |
-| **Prebuilt placement** | `tctl install` / `tctl upgrade` / `install.sh` — the downloader | absent, or stale (describes the replaced version) | `Unknown` |
+| **Prebuilt placement** | `tctl install` / `tctl upgrade` / `install.sh` — the downloader | absent, or stale (describes the replaced version) | `Unknown` when the placed version is NEWER than the stale record, or when no record covers the binary; **`Fail` on a downgrade placement** — see the direction split below |
 | **Path install** | `cargo install --path` | accurate record, `path+file://` source | `Warn` — **still a violation of this ADR** |
 
 The path-install row is unchanged by this amendment and remains prohibited.
@@ -116,6 +116,23 @@ The prebuilt-placement row is **permitted**. It is not a path install, it is not
 invisible to update detection (`tctl upgrade` and the daemons' own update check
 query crates.io directly, not cargo's ledger), and it is exactly what the
 toolchain-free install path is for.
+
+### The one case where a prebuilt placement still reports `Fail`
+
+A **deliberate downgrade** placed by the downloader. `tctl install --force`
+documents exactly that rollback — replacing a registered supervisor with an
+"older-or-equal version" (`crates/trusty-installer/src/cli.rs:236`). Today that
+binary lands in `~/.local/bin` and reports `Unknown`; after Phase 3 it lands in
+`$CARGO_HOME/bin`, where an older-than-the-record binary is indistinguishable
+from the #4033 defect, and reports `Fail`.
+
+That is the same shape of manufactured failure this amendment removes, surviving
+in the opposite direction. It is accepted rather than fixed: an older binary on
+top of a newer record is genuinely the case worth flagging, a rollback is rare
+and explicit, and softening it would retire the real check. It is recorded here
+so nobody reads a `Fail` after a deliberate downgrade as corruption. Whether
+Phase 3 should handle it — for example by refreshing or clearing the stale
+ledger record on placement — is a call for the epic, not for this ADR.
 
 ### Why `Unknown` rather than `Ok` or `Fail`
 
@@ -137,9 +154,14 @@ either.
 Reporting every ledger/binary version disagreement as `Unknown` would have
 retired a real check, so the disagreement is split by direction:
 
-- **running binary NEWER than the ledger record** → `Unknown`. Cargo rewrites its
-  ledger whenever it writes, so a newer file at that path came from a writer that
-  keeps no cargo metadata. Sanctioned under this amendment.
+- **running binary NEWER than the ledger record** → `Unknown`. The ledger no
+  longer describes the file on disk. Cargo normally rewrites its ledger whenever
+  it writes, so this usually means a writer that keeps no cargo metadata placed
+  it — but `cargo install --no-track --force` never touches the ledger by design,
+  and cargo renames a binary into place before saving its tracker, so an
+  interrupted install leaves the same state. Every one of those paths lands on
+  this side of the split, so `Unknown` is honest for all of them; what the check
+  cannot determine is *which* writer, and it says so rather than naming one.
 - **running binary OLDER than the ledger record** → `Fail`. An older binary is
   sitting on top of a newer install: the upgrade the ledger says landed is not
   what executes. This is the #4033 incident verbatim and keeps its severity.
@@ -151,6 +173,13 @@ Implementation and per-branch tests: `crates/trusty-mpm/src/core/binary_provenan
 
 ### What this amendment does NOT settle
 
+- **Two Consequences bullets above are now scoped to cargo-written files.**
+  "Every binary in `~/.cargo/bin` now has an auditable source: `cargo install
+  --list` shows the version" and "Orphaned binaries … cannot happen — every
+  install is tied to a crates.io version" hold for the registry and path classes,
+  not for a prebuilt placement, which `cargo install --list` does not see at all.
+  That is the cost of the third class, and `binary_provenance` reporting
+  `Unknown` is what keeps it visible.
 - **The `tm doctor` gate in the Decision section is still the path-install gate.**
   It checks `cargo install --list` for path-install entries. This amendment adds
   no new mechanical gate; the prebuilt class is *observed* by
