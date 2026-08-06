@@ -633,6 +633,7 @@ mod tests {
             VECTORS.name(),
             VECTOR_KEYS.name(),
             DELETED_VECTORS.name(),
+            VECTOR_ID_SEQ.name(),
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

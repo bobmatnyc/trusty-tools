@@ -32,6 +32,103 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+/// Whether the vector-id alias audit actually ran (#5005).
+///
+/// Why: the audit's whole job is to answer "is any drawer's vector owned by a
+/// different drawer". A failed scan has NO answer, and reporting it as zeros
+/// would be the exact defect this ticket exists to fix, one level up — a
+/// failure branch leaving state that looks successful. So "could not tell" is a
+/// state of its own, not a number: nothing can read it as clean by accident.
+/// What: `Measured` carries the two counts and the aliased ids; `Unavailable`
+/// carries why. [`EmbedHealth::is_healthy`] is false for `Unavailable`.
+/// Test: `alias_audit_failure_is_never_reported_as_clean`.
+#[derive(Debug, Clone)]
+pub enum AliasAudit {
+    /// The audit ran; these numbers are authoritative.
+    Measured {
+        /// Rows in the `VECTOR_KEYS` table.
+        key_rows: usize,
+        /// Distinct vector ids those rows point at. Below `key_rows` exactly
+        /// when drawers share an id.
+        distinct_vector_ids: usize,
+        /// Drawers whose vector was overwritten by another drawer's. These have
+        /// a key, so they are NOT in `missing_vector_ids` — that is precisely
+        /// why the count gap missed them — but their content is embedded
+        /// nowhere.
+        aliased_drawer_ids: Vec<Uuid>,
+    },
+    /// The audit could not run. Nothing is known about aliasing in this palace.
+    Unavailable {
+        /// The scan error, for the operator.
+        reason: String,
+    },
+}
+
+impl AliasAudit {
+    /// Turn a scan result into an outcome — the ONLY way this type is built
+    /// from a fallible read.
+    ///
+    /// Why: the mapping is where a failed scan could be laundered into a
+    /// clean-looking zero, so it is a named function with its own test rather
+    /// than an inline `match` arm inside `embed_health`. `embed_health` now has
+    /// no error branch of its own to get wrong.
+    /// What: `Ok` → `Measured`; `Err` → `Unavailable` carrying the rendered
+    /// error. Never returns zeros for a failure.
+    /// Test: `alias_audit_failure_is_never_reported_as_clean`.
+    pub fn from_scan(scan: anyhow::Result<(usize, usize, Vec<Uuid>)>) -> Self {
+        match scan {
+            Ok((key_rows, distinct_vector_ids, aliased_drawer_ids)) => Self::Measured {
+                key_rows,
+                distinct_vector_ids,
+                aliased_drawer_ids,
+            },
+            Err(e) => Self::Unavailable {
+                reason: format!("{e:#}"),
+            },
+        }
+    }
+
+    /// Whether the audit ran AND found no drawer sharing an id.
+    ///
+    /// `Unavailable` is false: an unread palace is not a clean one.
+    pub fn is_clean(&self) -> bool {
+        matches!(self, Self::Measured { aliased_drawer_ids, .. } if aliased_drawer_ids.is_empty())
+    }
+
+    /// Drawers caught in a collision; empty when the audit did not run.
+    ///
+    /// Callers that branch on emptiness MUST check [`Self::is_clean`] instead —
+    /// empty here means "none found OR none looked for".
+    pub fn aliased_drawer_ids(&self) -> &[Uuid] {
+        match self {
+            Self::Measured {
+                aliased_drawer_ids, ..
+            } => aliased_drawer_ids,
+            Self::Unavailable { .. } => &[],
+        }
+    }
+
+    /// `(key_rows, distinct_vector_ids)`, or `None` when the audit did not run.
+    pub fn counts(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Measured {
+                key_rows,
+                distinct_vector_ids,
+                ..
+            } => Some((*key_rows, *distinct_vector_ids)),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    /// Why the audit could not run, when it could not.
+    pub fn unavailable_reason(&self) -> Option<&str> {
+        match self {
+            Self::Unavailable { reason } => Some(reason),
+            Self::Measured { .. } => None,
+        }
+    }
+}
+
 /// Vector-coverage snapshot for one palace.
 ///
 /// Why: the question "is this palace's memory actually findable?" had no answer
@@ -58,25 +155,19 @@ pub struct EmbedHealth {
     pub recorded_failures: Vec<EmbedFailure>,
     /// Whether a shared embedder has initialised in this process.
     pub embedder_ready: bool,
-    /// Rows in the `VECTOR_KEYS` table (#5005).
-    pub vector_key_rows: usize,
-    /// Distinct vector ids those rows point at (#5005). Below
-    /// `vector_key_rows` exactly when drawers share an id.
-    pub distinct_vector_ids: usize,
-    /// Drawers whose vector was overwritten by another drawer's (#5005). These
-    /// have a key, so they are NOT in `missing_vector_ids` — that is precisely
-    /// why the count gap missed them — but their content is embedded nowhere.
-    pub aliased_drawer_ids: Vec<Uuid>,
+    /// Vector-id alias audit (#5005), including whether it ran at all.
+    pub alias_audit: AliasAudit,
 }
 
 impl EmbedHealth {
     /// Whether every live drawer is vector-searchable.
     ///
     /// #5005: an aliased drawer has a vector key and still resolves to nothing,
-    /// so key presence alone is not the health condition. Both sets must be
-    /// empty.
+    /// so key presence alone is not the health condition — and an alias audit
+    /// that could not run is not a passing one. Healthy requires no missing
+    /// drawers AND an audit that ran and came back clean.
     pub fn is_healthy(&self) -> bool {
-        self.missing_vector_ids.is_empty() && self.aliased_drawer_ids.is_empty()
+        self.missing_vector_ids.is_empty() && self.alias_audit.is_clean()
     }
 }
 
@@ -130,14 +221,12 @@ pub struct VectorBackfillReport {
     /// Ids still without a vector after this run (including any skipped by
     /// `limit`), so a caller can act on the remainder.
     pub still_missing_ids: Vec<Uuid>,
-    /// Drawers sharing a vector id with another drawer (#5005). This run never
-    /// repairs them — a re-embed alone would not, since they already have a
-    /// key. A non-zero value means the palace is NOT clean however small
-    /// `missing` is, and it is the number a deletion-bearing workflow must gate
-    /// on alongside `missing` (#5000 resolution item 3).
-    pub aliased: usize,
-    /// The ids behind `aliased`.
-    pub aliased_ids: Vec<Uuid>,
+    /// The alias audit for this palace (#5005). This run never repairs an
+    /// aliased drawer — a re-embed alone would not, since it already has a key.
+    /// A deletion-bearing workflow must require `alias_audit.is_clean()` as well
+    /// as `missing == 0` (#5000 resolution item 3); an `Unavailable` audit
+    /// blocks exactly as a non-empty one does.
+    pub alias_audit: AliasAudit,
 }
 
 impl PalaceHandle {
@@ -171,17 +260,13 @@ impl PalaceHandle {
             .map(|d| embed_ledger::load(d))
             .unwrap_or_default();
         // #5005: an aliased drawer has a key, so it is invisible to the set
-        // difference above. A redb scan failure must not be reported as "no
-        // aliasing" — log it and leave the counts at zero, which reads as
-        // unknown rather than clean because the row count is zero too.
-        let (vector_key_rows, distinct_vector_ids, aliased_drawer_ids) =
-            match self.vector_store.alias_audit() {
-                Ok(triple) => triple,
-                Err(e) => {
-                    tracing::warn!(palace = %self.id, "#5005: alias audit failed: {e:#}");
-                    (0, 0, Vec::new())
-                }
-            };
+        // difference above. A failed scan becomes `Unavailable`, never zeros —
+        // a numeric zero standing in for "I could not tell" is the same
+        // false-all-clear shape this ticket exists to remove.
+        let alias_audit = AliasAudit::from_scan(self.vector_store.alias_audit());
+        if let Some(reason) = alias_audit.unavailable_reason() {
+            tracing::error!(palace = %self.id, "#5005: alias audit failed: {reason}");
+        }
         EmbedHealth {
             palace_id: self.id.as_str().to_string(),
             drawer_count: live.len(),
@@ -189,9 +274,7 @@ impl PalaceHandle {
             missing_vector_ids,
             recorded_failures,
             embedder_ready: shared_embedder_initialized(),
-            vector_key_rows,
-            distinct_vector_ids,
-            aliased_drawer_ids,
+            alias_audit,
         }
     }
 
@@ -227,8 +310,7 @@ impl PalaceHandle {
             repaired: 0,
             still_failing: 0,
             still_missing_ids: health.missing_vector_ids.clone(),
-            aliased: health.aliased_drawer_ids.len(),
-            aliased_ids: health.aliased_drawer_ids.clone(),
+            alias_audit: health.alias_audit.clone(),
         };
 
         // A healthy palace short-circuits BEFORE touching the embedder, so the

@@ -301,15 +301,36 @@ pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Resu
         "recorded_failures": health.recorded_failures.len(),
         // #5005 / #5000: `missing` counts drawers with no vector key. An
         // aliased drawer HAS a key and is still unretrievable, so `missing: 0`
-        // was a false all-clear on the palace that lost four of them. These
-        // three fields are the signal that catches it; gate deletions on
-        // `aliased` as well as `missing`.
-        "vector_key_rows": health.vector_key_rows,
-        "distinct_vector_ids": health.distinct_vector_ids,
-        "aliased": report.aliased,
-        "aliased_ids": report.aliased_ids
+        // was a false all-clear on the palace that lost four of them. Gate
+        // deletions on `alias_audit == "clean"` as well as `missing == 0`:
+        // `"unavailable"` means the scan failed and nothing is known, which is
+        // a block, not a pass. `vector_key_rows` / `distinct_vector_ids` are
+        // null in that case rather than 0, so no zero can be misread as clean.
+        "alias_audit": alias_audit_state(&report.alias_audit),
+        "alias_audit_error": report.alias_audit.unavailable_reason(),
+        "vector_key_rows": report.alias_audit.counts().map(|(rows, _)| rows),
+        "distinct_vector_ids": report.alias_audit.counts().map(|(_, ids)| ids),
+        "aliased": report.alias_audit.aliased_drawer_ids().len(),
+        "aliased_ids": report.alias_audit.aliased_drawer_ids()
             .iter().map(|i| i.to_string()).collect::<Vec<_>>(),
     }))
+}
+
+/// One word for how the #5005 alias audit went, for the `palace_reembed` payload.
+///
+/// Why: a caller has to be able to tell "no drawer is aliased" from "the scan
+/// failed and nothing is known" without inspecting counts — the second must
+/// never read as the first.
+/// What: `"clean"`, `"aliased"`, or `"unavailable"`.
+/// Test: `dispatch_palace_reembed_dry_run_reports_counts` in `tools::tests`.
+fn alias_audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) -> &'static str {
+    if audit.unavailable_reason().is_some() {
+        "unavailable"
+    } else if audit.is_clean() {
+        "clean"
+    } else {
+        "aliased"
+    }
 }
 
 pub(crate) async fn handle_palace_compact(state: &AppState, args: Value) -> Result<Value> {

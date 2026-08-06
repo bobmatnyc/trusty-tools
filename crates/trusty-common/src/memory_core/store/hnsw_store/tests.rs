@@ -187,6 +187,17 @@ fn read_seq(store: &HnswStore) -> Option<u64> {
     seq.get(NEXT_VECTOR_ID).unwrap().map(|g| g.value())
 }
 
+/// Delete the persisted counter, forcing the allocator onto its high-water
+/// fallback. Models a palace whose counter row never existed.
+fn set_seq_absent(store: &HnswStore) {
+    let wtx = store.db.begin_write().unwrap();
+    {
+        let mut seq = wtx.open_table(VECTOR_ID_SEQ).unwrap();
+        seq.remove(NEXT_VECTOR_ID).unwrap();
+    }
+    wtx.commit().unwrap();
+}
+
 /// Overwrite the persisted counter. Models the exact state a pre-#5005
 /// binary leaves behind: rows written, counter untouched.
 fn set_seq(store: &HnswStore, value: u64) {
@@ -524,4 +535,56 @@ fn dimension_mismatch_is_rejected() {
         } => {}
         other => panic!("wrong error variant: {other:?}"),
     }
+}
+
+/// Why (#5005, review finding): the occupancy probe reads `VECTORS`, but a
+/// `VECTOR_KEYS` row can outlive its `VECTORS` row. `compact_orphans` snapshots
+/// the live-id set, computes orphans, and deletes them in three separate
+/// transactions, so an `upsert` landing between the first and the third has its
+/// brand-new id classed as an orphan and its `VECTORS` row removed while the
+/// key survives — reachable under exactly the in-process concurrency this store
+/// supports. A `VECTORS`-only bound would then hand that id straight back out
+/// and alias the surviving key, arriving at the same defect from the other
+/// table.
+/// What: builds that state directly — a `VECTOR_KEYS` row claiming id 7 with no
+/// `VECTORS` row anywhere — clears the counter so allocation must fall back to
+/// the high-water mark, then upserts. The new drawer must not take 7.
+/// Test: this test itself is the verification. Reverting `high_water` to
+/// `vectors.last()? + 1` makes the fallback return 1, the probe sees `VECTORS`
+/// empty, and the upsert takes an id `VECTOR_KEYS` already claims — failing the
+/// `assert_ne!` and the audit.
+#[test]
+fn upsert_refuses_an_id_that_only_vector_keys_still_claims() {
+    let (_dir, store) = open_store(8);
+    let stranded = Uuid::new_v4().to_string();
+
+    // The post-`compact_orphans`-race state: key present, vector row gone.
+    {
+        let wtx = store.db.begin_write().unwrap();
+        {
+            let mut keys = wtx.open_table(VECTOR_KEYS).unwrap();
+            keys.insert(stranded.as_str(), 7u64).unwrap();
+        }
+        wtx.commit().unwrap();
+    }
+    set_seq_absent(&store);
+
+    let fresh = Uuid::new_v4().to_string();
+    let id = store.upsert(&fresh, &unit_vec(8, 21)).expect("upsert");
+    assert_ne!(
+        id, 7,
+        "an id still claimed by a VECTOR_KEYS row must not be re-issued, even with no VECTORS row"
+    );
+    assert!(
+        id > 7,
+        "the fallback must clear every id either table knows about, got {id}"
+    );
+
+    let audit = store.audit_aliases().expect("audit");
+    assert!(
+        audit.is_clean(),
+        "a VECTOR_KEYS-only id must not become an alias: {audit:?}"
+    );
+    assert_eq!(audit.key_rows, 2);
+    assert_eq!(audit.distinct_vector_ids, 2);
 }

@@ -16,7 +16,7 @@
 use super::deferred_embed::{
     EmbedLoss, RetryPolicy, embed_and_store, embed_store_or_record, record_loss,
 };
-use super::embed_repair::VectorBackfillOptions;
+use super::embed_repair::{AliasAudit, EmbedHealth, VectorBackfillOptions};
 use super::embedder::seed_shared_embedder_with_mock;
 use super::handle::PalaceHandle;
 use crate::embedder::MockEmbedder;
@@ -800,12 +800,12 @@ fn alias_audit_surfaces_a_collision() {
         health.missing_vector_ids.is_empty(),
         "the false all-clear this ticket is about: every aliased drawer has a key"
     );
-    assert_eq!(health.vector_key_rows, 3);
     assert_eq!(
-        health.distinct_vector_ids, 1,
+        health.alias_audit.counts(),
+        Some((3, 1)),
         "three keys, one id — the gap is the detector"
     );
-    let mut aliased = health.aliased_drawer_ids.clone();
+    let mut aliased = health.alias_audit.aliased_drawer_ids().to_vec();
     aliased.sort();
     assert_eq!(aliased, ids, "every member of the group must be named");
     assert!(
@@ -848,10 +848,7 @@ fn unalias_marks_the_whole_group_for_reembed() {
     );
 
     let after = handle.embed_health();
-    assert!(
-        after.aliased_drawer_ids.is_empty(),
-        "no group survives the repair"
-    );
+    assert!(after.alias_audit.is_clean(), "no group survives the repair");
     let mut missing = after.missing_vector_ids.clone();
     missing.sort();
     assert_eq!(
@@ -859,4 +856,68 @@ fn unalias_marks_the_whole_group_for_reembed() {
         "the freed drawers must now read as ordinary missing, which the backfill repairs"
     );
     assert!(!after.is_healthy(), "they still need a re-embed");
+}
+
+/// Why (#5005, review finding): the alias audit is the ONLY signal that catches
+/// an overwritten drawer, and the PR that added it tells operators to gate
+/// deletions on it. A scan that fails and reports `(0, 0, [])` therefore ships
+/// the exact defect this ticket exists to remove, one level up: a failure
+/// branch leaving state that looks successful. `is_healthy()` would return true
+/// and `palace_reembed` would say `aliased: 0` while nothing had been read.
+/// What: takes a palace with a real three-way collision — a state
+/// `alias_audit_surfaces_a_collision` proves is reported as unhealthy — and
+/// asserts the `Unavailable` outcome is ALSO unhealthy, is not clean, names its
+/// reason, and reports no counts rather than zeros.
+/// Test: itself. Making `AliasAudit::from_scan`'s `Err` arm return
+/// `Measured { key_rows: 0, distinct_vector_ids: 0, aliased_drawer_ids: vec![] }`
+/// — the code this finding removed — makes `is_clean()` true and fails every
+/// assertion here.
+#[test]
+fn alias_audit_failure_is_never_reported_as_clean() {
+    // Drive the REAL mapping with a failed scan, not a hand-built enum value:
+    // this is the branch `embed_health` takes, and the only place a failure
+    // could be laundered into a clean-looking zero.
+    let unavailable = AliasAudit::from_scan(Err(anyhow::anyhow!(
+        "redb storage error: simulated scan failure"
+    )));
+    assert!(
+        !unavailable.is_clean(),
+        "an audit that could not run must never read as clean"
+    );
+    assert_eq!(
+        unavailable.counts(),
+        None,
+        "no counts at all — a zero would be misread as 'measured, nothing found'"
+    );
+    assert!(
+        unavailable.unavailable_reason().is_some(),
+        "the reason must survive to the operator"
+    );
+
+    // The health verdict a caller actually gates on.
+    let health = EmbedHealth {
+        palace_id: "unreadable".to_string(),
+        drawer_count: 3,
+        vector_count: 3,
+        missing_vector_ids: Vec::new(),
+        recorded_failures: Vec::new(),
+        embedder_ready: true,
+        alias_audit: unavailable,
+    };
+    assert!(
+        !health.is_healthy(),
+        "zero missing drawers plus an unreadable alias audit is NOT healthy"
+    );
+
+    // Contrast: the same shape with a measured-clean audit IS healthy, so the
+    // assertion above is about the unknown state and not about something else.
+    let measured = EmbedHealth {
+        alias_audit: AliasAudit::Measured {
+            key_rows: 3,
+            distinct_vector_ids: 3,
+            aliased_drawer_ids: Vec::new(),
+        },
+        ..health
+    };
+    assert!(measured.is_healthy(), "a measured-clean palace is healthy");
 }

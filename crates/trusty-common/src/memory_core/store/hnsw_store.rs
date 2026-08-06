@@ -165,9 +165,10 @@ impl From<redb::CommitError> for HnswStoreError {
 /// What: reads `VECTOR_ID_SEQ`, takes the first candidate with no `VECTORS`
 /// row, writes `candidate + 1` back, and returns the candidate. When the
 /// candidate IS occupied — a counter left behind by a pre-#5005 binary, or a
-/// hand-edited file — it jumps past the highest occupied id rather than
-/// overwriting, logs the correction, and retries; after [`MAX_ALLOC_PROBES`]
-/// it fails with [`HnswStoreError::IdAllocationFailed`] instead of aliasing.
+/// hand-edited file — it jumps past the highest id EITHER vector table knows
+/// about (see [`high_water`]) rather than overwriting, logs the correction, and
+/// retries; after [`MAX_ALLOC_PROBES`] it fails with
+/// [`HnswStoreError::IdAllocationFailed`] instead of aliasing.
 /// A missing counter row (only reachable if the store skipped open-time
 /// seeding) falls back to the same high-water mark the seed would have used.
 /// Test: `upsert_refuses_to_reuse_an_id_already_present_in_vectors`,
@@ -175,6 +176,7 @@ impl From<redb::CommitError> for HnswStoreError {
 fn allocate_vector_id(
     seq: &mut Table<'_, &'static str, u64>,
     vectors: &Table<'_, u64, &'static [u8]>,
+    keys: &Table<'_, &'static str, u64>,
 ) -> Result<u64> {
     let mut candidate = match seq.get(NEXT_VECTOR_ID)? {
         Some(g) => g.value(),
@@ -183,7 +185,7 @@ fn allocate_vector_id(
                 "#5005: VECTOR_ID_SEQ has no counter row at allocation time; \
                  falling back to the VECTORS high-water mark"
             );
-            high_water(vectors)?
+            high_water(vectors, keys)?
         }
     };
 
@@ -199,7 +201,7 @@ fn allocate_vector_id(
              skipping the occupied id instead of overwriting it"
         );
         // Jump past the highest occupied id so one correction is enough.
-        candidate = high_water(vectors)?.max(candidate.saturating_add(1));
+        candidate = high_water(vectors, keys)?.max(candidate.saturating_add(1));
     }
 
     Err(HnswStoreError::IdAllocationFailed {
@@ -208,20 +210,38 @@ fn allocate_vector_id(
     })
 }
 
-/// One past the highest `vector_id` present in `VECTORS` (1 when empty).
+/// One past the highest `vector_id` either vector table knows about.
 ///
 /// Why: both the allocator's collision jump and its missing-counter fallback
-/// need the same "no id at or above this is taken" bound. `VECTORS` is a
-/// B-tree keyed by `u64`, so `last()` is O(log n) — cheap enough to call on the
-/// rare correction path.
-/// What: `last()? + 1`, or 1 for an empty table (id 0 is never issued, matching
-/// the pre-#5005 seed of `max_seen + 1`).
-/// Test: exercised by `upsert_refuses_to_reuse_an_id_already_present_in_vectors`.
-fn high_water(vectors: &Table<'_, u64, &'static [u8]>) -> Result<u64> {
-    Ok(match vectors.last()? {
-        Some((k, _)) => k.value().saturating_add(1),
-        None => 1,
-    })
+/// need a bound above which NO id is taken. `VECTORS` alone is not that bound.
+/// A `VECTOR_KEYS` row can outlive its `VECTORS` row: `compact_orphans` reads
+/// the live-id set, computes orphans, and deletes them in three separate
+/// transactions, so an `upsert` that lands between the first and the third has
+/// its brand-new id treated as an orphan and its `VECTORS` row removed while
+/// the key survives. Under the in-process concurrency this store supports that
+/// is a reachable state, and a `VECTORS`-only bound would hand the id straight
+/// back out — the same aliasing this module exists to prevent, arrived at from
+/// the other table.
+/// What: `max(last VECTORS key, largest mapped VECTOR_KEYS value) + 1`, or 1
+/// when both are empty (id 0 is never issued, matching the pre-#5005 seed of
+/// `max_seen + 1`). `VECTORS.last()` is O(log n); the `VECTOR_KEYS` sweep is
+/// O(n) but runs only on the rare correction path — never on a healthy upsert,
+/// where the counter's own invariant already bounds the candidate.
+/// Test: `upsert_refuses_to_reuse_an_id_already_present_in_vectors`,
+/// `upsert_refuses_an_id_that_only_vector_keys_still_claims`.
+fn high_water(
+    vectors: &Table<'_, u64, &'static [u8]>,
+    keys: &Table<'_, &'static str, u64>,
+) -> Result<u64> {
+    let mut max_seen = match vectors.last()? {
+        Some((k, _)) => k.value(),
+        None => 0,
+    };
+    for entry in keys.iter()? {
+        let (_, v) = entry?;
+        max_seen = max_seen.max(v.value());
+    }
+    Ok(max_seen.saturating_add(1))
 }
 
 /// Public result alias to keep call-site signatures concise.
@@ -506,7 +526,7 @@ impl HnswStore {
                 Some(id) => id,
                 None => {
                     // #5005: allocate from redb, inside this txn.
-                    let id = allocate_vector_id(&mut seq, &vectors)?;
+                    let id = allocate_vector_id(&mut seq, &vectors, &keys)?;
                     keys.insert(uuid, id)?;
                     id
                 }

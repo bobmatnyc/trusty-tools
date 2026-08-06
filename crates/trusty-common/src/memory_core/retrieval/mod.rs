@@ -52,7 +52,7 @@ pub use handle::PalaceHandle;
 // public because a caller choosing to run a longer policy than the write-path
 // default is a legitimate operator decision.
 pub use deferred_embed::RetryPolicy;
-pub use embed_repair::{EmbedHealth, VectorBackfillOptions, VectorBackfillReport};
+pub use embed_repair::{AliasAudit, EmbedHealth, VectorBackfillOptions, VectorBackfillReport};
 
 // Recall scoping (ADR-0027 T9)
 pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};
