@@ -70,9 +70,9 @@ fn info_managed_fallback_matches_by_id_and_name() {
 }
 
 #[test]
-fn parse_scoped_sessions_all_keeps_tombstone_in_slot_order() {
+fn scope_for_display_all_keeps_tombstone_in_slot_order() {
     // Why (#3034 fix-round LOW): the `--all` sort in
-    // `session_picker::parse_scoped_sessions` sinks ONLY "decommissioned"
+    // `session_picker::scope_for_display` sinks ONLY "decommissioned"
     // records to the bottom; a "deleted" slot tombstone must stay exactly
     // where the daemon placed it (ascending slot order) rather than being
     // grouped with decommissioned rows — Bob's directive requires a
@@ -80,7 +80,7 @@ fn parse_scoped_sessions_all_keeps_tombstone_in_slot_order() {
     // liveness sort would relocate it. Lives here (rather than
     // `tests_behavior_c_tests.rs`, which sits at the 1500-SLOC test cap)
     // since it needs no fixture that file already provides.
-    use crate::commands::session_picker::parse_scoped_sessions;
+    use crate::commands::session_picker::{parse_managed_sessions, scope_for_display};
 
     let raw = serde_json::json!({
         "sessions": [
@@ -92,7 +92,11 @@ fn parse_scoped_sessions_all_keeps_tombstone_in_slot_order() {
     })
     .to_string();
 
-    let sessions = parse_scoped_sessions(&raw, true).expect("parse must succeed");
+    let sessions = scope_for_display(
+        parse_managed_sessions(&raw).expect("parse must succeed"),
+        true,
+        &std::collections::HashSet::new(),
+    );
 
     // All 4 rows survive `--all` (nothing dropped, unlike the default view).
     assert_eq!(

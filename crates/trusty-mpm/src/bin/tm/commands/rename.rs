@@ -187,13 +187,21 @@ async fn finish_rename(
 /// didn't ("renamed → tm-x" when the session is really `tm-x-2`), poisoning
 /// their next `tmux attach`/resume-by-name.
 /// What: PATCHes `{ "name": … }`; 404 bails; 400 (and the legacy 409, kept for
-/// older daemons) surfaces the daemon's message on stderr and errors. On
+/// older daemons) surfaces the daemon's message on stderr and errors. Any
+/// OTHER non-success status reads the body and carries it into the error — the
+/// daemon writes an actionable reason there (e.g. `store error: session store
+/// serialization error: trailing characters at line 3755 column 2` when
+/// `sessions.json` is corrupt), and `error_for_status()` used to DISCARD it,
+/// leaving the operator with a bare `HTTP status server error (500 …)`. On
 /// success, parses the response body's `name` field and returns
 /// [`rename_success_message`] built from it — falling back to the requested
 /// name only when the body carries none (an older daemon). Returns the
 /// message rather than printing so tests can assert it.
 /// Test: `do_rename_request_reports_server_confirmed_suffixed_name`,
-/// `do_rename_request_reports_plain_success` (`rename_tests.rs`).
+/// `do_rename_request_reports_plain_success`,
+/// `do_rename_request_surfaces_daemon_500_body`,
+/// `do_rename_request_reports_bare_status_when_500_body_is_empty`
+/// (`rename_tests.rs`).
 ///
 /// `pub(super)` (rather than private): the `tm ls`/bare-`tm` picker's `r<N>
 /// <new-name>` rename input mode (`commands::session_picker_rename`) calls
@@ -226,8 +234,20 @@ pub(super) async fn do_rename_request(
             eprintln!("error: {msg}");
             Err(anyhow::anyhow!("rename rejected: {msg}"))
         }
+        status if !status.is_success() => {
+            // Every OTHER non-success status (500 above all). `error_for_status()`
+            // used to handle this arm, and it DISCARDS the response body — the
+            // daemon's own actionable text was thrown away and the operator got
+            // only "HTTP status server error (500 …) for url (…)". Read the body
+            // and carry it into the error instead.
+            let body = resp.text().await.unwrap_or_default();
+            let detail = body.trim();
+            if detail.is_empty() {
+                anyhow::bail!("daemon returned {status} with no detail");
+            }
+            anyhow::bail!("daemon returned {status}: {detail}");
+        }
         _ => {
-            let resp = resp.error_for_status()?;
             // The daemon's summary carries the name it ACTUALLY applied,
             // which may be an auto-suffixed variant of what we sent (#3692).
             let confirmed = resp
