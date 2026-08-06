@@ -187,8 +187,8 @@ pub enum RepairError {
 /// session.
 /// What: the diagnosis, how many sessions the recovered document holds, and the
 /// session ids named ONLY in the bytes that would be discarded.
-/// Test: `plan_reports_no_orphans_when_the_tail_repeats_known_ids`,
-/// `plan_reports_an_orphan_id_present_only_in_the_tail`.
+/// Test: `repair_backs_up_then_truncates_to_the_valid_document`,
+/// `repair_refuses_an_orphaned_tail_without_force`.
 #[derive(Debug, Clone)]
 pub struct RepairPlan {
     /// The diagnosis this plan is derived from.
@@ -225,8 +225,8 @@ pub struct RepairOutcome {
 /// [`RepairError::NoValidPrefix`] when nothing at the head is a whole document,
 /// otherwise a plan carrying the orphan-id verdict.
 /// Test: `plan_refuses_a_healthy_store`,
-/// `plan_reports_no_orphans_when_the_tail_repeats_known_ids`,
-/// `plan_reports_an_orphan_id_present_only_in_the_tail`.
+/// `repair_rejects_a_file_with_no_valid_prefix`,
+/// `repair_refuses_an_orphaned_tail_without_force`.
 pub fn plan(path: &Path) -> Result<RepairPlan, RepairError> {
     let raw = std::fs::read_to_string(path).map_err(|source| RepairError::Io {
         path: path.to_path_buf(),
@@ -270,8 +270,7 @@ pub fn plan(path: &Path) -> Result<RepairPlan, RepairError> {
 /// with no backup.
 /// Test: `repair_backs_up_then_truncates_to_the_valid_document`,
 /// `repair_refuses_an_orphaned_tail_without_force`,
-/// `repair_with_force_discards_an_orphaned_tail`,
-/// `repair_leaves_the_file_untouched_when_it_refuses`.
+/// `repair_with_force_discards_an_orphaned_tail`.
 pub fn repair(path: &Path, force: bool, now: DateTime<Utc>) -> Result<RepairOutcome, RepairError> {
     let plan = plan(path)?;
     if !plan.orphan_ids.is_empty() && !force {

@@ -147,8 +147,7 @@ struct FileSig {
 /// separates instances within one process (tests routinely hold two stores over
 /// one directory, and `agent_reset_workspace` builds its own alongside the
 /// daemon's).
-/// Test: `two_stores_over_one_path_do_not_share_a_staging_file`,
-/// `staging_path_is_a_sibling_of_the_store`.
+/// Test: `two_stores_over_one_path_do_not_share_a_staging_file`.
 fn staging_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(
@@ -239,7 +238,8 @@ impl SessionStore {
     /// file, and re-deriving `<data_dir>/sessions.json` at each of those call
     /// sites is how two of them end up disagreeing.
     /// What: the absolute path to `sessions.json`.
-    /// Test: `store_exposes_its_backing_path`.
+    /// Test: exercised by `check_session_store` and `tm repair session-store`,
+    /// which both name the file this returns.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -323,7 +323,10 @@ impl SessionStore {
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                 return Err(StoreError::Corrupt(Box::new(StoreIntegrity {
                     path: path.to_path_buf(),
-                    total_bytes: fs::metadata(path).await.map(|m| m.len() as usize).unwrap_or(0),
+                    total_bytes: fs::metadata(path)
+                        .await
+                        .map(|m| m.len() as usize)
+                        .unwrap_or(0),
                     valid_prefix_bytes: None,
                     detail: e.to_string(),
                     line: 0,

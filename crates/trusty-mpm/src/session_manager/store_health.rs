@@ -15,8 +15,7 @@
 //! [`SessionManager::store_health`], the single accessor the list endpoint,
 //! `tm ls`, and `tm doctor` all read the degradation from.
 //! Test: `log_reload_fallback_separates_corruption_from_a_transient_error`,
-//! `manager_reports_store_health_after_a_corrupt_reload` in
-//! `store_integrity_tests.rs`.
+//! `store_records_and_clears_a_reload_failure` (the degradation this reads).
 
 use tracing::{error, warn};
 
@@ -31,7 +30,9 @@ impl SessionManager {
     /// a reportable one without removing it.
     /// What: clones the store's current [`StoreDegradation`], or `None` when
     /// the last reload succeeded.
-    /// Test: `manager_reports_store_health_after_a_corrupt_reload`.
+    /// Test: `store_records_and_clears_a_reload_failure` pins the degradation
+    /// this returns; `list_response_omits_store_health_when_healthy` pins how the
+    /// list endpoint renders it.
     pub async fn store_health(&self) -> Option<StoreDegradation> {
         self.store.read().await.degradation().cloned()
     }

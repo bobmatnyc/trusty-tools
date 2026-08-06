@@ -300,7 +300,10 @@ async fn repair_backs_up_then_truncates_to_the_valid_document() {
     let path = dir.path().join("sessions.json");
     let before = std::fs::read_to_string(&path).expect("read corrupt");
 
-    let now = Utc.with_ymd_and_hms(2026, 8, 6, 9, 1, 17).single().expect("timestamp");
+    let now = Utc
+        .with_ymd_and_hms(2026, 8, 6, 9, 1, 17)
+        .single()
+        .expect("timestamp");
     let outcome = repair(&path, false, now).expect("repair");
 
     assert_eq!(outcome.kept_bytes, valid);
@@ -530,7 +533,10 @@ fn analyze_reports_no_valid_prefix_for_a_broken_head() {
 /// Test: this test.
 #[test]
 fn backup_path_is_a_timestamped_sibling() {
-    let now = Utc.with_ymd_and_hms(2026, 8, 6, 9, 1, 17).single().expect("timestamp");
+    let now = Utc
+        .with_ymd_and_hms(2026, 8, 6, 9, 1, 17)
+        .single()
+        .expect("timestamp");
     let got = backup_path(&PathBuf::from("/x/session-manager/sessions.json"), now);
     assert_eq!(
         got,

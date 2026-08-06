@@ -53,7 +53,10 @@ pub(crate) fn repair_session_store(path: Option<String>, dry_run: bool, force: b
     let planned = match plan(&path) {
         Ok(p) => p,
         Err(RepairError::NotCorrupt(p)) => {
-            println!("session store {} parses cleanly — nothing to do", p.display());
+            println!(
+                "session store {} parses cleanly — nothing to do",
+                p.display()
+            );
             return Ok(());
         }
         Err(e) => return Err(anyhow::Error::new(e)),

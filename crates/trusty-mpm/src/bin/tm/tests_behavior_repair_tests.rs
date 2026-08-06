@@ -70,11 +70,12 @@ fn cli_parses_repair_session_store() {
     let cli = Cli::try_parse_from(["trusty-mpm", "repair", "session-store"]).unwrap();
     match cli.command.unwrap() {
         Command::Repair {
-            action: RepairAction::SessionStore {
-                path,
-                dry_run,
-                force,
-            },
+            action:
+                RepairAction::SessionStore {
+                    path,
+                    dry_run,
+                    force,
+                },
         } => {
             assert_eq!(path, None, "the default target is the real store");
             assert!(!dry_run, "a bare invocation actually repairs");
@@ -102,11 +103,12 @@ fn cli_parses_repair_session_store_flags() {
     .unwrap();
     match cli.command.unwrap() {
         Command::Repair {
-            action: RepairAction::SessionStore {
-                path,
-                dry_run,
-                force,
-            },
+            action:
+                RepairAction::SessionStore {
+                    path,
+                    dry_run,
+                    force,
+                },
         } => {
             assert_eq!(path, Some("/tmp/sessions.json".to_string()));
             assert!(dry_run);

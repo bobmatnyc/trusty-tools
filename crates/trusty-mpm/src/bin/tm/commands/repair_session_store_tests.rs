@@ -97,11 +97,7 @@ fn repair_session_store_truncates_and_backs_up() {
     let backup = std::fs::read_dir(dir.path())
         .expect("readdir")
         .filter_map(|e| e.ok())
-        .find(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .contains(".corrupt-backup-")
-        })
+        .find(|e| e.file_name().to_string_lossy().contains(".corrupt-backup-"))
         .expect("a timestamped backup must exist");
     assert_eq!(
         std::fs::read_to_string(backup.path()).expect("read backup"),
