@@ -181,16 +181,38 @@ pub(crate) async fn fetch_managed_raw(
     Ok(req.send().await?.error_for_status()?.text().await?)
 }
 
-/// Parse a raw managed-session list body into a scoped `Vec` for display.
+/// Deserialize a raw managed-session list body — every row, unscoped.
+///
+/// Why: the listing-time auto-prune must see the FULL fleet, including the dead
+/// rows the default view hides (#4994). Splitting the deserialize away from the
+/// display scoping ([`scope_for_display`]) is what lets the pipeline run in the
+/// only order that works: parse → prune → scope. Before #4994 the scoping ran
+/// inside this function, upstream of the prune, which was harmless only because
+/// nothing it dropped was ever prunable.
+/// What: deserializes `ManagedListResponse` and hands back its `sessions`
+/// verbatim, in the daemon's ascending-slot order.
+/// Test: `scope_for_display_all_keeps_tombstone_in_slot_order` (via the pair),
+/// `session_ls_prunes_dead_records_on_piped_invocation`.
+pub(crate) fn parse_managed_sessions(raw: &str) -> anyhow::Result<Vec<ManagedSessionSummary>> {
+    Ok(serde_json::from_str::<ManagedListResponse>(raw)?.sessions)
+}
+
+/// Apply the default-vs-`--all` display scoping to an already-pruned list.
 ///
 /// Why: the static table and the picker share one filtering/sorting policy so
 /// the two views never diverge (#1809/#1841).
-/// What: deserializes `ManagedListResponse`; when `all` is false, drops
-/// decommissioned records via [`filter_live_sessions`] (a `"deleted"` slot
-/// tombstone, #3034, is NOT a decommissioned record and always passes through
-/// this branch too — see [`super::managed::is_live_session_state`]'s doc).
-/// When `all` is true, keeps every row — live, decommissioned, AND tombstoned
-/// — but stable-sorts ONLY `"decommissioned"` records to the end.
+/// What: when `all` is false, drops decommissioned records, soft-deleted
+/// records, and (#4994) records the listing-time sweep classified dead, via
+/// [`filter_live_sessions`] (a `"deleted"` slot tombstone, #3034, is NOT a
+/// decommissioned record and always passes through this branch too — see
+/// [`super::managed::is_live_session_state`]'s doc).
+///
+/// 🔴 `dead_ids` must be the set the sweep that just ran over THIS list
+/// produced — never the wire's `unresumable` flag re-derived here. See
+/// [`super::managed::is_live_session_state`] for the live session that
+/// distinction keeps visible.
+/// When `all` is true, keeps every row — live, decommissioned, dead, AND
+/// tombstoned — but stable-sorts ONLY `"decommissioned"` records to the end.
 ///
 /// `"deleted"` (#3034) tombstones are deliberately EXCLUDED from that
 /// sink-to-bottom sort key, even though a reviewer might expect both "dead"
@@ -214,25 +236,23 @@ pub(crate) async fn fetch_managed_raw(
 /// slot order untouched.
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
 /// `ls_source_id_filter_selects_correct_slug` in `tests_behavior_c_tests.rs`;
-/// `parse_scoped_sessions_all_keeps_tombstone_in_slot_order` in
+/// `scope_for_display_all_keeps_tombstone_in_slot_order` in
 /// `commands/session_tests.rs` covers the sink-to-bottom exclusion this doc
 /// describes.
-pub(crate) fn parse_scoped_sessions(
-    raw: &str,
+pub(crate) fn scope_for_display(
+    sessions: Vec<ManagedSessionSummary>,
     all: bool,
-) -> anyhow::Result<Vec<ManagedSessionSummary>> {
-    let fetched = serde_json::from_str::<ManagedListResponse>(raw)?.sessions;
-    let sessions = if all {
-        let mut s = fetched;
-        // Sink ONLY soft-retired "decommissioned" records — never "deleted"
-        // slot tombstones, which must stay in their original slot position
-        // (see this function's doc for the full reasoning).
-        s.sort_by_key(|sess| u8::from(sess.state == "decommissioned"));
-        s
-    } else {
-        filter_live_sessions(fetched)
-    };
-    Ok(sessions)
+    dead_ids: &std::collections::HashSet<String>,
+) -> Vec<ManagedSessionSummary> {
+    if !all {
+        return filter_live_sessions(sessions, dead_ids);
+    }
+    // Sink ONLY soft-retired "decommissioned" records — never "deleted"
+    // slot tombstones, which must stay in their original slot position
+    // (see this function's doc for the full reasoning).
+    let mut sessions = sessions;
+    sessions.sort_by_key(|sess| u8::from(sess.state == "decommissioned"));
+    sessions
 }
 
 /// Sort order for the `tm ls` / `tm sessions ls` table and picker (#3483).
@@ -426,11 +446,13 @@ fn recency_key(s: &ManagedSessionSummary) -> &str {
 /// Why: the interactive picker (both call sites) needs the deserialized, filtered
 /// session list; combining the GET and the parse keeps re-fetch-after-detach a
 /// single call and guarantees identical scoping to the static list.
-/// What: [`fetch_managed_raw`], then [`parse_scoped_sessions`], then
+/// What: [`fetch_managed_raw`], then [`parse_managed_sessions`], then
 /// [`super::session_picker_prune::prune_and_report`] — every session confirmed
 /// dead on TWO consecutive listings is cleared from the registry (capped per
 /// call) instead of sitting in the list forever printing "use [d<N>] to remove
-/// the record".
+/// the record" — and only THEN [`scope_for_display`]. That order is
+/// load-bearing (#4994): the default view now hides dead rows, so scoping first
+/// would hand the prune a list with its own targets already removed.
 ///
 /// #4702: the prune used to be behind an `allow_auto_prune` opt-in that only
 /// the TTY-gated call sites ever passed. That inconsistency is the defect —
@@ -451,7 +473,7 @@ fn recency_key(s: &ManagedSessionSummary) -> &str {
 ///     `auto_prune_always_requests_record_only_never_full_teardown`.
 ///
 /// Test: HTTP path in `tests/session_manager_mvp.rs`; the parse/filter seam is
-/// unit-tested via `parse_scoped_sessions`; the auto-prune seam by
+/// unit-tested via `scope_for_display`; the auto-prune seam by
 /// `auto_prune_*` in `tests_behavior_d_tests.rs`.
 pub(crate) async fn fetch_live_sessions(
     client: &reqwest::Client,
@@ -460,8 +482,11 @@ pub(crate) async fn fetch_live_sessions(
     all: bool,
 ) -> anyhow::Result<Vec<ManagedSessionSummary>> {
     let raw = fetch_managed_raw(client, url, source_id).await?;
-    let sessions = parse_scoped_sessions(&raw, all)?;
-    Ok(super::session_picker_prune::prune_and_report(client, url, sessions).await)
+    let fetched = parse_managed_sessions(&raw)?;
+    // `!all` is exactly whether this call will drop the dead rows, which is what
+    // decides the banner's "hidden" suffix (#4994).
+    let listing = super::session_picker_prune::prune_and_report(client, url, fetched, !all).await;
+    Ok(scope_for_display(listing.sessions, all, &listing.dead_ids))
 }
 
 /// Find the 0-based position in `sessions` whose stable `slot` equals `n`

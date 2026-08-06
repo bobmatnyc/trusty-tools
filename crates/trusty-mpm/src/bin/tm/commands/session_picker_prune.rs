@@ -47,8 +47,10 @@
 //!      attempts until the sentinel expires ([`STALE_DAEMON_TTL_SECS`], 1
 //!      hour) — self-healing: one probe per hour against a genuinely stale
 //!      daemon, not a permanent lockout once it's restarted. Records held
-//!      back by this gate fold into [`AutoPruneOutcome::pending`], never
-//!      silently disappearing from the reported count.
+//!      back by this gate fold into [`AutoPruneOutcome::pending`], as does a
+//!      record whose decommission was attempted and FAILED (#4995 review) —
+//!      neither may disappear from the reported count, because that count is
+//!      the only notice the operator gets that rows were withheld.
 //!
 //! What: [`prune_and_report`] is the production entry point (resolves the
 //! marker file under `~/.trusty-mpm` and prints the operator summary);
@@ -172,12 +174,54 @@ pub(crate) struct AutoPruneOutcome {
     /// Count of records actually decommissioned this call (never more than
     /// [`AUTO_PRUNE_CAP`]).
     pub(crate) pruned: usize,
-    /// Count of `unresumable` records NOT acted on this call — a first
-    /// sighting (not yet confirmed), confirmed-but-over-the-cap, or held
-    /// back because the stale-daemon gate is active (owner request
-    /// 2026-07-30 follow-up — this must fold in here or the reported count
-    /// under-represents exactly the batch that gate is protecting).
+    /// Count of dead records NOT cleared this call — a first sighting (not yet
+    /// confirmed), confirmed-but-over-the-cap, held back because the
+    /// stale-daemon gate is active (owner request 2026-07-30 follow-up), or
+    /// attempted and FAILED (#4995 review). Every one of those four must fold
+    /// in here: this count is the sole gate on the operator banner, and each
+    /// left out is a row hidden from the default view with nothing said about
+    /// it.
+    ///
+    /// Invariant: `pending == dead_ids.len()`, by construction — see
+    /// [`dead_ids`](Self::dead_ids).
     pub(crate) pending: usize,
+    /// Ids WITHIN [`kept`](Self::kept) that [`is_dead_record`] classified dead
+    /// but the sweep could not clear this call (#4994).
+    ///
+    /// 🔴 This — not the wire's `unresumable` flag — is what the default `tm ls`
+    /// view hides. The two are not the same set, and the difference is a live
+    /// session. `unresumable` is computed daemon-side from a record's PERSISTED
+    /// state; `reconcile_live_state` then overwrites the DISPLAY state without
+    /// recomputing it, so the wire can ship `state: "active"` alongside
+    /// `unresumable: true` for a session whose pane is running right now. The
+    /// prune already refuses to touch such a row ([`is_clearable_state`]'s
+    /// `stopped|errored` gate, and the `live_tmux_names` guard from PR #4725
+    /// round 2), so hiding on the raw flag would have made it hidden AND
+    /// unreapable — the exact "running agent unreachable through `tm`" outcome
+    /// those guards were built to prevent. Keying off this field instead makes
+    /// `hidden ⟺ prunable` true by construction.
+    ///
+    /// 🔴 `dead_ids.len() == pending` — the hidden set and the reported count
+    /// are the same rows, and every arm that leaves a record in
+    /// [`kept`](Self::kept) must increment `pending` to keep it that way. That
+    /// held only for three of the four arms until #4995's review: a FAILED
+    /// decommission left the record here (hidden) while counting it nowhere, so
+    /// a call where every attempt failed printed no banner at all. Test:
+    /// `auto_prune_counts_failed_decommissions_so_the_banner_still_prints`.
+    pub(crate) dead_ids: HashSet<String>,
+}
+
+/// What one listing-time prune hands its caller (#4994).
+///
+/// Why: the display scoping needs BOTH halves — the surviving rows and which of
+/// them the sweep classified dead — and they must come from the same call, or
+/// the view is scoped against a classification some other invocation computed.
+pub(crate) struct PrunedListing {
+    /// Every session surviving the sweep, dead-but-unreaped ones included.
+    pub(crate) sessions: Vec<ManagedSessionSummary>,
+    /// The subset of `sessions` the sweep classified dead — see
+    /// [`AutoPruneOutcome::dead_ids`].
+    pub(crate) dead_ids: HashSet<String>,
 }
 
 /// Everything the prune needs from its environment, resolved once per
@@ -265,8 +309,16 @@ pub(crate) async fn prune_and_report(
     client: &reqwest::Client,
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
-) -> Vec<ManagedSessionSummary> {
-    prune_and_report_at(client, url, sessions, &PruneContext::production()).await
+    hides_dead_rows: bool,
+) -> PrunedListing {
+    prune_and_report_at(
+        client,
+        url,
+        sessions,
+        &PruneContext::production(),
+        hides_dead_rows,
+    )
+    .await
 }
 
 /// [`prune_and_report`] with an injected [`PruneContext`] — the testable core.
@@ -282,7 +334,8 @@ pub(crate) async fn prune_and_report_at(
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
     ctx: &PruneContext,
-) -> Vec<ManagedSessionSummary> {
+    hides_dead_rows: bool,
+) -> PrunedListing {
     let outcome = auto_prune_dead_records_at(
         client,
         url,
@@ -298,14 +351,42 @@ pub(crate) async fn prune_and_report_at(
             if outcome.pruned == 1 { "" } else { "s" }
         );
     }
-    if outcome.pending > 0 {
-        eprintln!(
-            "tm: {} more dead record{} pending confirmation",
-            outcome.pending,
-            if outcome.pending == 1 { "" } else { "s" }
-        );
+    if let Some(banner) = pending_banner(outcome.pending, hides_dead_rows) {
+        eprintln!("{banner}");
     }
-    outcome.kept
+    PrunedListing {
+        sessions: outcome.kept,
+        dead_ids: outcome.dead_ids,
+    }
+}
+
+/// Build the "N more dead records pending confirmation" line, or `None` when
+/// there is nothing to report (#4994; extracted #4995 review).
+///
+/// Why: this line is the ONLY notice an operator gets that rows were withheld
+/// from the default view, so whether it prints is a behavior worth asserting
+/// directly rather than through a proxy for it. As an `eprintln!` inline in
+/// [`prune_and_report_at`] it could not be — a test could only check the
+/// `pending` count the branch happens to key on, which is what let a failed
+/// decommission suppress the banner unnoticed.
+/// What: `None` when `pending == 0`. The "(hidden; …)" suffix appears only when
+/// `hides_dead_rows` — `--json` and `--all` PRINT these rows, and claiming they
+/// are hidden where they are visibly listed sends the operator looking for a
+/// view they are already in.
+/// Test: `auto_prune_counts_failed_decommissions_so_the_banner_still_prints`.
+pub(crate) fn pending_banner(pending: usize, hides_dead_rows: bool) -> Option<String> {
+    if pending == 0 {
+        return None;
+    }
+    let suffix = if hides_dead_rows {
+        " (hidden; `tm ls --all` to see them)"
+    } else {
+        ""
+    };
+    Some(format!(
+        "tm: {pending} more dead record{} pending confirmation{suffix}",
+        if pending == 1 { "" } else { "s" }
+    ))
 }
 
 /// The workdir candidates a LISTED session carries on the wire (#4702).
@@ -633,6 +714,10 @@ pub(crate) async fn auto_prune_dead_records_at(
             kept: sessions,
             pruned: 0,
             pending: 0,
+            // No liveness signal means no classification, so nothing is hidden
+            // either — the fail-closed contract now covers the view as well as
+            // the sweep (#4994).
+            dead_ids: HashSet::new(),
         };
     };
 
@@ -647,6 +732,10 @@ pub(crate) async fn auto_prune_dead_records_at(
             kept.push(s);
         }
     }
+
+    // #4994: the classification the default view hides is captured HERE, from
+    // the same partition the sweep acts on — never re-derived from the wire.
+    let mut dead_ids: HashSet<String> = dead.iter().map(|s| s.id.clone()).collect();
 
     let mut seen = load_seen(marker_path);
     let mut changed = false;
@@ -667,6 +756,7 @@ pub(crate) async fn auto_prune_dead_records_at(
             kept,
             pruned: 0,
             pending: 0,
+            dead_ids,
         };
     }
 
@@ -712,6 +802,14 @@ pub(crate) async fn auto_prune_dead_records_at(
     // into `pending` — otherwise "N more dead records pending confirmation"
     // under-reports exactly the batch this gate is protecting.
     let mut stale_daemon_held = 0usize;
+    // #4995 review (MEDIUM): a record whose decommission FAILED stays in `kept`
+    // and in `dead_ids` — so the default view hides it — and must therefore be
+    // counted for exactly the reason `stale_daemon_held` is. Left uncounted, a
+    // call where every decommission failed reported `pending == 0`, skipped the
+    // banner entirely, and dropped those rows off `tm ls` with no notice: silent
+    // hiding arriving through the error path, which is the failure this whole
+    // feature exists to prevent.
+    let mut decommission_failed = 0usize;
 
     if already_stale_daemon {
         stale_daemon_held = to_prune.len();
@@ -723,9 +821,15 @@ pub(crate) async fn auto_prune_dead_records_at(
                 DecommissionOutcome::Pruned => {
                     pruned += 1;
                     seen.remove(&s.id);
+                    // It is gone from `kept`, so it must leave `dead_ids` too —
+                    // the set describes rows still on screen.
+                    dead_ids.remove(&s.id);
                     changed = true;
                 }
-                DecommissionOutcome::Failed => kept.push(s),
+                DecommissionOutcome::Failed => {
+                    decommission_failed += 1;
+                    kept.push(s);
+                }
                 DecommissionOutcome::StaleDaemon => {
                     newly_stale_daemon = true;
                     stale_daemon_held += 1;
@@ -752,7 +856,7 @@ pub(crate) async fn auto_prune_dead_records_at(
         );
     }
 
-    let pending = confirmed.len() + first_sighting.len() + stale_daemon_held;
+    let pending = confirmed.len() + first_sighting.len() + stale_daemon_held + decommission_failed;
     kept.extend(confirmed);
     kept.extend(first_sighting);
 
@@ -764,6 +868,7 @@ pub(crate) async fn auto_prune_dead_records_at(
         kept,
         pruned,
         pending,
+        dead_ids,
     }
 }
 
