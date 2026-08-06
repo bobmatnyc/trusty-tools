@@ -805,7 +805,11 @@ fn alias_audit_surfaces_a_collision() {
         Some((3, 1)),
         "three keys, one id — the gap is the detector"
     );
-    let mut aliased = health.alias_audit.aliased_drawer_ids().to_vec();
+    let mut aliased = health
+        .alias_audit
+        .aliased_drawer_ids()
+        .expect("a measured audit must expose its ids")
+        .to_vec();
     aliased.sort();
     assert_eq!(aliased, ids, "every member of the group must be named");
     assert!(
@@ -893,6 +897,13 @@ fn alias_audit_failure_is_never_reported_as_clean() {
         unavailable.unavailable_reason().is_some(),
         "the reason must survive to the operator"
     );
+    // Review follow-up: this accessor used to return `&[]` here, and the
+    // `palace_reembed` payload reported `aliased: 0` for a palace nobody had
+    // read — the same zero-for-unknown, one field short of the two beside it.
+    assert!(
+        unavailable.aliased_drawer_ids().is_none(),
+        "an unread audit must expose NO id list — an empty one reads as 'looked, found nothing'"
+    );
 
     // The health verdict a caller actually gates on.
     let health = EmbedHealth {
@@ -920,4 +931,9 @@ fn alias_audit_failure_is_never_reported_as_clean() {
         ..health
     };
     assert!(measured.is_healthy(), "a measured-clean palace is healthy");
+    assert_eq!(
+        measured.alias_audit.aliased_drawer_ids(),
+        Some(&[][..]),
+        "a measured-clean audit exposes an EMPTY list — what a zero legitimately means"
+    );
 }

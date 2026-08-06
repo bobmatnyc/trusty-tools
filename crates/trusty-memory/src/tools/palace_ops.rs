@@ -310,9 +310,13 @@ pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Resu
         "alias_audit_error": report.alias_audit.unavailable_reason(),
         "vector_key_rows": report.alias_audit.counts().map(|(rows, _)| rows),
         "distinct_vector_ids": report.alias_audit.counts().map(|(_, ids)| ids),
-        "aliased": report.alias_audit.aliased_drawer_ids().len(),
+        // `aliased` reported 0 for an unreadable audit in the first cut, while
+        // the two fields above it correctly reported null. Every count-shaped
+        // field in this object is now absent rather than zero when nothing was
+        // read — a lone zero is exactly the misreading #5005 documents.
+        "aliased": report.alias_audit.aliased_drawer_ids().map(<[Uuid]>::len),
         "aliased_ids": report.alias_audit.aliased_drawer_ids()
-            .iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+            .map(|ids| ids.iter().map(|i| i.to_string()).collect::<Vec<_>>()),
     }))
 }
 

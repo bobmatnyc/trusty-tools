@@ -95,16 +95,23 @@ impl AliasAudit {
         matches!(self, Self::Measured { aliased_drawer_ids, .. } if aliased_drawer_ids.is_empty())
     }
 
-    /// Drawers caught in a collision; empty when the audit did not run.
+    /// Drawers caught in a collision, or `None` when the audit did not run.
     ///
-    /// Callers that branch on emptiness MUST check [`Self::is_clean`] instead —
-    /// empty here means "none found OR none looked for".
-    pub fn aliased_drawer_ids(&self) -> &[Uuid] {
+    /// Why: this returned `&[]` for `Unavailable` in the first cut, and the
+    /// `palace_reembed` payload then reported `aliased: 0` for a palace nobody
+    /// had read — the same zero-standing-in-for-unknown this ticket exists to
+    /// remove, one field short of the two beside it. An `Option` makes that
+    /// unrepresentable: a caller cannot reach a length without first deciding
+    /// what to do about the `None`.
+    /// What: `Some(ids)` only when the audit ran. `Some(&[])` means "looked,
+    /// found nothing" — the only state a zero legitimately describes.
+    /// Test: `alias_audit_failure_is_never_reported_as_clean`.
+    pub fn aliased_drawer_ids(&self) -> Option<&[Uuid]> {
         match self {
             Self::Measured {
                 aliased_drawer_ids, ..
-            } => aliased_drawer_ids,
-            Self::Unavailable { .. } => &[],
+            } => Some(aliased_drawer_ids),
+            Self::Unavailable { .. } => None,
         }
     }
 
