@@ -273,3 +273,43 @@ fn force_adopt_leaves_an_operator_skill_alone() {
     assert_eq!(fs::read_to_string(&path).unwrap(), "OPERATOR CONTENT");
     assert!(!SkillManifest::load(dest.path()).is_managed("my-own-skill"));
 }
+
+#[test]
+fn force_adopt_leaves_an_operator_reference_stray_untracked() {
+    // An operator's own file dropped into a MANAGED skill's `references/` is
+    // not something any deploy will refresh, because the deployer only writes
+    // keys the source ships. Stamping it would move it out of
+    // `prune_guard::skill_verdict`'s spared set and into tm's managed set,
+    // where a later prune could remove it — so `--force` must leave it
+    // untracked. The skill's own entry point still gets re-stamped in the same
+    // pass, which is the whole point of the force.
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    fs::write(src.path().join("tm-workflow.md"), "bundled v2").unwrap();
+    deploy_skills(src.path(), dest.path()).unwrap();
+
+    let deployed = dest.path().join("tm-workflow").join("SKILL.md");
+    fs::write(&deployed, "HAND EDIT").unwrap();
+    let refs = dest.path().join("tm-workflow").join("references");
+    fs::create_dir_all(&refs).unwrap();
+    fs::write(refs.join("my-notes.md"), "OPERATOR NOTES").unwrap();
+
+    let adopted =
+        force_adopt_bundled_skills(dest.path(), &roster(&["tm-workflow"]), backups.path()).unwrap();
+
+    assert_eq!(
+        adopted[0].adopted_keys,
+        vec!["tm-workflow".to_string()],
+        "only the tracked entry point may be re-stamped: {adopted:?}"
+    );
+    let manifest = SkillManifest::load(dest.path());
+    assert!(
+        !manifest.is_managed("tm-workflow/references/my-notes.md"),
+        "the operator's stray must stay untracked"
+    );
+    assert_eq!(
+        fs::read_to_string(refs.join("my-notes.md")).unwrap(),
+        "OPERATOR NOTES"
+    );
+}

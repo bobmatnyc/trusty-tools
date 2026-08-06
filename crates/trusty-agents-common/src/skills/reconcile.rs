@@ -201,9 +201,18 @@ pub fn preview_unmanaged_bundled_skills(
 /// bundled text over it. Files already managed and current are left completely
 /// alone — no backup, no manifest churn. Content itself is never rewritten here.
 /// An empty result means nothing was in scope and NOTHING was written.
+///
+/// Scope limit: inside a skill the ledger ALREADY tracks, only files the ledger
+/// also tracks are re-stamped. An operator's own `references/*.md` dropped next
+/// to a managed skill is left untracked, so it stays in
+/// `prune_guard::skill_verdict`'s spared set instead of becoming tm-managed and
+/// prunable. When the skill's entry point is itself untracked the whole
+/// directory is adopted, references included — that is the #4605 state, and it
+/// is what [`adopt_unmanaged_bundled_skills`] already does.
 /// Test: `force_adopt_restamps_a_frozen_managed_skill`,
 /// `force_adopt_leaves_a_current_skill_alone`,
-/// `force_adopt_leaves_an_operator_skill_alone`.
+/// `force_adopt_leaves_an_operator_skill_alone`,
+/// `force_adopt_leaves_an_operator_reference_stray_untracked`.
 pub fn force_adopt_bundled_skills(
     dest: &Path,
     bundled: &BTreeSet<String>,
@@ -238,10 +247,26 @@ fn force_adopt_locked(
     let mut adopted = Vec::new();
 
     for skill in bundled_skill_dirs(dest, bundled) {
+        // Whether the ledger tracks this skill at all decides how wide the
+        // re-stamp may go — see the `adopted_keys` guard below.
+        let entry_managed = manifest.is_managed(&skill.stem);
         let mut adopted_keys = Vec::new();
         for (key, file) in skill.manifest_keys().into_iter().zip(&skill.files) {
             let content = std::fs::read_to_string(file)?;
             if manifest.checksum_matches(&key, &content) {
+                continue;
+            }
+            // An UNTRACKED file inside a skill the ledger DOES track is an
+            // operator addition — a `references/*.md` they dropped next to a
+            // managed skill. No deploy will ever refresh it (the deployer only
+            // writes keys the SOURCE ships), so stamping it would buy nothing
+            // and cost something: it would move the file from
+            // `prune_guard::skill_verdict`'s spared set into tm's managed set,
+            // where a later prune could remove it. Leave it alone. The wider
+            // sweep still applies when the skill's own entry point is untracked
+            // — that is the #4605 state `adopt_unmanaged_bundled_skills` already
+            // adopts whole, references included.
+            if entry_managed && !manifest.is_managed(&key) {
                 continue;
             }
             back_up(backup_root, file)?;

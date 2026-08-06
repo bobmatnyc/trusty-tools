@@ -144,6 +144,9 @@ fn reinstall_reports_every_target() {
     let project = TempDir::new().unwrap();
     let paths = seeded(base.path());
     let backups = base.path().join("backups");
+    // The project tier is only served when it already exists — see
+    // `targets_omit_the_project_tier_until_it_exists`.
+    std::fs::create_dir_all(project.path().join(".claude").join("skills")).unwrap();
 
     let report = reinstall_assets(
         &paths,
@@ -224,14 +227,15 @@ fn reinstall_refreshes_the_source_first() {
 
 #[test]
 fn reinstall_preserves_a_customized_agent_without_force() {
-    // Ownership: a file the manifest tracks as USER-owned and that has been
-    // edited is the operator's. It survives a reinstall byte-for-byte, and the
-    // report says so rather than counting it as deployed.
+    // Ownership: an agent file the manifest does not track and that differs
+    // from the fresh composition may be the operator's, so the deployer
+    // conservatively preserves it. It survives a reinstall byte-for-byte, and
+    // the report says so rather than counting it as deployed.
     let base = TempDir::new().unwrap();
     let paths = seeded(base.path());
     let dest = paths.agent_deploy_dir();
     let custom = "---\nname: engineer\n---\n\nMINE — KEEP ME\n";
-    seed_user_owned_agent(&dest, custom);
+    seed_untracked_agent(&dest, custom);
 
     let report = reinstall_assets(
         &paths,
@@ -261,7 +265,7 @@ fn reinstall_replaces_a_customized_agent_with_force() {
     let base = TempDir::new().unwrap();
     let paths = seeded(base.path());
     let dest = paths.agent_deploy_dir();
-    seed_user_owned_agent(&dest, "---\nname: engineer\n---\n\nMINE\n");
+    seed_untracked_agent(&dest, "---\nname: engineer\n---\n\nMINE\n");
 
     let report = reinstall_assets(
         &paths,
@@ -311,28 +315,25 @@ fn reinstall_repairs_a_corrupt_agent_without_force() {
     );
 }
 
-/// Deploy `content` as `engineer.md` at `dest` under a USER-owned manifest
-/// entry whose checksum deliberately disagrees with it.
+/// Write `content` as `engineer.md` at `dest` with NO manifest entry for it.
 ///
-/// Why: this is the exact shape the deployer's preserve branch keys off —
-/// tracked, user-owned origin, edited. Building it by hand keeps the fixture
-/// independent of whichever command last wrote a real manifest.
-/// Test: used by the two agent-ownership tests above.
-fn seed_user_owned_agent(dest: &std::path::Path, content: &str) {
-    use trusty_agents_common::agents::manifest::{AgentManifest, ManifestEntry, Origin, checksum};
+/// Why: this is the customized-agent state production actually reaches. The
+/// deployer's other preserve branch keys on `Origin::User`, and NO production
+/// path writes that origin — every deploy records `Origin::Bundled`
+/// (`agents::deployer::deploy_agents_locked`), and no shipped artifact uses the
+/// `SeedOnce` tier the `User` origin belongs to (`install.rs`, #3381). A test
+/// hand-seeding `Origin::User` would prove preservation through a branch that
+/// cannot occur, which is coverage in appearance only; that branch is already
+/// pinned at the unit level by `deploy_preserves_modified_user_owned_entry` in
+/// `trusty-agents-common`. UNTRACKED-and-differing is the reachable state: an
+/// agent file the operator hand-placed or edited before per-file manifest
+/// tracking existed, which the deployer conservatively skips and flags in
+/// `untracked_modified`.
+/// What: creates `dest`, writes `engineer.md`, and writes no manifest at all.
+/// Test: used by the two agent-ownership tests around it.
+fn seed_untracked_agent(dest: &std::path::Path, content: &str) {
     std::fs::create_dir_all(dest).unwrap();
     std::fs::write(dest.join("engineer.md"), content).unwrap();
-    let mut manifest = AgentManifest::default();
-    manifest.managed.insert(
-        "engineer.md".to_string(),
-        ManifestEntry {
-            source_chain: vec!["engineer".to_string()],
-            checksum: checksum("something else entirely"),
-            deployed_at: "2026-01-01T00:00:00Z".to_string(),
-            origin: Origin::User,
-        },
-    );
-    manifest.save(dest).unwrap();
 }
 
 #[test]
@@ -503,4 +504,210 @@ fn preserved_note_names_the_force_flag() {
     let note = preserved_note("skill", &["a.md".to_string()], "a.md").unwrap();
     assert!(note.contains("1 skill file(s)"), "{note}");
     assert!(note.contains("tm reinstall --force"), "{note}");
+}
+
+// ── #4605: the outcome that appears in none of the deploy counts ────────────
+
+#[test]
+fn reinstall_surfaces_a_shadowed_bundled_skill() {
+    // The silent skip this command exists to end, in its exact form: a bundled
+    // skill the destination does not track is classified project-custom by the
+    // tier planner and dropped before the deployer runs, so it is neither
+    // deployed, preserved, unchanged, nor failed. Reporting only those four
+    // prints zeros for it.
+    let base = TempDir::new().unwrap();
+    let paths = seeded(base.path());
+    let sa = standalone_dir(base.path());
+    let dest = paths.agent_deploy_dir().parent().unwrap().join("skills");
+    // Untracked, bundled-named, already on disk — no manifest anywhere.
+    let stray = dest.join("demo-skill");
+    std::fs::create_dir_all(&stray).unwrap();
+    std::fs::write(stray.join("SKILL.md"), "LOST TRACKING\n").unwrap();
+
+    let report = reinstall_assets(&paths, &sa, None, false, &base.path().join("backups"));
+
+    let t = tier(&report, "managed config");
+    assert_eq!(t.skills.deployed, 0, "{t:?}");
+    assert_eq!(t.skills.preserved, 0, "{t:?}");
+    assert_eq!(t.skills.unchanged, 0, "{t:?}");
+    assert_eq!(
+        t.skills.shadowed, 1,
+        "a skill in none of the other counts must be counted as shadowed: {t:?}"
+    );
+    assert!(
+        t.notes.iter().any(|n| n.contains("demo-skill")),
+        "the report must NAME it, not just count it: {:?}",
+        t.notes
+    );
+    assert!(
+        t.notes.iter().any(|n| n.contains("tm reinstall --force")),
+        "a bundled-named untracked skill is #4605 and has a remedy: {:?}",
+        t.notes
+    );
+    // And `--force` is that remedy: it adopts and refreshes the same skill.
+    let forced = reinstall_assets(&paths, &sa, None, true, &base.path().join("backups"));
+    assert_eq!(tier(&forced, "managed config").skills.shadowed, 0);
+    assert!(
+        std::fs::read_to_string(stray.join("SKILL.md"))
+            .unwrap()
+            .contains("Bundled skill text.")
+    );
+}
+
+#[test]
+fn shadowed_note_is_empty_when_nothing_was_shadowed() {
+    assert_eq!(shadowed_note(&[], &BTreeSet::new()), None);
+}
+
+#[test]
+fn shadowed_note_points_at_force_only_for_a_bundled_name() {
+    // A deliberate user-tier override is the tier system working and must not
+    // be prodded with a remedy; a project-shadowed BUNDLED name is #4605 and
+    // must be. The two share one line, so the distinction has to hold inside it.
+    use trusty_agents_common::skills::tiers::{Shadow, SkillTier};
+
+    let bundled: BTreeSet<String> = ["demo-skill".to_string()].into_iter().collect();
+    let deliberate = [Shadow {
+        stem: "demo-skill".to_string(),
+        winner: SkillTier::User,
+        loser: SkillTier::Bundled,
+    }];
+    let note = shadowed_note(&deliberate, &bundled).unwrap();
+    assert!(note.contains("kept by user-custom"), "{note}");
+    assert!(!note.contains("tm reinstall --force"), "{note}");
+
+    let orphaned = [Shadow {
+        stem: "demo-skill".to_string(),
+        winner: SkillTier::Project,
+        loser: SkillTier::Bundled,
+    }];
+    let note = shadowed_note(&orphaned, &bundled).unwrap();
+    assert!(note.contains("tm reinstall --force"), "{note}");
+
+    // An operator-authored skill matching no bundled name gets no pointer —
+    // the same admission rule `force_adopt_bundled_skills` applies.
+    let operators = [Shadow {
+        stem: "my-own-skill".to_string(),
+        winner: SkillTier::Project,
+        loser: SkillTier::Bundled,
+    }];
+    let note = shadowed_note(&operators, &bundled).unwrap();
+    assert!(!note.contains("tm reinstall --force"), "{note}");
+}
+
+// ── the working directory is never written to ───────────────────────────────
+
+#[test]
+fn targets_omit_the_project_tier_until_it_exists() {
+    // `project_dir` is the process's cwd. Including it unconditionally would
+    // make a flagless `tm reinstall` from `$HOME` or `/tmp` materialize the
+    // whole skill roster there — the #4409 contamination, one asset class over.
+    let base = TempDir::new().unwrap();
+    let bare = TempDir::new().unwrap();
+    let paths = FrameworkPaths::under(base.path());
+    let sa = standalone_dir(base.path());
+
+    let targets = reinstall_targets(&paths, &sa, Some(bare.path()));
+    assert!(
+        !targets.iter().any(|t| t.label == "project"),
+        "a bare directory is not a project tier: {targets:?}"
+    );
+
+    // A directory that already HAS a deployed skill tier is one, and it is
+    // marked optional.
+    std::fs::create_dir_all(bare.path().join(".claude").join("skills")).unwrap();
+    let targets = reinstall_targets(&paths, &sa, Some(bare.path()));
+    let project = targets
+        .iter()
+        .find(|t| t.label == "project")
+        .expect("an existing project tier must be refreshed");
+    assert!(project.optional, "{project:?}");
+    assert_eq!(project.agents_dir, None, "#4409: never agents in a project");
+}
+
+#[test]
+fn reinstall_never_writes_into_a_bare_working_directory() {
+    // The end-to-end form of the guard above: run with a bare directory as the
+    // "project" and prove nothing whatsoever was created in it.
+    let base = TempDir::new().unwrap();
+    let bare = TempDir::new().unwrap();
+    let paths = seeded(base.path());
+
+    let report = reinstall_assets(
+        &paths,
+        &standalone_dir(base.path()),
+        Some(bare.path()),
+        false,
+        &base.path().join("backups"),
+    );
+
+    assert!(!report.has_failures(), "{report:?}");
+    assert!(
+        !bare.path().join(".claude").exists(),
+        "a bare working directory must be left completely untouched"
+    );
+    assert_eq!(
+        std::fs::read_dir(bare.path()).unwrap().count(),
+        0,
+        "nothing at all may be created in an arbitrary cwd"
+    );
+}
+
+#[test]
+fn reinstall_does_not_fail_the_command_for_an_optional_destination() {
+    // An unwritable project tier must not report a failed reinstall after all
+    // three machine-global destinations succeeded — but it must still be
+    // REPORTED, so the operator sees it.
+    let base = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let paths = seeded(base.path());
+    // A project tier that exists (so it is included) but whose skills path is a
+    // regular file, so every write into it fails on every platform.
+    std::fs::create_dir_all(project.path().join(".claude").join("skills")).unwrap();
+    let report = reinstall_assets(
+        &paths,
+        &standalone_dir(base.path()),
+        Some(project.path()),
+        false,
+        &base.path().join("backups"),
+    );
+    assert!(!report.has_failures(), "healthy baseline: {report:?}");
+
+    // Keep `skills/` a real directory — otherwise the tier is excluded rather
+    // than included-and-failing, and this would test the wrong thing. A regular
+    // file where the deployer must create `<dest>/demo-skill/` fails its
+    // `create_dir_all` on every platform, without depending on permission bits.
+    let deployed_dir = project
+        .path()
+        .join(".claude")
+        .join("skills")
+        .join("demo-skill");
+    std::fs::remove_dir_all(&deployed_dir).unwrap();
+    std::fs::write(&deployed_dir, "not a directory").unwrap();
+    let report = reinstall_assets(
+        &paths,
+        &standalone_dir(base.path()),
+        Some(project.path()),
+        false,
+        &base.path().join("backups"),
+    );
+
+    let t = tier(&report, "project");
+    assert!(t.errored, "the failure must still be reported: {t:?}");
+    assert!(
+        !report.has_failures(),
+        "an optional destination must not fail the command: {report:?}"
+    );
+    // The real destinations are untouched by the project tier's failure. This
+    // is the second run, so the skill is already current — assert it is SERVED,
+    // not that it was rewritten.
+    let standalone = tier(&report, "standalone");
+    assert!(!standalone.errored, "{standalone:?}");
+    assert!(
+        standalone
+            .skills_dir
+            .join("demo-skill")
+            .join("SKILL.md")
+            .is_file()
+    );
 }

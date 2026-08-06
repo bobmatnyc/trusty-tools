@@ -37,6 +37,11 @@ pub(crate) async fn reinstall(force: bool, binary: bool, yes: bool) -> anyhow::R
     let paths = trusty_mpm::core::paths::FrameworkPaths::default();
     let managed = super::managed_root::resolve_managed_paths(None)
         .context("could not resolve the standalone managed root")?;
+    // The working directory is offered as a project tier, but
+    // `reinstall_targets` accepts it only when `<cwd>/.claude/skills` already
+    // exists — so a `tm reinstall` run from `$HOME` or `/tmp` refreshes a real
+    // project's skills and never creates a stray `.claude/` anywhere else. See
+    // that function's PROJECT TIER note.
     let project_dir = std::env::current_dir().ok();
     let backup_root = backup_root(&paths);
 
@@ -107,6 +112,12 @@ fn print_report(report: &ReinstallReport) {
             println!("  agents  {}  {}", counts(&tier.agents), dir.display());
         }
         println!("  skills  {}", counts(&tier.skills));
+        if tier.optional {
+            println!(
+                "          {}",
+                "(optional destination — a failure here does not fail the command)".dimmed()
+            );
+        }
         for note in &tier.notes {
             println!("    {} {note}", "!".yellow());
         }
@@ -118,8 +129,10 @@ fn print_report(report: &ReinstallReport) {
         .map(|t| t.agents.deployed + t.skills.deployed)
         .sum();
     let repaired: usize = report.tiers.iter().map(|t| t.agents.repaired).sum();
+    let shadowed: usize = report.tiers.iter().map(|t| t.skills.shadowed).sum();
     println!(
-        "\n{deployed} file(s) written, {repaired} repaired, across {} destination(s).",
+        "\n{deployed} file(s) written, {repaired} repaired, {shadowed} shadowed, across {} \
+         destination(s).",
         report.tiers.len()
     );
 }
@@ -136,8 +149,8 @@ fn refreshed(yes: bool) -> String {
 /// One-line rendering of an [`AssetCounts`].
 fn counts(c: &AssetCounts) -> String {
     format!(
-        "{} deployed, {} repaired, {} preserved, {} unchanged, {} failed",
-        c.deployed, c.repaired, c.preserved, c.unchanged, c.failed
+        "{} deployed, {} repaired, {} preserved, {} unchanged, {} shadowed, {} failed",
+        c.deployed, c.repaired, c.preserved, c.unchanged, c.shadowed, c.failed
     )
 }
 

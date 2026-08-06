@@ -46,10 +46,13 @@ use crate::core::skill_deploy_tiers::skill_deploy_tiers;
 /// Why: "a reinstall that silently no-ops on one of three tiers is the exact
 /// failure this command exists to end" — so the outcome is counted per
 /// destination and per asset class rather than summed into one number.
-/// What: five disjoint counts. `repaired` is a SUBSET of `deployed` for agents
-/// (the #4408 corruption branch) and is always 0 for skills, which carry no
-/// framework-owned/user-owned origin distinction.
-/// Test: `reinstall_reports_every_target`.
+/// What: six counts, disjoint except `repaired`, which is a SUBSET of
+/// `deployed`. `repaired` is the agents-only #4408 corruption branch and is
+/// always 0 for skills, which carry no framework-owned/user-owned origin
+/// distinction. `shadowed` is the skills-only converse and is always 0 for
+/// agents, which have no tier system.
+/// Test: `reinstall_reports_every_target`,
+/// `reinstall_surfaces_a_shadowed_bundled_skill`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AssetCounts {
     /// Files (re)written from the bundle this run.
@@ -62,6 +65,23 @@ pub struct AssetCounts {
     pub unchanged: usize,
     /// Files that could not be composed or written at all.
     pub failed: usize,
+    /// Skills a higher-precedence tier owns the name of, so the bundled copy
+    /// was never offered to the deployer at this destination.
+    ///
+    /// Why (#4605): `list_project_custom_stems` classifies EVERY untracked
+    /// skill directory at a destination as project-custom, and
+    /// `plan_skill_tiers` then drops the bundled stem before
+    /// `deploy_skills_filtered` runs. So a bundled skill that merely lost
+    /// manifest tracking reaches none of the counts above — not deployed, not
+    /// preserved, not unchanged, not failed. Reporting only those five would
+    /// print zeros for it, which is precisely the silent skip this command
+    /// exists to end.
+    /// What: the number of [`Shadow`] records for this destination, whatever
+    /// the winning tier. A deliberate user-tier or project-tier override lands
+    /// here too and is correct; the note the report carries alongside names the
+    /// ACTIONABLE subset separately.
+    /// Test: `reinstall_surfaces_a_shadowed_bundled_skill`.
+    pub shadowed: usize,
 }
 
 /// One deploy destination and what the reinstall did to it.
@@ -89,6 +109,9 @@ pub struct TierReport {
     /// Whether any step at this destination failed outright (as opposed to a
     /// per-file failure, which rides `AssetCounts::failed`).
     pub errored: bool,
+    /// Whether a failure here should leave the whole command's exit status
+    /// alone. Carried from [`ReinstallTarget::optional`]; see that field.
+    pub optional: bool,
 }
 
 /// One deploy destination, before anything has been written to it.
@@ -96,9 +119,10 @@ pub struct TierReport {
 /// Why: enumerating the destinations separately from acting on them is what
 /// makes the target set assertable in a test without a real home directory.
 /// What: a stable label, an optional agents directory (bundled agents deploy
-/// into exactly two of the destinations; #4409 keeps them out of the rest), and
-/// a skills directory.
-/// Test: `targets_cover_the_standalone_tier`, `targets_deduplicate`.
+/// into exactly two of the destinations; #4409 keeps them out of the rest), a
+/// skills directory, and whether a failure here is fatal to the command.
+/// Test: `targets_cover_the_standalone_tier`, `targets_deduplicate`,
+/// `targets_omit_the_project_tier_until_it_exists`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReinstallTarget {
     /// Short operator-facing label.
@@ -107,6 +131,18 @@ pub struct ReinstallTarget {
     pub agents_dir: Option<PathBuf>,
     /// Where deployed skills go.
     pub skills_dir: PathBuf,
+    /// A failure here is reported but does not fail the command.
+    ///
+    /// Why: the three machine-global destinations are what `tm reinstall`
+    /// promises to refresh; the project tier is a convenience refresh of
+    /// whatever project the operator happens to be standing in. An unwritable
+    /// project directory must not make the command exit non-zero after all
+    /// three real destinations succeeded — that would report a failed reinstall
+    /// when the reinstall in fact succeeded.
+    /// What: `true` only for the project tier. Its failures still appear in the
+    /// report, with the same wording; only the exit status ignores them.
+    /// Test: `reinstall_does_not_fail_the_command_for_an_optional_destination`.
+    pub optional: bool,
 }
 
 /// The whole run: hop-1 outcome plus one report per destination.
@@ -133,11 +169,17 @@ impl ReinstallReport {
     /// Did anything fail — a per-file compose/write failure, or a whole step?
     ///
     /// Why: the CLI exits non-zero on a partial reinstall rather than printing
-    /// failures under a success banner.
-    /// Test: `reinstall_reports_a_failed_destination`.
+    /// failures under a success banner. Optional destinations are excluded —
+    /// see [`ReinstallTarget::optional`] for why a failure there must not
+    /// condemn a run whose real destinations all succeeded.
+    /// What: `true` when any NON-optional destination errored outright or had a
+    /// per-file failure. An optional destination's failure is still reported.
+    /// Test: `reinstall_reports_a_failed_destination_and_serves_the_others`,
+    /// `reinstall_does_not_fail_the_command_for_an_optional_destination`.
     pub fn has_failures(&self) -> bool {
         self.tiers
             .iter()
+            .filter(|t| !t.optional)
             .any(|t| t.errored || t.agents.failed > 0 || t.skills.failed > 0)
     }
 }
@@ -149,9 +191,25 @@ impl ReinstallReport {
 /// command cannot cover a different set than `tm install`'s reporter and
 /// `tm doctor` do; the standalone tier appended after it is precisely the one
 /// none of them reach (#4849).
+/// PROJECT TIER — why it is gated on already existing. `project_dir` is the
+/// process's working directory, so including it unconditionally would make
+/// `<cwd>/.claude/skills` a write destination from ANY directory: a flagless
+/// `tm reinstall` run in `$HOME`, `/tmp`, or an unrelated repo would materialize
+/// the whole bundled skill roster plus a manifest and a lock sidecar there.
+/// That is the contamination #4409 fixed for agents, reintroduced one asset
+/// class over. `tm install` avoids it by passing no project at all. This keeps
+/// the destination the daemon-managed session path actually writes — a real
+/// project WITH deployed skills — while making contamination impossible by
+/// construction: the tier is included only when `<project_dir>/.claude/skills`
+/// is already a directory, so a reinstall REFRESHES a project tier and never
+/// creates one. (A project that has never been launched under tm gets its tier
+/// from `project_skill_tier::ensure_project_skill_tier` at launch, which knows
+/// it is a genuine managed project; this command does not.) The tier is also
+/// marked [`optional`](ReinstallTarget::optional).
 /// What: [`skill_deploy_tiers`]'s tiers (managed config, the operator's
-/// `~/.claude/skills`, and the project when one is supplied) followed by the
-/// standalone driver's `<standalone_config_dir>/skills`. Agents attach to the
+/// `~/.claude/skills`, and the project when one is supplied AND its skills
+/// directory already exists) followed by the standalone driver's
+/// `<standalone_config_dir>/skills`. Agents attach to the
 /// two destinations that serve them: [`FrameworkPaths::agent_deploy_dir`] on
 /// the managed-config tier and `<standalone_config_dir>/agents` on the
 /// standalone tier — #4409 keeps framework-owned agents out of every other
@@ -159,17 +217,22 @@ impl ReinstallReport {
 /// destination whose skills directory duplicates an earlier one is dropped.
 /// Pure path arithmetic — nothing is read or created.
 /// Test: `targets_cover_the_standalone_tier`, `targets_deduplicate`,
-/// `targets_attach_agents_to_two_destinations_only`.
+/// `targets_attach_agents_to_two_destinations_only`,
+/// `targets_omit_the_project_tier_until_it_exists`.
 pub fn reinstall_targets(
     paths: &FrameworkPaths,
     standalone_config_dir: &Path,
     project_dir: Option<&Path>,
 ) -> Vec<ReinstallTarget> {
     let agent_deploy = paths.agent_deploy_dir();
+    // See the PROJECT TIER paragraph above: refresh a project tier, never
+    // create one, so an arbitrary working directory is never written to.
+    let project_dir = project_dir.filter(|dir| dir.join(".claude").join("skills").is_dir());
     let mut targets: Vec<ReinstallTarget> = skill_deploy_tiers(paths, project_dir)
         .into_iter()
         .map(|tier| ReinstallTarget {
             agents_dir: (tier.label == "managed config").then(|| agent_deploy.clone()),
+            optional: tier.label == "project",
             label: tier.label.to_string(),
             skills_dir: tier.dir,
         })
@@ -179,6 +242,7 @@ pub fn reinstall_targets(
         label: "standalone".to_string(),
         agents_dir: Some(standalone_config_dir.join("agents")),
         skills_dir: standalone_config_dir.join("skills"),
+        optional: false,
     };
     if !targets
         .iter()
@@ -253,6 +317,7 @@ pub fn reinstall_assets(
             label: target.label,
             agents_dir: target.agents_dir.clone(),
             skills_dir: target.skills_dir.clone(),
+            optional: target.optional,
             ..TierReport::default()
         };
         if let Some(dir) = &target.agents_dir {
@@ -296,7 +361,7 @@ fn bundled_skill_stems(paths: &FrameworkPaths) -> BTreeSet<String> {
 /// and leaves the rest of the run going.
 /// Test: `reinstall_preserves_a_customized_agent_without_force`,
 /// `reinstall_replaces_a_customized_agent_with_force`,
-/// `reinstall_reports_a_failed_destination`.
+/// `reinstall_reports_a_failed_destination_and_serves_the_others`.
 fn deploy_agents_into(source: &Path, dest: &Path, force: bool, tier: &mut TierReport) {
     if force {
         // `reset_agents` backs a diverged file up in place as a
@@ -328,6 +393,9 @@ fn deploy_agents_into(source: &Path, dest: &Path, force: bool, tier: &mut TierRe
                 // registered into the manifest, never rewritten.
                 unchanged: result.unchanged.len() + result.adopted.len(),
                 failed: result.failed.len(),
+                // Agents have no tier system — #4409 pins them to one
+                // destination each, so nothing can shadow them.
+                shadowed: 0,
             };
             tier.notes.extend(preserved_note(
                 "agent",
@@ -431,12 +499,15 @@ fn deploy_skills_into(
                 preserved: deploy.stats.skipped.len(),
                 unchanged: deploy.stats.unchanged.len(),
                 failed: 0,
+                shadowed: deploy.shadowed.len(),
             };
             tier.notes.extend(preserved_note(
                 "skill",
                 &deploy.stats.skipped,
                 &crate::core::agent_source::preview(&deploy.stats.skipped, 5),
             ));
+            tier.notes
+                .extend(shadowed_note(&deploy.shadowed, bundled_stems));
         }
         Err(err) => {
             tier.errored = true;
@@ -444,6 +515,65 @@ fn deploy_skills_into(
                 .push(format!("skill deploy failed at {}: {err}", dest.display()));
         }
     }
+}
+
+/// One bounded line naming the skills a higher tier shadowed here, or nothing.
+///
+/// Why (#4605): a shadowed skill is the one outcome that appears in NO count
+/// the deployer produces — the tier planner drops it before
+/// `deploy_skills_filtered` ever sees it — so without this line a bare
+/// `tm reinstall` prints zeros for a bundled skill it did not deploy. `tm
+/// install` already warns about the same state; saying nothing here would make
+/// the command built to end silent skips contain one.
+///
+/// Two shadow kinds, and they mean opposite things. A stem the operator
+/// deliberately overrode from `~/.trusty-mpm/skills` (winner `user-custom`) is
+/// the tier system working, and gets no remedy pointer. A BUNDLED-named stem
+/// the destination classifies project-custom is usually #4605 — a bundled skill
+/// that lost manifest tracking, which no `tm` command can reach — so that
+/// subset names `tm reinstall --force`, which adopts exactly it.
+/// What: `None` when nothing was shadowed; otherwise a count, a five-entry
+/// preview, and the pointer when the actionable subset is non-empty. The
+/// actionable test is "the winner is the project tier AND the stem is currently
+/// bundled" — an operator-authored skill matching no bundled name is never
+/// named, matching `force_adopt_bundled_skills`'s own admission rule. Pure.
+/// Test: `shadowed_note_is_empty_when_nothing_was_shadowed`,
+/// `shadowed_note_points_at_force_only_for_a_bundled_name`,
+/// `reinstall_surfaces_a_shadowed_bundled_skill`.
+fn shadowed_note(
+    shadowed: &[trusty_agents_common::skills::tiers::Shadow],
+    bundled_stems: &BTreeSet<String>,
+) -> Option<String> {
+    use trusty_agents_common::skills::tiers::SkillTier;
+
+    if shadowed.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = shadowed
+        .iter()
+        .map(|s| format!("{} (kept by {})", s.stem, s.winner.label()))
+        .collect();
+    let actionable: Vec<String> = shadowed
+        .iter()
+        .filter(|s| s.winner == SkillTier::Project && bundled_stems.contains(&s.stem))
+        .map(|s| s.stem.clone())
+        .collect();
+    let pointer = if actionable.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {} of them carry a BUNDLED skill's name and this destination does not track them, \
+             so no deploy can reach them (#4605): {}. Run `tm reinstall --force` to adopt them \
+             (each is backed up first).",
+            actionable.len(),
+            crate::core::agent_source::preview(&actionable, 5)
+        )
+    };
+    Some(format!(
+        "{} skill(s) were NOT deployed here — a higher-precedence tier owns the name: {}.{pointer}",
+        shadowed.len(),
+        crate::core::agent_source::preview(&names, 5)
+    ))
 }
 
 #[cfg(test)]
