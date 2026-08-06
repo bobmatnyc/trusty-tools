@@ -33,7 +33,8 @@ use trusty_mpm::core::reinstall::{AssetCounts, ReinstallReport, reinstall_assets
 /// failed, so a partial reinstall never exits 0 under a success banner.
 /// Test: the engine's behaviour is covered in `core::reinstall_tests`; this
 /// wrapper is path resolution and printing.
-pub(crate) async fn reinstall(force: bool, binary: bool, yes: bool) -> anyhow::Result<()> {
+pub(crate) async fn run(args: crate::cli::ReinstallArgs) -> anyhow::Result<()> {
+    let crate::cli::ReinstallArgs { force, binary, yes } = args;
     let paths = trusty_mpm::core::paths::FrameworkPaths::default();
     let managed = super::managed_root::resolve_managed_paths(None)
         .context("could not resolve the standalone managed root")?;

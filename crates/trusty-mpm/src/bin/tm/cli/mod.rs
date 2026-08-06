@@ -464,17 +464,7 @@ pub(crate) enum Command {
     /// anything unclassifiable REFUSES rather than guessing.
     ///
     /// Test: `cli_parses_reinstall`, `cli_parses_reinstall_binary`.
-    Reinstall {
-        /// Overwrite files you own or edited, backing each one up first.
-        #[arg(long)]
-        force: bool,
-        /// Also reinstall the `tm` binary, routed by install provenance.
-        #[arg(long)]
-        binary: bool,
-        /// Skip the `--binary` confirmation prompt.
-        #[arg(long, requires = "binary")]
-        yes: bool,
-    },
+    Reinstall(ReinstallArgs),
     /// Handle a Claude Code lifecycle hook (PreToolUse / PostToolUse / Stop).
     ///
     /// Why: `tm install` registers `trusty-mpm hook` as Claude Code's
@@ -1286,4 +1276,27 @@ pub struct DoctorFlags {
     /// What: promotes `DriftedFrozen` findings into the repair set.
     #[arg(long, requires = "repair")]
     pub include_frozen: bool,
+}
+
+/// Flags for [`Command::Reinstall`].
+///
+/// Why: a struct variant with three fields makes the `main.rs` dispatch arm
+/// wrap onto three lines, and that file sits against the 500-SLOC production
+/// cap — `tm shell-init` (#4986) and this command each adding one line took it
+/// over. Carrying the flags in a `clap::Args` struct keeps the arm to ONE line
+/// and stops the next subcommand paying the same tax.
+/// What: the three `tm reinstall` flags, flattened by clap so the parsed CLI
+/// surface is identical to the inline struct-variant form it replaces.
+/// Test: `cli_parses_reinstall`, `cli_parses_reinstall_binary`.
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct ReinstallArgs {
+    /// Overwrite files you own or edited, backing each one up first.
+    #[arg(long)]
+    pub(crate) force: bool,
+    /// Also reinstall the `tm` binary, routed by install provenance.
+    #[arg(long)]
+    pub(crate) binary: bool,
+    /// Skip the `--binary` confirmation prompt.
+    #[arg(long, requires = "binary")]
+    pub(crate) yes: bool,
 }
