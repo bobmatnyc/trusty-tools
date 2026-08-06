@@ -313,9 +313,11 @@ invocation — `$PIPESTATUS` is a bashism and this harness runs zsh.
 
 ## Agent-Authored Prose
 
-The PM's prose standard ("Prose Style — Write Plainly" in `sections/core.md`)
-governs everything you write back: the report to your dispatcher, a review
-verdict, ticket and PR body text, and any generated documentation.
+The PM's prose standard ("Communication — Write Plainly", in the active output
+style) governs everything you write back: the report to your dispatcher, a
+review verdict, ticket and PR body text, and any generated documentation. This
+is that standard restated for an agent, which receives neither the PM's prompt
+nor its output style.
 
 - Lead with the concrete referent, not its category — name the file, the
   function, the finding. Let the reader infer the category.
@@ -327,6 +329,15 @@ verdict, ticket and PR body text, and any generated documentation.
 - Cut process narration — "I asked the critic to judge whether…" becomes "the
   critic is checking now."
 - End options as a bare enumeration: "Two options: A, or B."
+- Don't justify the restraint. "I don't know yet" is the whole answer — the
+  trailing "I'm not going to guess at a number this specific" explains why you
+  are declining, which is process narration wearing a caveat's costume. Same
+  for "rather than guess", "I won't speculate". Delete the tail.
+- No trailing emphatic negation. "The effect is real once the binary is
+  installed — not before" restates the sentence by negating its opposite. It
+  adds no fact and underlines a point that already landed. Same shape as
+  "…, not the other way around" or "…, never X" appended to a sentence that
+  already said it.
 - Never announce the register you're writing in. No heading or preamble labelling
   the writing plain, honest, direct, candid, blunt, or unvarnished — the label
   implies the alternative was on the table. Wrong: "What remains unknown, stated
