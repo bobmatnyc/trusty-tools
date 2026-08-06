@@ -1738,7 +1738,8 @@ fn the_prose_rules_live_in_the_output_style_not_core() {
         "core keeps the heading — the PM has to know the rules bind"
     );
     assert!(
-        core.contains("Communication —\nWrite Plainly") || core.contains("Communication — Write Plainly"),
+        core.contains("Communication —\nWrite Plainly")
+            || core.contains("Communication — Write Plainly"),
         "core must name the output-style section that carries the rules"
     );
 
