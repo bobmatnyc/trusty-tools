@@ -238,20 +238,55 @@ async fn store_records_and_clears_a_reload_failure() {
     );
 }
 
-/// Why: `log_reload_fallback` is the severity split that stops corruption being
-/// absorbed at the same level as an NFS hiccup. The classification it keys off
-/// is the part worth pinning.
-/// What: asserts corruption and I/O take the two different branches, and that
-/// both are callable.
+/// Why (#5027 review): the severity split is the ONLY reason
+/// `log_reload_fallback` exists, and nothing asserted it — swapping its
+/// `error!` and `warn!` left the suite green. The old test asserted
+/// `is_corruption()`, which `corruption_is_distinguished_from_transient_io`
+/// already covers, then called the function for coverage. This one reads the
+/// level off the events the function actually emits.
+/// What: captures both calls through the crate's existing `LogBufferLayer` and
+/// asserts the corrupt case lands at ERROR and the transient one at WARN.
+/// `#[serial]` for the same reason `ensure_managed_config_dir_emits_the_frozen_skill_warning`
+/// carries it: installing a subscriber perturbs the process-global interest
+/// cache.
 /// Test: this test.
 #[test]
+#[serial_test::serial]
 fn log_reload_fallback_separates_corruption_from_a_transient_error() {
+    use tracing_subscriber::layer::SubscriberExt;
+
     let corrupt = StoreError::Serialize("trailing characters".into());
     let transient = StoreError::Io(std::io::Error::other("nfs hiccup"));
-    assert!(corrupt.is_corruption());
-    assert!(!transient.is_corruption());
-    crate::session_manager::store_health::log_reload_fallback(&corrupt, 3);
-    crate::session_manager::store_health::log_reload_fallback(&transient, 3);
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        crate::session_manager::store_health::log_reload_fallback(&corrupt, 3);
+        crate::session_manager::store_health::log_reload_fallback(&transient, 3);
+    });
+
+    let lines = buffer.tail(64);
+    let corrupt_line = lines
+        .iter()
+        .find(|l| l.contains("CORRUPT"))
+        .unwrap_or_else(|| panic!("no line reported the corrupt store: {lines:#?}"));
+    assert!(
+        corrupt_line.contains("ERROR"),
+        "a corrupt store never clears on its own and blocks every write, so it must be \
+         ERROR, not a level an operator can scroll past: {corrupt_line}"
+    );
+
+    let transient_line = lines
+        .iter()
+        .find(|l| l.contains("reload failed"))
+        .unwrap_or_else(|| panic!("no line reported the transient failure: {lines:#?}"));
+    assert!(
+        transient_line.contains("WARN"),
+        "a possibly-transient read failure must stay WARN, or corruption stops standing \
+         out from an NFS hiccup: {transient_line}"
+    );
 }
 
 /// Why (#5007, the issue's hypothesis): the corruption shape — a shorter
@@ -466,6 +501,7 @@ fn trailing_bytes_counts_the_discarded_tail() {
         path: PathBuf::from("/x/sessions.json"),
         total_bytes: 146_201,
         valid_prefix_bytes: Some(145_090),
+        repairable_by_truncation: true,
         detail: "trailing characters".into(),
         line: 3755,
         column: 2,
@@ -491,6 +527,7 @@ fn diagnostic_names_the_file_the_offset_and_the_repair_command() {
         path: PathBuf::from("/x/sessions.json"),
         total_bytes: 146_201,
         valid_prefix_bytes: Some(145_090),
+        repairable_by_truncation: true,
         detail: "trailing characters at line 3755 column 2".into(),
         line: 3755,
         column: 2,
@@ -500,6 +537,91 @@ fn diagnostic_names_the_file_the_offset_and_the_repair_command() {
     assert!(msg.contains("byte 145090"), "{msg}");
     assert!(msg.contains("1111 trailing byte(s)"), "{msg}");
     assert!(msg.contains("tm repair session-store"), "{msg}");
+}
+
+/// Why (#5027 review): for `{"sessions": 5}` the store said "corrupt, repair
+/// with `tm repair session-store`" and the command answered "parses cleanly;
+/// nothing to repair" — and the diagnostic described "0 trailing byte(s)",
+/// junk that is not there. A message that names a fix which refuses sends the
+/// operator down a dead end while the store stays wedged.
+/// What: asserts the schema-failure diagnostic describes no phantom tail and
+/// advertises no command that would decline.
+/// Test: this test.
+#[test]
+fn diagnostic_does_not_advertise_a_repair_that_would_refuse() {
+    let raw = r#"{"sessions": 5}"#;
+    let integrity =
+        validate(&PathBuf::from("/x/sessions.json"), raw).expect_err("valid JSON, but not a store");
+    assert_eq!(
+        integrity.trailing_bytes(),
+        0,
+        "the whole file is one complete document"
+    );
+    assert!(
+        !integrity.repairable_by_truncation,
+        "there is nothing for a truncation to cut"
+    );
+
+    let msg = integrity.diagnostic();
+    assert!(
+        !msg.contains("tm repair session-store"),
+        "the message must not name a command that refuses this file: {msg}"
+    );
+    assert!(
+        !msg.contains("trailing byte(s)"),
+        "and must not describe trailing junk that is not there: {msg}"
+    );
+    assert!(
+        msg.contains("not a session store"),
+        "it must say what is actually wrong: {msg}"
+    );
+}
+
+/// Why (#5027 review): the store, `tm doctor`, and `tm repair session-store`
+/// used to validate three different schemas, so a file could be simultaneously
+/// "corrupt — run the repair" and "parses cleanly; nothing to repair". This is
+/// the disagreement itself, pinned.
+/// What: writes valid JSON that is not a loadable store and asserts the store
+/// rejects it AND `plan` refuses it as `NotAStore` rather than `NotCorrupt`.
+/// Test: this test.
+#[tokio::test]
+async fn plan_and_the_store_agree_that_valid_json_is_not_a_store() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("sessions.json");
+    std::fs::write(&path, r#"{"sessions": 5}"#).expect("write");
+
+    assert!(
+        SessionStore::load(dir.path()).await.is_err(),
+        "the daemon cannot load this file"
+    );
+    let err = plan(&path).expect_err("neither may the repair call it healthy");
+    assert!(
+        matches!(err, RepairError::NotAStore { .. }),
+        "expected NotAStore, got {err:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("re-read"),
+        r#"{"sessions": 5}"#,
+        "a refused plan must not modify the file"
+    );
+}
+
+/// Why (#5027 review): truncation is a repair only if what survives LOADS.
+/// Cutting a file whose head is valid JSON but not a store leaves it exactly as
+/// wedged as it was, minus the evidence.
+/// What: a head the daemon cannot load, followed by a stale tail, is refused.
+/// Test: this test.
+#[test]
+fn plan_refuses_to_cut_down_to_a_head_that_is_not_a_store() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("sessions.json");
+    std::fs::write(&path, r#"{"sessions":{"a":{}}}trailing"#).expect("write");
+
+    let err = plan(&path).expect_err("the head is not a loadable store");
+    assert!(
+        matches!(err, RepairError::NotAStore { .. }),
+        "expected NotAStore, got {err:?}"
+    );
 }
 
 /// Why: `analyze` is what turns a serde error into the diagnosis; both of its
@@ -544,20 +666,50 @@ fn backup_path_is_a_timestamped_sibling() {
     );
 }
 
-/// Why: the orphan check must read ids from the PARSED document, so a UUID
-/// mentioned inside a task description is not mistaken for a surviving session.
-/// What: asserts only the map keys count.
+/// Why: the orphan check must read ids from the DESERIALIZED document, so a
+/// UUID mentioned inside a task description is not mistaken for a surviving
+/// session.
+/// What: a store whose only session's task text names a second uuid — only the
+/// map key counts.
 /// Test: this test.
 #[test]
-fn session_ids_reads_the_sessions_map_keys() {
-    let head = r#"{"sessions":{"AAAAAAAA-1111-2222-3333-444444444444":{"task":"see bbbbbbbb-1111-2222-3333-444444444444"}}}"#;
-    let ids = session_ids(head);
-    assert!(ids.contains("aaaaaaaa-1111-2222-3333-444444444444"));
+fn kept_ids_come_from_the_map_keys_not_the_document_text() {
+    let key = "aaaaaaaa-1111-2222-3333-444444444444";
+    let mentioned = "bbbbbbbb-1111-2222-3333-444444444444";
+    let raw = loadable_store_json(&[(key, &format!("see {mentioned}"))]);
+    let data = validate(&PathBuf::from("/x/sessions.json"), &raw).expect("a loadable store");
+
+    let ids = kept_ids(&data);
+    assert!(ids.contains(key), "{ids:?}");
     assert!(
-        !ids.contains("bbbbbbbb-1111-2222-3333-444444444444"),
-        "a uuid inside a task string is not a session key"
+        !ids.contains(mentioned),
+        "a uuid inside a task string is not a session key: {ids:?}"
     );
-    assert!(session_ids("not json").is_empty());
+}
+
+/// Why (#5027 review): the cut lands at an arbitrary offset, so a session id
+/// can STRADDLE it. Scanning only the discarded tail sees the id's second half,
+/// which matches no UUID shape, so the refusal does not fire and the repair
+/// drops a session the recovered document never had.
+/// What: puts an id across the boundary and asserts the scan still names it.
+/// Before the widened window this returned an empty list.
+/// Test: this test.
+#[test]
+fn orphan_scan_sees_an_id_that_straddles_the_cut() {
+    let id = "aaaaaaaa-2222-3333-4444-555555555555";
+    let raw = format!("HEAD{id}TAIL");
+    // Cut inside the id, right after `aaaaaaaa-2222-3333-4444-`.
+    let valid = "HEAD".len() + 24;
+    assert!(
+        raw[valid..].starts_with("555555555555"),
+        "fixture invariant: the cut must split the id"
+    );
+
+    let got = orphaned_ids(&raw, valid, &BTreeSet::new());
+    assert!(
+        got.contains(&id.to_string()),
+        "an id spanning the cut must still be reported: {got:?}"
+    );
 }
 
 /// Why: the discarded tail is a fragment that cannot be parsed, so the only way

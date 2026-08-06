@@ -8,7 +8,22 @@
 //! Test: this file IS the test module.
 
 use super::*;
+use crate::session_manager::store::SessionStore;
+use crate::session_manager::store_integrity::loadable_store_json;
 use tempfile::TempDir;
+
+/// The two ids the fixtures below use. Fixed rather than random so a failure
+/// message is the same on every run.
+const ID_A: &str = "aaaaaaaa-1111-2222-3333-444444444444";
+const ID_B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+
+/// Write `body` where the probe (and the daemon) look for the store.
+fn seed(dir: &TempDir, body: &str) -> PathBuf {
+    let path = store_path(dir.path());
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&path, body).expect("write");
+    path
+}
 
 /// Why: the daemon and the probe must agree on which file they are talking
 /// about, or the probe reports on a file nobody writes.
@@ -24,19 +39,54 @@ fn store_path_is_under_the_session_manager_dir() {
 }
 
 /// Why: the probe must not cry wolf on a healthy store, or it gets ignored.
-/// What: writes a parseable store and asserts `Ok` with the record count.
+/// What: writes a store the daemon can genuinely LOAD — asserted here, not
+/// assumed — and asserts `Ok` with the record count.
 /// Test: this test.
-#[test]
-fn session_store_check_is_ok_for_a_healthy_store() {
+#[tokio::test]
+async fn session_store_check_is_ok_for_a_healthy_store() {
     let dir = TempDir::new().expect("tempdir");
-    std::fs::create_dir_all(dir.path().join("session-manager")).expect("mkdir");
-    std::fs::write(store_path(dir.path()), r#"{"sessions":{"a":{},"b":{}}}"#).expect("write");
+    let path = seed(&dir, &loadable_store_json(&[(ID_A, "a"), (ID_B, "b")]));
 
+    assert!(
+        SessionStore::load(path.parent().expect("parent"))
+            .await
+            .is_ok(),
+        "fixture invariant: the healthy fixture must be a store the daemon loads"
+    );
     let check = check_session_store(dir.path());
     assert_eq!(check.status, CheckStatus::Ok, "{}", check.message);
     assert!(
         check.message.contains("2 session record(s)"),
         "{}",
+        check.message
+    );
+}
+
+/// Why (#5027 review): this probe parsed a `serde_json::Value` while the store
+/// parses `StoredData`, so `{"sessions":{"a":{},"b":{}}}` — this test's own
+/// former "healthy" fixture — came back `Ok` with "2 session record(s)" for a
+/// file that blocks every write. A probe that positively asserts health for a
+/// wedged store is worse than no probe.
+/// What: feeds valid JSON that is not a loadable store and asserts the probe and
+/// `SessionStore::load` reach the SAME verdict.
+/// Test: this test.
+#[tokio::test]
+async fn session_store_check_agrees_with_the_store_about_what_loads() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = seed(&dir, r#"{"sessions":{"a":{},"b":{}}}"#);
+
+    let load = SessionStore::load(path.parent().expect("parent")).await;
+    assert!(load.is_err(), "the daemon cannot load this file");
+    let check = check_session_store(dir.path());
+    assert_eq!(
+        check.status,
+        CheckStatus::Fail,
+        "the probe must not report health for a store the daemon rejects: {}",
+        check.message
+    );
+    assert!(
+        !check.message.contains("session record(s)"),
+        "and it must not report a record count it could not read: {}",
         check.message
     );
 }
@@ -50,9 +100,8 @@ fn session_store_check_is_ok_for_a_healthy_store() {
 #[test]
 fn session_store_check_fails_on_a_trailing_tail_and_names_the_offset() {
     let dir = TempDir::new().expect("tempdir");
-    std::fs::create_dir_all(dir.path().join("session-manager")).expect("mkdir");
-    let doc = r#"{"sessions":{"a":{}}}"#;
-    std::fs::write(store_path(dir.path()), format!("{doc}{doc}")).expect("write");
+    let doc = loadable_store_json(&[(ID_A, "a")]);
+    seed(&dir, &format!("{doc}{doc}"));
 
     let check = check_session_store(dir.path());
     assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);

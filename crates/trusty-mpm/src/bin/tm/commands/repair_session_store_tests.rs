@@ -9,11 +9,25 @@
 use super::*;
 use tempfile::TempDir;
 
-/// Build a store file that is a complete document followed by a stale tail —
-/// the 2026-08-06 shape.
+/// One session record carrying every field `SessionRecord` requires.
+///
+/// Why (#5027 review): `{"sessions":{"<id>":{"task":"t"}}}` is valid JSON that
+/// `SessionStore` cannot load, so a repair driven by it never proved the
+/// command leaves a WORKING store — only a parseable one. The repair now
+/// refuses to cut down to a head the daemon could not load, which is exactly
+/// the case this fixture used to be.
+/// What: the six no-default fields, serialized the way the store writes them.
+const RECORD: &str = concat!(
+    r#"{"id":"3d1b0c8e-1111-2222-3333-444444444444","tmux_name":"tm-5007","#,
+    r#""cwd":"/tmp","task":"t","state":"active","#,
+    r#""created_at":"2026-08-06T09:01:17Z"}"#
+);
+
+/// Build a store file that is a complete, LOADABLE document followed by a stale
+/// tail — the 2026-08-06 shape.
 fn corrupt_store(dir: &TempDir) -> (std::path::PathBuf, String) {
     let path = dir.path().join("sessions.json");
-    let doc = r#"{"sessions":{"3d1b0c8e-1111-2222-3333-444444444444":{"task":"t"}}}"#;
+    let doc = format!(r#"{{"sessions":{{"3d1b0c8e-1111-2222-3333-444444444444":{RECORD}}}}}"#);
     let bytes = format!("{doc}{doc}");
     std::fs::write(&path, &bytes).expect("write");
     (path, bytes)
@@ -81,17 +95,23 @@ fn repair_session_store_dry_run_writes_nothing() {
 
 /// Why: the point of the command is that a wedged store becomes a working one
 /// without a human editing JSON.
-/// What: asserts the file parses afterwards and the original bytes survive in a
-/// timestamped backup.
+/// What: asserts the repaired file LOADS (#5027 review — "parses" was the
+/// weaker claim that let a fixture the daemon rejects look like a success) and
+/// that the original bytes survive in a timestamped backup.
 /// Test: this test.
-#[test]
-fn repair_session_store_truncates_and_backs_up() {
+#[tokio::test]
+async fn repair_session_store_truncates_and_backs_up() {
     let dir = TempDir::new().expect("tempdir");
     let (path, before) = corrupt_store(&dir);
 
     repair_session_store(Some(path.display().to_string()), false, false).expect("repair");
     let after = std::fs::read_to_string(&path).expect("re-read");
-    serde_json::from_str::<serde_json::Value>(&after).expect("the repaired store must parse");
+    assert!(
+        trusty_mpm::session_manager::SessionStore::load(dir.path())
+            .await
+            .is_ok(),
+        "the repaired store must be one the daemon can load, not merely parse"
+    );
     assert!(after.len() < before.len(), "the stale tail was discarded");
 
     let backup = std::fs::read_dir(dir.path())

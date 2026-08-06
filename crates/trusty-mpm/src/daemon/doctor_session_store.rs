@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::doctor::{CheckStatus, DoctorCheck};
-use crate::session_manager::store_integrity::analyze;
+use crate::session_manager::store_integrity::validate;
 
 /// Where the managed-session store lives under a framework root.
 ///
@@ -36,12 +36,13 @@ pub(super) fn store_path(fw_root: &Path) -> PathBuf {
 /// Why: see the module doc.
 /// What: reads `<fw_root>/session-manager/sessions.json` and classifies it —
 /// absent is `Ok` (a machine that has never run a managed session legitimately
-/// has no store), parseable is `Ok` with the session count, unparseable is
-/// `Fail` naming the byte offset and the repair command, and an unreadable file
-/// is `Unknown` rather than `Ok`, because a probe that learned nothing must not
-/// report health.
+/// has no store), LOADABLE (not merely parseable — see the `validate` call) is
+/// `Ok` with the session count, anything else is `Fail` carrying the store's own
+/// diagnosis, and an unreadable file is `Unknown` rather than `Ok`, because a
+/// probe that learned nothing must not report health.
 /// Test: `session_store_check_is_ok_for_a_healthy_store`,
 /// `session_store_check_fails_on_a_trailing_tail_and_names_the_offset`,
+/// `session_store_check_agrees_with_the_store_about_what_loads`,
 /// `session_store_check_is_ok_when_no_store_exists_yet`,
 /// `session_store_check_is_unknown_when_the_file_cannot_be_read`.
 pub(super) fn check_session_store(fw_root: &Path) -> DoctorCheck {
@@ -63,30 +64,27 @@ pub(super) fn check_session_store(fw_root: &Path) -> DoctorCheck {
             );
         }
     };
-    match serde_json::from_str::<serde_json::Value>(&raw) {
-        Ok(v) => {
-            let count = v
-                .get("sessions")
-                .and_then(|s| s.as_object())
-                .map(|m| m.len())
-                .unwrap_or(0);
-            DoctorCheck::new(
-                "session_store",
-                CheckStatus::Ok,
-                format!(
-                    "{} parses cleanly — {count} session record(s), {} byte(s)",
-                    path.display(),
-                    raw.len()
-                ),
-            )
-        }
+    // #5027 review: validate against the SAME type the daemon deserializes, via
+    // the same function. This probe used to parse a `serde_json::Value`, so it
+    // reported `Ok` — with a record count — for files `SessionStore::load`
+    // rejects outright, positively asserting health for a store that blocks
+    // every write.
+    match validate(&path, &raw) {
+        Ok(data) => DoctorCheck::new(
+            "session_store",
+            CheckStatus::Ok,
+            format!(
+                "{} loads cleanly — {} session record(s), {} byte(s)",
+                path.display(),
+                data.sessions.len(),
+                raw.len()
+            ),
+        ),
         // Fail, not Warn: while this holds, EVERY mutation of the store fails,
         // because every write path reloads before it saves.
-        Err(e) => DoctorCheck::new(
-            "session_store",
-            CheckStatus::Fail,
-            analyze(&path, &raw, &e).diagnostic(),
-        ),
+        Err(integrity) => {
+            DoctorCheck::new("session_store", CheckStatus::Fail, integrity.diagnostic())
+        }
     }
 }
 

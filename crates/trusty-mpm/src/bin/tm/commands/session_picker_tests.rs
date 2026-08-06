@@ -537,6 +537,53 @@ fn store_banner_names_corruption_and_the_repair_command() {
     assert!(banner.contains("tm repair session-store"), "{banner}");
 }
 
+/// Why (#5027 review): the banner's STREAM is the whole contract. `tm ls
+/// --json` writes the daemon's response body to stdout, so a banner on stdout
+/// makes that JSON unparseable for every consumer. Nothing asserted it —
+/// changing `eprintln!` to `println!` left the suite at `10 passed; 0 failed`
+/// with the banner on stdout.
+/// What: re-runs THIS test as a child process (the only way to observe the two
+/// real streams — under `cargo test` libtest intercepts them) and asserts the
+/// banner reaches stderr and never stdout.
+/// Test: this test.
+#[test]
+fn store_banner_goes_to_stderr_so_json_stays_machine_readable() {
+    const CHILD: &str = "TM_5027_BANNER_CHILD";
+    const MARKER: &str = "CORRUPT";
+    let raw = r#"{"sessions":[],"store_health":{"message":"/x/sessions.json is corrupt","corrupt":true,"observed_at":"2026-08-06T09:01:17Z"}}"#;
+
+    if std::env::var_os(CHILD).is_some() {
+        super::warn_if_store_degraded(raw);
+        return;
+    }
+
+    // libtest names tests relative to the crate root, without the crate name.
+    let module = module_path!();
+    let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+    let name = format!("{module}::store_banner_goes_to_stderr_so_json_stays_machine_readable");
+    let out = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+        .args([&name, "--exact", "--nocapture", "--test-threads", "1"])
+        .env(CHILD, "1")
+        .output()
+        .expect("re-run this test as a child process");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("1 passed"),
+        "the child must have actually run the case; stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(MARKER),
+        "the banner must go to stderr; stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains(MARKER),
+        "the banner must NEVER reach stdout — `tm ls --json` writes the response body \
+         there; stdout: {stdout}"
+    );
+}
+
 /// Why: a transient read failure is genuinely different — the fallback may
 /// already have cleared by the next listing — so the banner must say "stale",
 /// not "corrupt", or it would send an operator to repair a healthy file.

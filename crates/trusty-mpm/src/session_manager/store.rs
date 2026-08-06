@@ -17,7 +17,7 @@ use tokio::fs;
 use tracing::{debug, warn};
 
 use super::record::{ManagedSessionId, SessionRecord};
-use super::store_integrity::{StoreIntegrity, analyze};
+use super::store_integrity::{StoreIntegrity, validate};
 
 /// Errors that can arise from store I/O or serialization.
 ///
@@ -102,13 +102,19 @@ pub struct StoreDegradation {
 /// In-memory representation of the serialized store file.
 ///
 /// Why: serde needs a stable top-level shape for the JSON file; wrapping the
-/// map in a versioned struct makes future schema migrations possible.
+/// map in a versioned struct makes future schema migrations possible. Visible
+/// to the crate (#5027 review) because it is the ONLY definition of "a file the
+/// daemon can load": `tm doctor` and `tm repair session-store` both validate
+/// against it through
+/// [`store_integrity::validate`](super::store_integrity::validate), so no
+/// surface can form its own opinion of what a healthy store is.
 /// What: a flat map from stringified UUID to [`SessionRecord`].
-/// Test: round-tripped implicitly by `SessionStore` tests.
+/// Test: round-tripped implicitly by `SessionStore` tests;
+/// `session_store_check_agrees_with_the_store_about_what_loads`.
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct StoredData {
+pub(crate) struct StoredData {
     /// All managed sessions, keyed by stringified UUID.
-    sessions: HashMap<String, SessionRecord>,
+    pub(crate) sessions: HashMap<String, SessionRecord>,
 }
 
 /// A cheap freshness fingerprint for the backing file.
@@ -328,6 +334,7 @@ impl SessionStore {
                         .map(|m| m.len() as usize)
                         .unwrap_or(0),
                     valid_prefix_bytes: None,
+                    repairable_by_truncation: false,
                     detail: e.to_string(),
                     line: 0,
                     column: 0,
@@ -335,8 +342,12 @@ impl SessionStore {
             }
             Err(e) => return Err(StoreError::Io(e)),
         };
-        let data = serde_json::from_str::<StoredData>(&raw)
-            .map_err(|e| StoreError::Corrupt(Box::new(analyze(path, &raw, &e))))?;
+        // #5027 review: this is the one deserialization every surface routes
+        // through. `tm doctor` and `tm repair session-store` call the same
+        // function, so none of the three can call a file healthy that another
+        // rejects.
+        let data =
+            validate(path, &raw).map_err(|integrity| StoreError::Corrupt(Box::new(integrity)))?;
         // Stat AFTER the read so the signature matches the bytes we parsed.
         let sig = Self::sig_of(path).await.unwrap_or_default();
         Ok((data, Some(sig)))

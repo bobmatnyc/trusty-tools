@@ -201,10 +201,24 @@ pub(crate) async fn fetch_managed_raw(
     // #5007: every listing surface — `tm ls`, `tm ls --json`, the interactive
     // picker, the guided flow — comes through here, so this is the one place a
     // degraded store has to be announced to be announced everywhere.
-    if let Some(banner) = store_degradation_banner(&raw) {
+    warn_if_store_degraded(&raw);
+    Ok(raw)
+}
+
+/// Announce a degraded store on STDERR, above whatever the caller prints.
+///
+/// Why (#5027 review): the stream this writes to is the whole contract —
+/// `tm ls --json` puts the response body on stdout, so a banner on stdout would
+/// make the JSON unparseable for every consumer. Nothing asserted it, and
+/// changing `eprintln!` to `println!` killed no test. Emitting from its own
+/// function is what lets one be written.
+/// What: writes [`store_degradation_banner`] to stderr, or nothing when the
+/// listing is healthy.
+/// Test: `store_banner_goes_to_stderr_so_json_stays_machine_readable`.
+pub(crate) fn warn_if_store_degraded(raw: &str) {
+    if let Some(banner) = store_degradation_banner(raw) {
         eprintln!("{banner}");
     }
-    Ok(raw)
 }
 
 /// The warning to print above a listing the daemon served from stale memory.
