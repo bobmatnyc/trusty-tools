@@ -80,6 +80,13 @@ assignee + `trusty-mpm` label mark which issues a trusty-mpm session owns;
 `ws/<session-name>` tracks which workstream is driving it (a label, never a
 milestone — see `PM_INSTRUCTIONS.md`).
 
+These two are the harness defaults, not the whole label set. Type,
+component/crate, and conditional priority are required on top of them, and the
+milestone stays unset unless the issue is being scheduled into an open release.
+That is specified once, in the agent asset (`assets/agents/ticketing.md`,
+"Label at Creation" and "Milestones Are Release Slots") — the agent applies it,
+so do not restate it in a delegation brief.
+
 ## Ticket-Promotion Gate
 
 **A finding is not automatically a ticket.** Most findings belong to the work
@@ -87,11 +94,14 @@ already in flight; only some are worth a durable artifact that someone else has
 to triage, prioritize, and eventually close. Run this gate before every
 `gh issue create`.
 
-### 1. Search before filing
+### 1. Search before filing — and reopen before creating
 
-Search open and recently closed issues by test name, error/panic text, affected
-symbol, and package. If a canonical issue already exists, append the new
-reproduction and evidence to it — do not file a second one.
+Searching open and closed issues, and **reopening** a closed ticket for a
+recurrence instead of filing a fresh one, is a required ordered procedure the
+`ticketing` agent runs on every dispatch. It is specified once, in the agent
+asset (`assets/agents/ticketing.md`, "Reopen Before You Create") — the agent
+executes it, so that is where it lives. Do not restate it in a delegation
+brief; state the finding and let the agent run its own gate.
 
 ### 2. Promote only an independently prioritizable outcome
 
@@ -151,13 +161,19 @@ was claimed.
   each new occurrence (run URL, SHA, command, failure signature) to it; a new
   issue per occurrence is a duplicate.
 
-### 5. Minimal issue schema (six fields)
+### 5. Minimal issue schema (six facts)
+
+🔴 **These are six facts a reader must be able to tell from the body. They are
+NOT six headings to fill in.** A body carries defect, evidence, and resolution
+in prose, sparsely — the form is specified in the agent asset
+(`assets/agents/ticketing.md`, "Sparse Ticket Bodies"), which is binding here.
+Most tickets convey all six in under ten lines.
 
 1. Outcome/problem and impact.
 2. Confidence: Observed | Reproduced | Inferred | Speculative.
 3. Evidence/reproduction.
 4. Acceptance criteria.
-5. Relationship to parent work, and the duplicate-search result.
+5. Relationship to parent work, and the search/reopen outcome.
 6. Test level expected for closure.
 
 Field 3 governs issue bodies only. It does **not** relax the evidence rule for

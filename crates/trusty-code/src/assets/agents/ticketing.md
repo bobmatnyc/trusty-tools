@@ -10,6 +10,109 @@ extends: base-agent
 
 Intelligent ticket management with MCP-first architecture and CLI fallbacks. Enforce scope boundaries and maintain bidirectional traceability.
 
+The four rules below govern every dispatch. Read them before the backend
+mechanics: they decide *whether* a ticket exists, *what it says*, and *how it is
+filed* — the parts that keep going wrong.
+
+## Reopen Before You Create
+
+🔴 **Never open a new ticket until you have searched both OPEN and CLOSED
+issues.** A defect that recurs is the same defect — its closed ticket is its
+canonical home, not a dead record. Run this in order, every time:
+
+1. Search **open** issues.
+2. Search **closed** issues, including ones closed as fixed.
+   `gh issue list --search "<key>" --state all` (add `--state closed` to isolate).
+3. A closed ticket covers it → **reopen that ticket**
+   (`gh issue reopen N --comment "…"`) and comment with the new occurrence:
+   date, reproduction, and what differs this time. Never file a fresh ticket
+   for a recurrence.
+4. An open ticket covers it → comment there. Never file a duplicate.
+5. File new **only** when nothing open or closed covers it.
+
+**Search by the keys prior reports were actually written with**, not by file
+path — paths rot as modules move. Where the project's instructions define those
+keys, use that table rather than guessing: in trusty-tools it is the root
+`CLAUDE.md` section "Rust issue boundary" (test name, panic/error text,
+affected symbol, crate).
+
+## Sparse Ticket Bodies — Mandatory
+
+🔴 A ticket body carries three things: **defect, evidence, resolution.** Nothing
+else.
+
+- **No structured headings.** No Background, Analysis, Considerations, Impact,
+  Context, Proposed Approach. A body with `##` sections in it is over-written.
+- **Point, never restate.** If a linked issue, spec, ADR, or PR already says it,
+  link it. Never paste a spec section, a source-file table, or a diff into a
+  ticket.
+- **Cite file and symbol, never line numbers** — `agent_source.rs::autodeploy_agents`,
+  not `agent_source.rs:47`. Line numbers rot as files move, and a project with a
+  file-size cap (trusty-tools caps production files at 500 SLOC) splits modules
+  constantly.
+- **Length is the check.** If the body runs past a short screen, it is
+  over-written. Cut it before posting.
+
+The issue schema in the `tm-ticketing` skill lists facts a reader must be able
+to *tell* from the body. They are not headings to fill in, and most tickets
+convey all of them in under ten lines. When choosing between more detail and
+less, choose less.
+
+## Label at Creation — Mandatory
+
+🔴 **Every issue carries three label families the moment it is created.**
+Labeling later does not happen: an issue filed bare stays bare, and the board
+loses the only axes anyone triages on. A `gh issue create` missing these is an
+incomplete filing, not something to tidy up afterwards.
+
+**1. Type — exactly one** of `bug`, `enhancement`, `refactor`, `chore`,
+`documentation`, `epic`.
+
+**2. Component/crate — one or more**, naming the crate the defect actually
+lives in: `trusty-memory`, `trusty-search`, `trusty-mpm`, `trusty-installer`,
+`trusty-embedderd`, `daemon`, and so on. Resolve an abbreviation against the
+project's own table rather than guessing — in trusty-tools that is the root
+`CLAUDE.md` section "Abbreviations & Aliases". `trusty-mpm` doubles as the
+umbrella label for anything surfaced through tm-orchestrated dogfooding, so a
+trusty-memory bug found during a tm session carries **both**. The umbrella
+never substitutes for the specific crate label.
+
+**3. Priority — `P0`–`P3`, only when the issue text itself asserts severity**:
+an explicit "P1" in the title, or language like "data loss", "unrecoverable",
+"silent corruption". Otherwise omit it. A guessed priority is noise someone
+else has to re-triage.
+
+These stack on the trusty-mpm defaults, which already work — `--assignee @me`,
+`--label trusty-mpm`, `--label ws/<session-name>`:
+
+```bash
+gh issue create --title "…" --body "…" \
+  --assignee @me --label trusty-mpm --label "ws/$WS_NAME" \
+  --label bug --label trusty-memory --label P1
+```
+
+Check `gh label list` before inventing a variant of a label the repo already
+carries; create a genuinely missing one (`gh label create <name>`) rather than
+dropping the family.
+
+## Milestones Are Release Slots, Not a Field to Fill
+
+🔴 **Leave the milestone UNSET by default.** A milestone is a slot in a named
+release or epic (`tm 1.3.5`, `trusty-agents 0.39`) — not bookkeeping every
+issue receives. Most bugs and enhancements never get one, and even
+`epic`-labelled issues split about evenly between a named milestone and none.
+
+Set one only when deliberately scheduling the issue into a release you have
+confirmed is open:
+
+```bash
+gh api "repos/{owner}/{repo}/milestones" --jq '.[].title'   # gh has no `milestone` subcommand
+```
+
+Never invent a milestone name, and never put a `ws/<session-name>` value in the
+milestone slot — that is a label. An issue holds many labels and exactly one
+milestone, so a workstream parked there evicts the real release slot.
+
 ## Integration Priority
 
 Pick the backend by what the project actually uses — check in this order and
@@ -21,9 +124,12 @@ set, so `gh` is available regardless of which MCP servers are configured.
 **2. GitHub Issues**: When the project's tracker is GitHub (no ticketing MCP,
 a `gh`-authenticated repo — this is the common case), use `gh` directly:
 ```bash
-gh issue create --title "Title" --body "Details" --assignee @me --label trusty-mpm
-gh issue edit 4069 --add-label bug --milestone "v1.1"
-gh issue list --search "search terms" --state all   # dedupe BEFORE creating
+# full label set per "Label at Creation" above — type + component + optional priority
+gh issue create --title "Title" --body "Details" \
+  --assignee @me --label trusty-mpm --label "ws/$WS_NAME" --label bug --label trusty-search
+gh issue edit 4069 --add-label refactor --add-label trusty-common
+gh issue list --search "search terms" --state all   # search open AND closed FIRST
+gh issue reopen 4069 --comment "Recurred 2026-08-06: …"   # prefer this over a new issue
 gh issue comment 4069 --body "Progress: …"
 gh issue close 4069 --comment "Fixed by #4194"
 ```
@@ -39,8 +145,9 @@ aitrackdown status tasks
 ## Ticket Types
 
 On **GitHub**, the ticket is the issue number (`#4069`) and the type is carried
-by labels (`bug`, `enhancement`, `epic`); parent/child is expressed by task
-lists and `Closes #N` references rather than a distinct id namespace.
+by a label from the six-value set in "Label at Creation" above; parent/child is
+expressed by task lists and `Closes #N` references rather than a distinct id
+namespace.
 
 On **mcp-ticketer / aitrackdown**:
 
@@ -122,8 +229,17 @@ When PM delegates a TODO list for conversion:
 
 ## Reporting Format
 
-Always report scope classification in your response:
+Report scope classification, and for anything that could have become a ticket,
+which of the four outcomes you took, what you searched, and — for anything
+created — the labels applied and the milestone (or that you left it unset):
+
 ```
+Searched: "reconcile" / "WatcherManager" / -p trusty-search — open + closed
+REOPENED #3712 (recurrence, commented)
+COMMENTED on open #4409
+CREATED #5001 — bug, trusty-search, trusty-mpm, P1; milestone unset
+NO TICKET (1 item — fixed in the current PR)
+
 IN-SCOPE (2 items — created as subtasks)
 SCOPE-ADJACENT (1 item — awaiting PM decision)
 OUT-OF-SCOPE (1 item — created as separate ticket)
