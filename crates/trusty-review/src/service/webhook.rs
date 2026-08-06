@@ -39,6 +39,7 @@ use crate::{
     integrations::github::{RunMode, webhook::verify_webhook_signature},
     pipeline::{DiffSource, ReviewDeps, ReviewInput, classify_review_request, run_review},
     service::handlers::AppState,
+    store::InFlightCountGuard,
 };
 
 // ─── Webhook payload shapes ───────────────────────────────────────────────────
@@ -261,9 +262,12 @@ pub async fn handle_github_webhook(
             }
         };
 
-        state_clone
-            .in_flight
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Same RAII discipline as `_pr_guard` / `_sha_guard` above — a
+        // `run_review` panic unwinds this spawned task with the panic swallowed
+        // into a `JoinError` nobody reads, so a bare fetch_sub after the
+        // `.await` never runs and the /status gauge stays inflated for the life
+        // of the daemon.
+        let _in_flight = InFlightCountGuard::acquire(&state_clone.in_flight);
 
         let deps = ReviewDeps {
             llm: Arc::clone(&state_clone.llm),
@@ -298,9 +302,6 @@ pub async fn handle_github_webhook(
         };
 
         let result = run_review(&state_clone.config, input, deps).await;
-        state_clone
-            .in_flight
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 
         if let Some(ref err) = result.error {
             warn!(pr = pr_number, error = %err, "webhook pipeline completed with error");

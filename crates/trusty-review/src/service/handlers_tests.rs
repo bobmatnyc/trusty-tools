@@ -107,6 +107,67 @@ impl SearchClient for FailSearch {
     }
 }
 
+/// A search stub whose `health()` signals once and then never resolves.
+///
+/// Why: `preflight_context` awaits `search.health()` with no timeout, early in
+/// `run_review` and after `handle_review` has taken the in-flight guard. That
+/// makes it the control point for parking the handler future mid-review, which
+/// is what a client disconnect does in production.
+/// What: notifies `entered` on entry, then returns `Pending` forever.
+/// Test: `review_handler_in_flight_returns_to_zero_when_future_dropped`.
+pub(super) struct PendingSearch {
+    pub(super) entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl SearchClient for PendingSearch {
+    async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        std::future::pending().await
+    }
+
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        std::future::pending().await
+    }
+}
+
+/// A search stub whose `health()` panics.
+///
+/// Why: stands in for any panic anywhere inside `run_review` — the second exit
+/// path a bare `fetch_add`/`fetch_sub` pair skips.
+/// What: panics on `health()`, which `preflight_context` awaits unconditionally.
+/// Test: `review_handler_in_flight_returns_to_zero_when_pipeline_panics`.
+pub(super) struct PanicSearch;
+
+#[async_trait]
+impl SearchClient for PanicSearch {
+    async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+        panic!("simulated pipeline panic inside run_review");
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![])
+    }
+
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
 /// A search stub whose `health()` succeeds at the transport level but reports
 /// an unhealthy embedder — exercises the `Ok(Ok(v))` + `is_healthy(v) ==
 /// false` branch of `bounded_probe` end-to-end through a real `SearchClient`
@@ -464,6 +525,121 @@ async fn review_handler_bad_request_missing_fields() {
     let response = handle_review(State(state), Json(req)).await;
     let resp: axum::response::Response = response.into_response();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── in_flight gauge leak regression ──────────────────────────────────────────
+
+/// A unified diff big enough to survive noise filtering and reach the
+/// required-context gate, where the search stubs above take control.
+const LEAK_TEST_DIFF: &str = "diff --git a/src/lib.rs b/src/lib.rs\n\
+index 1111111..2222222 100644\n\
+--- a/src/lib.rs\n\
++++ b/src/lib.rs\n\
+@@ -1,3 +1,4 @@\n\
+ fn existing() {}\n\
++pub fn added_symbol() -> u32 { 7 }\n\
+ fn other() {}\n";
+
+fn leak_test_request() -> ReviewRequest {
+    ReviewRequest {
+        owner: None,
+        repo: None,
+        pr: None,
+        local_diff_text: Some(LEAK_TEST_DIFF.to_string()),
+        ..Default::default()
+    }
+}
+
+/// Dropping the handler future mid-review returns `in_flight` to its prior value.
+///
+/// Why: axum drops the handler future when the HTTP client disconnects. With a
+/// bare `fetch_add` / `fetch_sub` around the `.await`, the decrement never runs
+/// and `GET /status` reports a permanently inflated gauge for the life of the
+/// daemon. Reviews take tens of seconds, so this window is wide.
+/// What: parks `run_review` inside `preflight_context` via `PendingSearch`,
+/// asserts the counter reached 1 while parked, drops the future, and asserts it
+/// is back to 0.
+/// Test: this test. Removing the `InFlightCountGuard` from `handle_review` makes
+/// the post-drop assertion fail with `1`.
+#[tokio::test]
+async fn review_handler_in_flight_returns_to_zero_when_future_dropped() {
+    use std::sync::atomic::Ordering;
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let state = AppState::new(
+        crate::config::ReviewConfig::load(None),
+        Arc::new(FakeLlm),
+        Arc::new(PendingSearch {
+            entered: Arc::clone(&entered),
+        }),
+        None,
+    );
+    let counter = Arc::clone(&state.in_flight);
+    assert_eq!(counter.load(Ordering::Relaxed), 0, "gauge starts at zero");
+
+    let mut fut = Box::pin(handle_review(State(state), Json(leak_test_request())));
+
+    // Drive the handler until the pipeline parks on the never-resolving search
+    // probe. `PendingSearch` never completes, so the handler cannot finish.
+    tokio::select! {
+        _ = &mut fut => panic!("handler completed — PendingSearch must never resolve"),
+        _ = entered.notified() => {}
+    }
+
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        1,
+        "the review must be counted while it is actually in flight"
+    );
+
+    // The client disconnects: axum drops the handler future mid-review.
+    drop(fut);
+
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        0,
+        "dropping the handler future must release the in-flight slot"
+    );
+}
+
+/// A panic inside the pipeline returns `in_flight` to its prior value.
+///
+/// Why: the other exit path a bare `fetch_sub` after the `.await` skips. On the
+/// webhook path the panic is swallowed into a `JoinError` nobody reads, so the
+/// daemon survives with a gauge that can only ever climb.
+/// What: makes `preflight_context`'s search probe panic, runs the handler in a
+/// `tokio::spawn` so the unwind is caught at the task boundary, asserts the task
+/// did panic, and asserts the counter is back to 0.
+/// Test: this test. Removing the `InFlightCountGuard` makes the final assertion
+/// fail with `1`.
+#[tokio::test]
+async fn review_handler_in_flight_returns_to_zero_when_pipeline_panics() {
+    use std::sync::atomic::Ordering;
+
+    let state = AppState::new(
+        crate::config::ReviewConfig::load(None),
+        Arc::new(FakeLlm),
+        Arc::new(PanicSearch),
+        None,
+    );
+    let counter = Arc::clone(&state.in_flight);
+
+    let join = tokio::spawn(async move {
+        let _ = handle_review(State(state), Json(leak_test_request()))
+            .await
+            .into_response();
+    });
+    let outcome = join.await;
+
+    assert!(
+        outcome.is_err_and(|e| e.is_panic()),
+        "PanicSearch must have panicked the review task"
+    );
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        0,
+        "a panicking pipeline must still release the in-flight slot"
+    );
 }
 
 // ── Inference-probe handler tests (#719) ──────────────────────────────────────

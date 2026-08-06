@@ -10,12 +10,18 @@
 //! `(owner,repo,pr)` (active from request receipt, before the SHA is known) and
 //! one keyed by `(owner,repo,pr,sha)`.  `try_acquire_*` insert-if-absent and
 //! return an RAII `InFlightGuard` that removes the key on drop, so the slot is
-//! always released even if the review task panics.
+//! always released even if the review task panics.  `InFlightCountGuard`
+//! applies the same drop-releases discipline to `AppState::in_flight`, the
+//! numeric gauge reported by `GET /status`.
 //!
 //! Test: `pr_guard_blocks_second`, `pr_guard_released_on_drop`,
-//! `sha_guard_independent_of_pr`, `different_pr_not_blocked`.
+//! `sha_guard_independent_of_pr`, `different_pr_not_blocked`,
+//! `count_guard_increments_then_decrements_on_drop`,
+//! `count_guard_decrements_on_panic_unwind`,
+//! `count_guard_nests_and_unwinds_in_order`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashSet;
 
@@ -110,6 +116,53 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// RAII guard that increments a shared in-flight counter on acquire and
+/// decrements it on drop.
+///
+/// Why: `AppState::in_flight` is the gauge `GET /status` reports. Both review
+/// call sites used to bracket `run_review(...).await` with a bare
+/// `fetch_add` / `fetch_sub` pair, which is skipped on two real exit paths: the
+/// handler future being dropped when an HTTP client disconnects mid-review, and
+/// `run_review` panicking. Either leaks a permanent +1, and reviews take tens of
+/// seconds so the disconnect window is wide. Tying the decrement to `Drop`
+/// makes it unconditional — drop, panic unwind, early return, or success — the
+/// same discipline `InFlightGuard` already applies to the dedup slot.
+/// What: `acquire` bumps the counter and takes an owning `Arc` handle; `Drop`
+/// decrements it exactly once.
+/// Test: `count_guard_increments_then_decrements_on_drop`,
+/// `count_guard_decrements_on_panic_unwind`,
+/// `count_guard_nests_and_unwinds_in_order`; end-to-end via
+/// `review_handler_in_flight_returns_to_zero_when_future_dropped` and
+/// `review_handler_in_flight_returns_to_zero_when_pipeline_panics`.
+#[derive(Debug)]
+pub struct InFlightCountGuard {
+    counter: Arc<AtomicU64>,
+}
+
+impl InFlightCountGuard {
+    /// Increment `counter` and return a guard that decrements it on drop.
+    ///
+    /// Why: the counter must never be incremented without a matching guard, so
+    /// this is the only constructor — there is no way to spell the increment
+    /// without also arming the decrement.
+    /// What: `fetch_add(1, Relaxed)` then clones the `Arc`. `Relaxed` matches
+    /// the read side (`GET /status` does a plain `load(Relaxed)`); the value is
+    /// an advisory gauge, not a synchronisation edge.
+    /// Test: `count_guard_increments_then_decrements_on_drop`.
+    pub fn acquire(counter: &Arc<AtomicU64>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self {
+            counter: Arc::clone(counter),
+        }
+    }
+}
+
+impl Drop for InFlightCountGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -147,6 +200,59 @@ mod tests {
         assert!(reg.try_acquire_pr("acme", "backend", 43).is_some());
         // A different repo is independent.
         assert!(reg.try_acquire_pr("acme", "frontend", 42).is_some());
+    }
+
+    /// The counter guard bumps on acquire and returns to the prior value on drop.
+    ///
+    /// Why: pins the basic contract — a guard is worthless if it does not
+    /// actually increment, and the /status gauge is wrong if it does not
+    /// decrement.
+    #[test]
+    fn count_guard_increments_then_decrements_on_drop() {
+        let counter = Arc::new(AtomicU64::new(0));
+        {
+            let _g = InFlightCountGuard::acquire(&counter);
+            assert_eq!(counter.load(Ordering::Relaxed), 1, "acquire must increment");
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "drop must decrement");
+    }
+
+    /// The counter guard decrements when the holding frame panics.
+    ///
+    /// Why: `run_review` panicking used to leak a permanent +1 on the webhook
+    /// path, where the panic is swallowed by the spawned task's `JoinError` and
+    /// the daemon keeps running with an inflated gauge forever.
+    #[test]
+    fn count_guard_decrements_on_panic_unwind() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let probe = Arc::clone(&counter);
+        let outcome = std::panic::catch_unwind(move || {
+            let _g = InFlightCountGuard::acquire(&probe);
+            assert_eq!(probe.load(Ordering::Relaxed), 1);
+            panic!("simulated pipeline panic");
+        });
+        assert!(outcome.is_err(), "the closure must have panicked");
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "panic unwind must still run Drop"
+        );
+    }
+
+    /// Concurrent guards over the same counter nest correctly.
+    ///
+    /// Why: the daemon runs several reviews at once; each must contribute
+    /// exactly one to the gauge and remove exactly one when it finishes.
+    #[test]
+    fn count_guard_nests_and_unwinds_in_order() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let a = InFlightCountGuard::acquire(&counter);
+        let b = InFlightCountGuard::acquire(&counter);
+        assert_eq!(counter.load(Ordering::Relaxed), 2);
+        drop(a);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        drop(b);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 
     #[test]

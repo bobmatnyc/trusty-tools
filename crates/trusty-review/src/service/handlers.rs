@@ -30,7 +30,7 @@ use crate::{
     llm::LlmProvider,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
     service::inference_probe::{InferenceProbe, InferenceStatus},
-    store::{DedupStore, InFlightRegistry},
+    store::{DedupStore, InFlightCountGuard, InFlightRegistry},
 };
 
 // ─── AppState ─────────────────────────────────────────────────────────────────
@@ -661,9 +661,12 @@ pub async fn handle_review(
         surface: InvocationSurface::default(),
     };
 
-    state.in_flight.fetch_add(1, Ordering::Relaxed);
+    // The gauge must be released on every exit path. A bare
+    // fetch_add/fetch_sub pair around this `.await` is skipped when the caller
+    // disconnects (axum drops the handler future) or when `run_review` panics,
+    // leaking a permanent +1 for the life of the process.
+    let _in_flight = InFlightCountGuard::acquire(&state.in_flight);
     let result = run_review(&state.config, input, deps).await;
-    state.in_flight.fetch_sub(1, Ordering::Relaxed);
 
     info!(
         verdict = %result.verdict,
