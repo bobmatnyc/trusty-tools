@@ -47,8 +47,10 @@
 //!      attempts until the sentinel expires ([`STALE_DAEMON_TTL_SECS`], 1
 //!      hour) — self-healing: one probe per hour against a genuinely stale
 //!      daemon, not a permanent lockout once it's restarted. Records held
-//!      back by this gate fold into [`AutoPruneOutcome::pending`], never
-//!      silently disappearing from the reported count.
+//!      back by this gate fold into [`AutoPruneOutcome::pending`], as does a
+//!      record whose decommission was attempted and FAILED (#4995 review) —
+//!      neither may disappear from the reported count, because that count is
+//!      the only notice the operator gets that rows were withheld.
 //!
 //! What: [`prune_and_report`] is the production entry point (resolves the
 //! marker file under `~/.trusty-mpm` and prints the operator summary);
@@ -172,11 +174,16 @@ pub(crate) struct AutoPruneOutcome {
     /// Count of records actually decommissioned this call (never more than
     /// [`AUTO_PRUNE_CAP`]).
     pub(crate) pruned: usize,
-    /// Count of `unresumable` records NOT acted on this call — a first
-    /// sighting (not yet confirmed), confirmed-but-over-the-cap, or held
-    /// back because the stale-daemon gate is active (owner request
-    /// 2026-07-30 follow-up — this must fold in here or the reported count
-    /// under-represents exactly the batch that gate is protecting).
+    /// Count of dead records NOT cleared this call — a first sighting (not yet
+    /// confirmed), confirmed-but-over-the-cap, held back because the
+    /// stale-daemon gate is active (owner request 2026-07-30 follow-up), or
+    /// attempted and FAILED (#4995 review). Every one of those four must fold
+    /// in here: this count is the sole gate on the operator banner, and each
+    /// left out is a row hidden from the default view with nothing said about
+    /// it.
+    ///
+    /// Invariant: `pending == dead_ids.len()`, by construction — see
+    /// [`dead_ids`](Self::dead_ids).
     pub(crate) pending: usize,
     /// Ids WITHIN [`kept`](Self::kept) that [`is_dead_record`] classified dead
     /// but the sweep could not clear this call (#4994).
@@ -192,8 +199,15 @@ pub(crate) struct AutoPruneOutcome {
     /// round 2), so hiding on the raw flag would have made it hidden AND
     /// unreapable — the exact "running agent unreachable through `tm`" outcome
     /// those guards were built to prevent. Keying off this field instead makes
-    /// `hidden ⟺ prunable` true by construction, and makes the hidden set
-    /// exactly what [`pending`](Self::pending) counts.
+    /// `hidden ⟺ prunable` true by construction.
+    ///
+    /// 🔴 `dead_ids.len() == pending` — the hidden set and the reported count
+    /// are the same rows, and every arm that leaves a record in
+    /// [`kept`](Self::kept) must increment `pending` to keep it that way. That
+    /// held only for three of the four arms until #4995's review: a FAILED
+    /// decommission left the record here (hidden) while counting it nowhere, so
+    /// a call where every attempt failed printed no banner at all. Test:
+    /// `auto_prune_counts_failed_decommissions_so_the_banner_still_prints`.
     pub(crate) dead_ids: HashSet<String>,
 }
 
@@ -337,25 +351,42 @@ pub(crate) async fn prune_and_report_at(
             if outcome.pruned == 1 { "" } else { "s" }
         );
     }
-    if outcome.pending > 0 {
-        // #4994: the suffix is conditional because `--json` and `--all` PRINT
-        // these rows. Claiming they are hidden where they are visibly listed
-        // sends the operator looking for a view they are already in.
-        let suffix = if hides_dead_rows {
-            " (hidden; `tm ls --all` to see them)"
-        } else {
-            ""
-        };
-        eprintln!(
-            "tm: {} more dead record{} pending confirmation{suffix}",
-            outcome.pending,
-            if outcome.pending == 1 { "" } else { "s" }
-        );
+    if let Some(banner) = pending_banner(outcome.pending, hides_dead_rows) {
+        eprintln!("{banner}");
     }
     PrunedListing {
         sessions: outcome.kept,
         dead_ids: outcome.dead_ids,
     }
+}
+
+/// Build the "N more dead records pending confirmation" line, or `None` when
+/// there is nothing to report (#4994; extracted #4995 review).
+///
+/// Why: this line is the ONLY notice an operator gets that rows were withheld
+/// from the default view, so whether it prints is a behavior worth asserting
+/// directly rather than through a proxy for it. As an `eprintln!` inline in
+/// [`prune_and_report_at`] it could not be — a test could only check the
+/// `pending` count the branch happens to key on, which is what let a failed
+/// decommission suppress the banner unnoticed.
+/// What: `None` when `pending == 0`. The "(hidden; …)" suffix appears only when
+/// `hides_dead_rows` — `--json` and `--all` PRINT these rows, and claiming they
+/// are hidden where they are visibly listed sends the operator looking for a
+/// view they are already in.
+/// Test: `auto_prune_counts_failed_decommissions_so_the_banner_still_prints`.
+pub(crate) fn pending_banner(pending: usize, hides_dead_rows: bool) -> Option<String> {
+    if pending == 0 {
+        return None;
+    }
+    let suffix = if hides_dead_rows {
+        " (hidden; `tm ls --all` to see them)"
+    } else {
+        ""
+    };
+    Some(format!(
+        "tm: {pending} more dead record{} pending confirmation{suffix}",
+        if pending == 1 { "" } else { "s" }
+    ))
 }
 
 /// The workdir candidates a LISTED session carries on the wire (#4702).
@@ -771,6 +802,14 @@ pub(crate) async fn auto_prune_dead_records_at(
     // into `pending` — otherwise "N more dead records pending confirmation"
     // under-reports exactly the batch this gate is protecting.
     let mut stale_daemon_held = 0usize;
+    // #4995 review (MEDIUM): a record whose decommission FAILED stays in `kept`
+    // and in `dead_ids` — so the default view hides it — and must therefore be
+    // counted for exactly the reason `stale_daemon_held` is. Left uncounted, a
+    // call where every decommission failed reported `pending == 0`, skipped the
+    // banner entirely, and dropped those rows off `tm ls` with no notice: silent
+    // hiding arriving through the error path, which is the failure this whole
+    // feature exists to prevent.
+    let mut decommission_failed = 0usize;
 
     if already_stale_daemon {
         stale_daemon_held = to_prune.len();
@@ -787,7 +826,10 @@ pub(crate) async fn auto_prune_dead_records_at(
                     dead_ids.remove(&s.id);
                     changed = true;
                 }
-                DecommissionOutcome::Failed => kept.push(s),
+                DecommissionOutcome::Failed => {
+                    decommission_failed += 1;
+                    kept.push(s);
+                }
                 DecommissionOutcome::StaleDaemon => {
                     newly_stale_daemon = true;
                     stale_daemon_held += 1;
@@ -814,7 +856,7 @@ pub(crate) async fn auto_prune_dead_records_at(
         );
     }
 
-    let pending = confirmed.len() + first_sighting.len() + stale_daemon_held;
+    let pending = confirmed.len() + first_sighting.len() + stale_daemon_held + decommission_failed;
     kept.extend(confirmed);
     kept.extend(first_sighting);
 

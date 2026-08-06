@@ -2321,6 +2321,115 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     handle.abort();
 }
 
+/// 🔴 #4995 review (MEDIUM): every confirmed record's decommission FAILS, and
+/// the operator must still be told the rows were withheld.
+///
+/// Why: a failed decommission leaves the record in `kept` AND in `dead_ids`, so
+/// the default `tm ls` hides it. Until this fix it was counted in neither
+/// `pruned` nor `pending`, so a call where every attempt failed reported
+/// `pending == 0`, [`pending_banner`] returned `None`, and the rows dropped off
+/// the listing with nothing said — silent hiding arriving through the error
+/// path, which is the outcome #4994's whole design exists to prevent.
+///
+/// Fails before the fix: `pending` is 0, so the banner assertion gets `None`.
+/// What: a stub daemon that answers every decommission with HTTP 500 — the
+/// transport-level failure arm, distinct from the `workspace_removed: true`
+/// stale-daemon arm its sibling tests drive. Both ids are pre-seeded as already
+/// confirmed so this isolates the counting behavior from the two-sightings
+/// window.
+#[tokio::test]
+async fn auto_prune_counts_failed_decommissions_so_the_banner_still_prints() {
+    use crate::commands::managed::filter_live_sessions;
+    use crate::commands::session_picker_prune::pending_banner;
+
+    let app = axum::Router::new().route(
+        "/api/v1/sessions/managed/{id}/decommission",
+        axum::routing::post(
+            async |axum::extract::Path(_id): axum::extract::Path<String>| {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback port");
+    let addr = listener.local_addr().expect("resolve bound addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let url = format!("http://{addr}");
+
+    let client = reqwest::Client::new();
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+
+    let mut seen = std::collections::HashMap::new();
+    seen.insert("id-a".to_string(), "2020-01-01T00:00:00Z".to_string());
+    seen.insert("id-b".to_string(), "2020-01-01T00:00:00Z".to_string());
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    // Both workspaces are absent under an EXISTING parent (the tempdir), which
+    // is what `workspace_verified_gone` requires to call a record dead.
+    let dead_session = |id: &str, label: &str| {
+        let mut s = stopped_session_at(id, &root.path().join(label));
+        s.state = "errored".to_string();
+        s.unresumable = true;
+        s
+    };
+
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![
+            dead_session("id-a", "gone-a"),
+            dead_session("id-b", "gone-b"),
+        ],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.pruned, 0,
+        "an HTTP 500 must never be counted as a successful prune"
+    );
+    assert_eq!(
+        outcome.kept.len(),
+        2,
+        "both records survive the failed sweep"
+    );
+    let mut hidden: Vec<&str> = outcome.dead_ids.iter().map(String::as_str).collect();
+    hidden.sort_unstable();
+    assert_eq!(
+        hidden,
+        vec!["id-a", "id-b"],
+        "both records stay classified dead, so the default view hides both"
+    );
+
+    // 🔴 The defect itself: the banner is the only notice these rows were
+    // withheld, and `pending` is its sole gate.
+    assert_eq!(
+        pending_banner(outcome.pending, true).as_deref(),
+        Some("tm: 2 more dead records pending confirmation (hidden; `tm ls --all` to see them)"),
+        "a call whose every decommission failed must still name the withheld \
+         rows — before this fix `pending` was 0 and nothing printed at all"
+    );
+    assert_eq!(
+        outcome.pending,
+        outcome.dead_ids.len(),
+        "the reported count and the hidden set must be the same rows"
+    );
+
+    // And they really are hidden: the count above is not describing rows that
+    // stayed on screen.
+    assert!(
+        filter_live_sessions(outcome.kept, &outcome.dead_ids).is_empty(),
+        "the default view drops exactly the rows the banner just accounted for"
+    );
+
+    handle.abort();
+}
+
 // ── #4702: prune coverage — every invocation, and stopped records ───────────
 //
 // Two independent narrowings let dead records accumulate without bound before

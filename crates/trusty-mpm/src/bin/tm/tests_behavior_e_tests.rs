@@ -530,8 +530,13 @@ fn picker_filter_keeps_a_live_row_flagged_unresumable() {
     // daemon-side from a record's PERSISTED state; `reconcile_live_state` then
     // overwrites the DISPLAY state without recomputing it, so the wire really
     // does ship `state: "active"` with `unresumable: true` for a session whose
-    // pane is running — proven by `critic_proof_4995_live_pane_can_ship_active_
-    // plus_unresumable`. The sweep refuses to reap such a row
+    // pane is running. Both halves of that are pinned daemon-side, in the order
+    // `summary.rs` runs them: `checked_summaries_with` probes `unresumable` for
+    // persisted-`Stopped`/`Errored` records only, then
+    // `reconcile_live_state_flips_stopped_to_active_when_alive` shows the
+    // display state flipping to `active` with no second probe.
+    //
+    // The sweep refuses to reap such a row
     // (`auto_prune_never_touches_a_running_record`,
     // `auto_prune_never_touches_an_errored_record_with_a_live_detached_pane`),
     // so hiding it would leave a running agent hidden AND unreapable.

@@ -6,3 +6,4 @@ Fixed
   - the records are untouched: `tm ls --all` still lists every one, and the remedy is unchanged (`tm sessions delete <id> --force`)
   - the default-view filter runs AFTER the sweep, so it still sees the records it reaps
   - the "N more dead records pending confirmation" line says where those rows went, and only where they were actually hidden — not on `--json` or `--all`, which print them
+  - that line now also counts records whose decommission was attempted and failed. They stay hidden either way, so leaving them out meant a sweep where every attempt failed printed nothing at all and the rows vanished with no explanation
