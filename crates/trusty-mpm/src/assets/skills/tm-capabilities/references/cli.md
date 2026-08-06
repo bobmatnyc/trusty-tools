@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-56 top-level commands.
+57 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -185,6 +185,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `stop` — Stop a session by id or friendly name (managed or project session)
   - `sync-assets` — Re-sync a live managed session's deployed agents/skills/output-styles against the current catalog (issue #2444)
   - `tui` — Launch the coordinator TUI: an input box over a live session list (#1272)
+- `shell-init` — Print a shell wrapper so `tm run <alias>` leaves you in that repo
 - `slack` — Manage the Slack remote-management bot (start, stop) — DOC-20 adapter #1294
   - `start` — Start the Slack bot process (Socket Mode — no public webhook required)
   - `stop` — Stop the Slack bot process if running
