@@ -74,6 +74,7 @@ pub(crate) mod reconcile_worktrees;
 pub(crate) mod register_args;
 pub(crate) mod rename;
 pub(crate) mod repair;
+pub(crate) mod run_target;
 pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod sessctl;

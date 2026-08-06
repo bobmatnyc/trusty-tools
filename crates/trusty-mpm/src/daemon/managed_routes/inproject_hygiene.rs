@@ -205,16 +205,43 @@ fn ahead_count(base_path: &Path, branch: &str) -> Option<usize> {
 /// Test: `hygiene_dirty_tree_is_not_reset` integration test (via
 /// [`run_hygiene_for_base`]).
 fn is_dirty(base_path: &Path) -> Option<bool> {
+    porcelain_status(base_path).ok().map(|e| !e.is_empty())
+}
+
+/// Read `git status --porcelain` for a base clone as a list of entries.
+///
+/// Why: two callers need the same answer at different resolutions. [`is_dirty`]
+/// wants the verdict; the cold-start reuse gate
+/// ([`super::inproject_cold_start`]) wants the entries themselves, because its
+/// error message names what is dirty. Sharing one reader keeps them from
+/// drifting into two different definitions of "dirty" for the same directory.
+/// What: runs `git -C <base_path> status --porcelain` and returns the non-empty
+/// stdout lines verbatim. `Err` carries the spawn or non-zero-exit failure —
+/// callers decide whether that is fail-safe (`is_dirty` → `None` → refuse the
+/// update) or fatal (cold start → stop). Note that `--porcelain` without
+/// `--ignored` reports nothing for gitignored paths, which is why this cannot
+/// be the only data-loss guard; see [`colliding_untracked_paths`].
+/// Test: `hygiene_dirty_tree_is_not_reset` (via [`run_hygiene_for_base`]);
+/// `dirty_existing_checkout_fails_loud` (via the cold-start gate).
+pub(crate) fn porcelain_status(base_path: &Path) -> Result<Vec<String>, String> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(base_path)
         .args(["status", "--porcelain"])
         .output()
-        .ok()?;
+        .map_err(|e| format!("git status --porcelain failed to spawn: {e}"))?;
     if !out.status.success() {
-        return None;
+        return Err(format!(
+            "git status --porcelain failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
-    Some(!out.stdout.is_empty())
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Run `git -C <base_path> <args>` and return NUL-separated stdout entries.
