@@ -287,7 +287,8 @@ Publish-time `[patch.crates-io]` semantics are in
 ## Parallel Worktree Discipline
 
 Generic worktree discipline — main checkout inspection-only, provisioning off
-`origin/main`, branch-is-the-workstream, subagent confinement, cleanup — lives in
+`origin/main`, branch-is-the-workstream, one worktree per independently
+reviewable PR outcome, subagent confinement, cleanup — lives in
 `Skill(skill="tm-workflow")`. It applies here in full. What follows is only what
 this repo adds.
 
@@ -310,7 +311,8 @@ release-workflow note above). A plain `cp` over an on-PATH binary leaves a stale
 cdhash cache and the next exec is SIGKILL'd. The main checkout never needs to be
 involved.
 
-> **Extended discipline rationale and cleanup details:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
+> **Extended discipline rationale, the install-from-worktree commands, and the
+> stash-first fallback:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
 
 ## Abbreviations & Aliases
 

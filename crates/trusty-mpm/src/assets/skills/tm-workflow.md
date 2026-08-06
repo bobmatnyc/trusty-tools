@@ -162,9 +162,12 @@ is the fix; capping WIP treats the symptom.
 ## Worktree Discipline (Mandatory Before Any Edit)
 
 The main checkout is **inspection-only** — read-only `git status`/`log`/`diff`/
-`show` and file reads. No edits, no builds or test runs (whatever the project's
-gate is: `cargo build`/`test`, `npm run build`/`test`, `pytest`, …), no
-destructive git ops. All write-side work happens in a dedicated worktree branched
+`show` and file reads. Forbidden against it: any edit; any build or test run
+(whatever the project's gate is: `cargo build`/`test`, `npm run build`/`test`,
+`pytest`, …); any destructive git operation (`git reset --hard`,
+`git checkout .`, `git stash`, `git restore .`); any file-mutating command
+(`sed`/`awk`/`patch`) — or anything else that mutates the working tree, index,
+or build output. All write-side work happens in a dedicated worktree branched
 off `origin/main`:
 
 ```bash
@@ -176,6 +179,18 @@ cd .claude/worktrees/<dirname>
 
 Always `git fetch origin main` first and branch off `origin/main`, never local
 `main` — local `main` can be stale and branching from it has caused lost commits.
+
+**A worktree is a writer; the branch is the workstream.** The durable unit is
+the branch — one branch per workstream, one session per workstream. A worktree
+is only the checkout that lets you write to that branch: ephemeral, disposable,
+recreatable at any time with `git worktree add`. Losing a worktree loses nothing
+the branch does not still hold.
+
+**One branch and worktree per independently reviewable PR outcome** — not per
+ticket, per refactor step, or per experiment. Several related tickets may share
+one worktree when a single coherent change satisfies them (`Closes #A`,
+`Closes #B`); see "One Outcome, One PR" above for everything that outcome owes
+and keeps bundled in that same worktree and PR.
 
 **Experiments stay session-local.** Promote an experiment to a branch and
 worktree only once its result is accepted for implementation.
@@ -201,7 +216,11 @@ git -C /path/to/main-checkout stash pop
 ```
 
 Surface the stash name in your report if popping fails, so a human can restore
-it manually.
+it manually. This is a narrow exception, not license for routine edits from the
+main checkout.
+
+Project-specific worktree hazards (binary-install caveats, code-signing caches,
+and the like) belong in the project's own reference docs, not here.
 
 ## Git Security Review (Mandatory Before Push)
 
