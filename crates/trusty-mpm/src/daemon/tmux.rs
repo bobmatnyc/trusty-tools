@@ -127,7 +127,7 @@ pub struct SessionInfo {
     pub name: String,
     /// Unix epoch seconds the session was created.
     pub created: i64,
-    /// Whether a client is currently attached.
+    /// Whether at least one client is currently attached.
     pub attached: bool,
 }
 
@@ -135,10 +135,16 @@ impl SessionInfo {
     /// Parse one `name:created:attached` row from `list-sessions`.
     ///
     /// Why: a single parser keeps the format in sync with
-    /// `core::tmux::SESSION_LIST_FORMAT`.
-    /// What: splits on `:`; tolerates a malformed `attached` flag by defaulting
-    /// it to `false`.
-    /// Test: `parses_session_row`.
+    /// `core::tmux::SESSION_LIST_FORMAT`. The third field is
+    /// `#{session_attached}`, which tmux documents as the NUMBER of clients the
+    /// session is attached to — not a boolean. Comparing it to the literal
+    /// `"1"` therefore read every session with two or more clients as detached,
+    /// and `tm ls` labelled it `(active)` instead of `(attached)`.
+    /// What: splits on `:`; the attachment field is parsed as a count and any
+    /// value `> 0` means attached. A missing or unparseable field still
+    /// degrades to `false` rather than failing the row.
+    /// Test: `parses_session_row`, `parses_multi_client_session_row_as_attached`,
+    /// `attachment_flips_to_detached_when_client_count_drops_to_zero`.
     pub fn parse(line: &str) -> Result<Self> {
         let mut parts = line.splitn(3, ':');
         let name = parts
@@ -150,7 +156,13 @@ impl SessionInfo {
             .next()
             .and_then(|s| s.parse::<i64>().ok())
             .ok_or_else(|| Error::Protocol(format!("bad tmux created field: {line:?}")))?;
-        let attached = parts.next().map(|s| s == "1").unwrap_or(false);
+        // PR #4983: `#{session_attached}` is a client COUNT, not a flag — a
+        // session with a second terminal on it reports `2`, and the old
+        // `== "1"` test read that as detached.
+        let attached = parts
+            .next()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_some_and(|clients| clients > 0);
         Ok(Self {
             name,
             created,
