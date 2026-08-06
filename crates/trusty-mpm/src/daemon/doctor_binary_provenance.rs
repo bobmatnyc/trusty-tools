@@ -14,8 +14,10 @@
 //!
 //! Test: `provenance_is_unknown_without_a_ledger`,
 //! `provenance_is_unknown_without_an_exe`,
-//! `provenance_reports_the_ledger_verdict`; the full verdict table lives in
-//! `core::binary_provenance`'s own tests.
+//! `provenance_reports_the_ledger_verdict`,
+//! `provenance_is_unknown_for_a_downloader_replaced_cargo_install`,
+//! `provenance_fails_when_the_running_binary_is_older_than_the_ledger`; the full
+//! verdict table lives in `core::binary_provenance`'s own tests.
 
 use std::path::{Path, PathBuf};
 
@@ -180,6 +182,60 @@ mod tests {
             check.message
         );
         assert!(check.message.contains(".local/bin/tm"), "{}", check.message);
+    }
+
+    /// #4964 at the CHECK level: after Phase 3 the prebuilt downloader writes
+    /// into `$CARGO_HOME/bin`, so a clean cargo-free upgrade leaves a NEWER
+    /// binary at the path a stale ledger record names. That must not read as a
+    /// health failure.
+    ///
+    /// Why: this is the false positive #4964's mapping pass found. The path
+    /// match now succeeds (the file IS at the cargo path), the versions
+    /// disagree, and the pre-#4964 check answered `Fail` — on exactly the
+    /// upgrade Phases 1 and 3 exist to produce.
+    /// Test: this test.
+    #[test]
+    fn provenance_is_unknown_for_a_downloader_replaced_cargo_install() {
+        let ledger = r#"{"installs":{
+            "trusty-mpm 1.3.1 (registry+https://github.com/rust-lang/crates.io-index)":
+            {"bins":["tm"]}}}"#;
+        let check = check_binary_provenance_with(
+            Some(Path::new("/Users/x/.cargo/bin/tm")),
+            Some(Path::new("/Users/x/.cargo")),
+            Some(ledger),
+            "1.4.0",
+        );
+        assert_ne!(
+            check.status,
+            CheckStatus::Fail,
+            "a successful no-cargo upgrade must not fail doctor: {}",
+            check.message
+        );
+        assert_eq!(
+            check.status,
+            CheckStatus::Unknown,
+            "message: {}",
+            check.message
+        );
+        assert!(check.message.contains("NEWER"), "{}", check.message);
+    }
+
+    /// The control for the case above: reverse the two versions and the same
+    /// inputs must still FAIL. An older binary on top of a newer install is the
+    /// #4033 defect, and #4964 does not soften it.
+    #[test]
+    fn provenance_fails_when_the_running_binary_is_older_than_the_ledger() {
+        let ledger = r#"{"installs":{
+            "trusty-mpm 1.4.0 (registry+https://github.com/rust-lang/crates.io-index)":
+            {"bins":["tm"]}}}"#;
+        let check = check_binary_provenance_with(
+            Some(Path::new("/Users/x/.cargo/bin/tm")),
+            Some(Path::new("/Users/x/.cargo")),
+            Some(ledger),
+            "1.3.1",
+        );
+        assert_eq!(check.status, CheckStatus::Fail, "{}", check.message);
+        assert!(check.message.contains("OLDER"), "{}", check.message);
     }
 
     /// An unresolvable executable is also UNKNOWN, not a pass.

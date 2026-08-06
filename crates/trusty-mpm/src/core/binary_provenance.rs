@@ -27,9 +27,35 @@
 //! [`CheckStatus::Unknown`] and never `Ok` — the check has learned nothing about
 //! provenance in those cases and must not render as a clean bill of health.
 //!
+//! # Three provenance classes, not two (#4964)
+//!
+//! The check was written when a binary was either cargo's (it sits at
+//! `$CARGO_HOME/bin/<name>` and the ledger describes it) or not cargo's (it sits
+//! somewhere else). Epic #4964 consolidates every install destination onto
+//! `$CARGO_HOME/bin`, which makes a THIRD class reachable: a file the prebuilt
+//! downloader placed at the exact path a stale ledger record describes. Cargo
+//! writes no metadata for it, so the record still names the previous version.
+//!
+//! Cargo updates its ledger whenever it writes a binary, so a ledger/binary
+//! version disagreement at the same path can only mean a non-cargo writer
+//! replaced the file. Which of the two is NEWER decides what that means, and the
+//! two directions carry opposite operator consequences:
+//!
+//! | State | Verdict | Why |
+//! |---|---|---|
+//! | running NEWER than the ledger record | `Unknown` | the ledger is stale; the running binary is the current one. Same substance as the same file sitting in `~/.local/bin`, which already reports `Unknown` — so the verdict does not change when #4964 Phase 3 flips the destination |
+//! | running OLDER than the ledger record | `Fail` | an older binary overwrote a newer install: the upgrade the operator believes landed is not what executes. This is the #4033 defect class verbatim and keeps its severity |
+//! | the two cannot be ordered as semver | `Fail` | conservative — an unverifiable mismatch is still a mismatch |
+//!
+//! Known limit, stated rather than papered over: when the downloader places the
+//! SAME version cargo last recorded, the check reports `Ok`. It cannot tell the
+//! two writers apart in that case and does not need to — its claim is that the
+//! running version agrees with cargo's record, and that claim holds.
+//!
 //! Test: the `tests` module below covers every source classification and every
 //! verdict branch.
 
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -170,16 +196,23 @@ fn classify_source(fragment: &str) -> InstallSource {
 ///   cargo record and, if the versions happened to agree, report `Ok —
 ///   installed from crates.io` (#4622 review, HIGH-2).
 /// - `Fail` — the same binary is provided by MORE THAN ONE install (the #4033
-///   trusty-channels case: two worktrees, conflicting binaries), or the ledger's
-///   recorded version disagrees with the version actually running.
+///   trusty-channels case: two worktrees, conflicting binaries).
+/// - the ledger's recorded version disagrees with the version actually running:
+///   see [`version_skew_verdict`] — `Unknown` when the running binary is the
+///   newer of the two, `Fail` when it is the older (#4964).
 /// - `Fail` — a path install whose source directory is GONE: no provenance, no
 ///   upgrade path, and nothing left to rebuild from.
 /// - `Warn` — a path, git, or unrecognised-source install whose source survives:
-///   it works, but it is invisible to registry update detection.
+///   it works, but it is invisible to registry update detection. ADR-0021 makes
+///   `Warn` the CORRECT and terminal verdict for a path install; #4964 does not
+///   change that.
 /// - `Ok` — a registry install whose recorded version matches what is running.
 ///
 /// Test: `unknown_without_a_ledger`, `unknown_when_bin_is_not_in_the_ledger`,
 /// `fails_on_duplicate_installs`, `fails_on_version_disagreement`,
+/// `unknown_when_downloader_replaced_the_cargo_install`,
+/// `fails_when_versions_cannot_be_ordered`,
+/// `downloader_placed_binary_is_unknown_in_either_directory`,
 /// `fails_when_path_source_is_gone`, `warns_for_a_live_path_install`,
 /// `warns_for_a_git_install`, `ok_for_a_matching_registry_install`.
 pub fn provenance_report(
@@ -258,18 +291,7 @@ pub fn provenance_report(
     }
 
     if record.version != running_version {
-        return (
-            CheckStatus::Fail,
-            format!(
-                "the running `{bin_name}` reports version {running_version}, but cargo's ledger \
-                 records {} {} installed from {} — the binary on disk is not the one cargo \
-                 tracks, so an upgrade will not replace what is actually running{where_from} \
-                 (issue #4033)",
-                record.package,
-                record.version,
-                describe(&record.source),
-            ),
-        );
+        return version_skew_verdict(bin_name, running_version, record, &installed, &where_from);
     }
 
     match &record.source {
@@ -316,6 +338,125 @@ pub fn provenance_report(
             format!(
                 "`{bin_name}` {running_version} was installed from an unrecognised source \
                  (`{raw}`) — its upgrade path cannot be classified{where_from} (issue #4033)"
+            ),
+        ),
+    }
+}
+
+/// Which of the ledger record and the running binary is the newer one.
+///
+/// Why (#4964): the running binary and cargo's record sit at the SAME path, and
+/// cargo rewrites its ledger whenever it writes — so a version disagreement can
+/// only mean a non-cargo writer replaced the file. That is a defect in one
+/// direction and a sanctioned install in the other, and a single `Fail` cannot
+/// say which. Ordering the two versions is what separates them.
+/// What: three states, named for which side is stale.
+/// Test: `skew_is_ledger_stale_when_running_is_newer`,
+/// `skew_is_running_stale_when_ledger_is_newer`,
+/// `skew_is_unordered_for_unparseable_versions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VersionSkew {
+    /// The running binary is NEWER than cargo's record: a writer that keeps no
+    /// cargo metadata (the prebuilt installer, a package manager, a manual
+    /// copy) replaced the file, and the ledger has not caught up.
+    LedgerStale,
+    /// The running binary is OLDER than cargo's record: something overwrote a
+    /// newer install with an older binary.
+    RunningStale,
+    /// At least one of the two versions is not parseable semver, so they cannot
+    /// be ordered at all.
+    Unordered,
+}
+
+/// Order a ledger version against the running binary's version.
+///
+/// Why: kept separate from [`version_skew_verdict`] so the ordering rule is
+/// unit-testable without constructing a whole ledger record, and so the
+/// unparseable case is a deliberate third outcome rather than a silent `false`.
+/// What: parses both with the canonical `semver` parser; any parse failure
+/// yields [`VersionSkew::Unordered`]. Equal versions never reach here — the
+/// caller only calls it on a disagreement — but an `Equal` comparison maps to
+/// `Unordered` so no branch is left implicit.
+/// Test: `skew_is_ledger_stale_when_running_is_newer`,
+/// `skew_is_running_stale_when_ledger_is_newer`,
+/// `skew_is_unordered_for_unparseable_versions`.
+pub(crate) fn classify_version_skew(ledger_version: &str, running_version: &str) -> VersionSkew {
+    let (Ok(ledger), Ok(running)) = (
+        semver::Version::parse(ledger_version),
+        semver::Version::parse(running_version),
+    ) else {
+        return VersionSkew::Unordered;
+    };
+    match running.cmp(&ledger) {
+        Ordering::Greater => VersionSkew::LedgerStale,
+        Ordering::Less => VersionSkew::RunningStale,
+        Ordering::Equal => VersionSkew::Unordered,
+    }
+}
+
+/// The verdict for a running binary whose version disagrees with cargo's record
+/// at the same path.
+///
+/// Why (#4964): before consolidation this was one `Fail`, because the only way
+/// to reach it was a non-cargo writer clobbering the cargo bin directory. After
+/// #4964 Phase 3 the prebuilt downloader writes there BY DESIGN, and reporting
+/// its clean, successful, cargo-free upgrade as `Fail` would manufacture a
+/// health failure out of the fix. Widening the whole branch to `Warn` was
+/// rejected: it would also downgrade the real defect (an older binary sitting on
+/// top of a newer install), which is the #4033 incident itself.
+/// What: `Unknown` for [`VersionSkew::LedgerStale`] — the same verdict the same
+/// file gets today when it sits in `~/.local/bin`, so #4964's destination flip
+/// leaves the operator's `tm doctor` output unchanged; `Fail` for
+/// [`VersionSkew::RunningStale`] and [`VersionSkew::Unordered`].
+/// Test: `unknown_when_downloader_replaced_the_cargo_install`,
+/// `fails_on_version_disagreement`, `fails_when_versions_cannot_be_ordered`,
+/// `downloader_placed_binary_is_unknown_in_either_directory`.
+fn version_skew_verdict(
+    bin_name: &str,
+    running_version: &str,
+    record: &CargoInstall,
+    installed: &Path,
+    where_from: &str,
+) -> (CheckStatus, String) {
+    let recorded = format!(
+        "{} {} from {}",
+        record.package,
+        record.version,
+        describe(&record.source)
+    );
+    match classify_version_skew(&record.version, running_version) {
+        VersionSkew::LedgerStale => (
+            CheckStatus::Unknown,
+            format!(
+                "the running `{bin_name}` is version {running_version}, NEWER than the {recorded} \
+                 cargo's ledger records for that same file `{}`. Cargo rewrites its ledger \
+                 whenever it writes, so this binary was placed by a writer that keeps no cargo \
+                 metadata — the prebuilt installer (`tctl install` / `tctl upgrade`), a package \
+                 manager, or a manual copy. The binary is NOT stale; what cannot be verified \
+                 from here is where it came from, and `cargo install --list` will keep reporting \
+                 {}{where_from} (issues #4033, #4964, ADR-0021)",
+                installed.display(),
+                record.version,
+            ),
+        ),
+        VersionSkew::RunningStale => (
+            CheckStatus::Fail,
+            format!(
+                "the running `{bin_name}` is version {running_version}, OLDER than the {recorded} \
+                 cargo's ledger records for that same file `{}` — an older binary is sitting on \
+                 top of a newer install, so an upgrade the ledger says landed is not what is \
+                 executing{where_from} (issue #4033)",
+                installed.display(),
+            ),
+        ),
+        VersionSkew::Unordered => (
+            CheckStatus::Fail,
+            format!(
+                "the running `{bin_name}` reports version {running_version}, but cargo's ledger \
+                 records {recorded} for that same file `{}`, and the two cannot be ordered as \
+                 semantic versions — the binary on disk is not the one cargo tracks and which of \
+                 them is newer cannot be determined{where_from} (issue #4033)",
+                installed.display(),
             ),
         ),
     }

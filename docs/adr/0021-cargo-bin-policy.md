@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-07-26
+- **Amended:** 2026-08-06 — see [Amendment 1](#amendment-1--2026-08-06-the-prebuilt-downloader-is-a-third-provenance-class-4964)
 - **Scope:** Workspace-wide (all trusty-* crates with binary artifacts)
 - **Reversibility Cost:** Low — the policy is a constraint on what goes into `~/.cargo/bin`, not a refactor of existing code; reverting it changes permissions but requires no migrations
 - **Decision Drivers:** Visibility of installed binaries, traceability of their source code state, inability to detect bit-rot and version skew after source worktrees are deleted, mechanical checkability via issue #4033 (tm doctor)
@@ -77,6 +78,91 @@ Three trusty-* crates ship binaries but have no published versions, or only yank
 See the related issues filed under this ADR for detailed publish checklists (publish only from merged main, `--dry-run` must pass, cross-crate ordering matters if dependencies are involved).
 
 **Adoption gate:** Once 1–3 above are resolved, issue #4033 (`tm doctor` gate) can be landed, and this ADR's status can move to Accepted.
+
+## Amendment 1 — 2026-08-06: the prebuilt downloader is a third provenance class (#4964)
+
+**Amended, not superseded.** The decision above is unchanged and unreversed: no
+trusty-* crate uses `cargo install --path`, and every *cargo* install into
+`$CARGO_HOME/bin` is a registry install. What this amendment adds is a class the
+original text never enumerated, because at the time it could not occur.
+
+### What changed underneath the ADR
+
+The original text reasons about `~/.cargo/bin` as a directory only cargo writes
+to, so every file in it has a ledger record and the only open question is which
+*kind* of record — registry, path, or git. Epic
+[#4964](https://github.com/bobmatnyc/trusty-tools/issues/4964) consolidates every
+install destination this repo controls onto `$CARGO_HOME/bin` (falling back to
+`~/.cargo/bin`), which makes the prebuilt downloader a legitimate writer into
+that directory. The downloader keeps no cargo metadata, so it produces files with
+**no ledger presence at all**, or with a ledger record that describes the version
+it just replaced.
+
+### The amended policy
+
+`$CARGO_HOME/bin` now holds files from exactly three sanctioned writers:
+
+| Class | Written by | Ledger presence | `tm doctor` `binary_provenance` |
+|---|---|---|---|
+| **Registry install** | `cargo install <crate>` | accurate record, `registry+` source | `Ok` when the versions agree |
+| **Prebuilt placement** | `tctl install` / `tctl upgrade` / `install.sh` — the downloader | absent, or stale (describes the replaced version) | `Unknown` |
+| **Path install** | `cargo install --path` | accurate record, `path+file://` source | `Warn` — **still a violation of this ADR** |
+
+The path-install row is unchanged by this amendment and remains prohibited.
+`Warn` is its CORRECT and terminal verdict; it is not a defect to be chased to
+`Ok`.
+
+The prebuilt-placement row is **permitted**. It is not a path install, it is not
+invisible to update detection (`tctl upgrade` and the daemons' own update check
+query crates.io directly, not cargo's ledger), and it is exactly what the
+toolchain-free install path is for.
+
+### Why `Unknown` rather than `Ok` or `Fail`
+
+`Ok` would be a false claim: the check reads cargo's ledger, and for a
+downloader-placed file the ledger either says nothing or says something stale.
+The module's founding rule (#4033) is that a probe which learned nothing reports
+`Unknown`.
+
+`Fail` would be a false alarm, and specifically a *new* one manufactured by this
+epic. Before #4964 Phase 3 a downloader-placed binary sat in `~/.local/bin`,
+failed `provenance_report`'s same-file check, and reported `Unknown`. After the
+flip the identical file sits in `$CARGO_HOME/bin`, the same-file check now
+succeeds, and the stale ledger version disagrees with the running one. Nothing
+about the binary changed — only its directory. The verdict must not change
+either.
+
+### The integrity check that survives
+
+Reporting every ledger/binary version disagreement as `Unknown` would have
+retired a real check, so the disagreement is split by direction:
+
+- **running binary NEWER than the ledger record** → `Unknown`. Cargo rewrites its
+  ledger whenever it writes, so a newer file at that path came from a writer that
+  keeps no cargo metadata. Sanctioned under this amendment.
+- **running binary OLDER than the ledger record** → `Fail`. An older binary is
+  sitting on top of a newer install: the upgrade the ledger says landed is not
+  what executes. This is the #4033 incident verbatim and keeps its severity.
+- **the two versions cannot be ordered as semver** → `Fail`. An unverifiable
+  mismatch is still a mismatch.
+
+Implementation and per-branch tests: `crates/trusty-mpm/src/core/binary_provenance.rs`
+(`version_skew_verdict`, `classify_version_skew`).
+
+### What this amendment does NOT settle
+
+- **The `tm doctor` gate in the Decision section is still the path-install gate.**
+  It checks `cargo install --list` for path-install entries. This amendment adds
+  no new mechanical gate; the prebuilt class is *observed* by
+  `binary_provenance`, not enforced.
+- **The Blocking Prerequisites are unchanged**, so the status stays **Proposed**.
+  Three crates (`trusty-agents`, `trusty-channels`, `trusty-gworkspace`) are
+  still unpublished or yanked.
+- **Homebrew remains out of scope.** Per the repo owner's ruling on #4964
+  (2026-08-06), `$(brew --prefix)/bin` is a fourth destination this repo cannot
+  redirect, and PATH collisions with it are accepted residual risk. Any statement
+  that `$CARGO_HOME/bin` is the single install location means *excluding
+  Homebrew-installed copies*.
 
 ## Related Decisions
 
