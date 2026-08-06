@@ -215,7 +215,9 @@ impl ReinstallReport {
 /// standalone tier — #4409 keeps framework-owned agents out of every other
 /// directory, including the operator's `~/.claude/agents` and any project. A
 /// destination whose skills directory duplicates an earlier one is dropped.
-/// Pure path arithmetic — nothing is read or created.
+/// Path arithmetic plus ONE filesystem probe — the `is_dir` test that decides
+/// whether the project tier is in scope (see the PROJECT TIER note above).
+/// Nothing is created, and nothing but that probe is read.
 /// Test: `targets_cover_the_standalone_tier`, `targets_deduplicate`,
 /// `targets_attach_agents_to_two_destinations_only`,
 /// `targets_omit_the_project_tier_until_it_exists`.
@@ -499,7 +501,7 @@ fn deploy_skills_into(
                 preserved: deploy.stats.skipped.len(),
                 unchanged: deploy.stats.unchanged.len(),
                 failed: 0,
-                shadowed: deploy.shadowed.len(),
+                shadowed: distinct_shadowed(&deploy.shadowed).len(),
             };
             tier.notes.extend(preserved_note(
                 "skill",
@@ -515,6 +517,27 @@ fn deploy_skills_into(
                 .push(format!("skill deploy failed at {}: {err}", dest.display()));
         }
     }
+}
+
+/// Collapse a tier plan's shadow records to one entry per skill.
+///
+/// Why: `plan_skill_tiers` emits one [`Shadow`] per LOSING tier, so a stem the
+/// project, user, AND bundled tiers all carry produces TWO records — project
+/// shadows user, project shadows bundled. Counting records instead of skills
+/// reports one skill as two, which is the same wrong-output defect as the
+/// silent zero this reporting exists to fix, pointed the other way.
+/// What: a stem → winning-tier map. Every record for a given stem carries the
+/// same winner (the planner picks the nearest higher tier, once per stem), so
+/// collapsing loses nothing; only the loser tier differs, and the operator does
+/// not need it. Pure.
+/// Test: `shadowed_note_counts_one_skill_once`.
+fn distinct_shadowed(
+    shadowed: &[trusty_agents_common::skills::tiers::Shadow],
+) -> std::collections::BTreeMap<String, trusty_agents_common::skills::tiers::SkillTier> {
+    shadowed
+        .iter()
+        .map(|s| (s.stem.clone(), s.winner))
+        .collect()
 }
 
 /// One bounded line naming the skills a higher tier shadowed here, or nothing.
@@ -546,17 +569,18 @@ fn shadowed_note(
 ) -> Option<String> {
     use trusty_agents_common::skills::tiers::SkillTier;
 
-    if shadowed.is_empty() {
+    let distinct = distinct_shadowed(shadowed);
+    if distinct.is_empty() {
         return None;
     }
-    let names: Vec<String> = shadowed
+    let names: Vec<String> = distinct
         .iter()
-        .map(|s| format!("{} (kept by {})", s.stem, s.winner.label()))
+        .map(|(stem, winner)| format!("{stem} (kept by {})", winner.label()))
         .collect();
-    let actionable: Vec<String> = shadowed
+    let actionable: Vec<String> = distinct
         .iter()
-        .filter(|s| s.winner == SkillTier::Project && bundled_stems.contains(&s.stem))
-        .map(|s| s.stem.clone())
+        .filter(|(stem, winner)| **winner == SkillTier::Project && bundled_stems.contains(*stem))
+        .map(|(stem, _)| stem.clone())
         .collect();
     let pointer = if actionable.is_empty() {
         String::new()
@@ -571,7 +595,7 @@ fn shadowed_note(
     };
     Some(format!(
         "{} skill(s) were NOT deployed here — a higher-precedence tier owns the name: {}.{pointer}",
-        shadowed.len(),
+        distinct.len(),
         crate::core::agent_source::preview(&names, 5)
     ))
 }

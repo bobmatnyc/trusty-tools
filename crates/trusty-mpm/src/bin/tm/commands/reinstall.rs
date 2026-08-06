@@ -9,7 +9,7 @@
 //! what it did. The binary is secondary and opt-in: `--binary` never fires by
 //! default, because replacing the executable is a different, riskier operation
 //! than refreshing text files.
-//! What: [`reinstall`] resolves the real framework and standalone layouts,
+//! What: [`run`] resolves the real framework and standalone layouts,
 //! runs [`trusty_mpm::core::reinstall::reinstall_assets`], prints a
 //! per-destination table, and — only with `--binary` — routes through
 //! [`trusty_mpm::core::binary_reinstall::reinstall_route`]. This file is CLI

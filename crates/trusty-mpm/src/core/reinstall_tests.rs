@@ -711,3 +711,36 @@ fn reinstall_does_not_fail_the_command_for_an_optional_destination() {
             .is_file()
     );
 }
+
+#[test]
+fn shadowed_note_counts_one_skill_once() {
+    // `plan_skill_tiers` emits one record per LOSING tier, so a stem all three
+    // tiers carry yields TWO records for ONE skill. Counting records would say
+    // "2 skill(s)" and "2 of them" for a single name — the same wrong-output
+    // defect as the silent zero this reporting exists to fix, inverted.
+    use trusty_agents_common::skills::tiers::{Shadow, SkillTier};
+
+    let bundled: BTreeSet<String> = ["demo-skill".to_string()].into_iter().collect();
+    let both_losers = [
+        Shadow {
+            stem: "demo-skill".to_string(),
+            winner: SkillTier::Project,
+            loser: SkillTier::User,
+        },
+        Shadow {
+            stem: "demo-skill".to_string(),
+            winner: SkillTier::Project,
+            loser: SkillTier::Bundled,
+        },
+    ];
+
+    assert_eq!(distinct_shadowed(&both_losers).len(), 1);
+    let note = shadowed_note(&both_losers, &bundled).unwrap();
+    assert!(note.contains("1 skill(s) were NOT deployed"), "{note}");
+    assert!(note.contains("1 of them carry a BUNDLED"), "{note}");
+    assert_eq!(
+        note.matches("demo-skill").count(),
+        2,
+        "once in the name list, once in the actionable list — never twice in either: {note}"
+    );
+}
