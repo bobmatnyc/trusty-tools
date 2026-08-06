@@ -417,8 +417,11 @@ pub struct SessionRecord {
     /// decommissioned today, is a one-day-old tombstone, and a retention clock
     /// keyed off `created_at` would delete it immediately.
     ///
-    /// Written at exactly one place — [`Self::enter_terminal_state`] — so a
-    /// future terminal transition cannot silently skip stamping it.
+    /// Written at exactly one place — [`Self::set_lifecycle_state`] — which
+    /// every transition INTO or OUT OF a terminal state goes through. A
+    /// transition between two live states may still assign `state` directly:
+    /// a live record's `terminal_at` is already `None`, which is precisely what
+    /// that setter's clearing branch guarantees.
     ///
     /// `#[serde(default)]` (→ `None`) keeps every pre-retention record
     /// deserializable. `None` on a terminal record means UNKNOWN, not "old":
@@ -434,21 +437,25 @@ pub struct SessionRecord {
 }
 
 impl SessionRecord {
-    /// Move this record into a terminal state and stamp when that happened.
+    /// Set this record's lifecycle state, keeping [`Self::terminal_at`]
+    /// consistent with it.
     ///
-    /// Why: the single mutation point for [`Self::terminal_at`]. Three call
-    /// sites transition a record into a tombstone (`decommission`'s full
-    /// teardown and its record-only variant, and `delete`'s soft-delete); each
-    /// setting `state` by hand left the retention clock one forgotten
-    /// assignment away from never starting.
+    /// Why: the single mutation point for `terminal_at`. Four call sites cross
+    /// the terminal boundary — `decommission`'s full teardown and its
+    /// record-only variant, `delete`'s soft-delete, and `mark_reactivated`'s
+    /// `Decommissioned -> Active` revival. Each assigning `state` by hand left
+    /// the retention clock one forgotten assignment away from never starting in
+    /// one direction, and from surviving a revival in the other.
     /// What: sets `state` and, when `state` is terminal, sets `terminal_at` to
     /// `now`. Re-entering a terminal state the record already holds does NOT
     /// refresh the stamp — a repeated decommission must not extend the
     /// retention window. A non-terminal `state` clears the stamp, so a record
     /// resurrected out of a tombstone does not carry a stale death time.
-    /// Test: `enter_terminal_state_stamps_once`,
-    /// `enter_terminal_state_clears_stamp_on_revival` in `record_tests.rs`.
-    pub fn enter_terminal_state(&mut self, state: ManagedSessionState, now: DateTime<Utc>) {
+    /// Test: `set_lifecycle_state_stamps_once`,
+    /// `set_lifecycle_state_clears_stamp_on_revival` in `record_tests.rs`;
+    /// the live revival path by `mark_reactivated_clears_the_terminal_stamp`
+    /// in `reactivate_tests.rs`.
+    pub fn set_lifecycle_state(&mut self, state: ManagedSessionState, now: DateTime<Utc>) {
         let was_terminal = self.state.is_terminal();
         self.state = state;
         if !self.state.is_terminal() {

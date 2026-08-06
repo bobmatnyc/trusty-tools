@@ -20,7 +20,8 @@
 //! `sessions.json` and nothing else. It never removes a worktree, a workspace
 //! directory, a git branch, or any other file — see [`retention_verdict`]'s
 //! `workspace_on_disk` parameter for the guard that keeps a record-only
-//! eviction from becoming a filesystem deletion by proxy.
+//! eviction from becoming a filesystem deletion by proxy, and
+//! [`workspace_present`] for why an undetermined path counts as present.
 //!
 //! Test: `retention_tests.rs`.
 
@@ -95,8 +96,8 @@ pub enum RetentionVerdict {
 /// What: `Keep` unless the record is terminal AND its workspace is not on
 /// disk; then `Stamp` when undated, `Evict` when `now - terminal_at >=
 /// retention`, `Keep` otherwise. `workspace_on_disk` is supplied by the caller
-/// (`record.workspace_path.as_deref().is_some_and(Path::exists)`) so this
-/// function stays pure and does no I/O.
+/// (via [`workspace_present`], which resolves an undetermined path to `true`)
+/// so this function stays pure and does no I/O.
 /// Test: `retention_verdict_keeps_live_states`,
 /// `retention_verdict_keeps_record_whose_workspace_still_exists`,
 /// `retention_verdict_stamps_undated_terminal_record`,
@@ -139,6 +140,66 @@ impl RetentionOutcome {
     }
 }
 
+/// Is this record's workspace directory still on disk?
+///
+/// Why: `Path::exists()` maps EVERY stat error to `false` — a permission error
+/// on an ancestor, a stale NFS/SMB handle, `EIO` from a departed volume — so
+/// "cannot determine" and "not there" produce the same answer, and that answer
+/// evicts. The guard this feeds is the one keeping a record's `workspace_path`
+/// in `prune_orphaned_worktrees`'s protected set, so failing open here means a
+/// transient stat error can hand a live worktree to an unattended sweep.
+/// What: `probe` is `Path::try_exists` in production. An `Err` — undetermined —
+/// counts as PRESENT, so an unreadable path is never evicted. A `None` path is
+/// absent: there is nothing to protect and nothing to fail on.
+/// Test: `workspace_present_treats_an_undetermined_path_as_present`.
+fn workspace_present(
+    path: Option<&std::path::Path>,
+    probe: impl Fn(&std::path::Path) -> std::io::Result<bool>,
+) -> bool {
+    path.is_some_and(|p| probe(p).unwrap_or(true))
+}
+
+/// Two-observation gate before a record may be evicted.
+///
+/// Why: the sibling destructive sweeps in the same orphan-GC tick
+/// (`orphan_gc::OrphanGc`, `core::pid_registry::PidOrphanGc`) each require a
+/// candidate to survive TWO consecutive observations before acting, and
+/// retention deletes something no less permanent. The condition it reads is not
+/// purely a persisted timestamp: "the workspace directory is gone" is a live
+/// filesystem observation, and an external volume that unmounts between ticks
+/// answers `Ok(false)` — genuinely absent, indistinguishable from deleted —
+/// which [`workspace_present`]'s error handling cannot catch. Requiring the
+/// same verdict on two ticks ~60s apart costs nothing against a 7-day window
+/// and rules that case out.
+/// What: [`Self::confirm`] returns the candidates that were ALSO candidates on
+/// the previous call, then re-arms with the current set — so a record that
+/// stops being a candidate (reactivated, workspace remounted) disarms itself.
+/// Owned by the caller across ticks, exactly like its two siblings.
+/// Test: `debounce_requires_two_consecutive_observations`,
+/// `debounce_disarms_a_candidate_that_lapses`.
+#[derive(Debug, Default)]
+pub struct RetentionDebounce {
+    armed: std::collections::HashSet<ManagedSessionId>,
+}
+
+impl RetentionDebounce {
+    /// A gate with nothing armed — nothing can be evicted on the first tick.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the candidates seen on the previous call too, and re-arm.
+    pub fn confirm(&mut self, candidates: &[ManagedSessionId]) -> Vec<ManagedSessionId> {
+        let confirmed: Vec<ManagedSessionId> = candidates
+            .iter()
+            .filter(|id| self.armed.contains(id))
+            .copied()
+            .collect();
+        self.armed = candidates.iter().copied().collect();
+        confirmed
+    }
+}
+
 impl SessionManager {
     /// Evict terminal records past the retention window and free their slots.
     ///
@@ -146,45 +207,58 @@ impl SessionManager {
     /// hard-deletes a record without an operator asking for that specific
     /// record by id, so its scope is deliberately narrow: `sessions.json`, and
     /// the in-memory slot registry. Nothing on disk outside the store file is
-    /// read for deletion, opened for writing, or removed — the one filesystem
-    /// call it makes is an existence check that can only ever make it evict
-    /// FEWER records.
-    /// What: snapshots the store, runs [`retention_verdict`] over every record,
-    /// writes the stamped records back in one batch, removes the evicted ones
-    /// in one batch, then releases each evicted id's slot so the number is
-    /// reusable. A record stamped by this sweep is never evicted by the same
-    /// sweep, so every record gets the full window. `now` and `retention` are
-    /// parameters rather than read from the clock so tests are deterministic.
+    /// read for deletion, opened for writing, or removed. Its only filesystem
+    /// call is [`workspace_present`]'s `try_exists`, whose two non-`Ok(false)`
+    /// answers — present, or undetermined — both mean KEEP, so it can only ever
+    /// make the sweep evict fewer records.
+    /// What: three phases, mirroring `prune_orphaned_worktrees`'s #1845 item-9
+    /// shape.
+    ///
+    /// 1. Snapshot the store and run [`retention_verdict`] over every record.
+    ///    Undated terminal records are stamped and written back in one batch; a
+    ///    record stamped by this sweep is never evicted by it, so every record
+    ///    gets the full window.
+    /// 2. Put the eviction candidates through `debounce`, which only passes
+    ///    those that were candidates on the previous sweep as well.
+    /// 3. RE-READ each surviving candidate from the store and re-run the
+    ///    verdict against its current state and a fresh existence probe,
+    ///    immediately before deleting. Phase 1's snapshot is stale by then: this
+    ///    sweep's own `upsert_many` has landed, and another process may have
+    ///    reactivated a record (`mark_reactivated`) or removed it. Only records
+    ///    that still say `Evict` are removed, and only then are their slots
+    ///    released.
+    ///
+    /// `now`, `retention` and `debounce` are parameters rather than read from
+    /// the clock and a global so tests are deterministic.
     /// Test: `sweep_evicts_only_records_past_the_window`,
     /// `sweep_releases_the_evicted_slot`,
     /// `sweep_never_touches_the_filesystem`,
-    /// `sweep_stamps_legacy_records_instead_of_evicting_them` in
+    /// `sweep_stamps_legacy_records_instead_of_evicting_them`,
+    /// `sweep_revalidates_before_deleting_a_reactivated_record` in
     /// `super::retention_tests`.
     pub async fn sweep_terminal_records(
         &self,
         now: DateTime<Utc>,
         retention: Duration,
+        debounce: &mut RetentionDebounce,
     ) -> Result<RetentionOutcome, ManagedError> {
-        // Reload under a brief write lock, then snapshot via the I/O-free
-        // `cached_all()` under a read lock — the `reap_aged_ephemeral` pattern.
+        // Phase 1 — snapshot. Reload under a brief write lock, then snapshot via
+        // the I/O-free `cached_all()` under a read lock (`reap_aged_ephemeral`'s
+        // pattern).
         self.store.write().await.reload_if_changed().await?;
         let all = self.store.read().await.cached_all();
 
         let mut stamped: Vec<SessionRecord> = Vec::new();
-        let mut evicted: Vec<ManagedSessionId> = Vec::new();
+        let mut candidates: Vec<ManagedSessionId> = Vec::new();
         for record in all {
-            let on_disk = record
-                .workspace_path
-                .as_deref()
-                .is_some_and(std::path::Path::exists);
-            match retention_verdict(&record, on_disk, now, retention) {
+            match self.verdict_for(&record, now, retention) {
                 RetentionVerdict::Keep => {}
                 RetentionVerdict::Stamp => {
                     let mut dated = record;
                     dated.terminal_at = Some(now);
                     stamped.push(dated);
                 }
-                RetentionVerdict::Evict => evicted.push(record.id),
+                RetentionVerdict::Evict => candidates.push(record.id),
             }
         }
 
@@ -199,17 +273,32 @@ impl SessionManager {
             );
         }
 
-        let removed = self.store.write().await.remove_many(&evicted).await?;
-        if removed != evicted.len() {
-            // The ids came from a snapshot; a concurrent prune may have removed
-            // one first. Harmless, but say so rather than reporting a count the
-            // store did not perform.
-            warn!(
-                asked = evicted.len(),
-                removed, "retention: some records were already gone from the store"
-            );
+        // Phase 2 — a candidate must have been one on the previous sweep too.
+        let confirmed = debounce.confirm(&candidates);
+
+        // Phase 3 — re-validate against the CURRENT store immediately before
+        // deleting. `get` reloads from disk, so this sees another process's
+        // write; a record that has since been reactivated or resurrected now
+        // says `Keep` and survives.
+        let mut evicted: Vec<ManagedSessionId> = Vec::new();
+        for id in confirmed {
+            match self.get(&id).await {
+                Ok(fresh)
+                    if self.verdict_for(&fresh, now, retention) == RetentionVerdict::Evict =>
+                {
+                    evicted.push(id);
+                }
+                Ok(_) => warn!(
+                    id = %id,
+                    "retention: candidate changed between snapshot and delete; leaving it in place"
+                ),
+                // Already gone (a concurrent prune won the race) — nothing to do.
+                Err(_) => {}
+            }
         }
+
         if !evicted.is_empty() {
+            self.store.write().await.remove_many(&evicted).await?;
             let mut reg = self.slots.write().await;
             for id in &evicted {
                 reg.release(id);
@@ -225,6 +314,35 @@ impl SessionManager {
             stamped: n,
             evicted,
         })
+    }
+
+    /// [`Self::sweep_terminal_records`] against the wall clock and the shipped
+    /// [`TERMINAL_RECORD_RETENTION_DAYS`] window.
+    ///
+    /// Why: the daemon's GC tick wants neither of those two parameters — they
+    /// exist so tests can drive the sweep deterministically. Keeping the
+    /// defaults here rather than at the call site also keeps `daemon/mod.rs`
+    /// under the 500-SLOC cap.
+    /// What: `sweep_terminal_records(Utc::now(), Duration::days(WINDOW), debounce)`.
+    /// Test: covered through `sweep_terminal_records`'s own tests.
+    pub async fn sweep_default_retention(
+        &self,
+        debounce: &mut RetentionDebounce,
+    ) -> Result<RetentionOutcome, ManagedError> {
+        let window = Duration::days(TERMINAL_RECORD_RETENTION_DAYS);
+        self.sweep_terminal_records(Utc::now(), window, debounce)
+            .await
+    }
+
+    /// [`retention_verdict`] with the production existence probe applied.
+    fn verdict_for(
+        &self,
+        record: &SessionRecord,
+        now: DateTime<Utc>,
+        retention: Duration,
+    ) -> RetentionVerdict {
+        let on_disk = workspace_present(record.workspace_path.as_deref(), |p| p.try_exists());
+        retention_verdict(record, on_disk, now, retention)
     }
 }
 

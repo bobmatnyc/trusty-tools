@@ -565,7 +565,7 @@ fn from_wire_round_trips_every_variant() {
     assert_eq!(ManagedSessionState::from_wire(""), None);
 }
 
-/// Build a minimal Active record for the `enter_terminal_state` cases.
+/// Build a minimal Active record for the `set_lifecycle_state` cases.
 fn terminal_fixture() -> SessionRecord {
     SessionRecord {
         id: ManagedSessionId::new(),
@@ -603,15 +603,15 @@ fn terminal_fixture() -> SessionRecord {
 /// and asserts the original stamp survives.
 /// Test: this test.
 #[test]
-fn enter_terminal_state_stamps_once() {
+fn set_lifecycle_state_stamps_once() {
     let mut r = terminal_fixture();
     let first = Utc::now();
-    r.enter_terminal_state(ManagedSessionState::Decommissioned, first);
+    r.set_lifecycle_state(ManagedSessionState::Decommissioned, first);
     assert_eq!(r.state, ManagedSessionState::Decommissioned);
     assert_eq!(r.terminal_at, Some(first));
 
     let later = first + chrono::Duration::days(3);
-    r.enter_terminal_state(ManagedSessionState::Decommissioned, later);
+    r.set_lifecycle_state(ManagedSessionState::Decommissioned, later);
     assert_eq!(
         r.terminal_at,
         Some(first),
@@ -625,17 +625,17 @@ fn enter_terminal_state_stamps_once() {
 /// fresh terminal transition stamps again.
 /// Test: this test.
 #[test]
-fn enter_terminal_state_clears_stamp_on_revival() {
+fn set_lifecycle_state_clears_stamp_on_revival() {
     let mut r = terminal_fixture();
     let died = Utc::now();
-    r.enter_terminal_state(ManagedSessionState::Decommissioned, died);
-    r.enter_terminal_state(
+    r.set_lifecycle_state(ManagedSessionState::Decommissioned, died);
+    r.set_lifecycle_state(
         ManagedSessionState::Stopped,
         died + chrono::Duration::hours(1),
     );
     assert_eq!(r.terminal_at, None, "a revived record has no death time");
 
     let again = died + chrono::Duration::days(2);
-    r.enter_terminal_state(ManagedSessionState::Deleted, again);
+    r.set_lifecycle_state(ManagedSessionState::Deleted, again);
     assert_eq!(r.terminal_at, Some(again), "a fresh death restamps");
 }

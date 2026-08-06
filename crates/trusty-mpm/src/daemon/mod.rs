@@ -582,6 +582,10 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
     // reconstructed per-tick) so its two-pass candidate history persists across
     // sweeps, exactly like `gc` above.
     let mut pid_gc = crate::core::pid_registry::PidOrphanGc::new();
+    // Same two-observation discipline as `gc` and `pid_gc`, and owned here for
+    // the same reason: a record must be evictable on two consecutive sweeps
+    // before retention deletes it.
+    let mut retention_gc = crate::session_manager::RetentionDebounce::new();
     let probe = orphan_gc::ProcessTreeProbe;
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
     loop {
@@ -591,21 +595,19 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 break;
             }
             _ = tick.tick() => {
-                // Record retention runs FIRST, before the tmux probe below can
-                // `continue` past it. It needs no tmux and no live pane data —
-                // gating a store-only sweep on tmux being discoverable would
-                // silently disable it on any machine without tmux. Its window is
-                // 7 days, so a sweep skipped for a tick costs nothing; a sweep
-                // that never runs costs the whole feature.
+                // Record retention runs FIRST, ahead of the tmux probe below,
+                // which `continue`s the whole tick when tmux is not
+                // discoverable. A store-only sweep needs neither tmux nor live
+                // pane data, so running it after that probe would tie it to an
+                // unrelated dependency. This does NOT make it unconditional:
+                // `TRUSTY_MPM_ORPHAN_GC=0` disables this entire loop, retention
+                // included.
                 {
                     let mgr = state.session_manager().await;
-                    let retention = chrono::Duration::days(
-                        crate::session_manager::TERMINAL_RECORD_RETENTION_DAYS,
-                    );
-                    match mgr.sweep_terminal_records(chrono::Utc::now(), retention).await {
-                        Ok(outcome) if !outcome.is_empty() => info!(
-                            stamped = outcome.stamped,
-                            evicted = outcome.evicted.len(),
+                    match mgr.sweep_default_retention(&mut retention_gc).await {
+                        Ok(o) if !o.is_empty() => info!(
+                            stamped = o.stamped,
+                            evicted = o.evicted.len(),
                             "record retention sweep"
                         ),
                         Ok(_) => {}

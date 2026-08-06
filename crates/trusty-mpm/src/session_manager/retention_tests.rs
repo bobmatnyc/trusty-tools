@@ -20,7 +20,10 @@ use tempfile::TempDir;
 
 use super::super::record::{ManagedSessionState, SessionRecord};
 use super::super::tests::make_manager;
-use super::{RetentionVerdict, TERMINAL_RECORD_RETENTION_DAYS, retention_verdict};
+use super::{
+    RetentionDebounce, RetentionVerdict, TERMINAL_RECORD_RETENTION_DAYS, retention_verdict,
+    workspace_present,
+};
 
 /// The window the daemon actually applies. Pinned so a silent change to the
 /// constant fails a test rather than quietly shortening retention.
@@ -194,6 +197,24 @@ async fn seed_terminal(
     rec.id
 }
 
+/// Run the sweep to the point where it can actually delete.
+///
+/// The debounce requires a candidate on TWO consecutive sweeps, so a test
+/// asserting an eviction must tick twice with the same gate. Returns the second
+/// sweep's outcome — the one that does the deleting.
+async fn sweep_twice(
+    mgr: &super::super::manager::SessionManager,
+    now: chrono::DateTime<Utc>,
+) -> super::RetentionOutcome {
+    let mut gate = RetentionDebounce::new();
+    mgr.sweep_terminal_records(now, window(), &mut gate)
+        .await
+        .expect("first sweep");
+    mgr.sweep_terminal_records(now, window(), &mut gate)
+        .await
+        .expect("second sweep")
+}
+
 /// Why: the core promise — a record inside the window survives, one outside it
 /// does not, and a live session is untouched by either.
 #[tokio::test]
@@ -209,10 +230,7 @@ async fn sweep_evicts_only_records_past_the_window() {
         .await
         .expect("create live");
 
-    let outcome = mgr
-        .sweep_terminal_records(Utc::now(), window())
-        .await
-        .expect("sweep");
+    let outcome = sweep_twice(&mgr, Utc::now()).await;
 
     assert_eq!(outcome.evicted.len(), 2, "{outcome:?}");
     assert!(outcome.evicted.contains(&stale));
@@ -246,9 +264,7 @@ async fn sweep_preserves_the_in_window_tombstone_slot() {
     // An explicit compaction (the `tm sessions prune` path) removes the record
     // while the slot stays reserved — the tombstone #3034 specifies.
     mgr.compact_record(&fresh).await.expect("compact");
-    mgr.sweep_terminal_records(Utc::now(), window())
-        .await
-        .expect("sweep");
+    sweep_twice(&mgr, Utc::now()).await;
 
     let after = mgr.numbered_snapshot(&mgr.list().await).await;
     let row = after
@@ -286,9 +302,7 @@ async fn sweep_releases_the_evicted_slot() {
         .expect("keeper observed")
         .slot;
 
-    mgr.sweep_terminal_records(Utc::now(), window())
-        .await
-        .expect("sweep");
+    sweep_twice(&mgr, Utc::now()).await;
 
     let after = mgr.numbered_snapshot(&mgr.list().await).await;
     assert!(
@@ -347,10 +361,7 @@ async fn sweep_never_touches_the_filesystem() {
     rec.workspace_path = Some(workspace.path().to_path_buf());
     mgr.store.write().await.upsert(rec).await.expect("re-seed");
 
-    let outcome = mgr
-        .sweep_terminal_records(Utc::now(), window())
-        .await
-        .expect("sweep");
+    let outcome = sweep_twice(&mgr, Utc::now()).await;
 
     assert!(
         outcome.evicted.is_empty(),
@@ -386,8 +397,9 @@ async fn sweep_stamps_legacy_records_instead_of_evicting_them() {
     legacy.workspace_path = None;
     mgr.store.write().await.upsert(legacy).await.expect("seed");
 
+    let mut gate = RetentionDebounce::new();
     let first = mgr
-        .sweep_terminal_records(Utc::now(), window())
+        .sweep_terminal_records(Utc::now(), window(), &mut gate)
         .await
         .expect("first sweep");
     assert_eq!(first.stamped, 1, "{first:?}");
@@ -399,7 +411,7 @@ async fn sweep_stamps_legacy_records_instead_of_evicting_them() {
     assert!(stamped.terminal_at.is_some(), "stamp persisted");
 
     let second = mgr
-        .sweep_terminal_records(Utc::now(), window())
+        .sweep_terminal_records(Utc::now(), window(), &mut gate)
         .await
         .expect("second sweep");
     assert!(
@@ -408,10 +420,147 @@ async fn sweep_stamps_legacy_records_instead_of_evicting_them() {
     );
     assert!(mgr.get(&rec.id).await.is_ok());
 
-    // Only once the stamped window has elapsed does it go.
-    let later = mgr
-        .sweep_terminal_records(Utc::now() + window(), window())
-        .await
-        .expect("later sweep");
+    // Only once the stamped window has elapsed does it go — and only on the
+    // SECOND sweep past that point, per the debounce.
+    let later = sweep_twice(&mgr, Utc::now() + window()).await;
     assert_eq!(later.evicted, vec![rec.id]);
+}
+
+/// Why: `Path::exists()` collapses "cannot determine" into "not there", and
+/// "not there" is what evicts. A permission error on an ancestor, a stale NFS
+/// handle, or `EIO` from a departed volume would therefore drop the record —
+/// and with it the `workspace_path` that keeps `prune_orphaned_worktrees` from
+/// deleting the worktree. The probe is injected rather than provoked with real
+/// filesystem permissions so this is deterministic on every platform and under
+/// any uid, including root.
+/// What: asserts an `Err` probe reports PRESENT, so the verdict is `Keep`;
+/// `Ok(true)` is present, `Ok(false)` absent, and a `None` path is absent.
+/// Test: this test.
+#[test]
+fn workspace_present_treats_an_undetermined_path_as_present() {
+    let path = PathBuf::from("/definitely/unreadable");
+    assert!(
+        workspace_present(Some(&path), |_| Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "EACCES"
+        ))),
+        "an undetermined path must count as PRESENT so the record is kept"
+    );
+    assert!(workspace_present(Some(&path), |_| Ok(true)));
+    assert!(!workspace_present(Some(&path), |_| Ok(false)));
+    assert!(
+        !workspace_present(None, |_| Ok(true)),
+        "no path, nothing to protect"
+    );
+
+    // …and the verdict that consumes it keeps the record.
+    let mut r = terminal_record(ManagedSessionState::Decommissioned, 400);
+    r.workspace_path = Some(path.clone());
+    let undetermined = workspace_present(Some(&path), |_| Err(std::io::Error::other("EIO")));
+    assert_eq!(
+        retention_verdict(&r, undetermined, Utc::now(), window()),
+        RetentionVerdict::Keep,
+        "a stat error must never evict"
+    );
+}
+
+/// Why: the two sibling destructive sweeps in the same orphan-GC tick each
+/// require two consecutive observations, and retention deletes something no
+/// less permanent. A single observation would act on one filesystem reading —
+/// an unmounted volume answers `Ok(false)` truthfully and no error handling
+/// catches it.
+/// What: asserts the first sweep evicts nothing and the second one does.
+/// Test: this test.
+#[tokio::test]
+async fn debounce_requires_two_consecutive_observations() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let stale = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+
+    let mut gate = RetentionDebounce::new();
+    let first = mgr
+        .sweep_terminal_records(Utc::now(), window(), &mut gate)
+        .await
+        .expect("first sweep");
+    assert!(
+        first.evicted.is_empty(),
+        "one observation is never enough: {first:?}"
+    );
+    assert!(mgr.get(&stale).await.is_ok(), "record survives sweep one");
+
+    let second = mgr
+        .sweep_terminal_records(Utc::now(), window(), &mut gate)
+        .await
+        .expect("second sweep");
+    assert_eq!(second.evicted, vec![stale]);
+}
+
+/// Why: a candidate that stops being one — its volume remounts, or an operator
+/// reactivates it — must not stay armed and get deleted on a later tick.
+/// What: drives the gate directly: arm, lapse, re-arm, and assert only a
+/// genuinely consecutive pair confirms.
+/// Test: this test.
+#[test]
+fn debounce_disarms_a_candidate_that_lapses() {
+    let id = super::super::record::ManagedSessionId::new();
+    let other = super::super::record::ManagedSessionId::new();
+    let mut gate = RetentionDebounce::new();
+
+    assert!(
+        gate.confirm(&[id]).is_empty(),
+        "first observation never confirms"
+    );
+    // The candidate lapses for one tick…
+    assert!(gate.confirm(&[other]).is_empty());
+    // …so its next appearance is a FIRST observation again, not a second.
+    assert!(
+        gate.confirm(&[id]).is_empty(),
+        "a lapse must re-arm from zero"
+    );
+    assert_eq!(gate.confirm(&[id]), vec![id], "two in a row confirms");
+}
+
+/// Why: the phase-1 snapshot is stale by the time the delete runs — this
+/// sweep's own `upsert_many` has landed, and another process may have
+/// reactivated the record in between. `prune_orphaned_worktrees` re-reads the
+/// store immediately before deleting for exactly this reason (#1845 item 9).
+/// What: arms the gate on a stale terminal record, reactivates it through the
+/// real `mark_reactivated` path between the two sweeps, then asserts the second
+/// sweep re-reads, finds it live, and leaves it alone.
+/// Test: this test.
+#[tokio::test]
+async fn sweep_revalidates_before_deleting_a_reactivated_record() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let workspace = TempDir::new().expect("workspace");
+
+    let id = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
+    let mut gate = RetentionDebounce::new();
+    let first = mgr
+        .sweep_terminal_records(Utc::now(), window(), &mut gate)
+        .await
+        .expect("first sweep");
+    assert!(first.evicted.is_empty(), "armed, not yet evicted");
+
+    // A reactivation lands between the two sweeps. `mark_reactivated` needs a
+    // real directory to resume into.
+    let mut rec = mgr.get(&id).await.expect("get");
+    rec.workspace_path = Some(workspace.path().to_path_buf());
+    mgr.store.write().await.upsert(rec).await.expect("re-seed");
+    mgr.mark_reactivated(&id).await.expect("reactivate");
+
+    let second = mgr
+        .sweep_terminal_records(Utc::now(), window(), &mut gate)
+        .await
+        .expect("second sweep");
+    assert!(
+        second.evicted.is_empty(),
+        "a record reactivated after the snapshot must survive: {second:?}"
+    );
+    let live = mgr.get(&id).await.expect("record still present");
+    assert_eq!(live.state, ManagedSessionState::Active);
+    assert_eq!(
+        live.terminal_at, None,
+        "reactivation clears the retention stamp"
+    );
 }

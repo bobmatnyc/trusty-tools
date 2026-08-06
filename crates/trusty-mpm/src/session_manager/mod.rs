@@ -139,7 +139,8 @@ pub use manager::{ManagedError, ManagedTmuxDriver, ReconcileReport, SessionManag
 pub use prune::{MAX_EPHEMERAL_AGE_HOURS, PruneAction, PruneFilter, PruneOutcome, PrunedSession};
 pub use record::{ManagedSessionId, ManagedSessionState, RecordError, SessionRecord};
 pub use retention::{
-    RetentionOutcome, RetentionVerdict, TERMINAL_RECORD_RETENTION_DAYS, retention_verdict,
+    RetentionDebounce, RetentionOutcome, RetentionVerdict, TERMINAL_RECORD_RETENTION_DAYS,
+    retention_verdict,
 };
 pub use session_guard::TmuxSessionGuard;
 pub use slots::{NumberedSlot, SlotRegistry};

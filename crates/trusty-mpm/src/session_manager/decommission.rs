@@ -535,7 +535,7 @@ impl SessionManager {
         record.proposed_default = None;
         // Stamps `terminal_at` as well as `state` — the retention sweep's clock
         // starts here, not at `created_at`.
-        record.enter_terminal_state(ManagedSessionState::Decommissioned, Utc::now());
+        record.set_lifecycle_state(ManagedSessionState::Decommissioned, Utc::now());
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session record tombstoned (record-only)");
         Ok((record, false))
@@ -822,7 +822,7 @@ impl SessionManager {
         record.proposed_default = None;
         // Stamps `terminal_at` as well as `state` — the retention sweep's clock
         // starts here, not at `created_at`.
-        record.enter_terminal_state(ManagedSessionState::Decommissioned, Utc::now());
+        record.set_lifecycle_state(ManagedSessionState::Decommissioned, Utc::now());
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
         Ok((record, workspace_removed))
