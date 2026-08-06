@@ -24,7 +24,7 @@ exclude = []
 # — a second Tauri desktop GUI needing the pnpm/Svelte UI toolchain).
 #
 # Why: CI already runs the workspace-wide gates with
-# `--workspace --exclude trusty-mpm-gui --exclude trusty-code-gui`
+# `--workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui`
 # (`.github/workflows/ci.yml`) because these GUIs need the pnpm/Svelte UI
 # toolchain — a bare `cargo build`/`test`/`check` had no equivalent exclusion,
 # so every agent worktree (which routinely runs the bare form per this
@@ -36,7 +36,13 @@ exclude = []
 # and keep working exactly as before (`cargo build --workspace`,
 # `cargo test -p trusty-mpm-gui`, `cargo check -p trusty-code-gui`, etc.), so
 # this only changes what the bare, no-flag form does — it does not remove
-# either GUI crate from the workspace.
+# either GUI crate from the workspace. `trusty-agents-ui` needs the same
+# `--exclude` on `--workspace` invocations for a different reason: its
+# `tauri::generate_context!()` reads the same `crates/trusty-agents/ui/dist/`
+# that `trusty-agents`' own build.rs populates, so a `--workspace` run that
+# happens to check/build `trusty-agents-ui` before that build script has run
+# panics on the missing path — a real cargo build-order race, not merely a
+# missing-toolchain skip (#3053).
 #
 # Maintenance note: Cargo has no "members minus one" glob for
 # `default-members`, so this list must be updated by hand when a new crate
