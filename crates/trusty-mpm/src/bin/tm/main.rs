@@ -604,6 +604,7 @@ async fn main() -> anyhow::Result<()> {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::path_cmd(&paths, &alias)
         }
+        Some(Command::ShellInit { shell }) => commands::shell_init::run_shell_init(shell),
         Some(Command::Login { root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::login_cmd(&paths)
