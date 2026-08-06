@@ -117,25 +117,26 @@ fn declared_sets() -> Vec<&'static str> {
 }
 
 /// Why: A typo in a table row's set field (`"trusty-momery"`) silently creates
-/// a fourth "set" that no `tctl sign` target and no post-install hook can ever
+/// an extra "set" that no `tctl sign` target and no post-install hook can ever
 /// name, so the binary is never signed and nothing reports it. Pinning the
 /// declared sets against the exported constants catches that at compile-and-
 /// test time rather than on someone's machine months later.
 /// What: Asserts the distinct set names in `SIGNABLE_BINARIES` are exactly the
-/// four exported set constants, in table order.
+/// exported set constants, in table order.
 /// Test: This is the test.
 #[test]
 fn every_declared_set_is_a_named_constant() {
     assert_eq!(
         declared_sets(),
-        vec![SEARCH_SET, MPM_SET, AGENTS_SET, MEMORY_SET]
+        vec![SEARCH_SET, MPM_SET, AGENTS_SET, MEMORY_SET, ANALYZE_SET]
     );
 }
 
 /// Why: This table decides which binaries get a stable macOS designated
 /// requirement and which stay ad-hoc, losing their TCC grant on every
 /// `cargo install`. Every prior gap in it (#2721 `tm`, #2951 the GUI, #4277
-/// `tagent`, `trusty-memory` under the 2026-08-06 owner ruling) was a silent
+/// `tagent`, and `trusty-memory`/`trusty-analyze` under the 2026-08-06 owner
+/// ruling) was a silent
 /// omission, never a wrong value — so the guard that matters is one that fails
 /// when a row goes MISSING, which a per-binary spot check cannot do. Pinning
 /// the whole table is deliberate brittleness: changing it should require
@@ -169,6 +170,7 @@ fn signable_binaries_table_is_pinned() {
                 MEMORY_SET,
                 "com.trusty.trusty-memory-mcp-bridge"
             ),
+            ("trusty-analyze", ANALYZE_SET, "com.trusty.trusty-analyze"),
         ]
     );
 }
@@ -211,23 +213,49 @@ fn binaries_for_set_covers_memory() {
 /// `commands::sign::run` is ever called. A set added to `SIGNABLE_BINARIES`
 /// without a matching variant is therefore signable in principle and
 /// unreachable in practice, which is a silent no-op rather than an error.
-/// What: Asserts every `SignTargetArg` variant's `as_set_name()` resolves to a
-/// non-empty set, and that the variants cover every set the table declares.
+/// A variant's `as_set_name()` is only HALF the CLI contract, and the half
+/// that does not gate anything. What clap actually accepts on the command line
+/// is the `#[value(name = …)]` attribute, and nothing forces the two to agree:
+/// a variant whose attribute reads `"trusty-memroy"` while `as_set_name()`
+/// returns `"trusty-memory"` passes a check that only reads the latter, yet
+/// `tctl sign trusty-memory` is rejected by clap and `tctl sign trusty-memroy`
+/// resolves to a set that exists. That is the same vacuity this test was added
+/// to close, one level up — so both strings are pinned against each other.
+///
+/// What: For every `SignTargetArg` variant, asserts (a) its clap value name is
+/// byte-identical to its `as_set_name()`, and (b) that name resolves to a
+/// non-empty set; then asserts the variants and the table's declared sets are
+/// the same collection, so neither side can carry an entry the other lacks.
 /// Test: This is the test.
 #[test]
 fn every_sign_target_arg_resolves_to_a_real_set() {
     use crate::cli::SignTargetArg;
     use clap::ValueEnum;
 
-    let mut from_cli: Vec<&'static str> = SignTargetArg::value_variants()
-        .iter()
-        .map(|v| v.as_set_name())
-        .collect();
-    for set in &from_cli {
+    let mut from_cli: Vec<&'static str> = Vec::new();
+    for variant in SignTargetArg::value_variants() {
+        let set = variant.as_set_name();
+
+        // (a) The string clap ACCEPTS must be the string we RESOLVE. Without
+        // this, a typo'd `#[value(name = …)]` is invisible to every other
+        // assertion here.
+        let possible = variant
+            .to_possible_value()
+            .expect("every SignTargetArg variant must be a selectable clap value");
+        assert_eq!(
+            possible.get_name(),
+            set,
+            "SignTargetArg::{variant:?} accepts `{}` on the command line but resolves to set \
+             `{set}` — `tctl sign {set}` would be rejected by clap",
+            possible.get_name()
+        );
+
+        // (b) …and that string must name a set that has binaries.
         assert!(
             !binaries_for_set(set).is_empty(),
             "`tctl sign {set}` names a set with no binaries in SIGNABLE_BINARIES"
         );
+        from_cli.push(set);
     }
 
     let mut declared = declared_sets();
@@ -243,17 +271,36 @@ fn every_sign_target_arg_resolves_to_a_real_set() {
 /// stale — it still said `<trusty-search|trusty-mpm>` long after #4277 shipped
 /// `trusty-agents`. Checking it against the table turns a hand-maintained
 /// string into one that cannot silently fall behind.
-/// What: Asserts the tip mentions every set declared in `SIGNABLE_BINARIES`.
+///
+/// This parses the `<a|b|c>` group rather than asking whether the tip
+/// `contains` each set name. A substring check passes spuriously on any
+/// prefix-shaped name — a future `trusty-mem` set would be "found" inside the
+/// existing `trusty-memory` — and it is blind in the other direction, saying
+/// nothing when the tip advertises a target that is not a set at all.
+///
+/// What: Extracts the `<…>` group, splits it on `|`, and asserts the
+/// advertised targets are exactly the sets declared in `SIGNABLE_BINARIES`.
 /// Test: This is the test.
 #[test]
 fn signing_persistence_tip_names_every_signable_set() {
     let tip = signing_persistence_tip();
-    for set in declared_sets() {
-        assert!(
-            tip.contains(set),
-            "signing_persistence_tip omits the '{set}' target: {tip}"
-        );
-    }
+    let open = tip
+        .find('<')
+        .expect("the tip must list its targets in a `<a|b>` group");
+    let close = open
+        + tip[open..]
+            .find('>')
+            .expect("the tip's `<` must be closed by a `>`");
+
+    let mut advertised: Vec<&str> = tip[open + 1..close].split('|').collect();
+    let mut declared = declared_sets();
+    advertised.sort_unstable();
+    declared.sort_unstable();
+    assert_eq!(
+        advertised, declared,
+        "signing_persistence_tip advertises {advertised:?} but SIGNABLE_BINARIES declares \
+         {declared:?}: {tip}"
+    );
 }
 
 /// Why: The PM decision (PR #2657 review HIGH) is a precise per-set,
@@ -273,10 +320,29 @@ fn hardened_runtime_policy() {
     assert!(use_hardened_runtime(MPM_SET, true));
     assert!(use_hardened_runtime(AGENTS_SET, true));
     assert!(use_hardened_runtime(MEMORY_SET, true));
+    assert!(use_hardened_runtime(ANALYZE_SET, true));
     assert!(!use_hardened_runtime(SEARCH_SET, false));
     assert!(use_hardened_runtime(MPM_SET, false));
     assert!(use_hardened_runtime(AGENTS_SET, false));
     assert!(!use_hardened_runtime(MEMORY_SET, false));
+    assert!(!use_hardened_runtime(ANALYZE_SET, false));
+}
+
+/// Why (owner ruling 2026-08-06): `trusty-analyze` produces exactly ONE
+/// binary. The crate's only other target is the `trusty_analyze` library, so
+/// there is no bundled sibling to forget the way `tm` was forgotten in #2721 —
+/// this pins that the set stays a single entry rather than silently acquiring
+/// a second one.
+/// What: Asserts `ANALYZE_SET` resolves to `["trusty-analyze"]` with the
+/// canonical `com.trusty.<binary>` identifier.
+/// Test: This is the test.
+#[test]
+fn binaries_for_set_covers_analyze() {
+    assert_eq!(binaries_for_set(ANALYZE_SET), vec!["trusty-analyze"]);
+    assert_eq!(
+        codesign_identifier("trusty-analyze"),
+        "com.trusty.trusty-analyze"
+    );
 }
 
 /// Why: The migration notice must actually fire when the on-disk

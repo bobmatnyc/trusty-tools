@@ -21,6 +21,16 @@
 # but NOT `~/Desktop`, `~/Documents`, or `~/Downloads`, so a `read_dir` is
 # attempted on each — the macOS Files-and-Folders TCC categories.
 #
+# UNRESOLVED, and deliberately not overclaimed below: macOS attributes
+# Files-and-Folders access to the RESPONSIBLE process, which for a
+# shell-invoked CLI is usually the terminal rather than the binary — and the
+# setup/migrate path above is exactly that case. If the attribution lands on
+# the terminal, signing trusty-memory does not change that path's prompting.
+# The launchd-started daemon IS attributed to the binary, so a stable identity
+# applies there. Nothing here was validated by a real signing run; this script
+# states what signing does (a stable designated requirement — the necessary
+# precondition), never that a particular grant will survive.
+#
 # What: Builds+installs trusty-memory from local source (`cargo install
 # --path crates/trusty-memory --locked`), then codesigns ALL THREE installed
 # binaries — `trusty-memory` (`com.trusty.trusty-memory`),
@@ -221,11 +231,22 @@ print_next_steps() {
     {
     printf '\ntrusty-memory needs NO Full Disk Access re-grant — its palace store lives\n'
     printf 'under $HOME, and an application data directory is not TCC-protected.\n'
-    printf 'What this script fixes is the Files-and-Folders category reached by\n'
+    printf 'The category this addresses is Files-and-Folders, reached by\n'
     printf '"trusty-memory setup" / "trusty-memory migrate", which walk $HOME for\n'
     printf '.claude/settings*.json and so touch ~/Desktop, ~/Documents, and\n'
-    printf '~/Downloads. Approve those prompts once — the stable Developer ID\n'
-    printf 'identity makes the approval persist across every future cargo install.\n\n'
+    printf '~/Downloads. Approve those prompts when they appear.\n\n'
+    printf 'What signing changes, precisely: the binaries now carry a stable\n'
+    printf 'designated requirement instead of a cdhash that changes on every\n'
+    printf 'cargo install. That is what a durable TCC grant REQUIRES; it is not\n'
+    printf 'on its own proof that one was obtained. Two caveats:\n\n'
+    printf '  * macOS attributes Files-and-Folders access to the RESPONSIBLE\n'
+    printf '    process. For a CLI you launched from a shell that is usually the\n'
+    printf '    terminal app, not this binary — so on the setup/migrate path the\n'
+    printf '    prompt may name your terminal and signing trusty-memory would not\n'
+    printf '    change it. The launchd-started daemon is attributed to the binary\n'
+    printf '    itself, where a stable identity does apply.\n'
+    printf '  * Persistence across a reinstall has not been confirmed here by a\n'
+    printf '    signing run. Verify on your own machine before relying on it.\n\n'
     }
     printf 'RESTART the trusty-memory daemon gracefully to pick up the newly signed\n'
     printf 'binaries (SIGTERM drains in-flight requests; do NOT use kickstart -k):\n'

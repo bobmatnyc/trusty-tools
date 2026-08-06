@@ -501,8 +501,9 @@ fn tctl_alias_self_update() {
 }
 
 /// `trusty-installer sign trusty-search` / `sign trusty-mpm` / `sign
-/// trusty-agents` / `sign trusty-memory` all parse and round-trip to the right
-/// `SignTargetArg` (#2558, #4277, owner ruling 2026-08-06).
+/// trusty-agents` / `sign trusty-memory` / `sign trusty-analyze` all parse and
+/// round-trip to the right `SignTargetArg` (#2558, #4277, owner ruling
+/// 2026-08-06).
 #[test]
 fn parse_sign() {
     let search = Cli::try_parse_from(["trusty-installer", "sign", "trusty-search"])
@@ -547,6 +548,17 @@ fn parse_sign() {
         Commands::Sign { target, .. } => {
             assert_eq!(target, SignTargetArg::Memory);
             assert_eq!(target.as_set_name(), "trusty-memory");
+        }
+        other => panic!("expected Sign, got {other:?}"),
+    }
+
+    // Owner ruling 2026-08-06: `trusty-analyze` promoted in the same ruling.
+    let analyze = Cli::try_parse_from(["trusty-installer", "sign", "trusty-analyze"])
+        .expect("sign trusty-analyze parses");
+    match analyze.command {
+        Commands::Sign { target, .. } => {
+            assert_eq!(target, SignTargetArg::Analyze);
+            assert_eq!(target.as_set_name(), "trusty-analyze");
         }
         other => panic!("expected Sign, got {other:?}"),
     }

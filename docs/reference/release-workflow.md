@@ -186,16 +186,18 @@ every ad-hoc-signed rebuild, for the same cdhash-identity reason FDA does.
 exemption from the rest of this section.** Until 2026-08-06 that bullet was
 the only mention of `trusty-memory` here, and its absence from
 `SIGNABLE_BINARIES` was easy to mistake for a decision it never was. FDA is
-one TCC category out of several. `trusty-memory` needs no FDA *and* needs a
-stable Developer-ID identity, because `trusty-memory setup` and
-`trusty-memory migrate` walk `$HOME` to depth 8 looking for
+one TCC category out of several. `trusty-memory` and `trusty-analyze` need no FDA
+*and* need a stable Developer-ID identity, because `trusty-memory setup`,
+`trusty-memory migrate`, and `trusty-analyze setup --global` walk `$HOME` to
+depth 8 looking for
 `.claude/settings*.json` (`trusty_common::claude_config::discover_claude_settings`)
 and rewrite the ones they find. That walk skips `Library` and `Applications`
 but not `~/Desktop`, `~/Documents`, or `~/Downloads` — the macOS
 Files-and-Folders categories, keyed by cdhash exactly like FDA and App Data.
 Its own store under `~/Library/Application Support/trusty-memory/` is NOT the
 reason; an application's own data directory is not TCC-protected. See
-[Signed Install: trusty-memory](#signed-install-trusty-memory) below.
+[Signed Install: trusty-memory](#signed-install-trusty-memory) and
+[Signed Install: trusty-analyze](#signed-install-trusty-analyze) below.
 
 **Do not cross the categories:** granting `trusty-search` Full Disk Access does
 nothing for the `trusty-mpm` App-Data prompt, and `trusty-mpm` never needs —
@@ -267,16 +269,18 @@ context rather than always-on, to preserve BOTH pre-PR behaviors exactly:
 | `trusty-mpm` | **on** | **on** |
 | `trusty-agents` (`tagent`) | N/A — not a `tctl install` member (#4277) | **on** |
 | `trusty-memory` + `trusty-bm25-daemon` + `trusty-memory-mcp-bridge` | **off** (same ONNX exposure as trusty-search) | **on** |
+| `trusty-analyze` | **off** (same ONNX exposure as trusty-search) | **on** |
 
 trusty-search/embedderd load an ONNX runtime dylib, and Hardened Runtime's
 library-validation restriction has not yet been empirically verified safe for
 that load path — flipping the automatic hook to hardened-by-default risked
 silently breaking `tctl install trusty-search` on every machine with a
-Developer ID cert already installed. trusty-memory takes the same conservative
-side of the split: it links `ort`/`fastembed` through `trusty-common`'s
-`memory-core` feature (`cargo tree -p trusty-memory -i fastembed`), so it
-carries the identical unverified exposure. trusty-mpm and tagent load no
-dylibs, so they are hardened unconditionally. **This split does not affect TCC grant stability** —
+Developer ID cert already installed. trusty-memory and trusty-analyze take the same
+conservative side of the split — trusty-memory links `ort`/`fastembed`
+transitively through `trusty-common`'s `memory-core` feature, trusty-analyze as
+a direct dependency (`cargo tree -p <crate> -i fastembed` confirms each on its
+own), so both carry the identical unverified exposure. trusty-mpm and tagent
+load no dylibs, so they are hardened unconditionally. **This split does not affect TCC grant stability** —
 that depends on `--identifier` + Team ID, not `--options runtime` — only on
 notarization eligibility and dylib-validation strictness. See the tracking
 issue linked from PR #2657 for lifting this split once ONNX-under-Hardened-
@@ -463,8 +467,30 @@ setup` and `trusty-memory migrate` call
 `trusty_common::claude_config::discover_claude_settings`, which recurses
 `$HOME` to depth 8 for `.claude/settings*.json` and rewrites what it finds;
 the skip-list covers `Library` and `Applications` but not `~/Desktop`,
-`~/Documents`, or `~/Downloads`. Every `cargo install` mints a fresh cdhash
-and revokes whatever was approved.
+`~/Documents`, or `~/Downloads`. Every `cargo install` mints a fresh cdhash,
+so any grant keyed to the old one stops matching.
+
+🔴 **What signing establishes, and what it does not — read before treating
+anything below as verified.** A Developer-ID signature with a fixed
+`--identifier` gives the binaries a stable designated requirement in place of
+a cdhash that changes on every rebuild. That is the *necessary precondition*
+for a durable TCC grant. It is not on its own evidence that one was obtained,
+and none of the guidance in this section was validated by an actual signing
+run. Two specifics:
+
+- **Responsible-process attribution is unresolved.** macOS attributes
+  Files-and-Folders access to the *responsible process*, which for a
+  shell-invoked CLI is usually the terminal application rather than the binary
+  — and `setup`/`migrate` is exactly that case. If the attribution lands on
+  the terminal, signing `trusty-memory` does not change that path's prompting
+  at all. The launchd-started daemon is attributed to the binary itself, so a
+  stable identity does apply there. Nobody has confirmed which way the CLI
+  path resolves on this codebase.
+- **Persistence across a reinstall is unconfirmed.** Verify on a machine with
+  the Developer ID certificate before relying on it.
+
+The rest of this section describes what the tooling *does*. Treat the TCC
+outcome as expected, not established.
 
 `cargo install --path crates/trusty-memory` produces THREE binaries and all
 three are signed — #2721 is the recorded lesson that signing part of an
@@ -509,6 +535,48 @@ so the split costs nothing here.
 sign, matching `trusty-agents` (#4277) — `post_install_search` /
 `post_install_mpm` are the only hooks `commands::install` calls. Run the
 script or `tctl sign trusty-memory` after a local-source install.
+
+### Signed Install: trusty-analyze
+
+Same owner ruling, 2026-08-06, and it must be judged on its own evidence rather
+than by association with trusty-memory. **What is identical:**
+`trusty-analyze setup --global`
+(`crates/trusty-analyze/src/commands/setup.rs:129`) makes the same
+`discover_claude_settings` walk of `$HOME` to depth 8, reaching `~/Desktop`,
+`~/Documents`, and `~/Downloads` through the same skip-list gap. It links
+`ort`/`fastembed` — directly, not through `trusty-common` — so it sits on
+trusty-search's conservative side of the Hardened Runtime split for the same
+reason.
+
+**What is weaker, and the distinction is worth keeping:** trusty-memory walks
+`$HOME` on its DEFAULT `setup` path. trusty-analyze only does so behind
+`--global`; project mode patches `.mcp.json` in the project root and never
+leaves it. The exposure is narrower in how often it is reached, and identical
+when it is reached.
+
+One binary — the crate's only other target is the `trusty_analyze` library, so
+there is no bundled sibling to miss the way `tm` was missed in #2721:
+
+| Binary | Identifier |
+|---|---|
+| `trusty-analyze` | `com.trusty.trusty-analyze` |
+
+```bash
+tctl sign trusty-analyze
+```
+
+No dedicated wrapper script and no automatic `tctl install` hook — `tctl sign`
+is the whole surface. Everything in the 🔴 callout under
+[Signed Install: trusty-memory](#signed-install-trusty-memory) about what
+signing does and does not establish applies here unchanged, and applies more
+sharply: `setup --global` is a CLI path, so the responsible-process question is
+exactly the open one.
+
+🟢 **`trusty-review` was evaluated under the same test and excluded.** It makes
+no `$HOME` walk and reads no other application's files — grepping it for
+`.claude`, `Desktop`, `Documents`, `Downloads`, `Containers`, and `/Volumes`
+returns only Bedrock model-name strings. There is no grant for a stable
+identity to preserve, so adding it would be signing for its own sake.
 
 ### TRUSTY_SIGN_IDENTITY Override
 

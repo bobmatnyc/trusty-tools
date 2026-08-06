@@ -29,7 +29,8 @@ use std::path::PathBuf;
 use super::macos_signing;
 
 /// Handle `tctl sign <target>` (target: `trusty-search`, `trusty-mpm`,
-/// `trusty-memory` — owner ruling 2026-08-06 — or `trusty-agents` — #4277).
+/// `trusty-memory` / `trusty-analyze` — owner ruling 2026-08-06 — or
+/// `trusty-agents` — #4277).
 ///
 /// Why: The CLI-facing entry point for standalone Developer-ID signing,
 /// separate from the fail-soft hooks `commands::install` runs automatically.
@@ -47,7 +48,7 @@ use super::macos_signing;
 pub fn run(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i32 {
     if macos_signing::binaries_for_set(target).is_empty() {
         eprintln!(
-            "tctl sign: unknown target '{target}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', or 'trusty-agents')"
+            "tctl sign: unknown target '{target}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', or 'trusty-agents')"
         );
         return 2;
     }

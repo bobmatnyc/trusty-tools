@@ -133,8 +133,8 @@ pub enum AnalyzeCoreArg {
 /// `trusty-mpm` set (owner-authorized scope extension, #2558); `Agents` → the
 /// `trusty-agents` set, i.e. `tagent` (owner-authorized scope extension,
 /// #4277); `Memory` → the `trusty-memory` set, i.e. `trusty-memory` +
-/// `trusty-bm25-daemon` + `trusty-memory-mcp-bridge` (owner ruling
-/// 2026-08-06).
+/// `trusty-bm25-daemon` + `trusty-memory-mcp-bridge`; `Analyze` → the
+/// `trusty-analyze` set, a single binary (both owner ruling 2026-08-06).
 ///
 /// Test: `cli_tests::parse_sign` round-trips each value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -152,6 +152,9 @@ pub enum SignTargetArg {
     /// `trusty-memory-mcp-bridge` shim. (owner ruling 2026-08-06)
     #[value(name = "trusty-memory")]
     Memory,
+    /// `trusty-analyze` (single binary). (owner ruling 2026-08-06)
+    #[value(name = "trusty-analyze")]
+    Analyze,
 }
 
 impl SignTargetArg {
@@ -161,7 +164,8 @@ impl SignTargetArg {
     /// `macos_signing::binaries_for_set` / `sign_set_strict`, so that module
     /// has no clap dependency.
     /// What: `Search` → `"trusty-search"`, `Mpm` → `"trusty-mpm"`, `Agents` →
-    /// `"trusty-agents"`, `Memory` → `"trusty-memory"`.
+    /// `"trusty-agents"`, `Memory` → `"trusty-memory"`, `Analyze` →
+    /// `"trusty-analyze"`.
     /// Test: `cli_tests::parse_sign` (indirectly, via the round-trip),
     /// `macos_signing::tests::every_sign_target_arg_resolves_to_a_real_set`
     /// (every variant maps onto a non-empty `SIGNABLE_BINARIES` set).
@@ -171,6 +175,7 @@ impl SignTargetArg {
             SignTargetArg::Mpm => "trusty-mpm",
             SignTargetArg::Agents => "trusty-agents",
             SignTargetArg::Memory => "trusty-memory",
+            SignTargetArg::Analyze => "trusty-analyze",
         }
     }
 }
