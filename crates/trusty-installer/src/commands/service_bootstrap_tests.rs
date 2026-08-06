@@ -32,6 +32,10 @@ struct FakeServiceEnv {
     /// #4470: when `Some`, the port guard refuses with this reason.
     port_guard_refusal: Option<String>,
     installed: RefCell<Vec<String>>,
+    /// #4964: the `exe_path` each `run_service_install` call received, so a
+    /// test can assert the CONCRETE just-installed path reaches the spawn
+    /// rather than being dropped on the way.
+    installed_exe_paths: RefCell<Vec<Option<std::path::PathBuf>>>,
     fallback_calls: RefCell<Vec<String>>,
 }
 
@@ -47,6 +51,7 @@ impl FakeServiceEnv {
             // becoming a port-guard test.
             port_guard_refusal: None,
             installed: RefCell::new(Vec::new()),
+            installed_exe_paths: RefCell::new(Vec::new()),
             fallback_calls: RefCell::new(Vec::new()),
         }
     }
@@ -81,8 +86,15 @@ impl ServiceEnv for FakeServiceEnv {
     fn plist_present(&self, _binary: &str) -> bool {
         self.present
     }
-    fn run_service_install(&self, binary: &str) -> anyhow::Result<()> {
+    fn run_service_install(
+        &self,
+        binary: &str,
+        exe_path: Option<&std::path::Path>,
+    ) -> anyhow::Result<()> {
         self.installed.borrow_mut().push(binary.to_string());
+        self.installed_exe_paths
+            .borrow_mut()
+            .push(exe_path.map(std::path::Path::to_path_buf));
         if self.fail {
             anyhow::bail!("simulated failure");
         }
@@ -164,7 +176,7 @@ fn bootstrap_enabled_respects_env() {
 #[test]
 fn bootstrap_one_skips_non_service_member() {
     let env = FakeServiceEnv::new(false, false);
-    let action = bootstrap_one(&env, "trusty-mpm");
+    let action = bootstrap_one(&env, "trusty-mpm", None);
     assert!(matches!(action, BootstrapAction::Skipped(_)));
     assert!(env.installed.borrow().is_empty());
 }
@@ -178,7 +190,7 @@ fn bootstrap_one_skips_non_service_member() {
 #[test]
 fn bootstrap_one_skips_when_plist_present_and_loaded() {
     let env = FakeServiceEnv::new(true, false);
-    let action = bootstrap_one(&env, "trusty-search");
+    let action = bootstrap_one(&env, "trusty-search", None);
     assert!(matches!(action, BootstrapAction::Skipped(_)));
     assert!(
         env.installed.borrow().is_empty(),
@@ -205,7 +217,7 @@ fn bootstrap_one_skips_when_plist_present_and_loaded() {
 #[test]
 fn bootstrap_one_loads_via_fallback_when_plist_present_but_not_loaded() {
     let env = FakeServiceEnv::new(true, false).not_loaded();
-    let action = bootstrap_one(&env, "trusty-memory");
+    let action = bootstrap_one(&env, "trusty-memory", None);
     assert_eq!(action, BootstrapAction::LoadedByFallback);
     assert_eq!(env.fallback_calls.borrow().as_slice(), ["trusty-memory"]);
     assert!(
@@ -227,7 +239,7 @@ fn bootstrap_one_reports_failure_when_present_but_fallback_fails() {
     let env = FakeServiceEnv::new(true, false)
         .not_loaded()
         .failing_fallback();
-    let action = bootstrap_one(&env, "trusty-review");
+    let action = bootstrap_one(&env, "trusty-review", None);
     match action {
         BootstrapAction::Failed(e) => {
             assert!(e.contains("not loaded"), "message: {e}");
@@ -244,7 +256,7 @@ fn bootstrap_one_reports_failure_when_present_but_fallback_fails() {
 #[test]
 fn bootstrap_one_installs_when_absent() {
     let env = FakeServiceEnv::new(false, false);
-    let action = bootstrap_one(&env, "trusty-memory");
+    let action = bootstrap_one(&env, "trusty-memory", None);
     assert_eq!(action, BootstrapAction::Installed);
     assert_eq!(env.installed.borrow().as_slice(), ["trusty-memory"]);
 }
@@ -256,7 +268,7 @@ fn bootstrap_one_installs_when_absent() {
 #[test]
 fn bootstrap_one_reports_failure() {
     let env = FakeServiceEnv::new(false, true);
-    let action = bootstrap_one(&env, "trusty-analyze");
+    let action = bootstrap_one(&env, "trusty-analyze", None);
     match action {
         BootstrapAction::Failed(e) => assert!(e.contains("simulated failure")),
         other => panic!("expected Failed, got {other:?}"),
@@ -278,7 +290,7 @@ fn bootstrap_one_reports_failure() {
 #[test]
 fn bootstrap_one_installed_directly_when_loaded() {
     let env = FakeServiceEnv::new(false, false);
-    let action = bootstrap_one(&env, "trusty-search");
+    let action = bootstrap_one(&env, "trusty-search", None);
     assert_eq!(action, BootstrapAction::Installed);
     assert!(
         env.fallback_calls.borrow().is_empty(),
@@ -296,7 +308,7 @@ fn bootstrap_one_installed_directly_when_loaded() {
 #[test]
 fn bootstrap_one_falls_back_when_not_loaded() {
     let env = FakeServiceEnv::new(false, false).not_loaded();
-    let action = bootstrap_one(&env, "trusty-memory");
+    let action = bootstrap_one(&env, "trusty-memory", None);
     assert_eq!(action, BootstrapAction::InstalledByFallback);
     assert_eq!(env.fallback_calls.borrow().as_slice(), ["trusty-memory"]);
 }
@@ -315,7 +327,7 @@ fn bootstrap_one_reports_failure_when_fallback_also_fails() {
     let env = FakeServiceEnv::new(false, false)
         .not_loaded()
         .failing_fallback();
-    let action = bootstrap_one(&env, "trusty-review");
+    let action = bootstrap_one(&env, "trusty-review", None);
     match action {
         BootstrapAction::Failed(e) => {
             assert!(e.contains("never loaded"), "message: {e}");
@@ -342,7 +354,7 @@ fn bootstrap_one_reports_failure_when_fallback_also_fails() {
 #[test]
 fn bootstrap_one_refuses_when_foreign_process_holds_port() {
     let env = FakeServiceEnv::new(false, false).foreign_port_holder();
-    let action = bootstrap_one(&env, "trusty-search");
+    let action = bootstrap_one(&env, "trusty-search", None);
     match &action {
         BootstrapAction::RefusedForeignPort(reason) => {
             assert!(reason.contains("9931"), "reason: {reason}");
@@ -376,7 +388,7 @@ fn bootstrap_one_refuses_existing_plist_when_foreign_process_holds_port() {
     let env = FakeServiceEnv::new(true, false)
         .not_loaded()
         .foreign_port_holder();
-    let action = bootstrap_one(&env, "trusty-memory");
+    let action = bootstrap_one(&env, "trusty-memory", None);
     assert!(
         matches!(action, BootstrapAction::RefusedForeignPort(_)),
         "expected RefusedForeignPort, got {action:?}"
@@ -398,7 +410,7 @@ fn bootstrap_one_refuses_existing_plist_when_foreign_process_holds_port() {
 #[test]
 fn bootstrap_one_does_not_gate_an_already_loaded_member_on_the_port_guard() {
     let env = FakeServiceEnv::new(true, false).foreign_port_holder();
-    let action = bootstrap_one(&env, "trusty-search");
+    let action = bootstrap_one(&env, "trusty-search", None);
     assert!(
         matches!(action, BootstrapAction::Skipped(_)),
         "expected Skipped, got {action:?}"
@@ -622,4 +634,74 @@ fn run_captured_folds_stderr_into_error() {
         "error message did not fold in captured stderr: {msg}"
     );
     assert!(msg.contains("fake service install"));
+}
+
+// ── #4964 Phase 0.2: the concrete just-installed path reaches the spawn ──────
+//
+// The stale-daemon respawn loop starts here. `<binary> service install` bakes
+// the SPAWNED process's own `current_exe()` into the plist's
+// `ProgramArguments[0]`, and launchd's `KeepAlive` then respawns exactly that
+// path at every boot. Resolving a bare name through `$PATH` at this point means
+// `tctl install` can place a new binary and persist a DIFFERENT, older one into
+// launchd — with nothing that ever rewrites the plist.
+
+/// Why: the load-bearing assertion of Phase 0.2. `"sh"` resolves on `$PATH` to
+/// `/bin/sh` on every supported host, so a resolver that ignores the supplied
+/// path returns `/bin/sh` here — exactly the shadowing this fix removes. No
+/// environment mutation, so it is safe under the parallel harness.
+/// What: a concrete path is returned verbatim even when the binary NAME also
+/// resolves, to somewhere else, on `$PATH`.
+/// Test: this is the test.
+#[test]
+fn service_install_target_prefers_the_concrete_path_over_path_lookup() {
+    let concrete = std::path::PathBuf::from("/nowhere/just-installed/sh");
+    let got = service_install_target("sh", Some(&concrete)).expect("concrete path always resolves");
+    assert_eq!(
+        got, concrete,
+        "a caller-supplied concrete path must win over the $PATH lookup"
+    );
+}
+
+/// Why: `tctl start` installs nothing and has no concrete path to offer; the
+/// pre-#4964 `$PATH` lookup must survive for it.
+/// What: `None` falls back to `which`, which finds `/bin/sh` for `"sh"`.
+/// Test: this is the test.
+#[test]
+fn service_install_target_falls_back_to_path_lookup() {
+    let got = service_install_target("sh", None).expect("sh is on PATH on every supported host");
+    assert!(
+        got.ends_with("sh"),
+        "expected a $PATH resolution of `sh`, got {}",
+        got.display()
+    );
+}
+
+/// Why: an unresolvable name must be a clean error, not a spawn of a bare name
+/// that fails later with a less useful message.
+/// What: `None` plus a name that is on no `$PATH` errors.
+/// Test: this is the test.
+#[test]
+fn service_install_target_errors_when_nothing_resolves() {
+    let err = service_install_target("definitely-not-a-real-binary-4964", None)
+        .expect_err("expected Err for an unresolvable name");
+    assert!(err.to_string().contains("not on PATH"), "{err}");
+}
+
+/// Why: `service_install_target` being correct is useless if `bootstrap_one`
+/// drops the path on the way to it. This pins the whole thread from the
+/// installer's call site down to the spawn.
+/// What: `bootstrap_one` with `Some(path)` forwards exactly that path to
+/// `run_service_install`.
+/// Test: this is the test.
+#[test]
+fn bootstrap_one_forwards_the_concrete_exe_path_to_service_install() {
+    let env = FakeServiceEnv::new(false, false);
+    let concrete = std::path::PathBuf::from("/opt/ch/bin/trusty-memory");
+    let action = bootstrap_one(&env, "trusty-memory", Some(&concrete));
+    assert_eq!(action, BootstrapAction::Installed);
+    assert_eq!(
+        env.installed_exe_paths.borrow().as_slice(),
+        &[Some(concrete)],
+        "the concrete just-installed path must reach `run_service_install`"
+    );
 }

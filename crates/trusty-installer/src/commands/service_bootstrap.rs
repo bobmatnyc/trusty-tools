@@ -246,7 +246,20 @@ pub trait ServiceEnv {
     /// Run `<binary> service install` (expected to write the plist and
     /// bootstrap it — but see [`bootstrap_one`]'s #3836 postcondition check,
     /// which does not simply trust that expectation).
-    fn run_service_install(&self, binary: &str) -> anyhow::Result<()>;
+    ///
+    /// `exe_path` (#4964 Phase 0.2) is the CONCRETE path of the binary the
+    /// caller just installed, when it knows one. It must be spawned in
+    /// preference to a `PATH` lookup of `binary`: the spawned process bakes its
+    /// own `std::env::current_exe()` into the plist's `ProgramArguments[0]`, so
+    /// resolving a stale earlier-on-`PATH` copy here writes a plist that
+    /// launchd's `KeepAlive` then respawns forever. `None` means "no concrete
+    /// path known" (the `tctl start` path, which installs no binary) and keeps
+    /// the `PATH` lookup.
+    fn run_service_install(
+        &self,
+        binary: &str,
+        exe_path: Option<&std::path::Path>,
+    ) -> anyhow::Result<()>;
     /// Does launchd currently have this member's label loaded at all
     /// (#3836)?
     fn is_loaded(&self, binary: &str) -> bool;
@@ -319,7 +332,11 @@ pub trait ServiceEnv {
 /// reports success while that process keeps serving the port — the #4230
 /// orphan. The gate sits immediately before each side effect, never after, so
 /// a refusal cannot leave launchd or the filesystem half-changed.
-pub fn bootstrap_one(env: &dyn ServiceEnv, binary: &str) -> BootstrapAction {
+pub fn bootstrap_one(
+    env: &dyn ServiceEnv,
+    binary: &str,
+    exe_path: Option<&std::path::Path>,
+) -> BootstrapAction {
     if !member_has_service_install(binary) {
         return BootstrapAction::Skipped(format!("{binary} has no `service install` subcommand"));
     }
@@ -359,7 +376,7 @@ pub fn bootstrap_one(env: &dyn ServiceEnv, binary: &str) -> BootstrapAction {
     if let Err(reason) = env.port_guard(binary) {
         return BootstrapAction::RefusedForeignPort(reason);
     }
-    if let Err(e) = env.run_service_install(binary) {
+    if let Err(e) = env.run_service_install(binary, exe_path) {
         return BootstrapAction::Failed(e.to_string());
     }
     // #3836 HIGH fix: a clean exit is not proof launchd actually loaded the
@@ -384,17 +401,22 @@ pub fn bootstrap_one(env: &dyn ServiceEnv, binary: &str) -> BootstrapAction {
 /// member. launchd is macOS-only, so on other platforms it is a no-op skip
 /// (matching [`super::plist_bootstrap`]'s non-macOS behaviour).
 /// What: on macOS delegates to [`bootstrap_one`] with the production
-/// [`RealServiceEnv`]; elsewhere returns a `Skipped` no-op.
+/// [`RealServiceEnv`]; elsewhere returns a `Skipped` no-op. `exe_path` (#4964
+/// Phase 0.2) is the concrete path of the binary the caller just installed —
+/// see [`ServiceEnv::run_service_install`] for why passing it matters.
 /// Test: the pure policy is covered by `bootstrap_one_*`; this thin cfg wrapper
 /// is side-effecting (real `launchctl`) and never invoked in the test suite.
-pub fn bootstrap_member_service(binary: &str) -> BootstrapAction {
+pub fn bootstrap_member_service(
+    binary: &str,
+    exe_path: Option<&std::path::Path>,
+) -> BootstrapAction {
     #[cfg(target_os = "macos")]
     {
-        bootstrap_one(&RealServiceEnv, binary)
+        bootstrap_one(&RealServiceEnv, binary, exe_path)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = binary;
+        let _ = (binary, exe_path);
         BootstrapAction::Skipped("launchd is macOS-only".to_string())
     }
 }
@@ -454,13 +476,15 @@ impl ServiceEnv for RealServiceEnv {
             .unwrap_or(false)
     }
 
-    fn run_service_install(&self, binary: &str) -> anyhow::Result<()> {
-        if which::which(binary).is_err() {
-            anyhow::bail!("{binary} is not on PATH");
-        }
-        let mut cmd = std::process::Command::new(binary);
+    fn run_service_install(
+        &self,
+        binary: &str,
+        exe_path: Option<&std::path::Path>,
+    ) -> anyhow::Result<()> {
+        let target = service_install_target(binary, exe_path)?;
+        let mut cmd = std::process::Command::new(&target);
         cmd.args(["service", "install"]);
-        run_captured(cmd, &format!("`{binary} service install`"))
+        run_captured(cmd, &format!("`{} service install`", target.display()))
     }
 
     fn is_loaded(&self, binary: &str) -> bool {
@@ -512,6 +536,37 @@ impl ServiceEnv for RealServiceEnv {
             anyhow::bail!("launchd is macOS-only")
         }
     }
+}
+
+/// Which executable a `service install` should actually spawn.
+///
+/// Why (#4964 Phase 0.2): `<binary> service install` bakes the SPAWNED
+/// PROCESS's own `std::env::current_exe()` into the launchd plist's
+/// `ProgramArguments[0]`, and launchd's `KeepAlive` then respawns exactly that
+/// path at every boot, forever — nothing rewrites the plist unless `service
+/// install` runs again, and re-running it reproduces the same resolution. So
+/// resolving a bare NAME through `$PATH` here is not a cosmetic detail: on a
+/// machine where a stale copy sits earlier on `PATH` than the directory the
+/// install just wrote to, `tctl install` places a new binary and then persists
+/// the OLD one into launchd. Preferring a caller-supplied concrete path removes
+/// the name-resolution step a stale binary can win.
+///
+/// What: returns `exe_path` verbatim when the caller supplies one. Otherwise
+/// falls back to `which::which(binary)` — the pre-#4964 behaviour, still
+/// correct for `tctl start`, which installs nothing and genuinely has no
+/// concrete path to offer. Errors when neither yields a path.
+///
+/// Test: `service_install_target_prefers_the_concrete_path_over_path_lookup`,
+/// `service_install_target_falls_back_to_path_lookup`,
+/// `service_install_target_errors_when_nothing_resolves`.
+fn service_install_target(
+    binary: &str,
+    exe_path: Option<&std::path::Path>,
+) -> anyhow::Result<std::path::PathBuf> {
+    if let Some(p) = exe_path {
+        return Ok(p.to_owned());
+    }
+    which::which(binary).map_err(|_| anyhow::anyhow!("{binary} is not on PATH"))
 }
 
 /// Run `cmd` to completion with its stdout/stderr CAPTURED, never inherited.

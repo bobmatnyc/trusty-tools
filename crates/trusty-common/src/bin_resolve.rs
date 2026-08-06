@@ -328,6 +328,55 @@ pub fn is_ephemeral_build_path(path: &Path) -> bool {
     EPHEMERAL_PATH_SEGMENTS.iter().any(|seg| s.contains(seg))
 }
 
+/// The cargo binary install directory: `$CARGO_HOME/bin`, falling back to
+/// `~/.cargo/bin`.
+///
+/// Why (#4964): five call sites across `trusty-installer` and this crate each
+/// re-derived this same rule, and two of them got it wrong in the same way —
+/// they hardcoded `~/.cargo/bin` and never read `CARGO_HOME`, so a machine with
+/// `CARGO_HOME` set resolved a directory `cargo install` does not write to.
+/// One implementation means a `CARGO_HOME`-blind copy cannot be reintroduced by
+/// a fifth caller.
+///
+/// What: reads `CARGO_HOME` from the process environment and delegates to the
+/// pure [`canonical_bin_dir_from`]. Returns `None` only when `CARGO_HOME` is
+/// unset/empty AND the home directory cannot be resolved. Never spawns `cargo`
+/// — the resolution is pure path arithmetic, so it works on a machine with no
+/// Rust toolchain installed.
+///
+/// Test: the rule is covered by `canonical_bin_dir_from_*`; this wrapper is the
+/// side-effecting env read.
+pub fn canonical_bin_dir() -> Option<PathBuf> {
+    canonical_bin_dir_from(
+        dirs::home_dir().as_deref(),
+        std::env::var("CARGO_HOME").ok().as_deref(),
+    )
+}
+
+/// Pure resolution of the cargo binary install directory.
+///
+/// Why: extracting the rule from the env/home reads makes it testable without
+/// mutating process-global state, so the tests stay safe under the parallel
+/// harness. It is also what lets [`crate::update::candidate_bin_dirs`], which is
+/// already parameterised over explicit `home`/`cargo_home` inputs, share the
+/// same rule rather than restating it.
+///
+/// What: `<cargo_home>/bin` when `cargo_home` is `Some` and non-empty;
+/// otherwise `<home>/.cargo/bin`; `None` when neither input can supply a path.
+/// An empty `CARGO_HOME` is treated as unset — that is what cargo itself does,
+/// and treating it literally would resolve to the relative path `bin`.
+///
+/// Test: `canonical_bin_dir_from_honours_cargo_home`,
+/// `canonical_bin_dir_from_falls_back_to_dot_cargo`,
+/// `canonical_bin_dir_from_treats_empty_cargo_home_as_unset`,
+/// `canonical_bin_dir_from_is_none_without_either_input`.
+pub fn canonical_bin_dir_from(home: Option<&Path>, cargo_home: Option<&str>) -> Option<PathBuf> {
+    match cargo_home {
+        Some(h) if !h.is_empty() => Some(PathBuf::from(h).join("bin")),
+        _ => home.map(|h| h.join(".cargo").join("bin")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +706,47 @@ mod tests {
             resolve_binary("/no/such/path/here-1298").is_none(),
             "a non-existent explicit path must resolve to None"
         );
+    }
+
+    /// Why (#4964): the whole reason this helper exists is that two of the
+    /// five copies it replaces ignored `CARGO_HOME` and hardcoded
+    /// `~/.cargo/bin`. A `CARGO_HOME` that is honoured is the load-bearing
+    /// behaviour.
+    /// What: a non-empty `CARGO_HOME` wins over `home` entirely.
+    /// Test: this is the test.
+    #[test]
+    fn canonical_bin_dir_from_honours_cargo_home() {
+        let got = canonical_bin_dir_from(Some(Path::new("/home/u")), Some("/opt/ch"));
+        assert_eq!(got, Some(PathBuf::from("/opt/ch/bin")));
+    }
+
+    /// Why: with no `CARGO_HOME`, cargo installs into `~/.cargo/bin`.
+    /// What: `None` cargo_home falls back to `<home>/.cargo/bin`.
+    /// Test: this is the test.
+    #[test]
+    fn canonical_bin_dir_from_falls_back_to_dot_cargo() {
+        let got = canonical_bin_dir_from(Some(Path::new("/home/u")), None);
+        assert_eq!(got, Some(PathBuf::from("/home/u/.cargo/bin")));
+    }
+
+    /// Why: `CARGO_HOME=""` is how a shell exports a variable it never set a
+    /// value for. Taken literally it resolves to the RELATIVE path `bin`,
+    /// which would place binaries under the process's working directory.
+    /// What: an empty `CARGO_HOME` resolves the same as an absent one.
+    /// Test: this is the test.
+    #[test]
+    fn canonical_bin_dir_from_treats_empty_cargo_home_as_unset() {
+        let got = canonical_bin_dir_from(Some(Path::new("/home/u")), Some(""));
+        assert_eq!(got, Some(PathBuf::from("/home/u/.cargo/bin")));
+    }
+
+    /// Why: with neither input there is no defensible guess; callers must see
+    /// `None` and decide, rather than receive a fabricated relative path.
+    /// What: both inputs absent → `None`.
+    /// Test: this is the test.
+    #[test]
+    fn canonical_bin_dir_from_is_none_without_either_input() {
+        assert_eq!(canonical_bin_dir_from(None, None), None);
+        assert_eq!(canonical_bin_dir_from(None, Some("")), None);
     }
 }
