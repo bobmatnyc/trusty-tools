@@ -146,8 +146,11 @@ fn is_name_segment(s: &str) -> bool {
 /// disjointness holds — a valid alias matches `^[a-z0-9][a-z0-9._-]*$`
 /// (`validate_alias` in `core::standalone::registry`), so it can never contain
 /// the `/` or `:` every repo form requires.
+/// #4990: `tm run` shares this predicate so `tm run <owner>/<repo>` and
+/// `tm register <owner>/<repo>` cannot disagree about what a string names.
+/// A positional this rejects is a DOC-24 registry alias to `tm run`.
 /// Test: `looks_like_repo_rejects_aliases`, `two_args_legacy_alias_first`.
-fn looks_like_repo(s: &str) -> bool {
+pub(crate) fn looks_like_repo(s: &str) -> bool {
     matches!(
         classify(s),
         Positional::Url(_) | Positional::Shorthand { .. }
@@ -202,13 +205,28 @@ pub(crate) fn resolve_register_args(
     }
 }
 
+/// True when a positional is a relative path (`./x`, `../x`, `.hidden/x`).
+///
+/// Why (#4990): `tm run` has to tell a repo from a REGISTRY ALIAS, and
+/// [`looks_like_repo`] alone cannot: it answers `false` for a relative path,
+/// which would route `tm run ./some/dir` into an alias lookup and report
+/// "alias './some/dir' not found" instead of the path advice [`rejection`]
+/// already carries. A relative path is neither — an alias matches
+/// `^[a-z0-9][a-z0-9._-]*$` and can never start with a dot.
+/// What: `true` for exactly the [`Positional::RelativePath`] arm.
+/// Test: `classify_rejects_browser_pastes_and_paths` (in `run_target_tests.rs`),
+/// `relative_paths_are_never_shorthand`.
+pub(crate) fn is_relative_path(s: &str) -> bool {
+    matches!(classify(s.trim()), Positional::RelativePath)
+}
+
 /// Build the error for a positional that does not name a repository.
 ///
 /// Why: the message is the remedy. A relative path and a bare word fail for
 /// different reasons and need different advice.
 /// Test: `relative_paths_are_never_shorthand`, `one_arg_non_repo_errors`,
 /// `two_non_urls_error`.
-fn rejection(s: &str) -> anyhow::Error {
+pub(crate) fn rejection(s: &str) -> anyhow::Error {
     match classify(s) {
         Positional::RelativePath => anyhow::anyhow!(
             "'{s}' is a relative path, not a repository. It would be resolved \
@@ -240,7 +258,11 @@ fn rejection(s: &str) -> anyhow::Error {
 /// `browser_paste_shapes_are_rejected`, `github_tab_urls_are_rejected`,
 /// `query_and_fragment_are_stripped`, `scheme_less_host_gains_https`,
 /// `home_relative_path_is_expanded`.
-fn resolved_url(s: &str) -> anyhow::Result<String> {
+///
+/// #4990: `tm run <owner>/<repo>` resolves its clone URL through this same
+/// function, so the string `tm register` would store is the string `tm run`
+/// clones.
+pub(crate) fn resolved_url(s: &str) -> anyhow::Result<String> {
     let url: String = match classify(s) {
         // #4912: GitHub is assumed for shorthand; the stored value must be
         // clone-able, so the host goes on here rather than at clone time.

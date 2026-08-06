@@ -585,20 +585,12 @@ async fn main() -> anyhow::Result<()> {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::load_cmd(&paths, &alias)
         }
-        Some(Command::Run { alias, task, root }) => {
-            // F5: --task is not yet implemented in the MVP standalone driver.
-            // Per spec (DOC-24), autonomous/task dispatch is the session-manager
-            // layer, not `tm run`. Warn clearly so the flag is not silently
-            // dropped without user awareness.
-            if let Some(ref t) = task {
-                eprintln!(
-                    "warning: --task '{t}' is not yet implemented in the standalone MVP \
-                     and will be ignored. Task dispatch is handled by the session-manager \
-                     layer (a future phase of DOC-24)."
-                );
-            }
-            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
-            commands::standalone::run_cmd(&paths, &alias)
+        // #4990: `tm run` now carries two disjoint targets. A repo shape
+        // (`<owner>/<repo>` or a full URL) cold-starts a DAEMON-MANAGED session;
+        // a registry alias keeps the unchanged DOC-24 standalone behaviour. The
+        // routing decision lives in `run_target` so it is unit-testable.
+        Some(Command::Run { target, task, root }) => {
+            commands::run_target::run(&client, &url, &target, task, root).await
         }
         Some(Command::Path { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;

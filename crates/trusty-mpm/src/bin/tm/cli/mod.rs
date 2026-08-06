@@ -923,25 +923,50 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
-    /// Launch an interactive `claude` session for a managed alias (DOC-24).
+    /// Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias.
     ///
-    /// Why: `tm run` is the claude-mpm replacement — it launches Claude Code
-    /// with `CLAUDE_CONFIG_DIR=<root>/claude-config` so the global
-    /// hooks/MCPs are supplied and the real `~/.claude` is excluded.
-    /// What: loads the alias if needed, checks credentials, and spawns `claude`
-    /// with inherited stdio.
-    /// Test: `cli_parses_run_standalone`.
+    /// Why (#4990): `tm run` accepted only a DOC-24 registry alias, so starting
+    /// work on a repo that was neither registered nor already cloned had no
+    /// entry point. `tm run <owner>/<repo>` is that cold start, and it lands on
+    /// the DAEMON-MANAGED system (ADR-0030): the checkout goes to
+    /// `~/trusty-mpm-projects/<owner>/<repo>`, and the session is a real
+    /// `SessionRecord` with a tmux pane that shows up in `tm ls` and
+    /// `tm sessions` — not a blocking foreground `claude`.
+    /// What: a positional naming a repo (`<owner>/<repo>` with GitHub assumed,
+    /// or a full URL for any host — classified by the same predicate
+    /// `tm register` uses) clones or verifies the managed checkout, then hands
+    /// off to the `tm launch` path. A positional naming a registered alias
+    /// keeps the unchanged standalone behaviour: load if needed, check
+    /// credentials, spawn `claude` with inherited stdio and
+    /// `CLAUDE_CONFIG_DIR=<root>/claude-config`.
+    ///
+    /// Reusing an existing managed checkout FAILS LOUD when its `origin` names
+    /// a different repository — trusty-mpm never re-points a remote. A DIRTY
+    /// checkout is not an error: the fast-forward is skipped, a warning naming
+    /// the path and what is uncommitted is printed, and the session starts
+    /// anyway. Its branch is cut from a freshly-fetched
+    /// `origin/<default-branch>`, so it does not inherit the checkout's state.
+    ///
+    /// `--root` applies to the alias form only. The managed checkout's location
+    /// is set by `TRUSTY_MPM_REPOS_ROOT` / `TRUSTY_MPM_WORKSPACE_ROOT`.
+    /// Test: `cli_parses_run_standalone`, `run_target_tests.rs`.
     Run {
-        /// Registered alias to run.
-        alias: String,
+        /// `<owner>/<repo>` (GitHub assumed), a full repository URL, or a
+        /// registered alias (see `tm ls --projects`).
+        target: String,
         /// Optional initial task to pre-seed (currently unused by MVP).
         #[arg(long)]
         task: Option<String>,
-        /// Override the managed root (default: `~/.trusty-mpm`).
+        /// Override the managed root (default: `~/.trusty-mpm`). ALIAS FORM ONLY.
         ///
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
         /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
         /// default `~/.trusty-mpm`.
+        ///
+        /// With an `<owner>/<repo>` target this root is not consulted — the
+        /// managed checkout lives under `TRUSTY_MPM_REPOS_ROOT` /
+        /// `TRUSTY_MPM_WORKSPACE_ROOT` instead — so passing it there warns
+        /// rather than being silently ignored.
         ///
         /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
         #[arg(long)]
