@@ -92,7 +92,11 @@ work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
 
 🟢 **`trusty-mpm-gui` is excluded from bare `cargo build`/`test`/`check`**
 (#2951) — the root `Cargo.toml`'s `default-members` list omits it, matching
-CI's existing `--workspace --exclude trusty-mpm-gui` for the same commands.
+CI's existing `--workspace --exclude trusty-mpm-gui --exclude trusty-code-gui
+--exclude trusty-agents-ui` for the same commands (the third exclusion guards
+against a build-order race: `trusty-agents-ui`'s `tauri::generate_context!()`
+reads the same `ui/dist/` that `trusty-agents`' own build.rs populates, and
+panics if it runs first).
 Use `cargo build -p trusty-mpm-gui` (or `--workspace`, which always builds
 everything regardless of `default-members`) when you actually need it. This
 also stops every agent worktree from silently producing a fresh ad-hoc-signed
