@@ -1,14 +1,16 @@
 //! Unit tests for the cold-start entry point (#4990).
 //!
-//! Why: the two reuse guards are the whole reason this module exists, so both
-//! are proven against REAL temp git repositories rather than mocks — the
-//! failures they prevent (a checkout on the wrong remote, a dirty tree that
-//! cannot be fast-forwarded) live entirely in what git reports about a working
+//! Why: the two reuse behaviours are the whole reason this module exists, and
+//! they are deliberately DIFFERENT — a wrong remote refuses, a dirty tree warns
+//! and proceeds. Both are proven against REAL temp git repositories rather than
+//! mocks, because each one lives entirely in what git reports about a working
 //! directory. The remote canonicalization is pure and gets ordinary table
 //! tests.
 //! What: `canonical_remote` equivalence and non-equivalence; the
-//! remote-mismatch refusal; the dirty-tree refusal; the clean-reuse success;
-//! and the truncation of a long dirty-status message.
+//! remote-mismatch and no-origin refusals; the dirty-tree warn-and-proceed
+//! (including that the fetch still lands and the local branch does not move);
+//! the clean-reuse fast-forward; the fresh clone; and the truncation of a long
+//! dirty-status notice.
 //! Test: this file IS the test module.
 
 use std::path::Path;
@@ -152,51 +154,85 @@ fn existing_checkout_without_an_origin_fails_loud() {
     );
 }
 
-/// DECIDED BEHAVIOR: a dirty existing checkout fails loud.
+/// DECIDED BEHAVIOR: a dirty existing checkout WARNS AND PROCEEDS.
 ///
-/// Why: this is the `pull_ff_only` hole (`core::standalone::load.rs`) — it
-/// warns on a failed refresh and returns `Ok(())`, so the caller cannot tell a
-/// refreshed checkout from a stale one. Here the refusal happens BEFORE any
-/// write, so the dirty content is never at risk either.
+/// Why: this reverses an earlier fail-loud decision on this same path. A dirty
+/// tree cannot be fast-forwarded, but since #4957 the session branch is cut
+/// from a freshly-fetched `origin/<default>` and never inherits the base
+/// checkout's local `HEAD`, so a skipped fast-forward cannot leak stale content
+/// into the session. Refusing would block the common case — the tm checkout is
+/// shared with the operator's editors, making uncommitted content its steady
+/// state (ADR-0030 §4/§5) — to guard against nothing.
+///
+/// What must NOT happen is silence, which is the half of the `pull_ff_only`
+/// (`core::standalone::load.rs`) shape that really is a defect: it warns where
+/// nobody looks and returns `Ok(())`. So this asserts four things at once — the
+/// call succeeds, the skip is REPORTED to the caller naming what is dirty, the
+/// uncommitted content survives, and the local branch genuinely did not move
+/// while `origin/main` genuinely did.
 /// Test: itself.
 #[test]
-fn dirty_existing_checkout_fails_loud() {
+fn dirty_existing_checkout_warns_and_proceeds() {
     let tmp = tempfile::TempDir::new().expect("temp dir");
     let origin = init_origin(&tmp.path().join("origin")).to_path_buf();
     let base = tmp.path().join("base");
     clone_to(&origin, &base);
+    let head_before = git(&base, &["rev-parse", "HEAD"]);
+
+    // Origin moves forward, so a fast-forward is genuinely AVAILABLE — without
+    // this the "was not fast-forwarded" assertion would pass vacuously.
+    std::fs::write(origin.join("file.txt"), "v2 from origin\n").expect("write");
+    git(&origin, &["add", "."]);
+    git(&origin, &["commit", "-q", "-m", "moved forward"]);
 
     // The operator's uncommitted work.
     std::fs::write(base.join("file.txt"), "MY UNCOMMITTED EDIT\n").expect("write");
 
     let url = origin.to_string_lossy().into_owned();
-    let err =
-        ensure_managed_checkout_at(&base, &url).expect_err("a dirty checkout must be refused");
+    let checkout =
+        ensure_managed_checkout_at(&base, &url).expect("a dirty checkout must NOT be refused");
 
+    assert!(checkout.reused);
+    let reason = checkout
+        .refresh_skipped
+        .as_deref()
+        .expect("the skip must be REPORTED to the caller, not merely logged");
     assert!(
-        matches!(err, ColdStartError::DirtyCheckout { .. }),
-        "expected DirtyCheckout, got {err:?}"
+        reason.contains("uncommitted changes"),
+        "reason must state the cause: {reason}"
     );
-    let msg = err.to_string();
     assert!(
-        msg.contains(&base.display().to_string()),
-        "names path: {msg}"
+        reason.contains("file.txt"),
+        "reason must name what is dirty: {reason}"
     );
-    assert!(msg.contains("file.txt"), "names what is dirty: {msg}");
 
-    // And the edit survives — the refusal happens before anything writes.
+    // The edit survives, and the local branch did not move.
     assert_eq!(
         std::fs::read_to_string(base.join("file.txt")).expect("read"),
         "MY UNCOMMITTED EDIT\n"
     );
+    assert_eq!(
+        git(&base, &["rev-parse", "HEAD"]),
+        head_before,
+        "a dirty tree must not be fast-forwarded"
+    );
+
+    // But the FETCH still happened, which is what keeps the session's start
+    // point current — the whole reason the skipped fast-forward costs nothing.
+    assert_ne!(
+        git(&base, &["rev-parse", "refs/remotes/origin/main"]),
+        head_before,
+        "origin/main must be fetched even when the fast-forward is skipped"
+    );
 }
 
-/// The success case the two refusals must not swallow: a clean checkout on the
-/// requested remote is reused, refreshed, and reported as `reused`.
+/// The success case the refusal must not swallow: a clean checkout on the
+/// requested remote is reused, fast-forwarded, and reports NO skip.
 ///
-/// Why: a guard that refuses everything is not a guard. This also pins the
-/// refresh actually happening — origin moves forward and the reused checkout
-/// follows it.
+/// Why: a guard that refuses everything is not a guard. This pins the refresh
+/// actually happening — origin moves forward and the reused checkout follows it
+/// — and that `refresh_skipped` is `None`, so the notice cannot fire spuriously
+/// on every clean run.
 /// Test: itself.
 #[test]
 fn clean_matching_checkout_is_reused_and_refreshed() {
@@ -215,6 +251,10 @@ fn clean_matching_checkout_is_reused_and_refreshed() {
 
     assert!(checkout.reused, "an existing checkout must report reused");
     assert_eq!(checkout.base_path, base);
+    assert_eq!(
+        checkout.refresh_skipped, None,
+        "a clean checkout must report no skipped refresh"
+    );
     assert_eq!(
         std::fs::read_to_string(base.join("file.txt")).expect("read"),
         "v2 from origin\n",

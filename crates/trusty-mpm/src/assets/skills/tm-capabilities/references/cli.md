@@ -101,7 +101,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `push-guard` — Retrofit the #2867 cross-branch `pre-push` guard onto an existing clone
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
-- `run` — Launch an interactive `claude` session for a managed alias (DOC-24)
+- `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
 - `serve` — Alias for `start` — start the daemon if not running, no-op if it is
 - `services` — Inspect and probe workspace service daemons
   - `health` — Probe the health endpoint and print OK or FAIL

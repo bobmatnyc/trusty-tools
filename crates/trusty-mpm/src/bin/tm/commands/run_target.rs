@@ -60,7 +60,7 @@ pub(crate) enum RunTarget {
 /// falling back to [`trusty_common::github_path::parse_github_path`] for a full
 /// URL, which `parse_owner_repo` refuses by design.
 /// Test: `classify_sorts_alias_from_repo`, `classify_resolves_shorthand`,
-/// `classify_resolves_full_urls`, `classify_rejects_browser_pastes`,
+/// `classify_resolves_full_urls`, `classify_rejects_browser_pastes_and_paths`,
 /// `shorthand_identity_agrees_with_url_identity`.
 pub(crate) fn classify_run_target(spec: &str) -> anyhow::Result<RunTarget> {
     let spec = spec.trim();
@@ -182,6 +182,21 @@ async fn run_managed(
         );
     } else {
         eprintln!("tm: cloned {clone_url} → {}", checkout.base_path.display());
+    }
+
+    // A skipped fast-forward must be VISIBLE, not just logged. `pull_ff_only`
+    // (`core::standalone::load.rs`) is the shape to avoid: it warns where nobody
+    // looks and returns Ok, so a stale checkout reads as a refreshed one.
+    if let Some(reason) = &checkout.refresh_skipped {
+        eprintln!(
+            "tm: warning: did NOT fast-forward {} — {reason}",
+            checkout.base_path.display()
+        );
+        eprintln!(
+            "tm:          the session's branch is cut from a freshly-fetched \
+             origin/<default-branch>, so it is unaffected (#4957). \
+             The checkout itself stays where you left it."
+        );
     }
 
     super::launch::launch(

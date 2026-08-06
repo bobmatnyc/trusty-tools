@@ -11,57 +11,72 @@
 //!
 //! What: [`ensure_managed_checkout`] resolves `<repos_root>/<owner>/<repo>` via
 //! [`super::inproject::base_clone_path`] and drives
-//! [`super::inproject::ensure_base_clone`] against it, returning the path and
-//! whether an existing checkout was reused. Reuse is gated by two checks that
-//! FAIL LOUD rather than proceeding:
+//! [`super::inproject::ensure_base_clone`] against it, returning the path,
+//! whether an existing checkout was reused, and whether its fast-forward was
+//! skipped. Reusing an existing checkout has two distinct outcomes, and the
+//! difference between them is deliberate:
 //!
-//! 1. **Remote mismatch.** An existing checkout whose `origin` names a
-//!    different repository is an error. trusty-mpm never re-points a remote —
-//!    doing so silently would make `tm run <owner>/<repo>` operate on some
-//!    other repository under that repository's name.
-//! 2. **Dirty tree.** An existing checkout with uncommitted changes cannot be
-//!    refreshed, so it is an error rather than a silent no-op on stale
-//!    content. This is the shape `core::standalone::load::pull_ff_only` gets
-//!    wrong: it warns and returns `Ok(())`, so a failed refresh is
-//!    indistinguishable from a successful one.
+//! 1. **Remote mismatch → FAIL LOUD.** An existing checkout whose `origin`
+//!    names a different repository is an error. trusty-mpm never re-points a
+//!    remote: doing so silently would make `tm run <owner>/<repo>` operate on
+//!    some other repository under that repository's name, and every future
+//!    pull would keep coming from the wrong place.
+//! 2. **Dirty tree → WARN AND PROCEED.** A dirty tree cannot be
+//!    fast-forwarded, so the fast-forward is skipped and the operator is told
+//!    so in normal output. It is NOT an error, because since #4957 the session
+//!    branch is cut from a freshly-fetched `origin/<default>`
+//!    ([`super::inproject_start_point::resolve`]) and never inherits the base
+//!    checkout's local `HEAD` — so a skipped fast-forward cannot leak stale
+//!    content into the session. The tm checkout is shared with the operator and
+//!    their editors, which makes uncommitted content its expected steady state
+//!    (ADR-0030 §4/§5); refusing there would block the common case to guard
+//!    against nothing.
 //!
-//! Only after both clear does the refresh run, through
+//! What must never happen is SILENCE. The failure shape this module exists to
+//! avoid is `core::standalone::load::pull_ff_only`, which warns at a level
+//! nobody reads and returns `Ok(())`, leaving a failed refresh
+//! indistinguishable from a successful one at the call site. Here the skip is
+//! both `warn!`-logged and returned to the caller in
+//! [`ManagedCheckout::refresh_skipped`] so the CLI can print it.
+//!
+//! Either way the refresh still runs through
 //! [`super::inproject_hygiene::run_hygiene_for_base`] — the crate's single
-//! non-destructive base-clone refresh (fetch, gated fast-forward, worktree
-//! prune). Its own gates then have nothing left to decline for.
+//! non-destructive base-clone refresh. Its fetch is unconditional (which is
+//! what keeps `origin/<default>` current) and only its fast-forward is gated,
+//! matching ADR-0030 §4 exactly.
 //!
-//! Test: `inproject_cold_start_tests.rs` (pure canonicalization + the two
-//! loud-failure paths against real temp git repos);
-//! `tests/inproject_cold_start.rs` (fresh clone → the shape
+//! Test: `inproject_cold_start_tests.rs` (pure canonicalization, the
+//! remote-mismatch refusal, and the dirty warn-and-proceed path against real
+//! temp git repos); `tests/inproject_cold_start.rs` (fresh clone → the shape
 //! `try_inproject_spawn` requires).
 
 use std::path::{Path, PathBuf};
 
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{inproject, inproject_hygiene};
 
-/// How many working-tree entries a [`ColdStartError::DirtyCheckout`] message
-/// lists before it summarises the rest.
+/// How many working-tree entries a skipped-refresh notice lists before it
+/// summarises the rest.
 ///
-/// Why: a managed checkout can be thousands of lines dirty; an error that
-/// scrolls the terminal hides its own first line, which is the remedy.
+/// Why: a managed checkout can be thousands of lines dirty; a notice that
+/// scrolls the terminal hides its own first line, which is the point.
 /// What: `10`.
 /// Test: `dirty_message_truncates_long_status`.
 const DIRTY_ENTRY_PREVIEW: usize = 10;
 
 /// Why a cold start refused. Every variant is a loud stop, never a warning.
 ///
-/// Why: the two reuse hazards this module exists to close are both
-/// silent-success shapes elsewhere in the codebase, so they are modelled as
-/// errors that carry the offending path and what is wrong with it — not as
-/// booleans a caller could ignore.
-/// What: `RemoteMismatch` and `DirtyCheckout` are the two decided fail-loud
-/// cases; `NoOrigin` and `StatusUnavailable` are the fail-safe directions for
-/// a checkout whose state cannot be established; `Provision` wraps the
+/// Why: a checkout whose IDENTITY cannot be confirmed is the one hazard no
+/// warning can cover — proceeding would operate on the wrong repository under
+/// the requested one's name. A dirty tree is deliberately NOT here: it is
+/// reported through [`ManagedCheckout::refresh_skipped`] instead, because the
+/// session branch never inherits the base checkout's `HEAD` (module docs).
+/// What: `RemoteMismatch` when `origin` names another repository; `NoOrigin`
+/// when there is no `origin` to compare at all; `Provision` wraps the
 /// underlying clone/hygiene failure verbatim.
 /// Test: `existing_checkout_on_a_different_remote_fails_loud`,
-/// `dirty_existing_checkout_fails_loud`.
+/// `existing_checkout_without_an_origin_fails_loud`.
 #[derive(Debug, thiserror::Error)]
 pub enum ColdStartError {
     /// The existing managed checkout belongs to a different repository.
@@ -81,21 +96,6 @@ pub enum ColdStartError {
         requested: String,
     },
 
-    /// The existing managed checkout has uncommitted changes.
-    #[error(
-        "managed checkout {} has uncommitted changes, so it cannot be refreshed:\n{}\n\
-         Refusing to start a session on content that may be stale. Commit, stash, or \
-         discard those changes and run the command again.",
-        .path.display(),
-        summarize_entries(.entries)
-    )]
-    DirtyCheckout {
-        /// The managed checkout that was inspected.
-        path: PathBuf,
-        /// `git status --porcelain` lines, verbatim.
-        entries: Vec<String>,
-    },
-
     /// The existing managed checkout has no `remote.origin.url`.
     #[error(
         "managed checkout {} exists but has no remote.origin.url, so it cannot be matched \
@@ -109,18 +109,6 @@ pub enum ColdStartError {
         requested: String,
     },
 
-    /// git could not report the state of the existing managed checkout.
-    #[error(
-        "cannot read the git state of managed checkout {}: {detail}",
-        .path.display()
-    )]
-    StatusUnavailable {
-        /// The managed checkout that was inspected.
-        path: PathBuf,
-        /// The underlying git failure.
-        detail: String,
-    },
-
     /// Cloning or refreshing the base clone failed.
     #[error("{0}")]
     Provision(String),
@@ -128,16 +116,27 @@ pub enum ColdStartError {
 
 /// The managed base clone a cold start produced.
 ///
-/// Why: the caller needs the path to launch into, and needs to say whether it
-/// cloned or reused so the operator can tell a first run from a repeat one.
-/// What: the absolute `<repos_root>/<owner>/<repo>` path, plus `reused`.
-/// Test: `fresh_clone_yields_the_shape_try_inproject_spawn_requires`.
+/// Why: the caller needs the path to launch into, whether it cloned or reused
+/// (so the operator can tell a first run from a repeat one), and — critically —
+/// whether the fast-forward was skipped. That last field exists so the skip
+/// cannot be silent: a `warn!` alone goes to a log the operator is not reading,
+/// which is the `pull_ff_only` failure mode. Returning it makes the CLI able to
+/// print it in normal output.
+/// What: the absolute `<repos_root>/<owner>/<repo>` path, `reused`, and
+/// `refresh_skipped` — `Some(reason)` when the fast-forward was declined, in a
+/// form suitable for printing directly after the path.
+/// Test: `dirty_existing_checkout_warns_and_proceeds`,
+/// `clean_matching_checkout_is_reused_and_refreshed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedCheckout {
     /// Absolute path to the managed base clone.
     pub base_path: PathBuf,
     /// `true` when an existing checkout was verified and reused rather than cloned.
     pub reused: bool,
+    /// Why the fast-forward was skipped, when it was. `None` means it was not.
+    ///
+    /// The caller MUST surface this in normal output. See the type-level doc.
+    pub refresh_skipped: Option<String>,
 }
 
 /// Ensure a managed base clone exists for `owner`/`repo`, cloning from `clone_url`.
@@ -163,37 +162,54 @@ pub fn ensure_managed_checkout(
 /// Why: split from [`ensure_managed_checkout`] so tests can supply a temp
 /// directory directly rather than mutating `TRUSTY_MPM_REPOS_ROOT`, which
 /// races other threads in the same test binary.
-/// What: when `base_path/.git` is absent, clones. When it is present, runs the
-/// remote check then the dirty check — both fail loud — and only then
-/// refreshes through [`super::inproject_hygiene::run_hygiene_for_base`].
-/// Either way it finishes through [`super::inproject::ensure_base_clone`], so
-/// a reused checkout gets the same `.worktrees/` exclusion invariant a fresh
-/// clone does.
+/// What: when `base_path/.git` is absent, clones. When it is present, the
+/// remote check runs FIRST and can refuse; then the fast-forward gate is
+/// evaluated ([`fast_forward_skip_reason`]) and reported rather than enforced;
+/// then the refresh runs through
+/// [`super::inproject_hygiene::run_hygiene_for_base`], whose fetch is
+/// unconditional and whose fast-forward is gated by the same conditions. Either
+/// way it finishes through [`super::inproject::ensure_base_clone`], so a reused
+/// checkout gets the same `.worktrees/` exclusion invariant a fresh clone does.
 ///
-/// ORDERING IS THE POINT. Both guards run BEFORE anything writes to the
-/// directory, so a mismatched or dirty checkout is never fetched into, merged
-/// into, or otherwise touched.
+/// ORDERING IS THE POINT. The identity check runs BEFORE anything writes to the
+/// directory, so a checkout belonging to another repository is never fetched
+/// into, merged into, or otherwise touched.
 /// Test: `existing_checkout_on_a_different_remote_fails_loud`,
-/// `dirty_existing_checkout_fails_loud`,
+/// `dirty_existing_checkout_warns_and_proceeds`,
 /// `clean_matching_checkout_is_reused_and_refreshed`.
 pub fn ensure_managed_checkout_at(
     base_path: &Path,
     clone_url: &str,
 ) -> Result<ManagedCheckout, ColdStartError> {
     let reused = base_path.join(".git").exists();
+    let mut refresh_skipped = None;
 
     if reused {
+        // The one refusal: an existing checkout must be the repo that was asked
+        // for. Checked before any write.
         verify_remote_matches(base_path, clone_url)?;
-        verify_tree_is_clean(base_path)?;
 
-        // Refresh through the crate's single base-clone hygiene entry point.
-        // It is non-destructive by construction (fetch, gated fast-forward,
-        // worktree prune) and its dirty/ahead gates have nothing to decline
-        // for here, because `verify_tree_is_clean` already stopped that case.
-        info!(
-            path = %base_path.display(),
-            "cold-start: reusing managed checkout; refreshing"
-        );
+        refresh_skipped = fast_forward_skip_reason(base_path);
+        if let Some(reason) = &refresh_skipped {
+            // Logged here for the daemon/log path AND returned to the caller,
+            // which prints it. A warn! alone would be the `pull_ff_only`
+            // failure mode: technically not silent, practically unread.
+            warn!(
+                path = %base_path.display(),
+                "cold-start: NOT fast-forwarding the managed checkout — {reason}"
+            );
+        } else {
+            info!(
+                path = %base_path.display(),
+                "cold-start: reusing managed checkout; refreshing"
+            );
+        }
+
+        // Runs either way. The fetch is what keeps `origin/<default>` current,
+        // and that ref — not the local HEAD — is what the session branch is cut
+        // from (#4957), which is exactly why a declined fast-forward is
+        // reportable rather than fatal. Only the fast-forward is gated, matching
+        // ADR-0030 §4.
         inproject_hygiene::run_hygiene_for_base(base_path).map_err(ColdStartError::Provision)?;
     }
 
@@ -202,6 +218,7 @@ pub fn ensure_managed_checkout_at(
     Ok(ManagedCheckout {
         base_path: base_path.to_path_buf(),
         reused,
+        refresh_skipped,
     })
 }
 
@@ -236,36 +253,37 @@ fn verify_remote_matches(base_path: &Path, requested: &str) -> Result<(), ColdSt
     })
 }
 
-/// Refuse when an existing checkout has uncommitted changes.
+/// Report why the fast-forward will be skipped, if it will be.
 ///
-/// Why: a dirty tree cannot be fast-forwarded, so proceeding means running the
-/// session against whatever the checkout was last left at. `pull_ff_only`
-/// (`core::standalone::load.rs`) does exactly that — it prints a warning and
-/// returns `Ok(())`, making a failed refresh indistinguishable from a
-/// successful one at the call site.
+/// Why: this predicts the hygiene sweep's own dirty gate so the skip can be
+/// stated to the operator in normal output. It does NOT enforce anything —
+/// enforcement would block the common case for no benefit, because the session
+/// branch is cut from freshly-fetched `origin/<default>` and never inherits the
+/// base checkout's local `HEAD` (#4957). What it buys is that the skip is not
+/// silent, which is the half of the `pull_ff_only` shape that IS a defect: that
+/// function warns at a level nobody reads and returns `Ok(())`.
 ///
-/// The check is `git status --porcelain` WITHOUT `--ignored`, deliberately:
-/// the question is whether tracked work is at risk of being outrun, and
-/// gitignored build output is not that. The gitignored-collision hazard has
-/// its own, narrower guard inside the hygiene sweep
+/// The check is `git status --porcelain` WITHOUT `--ignored`, deliberately: the
+/// question is whether git can fast-forward this tree, and gitignored build
+/// output does not affect that. The gitignored-collision hazard has its own,
+/// narrower guard inside the hygiene sweep
 /// (`inproject_hygiene::colliding_untracked_paths`, #4961), which runs against
 /// the specific paths an update would write.
-/// What: `Ok(())` on empty output; `DirtyCheckout` carrying the porcelain
-/// lines otherwise; `StatusUnavailable` when git itself fails, which is the
-/// fail-safe direction — an unreadable checkout is never assumed clean.
-/// Test: `dirty_existing_checkout_fails_loud`,
+/// What: `None` when the tree is clean. `Some(reason)` when it is dirty (naming
+/// up to [`DIRTY_ENTRY_PREVIEW`] entries) or when git could not report at all —
+/// an unreadable checkout is never assumed clean, and the hygiene sweep's own
+/// gate declines the fast-forward in that case too, so predicting a skip
+/// matches what actually happens.
+/// Test: `dirty_existing_checkout_warns_and_proceeds`,
 /// `clean_matching_checkout_is_reused_and_refreshed`.
-fn verify_tree_is_clean(base_path: &Path) -> Result<(), ColdStartError> {
+fn fast_forward_skip_reason(base_path: &Path) -> Option<String> {
     match inproject_hygiene::porcelain_status(base_path) {
-        Ok(entries) if entries.is_empty() => Ok(()),
-        Ok(entries) => Err(ColdStartError::DirtyCheckout {
-            path: base_path.to_path_buf(),
-            entries,
-        }),
-        Err(detail) => Err(ColdStartError::StatusUnavailable {
-            path: base_path.to_path_buf(),
-            detail,
-        }),
+        Ok(entries) if entries.is_empty() => None,
+        Ok(entries) => Some(format!(
+            "it has uncommitted changes:\n{}",
+            summarize_entries(&entries)
+        )),
+        Err(detail) => Some(format!("its git state could not be read: {detail}")),
     }
 }
 
@@ -311,10 +329,10 @@ pub fn canonical_remote(url: &str) -> String {
         .join("/")
 }
 
-/// Render the working-tree entries for a [`ColdStartError::DirtyCheckout`].
+/// Render the working-tree entries naming why a fast-forward was skipped.
 ///
-/// Why: see [`DIRTY_ENTRY_PREVIEW`] — the remedy is the message's last line,
-/// and an untruncated status can push it off the screen.
+/// Why: see [`DIRTY_ENTRY_PREVIEW`] — an untruncated status can push the notice
+/// that matters off the screen.
 /// What: joins up to [`DIRTY_ENTRY_PREVIEW`] entries with newlines, appending
 /// a `… and N more` line when there are more.
 /// Test: `dirty_message_truncates_long_status`.

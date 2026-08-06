@@ -222,7 +222,7 @@ fn is_dirty(base_path: &Path) -> Option<bool> {
 /// `--ignored` reports nothing for gitignored paths, which is why this cannot
 /// be the only data-loss guard; see [`colliding_untracked_paths`].
 /// Test: `hygiene_dirty_tree_is_not_reset` (via [`run_hygiene_for_base`]);
-/// `dirty_existing_checkout_fails_loud` (via the cold-start gate).
+/// `dirty_existing_checkout_warns_and_proceeds` (via the cold-start gate).
 pub(crate) fn porcelain_status(base_path: &Path) -> Result<Vec<String>, String> {
     let out = std::process::Command::new("git")
         .arg("-C")
