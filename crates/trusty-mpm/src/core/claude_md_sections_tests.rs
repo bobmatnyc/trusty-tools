@@ -1673,24 +1673,84 @@ fn the_prose_rules_ban_categories_not_phrase_lists() {
     // generalize. Each must state the ban as a category or template AND mark
     // its examples non-exhaustive; asserting only the examples would rebuild
     // the exact failure they were written for.
+    //
+    // #4574 moved the rules out of `core` and into the output style, which was
+    // already carrying a live mirror of the same text — both channels are
+    // session-resident, so the project was paying for them twice. The
+    // assertions follow the rules to their one home rather than being deleted;
+    // `the_prose_rules_live_in_the_output_style_not_core` below is what keeps
+    // the second copy from coming back.
+    for style in crate::core::bundle::OUTPUT_STYLES {
+        let body = style.content;
+        let id = style.id;
+
+        assert!(
+            body.contains("**No praise for the user.**"),
+            "{id}: must carry the sycophancy rule"
+        );
+        assert!(
+            body.contains("bans the CATEGORY"),
+            "{id}: the sycophancy rule must ban the category, not four strings"
+        );
+        assert!(
+            body.contains("Non-exhaustive examples:"),
+            "{id}: the sycophancy examples must be marked non-exhaustive"
+        );
+
+        assert!(
+            body.contains("**Delete the framing opener; lead with the fact.**"),
+            "{id}: must carry the framing-opener rule"
+        );
+        assert!(
+            body.contains("`One <noun> that <its significance, or your relation to it>:`"),
+            "{id}: the framing-opener rule must state the TEMPLATE"
+        );
+        assert!(
+            body.contains("the rule is the template\nabove, never this list"),
+            "{id}: the observed instances must be marked as illustration only"
+        );
+
+        // The two rules the owner added on 2026-08-06 (#4574). Both are
+        // shape-stated, not phrase-listed, for the same reason as above.
+        assert!(
+            body.contains("Don't justify the restraint."),
+            "{id}: must carry the don't-justify-the-restraint rule"
+        );
+        assert!(
+            body.contains("No trailing emphatic negation."),
+            "{id}: must carry the trailing-emphatic-negation rule"
+        );
+    }
+}
+
+#[test]
+fn the_prose_rules_live_in_the_output_style_not_core() {
+    // #4574: `core` keeps the heading and a pointer so the PM knows the rules
+    // bind, and states none of them itself. A restatement here would be a
+    // second resident copy of text the output style already delivers — the
+    // duplication this issue removed.
     let core = bundled_fallback_package()
         .expect("manifest parses")
         .authored_run(&[SectionId::Core]);
 
-    assert!(core.contains("**No praise for the user.**"));
     assert!(
-        core.contains("bans the CATEGORY"),
-        "the sycophancy rule must ban the category, not four strings"
+        core.contains("## Prose Style — Write Plainly"),
+        "core keeps the heading — the PM has to know the rules bind"
     );
-    assert!(core.contains("Non-exhaustive examples:"));
+    assert!(
+        core.contains("Communication —\nWrite Plainly") || core.contains("Communication — Write Plainly"),
+        "core must name the output-style section that carries the rules"
+    );
 
-    assert!(core.contains("**Delete the framing opener; lead with the fact.**"));
-    assert!(
-        core.contains("`One <noun> that <its significance, or your relation to it>:`"),
-        "the framing-opener rule must state the TEMPLATE"
-    );
-    assert!(
-        core.contains("the rule is the template\nabove, never this list"),
-        "the observed instances must be marked as illustration only"
-    );
+    for restated in [
+        "**No praise for the user.**",
+        "**Delete the framing opener; lead with the fact.**",
+        "bans the CATEGORY",
+        "**Do not embellish.**",
+    ] {
+        assert!(
+            !core.contains(restated),
+            "core restates {restated:?} — the rules live in the output style only (#4574)"
+        );
+    }
 }

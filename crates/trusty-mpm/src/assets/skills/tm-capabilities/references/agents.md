@@ -11,7 +11,7 @@ Every agent below transitively `extends: base-agent` (directly, or via `base-eng
 | Agent | Category | Deploys When | Role | Extends | Description | Declared Skills |
 |---|---|---|---|---|---|---|
 | `api-qa` | universal | always | qa | base-qa | Specialized API and backend testing for REST, GraphQL, and server-side functionality | systematic-debugging, test-driven-development, testing-anti-patterns |
-| `code-analyzer` | universal | always | code-analyzer | base-research | Code analysis specialist. Reviews code for correctness, quality, security, and architectural health using static analysis. |  |
+| `code-analyzer` | universal | always | code-analyzer | base-research | Code analysis specialist. Reviews code for correctness, quality, security, and architectural health using static analysis. | code-review-standards |
 | `code-critic` | universal | always | qa | base-qa | Adversarial code review using a structured rubric. Outputs APPROVE/WARN/BLOCK verdict with line-level citations. Independent of implementer to avoid anchoring bias. | code-review-standards, contract-driven-testing |
 | `dart-engineer` | language | `pubspec.yaml` | engineer | base-engineer | Specialized Dart/Flutter engineer for cross-platform mobile, web, and desktop development with modern null safety and state management | systematic-debugging, test-driven-development |
 | `data-engineer` | universal | always | data-engineer | base-engineer | Data transformation specialist. Builds ETL pipelines, performs database migrations, and processes large datasets efficiently. | systematic-debugging, test-driven-development |

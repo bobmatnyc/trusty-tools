@@ -118,23 +118,15 @@ The shape: an operation can fail, the failure is downgraded to a warning, a
 default, or a `false` — and state advances anyway. The loss is permanent, and
 every alarm that should have caught it reports healthy.
 
-Run these five checks over every failure branch, in implementation and in
-review:
+Where a change adds or touches a failure branch, that branch is not reviewed
+until it has been checked against this shape and an error-arm regression test
+exists — one that FAILS against the pre-fix commit. Green CI over an untested
+failure path is evidence of nothing.
 
-1. **Does anything advance past the failure?** A cursor, watermark, index,
-   "done" marker, or success return that moves forward when the operation
-   failed puts the lost item outside every future window. **Fail closed** —
-   hold the state, propagate the error.
-2. **Name the alarm, then break it.** Identify which check is supposed to catch
-   this loss, then ask whether it can report healthy while the loss occurs.
-   Aggregates, tallies and summaries hide single-item failures by construction.
-3. **Compare sibling branches.** Asymmetry between arms of one state machine is
-   the tell. The arm that fails open is usually the bug.
-4. **Demand an error-arm test.** These ship green because no test ever entered
-   the failure path. Green CI over an untested failure path is evidence of
-   nothing. Require a regression test that FAILS against the pre-fix commit.
-5. **Review the fix harder than the bug.** A fix for this shape is the highest
-   risk place for it to reappear. Never merge one on the author's own gate.
+The five checks that find it, and why a fix for this shape needs a harder review
+than the bug did, are in the `code-review-standards` skill ("Fail-Open Check").
+`code-analyzer` and `code-critic` already load that skill; name the check in
+their dispatch brief.
 
 ### Phase 5: Documentation (CONDITIONAL)
 **Agent**: `documentation`
@@ -146,15 +138,9 @@ review:
 
 **Mandatory before `git push`**:
 1. Run `git diff origin/main HEAD`
-2. Delegate to `security` for a credential scan
-3. Block push if secrets detected
-
-**Security Check Template**:
-```
-Task: Pre-push security scan
-Scan for: API keys, passwords, private keys, tokens
-Return: Clean or list of blocked items
-```
+2. Delegate to `security` for a credential scan — API keys, passwords, private
+   keys, tokens — returning either clean or the list of blocked items
+3. Block the push if secrets are detected
 
 ## Commits, Issues & PRs (Shipped Defaults)
 
@@ -171,11 +157,13 @@ before linking.
 
 ## Publish and Release Workflow
 
-**CRITICAL**: PM MUST DELEGATE all version bumps and releases to `local-ops`. PM never edits version files (pyproject.toml, package.json, VERSION) directly.
+**CRITICAL**: PM MUST DELEGATE all version bumps and releases to `local-ops`.
+PM never edits version files (`Cargo.toml`, `pyproject.toml`, `package.json`,
+`VERSION`) directly.
 
-**Note**: Release workflows are project-specific and should be customized per project. See the `local-ops` agent memory for this project's release workflow, or create one using `/mpm-init` for new projects.
-
-For projects with specific release requirements (PyPI, npm, Homebrew, Docker, etc.), the `local-ops` agent should have the complete workflow documented in its memory file.
+Release workflows are project-specific — PyPI, npm, crates.io, Homebrew,
+Docker. The complete sequence lives in the project's own `CLAUDE.md` and in the
+`local-ops` agent's memory, not here. `tm-init` scaffolds it for a new project.
 
 ## Structural Delegation Format
 
