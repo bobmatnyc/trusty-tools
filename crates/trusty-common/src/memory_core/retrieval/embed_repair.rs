@@ -58,12 +58,25 @@ pub struct EmbedHealth {
     pub recorded_failures: Vec<EmbedFailure>,
     /// Whether a shared embedder has initialised in this process.
     pub embedder_ready: bool,
+    /// Rows in the `VECTOR_KEYS` table (#5005).
+    pub vector_key_rows: usize,
+    /// Distinct vector ids those rows point at (#5005). Below
+    /// `vector_key_rows` exactly when drawers share an id.
+    pub distinct_vector_ids: usize,
+    /// Drawers whose vector was overwritten by another drawer's (#5005). These
+    /// have a key, so they are NOT in `missing_vector_ids` — that is precisely
+    /// why the count gap missed them — but their content is embedded nowhere.
+    pub aliased_drawer_ids: Vec<Uuid>,
 }
 
 impl EmbedHealth {
     /// Whether every live drawer is vector-searchable.
+    ///
+    /// #5005: an aliased drawer has a vector key and still resolves to nothing,
+    /// so key presence alone is not the health condition. Both sets must be
+    /// empty.
     pub fn is_healthy(&self) -> bool {
-        self.missing_vector_ids.is_empty()
+        self.missing_vector_ids.is_empty() && self.aliased_drawer_ids.is_empty()
     }
 }
 
@@ -117,6 +130,14 @@ pub struct VectorBackfillReport {
     /// Ids still without a vector after this run (including any skipped by
     /// `limit`), so a caller can act on the remainder.
     pub still_missing_ids: Vec<Uuid>,
+    /// Drawers sharing a vector id with another drawer (#5005). This run never
+    /// repairs them — a re-embed alone would not, since they already have a
+    /// key. A non-zero value means the palace is NOT clean however small
+    /// `missing` is, and it is the number a deletion-bearing workflow must gate
+    /// on alongside `missing` (#5000 resolution item 3).
+    pub aliased: usize,
+    /// The ids behind `aliased`.
+    pub aliased_ids: Vec<Uuid>,
 }
 
 impl PalaceHandle {
@@ -149,6 +170,18 @@ impl PalaceHandle {
             .as_ref()
             .map(|d| embed_ledger::load(d))
             .unwrap_or_default();
+        // #5005: an aliased drawer has a key, so it is invisible to the set
+        // difference above. A redb scan failure must not be reported as "no
+        // aliasing" — log it and leave the counts at zero, which reads as
+        // unknown rather than clean because the row count is zero too.
+        let (vector_key_rows, distinct_vector_ids, aliased_drawer_ids) =
+            match self.vector_store.alias_audit() {
+                Ok(triple) => triple,
+                Err(e) => {
+                    tracing::warn!(palace = %self.id, "#5005: alias audit failed: {e:#}");
+                    (0, 0, Vec::new())
+                }
+            };
         EmbedHealth {
             palace_id: self.id.as_str().to_string(),
             drawer_count: live.len(),
@@ -156,6 +189,9 @@ impl PalaceHandle {
             missing_vector_ids,
             recorded_failures,
             embedder_ready: shared_embedder_initialized(),
+            vector_key_rows,
+            distinct_vector_ids,
+            aliased_drawer_ids,
         }
     }
 
@@ -191,6 +227,8 @@ impl PalaceHandle {
             repaired: 0,
             still_failing: 0,
             still_missing_ids: health.missing_vector_ids.clone(),
+            aliased: health.aliased_drawer_ids.len(),
+            aliased_ids: health.aliased_drawer_ids.clone(),
         };
 
         // A healthy palace short-circuits BEFORE touching the embedder, so the

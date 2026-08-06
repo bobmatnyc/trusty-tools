@@ -734,3 +734,129 @@ fn concurrent_clear_and_record_do_not_lose_each_other() {
         );
     }
 }
+
+// ── 6. #5005 — id aliasing is detectable and repairable ─────────────────────
+
+/// Build the palace's vector redb file with `uuids` all mapped onto one
+/// `vector_id`, the state a pre-#5005 double-open left behind.
+///
+/// Why: after the allocator fix this state can no longer be produced through
+/// `upsert`, so the fixture has to be written at the redb level. The handle is
+/// dropped before returning, releasing the file lock so `make_handle` can open
+/// it normally.
+/// What: creates `<dir>/idx.usearch.redb`, writes one 384-d vector at
+/// `shared_id` and a `VECTOR_KEYS` row per uuid pointing at it.
+/// Test: used by `alias_audit_surfaces_a_collision`.
+fn seed_aliased_vector_file(dir: &std::path::Path, shared_id: u64, uuids: &[Uuid]) {
+    use crate::memory_core::store::kg_store::{VECTOR_KEYS, VECTORS};
+    use redb::Database;
+    let db = Database::create(dir.join("idx.usearch.redb")).expect("create vector redb");
+    let encoded = postcard::to_allocvec(&vec![0.05_f32; 384]).expect("encode");
+    let wtx = db.begin_write().expect("begin");
+    {
+        let mut vectors = wtx.open_table(VECTORS).expect("vectors");
+        let mut keys = wtx.open_table(VECTOR_KEYS).expect("keys");
+        vectors.insert(shared_id, encoded.as_slice()).expect("vec");
+        for u in uuids {
+            keys.insert(u.to_string().as_str(), shared_id).expect("key");
+        }
+    }
+    wtx.commit().expect("commit");
+    drop(db); // release the flock so the palace can open the file
+}
+
+/// Why (#5005): `palace_reembed` reported `missing: 0` for a palace with four
+/// unretrievable drawers, because an aliased drawer HAS a vector key. Health
+/// that only set-differences drawer ids against vector keys cannot see it, and
+/// a deletion-bearing workflow gating on `missing` would have read that as a
+/// clean bill of health.
+/// What: seeds three drawers sharing one `vector_id`, opens the palace over
+/// that file, and asserts `embed_health` reports zero missing (the false
+/// all-clear, unchanged) AND names all three as aliased, with the key-row /
+/// distinct-id arithmetic that detects it. `is_healthy` must be false.
+/// Test: itself. Making `embed_health` drop the alias audit leaves
+/// `aliased_drawer_ids` empty and `is_healthy()` true — both assertions fail.
+#[test]
+fn alias_audit_surfaces_a_collision() {
+    let dir = tempfile::tempdir().unwrap();
+    // Build the drawers first: `Drawer::new`'s first argument is the ROOM id and
+    // the drawer id is generated, so the vector file has to be seeded with the
+    // ids the drawers actually carry.
+    let room = Uuid::new_v4();
+    let drawers: Vec<Drawer> = (0..3)
+        .map(|_| Drawer::new(room, "aliased content"))
+        .collect();
+    let mut ids: Vec<Uuid> = drawers.iter().map(|d| d.id).collect();
+    ids.sort();
+    seed_aliased_vector_file(dir.path(), 988, &ids);
+
+    let handle = make_handle(dir.path());
+    for d in drawers {
+        handle.add_drawer(d);
+    }
+
+    let health = handle.embed_health();
+    assert!(
+        health.missing_vector_ids.is_empty(),
+        "the false all-clear this ticket is about: every aliased drawer has a key"
+    );
+    assert_eq!(health.vector_key_rows, 3);
+    assert_eq!(
+        health.distinct_vector_ids, 1,
+        "three keys, one id — the gap is the detector"
+    );
+    let mut aliased = health.aliased_drawer_ids.clone();
+    aliased.sort();
+    assert_eq!(aliased, ids, "every member of the group must be named");
+    assert!(
+        !health.is_healthy(),
+        "a palace with aliased drawers is not healthy however small `missing` is"
+    );
+}
+
+/// Why (#5005 repair): freeing the group is what turns an invisible alias into
+/// an ordinary missing drawer the existing backfill can repair. Code only —
+/// this was never run against a live palace in the PR that added it.
+/// What: seeds the same three-way collision, calls `UsearchStore::unalias`, and
+/// asserts health flips from "0 missing, 3 aliased" to "3 missing, 0 aliased".
+/// Test: itself. A repair that spared the reachable member frees 2 and leaves
+/// `missing` at 2, failing both counts.
+#[test]
+fn unalias_marks_the_whole_group_for_reembed() {
+    let dir = tempfile::tempdir().unwrap();
+    // Build the drawers first: `Drawer::new`'s first argument is the ROOM id and
+    // the drawer id is generated, so the vector file has to be seeded with the
+    // ids the drawers actually carry.
+    let room = Uuid::new_v4();
+    let drawers: Vec<Drawer> = (0..3)
+        .map(|_| Drawer::new(room, "aliased content"))
+        .collect();
+    let mut ids: Vec<Uuid> = drawers.iter().map(|d| d.id).collect();
+    ids.sort();
+    seed_aliased_vector_file(dir.path(), 988, &ids);
+
+    let handle = make_handle(dir.path());
+    for d in drawers {
+        handle.add_drawer(d);
+    }
+
+    let freed = handle.vector_store.unalias().expect("unalias");
+    assert_eq!(
+        freed.len(),
+        3,
+        "the whole group is freed, not just the losers"
+    );
+
+    let after = handle.embed_health();
+    assert!(
+        after.aliased_drawer_ids.is_empty(),
+        "no group survives the repair"
+    );
+    let mut missing = after.missing_vector_ids.clone();
+    missing.sort();
+    assert_eq!(
+        missing, ids,
+        "the freed drawers must now read as ordinary missing, which the backfill repairs"
+    );
+    assert!(!after.is_healthy(), "they still need a re-embed");
+}

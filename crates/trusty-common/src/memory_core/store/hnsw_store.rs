@@ -20,14 +20,15 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 use parking_lot::RwLock;
-use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, Table};
 use thiserror::Error;
 
-use crate::memory_core::store::kg_store::{DELETED_VECTORS, VECTOR_KEYS, VECTORS};
+use crate::memory_core::store::kg_store::{
+    DELETED_VECTORS, NEXT_VECTOR_ID, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS,
+};
 
 /// Default HNSW connectivity. Maps to `max_nb_connection` in `hnsw_rs`.
 ///
@@ -58,6 +59,20 @@ const HNSW_INITIAL_CAPACITY: usize = 1024;
 /// stable for small `top_k`.
 const HNSW_DEFAULT_EF_SEARCH: usize = 64;
 
+/// How many candidate ids the allocator may probe before it gives up.
+///
+/// Why (#5005): the persisted counter is the mechanism that keeps ids unique;
+/// the occupancy probe in [`allocate_vector_id`] is the backstop for a counter
+/// that is somehow behind the table (a palace written by a pre-#5005 binary
+/// between two opens, a hand-edited file). Each probe jumps past the highest
+/// occupied id, so one iteration resolves any real collision — a budget this
+/// small only runs out if the table is being mutated underneath a write
+/// transaction, which redb does not permit. Bounded so a corrupt file makes
+/// `upsert` fail loudly instead of spinning.
+/// What: 8 attempts, then [`HnswStoreError::IdAllocationFailed`].
+/// Test: `upsert_refuses_to_reuse_an_id_already_present_in_vectors`.
+const MAX_ALLOC_PROBES: u8 = 8;
+
 /// Why: A structured error type lets callers distinguish redb failures
 /// from postcard decode failures and from UUID parse failures without
 /// pattern-matching on stringly-typed `anyhow::Error` payloads.
@@ -86,6 +101,15 @@ pub enum HnswStoreError {
     InvalidUuid(#[from] uuid::Error),
     #[error("vector dimension mismatch: expected {expected}, got {got}")]
     DimensionMismatch { expected: usize, got: usize },
+    /// The allocator could not find a free `vector_id` within
+    /// [`MAX_ALLOC_PROBES`]. Fails the upsert rather than overwriting a live
+    /// vector (#5005).
+    #[error(
+        "could not allocate a free vector_id after {probes} attempts \
+         (last candidate {last_candidate} is already present in VECTORS); \
+         refusing to overwrite a live vector — the palace index needs a rebuild"
+    )]
+    IdAllocationFailed { probes: u8, last_candidate: u64 },
     /// Returned by every write method when the store is in snapshot
     /// (read-only) mode. Callers should surface this verbatim — the
     /// message is the canonical guidance for issue #59.
@@ -128,6 +152,78 @@ impl From<redb::CommitError> for HnswStoreError {
     }
 }
 
+/// Reserve the next free `vector_id`, inside the caller's write transaction.
+///
+/// Why (#5005): the old allocator was a process-local `AtomicU64` seeded at
+/// open. Two live `HnswStore`s over one database file — which the vector-db
+/// cache deliberately allows, so that a palace opened twice in one process
+/// shares a single redb handle — each seeded from the same high-water mark and
+/// then issued the same ids. Because redb permits one write transaction at a
+/// time per database, moving the reservation into the transaction that does the
+/// insert makes it serialisable with every other writer on that file: the id
+/// and the row that claims it commit or roll back together.
+/// What: reads `VECTOR_ID_SEQ`, takes the first candidate with no `VECTORS`
+/// row, writes `candidate + 1` back, and returns the candidate. When the
+/// candidate IS occupied — a counter left behind by a pre-#5005 binary, or a
+/// hand-edited file — it jumps past the highest occupied id rather than
+/// overwriting, logs the correction, and retries; after [`MAX_ALLOC_PROBES`]
+/// it fails with [`HnswStoreError::IdAllocationFailed`] instead of aliasing.
+/// A missing counter row (only reachable if the store skipped open-time
+/// seeding) falls back to the same high-water mark the seed would have used.
+/// Test: `upsert_refuses_to_reuse_an_id_already_present_in_vectors`,
+/// `two_live_stores_over_one_file_never_alias_ids`.
+fn allocate_vector_id(
+    seq: &mut Table<'_, &'static str, u64>,
+    vectors: &Table<'_, u64, &'static [u8]>,
+) -> Result<u64> {
+    let mut candidate = match seq.get(NEXT_VECTOR_ID)? {
+        Some(g) => g.value(),
+        None => {
+            tracing::warn!(
+                "#5005: VECTOR_ID_SEQ has no counter row at allocation time; \
+                 falling back to the VECTORS high-water mark"
+            );
+            high_water(vectors)?
+        }
+    };
+
+    for probe in 0..MAX_ALLOC_PROBES {
+        if vectors.get(candidate)?.is_none() {
+            seq.insert(NEXT_VECTOR_ID, candidate.saturating_add(1))?;
+            return Ok(candidate);
+        }
+        tracing::warn!(
+            candidate,
+            probe,
+            "#5005: persisted vector_id counter is behind the VECTORS table; \
+             skipping the occupied id instead of overwriting it"
+        );
+        // Jump past the highest occupied id so one correction is enough.
+        candidate = high_water(vectors)?.max(candidate.saturating_add(1));
+    }
+
+    Err(HnswStoreError::IdAllocationFailed {
+        probes: MAX_ALLOC_PROBES,
+        last_candidate: candidate,
+    })
+}
+
+/// One past the highest `vector_id` present in `VECTORS` (1 when empty).
+///
+/// Why: both the allocator's collision jump and its missing-counter fallback
+/// need the same "no id at or above this is taken" bound. `VECTORS` is a
+/// B-tree keyed by `u64`, so `last()` is O(log n) — cheap enough to call on the
+/// rare correction path.
+/// What: `last()? + 1`, or 1 for an empty table (id 0 is never issued, matching
+/// the pre-#5005 seed of `max_seen + 1`).
+/// Test: exercised by `upsert_refuses_to_reuse_an_id_already_present_in_vectors`.
+fn high_water(vectors: &Table<'_, u64, &'static [u8]>) -> Result<u64> {
+    Ok(match vectors.last()? {
+        Some((k, _)) => k.value().saturating_add(1),
+        None => 1,
+    })
+}
+
 /// Public result alias to keep call-site signatures concise.
 ///
 /// Why: Most call sites only need `Result<T, HnswStoreError>` and
@@ -135,6 +231,44 @@ impl From<redb::CommitError> for HnswStoreError {
 /// What: `type Result<T> = std::result::Result<T, HnswStoreError>`.
 /// Test: Used by every public method below.
 pub type Result<T> = std::result::Result<T, HnswStoreError>;
+
+/// How many drawer keys point at a `vector_id` that another key also points at.
+///
+/// Why (#5005 / #5000): every count-based health signal this palace had could
+/// be zero while four drawers were unretrievable — `drawer_count` matched,
+/// `palace_reembed` reported nothing missing, and recall could still hit
+/// lexically. `key_rows` versus `distinct_vector_ids` is the one comparison
+/// that cannot be fooled by it, because it never leaves `VECTOR_KEYS`.
+/// What: the two counts plus the offending groups, each `(vector_id, uuids)`.
+/// Test: `audit_detects_two_uuids_mapped_to_one_id`.
+#[derive(Debug, Clone, Default)]
+pub struct AliasAudit {
+    /// Rows in `VECTOR_KEYS` — one per drawer that has ever been embedded.
+    pub key_rows: usize,
+    /// Distinct `vector_id`s those rows point at. Equal to `key_rows` iff no
+    /// drawer's vector has been overwritten by another drawer's.
+    pub distinct_vector_ids: usize,
+    /// Every `vector_id` claimed by more than one uuid, with its uuids sorted.
+    pub aliased: Vec<(u64, Vec<String>)>,
+}
+
+impl AliasAudit {
+    /// Drawer keys caught in a collision — the count an operator acts on.
+    ///
+    /// Why: `aliased.len()` counts groups, not drawers, and the number that
+    /// matters is how many drawers are affected. Equals
+    /// `key_rows - distinct_vector_ids` on a consistent audit.
+    /// What: sums the group sizes.
+    /// Test: `audit_detects_two_uuids_mapped_to_one_id`.
+    pub fn aliased_key_count(&self) -> usize {
+        self.aliased.iter().map(|(_, uuids)| uuids.len()).sum()
+    }
+
+    /// Whether no drawer's vector is shared with another drawer.
+    pub fn is_clean(&self) -> bool {
+        self.aliased.is_empty()
+    }
+}
 
 /// Pure-Rust HNSW store backed by redb for persistence (issue #50).
 ///
@@ -145,15 +279,15 @@ pub type Result<T> = std::result::Result<T, HnswStoreError>;
 /// minor versions. The cost is a one-time O(N) re-insertion per open;
 /// real-world palaces are bounded to ~10⁵ vectors so this is acceptable.
 /// What: Holds `Arc<Database>` for persistence, the in-memory `Hnsw<f32,
-/// DistCosine>` wrapped in `Arc<RwLock<_>>` for concurrent reads, the
-/// embedding dimension (for validation), and an `AtomicU64` monotonic
-/// vector_id counter (seeded from `max(VECTOR_KEYS) + 1` on open).
+/// DistCosine>` wrapped in `Arc<RwLock<_>>` for concurrent reads, and the
+/// embedding dimension (for validation). The vector_id counter is NOT held
+/// here — it lives in redb (`VECTOR_ID_SEQ`), because a per-store counter is
+/// exactly the #5005 aliasing bug.
 /// Test: See `tests::upsert_and_search_round_trips` and friends.
 pub struct HnswStore {
     db: Arc<Database>,
     index: Arc<RwLock<Hnsw<'static, f32, DistCosine>>>,
     dim: usize,
-    next_id: AtomicU64,
     /// When true, every write method short-circuits with a "read-only"
     /// error before touching redb.
     ///
@@ -174,12 +308,12 @@ impl HnswStore {
     /// drawer/triple writes and vector upserts can be coordinated. Passing
     /// in `Arc<Database>` (rather than a path) lets the caller own the
     /// connection cache and reuse the same handle as `KgStoreRedb`.
-    /// What: Touches `VECTORS` / `VECTOR_KEYS` / `DELETED_VECTORS` to
-    /// create them if missing, then reads every `(vector_id, vec)` row from
-    /// `VECTORS` (skipping tombstoned ids) and replays them into a fresh
-    /// in-memory `Hnsw<f32, DistCosine>` index. Seeds `next_id` from
-    /// `max(VECTOR_KEYS.value()) + 1` so subsequent upserts never collide
-    /// with an existing id.
+    /// What: Touches `VECTORS` / `VECTOR_KEYS` / `DELETED_VECTORS` /
+    /// `VECTOR_ID_SEQ` to create them if missing, then reads every
+    /// `(vector_id, vec)` row from `VECTORS` (skipping tombstoned ids) and
+    /// replays them into a fresh in-memory `Hnsw<f32, DistCosine>` index.
+    /// Raises the persisted `VECTOR_ID_SEQ` counter to at least
+    /// `max(VECTORS, VECTOR_KEYS) + 1` (#5005).
     /// Test: `hydration_restores_index`.
     pub fn open(db: Arc<Database>, dim: usize) -> Result<Self> {
         Self::open_with_mode(db, dim, false)
@@ -208,6 +342,7 @@ impl HnswStore {
                 let _ = wtx.open_table(VECTORS)?;
                 let _ = wtx.open_table(VECTOR_KEYS)?;
                 let _ = wtx.open_table(DELETED_VECTORS)?;
+                let _ = wtx.open_table(VECTOR_ID_SEQ)?;
             }
             wtx.commit()?;
         }
@@ -273,11 +408,34 @@ impl HnswStore {
             }
         }
 
+        // #5005: raise the persisted allocator to the file's high-water mark.
+        //
+        // This is both the migration for a palace written before `VECTOR_ID_SEQ`
+        // existed (no row → seeded here) and the repair for one that a
+        // pre-#5005 binary wrote to between two opens (row present but stale →
+        // raised here). Written as a max, never a plain set, so it is
+        // idempotent and can only move forward: a rolling upgrade that
+        // interleaves an old binary can leave the counter behind the tables,
+        // and the next open of a fixed binary pulls it back up before any id is
+        // issued. Skipped in read-only/snapshot mode, where every write path
+        // returns `ReadOnly` before it could allocate anything.
+        if !read_only {
+            let wtx = db.begin_write()?;
+            {
+                let mut seq = wtx.open_table(VECTOR_ID_SEQ)?;
+                let current = seq.get(NEXT_VECTOR_ID)?.map(|g| g.value()).unwrap_or(0);
+                let floor = max_seen.saturating_add(1);
+                if current < floor {
+                    seq.insert(NEXT_VECTOR_ID, floor)?;
+                }
+            }
+            wtx.commit()?;
+        }
+
         Ok(Self {
             db,
             index: Arc::new(RwLock::new(index)),
             dim,
-            next_id: AtomicU64::new(max_seen.saturating_add(1)),
             read_only,
         })
     }
@@ -311,7 +469,15 @@ impl HnswStore {
     /// `VECTORS`, writes the UUID→id mapping to `VECTOR_KEYS`, and removes
     /// any prior tombstone for this id. Then inserts the vector into the
     /// in-memory graph.
-    /// Test: `upsert_and_search_round_trips`.
+    ///
+    /// #5005: allocation for a NEW uuid reads and bumps the persisted
+    /// `VECTOR_ID_SEQ` counter inside this same write transaction, so two live
+    /// stores over one file serialise against each other instead of each
+    /// handing out ids from a private counter. [`allocate_vector_id`] also
+    /// refuses to return an id that already has a `VECTORS` row, so an upsert
+    /// can never silently overwrite another drawer's vector.
+    /// Test: `upsert_and_search_round_trips`,
+    /// `two_live_stores_over_one_file_never_alias_ids`.
     pub fn upsert(&self, uuid: &str, vector: &[f32]) -> Result<u64> {
         if self.read_only {
             return Err(HnswStoreError::ReadOnly);
@@ -330,6 +496,7 @@ impl HnswStore {
             let mut vectors = wtx.open_table(VECTORS)?;
             let mut keys = wtx.open_table(VECTOR_KEYS)?;
             let mut tombstones = wtx.open_table(DELETED_VECTORS)?;
+            let mut seq = wtx.open_table(VECTOR_ID_SEQ)?;
 
             // Resolve the existing id in a scoped block so the AccessGuard
             // (immutable borrow of `keys`) is dropped before we re-borrow
@@ -338,7 +505,8 @@ impl HnswStore {
             vector_id = match existing {
                 Some(id) => id,
                 None => {
-                    let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+                    // #5005: allocate from redb, inside this txn.
+                    let id = allocate_vector_id(&mut seq, &vectors)?;
                     keys.insert(uuid, id)?;
                     id
                 }
@@ -501,6 +669,99 @@ impl HnswStore {
         Ok(out)
     }
 
+    /// Count how many drawer keys share a `vector_id` with another key.
+    ///
+    /// Why (#5005, and requirement 1 of #5000): key PRESENCE is what
+    /// `palace_reembed` tests, and an aliased drawer has a key — so the palace
+    /// that lost four drawers to id collisions reported zero missing. The
+    /// signal that does catch it is arithmetic on `VECTOR_KEYS` alone: one row
+    /// per drawer, one distinct id per row, so any shortfall between the two is
+    /// exactly the number of drawers whose vector belongs to someone else.
+    /// What: one pass over `VECTOR_KEYS` building id → uuids. Returns the row
+    /// count, the distinct-id count, and every group with more than one uuid.
+    /// Cheap: `VECTOR_KEYS` is one small row per drawer and holds no vectors.
+    /// Test: `audit_detects_two_uuids_mapped_to_one_id`.
+    pub fn audit_aliases(&self) -> Result<AliasAudit> {
+        let mut by_id: HashMap<u64, Vec<String>> = HashMap::new();
+        let mut key_rows = 0usize;
+        {
+            let rtx = self.db.begin_read()?;
+            let keys = rtx.open_table(VECTOR_KEYS)?;
+            for entry in keys.iter()? {
+                let (k, v) = entry?;
+                key_rows += 1;
+                by_id
+                    .entry(v.value())
+                    .or_default()
+                    .push(k.value().to_string());
+            }
+        }
+        let distinct_vector_ids = by_id.len();
+        let mut aliased: Vec<(u64, Vec<String>)> = by_id
+            .into_iter()
+            .filter(|(_, uuids)| uuids.len() > 1)
+            .collect();
+        // Deterministic order so callers, logs, and tests all agree.
+        aliased.sort_by_key(|(id, _)| *id);
+        for (_, uuids) in &mut aliased {
+            uuids.sort();
+        }
+        Ok(AliasAudit {
+            key_rows,
+            distinct_vector_ids,
+            aliased,
+        })
+    }
+
+    /// Unmap every drawer caught in an id collision so a re-embed can repair it.
+    ///
+    /// 🔴 Not wired to any CLI or MCP surface, and never run against a live
+    /// palace in the PR that added it (#5005) — see that PR's body.
+    ///
+    /// Why: when N uuids alias onto one `vector_id`, the single surviving
+    /// `VECTORS` row holds whichever vector was written LAST, and search
+    /// resolves that id to whichever uuid `VECTOR_KEYS` yields last (ascending
+    /// by uuid). Those two "last"s are unrelated, so the reachable drawer's
+    /// content is not reliably its own either — every member of the group is
+    /// suspect, not just the unreachable ones. The only sound repair is to drop
+    /// the whole group's mapping and re-embed all of them.
+    /// What: for each aliased group, removes every `VECTOR_KEYS` row in it and
+    /// tombstones the shared id, in one write transaction. Returns the freed
+    /// uuids, which then read as ordinary "missing" drawers to
+    /// `PalaceHandle::embed_health` and are repaired by the normal backfill.
+    /// Idempotent: a second run finds no groups and frees nothing.
+    /// Test: `unalias_frees_every_uuid_in_a_collision_group`.
+    pub fn unalias(&self) -> Result<Vec<String>> {
+        if self.read_only {
+            return Err(HnswStoreError::ReadOnly);
+        }
+        let audit = self.audit_aliases()?;
+        if audit.aliased.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut freed: Vec<String> = Vec::new();
+        let wtx = self.db.begin_write()?;
+        {
+            let mut keys = wtx.open_table(VECTOR_KEYS)?;
+            let mut tombstones = wtx.open_table(DELETED_VECTORS)?;
+            for (id, uuids) in &audit.aliased {
+                for uuid in uuids {
+                    let _ = keys.remove(uuid.as_str())?;
+                    freed.push(uuid.clone());
+                }
+                tombstones.insert(*id, [].as_slice())?;
+            }
+        }
+        wtx.commit()?;
+        tracing::warn!(
+            groups = audit.aliased.len(),
+            freed = freed.len(),
+            "#5005: unmapped every drawer in an aliased vector_id group; they now \
+             read as missing and need a re-embed"
+        );
+        Ok(freed)
+    }
+
     /// Remove `VECTORS` rows whose `vector_id` no longer has a matching
     /// `VECTOR_KEYS` entry (i.e. dangling vectors). Also clears tombstoned
     /// rows from `VECTORS` and `DELETED_VECTORS` in the same pass.
@@ -587,180 +848,4 @@ impl HnswStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use redb::Database;
-    use tempfile::tempdir;
-    use uuid::Uuid;
-
-    /// Build a deterministic dim-D unit vector. Different seeds produce
-    /// numerically distinct vectors, which keeps the HNSW graph from
-    /// short-circuiting any "exact match" paths during search.
-    fn unit_vec(dim: usize, seed: u32) -> Vec<f32> {
-        let raw: Vec<f32> = (0..dim).map(|i| ((i as u32 + seed) as f32) + 1.0).collect();
-        let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
-        raw.into_iter().map(|x| x / norm).collect()
-    }
-
-    fn open_store(dim: usize) -> (tempfile::TempDir, HnswStore) {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("hnsw.redb");
-        let db = Arc::new(Database::create(&path).expect("create db"));
-        let store = HnswStore::open(db, dim).expect("open store");
-        (dir, store)
-    }
-
-    /// Why: The end-to-end contract is "upsert a vector under a UUID,
-    /// then search for that vector and get the UUID back at rank 0".
-    /// What: Insert three vectors, query with one of them, assert the
-    /// matching UUID is the top hit with near-zero distance.
-    /// Test: This test itself is the verification.
-    #[test]
-    fn upsert_and_search_round_trips() {
-        let (_dir, store) = open_store(8);
-        let u1 = Uuid::new_v4().to_string();
-        let u2 = Uuid::new_v4().to_string();
-        let u3 = Uuid::new_v4().to_string();
-        let v1 = unit_vec(8, 1);
-        let v2 = unit_vec(8, 100);
-        let v3 = unit_vec(8, 200);
-
-        store.upsert(&u1, &v1).unwrap();
-        store.upsert(&u2, &v2).unwrap();
-        store.upsert(&u3, &v3).unwrap();
-
-        let hits = store.search(&v2, 1).unwrap();
-        assert_eq!(hits.len(), 1, "expected one hit");
-        assert_eq!(hits[0].0, u2, "top hit must be the queried vector's uuid");
-        assert!(
-            hits[0].1 < 1e-3,
-            "distance should be ~0 for exact match, got {}",
-            hits[0].1
-        );
-    }
-
-    /// Why: `delete` must hide the vector from subsequent searches even
-    /// though `hnsw_rs` cannot physically remove it from the graph.
-    /// What: Insert three vectors, delete one, search using the deleted
-    /// vector, assert the deleted UUID is NOT in the results.
-    /// Test: This test itself is the verification.
-    #[test]
-    fn delete_filters_results() {
-        let (_dir, store) = open_store(8);
-        let u1 = Uuid::new_v4().to_string();
-        let u2 = Uuid::new_v4().to_string();
-        let u3 = Uuid::new_v4().to_string();
-        let v1 = unit_vec(8, 11);
-        let v2 = unit_vec(8, 22);
-        let v3 = unit_vec(8, 33);
-
-        store.upsert(&u1, &v1).unwrap();
-        store.upsert(&u2, &v2).unwrap();
-        store.upsert(&u3, &v3).unwrap();
-
-        assert!(store.delete(&u2).unwrap(), "delete should report removed");
-        // Second delete is a no-op and returns false.
-        assert!(!store.delete(&u2).unwrap());
-
-        let hits = store.search(&v2, 3).unwrap();
-        assert!(
-            !hits.iter().any(|(uuid, _)| uuid == &u2),
-            "deleted uuid must not appear in results: {hits:?}"
-        );
-        assert_eq!(store.len().unwrap(), 2, "len should account for tombstone");
-    }
-
-    /// Why: A fresh `HnswStore::open` against the same redb file must
-    /// rehydrate the in-memory graph from `VECTORS`, so searches return
-    /// the same UUIDs as before reopen.
-    /// What: Upsert via one store instance, drop it, reopen at the same
-    /// path, run the same search, assert the same UUID comes back.
-    /// Test: This test itself is the verification.
-    #[test]
-    fn hydration_restores_index() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("hnsw.redb");
-        let u1 = Uuid::new_v4().to_string();
-        let v1 = unit_vec(8, 42);
-
-        {
-            let db = Arc::new(Database::create(&path).expect("create"));
-            let store = HnswStore::open(db, 8).unwrap();
-            store.upsert(&u1, &v1).unwrap();
-            assert_eq!(store.len().unwrap(), 1);
-        }
-
-        // Reopen — the in-memory graph must rebuild from redb.
-        let db = Arc::new(Database::create(&path).expect("reopen"));
-        let store = HnswStore::open(db, 8).unwrap();
-        assert_eq!(store.len().unwrap(), 1, "len survives reopen");
-
-        let hits = store.search(&v1, 1).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].0, u1, "uuid must round-trip across reopen");
-    }
-
-    /// Why: `compact_orphans` is the maintenance hook that reclaims
-    /// `VECTORS` rows whose `VECTOR_KEYS` mapping has been removed.
-    /// What: Manually insert a `VECTORS` row without a corresponding
-    /// `VECTOR_KEYS` entry (simulating an old orphan), upsert a real one,
-    /// run compaction, assert the orphan was removed and the real one
-    /// survived.
-    /// Test: This test itself is the verification.
-    #[test]
-    fn compact_orphans_removes_dangling() {
-        let (_dir, store) = open_store(8);
-        let u1 = Uuid::new_v4().to_string();
-        let v1 = unit_vec(8, 7);
-
-        // Real upsert — creates one (VECTORS, VECTOR_KEYS) pair.
-        store.upsert(&u1, &v1).unwrap();
-        assert_eq!(store.len().unwrap(), 1);
-
-        // Manually inject an orphan: write to VECTORS without writing to
-        // VECTOR_KEYS. Use a vector_id that the store has not allocated.
-        let orphan_id: u64 = 999_999;
-        let orphan_vec: Vec<f32> = unit_vec(8, 99);
-        let encoded = postcard::to_allocvec(&orphan_vec).unwrap();
-        {
-            let wtx = store.db.begin_write().unwrap();
-            {
-                let mut vectors = wtx.open_table(VECTORS).unwrap();
-                vectors.insert(orphan_id, encoded.as_slice()).unwrap();
-            }
-            wtx.commit().unwrap();
-        }
-
-        // Now `len()` sees two VECTORS rows minus zero tombstones = 2.
-        assert_eq!(store.len().unwrap(), 2);
-
-        let removed = store.compact_orphans().unwrap();
-        assert_eq!(removed, 1, "should remove exactly the orphan");
-        assert_eq!(store.len().unwrap(), 1, "live vector survives");
-
-        // The real upsert should still resolve via search.
-        let hits = store.search(&v1, 1).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].0, u1);
-    }
-
-    /// Why: Dimension mismatches are programmer errors that must surface
-    /// loudly (not corrupt the index silently).
-    /// What: Open a dim=8 store, attempt to upsert a 4-d vector, assert
-    /// the call returns `DimensionMismatch`.
-    /// Test: This test itself is the verification.
-    #[test]
-    fn dimension_mismatch_is_rejected() {
-        let (_dir, store) = open_store(8);
-        let u1 = Uuid::new_v4().to_string();
-        let too_small = vec![0.1_f32; 4];
-        let err = store.upsert(&u1, &too_small).unwrap_err();
-        match err {
-            HnswStoreError::DimensionMismatch {
-                expected: 8,
-                got: 4,
-            } => {}
-            other => panic!("wrong error variant: {other:?}"),
-        }
-    }
-}
+mod tests;

@@ -404,6 +404,56 @@ impl UsearchStore {
         }
     }
 
+    /// Drawer ids whose vector has been overwritten by another drawer's.
+    ///
+    /// Why (#5005): key presence — what `embed_health` and `palace_reembed`
+    /// test — cannot see an id collision, so a palace with four unretrievable
+    /// drawers reported a clean bill of health. This is the comparison that
+    /// does see it.
+    /// What: delegates to `HnswStore::audit_aliases` and parses the uuids back
+    /// into `Uuid`s, dropping (and logging) any row that will not parse so one
+    /// bad key cannot hide the rest. Returns the two counts alongside the ids.
+    /// Test: `alias_audit_surfaces_a_collision` in `embed_repair_tests`.
+    pub fn alias_audit(&self) -> Result<(usize, usize, Vec<Uuid>)> {
+        let audit = self
+            .inner
+            .audit_aliases()
+            .context("alias_audit: scan vector keys")?;
+        let ids = audit
+            .aliased
+            .iter()
+            .flat_map(|(_, uuids)| uuids.iter())
+            .filter_map(|s| match Uuid::parse_str(s) {
+                Ok(u) => Some(u),
+                Err(e) => {
+                    tracing::warn!(key = %s, "alias_audit: skipping unparseable uuid: {e}");
+                    None
+                }
+            })
+            .collect();
+        Ok((audit.key_rows, audit.distinct_vector_ids, ids))
+    }
+
+    /// Unmap every drawer caught in an id collision so a re-embed repairs it.
+    ///
+    /// 🔴 Not wired to any CLI or MCP surface, and never run against a live
+    /// palace in the PR that added it (#5005).
+    ///
+    /// Why: see [`HnswStore::unalias`] — the reachable member of a collision
+    /// group is no more trustworthy than the unreachable ones, so the repair
+    /// has to free the whole group.
+    /// What: delegates to `HnswStore::unalias` and returns the freed drawer
+    /// ids, which then read as ordinary "missing" to `embed_health`.
+    /// Test: `unalias_marks_the_whole_group_for_reembed` in
+    /// `embed_repair_tests`.
+    pub fn unalias(&self) -> Result<Vec<Uuid>> {
+        let freed = self.inner.unalias().context("unalias: free aliased keys")?;
+        Ok(freed
+            .iter()
+            .filter_map(|s| Uuid::parse_str(s).ok())
+            .collect())
+    }
+
     /// Remove vector entries whose drawer IDs are not in `valid_ids`.
     ///
     /// Why: Issue #49 — over a palace's lifetime, vectors get orphaned by
@@ -580,334 +630,4 @@ fn migrate_legacy_usearch_if_present(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    fn unit_vec(dim: usize, seed: u32) -> Vec<f32> {
-        let raw: Vec<f32> = (0..dim).map(|i| ((i as u32 + seed) as f32) + 1.0).collect();
-        let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
-        raw.into_iter().map(|x| x / norm).collect()
-    }
-
-    #[tokio::test]
-    async fn upsert_then_search_returns_same_vector_at_rank_0() {
-        let dir = tempdir().unwrap();
-        let store = UsearchStore::new(dir.path().join("test.usearch"), 384).unwrap();
-        let id = Uuid::new_v4();
-        let v = unit_vec(384, 0);
-
-        store.upsert(id, v.clone()).await.unwrap();
-        let hits = store.search(&v, 1).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].drawer_id, id);
-        assert!(hits[0].score >= 0.99, "score was {}", hits[0].score);
-    }
-
-    #[tokio::test]
-    async fn remove_clears_vector() {
-        let dir = tempdir().unwrap();
-        let store = UsearchStore::new(dir.path().join("test.usearch"), 384).unwrap();
-        let id = Uuid::new_v4();
-        let v = unit_vec(384, 7);
-        store.upsert(id, v.clone()).await.unwrap();
-        store.remove(id).await.unwrap();
-
-        let hits = store.search(&v, 5).await.unwrap();
-        assert!(
-            !hits.iter().any(|h| h.drawer_id == id),
-            "removed id still present in results"
-        );
-    }
-
-    #[tokio::test]
-    async fn persist_and_reload() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("test.usearch");
-        let id = Uuid::new_v4();
-        let v = unit_vec(384, 13);
-        {
-            let store = UsearchStore::new(path.clone(), 384).unwrap();
-            store.upsert(id, v.clone()).await.unwrap();
-        }
-        let store2 = UsearchStore::new(path, 384).unwrap();
-        let hits = store2.search(&v, 1).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].drawer_id, id);
-        assert!(hits[0].score >= 0.99, "score was {}", hits[0].score);
-    }
-
-    /// Why: Issue #51 — `compact_orphans` must remove only the vectors
-    /// whose drawer UUIDs are absent from the supplied valid set, and must
-    /// persist the change so a subsequent reload doesn't resurrect the
-    /// orphans.
-    /// What: Insert three vectors, mark one as valid, run compaction,
-    /// then assert (a) total_checked counts all three, (b) two were
-    /// removed, and (c) reopening the store from disk shows only the
-    /// kept vector.
-    /// Test: This test itself is the verification.
-    #[tokio::test]
-    async fn compact_orphans_removes_only_missing_ids() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("test.usearch");
-        let store = UsearchStore::new(path.clone(), 384).unwrap();
-
-        let keep = Uuid::new_v4();
-        let drop_a = Uuid::new_v4();
-        let drop_b = Uuid::new_v4();
-        store.upsert(keep, unit_vec(384, 1)).await.unwrap();
-        store.upsert(drop_a, unit_vec(384, 2)).await.unwrap();
-        store.upsert(drop_b, unit_vec(384, 3)).await.unwrap();
-
-        let mut valid = HashSet::new();
-        valid.insert(keep);
-        let res = store.compact_orphans(&valid).unwrap();
-        assert_eq!(res.total_checked, 3);
-        assert_eq!(res.orphans_removed, 2);
-        assert_eq!(res.index_size_before, 3);
-        assert_eq!(res.index_size_after, 1);
-
-        // Reopen from disk — the compacted state must survive.
-        drop(store);
-        let reopened = UsearchStore::new(path, 384).unwrap();
-        let ids = reopened.all_ids();
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0], keep);
-    }
-
-    /// Why: Search results must round-trip the full UUID (not a truncated
-    /// or zero-padded form), so dedup across L1/L2 doesn't silently fail.
-    /// What: Upsert a vector under a fresh `Uuid::new_v4`, search for it,
-    /// and assert the returned `drawer_id` matches the input bit-for-bit.
-    /// Test: This test itself is the verification.
-    #[tokio::test]
-    async fn upsert_then_l1_l2_no_duplicate() {
-        let dir = tempdir().unwrap();
-        let store = UsearchStore::new(dir.path().join("test.usearch"), 384).unwrap();
-        let id = Uuid::new_v4();
-        let v = unit_vec(384, 42);
-
-        store.upsert(id, v.clone()).await.unwrap();
-        let hits = store.search(&v, 1).await.unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(
-            hits[0].drawer_id, id,
-            "search must return the full original UUID"
-        );
-    }
-
-    /// Why: `reset` must wipe the index so the next search returns
-    /// nothing — the dream cycle relies on this to safely rebuild from
-    /// drawers.
-    /// What: Insert two vectors, reset, then search; expect an empty
-    /// result.
-    /// Test: This test itself is the verification.
-    #[tokio::test]
-    async fn reset_clears_index() {
-        let dir = tempdir().unwrap();
-        let store = UsearchStore::new(dir.path().join("test.usearch"), 384).unwrap();
-        store
-            .upsert(Uuid::new_v4(), unit_vec(384, 1))
-            .await
-            .unwrap();
-        store
-            .upsert(Uuid::new_v4(), unit_vec(384, 2))
-            .await
-            .unwrap();
-        assert!(store.index_size() >= 2);
-
-        store.reset().unwrap();
-        assert_eq!(store.index_size(), 0);
-
-        let hits = store.search(&unit_vec(384, 1), 5).await.unwrap();
-        assert!(hits.is_empty(), "search after reset should be empty");
-    }
-
-    // -- Issue #59 / #1152: cross-process lock + snapshot fallback -------------
-    // `UsearchStore::new` uses `OpenIntent::ReadOnlyClient` so that when another
-    // process holds the redb exclusive lock, we fall back to a read-only snapshot
-    // (issue #59 behaviour). Writes against that snapshot are rejected via
-    // `READ_ONLY_ERROR_MSG`. The issue #1152 guard is enforced at the daemon
-    // level (`single_instance_check` in main.rs), not at the storage layer.
-
-    /// Why (issue #59 / #1152): `UsearchStore::new` uses
-    /// `OpenIntent::ReadOnlyClient` — when a cross-process lock conflict occurs
-    /// (another daemon holds the file), the caller gets a read-only snapshot
-    /// handle rather than an error. Writes are rejected via `READ_ONLY_ERROR_MSG`
-    /// so silent divergence is impossible.
-    /// What: Seeds the vector file, drops the store so the cache expires, holds
-    /// the redb file lock with a raw handle, then asserts the second
-    /// `UsearchStore::new` SUCCEEDS in snapshot (read-only) mode.
-    /// Test: this test.
-    #[tokio::test]
-    async fn vector_open_on_locked_file_returns_snapshot_handle() {
-        let dir = tempdir().unwrap();
-        let logical = dir.path().join("test.usearch");
-
-        // Populate and drop so the cache entry expires.
-        {
-            let primary = UsearchStore::new(logical.clone(), 384).unwrap();
-            primary
-                .upsert(Uuid::new_v4(), unit_vec(384, 1))
-                .await
-                .unwrap();
-        }
-
-        // Hold the redb file lock with a raw `Database::create`.
-        let redb_path = redb_path_for(&logical);
-        let _live = redb::Database::create(&redb_path).expect("lock vector redb");
-
-        // ReadOnlyClient open must succeed via snapshot fallback.
-        let result = UsearchStore::new(logical.clone(), 384);
-        assert!(
-            result.is_ok(),
-            "ReadOnlyClient open on locked vector redb must succeed via snapshot fallback"
-        );
-        let snap = result.expect("should be Ok");
-        assert!(
-            snap.is_read_only(),
-            "snapshot store must report is_read_only()"
-        );
-    }
-
-    /// Why (issue #1487): the HTTP daemon opens the vector store with
-    /// `OpenIntent::Writer`. When a second live instance already holds the
-    /// redb write lock, the Writer open MUST fail loud (after the bounded
-    /// handoff window) and MUST NOT return a read-only snapshot handle —
-    /// otherwise every `upsert`/`remove` would be silently rejected for the
-    /// daemon's lifetime (the original bug).
-    /// What: Seeds the vector file, drops the store so the cache expires,
-    /// holds the redb file lock with a raw handle, then calls
-    /// `UsearchStore::new_with_intent(.., Writer)`. The call must return `Err`
-    /// naming the lock conflict — never an `Ok` snapshot handle.
-    /// Test: this test.
-    #[tokio::test]
-    async fn writer_intent_open_fails_loud_on_locked_vector_file() {
-        let dir = tempdir().unwrap();
-        let logical = dir.path().join("test.usearch");
-
-        // Populate and drop so the cache entry expires.
-        {
-            let primary = UsearchStore::new(logical.clone(), 384).unwrap();
-            primary
-                .upsert(Uuid::new_v4(), unit_vec(384, 1))
-                .await
-                .unwrap();
-        }
-
-        // Hold the redb file lock with a raw `Database::create`.
-        let redb_path = redb_path_for(&logical);
-        let _live = redb::Database::create(&redb_path).expect("lock vector redb");
-
-        // Writer open must fail loud, never snapshot.
-        let result = UsearchStore::new_with_intent(logical.clone(), 384, OpenIntent::Writer);
-        // Match rather than `unwrap_err()` so we don't require UsearchStore: Debug.
-        let err = match result {
-            Ok(_) => panic!(
-                "Writer open on a locked vector redb must fail loud, not return a snapshot handle"
-            ),
-            Err(e) => e,
-        };
-        // Use the alternate `{:#}` form so the full anyhow context chain
-        // (the `open_or_get_cached_db` wrapper + the root lock message) is
-        // rendered, not just the outermost context line.
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("still locked") || msg.contains("write access"),
-            "Writer error must name the lock conflict; got: {msg}"
-        );
-    }
-
-    /// Why (issue #59): `upsert` and `remove` on a snapshot handle must
-    /// return an error that includes the read-only sentinel text so callers
-    /// see actionable guidance. This tests the storage-layer write guard
-    /// independently of the daemon-level `single_instance_check`.
-    /// What: Seeds a vector file, drops the store so the cache expires,
-    /// holds the lock, opens a snapshot handle, then asserts both write
-    /// methods Err with the expected message.
-    /// Test: this test — `vector_writes_rejected_on_snapshot`.
-    #[tokio::test]
-    async fn vector_writes_rejected_on_snapshot() {
-        let dir = tempdir().unwrap();
-        let logical = dir.path().join("test.usearch");
-
-        // Populate and drop so the cache entry expires.
-        {
-            let primary = UsearchStore::new(logical.clone(), 384).unwrap();
-            primary
-                .upsert(Uuid::new_v4(), unit_vec(384, 1))
-                .await
-                .unwrap();
-        }
-
-        // Hold the lock so the next open takes the snapshot path.
-        let redb_path = redb_path_for(&logical);
-        let _live = redb::Database::create(&redb_path).expect("lock vector redb");
-
-        let snap = UsearchStore::new(logical.clone(), 384).expect("snapshot open must succeed");
-        assert!(snap.is_read_only());
-
-        // upsert must fail with read-only guidance.
-        let err = snap
-            .upsert(Uuid::new_v4(), unit_vec(384, 99))
-            .await
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("read-only"),
-            "upsert on snapshot must mention read-only, got: {msg}"
-        );
-
-        // remove must fail with read-only guidance.
-        let err = snap.remove(Uuid::new_v4()).await.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("read-only"),
-            "remove on snapshot must mention read-only, got: {msg}"
-        );
-    }
-
-    /// Why (issue #59): reads must succeed on a snapshot handle — the
-    /// snapshot is a point-in-time copy of the live file and must be
-    /// searchable.
-    /// What: Seeds one vector, drops, acquires lock, opens snapshot,
-    /// searches, and asserts the seeded id is returned at rank 0.
-    /// Test: this test — `vector_remove_rejected_on_snapshot` (search
-    /// path — the symmetric read-succeeds counterpart).
-    #[tokio::test]
-    async fn vector_remove_rejected_on_snapshot() {
-        let dir = tempdir().unwrap();
-        let logical = dir.path().join("test.usearch");
-        let id = Uuid::new_v4();
-        let v = unit_vec(384, 5);
-
-        // Seed then drop so cache expires.
-        {
-            let primary = UsearchStore::new(logical.clone(), 384).unwrap();
-            primary.upsert(id, v.clone()).await.unwrap();
-        }
-
-        // Hold the lock.
-        let redb_path = redb_path_for(&logical);
-        let _live = redb::Database::create(&redb_path).expect("lock vector redb");
-
-        let snap = UsearchStore::new(logical.clone(), 384).expect("snapshot open must succeed");
-        assert!(snap.is_read_only());
-
-        // Search (read) must succeed and return the seeded vector.
-        let hits = snap.search(&v, 1).await.unwrap();
-        assert_eq!(
-            hits.len(),
-            1,
-            "search on snapshot must return seeded vector"
-        );
-        assert_eq!(hits[0].drawer_id, id);
-
-        // remove must be rejected.
-        let err = snap.remove(id).await.unwrap_err();
-        assert!(
-            err.to_string().contains("read-only"),
-            "remove on snapshot must be rejected"
-        );
-    }
-}
+mod tests;

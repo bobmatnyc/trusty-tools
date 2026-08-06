@@ -299,6 +299,16 @@ pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Resu
         // reads identically to "the embedder is dropping writes".
         "embedder_ready": health.embedder_ready,
         "recorded_failures": health.recorded_failures.len(),
+        // #5005 / #5000: `missing` counts drawers with no vector key. An
+        // aliased drawer HAS a key and is still unretrievable, so `missing: 0`
+        // was a false all-clear on the palace that lost four of them. These
+        // three fields are the signal that catches it; gate deletions on
+        // `aliased` as well as `missing`.
+        "vector_key_rows": health.vector_key_rows,
+        "distinct_vector_ids": health.distinct_vector_ids,
+        "aliased": report.aliased,
+        "aliased_ids": report.aliased_ids
+            .iter().map(|i| i.to_string()).collect::<Vec<_>>(),
     }))
 }
 
