@@ -153,6 +153,10 @@ struct PruneOutcome {
 ///   bundled include/exclude says — [`deploy_all_skill_tiers`] deploys that tier
 ///   in full and exempt from those rules, but its ledger entries look identical
 ///   to bundled ones.
+/// - The agent equivalent of that rule reads the ledger instead of a source
+///   directory, because the agent ledger records a tier and the skill one does
+///   not: an entry whose `Origin` is not `Bundled` is user-owned and is never
+///   pruned, matching how `agents::deployer` already treats it.
 /// - Everything actually deleted is copied under
 ///   `<framework-root>/backup-catalog-prune-<timestamp>/` first;
 ///   [`ApplyReport::prune_backup_dir`] names it.
@@ -252,10 +256,13 @@ pub fn apply_catalog<G: GitBackend>(
 /// Why: HR-2 deferred removal of deselected agents; HR-3 supplies it behind the
 /// explicit `--prune` flag. Only MANAGED files (present in the agent checksum
 /// manifest) are eligible — a user-dropped file is never removed — and since
-/// #391 an eligible file is deleted only when its bytes still match the recorded
-/// checksum, so a hand-edited agent survives being deselected.
+/// #391 an eligible file is deleted only when the ledger attributes it to the
+/// framework (`Origin::Bundled`) AND its bytes still match the recorded
+/// checksum. So a hand-edited agent survives being deselected, and so does a
+/// pristine one the ledger records as user- or registry-owned.
 /// What: for each manifest-managed agent filename whose stem the plan rejects
-/// AND whose on-disk copy is unmodified, backs the file up under `backup_root`,
+/// AND whose on-disk copy is framework-owned and unmodified, backs the file up
+/// under `backup_root`,
 /// deletes `<target>/<filename>` (ignoring an already-absent file) and drops the
 /// manifest entry; saves the manifest if anything changed. A modified or
 /// unreadable file keeps BOTH its content and its ledger entry — dropping the
@@ -277,7 +284,7 @@ pub fn apply_catalog<G: GitBackend>(
 /// agent this prune then removes; that agent returns on the next launch or
 /// sync-assets, since deploy is idempotent. No update is ever lost.
 /// Test: `apply_prune_removes_deselected`, `apply_prune_spares_user_owned`,
-/// `apply_prune_skips_hand_edited_agent`.
+/// `apply_prune_skips_hand_edited_agent`, `apply_prune_spares_a_user_origin_agent`.
 fn prune_agents(
     target: &Path,
     plan: &HarnessPlan,
@@ -293,7 +300,7 @@ fn prune_agents(
 /// it directly, and never from inside another `with_agent_manifest_lock` on the
 /// same directory (`flock` on a second descriptor in one process deadlocks).
 /// Test: `apply_prune_removes_deselected`, `apply_prune_spares_user_owned`,
-/// `apply_prune_skips_hand_edited_agent`.
+/// `apply_prune_skips_hand_edited_agent`, `apply_prune_spares_a_user_origin_agent`.
 fn prune_agents_locked(
     target: &Path,
     plan: &HarnessPlan,
@@ -308,8 +315,9 @@ fn prune_agents_locked(
         if plan.agent_selected(stem) {
             continue;
         }
-        // #391: deselected is not the same as disposable — check the file is
-        // still the one trusty-mpm wrote before deleting it.
+        // #391: deselected is not the same as disposable — check the ledger
+        // still attributes the file to the framework, and that it is still the
+        // one trusty-mpm wrote, before deleting it.
         if let Verdict::Kept(why) = prune_guard::agent_verdict(&manifest, target, &filename) {
             tracing::info!(agent = %filename, reason = %why, "not pruning a deselected agent");
             outcome.kept.push(format!("{filename}: {why}"));
