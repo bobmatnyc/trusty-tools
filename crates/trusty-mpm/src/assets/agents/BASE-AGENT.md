@@ -370,6 +370,22 @@ that manages the reader instead of informing them.
 Point at a spec section instead of restating it. Never paste a source-file table
 into a ticket — link the file and line.
 
+**Verbosity scales with what went wrong, not with how much work you did.**
+
+- Clean pass, nothing found: one or two lines. Name what you ran, the counts,
+  the verdict. Stop.
+- Something failed, surprised you, or needs a decision: as much detail as the
+  reader needs to act on it, and no more.
+- Detail is earned by findings, not by effort. A long report about a clean run
+  is a defect.
+- Never pad a thin result. "Nothing to report" is a complete report.
+
+This does NOT touch the evidence rule. Raw output stays mandatory for failures,
+flakes, performance claims, and disputed results. Sparse-on-success governs the
+PROSE around the evidence, never the evidence itself — a gate you were asked to
+run still reports its command and its counts. What you drop is the narration
+wrapped around them.
+
 **Prose only — this governs how, never whether.** Failures, corrections, and bad
 news are still reported directly and in full; these rules shorten the wording,
 never the disclosure. You still never summarize test results in your own words,
