@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-55 top-level commands.
+57 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -96,12 +96,13 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `show` — Show a project's config PLUS a read-only nested sessions listing
   - `status` — Show a project's deterministic status rollup (session histogram + flags)
 - `register` — Register a repo alias for the standalone managed driver (DOC-24)
+- `reinstall` — Redeploy the bundled agents and skills to EVERY deploy destination, and optionally reinstall the binary
 - `repair` — Recover from corrupt or inconsistent deploy state
   - `deploy` — Repair the agent/skill deploy state in `~/.claude/`
   - `push-guard` — Retrofit the #2867 cross-branch `pre-push` guard onto an existing clone
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
-- `run` — Launch an interactive `claude` session for a managed alias (DOC-24)
+- `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
 - `serve` — Alias for `start` — start the daemon if not running, no-op if it is
 - `services` — Inspect and probe workspace service daemons
   - `health` — Probe the health endpoint and print OK or FAIL
@@ -184,6 +185,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `stop` — Stop a session by id or friendly name (managed or project session)
   - `sync-assets` — Re-sync a live managed session's deployed agents/skills/output-styles against the current catalog (issue #2444)
   - `tui` — Launch the coordinator TUI: an input box over a live session list (#1272)
+- `shell-init` — Print a shell wrapper so `tm run <alias>` leaves you in that repo
 - `slack` — Manage the Slack remote-management bot (start, stop) — DOC-20 adapter #1294
   - `start` — Start the Slack bot process (Socket Mode — no public webhook required)
   - `stop` — Stop the Slack bot process if running

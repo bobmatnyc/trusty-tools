@@ -15,7 +15,7 @@ use clap::Parser;
 
 use crate::cli::{
     AgentAction, CatalogAction, Cli, Command, DEFAULT_URL, DoctorFlags, McpCmd, McpTransportArg,
-    MemoryAction, MetaAction, ProjectAction, SessionAction, SlackCmd, TelegramCmd,
+    MemoryAction, MetaAction, ProjectAction, SessionAction, ShellArg, SlackCmd, TelegramCmd,
 };
 use crate::commands::misc::{CATALOG_STALE_MSG, CATALOG_UNKNOWN_MSG, NON_GIT_FALLBACK_HINT};
 use crate::formatters::banner::{
@@ -2152,4 +2152,23 @@ fn cli_parses_memory_import_dry_run_json() {
         }
         other => panic!("expected Memory/Import, got {other:?}"),
     }
+}
+
+#[test]
+fn cli_parses_shell_init() {
+    // The dialect is a closed set: a typo must be refused at parse time rather
+    // than reaching the emitter and printing a snippet for the wrong shell.
+    for (arg, want) in [
+        ("zsh", ShellArg::Zsh),
+        ("bash", ShellArg::Bash),
+        ("fish", ShellArg::Fish),
+    ] {
+        let cli = Cli::try_parse_from(["trusty-mpm", "shell-init", arg]).unwrap();
+        match cli.command.unwrap() {
+            Command::ShellInit { shell } => assert_eq!(shell, want),
+            other => panic!("expected ShellInit, got {other:?}"),
+        }
+    }
+    assert!(Cli::try_parse_from(["trusty-mpm", "shell-init", "ksh"]).is_err());
+    assert!(Cli::try_parse_from(["trusty-mpm", "shell-init"]).is_err());
 }
