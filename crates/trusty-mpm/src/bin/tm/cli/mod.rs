@@ -969,6 +969,24 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
+    /// Print a shell wrapper so `tm run <alias>` leaves you in that repo.
+    ///
+    /// Why: `tm run <alias>` launches a session in the alias's repo directory,
+    /// but a child process cannot change its parent shell's cwd — so when the
+    /// session exits the shell is still where it started and a later bare `tm`
+    /// re-detects the wrong project. Only a function sourced into the shell can
+    /// fix that, so `tm` prints one.
+    /// What: writes a `tm` wrapper function to stdout. The user installs it
+    /// themselves — `eval "$(tm shell-init zsh)"` in `~/.zshrc`, or
+    /// `tm shell-init fish | source` in `config.fish`. This command NEVER
+    /// writes to a shell rc file, and nothing else in trusty-mpm does either.
+    /// Test: `cli_parses_shell_init`.
+    ShellInit {
+        /// Shell dialect to emit (`zsh`, `bash`, or `fish`).
+        #[arg(value_enum)]
+        shell: ShellArg,
+    },
+
     /// One-time keychain login for managed `tm run` sessions (WI-10, DOC-24).
     ///
     /// Why: `CLAUDE_CONFIG_DIR` relocates the macOS Keychain entry used for
