@@ -1833,7 +1833,21 @@ async fn fetch_raw_live(
     let raw = crate::commands::session_picker::fetch_managed_raw(client, url, None)
         .await
         .expect("fetch raw");
-    crate::commands::session_picker::parse_scoped_sessions(&raw, false).expect("parse")
+    crate::commands::session_picker::parse_managed_sessions(&raw).expect("parse")
+}
+
+/// Fetch what a DEFAULT (non-`--all`) `tm ls` would actually render, without
+/// running the auto-prune (#4994).
+///
+/// Why: [`fetch_raw_live`] deliberately returns every wire row so a test can see
+/// a dead record BEFORE the sweep clears it. The post-prune assertions need the
+/// opposite question answered — "is this row still in the operator's default
+/// view?" — which since #4994 is a different set: it drops decommissioned rows
+/// (the prune's own outcome) and dead `unresumable` rows alike.
+fn default_view(
+    sessions: Vec<trusty_mpm::client::ManagedSessionSummary>,
+) -> Vec<trusty_mpm::client::ManagedSessionSummary> {
+    crate::commands::session_picker::scope_for_display(sessions, false)
 }
 
 /// A FIRST sighting of an `unresumable` record is never pruned — only
@@ -1952,11 +1966,11 @@ async fn auto_prune_dead_records_removes_confirmed_unresumable_records() {
 
     // The daemon's own record must have been torn down for real (not merely
     // dropped client-side) — decommission tombstones it, which the default
-    // live-only fetch hides.
-    let refetched = fetch_raw_live(&client, &server.url).await;
+    // view hides.
+    let refetched = default_view(fetch_raw_live(&client, &server.url).await);
     assert!(
         !refetched.iter().any(|s| s.id == id.to_string()),
-        "the decommissioned record must no longer appear in the live listing"
+        "the decommissioned record must no longer appear in the default listing"
     );
 }
 
@@ -2632,7 +2646,7 @@ async fn session_ls_prunes_dead_records_on_piped_invocation() {
     let ctx = hermetic_prune_ctx(&marker_path);
     ls(&ctx).await;
 
-    let live = fetch_raw_live(&client, &server.url).await;
+    let live = default_view(fetch_raw_live(&client, &server.url).await);
     assert!(
         !live.iter().any(|s| s.id == id.to_string()),
         "a non-TTY `tm ls` must clear a confirmed dead record from the registry"
@@ -2672,7 +2686,7 @@ async fn session_ls_json_passthrough_prunes_dead_records() {
     backdate_sightings(&marker_path, 11);
     ls_json(&hermetic_prune_ctx(&marker_path)).await;
 
-    let live = fetch_raw_live(&client, &server.url).await;
+    let live = default_view(fetch_raw_live(&client, &server.url).await);
     assert!(
         !live.iter().any(|s| s.id == id.to_string()),
         "`tm ls --json` must clear a confirmed dead record from the registry"

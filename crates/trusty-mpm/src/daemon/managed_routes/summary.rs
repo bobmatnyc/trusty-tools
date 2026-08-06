@@ -268,10 +268,11 @@ pub(super) fn reconcile_against_tmux(
 /// single place that shape is constructed so every numbered-listing caller
 /// renders an identical, unambiguously-empty row.
 /// What: every string/option field is blank/`None`; `state` is the literal
-/// `"deleted"` — distinct from `"decommissioned"`, so the CLI's
-/// decommissioned-only tombstone filter (`is_live_session_state`) never hides
-/// this row from the default (non-`--all`) view; `slot` is the caller-supplied
-/// stable number and `deleted` is always `true`.
+/// `"deleted"` — distinct from `"decommissioned"`, and paired with
+/// `deleted: true`, so the CLI's default-view filter (`is_live_session_state`)
+/// never hides this row from the default (non-`--all`) view, including via the
+/// #4994 dead-record arm, which sits below the `"deleted"` one; `slot` is the
+/// caller-supplied stable number and `deleted` is always `true`.
 /// Test: `list_assigns_stable_slot_numbers_and_tombstones_deleted_one`
 /// (integration test, `tests/session_manager_slots.rs`).
 pub(super) fn tombstone_summary(slot: u32) -> SessionSummary {

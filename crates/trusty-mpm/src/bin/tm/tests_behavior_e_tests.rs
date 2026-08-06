@@ -19,7 +19,9 @@
 //! picker-filter coverage (`is_live_session_state_*`, `picker_filter_*`),
 //! moved here from `tests_behavior_c_tests.rs` when the #3044 reconciliation's
 //! added tests pushed that file over the 1500-SLOC test cap — this file had
-//! headroom under the same `tests_behavior_c/d/e` split convention.
+//! headroom under the same `tests_behavior_c/d/e` split convention. #4994 adds
+//! the dead-record (`unresumable`) half of the same default-view filter
+//! alongside it.
 //! Test: `cargo test -p trusty-mpm` runs this file as part of the `tm` binary
 //! test suite.
 
@@ -257,26 +259,26 @@ fn picker_filter_live_state_excludes_decommissioned() {
     // None of these are #3034 slot tombstones, so `is_slot_tombstone` is `false`
     // throughout — it is only consulted when `state == "deleted"`.
     assert!(
-        !is_live_session_state("decommissioned", false),
+        !is_live_session_state("decommissioned", false, false),
         "decommissioned must be excluded from default view"
     );
     // Active sessions must always be visible.
     assert!(
-        is_live_session_state("active", false),
+        is_live_session_state("active", false, false),
         "active must be included in default view"
     );
     // Stopped/errored sessions can still be resumed — they must show.
     assert!(
-        is_live_session_state("stopped", false),
+        is_live_session_state("stopped", false, false),
         "stopped must be included in default view"
     );
     assert!(
-        is_live_session_state("errored", false),
+        is_live_session_state("errored", false, false),
         "errored must be included in default view"
     );
     // Provisioning sessions are in-flight — they must show.
     assert!(
-        is_live_session_state("provisioning", false),
+        is_live_session_state("provisioning", false, false),
         "provisioning must be included in default view"
     );
 }
@@ -290,13 +292,13 @@ fn is_live_session_state_excludes_soft_deleted_record() {
     // excluded from the default picker/list exactly like `decommissioned`, so
     // it is never offered as a resume target (which would resurrect it).
     assert!(
-        !is_live_session_state("deleted", false),
+        !is_live_session_state("deleted", false, false),
         "a soft-deleted, still-in-store record must be excluded from the \
          default picker/list view"
     );
-    assert!(!is_live_session_state("decommissioned", false));
-    assert!(is_live_session_state("active", false));
-    assert!(is_live_session_state("stopped", false));
+    assert!(!is_live_session_state("decommissioned", false, false));
+    assert!(is_live_session_state("active", false, false));
+    assert!(is_live_session_state("stopped", false, false));
 }
 
 #[test]
@@ -309,7 +311,7 @@ fn is_live_session_state_keeps_slot_tombstone_visible() {
     // longer resolves) is defeated. `is_slot_tombstone == true` is what
     // distinguishes it from the soft-deleted-record case above.
     assert!(
-        is_live_session_state("deleted", true),
+        is_live_session_state("deleted", true, false),
         "a #3034 slot tombstone must remain visible in the default view"
     );
     // Resurrection-safety for this visible row is NOT this predicate's job —
@@ -430,5 +432,125 @@ fn picker_filter_keeps_slot_tombstone_hides_soft_deleted_record() {
     assert!(
         !filtered.iter().any(|s| s.state == "deleted" && !s.deleted),
         "the soft-deleted, still-in-store record (deleted: false) must be excluded"
+    );
+}
+
+// ── #4994: dead (`unresumable`) records are hidden from the DEFAULT view ──────
+
+#[test]
+fn is_live_session_state_hides_unresumable_record() {
+    // Why (#4994): the reported defect. A record whose tmux pane is gone AND
+    // whose workspace directory no longer exists anywhere on disk is flagged
+    // `unresumable` by the daemon and rendered `[dead]`, yet still took the
+    // catch-all `true` arm into the default `tm ls`. Six such rows sat in the
+    // owner's list. `unresumable` is the ONLY input that differs between these
+    // two assertions, so a filter that ignored the flag fails here.
+    assert!(
+        !is_live_session_state("stopped", false, true),
+        "a dead (unresumable) stopped record must be hidden from the default view"
+    );
+    assert!(
+        !is_live_session_state("errored", false, true),
+        "a dead (unresumable) errored record must be hidden from the default view"
+    );
+}
+
+#[test]
+fn is_live_session_state_keeps_resumable_stopped_record() {
+    // 🔴 The regression guard for the hiding rule above. `unresumable` is
+    // computed daemon-side for exactly the stopped/errored class, and MOST
+    // stopped records are legitimately resumable — 15 on the reporting machine
+    // against 6 dead ones. Hiding a stopped record on its STATE rather than on
+    // the flag would take those 15 with it.
+    assert!(
+        is_live_session_state("stopped", false, false),
+        "a stopped record with an intact workspace is resumable and must stay visible"
+    );
+    assert!(
+        is_live_session_state("errored", false, false),
+        "an errored record with an intact workspace must stay visible"
+    );
+    assert!(
+        is_live_session_state("active", false, false),
+        "an active record must stay visible"
+    );
+}
+
+#[test]
+fn is_live_session_state_keeps_slot_tombstone_even_when_unresumable() {
+    // Why (#3034 × #4994): the two rules meet on one row. A slot tombstone is a
+    // rendering placeholder for a slot whose record left the store, and Bob's
+    // #3034 directive keeps it visible at its slot unconditionally. The
+    // `unresumable` arm therefore sits BELOW the `"deleted"` arm — reordering
+    // them would silently un-do #3034 for any tombstone the daemon happened to
+    // flag.
+    assert!(
+        is_live_session_state("deleted", true, true),
+        "a #3034 slot tombstone must stay visible regardless of the unresumable flag"
+    );
+    // The soft-deleted-record and decommissioned rules are likewise unmoved by
+    // the new input.
+    assert!(!is_live_session_state("deleted", false, false));
+    assert!(!is_live_session_state("decommissioned", false, false));
+}
+
+#[test]
+fn picker_filter_hides_dead_records_keeps_resumable_stopped() {
+    // The list-level mirror of the three predicate tests: a mixed fleet where
+    // the two stopped rows differ ONLY by `unresumable`, so "the row is absent"
+    // can only be explained by the flag.
+    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "a1", "name": "sess-active",   "state": "active" },
+            { "id": "b2", "name": "sess-alive",    "state": "stopped", "unresumable": false },
+            { "id": "c3", "name": "sess-dead",     "state": "stopped", "unresumable": true },
+            { "id": "d4", "name": "sess-dead-err", "state": "errored", "unresumable": true },
+            { "id": "",   "name": "",              "state": "deleted", "slot": 5, "deleted": true },
+        ]))
+        .expect("test data must deserialize");
+
+    let filtered = filter_live_sessions(sessions);
+
+    assert_eq!(
+        filtered.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        vec!["a1", "b2", ""],
+        "exactly the active row, the RESUMABLE stopped row, and the slot \
+         tombstone must survive"
+    );
+}
+
+#[test]
+fn scope_for_display_all_keeps_dead_record_visible() {
+    // #4994 is a VISIBILITY change, never a deletion: `tm ls --all` must still
+    // list every dead record, exactly as it already does for decommissioned
+    // ones. This is the operator's path to see and act on them; the remedy verb
+    // is `tm sessions delete <id> --force`, the same one
+    // `unresumable_remedy_line` cites (there is no `tm sessions rm`).
+    use crate::commands::session_picker::{parse_managed_sessions, scope_for_display};
+
+    let raw = serde_json::json!({
+        "sessions": [
+            { "id": "a1", "name": "sess-active", "state": "active",  "slot": 1 },
+            { "id": "c3", "name": "sess-dead",   "state": "stopped", "slot": 2, "unresumable": true },
+        ]
+    })
+    .to_string();
+    let sessions = parse_managed_sessions(&raw).expect("parse must succeed");
+
+    assert_eq!(
+        scope_for_display(sessions.clone(), true)
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a1", "c3"],
+        "--all must keep the dead record"
+    );
+    assert_eq!(
+        scope_for_display(sessions, false)
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a1"],
+        "the default view must drop the same record --all keeps"
     );
 }

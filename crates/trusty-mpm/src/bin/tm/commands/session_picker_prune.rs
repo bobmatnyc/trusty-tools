@@ -299,8 +299,11 @@ pub(crate) async fn prune_and_report_at(
         );
     }
     if outcome.pending > 0 {
+        // #4994: these rows are no longer in the default table, so the count has
+        // to say where they went — otherwise it reports a number the operator
+        // cannot reconcile against anything on screen.
         eprintln!(
-            "tm: {} more dead record{} pending confirmation",
+            "tm: {} more dead record{} pending confirmation (hidden; `tm ls --all` to see them)",
             outcome.pending,
             if outcome.pending == 1 { "" } else { "s" }
         );
