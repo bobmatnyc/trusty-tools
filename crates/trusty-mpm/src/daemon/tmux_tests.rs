@@ -163,6 +163,68 @@ fn parses_session_row() {
     assert!(!detached.attached);
 }
 
+/// `#{session_attached}` is a CLIENT COUNT, not a boolean.
+///
+/// Why: `tm ls` labelled `tm-dogfood-relaunch-01` — the session the operator
+/// was sitting in, with two tmux clients on it — `(active)` rather than
+/// `(attached)`, while nine single-client sessions read `(attached)`. The
+/// parser compared the field to the literal `"1"`, so every count above one
+/// fell through to `false`. Two clients on one session is ordinary (a second
+/// terminal tab, an `attach -r` observer, a detached-and-reattached shell), so
+/// the label failed exactly for the session most likely to be the operator's.
+/// What: any count `> 0` is attached; `0` is not; a malformed field still
+/// degrades to `false` rather than erroring the whole row.
+/// Test: this function IS the test.
+#[test]
+fn parses_multi_client_session_row_as_attached() {
+    for clients in ["1", "2", "3", "17"] {
+        let info = SessionInfo::parse(&format!("tm-dogfood-relaunch-01:1785443731:{clients}"))
+            .unwrap_or_else(|e| panic!("row with {clients} client(s) must parse: {e}"));
+        assert!(
+            info.attached,
+            "session_attached={clients} is a client COUNT — any non-zero value \
+             means a client is connected, so the row must read attached"
+        );
+    }
+
+    assert!(
+        !SessionInfo::parse("tm-detached-01:1785443731:0")
+            .unwrap()
+            .attached,
+        "zero clients is the only value that means detached"
+    );
+
+    // A field tmux would never emit must not be read as attachment.
+    assert!(
+        !SessionInfo::parse("tm-garbage-01:1785443731:banana")
+            .unwrap()
+            .attached,
+        "an unparseable count degrades to detached, never to attached"
+    );
+}
+
+/// The label must FLIP when the last client goes away.
+///
+/// Why: a count-aware parser that only ever widened `attached` would still be
+/// wrong — the point of reading live tmux is that detaching is observable on
+/// the very next `tm ls`. This pins both directions of the transition.
+/// What: the same session name parsed at two client counts yields
+/// `attached == true` then `attached == false`.
+/// Test: this function IS the test.
+#[test]
+fn attachment_flips_to_detached_when_client_count_drops_to_zero() {
+    let name = "tm-dogfood-relaunch-01";
+    let while_attached = SessionInfo::parse(&format!("{name}:1785443731:2")).unwrap();
+    let after_detach = SessionInfo::parse(&format!("{name}:1785443731:0")).unwrap();
+
+    assert_eq!(while_attached.name, after_detach.name);
+    assert!(while_attached.attached);
+    assert!(
+        !after_detach.attached,
+        "once the last client detaches the very next listing must report detached"
+    );
+}
+
 #[test]
 fn parses_managed_pane_row() {
     let row = TmuxDriver::parse_managed_pane_row("tmpm-brave-otter\tclaude\t12345\t%7").unwrap();
