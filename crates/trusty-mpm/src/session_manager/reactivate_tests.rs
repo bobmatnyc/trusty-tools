@@ -300,3 +300,62 @@ async fn mark_reactivated_rejects_non_stopped() {
         "expected InvalidState, got {err:?}"
     );
 }
+
+/// Why: `mark_reactivated` is the sole production `Decommissioned -> Active`
+/// transition, so it is the only place a record can leave a terminal state
+/// still carrying the `terminal_at` stamp the retention sweep reads. It used to
+/// assign `record.state` directly, which left the stamp intact — inert while
+/// the verdict short-circuits on `!is_terminal()`, but a documented invariant
+/// that is false is how that becomes a live bug. This drives the REAL path, not
+/// the setter in isolation.
+/// What: decommissions a record through `decommission` (which stamps), asserts
+/// the stamp is set, reactivates, and asserts it is cleared.
+/// Test: this test.
+#[tokio::test]
+async fn mark_reactivated_clears_the_terminal_stamp() {
+    let dir = TempDir::new().unwrap();
+    let workspace_dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(workspace_dir.path().to_owned()),
+            None,
+            Some(workspace_dir.path().to_owned()),
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.set_workspace(
+        &record.id,
+        workspace_dir.path().to_owned(),
+        ManagedSessionState::Decommissioned,
+    )
+    .await
+    .expect("force Decommissioned");
+
+    // Stamp it the way a real decommission does.
+    let mut tombstoned = mgr.get(&record.id).await.expect("get");
+    tombstoned.set_lifecycle_state(ManagedSessionState::Decommissioned, chrono::Utc::now());
+    assert!(tombstoned.terminal_at.is_some(), "fixture is stamped");
+    mgr.store
+        .write()
+        .await
+        .upsert(tombstoned)
+        .await
+        .expect("persist stamp");
+
+    let reactivated = mgr.mark_reactivated(&record.id).await.expect("reactivate");
+    assert_eq!(reactivated.state, ManagedSessionState::Active);
+    assert_eq!(
+        reactivated.terminal_at, None,
+        "a revived record must not keep its death time"
+    );
+    assert_eq!(
+        mgr.get(&record.id).await.expect("get").terminal_at,
+        None,
+        "and the cleared stamp is what got persisted"
+    );
+}

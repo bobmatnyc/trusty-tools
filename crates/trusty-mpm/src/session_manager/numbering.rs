@@ -29,9 +29,14 @@ impl SessionManager {
     /// [`SessionManager::list`] result — a `--source-id`-filtered subset
     /// would leave excluded sessions unobserved and renumbered on their next
     /// global listing) into the registry, then returns one [`NumberedSlot`]
-    /// per slot 1..=highest-assigned: `record: Some(_)` when still present in
-    /// `records`, `record: None` once it disappears from the store via ANY
+    /// per slot the registry still HOLDS: `record: Some(_)` when still present
+    /// in `records`, `record: None` once it disappears from the store via ANY
     /// removal path (hard-delete, decommission-reap, prune).
+    ///
+    /// Walks the held slots rather than `1..=max` because the retention sweep
+    /// ([`super::retention`]) releases a slot when its record ages out, leaving
+    /// gaps. A `1..=max` walk would emit a phantom tombstone row at every gap —
+    /// a number nobody holds and no operator ever saw.
     /// Test: `numbered_snapshot_keeps_slot_stable_across_delete`,
     /// `numbered_snapshot_tombstones_deleted_slot`,
     /// `numbered_snapshot_never_reuses_a_deleted_slot`,
@@ -44,8 +49,8 @@ impl SessionManager {
         }
         let live: HashMap<ManagedSessionId, SessionRecord> =
             records.iter().map(|r| (r.id, r.clone())).collect();
-        let max = reg.max_slot();
-        (1..=max)
+        reg.assigned_slots()
+            .into_iter()
             .map(|slot| NumberedSlot {
                 slot,
                 record: reg.id_at(slot).and_then(|id| live.get(&id).cloned()),

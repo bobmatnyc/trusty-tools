@@ -71,6 +71,7 @@ fn record_round_trips_injection_status() {
         pane_id: None,
         injection_status: InjectionStatus::Pending,
         worktree_owner: None,
+        terminal_at: None,
     };
     record.injection_status = InjectionStatus::Success;
     let json = serde_json::to_string(&record).expect("serialize");
