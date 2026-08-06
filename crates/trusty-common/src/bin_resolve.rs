@@ -344,7 +344,7 @@ pub fn is_ephemeral_build_path(path: &Path) -> bool {
 /// — the resolution is pure path arithmetic, so it works on a machine with no
 /// Rust toolchain installed.
 ///
-/// Test: the rule is covered by `canonical_bin_dir_from_*`; this wrapper is the
+/// Test: `canonical_bin_dir_from_*` cover the rule; this wrapper is the
 /// side-effecting env read.
 pub fn canonical_bin_dir() -> Option<PathBuf> {
     canonical_bin_dir_from(

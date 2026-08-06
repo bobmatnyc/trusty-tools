@@ -17,9 +17,14 @@ Fixed
   the supervised daemon, and a guaranteed no-op for `tctl`, a terminal process
   launchd has never heard of. The supervision check evaluated `tctl`, returned
   false every time, and the manual-restart hint it produced was reported as
-  success, so the daemon kept serving the old binary. Both daemon branches now
-  bounce the member through the same launchd path `tctl restart` uses
-  (port-guard, then `bootout`, then `bootstrap` — never `kickstart -k`)
+  success, so the daemon kept serving the old process indefinitely. Both daemon
+  branches now bounce the member through the same launchd path `tctl restart`
+  uses (port-guard, then `bootout`, then `bootstrap` — never `kickstart -k`).
+  Note the bounce re-execs whatever path the plist's `ProgramArguments[0]`
+  names, and nothing yet rewrites that — so on a host whose plist was baked
+  from the other bin directory the daemon comes back on the same old binary.
+  Phase 4 of the epic regenerates the plist; this change stops the daemon being
+  left un-bounced, it does not yet guarantee which binary it comes back on
   ([#4964](https://github.com/bobmatnyc/trusty-tools/issues/4964))
 - `tctl install` passes the concrete path of the binary it just wrote to a
   member's `service install`, instead of a bare name resolved through `$PATH`.

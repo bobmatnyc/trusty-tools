@@ -3,8 +3,22 @@
 //! Why: The mutating half of the update flow. The #1316 added requirement makes
 //! the safety property explicit: present the available updates and apply them
 //! ONLY after confirmation (`--yes` skips the prompt for automation). Daemons
-//! are restarted after the new binary lands, so launchd-supervised members come
-//! back on it rather than continuing to serve the old one.
+//! are restarted after the new binary lands, instead of being left serving the
+//! old process indefinitely.
+//!
+//! 🔴 What that restart does NOT yet guarantee (#4964, Phase 4 owns the fix):
+//! the daemon comes back on the NEW binary only when the plist's
+//! `ProgramArguments[0]` already points at the directory this upgrade wrote to.
+//! `bootout`/`bootstrap` re-exec whatever path the plist names, and nothing on
+//! this path rewrites it. Today the prebuilt branch writes `~/.local/bin` while
+//! the `cargo install` fallback writes `$CARGO_HOME/bin`, so on a host whose
+//! plist was baked from the other directory the bounce costs a downtime window
+//! and brings the SAME OLD BINARY back — while the report still says
+//! "upgraded to X; restarted". That is a false success report, and it is why
+//! Phase 4's plist regeneration is a prerequisite for the guarantee rather than
+//! a cleanup after it. Phase 3 (single destination) removes the divergence that
+//! makes it reachable; until both land, read "restarted" as exactly that and no
+//! more.
 //!
 //! What: Gathers candidates (`update_engine`), runs the pure confirm-then-apply
 //! gate (`decide_apply`), and — only on `Apply` — upgrades each member: prebuilt
@@ -19,8 +33,10 @@
 //! directories in one command) and whose restart step could not restart
 //! anything when the caller is `tctl`. See `upgrade_one`'s doc.
 //!
-//! Test: `tests` covers the decision routing and the JSON report shaping; the
-//! actual `cargo install` + restart path is side-effecting.
+//! Test: `upgrade_tests.rs` (the sibling `#[path]`-included `tests` module —
+//! split out under the 500-SLOC production cap) covers the decision routing,
+//! the JSON report shaping, and the #4964 restart plan; the actual `cargo
+//! install` + restart path is side-effecting.
 
 use serde::Serialize;
 use tokio::runtime::Handle;
@@ -460,9 +476,11 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
 /// uses. `upgrade_and_restart` itself is unchanged and still serves its
 /// in-daemon callers.
 ///
-/// Test: Side-effecting; covered indirectly. `UpgradeDetail`'s shadow-folding
-/// is covered by `tests::applied_report_all_ok_reflects_shadow_failure`, and
-/// the restart routing by `tests::daemon_restart_routes_by_manage_strategy`.
+/// Test: `tests::applied_report_all_ok_reflects_shadow_failure` (shadow
+/// folding), `tests::restart_plan_daemons_restart` and
+/// `tests::no_installer_call_site_invokes_upgrade_and_restart` (the #4964
+/// restart routing and the removed double-write) — all in `upgrade_tests.rs`.
+/// This function itself is side-effecting and covered only indirectly.
 async fn upgrade_one(
     c: &UpdateCandidate,
     path_env: &std::ffi::OsStr,

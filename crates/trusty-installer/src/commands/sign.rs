@@ -120,9 +120,11 @@ fn run_macos(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i
 /// `CARGO_HOME` read, so `tctl sign`'s default and every other cargo-bin-dir
 /// resolution in the workspace cannot drift apart.
 ///
-/// Test: the rule is covered by
-/// `trusty_common::bin_resolve::tests::canonical_bin_dir_from_*`; this wrapper
-/// only supplies the last-resort `/usr/local/bin`.
+/// Test: no test in this crate — a two-line delegation that only supplies the
+/// last-resort `/usr/local/bin`. The rule it delegates to is covered in
+/// trusty-common by the `canonical_bin_dir_from_*` tests, which the pointer
+/// lint cannot verify from here because it scopes citations to the citing
+/// file's own crate.
 #[cfg(target_os = "macos")]
 fn default_bin_dir() -> PathBuf {
     trusty_common::bin_resolve::canonical_bin_dir()

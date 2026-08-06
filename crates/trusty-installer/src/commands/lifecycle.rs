@@ -266,9 +266,12 @@ fn run_lifecycle(verb: Verb, members: &[String], yes: bool, json: bool) -> i32 {
 /// What: [`apply_to_member`] with [`Verb::Restart`], over a member synthesised
 /// from `binary` + `manage` (the only two fields the restart path reads).
 ///
-/// Test: `super::upgrade::tests::daemon_restart_routes_by_manage_strategy`
-/// pins the caller's dispatch; the `launchctl`/subprocess calls are
-/// side-effecting and never run in unit tests.
+/// Test: `super::upgrade::tests::restart_plan_daemons_restart`,
+/// `super::upgrade::tests::restart_plan_non_daemon_is_a_noop`,
+/// `super::upgrade::tests::restart_plan_launchd_member_off_macos_is_manual`
+/// pin the caller's dispatch (in `upgrade_tests.rs`); the
+/// `launchctl`/subprocess calls are side-effecting and never run in unit
+/// tests.
 pub fn restart_member(binary: &str, manage: ManageStrategy) -> anyhow::Result<String> {
     let m = StableMember {
         crate_name: binary.to_owned(),
@@ -431,6 +434,15 @@ fn launchd_control(_verb: Verb, binary: &str) -> anyhow::Result<String> {
 /// restart` that spawn/`pkill` the daemon. Shelling to those is the only correct
 /// way to control its lifecycle (#1332 decision 3).
 /// What: spawns `<binary> <verb>`; maps a non-zero exit into an `Err`.
+///
+/// #4964: `binary` is resolved through `which::which`, so the process this
+/// bounces is whichever copy wins `$PATH` — NOT necessarily the concrete path
+/// `tctl upgrade` just wrote and health-gated before calling
+/// [`restart_member`]. On a host with two copies on `PATH` the upgrade can
+/// therefore restart a different binary than the one it verified. Left as-is
+/// deliberately: the fix is one destination (Phase 3), not a second
+/// path-threading change here.
+///
 /// Test: side-effecting subprocess; never exercised in unit tests.
 fn own_verb_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
     if which::which(binary).is_err() {
