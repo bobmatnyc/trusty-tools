@@ -240,12 +240,16 @@ function scan(f, ln, raw, inhd,   line, i, c, pre, nm, isfor, j, s) {
             if (nm == "") continue
             if (inhd)  { report(f, ln, "heredoc-substitution", nm, line); continue }
             if (isfor) { report(f, ln, "for-list", nm, line); continue }
-            # A BARE assignment (`x=$(f)` / `local x=$(f)`) propagates the child
-            # status to `set -e`, and since #16 the classification survives the
-            # fork through the side channel.  Everything else is an argument
-            # position, where the ENCLOSING command owns the status.
+            # A BARE assignment (`x=$(f)`) propagates the child status to
+            # `set -e`, and since #16 the classification survives the fork
+            # through the side channel.  `local x=$(f)` DOES NOT, and is not
+            # exempt: `local` is itself a command, so ITS status — always 0 —
+            # is the one the shell sees and the child status is lost
+            # (`vmtest:28-29`; declare first, assign second).  Everything else
+            # is an argument position, where the ENCLOSING command owns the
+            # status.
             pre = substr(line, 1, i - 1)
-            if (pre ~ /^[ \t]*(local[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=$/) continue
+            if (pre ~ /^[ \t]*[A-Za-z_][A-Za-z0-9_]*=$/) continue
             report(f, ln, "argument-position", nm, line)
         }
     }
