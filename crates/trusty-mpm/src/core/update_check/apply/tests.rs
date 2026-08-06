@@ -662,3 +662,72 @@ fn apply_prune_reports_what_it_kept_and_where_backups_went() {
         .expect("something was deleted, so a backup root is reported");
     assert!(backup.join("skills/pristine/SKILL.md").is_file());
 }
+
+#[test]
+fn apply_prune_spares_a_user_origin_agent() {
+    // #391 follow-up: the agent ledger records an ownership tier the skill
+    // ledger lacks, and `agents::deployer` already honours it — a non-`Bundled`
+    // entry is the seed-once tier, preserved on a checksum mismatch. Prune read
+    // the checksum and not the tier, so a PRISTINE user-owned agent was deleted
+    // by a bundled exclude rule: the exact hole #4979 closed for skills.
+    //
+    // Nothing writes a non-`Bundled` origin in production today, so this test
+    // constructs the ledger entry directly. That is deliberate — the state is
+    // unreachable until something does write one, and the point of pinning it
+    // now is that the day it becomes reachable it must not also be the day the
+    // guard is discovered missing.
+    let fw_root = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::from_root(fw_root.path().join(".trusty-mpm"));
+
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    seed_catalog_agent(&catalog_root, "operator-owned", "BODY");
+    write_catalog_manifest(project.path());
+    apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, false).unwrap();
+
+    let deployed = fw.agent_deploy_dir().join("operator-owned.md");
+    let before = fs::read_to_string(&deployed).unwrap();
+
+    // Re-attribute the (unmodified) entry to the user tier.
+    let target = fw.agent_deploy_dir();
+    let mut ledger = AgentManifest::load(&target);
+    ledger
+        .managed
+        .get_mut("operator-owned.md")
+        .expect("the deploy recorded it")
+        .origin = crate::core::agent_manifest::Origin::User;
+    ledger.save(&target).unwrap();
+
+    rewrite_manifest(
+        project.path(),
+        "[agents]\nsource = \"catalog\"\nexclude = [\"operator-owned\"]\n\n[skills]\nsource = \"catalog\"\n",
+    );
+    let report = apply_catalog(FakeGitBackend::new(), &fw, project.path(), true, true).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(&deployed).unwrap(),
+        before,
+        "a user-origin agent must survive --prune even while pristine"
+    );
+    assert!(
+        !report
+            .agents_pruned
+            .contains(&"operator-owned.md".to_string()),
+        "user-origin agent must not be pruned: {report:?}"
+    );
+    assert_eq!(
+        report.agents_prune_kept.len(),
+        1,
+        "and the operator is told it was kept: {report:?}"
+    );
+    assert!(
+        report.agents_prune_kept[0].starts_with("operator-owned.md: "),
+        "the kept entry names the agent and the reason: {report:?}"
+    );
+    // The ledger keeps both the entry and its tier.
+    let after = AgentManifest::load(&target);
+    assert_eq!(
+        after.managed.get("operator-owned.md").map(|e| e.origin),
+        Some(crate::core::agent_manifest::Origin::User)
+    );
+}
