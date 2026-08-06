@@ -37,7 +37,8 @@ use crate::cli::ShellArg;
 /// the alias so `tm run --task 'ship it' web` does not mistake the task text
 /// for the alias, and a captured `--root` is forwarded to `tm path` so a
 /// non-default root resolves against the same root the session used.
-/// Test: `zsh_and_bash_bodies_are_identical`, `wrapper_cds_after_tm_run`,
+/// Test: `zsh_and_bash_share_one_body`,
+/// `wrapper_cds_after_tm_run_and_passes_the_exit_status_through`,
 /// `wrapper_does_not_cd_when_path_resolution_fails`.
 const POSIX_BODY: &str = r#"tm() {
     command tm "$@"
