@@ -36,7 +36,9 @@ use crate::agents::manifest::{Result, checksum};
 use crate::skills::manifest::{
     SkillManifest, SkillManifestEntry, SkillManifestSave, with_skill_manifest_lock,
 };
-use crate::skills::unmanaged::{UnmanagedBundledSkill, unmanaged_bundled_skills};
+use crate::skills::unmanaged::{
+    UnmanagedBundledSkill, bundled_skill_dirs, unmanaged_bundled_skills,
+};
 
 /// Filename of the per-backup-root ledger of what was copied where.
 ///
@@ -178,6 +180,103 @@ pub fn preview_unmanaged_bundled_skills(
     bundled: &BTreeSet<String>,
 ) -> Vec<UnmanagedBundledSkill> {
     unmanaged_bundled_skills(dest, bundled)
+}
+
+/// Re-stamp every bundled-named skill at `dest` the deployer would decline to
+/// refresh, backing each file up first — the `tm reinstall --force` clobber.
+///
+/// Why: [`adopt_unmanaged_bundled_skills`] covers only skills the manifest has
+/// lost track of. The other declined state is a MANAGED file hand-edited away
+/// from its recorded checksum, which the deployer reads as a user edit and
+/// skips forever. `tm reinstall --force` is the explicit, human-initiated
+/// instruction to overwrite both, and this module's contract for that is
+/// unchanged: nothing is touched without a backup, and the backup goes to the
+/// same `backup_root` with the same [`BACKUP_LEDGER_FILE`] ledger.
+/// What: scans [`bundled_skill_dirs`] — the same walk the unmanaged detector
+/// uses, without its ownership filter — and for each file whose manifest entry
+/// is absent or whose checksum no longer matches the bytes on disk, copies it
+/// under `backup_root` and records a [`SkillManifestEntry`] carrying the CURRENT
+/// on-disk checksum. That returns the file to the deployer's
+/// managed-and-unmodified branch, so the deploy that runs next writes the
+/// bundled text over it. Files already managed and current are left completely
+/// alone — no backup, no manifest churn. Content itself is never rewritten here.
+/// An empty result means nothing was in scope and NOTHING was written.
+/// Test: `force_adopt_restamps_a_frozen_managed_skill`,
+/// `force_adopt_leaves_a_current_skill_alone`,
+/// `force_adopt_leaves_an_operator_skill_alone`.
+pub fn force_adopt_bundled_skills(
+    dest: &Path,
+    bundled: &BTreeSet<String>,
+    backup_root: &Path,
+) -> Result<Vec<AdoptedSkill>> {
+    // Cheap read-only precheck OUTSIDE the lock, matching
+    // `adopt_unmanaged_bundled_skills`: a no-op force neither blocks on a
+    // concurrent writer nor leaves a lock sidecar in a directory it will not
+    // touch. The authoritative scan happens again inside.
+    if bundled_skill_dirs(dest, bundled).is_empty() {
+        return Ok(Vec::new());
+    }
+    with_skill_manifest_lock(dest, || force_adopt_locked(dest, bundled, backup_root))
+}
+
+/// The body of [`force_adopt_bundled_skills`], run holding the ledger lock.
+///
+/// Why (#4881): re-stamping is a load-modify-save of the ledger a concurrent
+/// deploy also writes; unlocked, the two drop each other's entries and the files
+/// those entries described freeze. Never call it directly, and never from inside
+/// another [`with_skill_manifest_lock`] on the same directory.
+/// What: the scan/back-up/re-stamp pipeline documented on the public wrapper.
+/// Test: exercised through that wrapper by the `force_adopt_*` tests.
+fn force_adopt_locked(
+    dest: &Path,
+    bundled: &BTreeSet<String>,
+    backup_root: &Path,
+) -> Result<Vec<AdoptedSkill>> {
+    let mut manifest = SkillManifest::load(dest);
+    let base = manifest.clone();
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut adopted = Vec::new();
+
+    for skill in bundled_skill_dirs(dest, bundled) {
+        let mut adopted_keys = Vec::new();
+        for (key, file) in skill.manifest_keys().into_iter().zip(&skill.files) {
+            let content = std::fs::read_to_string(file)?;
+            if manifest.checksum_matches(&key, &content) {
+                continue;
+            }
+            back_up(backup_root, file)?;
+            manifest.managed.insert(
+                key.clone(),
+                SkillManifestEntry {
+                    checksum: checksum(&content),
+                    deployed_at: now.clone(),
+                },
+            );
+            adopted_keys.push(key);
+        }
+        if adopted_keys.is_empty() {
+            continue;
+        }
+        adopted.push(AdoptedSkill {
+            stem: skill.stem,
+            backup_dir: backup_target(backup_root, &skill.dir),
+            dir: skill.dir,
+            adopted_keys,
+        });
+    }
+
+    if adopted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if manifest.save_merging(dest, &base)? == SkillManifestSave::Merged {
+        tracing::warn!(
+            dest = %dest.display(),
+            "the skill manifest changed during a forced re-stamp — a writer bypassed \
+             the ledger lock; its entries were merged rather than dropped"
+        );
+    }
+    Ok(adopted)
 }
 
 /// Where `source`'s backup copy lives under `backup_root`.

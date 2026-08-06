@@ -134,3 +134,33 @@ fn manifest_keys_match_the_deployer_key_shape() {
         ]
     );
 }
+
+#[test]
+fn bundled_skill_dirs_includes_a_managed_skill() {
+    // The wider scan `tm reinstall --force` needs: `unmanaged_bundled_skills`
+    // filters managed skills out by design, but the force pass must also see
+    // the MANAGED-and-hand-edited ones, so the shared walk must not apply that
+    // filter itself.
+    let dest = TempDir::new().unwrap();
+    let dir = dest.path().join("tm-workflow");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(SKILL_ENTRY_POINT), "text").unwrap();
+    let mut manifest = SkillManifest::default();
+    manifest.managed.insert(
+        "tm-workflow".to_string(),
+        crate::skills::manifest::SkillManifestEntry {
+            checksum: crate::agents::manifest::checksum("text"),
+            deployed_at: "2026-01-01T00:00:00Z".to_string(),
+        },
+    );
+    manifest.save(dest.path()).unwrap();
+    let roster: BTreeSet<String> = ["tm-workflow".to_string()].into_iter().collect();
+
+    assert!(
+        unmanaged_bundled_skills(dest.path(), &roster).is_empty(),
+        "a managed skill is not an unmanaged finding"
+    );
+    let all = bundled_skill_dirs(dest.path(), &roster);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].stem, "tm-workflow");
+}

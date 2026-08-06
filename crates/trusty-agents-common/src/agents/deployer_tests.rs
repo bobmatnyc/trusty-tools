@@ -97,6 +97,13 @@ fn deploy_redeploys_corrupted_bundled_file() {
         "a corrupted bundled agent must be re-deployed, got: {result:?}"
     );
     assert!(!result.skipped.contains(&"engineer.md".to_string()));
+    // The repair is reported as a REPAIR, not as an ordinary refresh — that is
+    // what lets `tm reinstall` say "1 repaired" for this destination instead of
+    // burying a corruption event in the deployed count.
+    assert!(
+        result.repaired.contains(&"engineer.md".to_string()),
+        "a corruption repair must be reported separately, got: {result:?}"
+    );
 
     // The real content is back, byte-for-byte, and the manifest agrees with it.
     let repaired = fs::read_to_string(tgt.path().join("engineer.md")).unwrap();

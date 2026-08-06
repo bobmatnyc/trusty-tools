@@ -96,6 +96,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `show` — Show a project's config PLUS a read-only nested sessions listing
   - `status` — Show a project's deterministic status rollup (session histogram + flags)
 - `register` — Register a repo alias for the standalone managed driver (DOC-24)
+- `reinstall` — Redeploy the bundled agents and skills to EVERY deploy destination, and optionally reinstall the binary
 - `repair` — Recover from corrupt or inconsistent deploy state
   - `deploy` — Repair the agent/skill deploy state in `~/.claude/`
   - `push-guard` — Retrofit the #2867 cross-branch `pre-push` guard onto an existing clone

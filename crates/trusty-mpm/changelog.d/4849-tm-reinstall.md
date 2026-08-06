@@ -1,0 +1,5 @@
+Added
+
+- `tm reinstall` — redeploys the bundled agents and skills to EVERY deploy destination, not just the one the command you happened to run writes. It refreshes the compiled-in bundle onto disk first (hop 1), then deploys into the tm-managed `claude-config`, the operator's `~/.claude/skills`, the current project's `.claude/skills`, and the standalone driver's `~/.trusty-mpm/claude-config` — the last of which no command reached before (closes [#4849](https://github.com/bobmatnyc/trusty-tools/issues/4849)). Reports deployed / repaired / preserved / unchanged / failed per destination.
+  - Ownership is the deployers' existing model: a framework-owned file that drifted or was corrupted is repaired, a file you own or edited is preserved. `--force` overwrites, backing every file up first.
+  - The binary is never touched unless `--binary` is passed, and the route is decided by install provenance — a crates.io install upgrades through the shared update path, a `cargo install --path` install rebuilds from its recorded source directory, and anything unclassifiable refuses instead of guessing.

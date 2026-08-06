@@ -201,3 +201,75 @@ fn backup_target_mirrors_the_absolute_path() {
         backup_target(root, Path::new("/Users/x/cfg/skills/tm-x"))
     );
 }
+
+// ── `tm reinstall --force`: re-stamping what the deployer declines ───────────
+
+#[test]
+fn force_adopt_restamps_a_frozen_managed_skill() {
+    // The state `adopt_unmanaged_bundled_skills` cannot reach: MANAGED, but
+    // hand-edited away from its recorded checksum, so the deployer reads it as
+    // a user edit and skips it forever. `--force` re-stamps it to what is on
+    // disk, which returns it to the managed-and-unmodified branch, and the
+    // deploy that runs next writes the bundled text over it.
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    fs::write(src.path().join("tm-workflow.md"), "bundled v2").unwrap();
+
+    deploy_skills(src.path(), dest.path()).unwrap();
+    let deployed = dest.path().join("tm-workflow").join("SKILL.md");
+    fs::write(&deployed, "HAND EDIT").unwrap();
+    // Proof the freeze is real before the force runs.
+    let frozen = deploy_skills(src.path(), dest.path()).unwrap();
+    assert_eq!(frozen.skipped, vec!["tm-workflow".to_string()]);
+
+    let adopted =
+        force_adopt_bundled_skills(dest.path(), &roster(&["tm-workflow"]), backups.path()).unwrap();
+
+    assert_eq!(adopted.len(), 1, "{adopted:?}");
+    assert_eq!(adopted[0].adopted_keys, vec!["tm-workflow".to_string()]);
+    assert!(
+        backups.path().join(BACKUP_LEDGER_FILE).is_file(),
+        "the clobber must be recoverable"
+    );
+    let after = deploy_skills(src.path(), dest.path()).unwrap();
+    assert_eq!(after.deployed, vec!["tm-workflow".to_string()]);
+    assert_eq!(fs::read_to_string(&deployed).unwrap(), "bundled v2");
+}
+
+#[test]
+fn force_adopt_leaves_a_current_skill_alone() {
+    // A managed skill already matching its recorded checksum needs nothing.
+    // Backing it up and rewriting the ledger anyway would churn the manifest on
+    // every forced run and fill the backup root with identical copies.
+    let src = TempDir::new().unwrap();
+    let dest = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    fs::write(src.path().join("tm-workflow.md"), "bundled v2").unwrap();
+    deploy_skills(src.path(), dest.path()).unwrap();
+
+    let adopted =
+        force_adopt_bundled_skills(dest.path(), &roster(&["tm-workflow"]), backups.path()).unwrap();
+
+    assert!(adopted.is_empty(), "{adopted:?}");
+    assert!(
+        !backups.path().join(BACKUP_LEDGER_FILE).exists(),
+        "nothing was declined, so nothing should have been backed up"
+    );
+}
+
+#[test]
+fn force_adopt_leaves_an_operator_skill_alone() {
+    // The roster is the ONLY admission test, and `--force` is not licence to
+    // widen it. A skill whose name matches nothing bundled is the operator's.
+    let dest = TempDir::new().unwrap();
+    let backups = TempDir::new().unwrap();
+    let path = stage_untracked(dest.path(), "my-own-skill", "OPERATOR CONTENT");
+
+    let adopted =
+        force_adopt_bundled_skills(dest.path(), &roster(&["tm-workflow"]), backups.path()).unwrap();
+
+    assert!(adopted.is_empty(), "{adopted:?}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "OPERATOR CONTENT");
+    assert!(!SkillManifest::load(dest.path()).is_managed("my-own-skill"));
+}

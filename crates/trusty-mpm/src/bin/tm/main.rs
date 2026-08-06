@@ -33,6 +33,7 @@ use commands::{
     misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
     project::project,
     projects::projects,
+    reinstall::reinstall as reinstall_cmd,
     repair::repair_deploy,
     services::services,
     session::session,
@@ -469,6 +470,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
+        Some(Command::Reinstall { force, binary, yes }) => reinstall_cmd(force, binary, yes).await,
         Some(Command::Hook { pm_guard }) => {
             if pm_guard {
                 commands::pm_guard::pm_guard(&url).await
