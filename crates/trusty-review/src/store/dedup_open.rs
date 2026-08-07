@@ -17,7 +17,7 @@
 //!
 //! Test: `dedup_tests.rs` — `held_lock_that_never_releases_reports_contention`,
 //! `cross_process_holder_serialises_rather_than_locking_out`,
-//! `concurrent_recovery_does_not_lose_committed_claims`,
+//! `concurrent_recovery_waits_and_adopts_the_winners_database`,
 //! `open_for_not_needed_touches_nothing`.
 
 use std::fs::File;
@@ -102,7 +102,7 @@ fn try_open_dedup_db(path: &Path) -> Result<OpenAttempt, DedupError> {
 /// simply uses it, or finds it locked and retries — and only rebuilds if the
 /// file is still unreadable.
 /// Test: `incompatible_dedup_db_is_recreated`,
-/// `concurrent_recovery_does_not_lose_committed_claims`.
+/// `concurrent_recovery_waits_and_adopts_the_winners_database`.
 fn recover_incompatible_db(path: &Path, cause: &DatabaseError) -> Result<OpenAttempt, DedupError> {
     let lock_path = sibling(path, RECOVERY_LOCK_SUFFIX);
     let lock = File::create(&lock_path).map_err(|io| {
