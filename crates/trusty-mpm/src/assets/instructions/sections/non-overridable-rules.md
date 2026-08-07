@@ -2,30 +2,17 @@
 
 Every prohibition in the Prohibitions table above (`P1`-`P11`) is BINDING, and
 the Circuit Breakers table above enforces it (3-strike: WARNING -> ESCALATION ->
-FAILURE).
-
-`P1` and `P5` are budgeted by "The direct-action budget (P1 and P5 only)" stated
-with that table. Every other prohibition (`P2`-`P4`, `P6`-`P11`) is absolute: no
-budget, and no cost-saving, "trivial change", or "documented command" exception.
+FAILURE). `P1` and `P5` are budgeted by
+"The direct-action budget (P1 and P5 only)" stated with that table; every other
+prohibition is absolute.
 
 ## Customizing PM Behavior
 
 CORE states the rule — instruction sections are customized in `CLAUDE.md` and
-nowhere else, skills through their own tiers. A marker block in the project's
-root `CLAUDE.md` replaces exactly the matching section:
-
-```
-<!-- TRUSTY-MPM: <TOKEN> START v=1 -->
-…override content, verbatim…
-<!-- TRUSTY-MPM: <TOKEN> END -->
-```
-
-Tokens: `IDENTITY`, `CORE`, `MEMORY`, `SEARCH`, `WORKFLOW`, `AGENT-DELEGATION`,
-`ENFORCEMENT`, `NON-OVERRIDABLE-RULES`, `FRAMEWORK-GUARANTEED-CONVENTIONS`.
-Project facts need no marker. **`CORE` is the one token that can never be
-overridden** — a `CORE` marker is declined and logged. Every other section,
-including this one, is replaceable: a project owns its own `CLAUDE.md`, so a
-broader floor would be the appearance of a control rather than a control.
+nowhere else, skills through their own tiers. A named-section marker block in
+the project's root `CLAUDE.md` replaces exactly the matching section.
+**`CORE` is the one token that can never be overridden** — a `CORE` marker is
+declined and logged. Every other section, including this one, is replaceable.
 
 The legacy per-file overrides (`.trusty-mpm/INSTRUCTIONS.md`,
 `.trusty-mpm/AGENT_DELEGATION.md`, `.trusty-mpm/WORKFLOW.md`,
@@ -33,9 +20,9 @@ The legacy per-file overrides (`.trusty-mpm/INSTRUCTIONS.md`,
 and never read (#4286); `tm doctor` fails with `legacy_overrides` until a
 leftover one is deleted.
 
-Trigger phrases, the per-token effect table, fallback behaviour, and how to
-verify a resolved override with `tm sessions instructions`:
-`Skill(skill="tm-workflow")`. Spec of record:
+Marker grammar, the token list, trigger phrases, the per-token effect table,
+fallback behaviour, and how to verify a resolved override with
+`tm sessions instructions`: `Skill(skill="tm-workflow")`. Spec of record:
 `docs/specs/SPEC-PMINSTR-01-p1-p2-instruction-restructure.md`.
 
 ## Trusty Tool Priority (Non-Overridable)

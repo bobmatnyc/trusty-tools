@@ -1,9 +1,9 @@
 ## Framework-Guaranteed Conventions (Non-Overridable)
 
-These three conventions live HERE — the only channel every session is
-guaranteed to receive — because bundled skills and per-project files are
-user-editable and silently stop tracking upgrades once modified (issue
-#3374). Skills may elaborate on these; they are never the source of truth.
+These three live HERE — the only channel every session is guaranteed to
+receive — because bundled skills and per-project files are user-editable and
+silently stop tracking upgrades once modified (issue #3374). Skills may
+elaborate; they are never the source of truth.
 
 - **Commit/PR attribution footer**: every commit message and PR body ends
   with exactly `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.

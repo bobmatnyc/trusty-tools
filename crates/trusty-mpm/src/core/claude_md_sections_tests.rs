@@ -1398,7 +1398,20 @@ fn locate_blocks_ignores_other_sections() {
 /// surviving table would silently drop a real routing rule with nothing else
 /// asserting it — which is the failure this test exists to catch, not the
 /// wording of any one row.
-const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
+///
+/// #5087 moved the per-agent trigger lists and the default-model column out of
+/// the always-loaded prompt and into the `tm-delegation-patterns` skill, which
+/// loads on trigger. The assertions FOLLOW the mappings to their new home
+/// rather than being deleted — the same pattern #4574 used when the prose rules
+/// moved to the output style. Every mapping is still asserted verbatim, byte
+/// for byte; what changed is which surface has to carry it. A mapping that
+/// appears on NEITHER surface is the regression these tests exist to catch.
+///
+/// The split: a mapping stays resident when it gates a dispatch decision the PM
+/// makes without first reaching for a skill (what is delegated at all, which of
+/// two confusable agents, which tool is banned). It moves to the skill when it
+/// is lookup detail — a trigger keyword list, or an agent's default model.
+const FOLDED_ROUTING_MAPPINGS_PROMPT: &[(&str, &str)] = &[
     // Make / Mise Command Routing — the whole table lived nowhere else. `mise`
     // in particular is absent from the Prohibitions table, so this section is
     // the ONLY statement that `mise run` targets are delegated at all.
@@ -1414,27 +1427,7 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
         "every `make` and `mise run` target",
         "make/mise → local-ops",
     ),
-    (
-        "build, dist, clean, install, setup",
-        "build/dist/clean/install/setup → local-ops",
-    ),
-    (
-        "version, bump, release, publish, deploy",
-        "version/release/publish → local-ops",
-    ),
-    (
-        "`pyproject.toml`, `package.json`",
-        "the manifest-file release triggers",
-    ),
-    (
-        "`test`, `lint`, `check` (or `engineer`)",
-        "make/mise test/lint/check → qa or engineer",
-    ),
     // Ops Agent Routing.
-    (
-        "localhost, PM2, npm, docker",
-        "the local-ops trigger keywords",
-    ),
     (
         "including anything unknown or ambiguous",
         "unknown/ambiguous → local-ops",
@@ -1460,11 +1453,7 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
         "`research` → `engineer` → `local-ops` → `qa` → `documentation`",
         "the \"just do it\" full pipeline",
     ),
-    // When to Delegate to Each Agent — the per-agent facts.
-    (
-        "Prefer the language-specific engineer",
-        "the language-specific engineer preference",
-    ),
+    // When to Delegate to Each Agent — the two confusable pairs.
     (
         "APPROVED / NEEDS_IMPROVEMENT / BLOCKED",
         "the code-analyzer verdict vocabulary",
@@ -1476,6 +1465,40 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
     (
         "never goes to `version-control`",
         "P6 — ticket bookkeeping stays with ticketing",
+    ),
+    // The verbatim-name rule, which gated both deleted tables.
+    (
+        "fails to dispatch (issue #4594)",
+        "the pass-the-name-verbatim rule",
+    ),
+];
+
+/// The lookup detail #5087 relocated to `tm-delegation-patterns`. Same
+/// needles, asserted against the skill instead of the prompt.
+const FOLDED_ROUTING_MAPPINGS_SKILL: &[(&str, &str)] = &[
+    (
+        "build, dist, clean, install, setup",
+        "build/dist/clean/install/setup → local-ops",
+    ),
+    (
+        "version, bump, release, publish, deploy",
+        "version/release/publish → local-ops",
+    ),
+    (
+        "`pyproject.toml`, `package.json`",
+        "the manifest-file release triggers",
+    ),
+    (
+        "`test`, `lint`, `check` (or `engineer`)",
+        "make/mise test/lint/check → qa or engineer",
+    ),
+    (
+        "localhost, PM2, npm, docker",
+        "the local-ops trigger keywords",
+    ),
+    (
+        "Prefer the language-specific engineer",
+        "the language-specific engineer preference",
     ),
     (
         "Check git user for main-branch access",
@@ -1489,28 +1512,49 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
         "Secret scanning, attack-vector detection",
         "the security capabilities",
     ),
-    // core.md's Agent Routing — the per-agent default model column.
+    // The per-agent default-model column.
     ("| sonnet |", "the per-agent default-model column"),
     ("| opus |", "the per-agent default-model column"),
     ("| haiku |", "the per-agent default-model column"),
-    // The verbatim-name rule, which gated both deleted tables.
-    (
-        "fails to dispatch (issue #4594)",
-        "the pass-the-name-verbatim rule",
-    ),
 ];
+
+/// The bundled `tm-delegation-patterns` skill body, as shipped.
+const DELEGATION_PATTERNS_SKILL: &str = include_str!("../assets/skills/tm-delegation-patterns.md");
 
 #[test]
 fn the_surviving_routing_table_covers_every_folded_mapping() {
     let package = bundled_fallback_package().expect("manifest parses");
     let delegation = package.authored_run(&[SectionId::AgentDelegation]);
 
-    for (needle, what) in FOLDED_ROUTING_MAPPINGS {
+    for (needle, what) in FOLDED_ROUTING_MAPPINGS_PROMPT {
         assert!(
             delegation.contains(needle),
             "the collapsed routing tables lost {what}; missing {needle:?}"
         );
     }
+}
+
+#[test]
+fn the_relocated_routing_detail_is_carried_by_the_delegation_skill() {
+    // #5087: the other half of the same guarantee. These mappings left the
+    // always-loaded prompt, so the prompt-side assertion above can no longer
+    // see them — without this test, trimming the prompt would have silently
+    // deleted them with nothing failing.
+    for (needle, what) in FOLDED_ROUTING_MAPPINGS_SKILL {
+        assert!(
+            DELEGATION_PATTERNS_SKILL.contains(needle),
+            "tm-delegation-patterns lost {what}; missing {needle:?}"
+        );
+    }
+
+    // The prompt must name the call, or the relocated detail is unreachable.
+    let package = bundled_fallback_package().expect("manifest parses");
+    assert!(
+        package
+            .authored_run(&[SectionId::AgentDelegation])
+            .contains(r#"Skill(skill="tm-delegation-patterns")"#),
+        "the routing section must name the skill that now carries the detail"
+    );
 }
 
 #[test]
