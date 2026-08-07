@@ -470,3 +470,184 @@ async fn coverage_probe_chunks_large_id_sets() {
     );
     h.abort();
 }
+
+/// Create `count` palaces on disk under the state's data root, each holding one
+/// indexable drawer.
+///
+/// Why: the enumeration bug is only visible when a palace exists on disk and is
+/// absent from the open-handle LRU, so the fixture has to go through the
+/// registry's own create path.
+/// What: returns the ids created.
+/// Test: used by the sweep tests below.
+fn create_palaces_on_disk(state: &AppState, count: usize) -> Vec<String> {
+    use trusty_common::memory_core::palace::{Palace, PalaceId};
+    (0..count)
+        .map(|i| {
+            let id = format!("sweep-{i}");
+            let handle = state
+                .registry
+                .create_palace(
+                    &state.data_root,
+                    Palace {
+                        id: PalaceId::new(&id),
+                        name: id.clone(),
+                        description: None,
+                        created_at: chrono::Utc::now(),
+                        data_dir: state.data_root.join(&id),
+                    },
+                )
+                .expect("create palace on disk");
+            // Persist through redb — the drawer table is rebuilt from there on
+            // open, so an in-memory push alone would leave the reopened palace
+            // empty and the test would prove nothing about the sweep.
+            let drawer = Drawer::new(Uuid::new_v4(), "content worth indexing");
+            handle
+                .kg
+                .upsert_drawer_sync(&drawer)
+                .expect("persist drawer");
+            handle.drawers.write().push(drawer);
+            id
+        })
+        .collect()
+}
+
+/// Why (#5048 re-review): the sweep enumerated `registry.list()` — the LRU key
+/// set of currently-OPEN handles, capped at 64 — while this host holds ~99
+/// palaces. At least 35 were never probed, never marked dirty, and the sweep
+/// then logged `all coverage verified`. That is the coverage fail-open moved
+/// one layer out: the predicate stopped lying about palaces it examined, and
+/// the sweep started lying about palaces it never examines.
+/// What: builds three palaces on disk, then runs the sweep from a COLD
+/// `AppState` whose registry holds nothing — the worst case of the eviction the
+/// cap causes. All three must be enumerated, and with the lane off all three
+/// must land in the repair queue rather than being silently skipped.
+/// Test: this test itself. Revert the enumeration to `state.registry.list()`
+/// and `enumerated` reads 0, the queue is empty, and `all_verified()` is true.
+#[tokio::test]
+async fn startup_sweep_enumerates_every_palace_on_disk() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let ids = create_palaces_on_disk(&AppState::new(root.clone()), 3);
+
+    let cold = AppState::new(root);
+    assert!(
+        cold.registry.list().is_empty(),
+        "precondition: the registry must be cold, so an LRU-based enumeration finds nothing"
+    );
+
+    let out = run_startup_sweep(&cold).await;
+
+    assert_eq!(
+        out.enumerated,
+        Some(3),
+        "every palace on disk must be enumerated, not just the open ones"
+    );
+    assert_eq!(
+        out.swept, 3,
+        "each has a drawer, so each must be backfilled"
+    );
+    assert_eq!(
+        out.incomplete, 3,
+        "the lane is off, so none can be verified"
+    );
+    assert!(
+        !out.all_verified(),
+        "a sweep that verified nothing must never read as complete"
+    );
+
+    let mut queued = crate::bm25_repair::dirty_palaces(&cold);
+    queued.sort();
+    assert_eq!(
+        queued, ids,
+        "every unverified palace must be queued for repair"
+    );
+}
+
+/// Depth-first search for a file by name under `root`.
+fn find_file(root: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().is_some_and(|f| f == name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Why: a palace the sweep cannot open is a palace it cannot verify, and the
+/// pre-existing code `continue`d past it into the "all verified" tally. Same
+/// shape as the enumeration gap, one case narrower.
+/// What: replaces the palace's KG redb file with a DIRECTORY, so `list_palaces`
+/// still decodes the row from `palace.json` but `open_palace` cannot open the
+/// store. Asserts the sweep counts it, queues it, and does not report a clean
+/// sweep. Corrupting `palace.json` instead would not exercise this branch —
+/// `list_palaces` skips rows it cannot decode, so the palace would never be
+/// enumerated in the first place.
+/// Test: this test itself. Replace the `unopenable` arm with a bare `continue`
+/// and `all_verified()` reads true over a palace that was never examined.
+#[tokio::test]
+async fn startup_sweep_marks_unopenable_palaces_instead_of_skipping_them() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    create_palaces_on_disk(&AppState::new(root.clone()), 1);
+
+    // Locate the store rather than assuming the layout — `create_palace`
+    // normalises `data_dir`, so the path is the registry's to decide.
+    let kg_path = find_file(&root, "kg.redb").expect("the palace must have a KG store on disk");
+    std::fs::remove_file(&kg_path).expect("remove kg.db");
+    std::fs::create_dir(&kg_path).expect("a directory cannot be opened as a redb file");
+
+    let cold = AppState::new(root);
+    let out = run_startup_sweep(&cold).await;
+
+    assert_eq!(
+        out.enumerated,
+        Some(1),
+        "precondition: the row is still decodable, so the palace IS enumerated"
+    );
+    assert_eq!(out.unopenable, 1, "an unopenable palace must be counted");
+    assert!(
+        !out.all_verified(),
+        "a palace that could not be examined must not read as verified"
+    );
+    assert_eq!(
+        crate::bm25_repair::dirty_palaces(&cold),
+        vec!["sweep-0".to_string()],
+        "and queued for repair rather than skipped"
+    );
+}
+
+/// Why: a failed enumeration is the outermost fail-open — the sweep would run
+/// its loop zero times and report a clean result over the entire corpus. It
+/// must verify nothing and say so.
+/// What: points the state at a data root that cannot be listed.
+/// Test: this test itself.
+#[tokio::test]
+async fn a_sweep_that_cannot_enumerate_verifies_nothing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // A regular file where the data root should be — `read_dir` cannot walk it.
+    let root = tmp.path().join("not-a-directory");
+    std::fs::write(&root, b"x").expect("write file");
+
+    let state = AppState::new(root);
+    let out = run_startup_sweep(&state).await;
+
+    assert_eq!(
+        out.enumerated, None,
+        "the enumeration failed — say so in the type"
+    );
+    assert_eq!(out.swept, 0);
+    assert!(
+        !out.all_verified(),
+        "a sweep that examined nothing has zero incomplete palaces only because \
+         it looked at none — that must never read as complete"
+    );
+    assert!(
+        crate::bm25_repair::dirty_palaces(&state).is_empty(),
+        "nothing was examined, so nothing can be queued — the log line is the alarm"
+    );
+}

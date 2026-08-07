@@ -602,16 +602,162 @@ pub fn startup_backfill_opted_out() -> bool {
     std::env::var(ENV_NO_BACKFILL).as_deref() == Ok("1")
 }
 
-/// Sweep every registered palace that has drawers, serially.
+/// What one startup sweep considered and what it could not verify.
+///
+/// Why: the sweep's own log line is a coverage claim, and a claim built from
+/// counters that never saw a palace is the same fail-open one layer out. This
+/// carries `enumerated` — palaces found ON DISK — so "all coverage verified"
+/// is a statement about the whole corpus rather than about whatever subset the
+/// sweep happened to look at.
+/// What: `enumerated` is `Some(n)` palaces found on disk, or `None` when the
+/// enumeration itself failed; `swept` is those with drawers that were actually
+/// backfilled; `incomplete` is those left without verified coverage;
+/// `unopenable` is those that could not be hydrated at all.
+///
+/// `enumerated` is an `Option` for the same reason `BackfillReport::
+/// missing_after` is: a sweep that could not enumerate has zero incomplete
+/// palaces only because it examined none, and a plain `usize` would let
+/// `all_verified()` read `true` off exactly that. Encoding "did not ask" in the
+/// type makes the fail-open unrepresentable rather than merely avoided.
+/// Test: `startup_sweep_enumerates_every_palace_on_disk`,
+/// `a_sweep_that_cannot_enumerate_verifies_nothing`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SweepOutcome {
+    pub enumerated: Option<usize>,
+    pub swept: usize,
+    pub incomplete: usize,
+    pub unopenable: usize,
+}
+
+impl SweepOutcome {
+    /// True only when the whole corpus was enumerated, every palace in it was
+    /// examined, and every one came back with verified coverage.
+    ///
+    /// Test: `a_sweep_that_cannot_enumerate_verifies_nothing`.
+    pub fn all_verified(&self) -> bool {
+        self.enumerated.is_some() && self.incomplete == 0 && self.unopenable == 0
+    }
+}
+
+/// Sweep every palace ON DISK that has drawers, serially.
+///
+/// Why the disk and not the registry: `registry.list()` snapshots the LRU key
+/// set of currently-OPEN handles, capped at `DEFAULT_MAX_OPEN_PALACES` (64).
+/// This host holds ~99 palaces, so at least 35 would never be probed, never be
+/// marked dirty, and the sweep would then report `all coverage verified` — the
+/// same fail-open the coverage predicate itself had, relocated from "a palace
+/// it examined" to "a palace it never examines". `service/helpers.rs` (#4637)
+/// already settled this for the recall fan-out: answering from cache-resident
+/// palaces only "would silently drop ~98.9% of the corpus, which is a
+/// correctness regression, not an optimisation". Same reasoning, same fix.
+/// Holding the opened `Arc` for the palace's whole backfill also removes the
+/// mid-sweep-eviction hole — the idle ticker is armed before this runs, and a
+/// borrowed LRU entry could vanish underneath it.
+/// What: enumerates with `PalaceRegistry::list_palaces` and hydrates each with
+/// `open_palace` on the blocking pool (serial, so cold opens do not thrash the
+/// 64-slot LRU). Every palace that cannot be enumerated, cannot be opened, or
+/// cannot be verified is reported and queued for repair. A failed enumeration
+/// verifies NOTHING and says so — it never reports a clean sweep.
+/// Test: `startup_sweep_enumerates_every_palace_on_disk`,
+/// `startup_sweep_marks_unopenable_palaces_instead_of_skipping_them`.
+pub async fn run_startup_sweep(state: &AppState) -> SweepOutcome {
+    let started = Instant::now();
+    let root = state.data_root.clone();
+    let listed = tokio::task::spawn_blocking(move || {
+        trusty_common::memory_core::registry::PalaceRegistry::list_palaces(&root)
+    })
+    .await;
+
+    let palaces = match listed {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => {
+            tracing::error!(
+                "bm25 backfill: could not enumerate palaces on disk — the startup sweep \
+                 verified NOTHING and no palace was queued for repair: {e:#}"
+            );
+            return SweepOutcome::default();
+        }
+        Err(e) => {
+            tracing::error!(
+                "bm25 backfill: palace enumeration task failed — the startup sweep \
+                 verified NOTHING: {e}"
+            );
+            return SweepOutcome::default();
+        }
+    };
+
+    let mut out = SweepOutcome {
+        enumerated: Some(palaces.len()),
+        ..Default::default()
+    };
+
+    for palace in palaces {
+        let id = palace.id.clone();
+        let registry = std::sync::Arc::clone(&state.registry);
+        let root = state.data_root.clone();
+        let opened = tokio::task::spawn_blocking(move || registry.open_palace(&root, &id)).await;
+        let handle = match opened {
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => {
+                // A palace we cannot open is a palace we cannot verify. Queue
+                // it rather than skipping it into the "all verified" tally.
+                tracing::error!(palace = %palace.id, "bm25 backfill: could not open palace: {e:#}");
+                out.unopenable += 1;
+                crate::bm25_repair::mark_dirty(state, palace.id.as_str());
+                continue;
+            }
+            Err(e) => {
+                tracing::error!(palace = %palace.id, "bm25 backfill: open task failed: {e}");
+                out.unopenable += 1;
+                crate::bm25_repair::mark_dirty(state, palace.id.as_str());
+                continue;
+            }
+        };
+
+        // A palace with no drawers has nothing that could be missing, so it is
+        // covered by definition — skipping it is not a gap. This is what keeps
+        // the sweep from starting ~80 daemons to tell each it has nothing to do.
+        if handle.drawers.read().is_empty() {
+            continue;
+        }
+
+        let report = backfill_state_palace(state, &handle, palace.id.as_str(), false).await;
+        out.swept += 1;
+        if !report.fully_indexed() {
+            out.incomplete += 1;
+            crate::bm25_repair::mark_dirty(state, palace.id.as_str());
+        }
+    }
+
+    if out.all_verified() {
+        tracing::info!(
+            enumerated = ?out.enumerated,
+            swept = out.swept,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "bm25 backfill: startup sweep complete, all coverage verified"
+        );
+    } else {
+        tracing::error!(
+            enumerated = ?out.enumerated,
+            swept = out.swept,
+            incomplete = out.incomplete,
+            unopenable = out.unopenable,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "bm25 backfill: startup sweep left palaces without verified coverage — \
+             queued for repair"
+        );
+    }
+    out
+}
+
+/// Start the startup sweep on a background task.
 ///
 /// Why: a daemon restart is the only moment at which the whole corpus is known
-/// to be reachable and nothing is waiting on it. Serial is deliberate: the
-/// supervisor caps concurrently-live daemons at three, so a parallel sweep
-/// would spend its time reaping daemons it had just spawned.
-/// What: returns immediately, doing the work on a spawned task. No-op when the
-/// lane is off or [`ENV_NO_BACKFILL`] is set — which, until the lane's default
-/// is flipped, is every deployment. Palaces with zero drawers are skipped
-/// without starting a daemon, which is roughly 80 of the ~99 on this host.
+/// to be reachable and nothing is waiting on it. The work itself is
+/// [`run_startup_sweep`], kept awaitable so its enumeration can be tested
+/// without racing a spawned task.
+/// What: returns immediately. No-op when the lane is off or [`ENV_NO_BACKFILL`]
+/// is set — which, until the lane's default is flipped, is every deployment.
 /// Test: `startup_backfill_respects_the_opt_out`.
 pub fn spawn_startup_backfill(state: &AppState) {
     if state.bm25_client.is_none() {
@@ -624,46 +770,7 @@ pub fn spawn_startup_backfill(state: &AppState) {
     }
     let state = state.clone();
     tokio::spawn(async move {
-        let started = Instant::now();
-        let mut swept = 0usize;
-        let mut incomplete = 0usize;
-        for id in state.registry.list() {
-            // `get` rather than `peek`: the sweep genuinely uses the handle, so
-            // it should refresh the registry's own idle-eviction recency.
-            let Some(handle) = state.registry.get(&id) else {
-                continue;
-            };
-            let palace = id.as_str().to_string();
-            // Skipping empty palaces here rather than inside `backfill_palace`
-            // is what keeps the sweep from starting ~80 daemons to tell each
-            // one it has nothing to do.
-            if handle.drawers.read().is_empty() {
-                continue;
-            }
-            let report = backfill_state_palace(&state, &handle, &palace, false).await;
-            swept += 1;
-            if !report.fully_indexed() {
-                incomplete += 1;
-                // Queue it for the repair sweep rather than waiting for the
-                // next restart — see `bm25_repair`.
-                crate::bm25_repair::mark_dirty(&state, &palace);
-            }
-        }
-        if incomplete > 0 {
-            tracing::error!(
-                swept,
-                incomplete,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "bm25 backfill: startup sweep left palaces without verified coverage — \
-                 queued for repair"
-            );
-        } else {
-            tracing::info!(
-                swept,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "bm25 backfill: startup sweep complete, all coverage verified"
-            );
-        }
+        run_startup_sweep(&state).await;
     });
 }
 

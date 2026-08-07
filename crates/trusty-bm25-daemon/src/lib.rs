@@ -143,11 +143,15 @@ pub struct DaemonConfig {
 /// worth hanging on. Two seconds is far beyond a JSON write of a few MB and
 /// still well inside the supervisor's own SIGTERM-then-SIGKILL budget, so a
 /// wedged worker costs a bounded delay rather than an unkillable process.
-/// What: 2 seconds.
+/// What: 2 seconds. Public so a supervisor that must outwait this daemon can
+/// compare against the real value instead of restating it — a restated copy
+/// cannot detect the drift it exists to name.
 /// Test: exercised by every shutdown path; the durability guarantee it
 /// protects is asserted by
-/// `tests/shutdown_flush.rs::shutdown_flushes_the_open_write_window`.
-const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+/// `tests/shutdown_flush.rs::shutdown_flushes_the_open_write_window`;
+/// `trusty-memory`'s `sigterm_patience_exceeds_the_daemon_flush_budget` pins
+/// the supervisor's margin over it.
+pub const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Run the BM25 daemon to completion.
 ///

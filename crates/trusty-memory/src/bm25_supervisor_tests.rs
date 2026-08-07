@@ -471,11 +471,10 @@ async fn shutdown_does_not_count_as_a_limit_reap() {
 /// Test: this test itself.
 #[test]
 fn sigterm_patience_exceeds_the_daemon_flush_budget() {
-    // The daemon's own budget. Not importable — `trusty-memory` depends on the
-    // daemon crate only for the bundled binary shim, and the constant is
-    // private — so it is restated with a pointer, the same way the BM25 client
-    // restates the wire method names.
-    let daemon_flush_budget = Duration::from_secs(2);
+    // Imported, not restated: a hardcoded copy stays equal to itself while the
+    // daemon's real budget drifts, so it could never detect the drift it exists
+    // to name.
+    let daemon_flush_budget = trusty_bm25_daemon::SHUTDOWN_FLUSH_TIMEOUT;
     assert!(
         SIGTERM_PATIENCE > daemon_flush_budget,
         "the supervisor must outwait the daemon's flush: {SIGTERM_PATIENCE:?} vs \

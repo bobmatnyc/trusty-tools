@@ -110,39 +110,86 @@ pub fn dirty_palaces(state: &AppState) -> Vec<String> {
 /// Run one repair pass over the queued palaces.
 ///
 /// Why: exposed separately from the timer so a test can drive a pass
-/// deterministically rather than sleeping out an interval, and so the startup
-/// path could invoke one directly if that ever becomes useful.
-/// What: drains the dirty set, then for each palace runs the lossless backfill
-/// (not forced — the coverage probe decides whether there is work). A palace
-/// whose coverage is still unverified afterwards is re-marked, so a daemon
-/// that is down stays queued instead of being quietly forgotten. Returns
-/// `(attempted, repaired)`.
-/// Test: `an_unrepairable_palace_stays_queued`, `a_vanished_palace_is_dropped_from_the_queue`.
+/// deterministically rather than sleeping out an interval.
+/// What: for each queued palace, resolves the handle with `open_palace` —
+/// which HYDRATES from disk — and re-runs the lossless backfill. An entry is
+/// removed only on verified coverage, or when the palace is genuinely absent
+/// from disk. Everything else stays queued, so an interruption at any point
+/// loses nothing.
+///
+/// `open_palace`, not `registry.get`: `get` is a bare LRU lookup that misses a
+/// palace which has gone idle and been evicted — and a dirty palace is exactly
+/// the kind that goes idle, because its writes are failing. Dropping it there
+/// left its gap waiting for a restart, which is the outcome this module exists
+/// to prevent. Telling "evicted" from "deleted" needs the on-disk palace list;
+/// without it, a transient open failure and a deleted palace look identical and
+/// one of the two answers is always wrong.
+/// Returns `(attempted, repaired)`.
+/// Test: `an_evicted_palace_is_rehydrated_not_dropped`,
+/// `a_palace_absent_from_disk_is_dropped_from_the_queue`,
+/// `an_unrepairable_palace_stays_queued`.
 pub async fn run_repair_pass(state: &AppState) -> (usize, usize) {
-    let queued: Vec<String> = state
-        .bm25_dirty
-        .iter()
-        .map(|e| e.key().clone())
-        .collect::<Vec<_>>();
-    for palace in &queued {
-        state.bm25_dirty.remove(palace);
-    }
+    // Snapshot rather than drain: an entry leaves the set only once its
+    // coverage is verified, so a panic or cancellation mid-pass cannot silently
+    // discard the very gap the set exists to remember.
+    let queued: Vec<String> = state.bm25_dirty.iter().map(|e| e.key().clone()).collect();
     if queued.is_empty() {
         return (0, 0);
     }
 
+    let root = state.data_root.clone();
+    let on_disk = match tokio::task::spawn_blocking(move || {
+        trusty_common::memory_core::registry::PalaceRegistry::list_palaces(&root)
+    })
+    .await
+    {
+        Ok(Ok(palaces)) => palaces
+            .into_iter()
+            .map(|p| p.id.0)
+            .collect::<std::collections::HashSet<String>>(),
+        Ok(Err(e)) => {
+            // Without the on-disk list we cannot tell a deleted palace from an
+            // evicted one. Keep everything queued and try again next pass —
+            // guessing here would drop a real gap.
+            tracing::warn!("bm25 repair: could not enumerate palaces, deferring pass: {e:#}");
+            return (0, 0);
+        }
+        Err(e) => {
+            tracing::warn!("bm25 repair: enumeration task failed, deferring pass: {e}");
+            return (0, 0);
+        }
+    };
+
     let mut repaired = 0usize;
     for palace in &queued {
-        let id = trusty_common::memory_core::palace::PalaceId::new(palace.clone());
-        let Some(handle) = state.registry.get(&id) else {
-            // The palace was evicted or deleted. Nothing to repair, and
-            // re-queueing it would spin forever.
-            tracing::debug!(palace = %palace, "bm25 repair: palace no longer resident — dropping");
+        if !on_disk.contains(palace) {
+            // Genuinely gone. Re-queueing a deleted palace spins forever.
+            state.bm25_dirty.remove(palace);
+            tracing::debug!(palace = %palace, "bm25 repair: palace no longer on disk — dropping");
             continue;
+        }
+
+        let id = trusty_common::memory_core::palace::PalaceId::new(palace.clone());
+        let registry = Arc::clone(&state.registry);
+        let root = state.data_root.clone();
+        let handle = match tokio::task::spawn_blocking(move || registry.open_palace(&root, &id))
+            .await
+        {
+            Ok(Ok(h)) => h,
+            Ok(Err(e)) => {
+                tracing::warn!(palace = %palace, "bm25 repair: open failed, staying queued: {e:#}");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(palace = %palace, "bm25 repair: open task failed, staying queued: {e}");
+                continue;
+            }
         };
+
         let report =
             crate::bm25_backfill::backfill_state_palace(state, &handle, palace, false).await;
         if report.fully_indexed() {
+            state.bm25_dirty.remove(palace);
             repaired += 1;
             tracing::info!(
                 palace = %palace,
@@ -150,10 +197,8 @@ pub async fn run_repair_pass(state: &AppState) -> (usize, usize) {
                 "bm25 repair: coverage restored"
             );
         } else {
-            // Still broken — keep it queued. This is what makes "a drop is
-            // recoverable" true across a daemon outage rather than only across
-            // a lucky one.
-            state.bm25_dirty.insert(palace.clone());
+            // Stays queued — that is what makes "a drop is recoverable" true
+            // across a daemon outage rather than only across a lucky one.
             tracing::warn!(
                 palace = %palace,
                 status = ?report.status,
