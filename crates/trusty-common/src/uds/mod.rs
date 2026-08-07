@@ -49,8 +49,29 @@ mod tests;
 pub mod dir;
 mod peer;
 
+/// On-demand supervision of a UDS-serving child process (#5089 step 2).
+///
+/// Why: ADR-0034 §1 needs `trusty-console` to start `trusty-review` /
+/// `trusty-analyze` at delivery time so neither has to be resident. The
+/// mechanism ADR-0032 said "does not yet exist" did exist, as `trusty-memory`'s
+/// `Bm25Supervisor`; this is that supervisor with its BM25-specific parts lifted
+/// into per-service configuration.
+/// What: [`supervisor::UdsServiceSupervisor`] plus its config, error and probe
+/// types. Gated behind the `uds-supervisor` feature because it pulls the whole
+/// child-process lifecycle in, which a crate that only binds a socket does not
+/// need.
+/// Test: `supervisor/tests.rs`, and `trusty-memory`'s
+/// `tests/bm25_supervisor_concurrency.rs` against real children.
+#[cfg(feature = "uds-supervisor")]
+pub mod supervisor;
+
 pub use dir::prepare_socket_dir;
 pub use peer::{ensure_peer_is_self, peer_uid, self_uid};
+#[cfg(feature = "uds-supervisor")]
+pub use supervisor::{
+    ServiceTimeouts, SocketVerdict, SpawnSpec, SupervisorConfig, SupervisorError,
+    UdsServiceSupervisor,
+};
 
 use std::fs::Permissions;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};

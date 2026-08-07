@@ -329,6 +329,15 @@ bm25-client = ["uds"]
 # Pulls in `thiserror` (error enum) and uses the `libc` and `tokio` workspace
 # deps already required — adds no new dependencies to the lockfile.
 uds = ["dep:thiserror"]
+# Enables the `uds::supervisor` module: the generic on-demand spawn supervisor
+# (`UdsServiceSupervisor`) promoted from trusty-memory's `Bm25Supervisor`
+# (issue #5089 step 2, ADR-0034 §1). Implies `uds` — it verifies an adopted
+# socket through `verify_socket_for_connect` and checks the `sun_path` budget
+# before spawning. Adds no new dependencies: `tokio/process`, `libc` on unix and
+# the unconditional `sys_metrics` module are already required by this crate.
+# Off by default so a consumer that only binds a socket does not compile the
+# child-process lifecycle.
+uds-supervisor = ["uds"]
 # Bundle the ONNX Runtime static libs via fastembed's
 # `ort-download-binaries-native-tls`. Right choice for macOS and modern
 # Linux (glibc ≥ 2.38). Mutually exclusive with `embedder-load-dynamic`
