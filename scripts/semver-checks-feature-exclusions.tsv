@@ -1,0 +1,17 @@
+# Features that scripts/check_semver.sh must NOT enable (issue #5050).
+#
+# The gate enables every declared feature, because the alternative
+# (--default-features) is theatre here: trusty-common declares `default = []`,
+# so the #4088 break — a required public field on DaemonBridgeConfig, behind the
+# `mcp` feature — passes clean under it. Verified: 196 checks, 196 pass.
+#
+# This file is the ONLY subtraction from that set, and every row must say why the
+# feature cannot be built on a stock CI runner. "It is slow" is not a reason —
+# an excluded feature's public API is unchecked, so each row is a real coverage
+# hole and has to earn its place.
+#
+# Format (tab-separated):  <crate>	<feature>	<reason>
+#
+# <crate>	<feature>	<reason>
+trusty-common	embedder-cuda	cudarc/candle-kernels build.rs panics without nvcc; no CI runner has the CUDA toolkit
+trusty-common	embedder-coreml	links the macOS CoreML framework; cannot build on ubuntu-latest
