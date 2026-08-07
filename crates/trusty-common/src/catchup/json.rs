@@ -23,7 +23,9 @@ use super::CatchupOptions;
 use super::derive_palace_id_for;
 use super::git::{CommitSummary, git_commits_since};
 use super::palace::fetch_recent_palace_drawers;
-use super::session_finder::{PausedSession, filter_sessions_since, find_paused_sessions};
+use super::session_finder::{
+    FilteredSessions, PausedSession, filter_sessions_since, find_paused_sessions,
+};
 use super::state::load_catchup_state;
 
 /// A single paused session, restructured as JSON fields instead of markdown
@@ -174,6 +176,47 @@ pub struct CatchupJson {
     pub undatable_sessions_dropped: usize,
 }
 
+impl CatchupJson {
+    /// Fold another project's digest into this one.
+    ///
+    /// Why: `session_context_catchup --all-projects` merges a digest per
+    /// project, and every field has to merge — including
+    /// `undatable_sessions_dropped`, which SUMS rather than concatenating. The
+    /// caller previously hand-rolled three `extend` calls plus a `+=`, where
+    /// forgetting the `+=` would drop the receipt for every project after the
+    /// first and leave the suite green (#5072).
+    /// What: appends `sessions` / `recent_commits` / `recent_memory` and adds
+    /// `undatable_sessions_dropped`, saturating.
+    /// Test: `absorb_sums_dropped_counts_and_concatenates_the_rest`.
+    pub fn absorb(&mut self, other: CatchupJson) {
+        self.sessions.extend(other.sessions);
+        self.recent_commits.extend(other.recent_commits);
+        self.recent_memory.extend(other.recent_memory);
+        self.undatable_sessions_dropped = self
+            .undatable_sessions_dropped
+            .saturating_add(other.undatable_sessions_dropped);
+    }
+}
+
+/// Project a filter outcome into the two [`CatchupJson`] fields it feeds.
+///
+/// Why: the withheld count has to reach the caller, and nothing else pins that
+/// it does — an undatable session is unreachable through the filesystem once
+/// both [`PausedSession`] arms fall back to mtime, so no end-to-end test can
+/// drive the count non-zero. Replacing the count with a literal `0` here would
+/// otherwise leave the whole suite green while the receipt silently stopped
+/// working, which is the same fail-open class #5072 is about. This is the seam
+/// that makes the wire testable.
+/// What: maps `kept` through [`paused_session_to_json`] and returns
+/// `dropped_undatable` alongside it, unchanged.
+/// Test: `sessions_payload_propagates_dropped_count`.
+fn sessions_payload(filtered: FilteredSessions) -> (Vec<PausedSessionJson>, usize) {
+    (
+        filtered.kept.iter().map(paused_session_to_json).collect(),
+        filtered.dropped_undatable,
+    )
+}
+
 /// Generate a structured (JSON) catch-up digest for the given options.
 ///
 /// Why: the `session_context_catchup` MCP tool needs typed fields, not a
@@ -201,13 +244,7 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
 
     // #5072: shared fail-closed predicate — see `filter_sessions_since`.
     let (sessions, undatable_sessions_dropped) = match find_paused_sessions(&opts.project_dir) {
-        Ok(found) => {
-            let filtered = filter_sessions_since(found, watermark);
-            (
-                filtered.kept.iter().map(paused_session_to_json).collect(),
-                filtered.dropped_undatable,
-            )
-        }
+        Ok(found) => sessions_payload(filter_sessions_since(found, watermark)),
         Err(e) => {
             eprintln!("catchup: warning: could not scan paused sessions: {e}");
             (Vec::new(), 0)
@@ -497,6 +534,72 @@ mod tests {
             json.undatable_sessions_dropped, 0,
             "a merely-too-old session is filtered, not withheld — the count \
              must not conflate the two"
+        );
+    }
+
+    fn claude_session(resume: &str) -> PausedSession {
+        use crate::catchup::mpm_session::ClaudeMpmSession;
+        PausedSession::ClaudeMpm {
+            session: ClaudeMpmSession {
+                resume_instructions: Some(resume.to_string()),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Why: #5072 — the withheld count must reach `CatchupJson`, and no
+    /// end-to-end test can prove it does: an undatable session is unreachable
+    /// through the filesystem once both `PausedSession` arms fall back to
+    /// mtime, so replacing the count with a literal `0` at the call site left
+    /// the whole suite green. This pins the wire itself.
+    /// What: a non-zero `dropped_undatable` survives the projection unchanged,
+    /// alongside the mapped sessions.
+    /// Test: itself.
+    #[test]
+    fn sessions_payload_propagates_dropped_count() {
+        let (sessions, dropped) = sessions_payload(FilteredSessions {
+            kept: vec![claude_session("a"), claude_session("b")],
+            dropped_undatable: 7,
+        });
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            dropped, 7,
+            "the withheld count must not be reset in transit"
+        );
+    }
+
+    /// Why: `--all-projects` merges one digest per project, and the withheld
+    /// count SUMS where every other field concatenates. Hand-rolling that
+    /// merge is how a receipt gets dropped for every project after the first
+    /// (#5072).
+    /// What: two digests fold into one with concatenated arrays and an added
+    /// count.
+    /// Test: itself.
+    #[test]
+    fn absorb_sums_dropped_counts_and_concatenates_the_rest() {
+        let mut a = CatchupJson {
+            sessions: vec![paused_session_to_json(&claude_session("a"))],
+            recent_memory: vec![RecentMemoryJson {
+                title: "t1".into(),
+                tags: vec![],
+            }],
+            undatable_sessions_dropped: 2,
+            ..Default::default()
+        };
+        a.absorb(CatchupJson {
+            sessions: vec![paused_session_to_json(&claude_session("b"))],
+            recent_memory: vec![RecentMemoryJson {
+                title: "t2".into(),
+                tags: vec![],
+            }],
+            undatable_sessions_dropped: 3,
+            ..Default::default()
+        });
+        assert_eq!(a.sessions.len(), 2);
+        assert_eq!(a.recent_memory.len(), 2);
+        assert_eq!(
+            a.undatable_sessions_dropped, 5,
+            "withheld counts sum across projects, never overwrite"
         );
     }
 
