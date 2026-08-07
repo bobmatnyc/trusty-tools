@@ -396,7 +396,7 @@ pub(super) fn inject_mcp_server(
     name: &str,
     server: serde_json::Value,
 ) -> Result<(), PrepError> {
-    let mcp_path = project_path.join(".mcp.json");
+    let mcp_path = project_path.join(crate::core::mcp_config::MCP_JSON);
 
     // Load existing config to preserve unrelated servers; tolerate a missing or
     // malformed file by starting from an empty object.
@@ -427,8 +427,16 @@ pub(super) fn inject_mcp_server(
     }
     servers.insert(name.to_string(), server);
 
-    let serialized =
-        serde_json::to_string_pretty(&config).map_err(|err| PrepError::Deploy(err.to_string()))?;
+    // #4181: trailing newline. Without it every rewrite of a git-tracked
+    // `.mcp.json` reports "\ No newline at end of file" on top of whatever
+    // actually changed, and a POSIX-text-expecting tool sees a malformed last
+    // line. One byte, and the diff shows only the entry that moved.
+    let serialized = serde_json::to_string_pretty(&config)
+        .map(|mut s| {
+            s.push('\n');
+            s
+        })
+        .map_err(|err| PrepError::Deploy(err.to_string()))?;
     std::fs::write(&mcp_path, serialized).map_err(|source| PrepError::Io {
         path: mcp_path.clone(),
         source,
