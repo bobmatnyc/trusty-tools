@@ -52,10 +52,12 @@
 	}
 </script>
 
+<!-- The keydown handler sits on each radio, not on the group: a roving-tabindex
+     group is never itself focusable, and Svelte's a11y rules correctly reject a
+     keyboard handler on an unfocusable interactive element. -->
 <div
 	role="radiogroup"
 	aria-label="Color theme"
-	onkeydown={onKeydown}
 	class="inline-flex rounded border-[1.5px] border-foundry-border bg-foundry-card p-0.5"
 >
 	{#each OPTIONS as option, i (option.mode)}
@@ -68,6 +70,7 @@
 			title={option.label}
 			tabindex={mode === option.mode ? 0 : -1}
 			onclick={() => select(option.mode)}
+			onkeydown={onKeydown}
 			class="rounded-sm px-2.5 py-1 font-mono text-sm leading-none transition-colors
 				{mode === option.mode
 				? 'bg-foundry-primary text-foundry-inverse'

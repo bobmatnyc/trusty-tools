@@ -14,15 +14,15 @@ pnpm install
 pnpm dev        # http://localhost:5173
 ```
 
-| Command | What it does |
-| --- | --- |
-| `pnpm dev` | Dev server with HMR |
-| `pnpm build` | Production build into `.vercel/output/` |
-| `pnpm preview` | Serve the production build locally |
-| `pnpm check` | `svelte-check` typecheck |
-| `pnpm lint` | `prettier --check` + `eslint` |
-| `pnpm format` | Rewrite with Prettier |
-| `pnpm test` | Vitest: token parity, theme store, site content, build smoke |
+| Command             | What it does                                                   |
+| ------------------- | -------------------------------------------------------------- |
+| `pnpm dev`          | Dev server with HMR                                            |
+| `pnpm build`        | Production build into `.vercel/output/`                        |
+| `pnpm preview`      | Serve the production build locally                             |
+| `pnpm check`        | `svelte-check` typecheck                                       |
+| `pnpm lint`         | `prettier --check` + `eslint`                                  |
+| `pnpm format`       | Rewrite with Prettier                                          |
+| `pnpm test`         | Vitest: token parity, theme store, site content, build smoke   |
 | `pnpm check:tokens` | Repo-wide Foundry drift gate (`scripts/check_token_drift.mjs`) |
 
 pnpm `9.15.9`, pinned in `packageManager` to match the seven UI packages under
@@ -33,11 +33,11 @@ pnpm `9.15.9`, pinned in `packageManager` to match the seven UI packages under
 Three settings must be configured on the Vercel project. Only the first is
 obvious; the other two produce confusing failures when missing.
 
-| Setting | Value |
-| --- | --- |
-| Root Directory | `website` |
-| Include source files outside of the Root Directory | **ON** |
-| Ignored Build Step | `git diff --quiet HEAD^ HEAD -- website/ docs/` |
+| Setting                                            | Value                                           |
+| -------------------------------------------------- | ----------------------------------------------- |
+| Root Directory                                     | `website`                                       |
+| Include source files outside of the Root Directory | **ON**                                          |
+| Ignored Build Step                                 | `git diff --quiet HEAD^ HEAD -- website/ docs/` |
 
 **Include source files outside of the Root Directory** is not optional. The
 documentation reader ([#5098](https://github.com/bobmatnyc/trusty-tools/issues/5098))
@@ -76,9 +76,9 @@ Both are canonical values, not transcription errors, and the layout works
 around them. `tokens.test.ts` pins the numbers so a future palette revision
 surfaces here.
 
-| Pair | Ratio | Consequence |
-| --- | --- | --- |
-| `--trusty-text-muted` on `--trusty-content-bg` | 3.87:1 | Small labels use `text-secondary` (5.85:1) instead |
+| Pair                                           | Ratio  | Consequence                                          |
+| ---------------------------------------------- | ------ | ---------------------------------------------------- |
+| `--trusty-text-muted` on `--trusty-content-bg` | 3.87:1 | Small labels use `text-secondary` (5.85:1) instead   |
 | `--trusty-accent` on `--trusty-surface-raised` | 4.50:1 | The raised band carries no accent-coloured body text |
 
 Everything else clears AA in both themes; the accent clears the 3:1 non-text
