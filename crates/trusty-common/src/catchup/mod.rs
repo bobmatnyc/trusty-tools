@@ -31,7 +31,7 @@ pub use json::{CatchupJson, PausedSessionJson, RecentMemoryJson, generate_catchu
 use self::{
     git::git_commits_since,
     palace::fetch_recent_palace_drawers,
-    session_finder::{find_paused_sessions, render_resume_context},
+    session_finder::{filter_sessions_since, find_paused_sessions, render_resume_context},
     state::{CatchupState, load_catchup_state, save_catchup_state},
 };
 
@@ -161,15 +161,8 @@ pub async fn generate_catchup_context(opts: &CatchupOptions) -> String {
     out.push_str("## Paused Sessions\n\n");
     match find_paused_sessions(&opts.project_dir) {
         Ok(sessions) => {
-            // Filter by watermark when available.
-            let sessions: Vec<_> = if let Some(wm) = watermark {
-                sessions
-                    .into_iter()
-                    .filter(|s| s.sort_key().is_none_or(|ts| ts > wm))
-                    .collect()
-            } else {
-                sessions
-            };
+            // #5072: shared fail-closed predicate — see `filter_sessions_since`.
+            let sessions = filter_sessions_since(sessions, watermark);
             if sessions.is_empty() {
                 out.push_str("No paused sessions since last catch-up.\n\n");
             } else {

@@ -23,7 +23,7 @@ use super::CatchupOptions;
 use super::derive_palace_id_for;
 use super::git::{CommitSummary, git_commits_since};
 use super::palace::fetch_recent_palace_drawers;
-use super::session_finder::{PausedSession, find_paused_sessions};
+use super::session_finder::{PausedSession, filter_sessions_since, find_paused_sessions};
 use super::state::load_catchup_state;
 
 /// A single paused session, restructured as JSON fields instead of markdown
@@ -190,14 +190,8 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
 
     let sessions = match find_paused_sessions(&opts.project_dir) {
         Ok(sessions) => {
-            let sessions: Vec<_> = if let Some(wm) = watermark {
-                sessions
-                    .into_iter()
-                    .filter(|s| s.sort_key().is_none_or(|ts| ts > wm))
-                    .collect()
-            } else {
-                sessions
-            };
+            // #5072: shared fail-closed predicate — see `filter_sessions_since`.
+            let sessions = filter_sessions_since(sessions, watermark);
             sessions.iter().map(paused_session_to_json).collect()
         }
         Err(e) => {
@@ -364,6 +358,74 @@ mod tests {
             json.recent_commits.is_empty(),
             "future watermark should exclude all commits: {:?}",
             json.recent_commits
+        );
+    }
+
+    /// Why: issue #5072 — the live `session_context_catchup` call on
+    /// `bobmatnyc/trusty-tools` returned exactly one session, the hand-written
+    /// `session-20260730-bounce.md`, with every field empty or null, while
+    /// dozens of well-formed newer snapshots sat in the same directory. The
+    /// watermark filter admitted the bounce file precisely BECAUSE its
+    /// timestamp could not be derived (`is_none_or` treats an unknown key as
+    /// "newer than the watermark"), and dropped every snapshot whose timestamp
+    /// could be. The result was an inverted digest: only the record that could
+    /// not be dated survived.
+    /// What: reproduces that directory shape — one well-formed dated snapshot
+    /// plus one undated hand-written file — behind a far-future watermark. No
+    /// session is newer than 2099, so the digest must be empty. Before the fix
+    /// it contained the undated file.
+    /// Test: itself.
+    #[tokio::test]
+    async fn generate_catchup_json_excludes_undatable_session_behind_watermark() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(&tmp);
+
+        let sessions_dir = tmp.path().join(".trusty-mpm").join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("session-20260806-211305.md"),
+            "## Summary\nReal work.\n\n## Next Steps\nShip it.\n",
+        )
+        .unwrap();
+        // Hand-written snapshot: the filename carries no parseable
+        // `YYYYMMDD-HHMMSS`, and the body uses none of the parsed section
+        // headers — so every field would render empty if it leaked through.
+        fs::write(
+            sessions_dir.join("session-20260730-bounce.md"),
+            "# Session snapshot — pre-daemon-bounce\n\n## What landed this leg\n- stuff\n",
+        )
+        .unwrap();
+
+        let palace_id = derive_palace_id_for(tmp.path());
+        save_catchup_state(
+            &palace_id,
+            &CatchupState {
+                last_catchup_at: "2099-01-01T00:00:00Z".parse().unwrap(),
+                palace_id: palace_id.clone(),
+                last_git_sha: None,
+            },
+        )
+        .unwrap();
+
+        let opts = CatchupOptions {
+            project_dir: tmp.path().to_path_buf(),
+            memory_url: "http://127.0.0.1:19999".to_string(),
+            include_git: false,
+            include_palace: false,
+            git_limit: 50,
+            drawer_limit: 15,
+            full: false,
+        };
+
+        let json = generate_catchup_json(&opts).await;
+        assert!(
+            json.sessions.is_empty(),
+            "a snapshot with no derivable timestamp must not survive a watermark \
+             that every datable snapshot fails: {:?}",
+            json.sessions
+                .iter()
+                .map(|s| s.source_file.clone())
+                .collect::<Vec<_>>()
         );
     }
 

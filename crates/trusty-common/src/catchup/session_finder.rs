@@ -28,7 +28,11 @@ pub enum PausedSession {
     TrustyMpm {
         /// Path to the `.md` session file.
         path: PathBuf,
-        /// Timestamp parsed from the filename or `## Paused At:` header.
+        /// Timestamp parsed from the `session-YYYYMMDD-HHMMSS.md` filename,
+        /// falling back to the file's mtime when the filename carries no
+        /// parseable stamp. `None` only when the filesystem cannot supply a
+        /// modification time — and such a record is excluded from every
+        /// watermark-filtered digest (see [`filter_sessions_since`], #5072).
         paused_at: Option<DateTime<Utc>>,
         /// Content of the `## Summary` section.
         summary: String,
@@ -117,6 +121,65 @@ pub fn find_paused_sessions(project_dir: &Path) -> anyhow::Result<Vec<PausedSess
     });
 
     Ok(sessions)
+}
+
+/// Retain only the sessions that provably paused after `watermark`.
+///
+/// Why: this predicate previously lived, copy-pasted, in both
+/// [`crate::catchup::generate_catchup_context`] and
+/// [`crate::catchup::generate_catchup_json`] as
+/// `s.sort_key().is_none_or(|ts| ts > wm)`. `is_none_or` yields `true` for an
+/// unknown key, so a session whose pause instant could not be derived was
+/// admitted by EVERY watermark, forever, while every session that could be
+/// dated was correctly filtered out. On a real project that inverted the
+/// digest: the one undatable record survived and dozens of newer well-formed
+/// snapshots did not (#5072). "Sessions since T" is not a claim an undatable
+/// record can satisfy, so it is now excluded — and the exclusion is logged
+/// rather than silent, because a dropped record is a real (if bounded) loss.
+/// What: with no watermark (a `full` catch-up) returns `sessions` untouched.
+/// With a watermark, keeps only sessions whose [`PausedSession::sort_key`] is
+/// `Some` and strictly greater, warning on stderr for each drop.
+/// Test: `filter_sessions_since_drops_undatable_session`,
+/// `filter_sessions_since_keeps_everything_without_watermark`,
+/// `generate_catchup_json_excludes_undatable_session_behind_watermark`.
+pub fn filter_sessions_since(
+    sessions: Vec<PausedSession>,
+    watermark: Option<DateTime<Utc>>,
+) -> Vec<PausedSession> {
+    let Some(wm) = watermark else {
+        return sessions;
+    };
+    sessions
+        .into_iter()
+        // #5072: fail-closed — an undatable session cannot be shown to postdate
+        // the watermark, so it is dropped instead of admitted unconditionally.
+        .filter(|s| match s.sort_key() {
+            Some(ts) => ts > wm,
+            None => {
+                eprintln!(
+                    "catchup: warning: dropping a paused session with no derivable \
+                     pause timestamp from the since-{wm} digest; re-run with \
+                     full=true to see it"
+                );
+                false
+            }
+        })
+        .collect()
+}
+
+/// Read a file's modification time as a UTC instant.
+///
+/// Why: the fallback source for [`PausedSession::TrustyMpm::paused_at`] when a
+/// snapshot's filename carries no `YYYYMMDD-HHMMSS` stamp (#5072).
+/// What: `metadata().modified()`, converted to `DateTime<Utc>`; `None` when the
+/// platform or filesystem cannot supply one.
+/// Test: `parse_falls_back_to_mtime_when_filename_lacks_timestamp`.
+fn mtime_utc(path: &Path) -> Option<DateTime<Utc>> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()
+        .map(DateTime::<Utc>::from)
 }
 
 /// Resolve the latest native `.trusty-mpm` snapshot, preferring the per-session
@@ -289,11 +352,15 @@ fn parse_trusty_mpm_session(path: &Path) -> anyhow::Result<PausedSession> {
     let tmux_window = extract_section(&content, "Tmux Window");
 
     // Try to parse a UTC timestamp from the filename: session-YYYYMMDD-HHMMSS.md
+    // #5072: hand-written snapshots (`session-20260730-bounce.md`) carry no
+    // parseable stamp; fall back to the file's mtime so the record is still
+    // datable — an undatable one is dropped by `filter_sessions_since`.
     let paused_at = path
         .file_stem()
         .and_then(|s| s.to_str())
         .and_then(|s| s.strip_prefix("session-"))
-        .and_then(parse_filename_timestamp);
+        .and_then(parse_filename_timestamp)
+        .or_else(|| mtime_utc(path));
 
     Ok(PausedSession::TrustyMpm {
         path: path.to_owned(),
