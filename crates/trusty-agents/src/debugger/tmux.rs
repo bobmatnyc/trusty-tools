@@ -129,6 +129,7 @@ impl TmuxAdapter {
             None,
             trusty_common::tmux::DEFAULT_TMUX_HISTORY_LIMIT,
             trusty_common::tmux::DEFAULT_TMUX_MOUSE,
+            trusty_common::tmux::DEFAULT_TMUX_ALTERNATE_SCREEN,
             false,
             Some(cmd),
         )
@@ -257,11 +258,11 @@ mod tests {
     fn create_session_commands_applies_scrollback_before_new_session() {
         // #3004: hermetic proof (no live tmux needed) that the debug REPL's
         // session creation routes through the shared `trusty_common::tmux`
-        // ordering guarantee — history-limit/mouse options land BEFORE
-        // new-session, and the initial command still renders as the
-        // trailing positional argument exactly as before.
+        // ordering guarantee — history-limit/mouse/alternate-screen options
+        // land BEFORE new-session, and the initial command still renders as
+        // the trailing positional argument exactly as before.
         let cmds = TmuxAdapter::create_session_commands("debug-repl", "run-repl");
-        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds.len(), 4);
         assert_eq!(
             tmux_argv(&cmds[0]),
             [
@@ -272,8 +273,14 @@ mod tests {
             ]
         );
         assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "on"]);
+        // #5151: window scope (`-wg`), and `on` — the factory default this
+        // adapter passes through unchanged.
         assert_eq!(
             tmux_argv(&cmds[2]),
+            ["set-option", "-wg", "alternate-screen", "on"]
+        );
+        assert_eq!(
+            tmux_argv(&cmds[3]),
             ["new-session", "-d", "-s", "debug-repl", "run-repl"]
         );
     }
