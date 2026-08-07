@@ -367,7 +367,7 @@ symgraph = ["dep:thiserror", "dep:sha2"]
 # `IndexMap`-based `SymbolRegistry`, the deterministic emitter, the
 # `SymbolGraph`, editor primitives, and the strategy/locality/
 # test-colocation modules. Pulls in the `links = "tree-sitter"` constraint
-# — only enable in one crate per build graph (typically `open-mpm`).
+# — only enable in one crate per build graph (typically `trusty-agents`).
 symgraph-parser = [
     "symgraph",
     "dep:uuid",

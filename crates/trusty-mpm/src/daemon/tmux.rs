@@ -4,7 +4,7 @@
 //! process — that keeps it pure and testable. The daemon needs the other half:
 //! actually running `tmux` and interpreting its exit status. This module is
 //! distilled from `ai-commander`'s `commander-tmux` orchestrator and
-//! `open-mpm`'s `tm` manager — find the binary once, run argv, classify the
+//! `trusty-agents`'s `tm` manager — find the binary once, run argv, classify the
 //! "no server running" empty-list case.
 //! What: [`TmuxDriver`] wraps the resolved `tmux` path; it can create/kill/list
 //! sessions, send keystrokes, and capture pane output. [`SessionInfo`] is one

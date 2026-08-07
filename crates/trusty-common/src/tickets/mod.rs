@@ -1,6 +1,6 @@
 //! Unified ticketing MCP server (GitHub / JIRA / Linear).
 //!
-//! Why: open-mpm and the rest of the trusty-* suite need a single MCP
+//! Why: trusty-agents and the rest of the trusty-* suite need a single MCP
 //! surface that can talk to GitHub Issues, JIRA, and Linear without the
 //! caller knowing which backend is configured. Absorbed from the former
 //! standalone `trusty-tickets` crate (issue #5 phase consolidation).

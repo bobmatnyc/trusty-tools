@@ -220,7 +220,7 @@ pub mod embedder_client;
 /// Why: trusty-memory, trusty-search, and the per-palace
 /// `trusty-bm25-daemon` subprocess all want one shared BM25 implementation
 /// so the tokenizer's camelCase / PascalCase / alpha↔digit splits stay
-/// consistent across the workspace. Originally ported from open-mpm; now
+/// consistent across the workspace. Originally ported from trusty-agents; now
 /// the single source of truth lives here.
 /// What: Gated behind the `bm25` feature. Adds no new dependencies — pure
 /// `std` + `tracing` (already required).
@@ -264,7 +264,7 @@ pub mod bm25_client;
 
 /// Symbol-graph engine (formerly the `trusty-symgraph` crate).
 ///
-/// Why: All trusty-* tools that touch source code (open-mpm, trusty-search,
+/// Why: All trusty-* tools that touch source code (trusty-agents, trusty-search,
 /// trusty-analyze) want the same `EntityType` / `RawEntity` / `EdgeKind`
 /// data shapes and (for orchestrators) the same tree-sitter pipeline. Living
 /// here lets the workspace ship one tree-sitter `links =` slot instead of
@@ -359,7 +359,7 @@ pub mod sld;
 /// unknown-subcommand error output independently, so the formats drifted
 /// apart over time. Centralising the help model into one YAML schema, one
 /// canonical renderer, and one Jaro-Winkler suggester keeps the six binaries
-/// (search, memory, analyze, mpm-cli, tga, open-mpm) speaking with a single
+/// (search, memory, analyze, mpm-cli, tga, trusty-agents) speaking with a single
 /// user-facing voice.
 /// What: gated behind the `cli-help` feature. Pulls in `serde_yaml`, `strsim`,
 /// and `indexmap`. Exposes `HelpConfig` / `CommandDef` / `FlagDef` / `Example`

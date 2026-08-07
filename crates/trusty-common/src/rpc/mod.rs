@@ -2,7 +2,7 @@
 //!
 //! Why: Formerly the library half of the standalone `trusty-rpc` crate.
 //! Consolidating into `trusty-common` lets both the `trpc` CLI and any
-//! future library consumer (open-mpm, tests, ops scripts) share one
+//! future library consumer (trusty-agents, tests, ops scripts) share one
 //! implementation of JSON-RPC envelope construction, stdio-subprocess
 //! transport, HTTP transport, and pretty-printers — instead of carrying
 //! a separate crate for what amounts to ~700 lines of glue code.

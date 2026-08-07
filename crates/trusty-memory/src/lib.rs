@@ -110,7 +110,7 @@ pub mod idle_evict;
 pub mod worker_liveness;
 // Why (issue #226): `chat` and `web` are pure axum HTTP/SSE handler
 //      surfaces. Gating them behind the `axum-server` feature is what lets
-//      library consumers (e.g. `open-mpm` linking only `MemoryMcpService`)
+//      library consumers (e.g. `trusty-agents` linking only `MemoryMcpService`)
 //      drop axum + tower-http entirely from their build graph.
 #[cfg(feature = "axum-server")]
 pub mod chat;
@@ -1300,7 +1300,7 @@ pub async fn handle_message(state: &AppState, msg: Value) -> Value {
             "result": tools::tool_definitions_with(state.default_palace.is_some())
         }),
         // OpenRPC 1.3.2 discovery — see `openrpc.rs`. Returns the full
-        // service description so orchestrators (open-mpm, etc.) can
+        // service description so orchestrators (trusty-agents, etc.) can
         // introspect every tool and its required `memory.read`/`memory.write`
         // scope without bespoke per-server adapters.
         "rpc.discover" => json!({

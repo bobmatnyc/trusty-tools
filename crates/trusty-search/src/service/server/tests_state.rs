@@ -147,7 +147,7 @@ async fn switchable_embedder_installed_alongside_embedder() {
 /// memory limit, a follow-up `POST /indexes/:id/reindex` request must be
 /// refused with `429 Too Many Requests` for the duration of the cooldown.
 ///
-/// Why: without the guard, an external caller (CLI watchdog, open-mpm)
+/// Why: without the guard, an external caller (CLI watchdog, trusty-agents)
 /// that retries on abort would loop: each retry re-processes files that
 /// had no content-hash entry yet, pushes RSS over the limit again, and
 /// aborts again.

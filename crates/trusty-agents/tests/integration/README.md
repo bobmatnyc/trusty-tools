@@ -1,6 +1,6 @@
 # Integration Tests
 
-These tests verify the full open-mpm installation experience, separate from unit tests.
+These tests verify the full trusty-agents (`tagent`) installation experience, separate from unit tests.
 
 ## Quick Start
 
@@ -33,7 +33,7 @@ tests/integration/
 
 ## Individual Bake-off Tasks
 
-The task files live in `.open-mpm/tasks/` in the project root (`level-1.txt` …
+The task files live in `.trusty-agents/tasks/` in the project root (`level-1.txt` …
 `level-5.txt`). The integration test uses **Level 2** (markdown table
 formatter) by default as a lightweight smoke test of the full pipeline.
 

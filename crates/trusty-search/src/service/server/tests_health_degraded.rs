@@ -97,7 +97,7 @@ async fn health_reports_degraded_when_corpus_open_failed() {
 
 /// Why: the healthy path must stay `"ok"` — the #1870 downgrade is scoped to
 /// indexes with a failed lane and must not regress the common case that
-/// external probes (open-mpm, `ensure_daemon_running`) depend on.
+/// external probes (trusty-agents, `ensure_daemon_running`) depend on.
 /// What: registers a single index left in its default (non-failed) stage state
 /// and asserts `/health` still reports `status: "ok"`, `indexes_corpus_failed:
 /// 0`, and does not spuriously set `warm_boot_degraded`.

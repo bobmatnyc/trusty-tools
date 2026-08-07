@@ -1,6 +1,6 @@
 //! `ServiceDescriptor` impl for the trusty-memory MCP service.
 //!
-//! Why: open-mpm (and any future host process that links several MCP
+//! Why: trusty-agents (and any future host process that links several MCP
 //! services into a single binary) needs a uniform way to enumerate every
 //! tool a linked service contributes and the scopes each tool requires.
 //! The shared `trusty_mcp_core::ServiceDescriptor` trait is that contract:
@@ -27,7 +27,7 @@ use crate::tools::tool_definitions_with;
 
 /// `ServiceDescriptor` impl that advertises this crate's 44 memory tools.
 ///
-/// Why: Lets open-mpm link trusty-memory-mcp directly and include its
+/// Why: Lets trusty-agents link trusty-memory-mcp directly and include its
 /// tools in a unified `rpc.discover` document without bespoke glue code.
 /// What: Wraps the existing tool definitions and the per-tool scope
 /// mapping behind the shared trait. The struct is unit-like — there is
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn dispatches_through_trait_object() {
-        // Why: open-mpm collects services as `Vec<Box<dyn ServiceDescriptor>>`,
+        // Why: trusty-agents collects services as `Vec<Box<dyn ServiceDescriptor>>`,
         //      so we must confirm dynamic dispatch resolves correctly here.
         let svc: Box<dyn ServiceDescriptor> = Box::new(MemoryMcpService);
         assert_eq!(svc.name(), "trusty-memory");

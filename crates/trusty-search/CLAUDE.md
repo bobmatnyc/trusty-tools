@@ -77,7 +77,7 @@ pub struct CodeChunk {
 
 ### HTTP API (axum, single daemon, multi-index)
 
-**Audience**: integrators (e.g. open-mpm) calling the daemon's REST API.
+**Audience**: integrators (e.g. trusty-agents) calling the daemon's REST API.
 
 **Transport conventions** (apply to every endpoint below):
 
@@ -100,7 +100,7 @@ pub struct CodeChunk {
 ##### `GET /health`
 
 Liveness + readiness probe. Used by `trusty-search status`, `trusty-search doctor`,
-and external process detectors (open-mpm) to decide whether to spawn their own
+and external process detectors (trusty-agents) to decide whether to spawn their own
 daemon.
 
 - **Request body**: none.
@@ -133,7 +133,7 @@ List every registered index.
 - **Request body**: none.
 - **Response 200**:
   ```json
-  { "indexes": ["my-project", "trusty-search", "open-mpm"] }
+  { "indexes": ["my-project", "trusty-search", "trusty-agents"] }
   ```
 
 ##### `POST /indexes`
@@ -562,7 +562,7 @@ The MCP server registers **18 tools** (authoritative source:
 - **HTTP**: axum 0.7 + tower-http (CORS, trace, gzip), HTTP/2
 - **Vector store**: usearch 2.25 (HNSW), wrapped in `Arc<RwLock<>>` for concurrent reads
 - **Embeddings**: fastembed 5.x (ONNX, all-MiniLM-L6-v2, 384-dim, SIMD/AVX2/NEON)
-- **Lexical**: BM25 (zero-dep port from open-mpm `src/context/bm25.rs`)
+- **Lexical**: BM25 (zero-dep port from trusty-agents `src/context/bm25.rs`)
 - **KV store**: redb 2.6 (chunk metadata, file→chunks mapping, `_meta` schema version)
 - **File watching**: notify 6 + notify-debouncer-mini 0.4 (500ms debounce, fsevent)
 - **Code parsing**: tree-sitter 0.24 (rust, python, js, ts, go, java, c, cpp)
@@ -633,7 +633,7 @@ Set `TRUSTY_DISABLE_MIGRATIONS=1` to skip auto-migrations.
 - `IndexHandle.indexer: Arc<RwLock<CodeIndexer>>` — reader-priority RwLock; many
   concurrent searches against the same index never block each other
 - Indexing operations use `tokio::sync::Semaphore` to prevent thread-pool starvation
-  (carry-over fix from open-mpm BUG-2)
+  (carry-over fix from trusty-agents BUG-2)
 - HTTP/2 multiplexing: a single client connection can issue many concurrent searches
 
 ## Performance Targets
@@ -823,7 +823,6 @@ trusty-search/
 ├── CLAUDE.md                        this file
 ├── CHANGELOG.md
 ├── README.md
-├── .open-mpm/agents/                pm.toml, engineer.toml
 ├── src/
 │   ├── lib.rs                       re-publishes `core`, `service`, `mcp`
 │   ├── main.rs                      CLI binary entry point

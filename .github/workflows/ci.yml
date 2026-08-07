@@ -1065,7 +1065,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           mkdir -p crates/trusty-agents/ui/dist
-          printf '<!doctype html><html><head><meta charset="utf-8"><title>open-mpm</title></head><body></body></html>\n' \
+          printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-agents</title></head><body></body></html>\n' \
             > crates/trusty-agents/ui/dist/index.html
 
       - name: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings

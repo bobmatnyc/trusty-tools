@@ -53,7 +53,7 @@ const DEFAULT_SETTINGS_MAX_DEPTH: usize = 8;
 /// double-post to the daemon. Memory enrichment (`trusty-memory
 /// prompt-context`) deliberately does **not** guard on this var — sub-agents
 /// benefit from the parent palace's prompt-fact block as much as the PM does.
-/// Centralising the literal here keeps the spawn side (`open-mpm`) and the
+/// Centralising the literal here keeps the spawn side (`trusty-agents`) and the
 /// consumer side (`trusty-mpm-cli`) referencing the exact same string so a
 /// rename never silently breaks the guard.
 /// What: the literal `"CLAUDE_MPM_SUB_AGENT"`. Presence is what matters; the

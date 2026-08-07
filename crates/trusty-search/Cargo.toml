@@ -23,7 +23,7 @@ include = [
 [lib]
 name = "trusty_search"
 path = "src/lib.rs"
-# Why: explicit rlib so downstream host crates (e.g. open-mpm) can link
+# Why: explicit rlib so downstream host crates (e.g. trusty-agents) can link
 # trusty-search as a Rust library and consume `SearchMcpService` directly
 # (issue #115). Default would already be rlib, but stating it explicitly
 # documents the intent and guards against future bin-only changes.
@@ -162,10 +162,10 @@ zip = { workspace = true }
 quick-xml = { workspace = true }
 
 # ── Tree-sitter grammars (ABI 15) ──────────────────────────────────────────
-# Upgraded to tree-sitter 0.26 to align with open-mpm (issue #116) so that
+# Upgraded to tree-sitter 0.26 to align with trusty-agents (issue #116) so that
 # trusty-search can be directly linked as an rlib without violating Cargo's
 # `links = "tree-sitter"` single-copy rule. Grammar versions match the set
-# used by open-mpm where possible; remaining grammars bumped to the latest
+# used by trusty-agents where possible; remaining grammars bumped to the latest
 # release compatible with tree-sitter 0.26.
 tree-sitter = "0.26"
 tree-sitter-language = "0.1"
