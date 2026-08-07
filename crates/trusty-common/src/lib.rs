@@ -746,6 +746,19 @@ pub mod health_probe;
 #[cfg(all(unix, feature = "uds"))]
 pub mod uds;
 
+/// GitHub webhook HMAC-SHA256 verification (#5089 step 3, ADR-0034 §3).
+///
+/// Why: the check exists twice today and the two copies disagree on what an
+/// unset secret means — `trusty-review` rejects, `trusty-analyze` processes the
+/// payload anyway. ADR-0034 §3 collapses verification to one place (console)
+/// and unifies the policy to fail-closed; this module is that place.
+/// What: Exposes [`webhook_hmac::verify_github_signature`], its three-state
+/// [`webhook_hmac::SignatureVerdict`], and [`webhook_hmac::sign_github_body`]
+/// for test harnesses.
+/// Test: `cargo test -p trusty-common --features webhook-hmac webhook_hmac::`.
+#[cfg(feature = "webhook-hmac")]
+pub mod webhook_hmac;
+
 /// Global tracing subscriber initialisation helpers.
 ///
 /// Why: Every trusty-* binary needs the same verbosity ladder, `RUST_LOG`
