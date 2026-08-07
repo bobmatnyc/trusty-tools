@@ -22,9 +22,10 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::batch_queue::BatchQueue;
 use crate::protocol::{
-    DeleteParams, DeleteResult, IndexParams, IndexResult, RebuildResult, RpcRequest, RpcResponse,
-    SearchParams, SearchResult, ERR_INTERNAL, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, ERR_PARSE,
-    JSONRPC_VERSION, METHOD_DELETE, METHOD_INDEX, METHOD_REBUILD, METHOD_SEARCH,
+    DeleteParams, DeleteResult, IndexParams, IndexResult, MissingDocsParams, MissingDocsResult,
+    RebuildResult, RpcRequest, RpcResponse, SearchParams, SearchResult, ERR_INTERNAL,
+    ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, ERR_PARSE, JSONRPC_VERSION, METHOD_DELETE,
+    METHOD_INDEX, METHOD_MISSING_DOCS, METHOD_REBUILD, METHOD_SEARCH, METHOD_STATS,
 };
 
 /// Bind the UDS listener at `path`.
@@ -145,6 +146,8 @@ pub async fn dispatch_request(frame: &str, queue: &BatchQueue) -> RpcResponse {
         METHOD_SEARCH => dispatch_search(id, req.params, queue).await,
         METHOD_DELETE => dispatch_delete(id, req.params, queue).await,
         METHOD_REBUILD => dispatch_rebuild(id, queue).await,
+        METHOD_STATS => dispatch_stats(id, queue).await,
+        METHOD_MISSING_DOCS => dispatch_missing_docs(id, req.params, queue).await,
         other => RpcResponse::err(id, ERR_METHOD_NOT_FOUND, format!("unknown method: {other}")),
     }
 }
@@ -235,6 +238,73 @@ async fn dispatch_delete(
             RpcResponse::ok(id, result_val)
         }
         Err(e) => RpcResponse::err(id, ERR_INTERNAL, format!("delete failed: {e:#}")),
+    }
+}
+
+/// Answer `stats` — the corpus-coverage query.
+///
+/// Why: unlike `delete`/`rebuild` this is NOT privileged. Any caller that can
+/// search must also be able to ask how much corpus backs that search,
+/// otherwise an empty hit list is ambiguous between "no match" and "nothing
+/// indexed" and the caller has to guess. Guessing is what fails open.
+/// What: takes no params (any supplied are ignored, so a future revision can
+/// add optional filters without breaking old clients) and returns
+/// [`crate::protocol::StatsResult`].
+/// Test: `dispatch_request_handles_stats`.
+async fn dispatch_stats(id: serde_json::Value, queue: &BatchQueue) -> RpcResponse {
+    match queue.stats().await {
+        Ok(stats) => match serde_json::to_value(stats) {
+            Ok(v) => RpcResponse::ok(id, v),
+            Err(e) => RpcResponse::err(id, ERR_INTERNAL, format!("serialise stats: {e}")),
+        },
+        Err(e) => RpcResponse::err(id, ERR_INTERNAL, format!("stats failed: {e:#}")),
+    }
+}
+
+/// Answer `missing_docs` — the coverage-by-identity query.
+///
+/// Why: a caller cannot establish coverage from `stats`, because a count says
+/// nothing about WHICH documents a daemon holds. This is the op that lets a
+/// backfiller make a set statement instead of an arithmetic one, so it is on
+/// the same access footing as `search` and `stats` rather than the privileged
+/// `delete` / `rebuild` pair.
+/// What: requires a `doc_ids` array; a missing or malformed params object is a
+/// hard `-32600` rather than an empty answer, because an empty answer reads as
+/// "everything is covered".
+/// Test: `dispatch_request_handles_missing_docs`,
+/// `missing_docs_without_params_is_an_error`.
+async fn dispatch_missing_docs(
+    id: serde_json::Value,
+    params: Option<serde_json::Value>,
+    queue: &BatchQueue,
+) -> RpcResponse {
+    let params: MissingDocsParams = match params.map(serde_json::from_value) {
+        Some(Ok(p)) => p,
+        Some(Err(e)) => {
+            return RpcResponse::err(
+                id,
+                ERR_INVALID_REQUEST,
+                format!("invalid missing_docs params: {e}"),
+            );
+        }
+        None => {
+            return RpcResponse::err(
+                id,
+                ERR_INVALID_REQUEST,
+                "missing_docs requires params.doc_ids",
+            );
+        }
+    };
+    let checked = params.doc_ids.len();
+    match queue.missing_docs(params.doc_ids).await {
+        Ok(missing) => {
+            let result = MissingDocsResult { missing, checked };
+            match serde_json::to_value(result) {
+                Ok(v) => RpcResponse::ok(id, v),
+                Err(e) => RpcResponse::err(id, ERR_INTERNAL, format!("serialise missing: {e}")),
+            }
+        }
+        Err(e) => RpcResponse::err(id, ERR_INTERNAL, format!("missing_docs failed: {e:#}")),
     }
 }
 
@@ -341,6 +411,71 @@ mod tests {
         // delete returns `{"deleted": <bool>}`.
         let result = resp.result.unwrap();
         assert!(result.get("deleted").is_some());
+    }
+
+    /// Why: this is the wire-level guarantee the whole backfill design leans
+    /// on — a caller must be able to ask a live daemon how much corpus it
+    /// holds, over the same socket it searches on, without params.
+    /// What: stats on an empty index, index two docs, stats again.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn dispatch_request_handles_stats() {
+        let (q, _dir) = test_queue();
+        let frame = r#"{"jsonrpc":"2.0","method":"stats","id":9}"#;
+        let resp = dispatch_request(frame, &q).await;
+        assert!(resp.error.is_none(), "stats must succeed: {resp:?}");
+        assert_eq!(resp.result.unwrap()["doc_count"].as_u64().unwrap(), 0);
+
+        for (doc, text) in [("d1", "alpha beta"), ("d2", "gamma")] {
+            let f = format!(
+                r#"{{"jsonrpc":"2.0","method":"index","params":{{"doc_id":"{doc}","text":"{text}"}},"id":1}}"#
+            );
+            assert!(dispatch_request(&f, &q).await.error.is_none());
+        }
+
+        let resp = dispatch_request(frame, &q).await;
+        let result = resp.result.unwrap();
+        assert_eq!(result["doc_count"].as_u64().unwrap(), 2);
+        assert_eq!(result["total_text_bytes"].as_u64().unwrap(), 15);
+    }
+
+    /// Why: this is the wire-level guarantee the coverage predicate rests on.
+    /// The index below holds as many documents as the caller asks about, so
+    /// every count-based check passes — only the identity answer is right.
+    /// What: indexes `d1` plus a stale doc, asks about `d1` and `d2`, and
+    /// asserts only `d2` comes back missing.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn dispatch_request_handles_missing_docs() {
+        let (q, _dir) = test_queue();
+        for (doc, text) in [("d1", "alpha"), ("stale-forgotten-drawer", "beta")] {
+            let f = format!(
+                r#"{{"jsonrpc":"2.0","method":"index","params":{{"doc_id":"{doc}","text":"{text}"}},"id":1}}"#
+            );
+            assert!(dispatch_request(&f, &q).await.error.is_none());
+        }
+
+        let frame =
+            r#"{"jsonrpc":"2.0","method":"missing_docs","params":{"doc_ids":["d1","d2"]},"id":7}"#;
+        let resp = dispatch_request(frame, &q).await;
+        assert!(resp.error.is_none(), "missing_docs must succeed: {resp:?}");
+        let result = resp.result.unwrap();
+        assert_eq!(result["missing"].as_array().unwrap().len(), 1);
+        assert_eq!(result["missing"][0].as_str().unwrap(), "d2");
+        assert_eq!(result["checked"].as_u64().unwrap(), 2);
+    }
+
+    /// Why: a params-less `missing_docs` must be an explicit error. Answering
+    /// it as "nothing missing" would hand a caller full coverage for a request
+    /// that named no documents at all.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn missing_docs_without_params_is_an_error() {
+        let (q, _dir) = test_queue();
+        let resp =
+            dispatch_request(r#"{"jsonrpc":"2.0","method":"missing_docs","id":8}"#, &q).await;
+        assert!(resp.error.is_some(), "params are required");
+        assert!(resp.result.is_none());
     }
 
     #[tokio::test]

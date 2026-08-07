@@ -115,7 +115,7 @@ trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.10" }
 # trusty-bm25-daemon: per-palace BM25 lexical-index daemon — referenced by
 # trusty-memory so `cargo install trusty-memory` produces both binaries from
 # one command (mirrors the trusty-embedderd / trusty-search pattern, PR #190).
-trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.1.3" }
+trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.2.0" }
 # tga: trusty-git-analytics — developer productivity analytics.
 # Referenced by trusty-review for contributor-profile data pipeline (#558).
 tga = { path = "crates/trusty-git-analytics", version = "2.10" }
