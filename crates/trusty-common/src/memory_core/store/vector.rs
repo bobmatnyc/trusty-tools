@@ -174,6 +174,32 @@ pub struct VectorHit {
     pub score: f32,
 }
 
+/// One raw alias scan of a palace's `VECTOR_KEYS` table.
+///
+/// Why (#5005): the counts and the id list answer different questions, and only
+/// the counts are trustworthy. `key_rows` and `distinct_vector_ids` come
+/// straight off the table — no parse, no filter, nothing that can shrink them —
+/// so their difference is the number of drawers whose vector belongs to someone
+/// else. The id list can be incomplete, because a key that is not a uuid names
+/// no drawer. Reading "no ids" as "no collision" is what let a real collision
+/// report clean.
+/// What: the two authoritative counts, the drawer ids in collision groups, and
+/// the keys in those groups that could not be parsed into one.
+/// Test: `a_collision_whose_keys_do_not_parse_is_never_clean`.
+#[derive(Debug, Clone, Default)]
+pub struct AliasScan {
+    /// Rows in `VECTOR_KEYS` — one per drawer with a vector.
+    pub key_rows: usize,
+    /// Distinct vector ids those rows point at. Below `key_rows` exactly when
+    /// drawers share an id.
+    pub distinct_vector_ids: usize,
+    /// Drawers caught in a collision group.
+    pub aliased_drawer_ids: Vec<Uuid>,
+    /// Keys in a collision group that are not valid uuids, so no drawer id can
+    /// be reported for them. Non-empty means `aliased_drawer_ids` is short.
+    pub unnameable_keys: Vec<String>,
+}
+
 /// What one `unalias` run freed, including anything it could not name.
 ///
 /// Why (#5005): the freed ids ARE the operator's worklist — each one is a
@@ -430,28 +456,45 @@ impl UsearchStore {
     /// test — cannot see an id collision, so a palace with four unretrievable
     /// drawers reported a clean bill of health. This is the comparison that
     /// does see it.
-    /// What: delegates to `HnswStore::audit_aliases` and parses the uuids back
-    /// into `Uuid`s, dropping (and logging) any row that will not parse so one
-    /// bad key cannot hide the rest. Returns the two counts alongside the ids.
-    /// Test: `alias_audit_surfaces_a_collision` in `embed_repair_tests`.
-    pub fn alias_audit(&self) -> Result<(usize, usize, Vec<Uuid>)> {
+    ///
+    /// This used to build its id list with `filter_map(…ok())`, which was the
+    /// same fail-open shape as the one fixed in [`UsearchStore::unalias`], one
+    /// layer earlier and in the detector rather than the repair: a collision
+    /// group whose keys did not parse shrank to nothing, so `is_clean()`
+    /// answered true over a real collision and `repair_aliases` returned
+    /// `Clean` without touching it. The keys are carried now, and
+    /// [`AliasAudit::is_clean`] consults the row-vs-distinct arithmetic rather
+    /// than the id list alone.
+    /// What: delegates to `HnswStore::audit_aliases` and splits each collision
+    /// group's keys into drawer ids and unnameable leftovers, alongside the two
+    /// counts. The counts come straight from the table and no parse can affect
+    /// them, which is why they are the authoritative signal.
+    /// Test: `alias_audit_surfaces_a_collision`,
+    /// `a_collision_whose_keys_do_not_parse_is_never_clean`.
+    pub fn alias_audit(&self) -> Result<AliasScan> {
         let audit = self
             .inner
             .audit_aliases()
             .context("alias_audit: scan vector keys")?;
-        let ids = audit
-            .aliased
-            .iter()
-            .flat_map(|(_, uuids)| uuids.iter())
-            .filter_map(|s| match Uuid::parse_str(s) {
-                Ok(u) => Some(u),
+        let mut scan = AliasScan {
+            key_rows: audit.key_rows,
+            distinct_vector_ids: audit.distinct_vector_ids,
+            ..Default::default()
+        };
+        for key in audit.aliased.iter().flat_map(|(_, uuids)| uuids.iter()) {
+            match Uuid::parse_str(key) {
+                Ok(u) => scan.aliased_drawer_ids.push(u),
                 Err(e) => {
-                    tracing::warn!(key = %s, "alias_audit: skipping unparseable uuid: {e}");
-                    None
+                    tracing::error!(
+                        key = %key,
+                        "#5005: a key in a collision group is not a uuid, so the drawer it \
+                         covers cannot be named: {e}"
+                    );
+                    scan.unnameable_keys.push(key.clone());
                 }
-            })
-            .collect();
-        Ok((audit.key_rows, audit.distinct_vector_ids, ids))
+            }
+        }
+        Ok(scan)
     }
 
     /// Unmap every drawer caught in an id collision so a re-embed repairs it.

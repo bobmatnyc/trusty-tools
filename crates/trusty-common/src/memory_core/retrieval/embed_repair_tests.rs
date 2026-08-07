@@ -933,6 +933,7 @@ fn alias_audit_failure_is_never_reported_as_clean() {
             key_rows: 3,
             distinct_vector_ids: 3,
             aliased_drawer_ids: Vec::new(),
+            unnameable_keys: Vec::new(),
         },
         ..health
     };
@@ -1326,4 +1327,195 @@ async fn repair_aliases_then_reembed_makes_a_lost_drawer_retrievable() {
     // And the palace is healthy on both conditions, not just the count.
     let health = handle.embed_health();
     assert!(health.is_healthy(), "clean audit AND no missing drawers");
+}
+
+/// Why (#5005, review HIGH): the fail-open shape fixed in `UsearchStore::unalias`
+/// survived one layer up, in the DETECTOR. `alias_audit` built its id list with
+/// `filter_map(…ok())`, so a collision group whose keys are not uuids shrank to
+/// nothing — and `is_clean()` tested only that list. A palace with two
+/// `VECTOR_KEYS` rows on one `vector_id` therefore reported `is_clean() = true`,
+/// `is_healthy() = true`, and `repair_aliases` returned `clean` / `is_success`
+/// while leaving the collision exactly where it was. That is the defect this PR
+/// exists to fix, reproduced inside the tool built to fix it, on the field the
+/// PR tells callers (including #4834's deletion gate) to branch on.
+/// What: builds that palace at the redb level and asserts the whole chain
+/// refuses it — the audit is not clean, health is not healthy, the counts show
+/// the shortfall, and the repair ends `partial` rather than `clean`, having
+/// actually freed the group.
+/// Test: itself. Reverting `is_clean` to `aliased_drawer_ids.is_empty()` alone,
+/// or the `repair_aliases` gate to `expected.is_empty()`, makes the outcome
+/// `clean` and fails here.
+#[test]
+fn a_collision_whose_keys_do_not_parse_is_never_clean() {
+    use crate::memory_core::store::kg_store::{VECTOR_KEYS, VECTORS};
+    use redb::Database;
+
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Database::create(dir.path().join("idx.usearch.redb")).expect("create");
+        let encoded = postcard::to_allocvec(&vec![0.05_f32; 384]).expect("encode");
+        let wtx = db.begin_write().expect("begin");
+        {
+            let mut vectors = wtx.open_table(VECTORS).expect("vectors");
+            let mut keys = wtx.open_table(VECTOR_KEYS).expect("keys");
+            vectors.insert(4242_u64, encoded.as_slice()).expect("vec");
+            // A genuine collision: two rows, one id. Neither key names a drawer.
+            keys.insert("not-a-uuid-one", 4242_u64).expect("k1");
+            keys.insert("not-a-uuid-two", 4242_u64).expect("k2");
+        }
+        wtx.commit().expect("commit");
+    }
+    let handle = make_handle(dir.path());
+
+    let health = handle.embed_health();
+    assert_eq!(
+        health.alias_audit.counts(),
+        Some((2, 1)),
+        "two key rows on one id — the arithmetic no parse can shrink"
+    );
+    assert_eq!(
+        health.alias_audit.aliased_drawer_ids(),
+        Some(&[][..]),
+        "the id list IS empty here — which is exactly why it must not be the signal"
+    );
+    assert!(
+        !health.alias_audit.is_clean(),
+        "a collision the audit cannot name is still a collision"
+    );
+    assert!(!health.is_healthy(), "and the palace is not healthy");
+    assert_eq!(
+        health.alias_audit.unnameable_keys().map(<[String]>::len),
+        Some(2),
+        "the keys must be carried, not dropped"
+    );
+
+    let report = handle
+        .repair_aliases(AliasRepairOptions { dry_run: false })
+        .expect("repair must run");
+    assert_eq!(
+        report.outcome.as_str(),
+        "partial",
+        "freed, but the worklist cannot be named — never `clean`"
+    );
+    assert!(
+        !report.outcome.is_success(),
+        "this is the field #4834's deletion gate branches on"
+    );
+    assert_eq!(
+        report.unnameable_keys.len(),
+        2,
+        "the operator needs the keys the run could not turn into drawer ids"
+    );
+
+    // The repair did real work: the collision is gone from the table, which is
+    // what separates this from the pre-fix behaviour of reporting clean and
+    // doing nothing.
+    let after = handle.vector_store.alias_audit().expect("post-repair scan");
+    assert_eq!(
+        (after.key_rows, after.distinct_vector_ids),
+        (0, 0),
+        "the whole group is freed even though it could not be named"
+    );
+}
+
+/// Why (#5005, review MEDIUM): `classify_repair` runs AFTER keys have been
+/// deleted. "Wrote, then could not verify" is a worse state than "refused to
+/// write", so it is the branch most worth proving — and unlike the pre-repair
+/// audit, it is reachable, because the function takes the audit as a parameter
+/// instead of building its own. This is the real production classifier, not a
+/// reimplementation of it.
+/// What: hands it an `Unavailable` post-repair audit after a fully successful
+/// free, and asserts it refuses `Repaired` — the freed ids are irrelevant when
+/// nothing verified them.
+/// Test: itself. Making the `Unavailable` arm fall through to the `Repaired`
+/// check reports success over an unverified destructive write.
+#[test]
+fn classify_refuses_to_call_an_unverified_write_repaired() {
+    use crate::memory_core::store::vector::UnaliasOutcome;
+    let id = Uuid::new_v4();
+    let freed = UnaliasOutcome {
+        freed: vec![id],
+        unparsed_keys: Vec::new(),
+    };
+    let after = AliasAudit::from_scan(Err(anyhow::anyhow!("redb read failed mid-verify")));
+
+    let outcome = super::embed_repair::classify_repair(&after, &freed, &[id]);
+
+    assert_eq!(outcome.as_str(), "unavailable");
+    assert!(
+        !outcome.is_success(),
+        "the write landed but nothing confirmed it; that is not a repaired palace"
+    );
+
+    // Contrast: the identical inputs with a clean verification DO give
+    // `Repaired`, so the assertion above is about the unverified audit and not
+    // about `classify_repair` refusing everything.
+    let clean = AliasAudit::Measured {
+        key_rows: 1,
+        distinct_vector_ids: 1,
+        aliased_drawer_ids: Vec::new(),
+        unnameable_keys: Vec::new(),
+    };
+    assert_eq!(
+        super::embed_repair::classify_repair(&clean, &freed, &[id]).as_str(),
+        "repaired"
+    );
+}
+
+/// Why (#5005): the other two ways a repair can be incomplete — the palace
+/// still has a collision, or the run did not free something the pre-repair
+/// audit named. Both must land on `Partial` with the shortfall named, because
+/// the ids are what the operator acts on.
+/// What: drives `classify_repair` over a verification audit that still reports
+/// a collision, and separately over one that is clean but where an expected id
+/// was never freed.
+/// Test: itself. Dropping the `not_freed` term from the `Repaired` guard makes
+/// the second case report `repaired`.
+#[test]
+fn classify_reports_partial_when_the_verification_still_finds_a_collision() {
+    use crate::memory_core::store::vector::UnaliasOutcome;
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+
+    // Case 1: the post-repair audit still sees a collision.
+    let freed = UnaliasOutcome {
+        freed: vec![a, b],
+        unparsed_keys: Vec::new(),
+    };
+    let still_dirty = AliasAudit::Measured {
+        key_rows: 2,
+        distinct_vector_ids: 1,
+        aliased_drawer_ids: vec![a],
+        unnameable_keys: Vec::new(),
+    };
+    let outcome = super::embed_repair::classify_repair(&still_dirty, &freed, &[a, b]);
+    assert_eq!(outcome.as_str(), "partial");
+    match &outcome {
+        AliasRepairOutcome::Partial { still_aliased, .. } => {
+            assert_eq!(still_aliased, &[a], "the survivor must be named")
+        }
+        other => panic!("expected Partial, got {other:?}"),
+    }
+
+    // Case 2: verification is clean, but the run never freed `b`.
+    let short = UnaliasOutcome {
+        freed: vec![a],
+        unparsed_keys: Vec::new(),
+    };
+    let clean = AliasAudit::Measured {
+        key_rows: 1,
+        distinct_vector_ids: 1,
+        aliased_drawer_ids: Vec::new(),
+        unnameable_keys: Vec::new(),
+    };
+    let outcome = super::embed_repair::classify_repair(&clean, &short, &[a, b]);
+    assert_eq!(
+        outcome.as_str(),
+        "partial",
+        "a clean audit does not excuse an id the run was supposed to free"
+    );
+    match &outcome {
+        AliasRepairOutcome::Partial { not_freed, .. } => assert_eq!(not_freed, &[b]),
+        other => panic!("expected Partial, got {other:?}"),
+    }
 }

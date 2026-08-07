@@ -381,6 +381,12 @@ pub(crate) async fn handle_palace_unalias(state: &AppState, args: Value) -> Resu
         // over real loss, and these ids are also the re-embed worklist.
         "freed_ids": ids(&report.freed_ids),
         "aliased_before_ids": report.before.aliased_drawer_ids().map(ids),
+        // #5005 review HIGH: a collision group whose keys are not uuids names
+        // no drawer, so `aliased_before_ids` can be EMPTY over a real
+        // collision. Non-empty here means that id list is short — read
+        // `vector_key_rows` vs `distinct_vector_ids` off `palace_reembed`, and
+        // branch on `outcome`, never on the id counts.
+        "unnameable_keys": report.unnameable_keys.clone(),
         // Present only on a partial repair, which is exactly when a caller must
         // not read the run as done.
         "still_aliased_ids": still_aliased_ids,

@@ -28,6 +28,7 @@ use super::deferred_embed::{RetryPolicy, embed_and_store};
 use super::embedder::{shared_embedder, shared_embedder_initialized};
 use super::handle::PalaceHandle;
 use crate::memory_core::store::embed_ledger::{self, EmbedFailure};
+use crate::memory_core::store::vector::{AliasScan, UnaliasOutcome};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -54,8 +55,12 @@ pub enum AliasAudit {
         /// Drawers whose vector was overwritten by another drawer's. These have
         /// a key, so they are NOT in `missing_vector_ids` — that is precisely
         /// why the count gap missed them — but their content is embedded
-        /// nowhere.
+        /// nowhere. May be SHORT of the real group: a key that is not a uuid
+        /// names no drawer. Never read its emptiness as "no collision" — that
+        /// is what `key_rows` vs `distinct_vector_ids` is for.
         aliased_drawer_ids: Vec<Uuid>,
+        /// Keys in a collision group that could not be parsed into a drawer id.
+        unnameable_keys: Vec<String>,
     },
     /// The audit could not run. Nothing is known about aliasing in this palace.
     Unavailable {
@@ -75,12 +80,13 @@ impl AliasAudit {
     /// What: `Ok` → `Measured`; `Err` → `Unavailable` carrying the rendered
     /// error. Never returns zeros for a failure.
     /// Test: `alias_audit_failure_is_never_reported_as_clean`.
-    pub fn from_scan(scan: anyhow::Result<(usize, usize, Vec<Uuid>)>) -> Self {
+    pub fn from_scan(scan: anyhow::Result<AliasScan>) -> Self {
         match scan {
-            Ok((key_rows, distinct_vector_ids, aliased_drawer_ids)) => Self::Measured {
-                key_rows,
-                distinct_vector_ids,
-                aliased_drawer_ids,
+            Ok(s) => Self::Measured {
+                key_rows: s.key_rows,
+                distinct_vector_ids: s.distinct_vector_ids,
+                aliased_drawer_ids: s.aliased_drawer_ids,
+                unnameable_keys: s.unnameable_keys,
             },
             Err(e) => Self::Unavailable {
                 reason: format!("{e:#}"),
@@ -88,11 +94,39 @@ impl AliasAudit {
         }
     }
 
-    /// Whether the audit ran AND found no drawer sharing an id.
+    /// Whether the audit ran AND no drawer shares a vector id.
     ///
-    /// `Unavailable` is false: an unread palace is not a clean one.
+    /// Why: this used to test `aliased_drawer_ids.is_empty()` alone, which a
+    /// collision whose keys are not uuids satisfies while the collision is
+    /// still there — the id list shrinks, the table does not. `key_rows` vs
+    /// `distinct_vector_ids` comes straight off `VECTOR_KEYS` and no parse can
+    /// affect it, so it is the signal that cannot be fooled. Both are checked:
+    /// if they ever disagree the answer is "not clean", which fails closed.
+    /// `Unavailable` is false — an unread palace is not a clean one.
+    /// Test: `a_collision_whose_keys_do_not_parse_is_never_clean`.
     pub fn is_clean(&self) -> bool {
-        matches!(self, Self::Measured { aliased_drawer_ids, .. } if aliased_drawer_ids.is_empty())
+        matches!(
+            self,
+            Self::Measured {
+                key_rows,
+                distinct_vector_ids,
+                aliased_drawer_ids,
+                unnameable_keys,
+            } if aliased_drawer_ids.is_empty()
+                && unnameable_keys.is_empty()
+                && key_rows == distinct_vector_ids
+        )
+    }
+
+    /// Keys in a collision group that name no drawer, or `None` when the audit
+    /// did not run. Non-empty means [`Self::aliased_drawer_ids`] is short.
+    pub fn unnameable_keys(&self) -> Option<&[String]> {
+        match self {
+            Self::Measured {
+                unnameable_keys, ..
+            } => Some(unnameable_keys),
+            Self::Unavailable { .. } => None,
+        }
     }
 
     /// Drawers caught in a collision, or `None` when the audit did not run.
@@ -330,6 +364,9 @@ pub struct AliasRepairReport {
     /// Exact drawer ids freed — or, on a dry run, that would be freed. These
     /// now have no vector and need a `backfill_missing_vectors` run.
     pub freed_ids: Vec<Uuid>,
+    /// Keys the pre-repair audit found in a collision group but could not name.
+    /// Non-empty means `freed_ids` cannot be the whole story.
+    pub unnameable_keys: Vec<String>,
     /// The verification audit. `None` on a dry run and when nothing was
     /// aliased, because neither wrote anything to verify.
     pub after: Option<AliasAudit>,
@@ -343,6 +380,61 @@ impl AliasRepairReport {
     /// missing one; only the backfill makes it retrievable again.
     pub fn reembed_required(&self) -> bool {
         !self.dry_run && !self.freed_ids.is_empty()
+    }
+}
+
+/// Decide how a repair run ended, from the post-repair audit alone.
+///
+/// Why (#5005): this is the guard that makes a partial repair impossible to
+/// report as a complete one, and it runs AFTER keys have already been deleted —
+/// "wrote, then could not verify" is a worse state than "refused to write", so
+/// it is the branch most worth testing. Pulling it out of `repair_aliases`
+/// makes it reachable with a hand-built `after` value without a fault-injection
+/// seam, and without adding any indirection to the production path: the
+/// function tested IS the function called.
+/// What: `Unavailable` when the verification audit could not run — that is not
+/// a success, even though the write itself succeeded. Otherwise `Repaired` only
+/// when nothing is still aliased, every id `expected` named was freed, and
+/// every freed key could be named; anything else is `Partial` carrying all
+/// three shortfalls.
+/// Test: `classify_refuses_to_call_an_unverified_write_repaired`,
+/// `classify_reports_partial_when_the_verification_still_finds_a_collision`,
+/// and end-to-end through `repair_aliases_frees_the_group_and_verifies_it`.
+pub(crate) fn classify_repair(
+    after: &AliasAudit,
+    freed: &UnaliasOutcome,
+    expected: &[Uuid],
+) -> AliasRepairOutcome {
+    let Some(still) = after.aliased_drawer_ids() else {
+        return AliasRepairOutcome::Unavailable {
+            reason: after
+                .unavailable_reason()
+                .unwrap_or("post-repair alias audit unavailable")
+                .to_string(),
+        };
+    };
+    let freed_set: HashSet<Uuid> = freed.freed.iter().copied().collect();
+    let not_freed: Vec<Uuid> = expected
+        .iter()
+        .copied()
+        .filter(|id| !freed_set.contains(id))
+        .collect();
+    let mut still_aliased = still.to_vec();
+    still_aliased.sort();
+    // A post-repair audit that is measured but NOT clean counts as still
+    // aliased even when it can name nobody — same arithmetic-over-ids rule as
+    // `is_clean`, so an all-unnameable group cannot verify as repaired.
+    if still_aliased.is_empty()
+        && not_freed.is_empty()
+        && freed.unparsed_keys.is_empty()
+        && after.is_clean()
+    {
+        return AliasRepairOutcome::Repaired;
+    }
+    AliasRepairOutcome::Partial {
+        still_aliased,
+        not_freed,
+        unparsed_keys: freed.unparsed_keys.clone(),
     }
 }
 
@@ -379,6 +471,7 @@ impl PalaceHandle {
             dry_run: opts.dry_run,
             before: before.clone(),
             freed_ids: Vec::new(),
+            unnameable_keys: before.unnameable_keys().unwrap_or_default().to_vec(),
             after: None,
             outcome: AliasRepairOutcome::Clean,
         };
@@ -400,7 +493,14 @@ impl PalaceHandle {
 
         let mut expected: Vec<Uuid> = aliased.to_vec();
         expected.sort();
-        if expected.is_empty() {
+        // Gate on the audit, NOT on `expected.is_empty()`. A collision whose
+        // keys are not uuids names no drawer, so the id list is empty while the
+        // collision is still in the table — returning `Clean` there reported a
+        // real collision as repaired. `is_clean()` consults the row-vs-distinct
+        // arithmetic, which no parse can shrink, so this now falls through to
+        // `unalias` and ends as `Partial`: the group IS freed, and the worklist
+        // genuinely cannot be named.
+        if before.is_clean() {
             return Ok(report);
         }
 
@@ -422,54 +522,19 @@ impl PalaceHandle {
         report.freed_ids = freed.freed.clone();
         report.freed_ids.sort();
 
-        // Verification. This is the only path to `Repaired`, so a post-repair
-        // audit that fails downgrades the run rather than being ignored.
         let after = AliasAudit::from_scan(self.vector_store.alias_audit());
         report.after = Some(after.clone());
-        let Some(still) = after.aliased_drawer_ids() else {
-            let reason = after
-                .unavailable_reason()
-                .unwrap_or("post-repair alias audit unavailable")
-                .to_string();
-            tracing::error!(
-                palace = %self.id, freed = report.freed_ids.len(),
-                "#5005: alias repair wrote, but the verification audit could not run — \
-                 the palace is NOT confirmed clean: {reason}"
-            );
-            report.outcome = AliasRepairOutcome::Unavailable { reason };
-            return Ok(report);
-        };
-
-        let freed_set: HashSet<Uuid> = report.freed_ids.iter().copied().collect();
-        let not_freed: Vec<Uuid> = expected
-            .iter()
-            .copied()
-            .filter(|id| !freed_set.contains(id))
-            .collect();
-        let mut still_aliased = still.to_vec();
-        still_aliased.sort();
-
-        if still_aliased.is_empty() && not_freed.is_empty() && freed.unparsed_keys.is_empty() {
-            tracing::warn!(
+        report.outcome = classify_repair(&after, &freed, &expected);
+        match &report.outcome {
+            AliasRepairOutcome::Repaired => tracing::warn!(
                 palace = %self.id, freed = report.freed_ids.len(),
                 "#5005: alias repair freed every aliased drawer and verified the palace \
                  clean; those drawers now need a re-embed"
-            );
-            report.outcome = AliasRepairOutcome::Repaired;
-        } else {
-            tracing::error!(
-                palace = %self.id,
-                freed = report.freed_ids.len(),
-                still_aliased = still_aliased.len(),
-                not_freed = not_freed.len(),
-                unparsed = freed.unparsed_keys.len(),
+            ),
+            other => tracing::error!(
+                palace = %self.id, freed = report.freed_ids.len(), outcome = other.as_str(),
                 "#5005: alias repair is INCOMPLETE — do not treat this palace as repaired"
-            );
-            report.outcome = AliasRepairOutcome::Partial {
-                still_aliased,
-                not_freed,
-                unparsed_keys: freed.unparsed_keys,
-            };
+            ),
         }
         Ok(report)
     }
