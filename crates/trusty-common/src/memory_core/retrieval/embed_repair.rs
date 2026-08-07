@@ -266,7 +266,7 @@ impl Default for AliasRepairOptions {
 /// verified), `Partial` (freed, but verification still finds a problem), and
 /// `Unavailable` (an audit could not run, so nothing is known).
 /// Test: `repair_aliases_never_reports_success_over_a_partial_repair`,
-/// `repair_aliases_refuses_to_run_on_an_unreadable_audit`.
+/// `an_unavailable_or_partial_repair_is_never_a_success`.
 #[derive(Debug, Clone)]
 pub enum AliasRepairOutcome {
     /// The audit ran and found no collision. Nothing was written.
@@ -370,7 +370,7 @@ impl PalaceHandle {
     /// Test: `repair_aliases_frees_the_group_and_verifies_it`,
     /// `repair_aliases_dry_run_names_the_group_and_changes_nothing`,
     /// `repair_aliases_never_reports_success_over_a_partial_repair`,
-    /// `repair_aliases_refuses_to_run_on_an_unreadable_audit`,
+    /// `an_unavailable_or_partial_repair_is_never_a_success`,
     /// `repair_aliases_then_reembed_makes_a_lost_drawer_retrievable`.
     pub fn repair_aliases(&self, opts: AliasRepairOptions) -> Result<AliasRepairReport> {
         let before = AliasAudit::from_scan(self.vector_store.alias_audit());
