@@ -719,7 +719,8 @@ fn health_reports_error_once_the_oldest_entry_passes_the_threshold() {
         h.oldest_pending_last_error.as_deref(),
         Some("no listener bound")
     );
-    assert_eq!(h.total_failed_attempts, 14);
+    assert_eq!(h.oldest_pending_attempts, Some(14));
+    assert_eq!(h.exhausted, 0, "nothing has been given up on yet");
 }
 
 #[test]
@@ -1130,7 +1131,7 @@ async fn integration_from_env_delivery_survives_a_console_restart() {
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(body["relay"], "pending");
 
-        let health = ingress.health();
+        let health = ingress.health().await;
         assert_eq!(health.pending, 1);
         assert_eq!(health.status, ServiceHealth::Degraded);
 
@@ -1159,7 +1160,7 @@ async fn integration_from_env_delivery_survives_a_console_restart() {
         assert_eq!(report.still_pending, 0);
         assert_eq!(captured.lock().await.len(), 1);
 
-        let final_health = with_target.health();
+        let final_health = with_target.health().await;
         assert_eq!(final_health.pending, 0);
         assert_eq!(final_health.status, ServiceHealth::Ok);
     }
@@ -1200,7 +1201,7 @@ async fn integration_from_env_fails_closed_when_the_secret_is_unset() {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(listing_of(ingress.spool()).pending.is_empty());
-        assert_eq!(ingress.health().status, ServiceHealth::Ok);
+        assert_eq!(ingress.health().await.status, ServiceHealth::Ok);
     }
     .await;
 
@@ -1516,18 +1517,205 @@ async fn sweep_stops_relaying_an_exhausted_entry() {
     assert_eq!(report.exhausted, 1);
     assert_eq!(report.still_pending, 0);
 
-    let listing = listing_of(ingress.spool());
+    // 🔴 Updated in review round 2. The previous version asserted the exhausted
+    // entry STAYS in the live set, which is what let it be re-read and
+    // re-decoded by every later sweep and metrics request forever. It is now
+    // moved aside — kept, because it is still an unacknowledged webhook, but off
+    // both hot paths.
+    assert!(
+        listing_of(ingress.spool()).pending.is_empty(),
+        "an exhausted entry must leave the live set"
+    );
+    let census = ingress.spool().scan_metadata().expect("census");
+    assert_eq!(census.live.len(), 0);
     assert_eq!(
-        listing.pending.len(),
+        census.exhausted.len(),
         1,
         "giving up on relaying is not the same as discarding the delivery"
     );
-    assert_eq!(listing.pending[0].entry.attempts, 3);
+    assert_eq!(census.exhausted[0].delivery_id, "d-1");
+
+    let quarantined = ingress
+        .spool()
+        .load(&census.exhausted[0].path)
+        .expect("the quarantined entry is still readable");
+    assert_eq!(quarantined.attempts, 3);
     assert_eq!(
-        ingress.health().status,
+        BASE64.decode(&quarantined.body_b64).expect("decode"),
+        BODY,
+        "and it still holds the original body for a manual redelivery"
+    );
+
+    let health = ingress.health().await;
+    assert_eq!(
+        health.status,
         ServiceHealth::Error,
         "an entry we have given up relaying must hold the health signal red"
     );
+    assert_eq!(health.exhausted, 1);
+    assert_eq!(health.exhausted_delivery_ids, vec!["d-1".to_string()]);
+    assert_eq!(health.pending, 0);
+}
+
+// ─── HIGH-A: exhausted entries leave the hot paths ──────────────────────────
+
+#[test]
+fn spool_quarantine_moves_an_entry_out_of_the_live_set() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let entry = sample_entry("d-quarantine", 1_700_000_000_000);
+    let path = spool.persist_new(&entry).expect("durable write");
+
+    let moved = spool.quarantine(&path).expect("quarantine");
+    assert!(!path.exists(), "the entry must leave the live directory");
+    assert!(moved.starts_with(spool.exhausted_root()));
+    assert_eq!(
+        spool.load(&moved).expect("still readable"),
+        entry,
+        "quarantine moves the delivery, it does not alter or discard it"
+    );
+    assert!(listing_of(&spool).pending.is_empty());
+}
+
+#[test]
+fn spool_list_pending_ignores_the_exhausted_subdirectory() {
+    // 🔴 Fails against `92c1ed3fc`, where nothing ever left the live set: both
+    // `retry_pending_once` and `scan_health` called `list_pending`, which reads
+    // and JSON-decodes every file. An entry that can never be relayed again was
+    // paid for on every sweep tick and every metrics request, forever.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let live = spool
+        .persist_new(&sample_entry("d-live", 1_700_000_005_000))
+        .expect("durable write");
+    let dead = spool
+        .persist_new(&sample_entry("d-dead", 1_700_000_000_000))
+        .expect("durable write");
+    spool.quarantine(&dead).expect("quarantine");
+
+    let listing = listing_of(&spool);
+    assert_eq!(
+        listing.pending.len(),
+        1,
+        "the decode-every-file path must see only the live entry"
+    );
+    assert_eq!(listing.pending[0].path, live);
+    assert!(listing.undecodable.is_empty());
+}
+
+#[test]
+fn spool_scan_metadata_avoids_decoding_and_load_reads_one() {
+    // `entry_path`'s stated rationale — the timestamp prefix exists so the age
+    // scan "does not have to parse every file" — is only true if something
+    // actually reads it. This is that reader.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    for (id, at) in [("d-c", 300u64), ("d-a", 100), ("d-b", 200)] {
+        spool
+            .persist_new(&sample_entry(id, at))
+            .expect("durable write");
+    }
+    // Corrupt every file. A census that opened them would notice; one that
+    // reads names only cannot, which is exactly the property under test.
+    for dirent in std::fs::read_dir(spool.root()).expect("read spool") {
+        let path = dirent.expect("dirent").path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            std::fs::write(&path, b"{ not json").expect("corrupt");
+        }
+    }
+
+    let census = spool.scan_metadata().expect("census");
+    assert_eq!(
+        census
+            .live
+            .iter()
+            .map(|m| m.delivery_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["d-a", "d-b", "d-c"],
+        "the census must read names only, oldest first"
+    );
+    assert_eq!(census.live[0].received_at_unix_ms, 100);
+    assert!(census.unparsable.is_empty());
+
+    // `load` is the one place bytes are read, and it reports the corruption.
+    assert!(spool.load(&census.live[0].path).is_err());
+}
+
+#[test]
+fn spool_scan_metadata_separates_live_from_exhausted() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let dead = spool
+        .persist_new(&sample_entry("d-dead", 100))
+        .expect("durable write");
+    spool
+        .persist_new(&sample_entry("d-live", 200))
+        .expect("durable write");
+    spool.quarantine(&dead).expect("quarantine");
+
+    let census = spool.scan_metadata().expect("census");
+    assert_eq!(census.live.len(), 1);
+    assert_eq!(census.live[0].delivery_id, "d-live");
+    assert_eq!(census.exhausted.len(), 1);
+    assert_eq!(census.exhausted[0].delivery_id, "d-dead");
+}
+
+#[test]
+fn spool_scan_metadata_reports_a_stray_file_rather_than_dating_it_zero() {
+    // A name with no timestamp prefix must not parse as age 0 — that would
+    // read as the oldest entry in the spool and hijack every diagnostic.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    std::fs::write(spool.root().join("stray.json"), b"{}").expect("write stray");
+
+    let census = spool.scan_metadata().expect("census");
+    assert!(census.live.is_empty());
+    assert_eq!(census.unparsable.len(), 1);
+}
+
+#[tokio::test]
+async fn sweep_quarantines_an_exhausted_entry_and_stops_paying_for_it() {
+    // 🔴 Fails against `92c1ed3fc`: the sweep counted `exhausted` and
+    // `continue`d, so the entry stayed in the live set and every subsequent
+    // pass decoded it again. The module doc says no target binds a listener
+    // until step 4, so in this PR's intended configuration that is EVERY
+    // delivery, permanently.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let policy = BackoffPolicy {
+        first_attempt_grace: Duration::ZERO,
+        base: Duration::ZERO,
+        ceiling: Duration::ZERO,
+        max_attempts: 1,
+    };
+    let ingress = ingress_with(
+        spool,
+        tmp.path().join("sockets").join("absent.sock"),
+        Duration::from_millis(300),
+    )
+    .with_backoff(policy);
+    for id in ["d-1", "d-2"] {
+        ingress
+            .spool()
+            .persist_new(&sample_entry(id, 1_700_000_000_000))
+            .expect("durable write");
+    }
+
+    assert_eq!(ingress.retry_pending_once().await.still_pending, 2);
+    let second = ingress.retry_pending_once().await;
+    assert_eq!(second.exhausted, 2);
+
+    let census = ingress.spool().scan_metadata().expect("census");
+    assert_eq!(
+        census.live.len(),
+        0,
+        "an exhausted entry must stop costing a decode on every pass"
+    );
+    assert_eq!(census.exhausted.len(), 2, "and must still be kept");
+
+    // Every later pass sees nothing to do at all.
+    let third = ingress.retry_pending_once().await;
+    assert_eq!(third, SweepReport::default());
 }
 
 // ─── HIGH-3: an absent spool directory is red, not green ────────────────────
@@ -1628,4 +1816,99 @@ async fn route_accepts_a_body_larger_than_the_axum_default_limit() {
         body,
         "and the whole 3 MiB must be spooled byte-exact"
     );
+}
+
+// ─── HIGH-B: the signal keeps saying something new after it goes red ────────
+
+#[test]
+fn health_diagnostics_track_the_live_entry_not_the_exhausted_one() {
+    // 🔴 Fails against `92c1ed3fc`. Exhausted entries are by construction the
+    // oldest, and `scan_health` took `listing.pending.first()`, so
+    // `oldest_pending_delivery_id`, `oldest_pending_last_error` and
+    // `oldest_pending_age_secs` pinned to the first poisoned delivery forever.
+    // Day 1 one delivery exhausts; day 30 a genuinely new one gets stuck and
+    // nothing an operator or alert rule reads moves.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let now = 1_700_000_000_000u64;
+
+    // Day 1: a delivery that has been given up on. Oldest thing in the spool.
+    let mut dead = sample_entry("d-day-one", now - 30 * 86_400_000);
+    dead.attempts = 24;
+    dead.last_error = Some("no listener bound".to_string());
+    let dead_path = spool.persist_new(&dead).expect("durable write");
+    spool.quarantine(&dead_path).expect("quarantine");
+
+    // Day 30: a NEW delivery is now failing. This is what an operator needs.
+    let mut live = sample_entry("d-day-thirty", now - 900_000);
+    live.attempts = 3;
+    live.last_error = Some("target rejected the frame: code -32000 — store locked".to_string());
+    live.last_attempt_at_unix_ms = Some(now - 60_000);
+    spool.persist_new(&live).expect("durable write");
+
+    let h = health::scan_health(&spool, now, Duration::from_secs(600));
+
+    assert_eq!(h.status, ServiceHealth::Error);
+    assert_eq!(
+        h.oldest_pending_delivery_id.as_deref(),
+        Some("d-day-thirty"),
+        "the diagnostics must describe the LIVE failure, not the 30-day-old corpse"
+    );
+    assert_eq!(
+        h.oldest_pending_last_error.as_deref(),
+        Some("target rejected the frame: code -32000 — store locked")
+    );
+    assert_eq!(h.oldest_pending_attempts, Some(3));
+    assert_eq!(h.oldest_pending_age_secs, Some(900));
+    assert_eq!(h.pending, 1);
+
+    // The exhausted one is still reported — in its own fields, where it cannot
+    // crowd out a live failure.
+    assert_eq!(h.exhausted, 1);
+    assert_eq!(h.exhausted_delivery_ids, vec!["d-day-one".to_string()]);
+    assert_eq!(h.oldest_exhausted_age_secs, Some(30 * 86_400));
+}
+
+#[test]
+fn health_is_red_for_an_exhausted_entry_even_with_nothing_live() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let now = 1_700_000_000_000u64;
+    let path = spool
+        .persist_new(&sample_entry("d-dead", now - 1_000))
+        .expect("durable write");
+    spool.quarantine(&path).expect("quarantine");
+
+    let h = health::scan_health(&spool, now, Duration::from_secs(600));
+    assert_eq!(
+        h.status,
+        ServiceHealth::Error,
+        "nothing clears an exhausted entry without an operator, so it stays red"
+    );
+    assert_eq!(h.pending, 0);
+    assert_eq!(h.exhausted, 1);
+    assert_eq!(h.oldest_pending_delivery_id, None);
+}
+
+#[tokio::test]
+async fn metrics_route_surfaces_exhausted_separately_from_live() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let now = 1_700_000_000_000u64;
+    let dead = spool
+        .persist_new(&sample_entry("d-dead", now - 86_400_000))
+        .expect("durable write");
+    spool.quarantine(&dead).expect("quarantine");
+    spool
+        .persist_new(&sample_entry("d-live", now - 1_000))
+        .expect("durable write");
+    let ingress = ingress_for(spool, tmp.path().join("sockets").join("absent.sock"));
+
+    let (status, body) = get_json(router_for(ingress), "/api/console/metrics/webhooks").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["metrics"]["pending"], 1);
+    assert_eq!(body["metrics"]["exhausted"], 1);
+    assert_eq!(body["metrics"]["oldest_pending_delivery_id"], "d-live");
+    assert_eq!(body["metrics"]["exhausted_delivery_ids"][0], "d-dead");
 }

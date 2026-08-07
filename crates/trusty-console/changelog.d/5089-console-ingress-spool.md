@@ -25,9 +25,23 @@ Added
 - retries are claimed and backed off. A `ClaimSet` gives one relay per entry at
   a time, so a sweep tick landing inside the request path's own relay window
   cannot send the same delivery twice; `BackoffPolicy` spaces attempts
-  exponentially (30 s doubling to a 1 h ceiling) and stops at 24 failures. An
-  exhausted entry is never relayed again and never deleted — it holds the
-  health signal red until an operator intervenes
+  exponentially (30 s doubling to a 1 h ceiling) and stops at 24 failures
+- an entry past that limit is moved to `webhook-spool/exhausted/` rather than
+  deleted or left in place. It is still an unacknowledged webhook, so it is
+  kept and it keeps the health signal red — but it stops being read and
+  JSON-decoded by every sweep tick and every metrics request, which with no
+  target listener yet is otherwise the fate of every delivery
+- the health scan reads receipt times from entry filenames and decodes exactly
+  one file — the oldest live entry — instead of the whole spool. `pending` and
+  `exhausted` are counted separately, and `oldest_pending_*` describes the
+  oldest LIVE entry: exhausted ones are permanently the oldest, so including
+  them froze the diagnostics on the first poisoned delivery and a genuinely
+  new failure moved nothing an operator reads. `total_failed_attempts` is
+  replaced by `oldest_pending_attempts`, which costs one decode instead of one
+  per entry
+- spool I/O runs on `spawn_blocking`. Ingest fsyncs a file and a directory
+  twice per delivery and the metrics route scans two directories per request;
+  none of that belongs on a runtime worker thread
 - a fresh entry is committed with `hard_link`, not `rename`, so a colliding
   path fails atomically instead of clobbering a delivery that may already have
   been acknowledged

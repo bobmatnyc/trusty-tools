@@ -56,6 +56,16 @@ pub const SPOOL_SCHEMA_VERSION: u32 = 1;
 /// Directory name under the console's data dir.
 pub const SPOOL_DIR_NAME: &str = "webhook-spool";
 
+/// Subdirectory holding deliveries console has stopped trying to relay.
+///
+/// Why: an entry past `max_attempts` is never relayed again, but deleting it
+/// would discard a delivery GitHub will never re-send — so it is moved aside
+/// rather than removed. Moving it matters as much as keeping it: while it sat
+/// in the live directory, every sweep and every metrics request read and
+/// JSON-decoded it, forever, and it pinned the oldest-pending diagnostics to
+/// itself so a genuinely new failure changed nothing an operator reads.
+pub const EXHAUSTED_DIR_NAME: &str = "exhausted";
+
 /// Failures of the durable-write path. Every variant means the delivery is
 /// **not** safely recorded, so every one of them must reach the HTTP caller as
 /// a 5xx rather than a log line.
@@ -468,16 +478,124 @@ impl Spool {
         sync_dir(&self.root)
     }
 
+    /// Directory holding entries console has given up relaying.
+    pub fn exhausted_root(&self) -> PathBuf {
+        self.root.join(EXHAUSTED_DIR_NAME)
+    }
+
+    /// Move an entry console will not retry into `exhausted/`.
+    ///
+    /// Why: an exhausted entry left in the live directory is read and decoded
+    /// by every sweep and every metrics request, forever — the spool becomes
+    /// unboundedly expensive to scan precisely because nothing can be relayed.
+    /// It also pins the oldest-pending diagnostics to itself, so a genuinely
+    /// new stuck delivery moves no field an operator or alert rule watches.
+    /// Moving it aside keeps the delivery (it is still an unacknowledged
+    /// webhook) while taking it off both hot paths.
+    /// What: `rename` into [`EXHAUSTED_DIR_NAME`], then `fsync` both
+    /// directories so the move survives a crash. Returns the new path.
+    /// Test: `spool_quarantine_moves_an_entry_out_of_the_live_set`,
+    /// `sweep_quarantines_an_exhausted_entry`.
+    pub fn quarantine(&self, path: &Path) -> Result<PathBuf, SpoolError> {
+        let dest_dir = self.exhausted_root();
+        std::fs::create_dir_all(&dest_dir).map_err(|source| SpoolError::PrepareDir {
+            path: dest_dir.clone(),
+            source,
+        })?;
+        std::fs::set_permissions(&dest_dir, Permissions::from_mode(SPOOL_DIR_MODE)).map_err(
+            |source| SpoolError::PrepareDir {
+                path: dest_dir.clone(),
+                source,
+            },
+        )?;
+
+        let name = path.file_name().ok_or_else(|| SpoolError::Remove {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("spool entry path has no file name"),
+        })?;
+        let dest = dest_dir.join(name);
+        std::fs::rename(path, &dest).map_err(|source| SpoolError::Commit {
+            from: path.to_path_buf(),
+            to: dest.clone(),
+            source,
+        })?;
+        sync_dir(&dest_dir)?;
+        sync_dir(&self.root)?;
+        Ok(dest)
+    }
+
+    /// Decode one entry by path.
+    ///
+    /// Why: the health scan needs `attempts` and `last_error` for exactly one
+    /// entry — the oldest live one. Decoding just that one keeps the metrics
+    /// request O(1) in decodes rather than O(spool).
+    /// Test: `spool_scan_metadata_avoids_decoding_and_load_reads_one`.
+    pub fn load(&self, path: &Path) -> Result<SpoolEntry, SpoolError> {
+        let bytes = std::fs::read(path).map_err(|source| SpoolError::ReadDir {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        serde_json::from_slice(&bytes).map_err(|source| SpoolError::Encode {
+            delivery_id: path.display().to_string(),
+            source,
+        })
+    }
+
+    /// Filename-only census of both the live and exhausted sets.
+    ///
+    /// Why: [`Spool::entry_path`] encodes the receipt time in the filename
+    /// precisely so age can be read without opening anything, and until now
+    /// nothing used that — both hot paths decoded every file. A metrics request
+    /// needs counts and ages, which the names already carry.
+    /// What: `read_dir` on the live directory and on `exhausted/`, parsing
+    /// `<received_at_unix_ms:013>-<delivery id>.json`. No file is opened. A name
+    /// that does not parse is reported through `unparsable` rather than
+    /// dropped, for the same reason an undecodable entry is.
+    ///
+    /// A missing live directory is an error for an opened spool, exactly as in
+    /// [`Spool::list_pending`]; a missing `exhausted/` is simply empty, since it
+    /// is created lazily on the first quarantine.
+    ///
+    /// Test: `spool_scan_metadata_avoids_decoding_and_load_reads_one`,
+    /// `spool_scan_metadata_separates_live_from_exhausted`.
+    pub fn scan_metadata(&self) -> Result<SpoolMetadata, SpoolError> {
+        let mut meta = SpoolMetadata::default();
+        collect_metadata(
+            &self.root,
+            self.opened,
+            &mut meta.live,
+            &mut meta.unparsable,
+        )?;
+        collect_metadata(
+            &self.exhausted_root(),
+            false,
+            &mut meta.exhausted,
+            &mut meta.unparsable,
+        )?;
+        meta.live.sort();
+        meta.exhausted.sort();
+        meta.unparsable.sort();
+        Ok(meta)
+    }
+
     /// Every entry currently pending, oldest first.
     ///
     /// Why: both the retry sweep and the health scan need this, and both need
     /// a *failure* to be distinguishable from an empty spool — an unreadable
     /// spool reported as "nothing pending" is the fail-quiet shape again.
-    /// What: reads the directory, skips temp files and anything that is not a
-    /// `.json` entry, decodes each, and sorts by receipt time. An entry that
-    /// fails to decode is reported through `undecodable` rather than dropped.
+    /// What: reads the live directory, skips temp files, the `exhausted/`
+    /// subdirectory, and anything that is not a `.json` entry, decodes each, and
+    /// sorts by receipt time. An entry that fails to decode is reported through
+    /// `undecodable` rather than dropped.
+    ///
+    /// This decodes every live entry, which is why exhausted ones are moved out
+    /// of it — the live set is then bounded by the arrival rate over the retry
+    /// window rather than growing without limit. A caller that only needs counts
+    /// and ages should use [`Spool::scan_metadata`], which opens nothing.
+    ///
     /// Test: `spool_list_pending_orders_oldest_first`,
-    /// `spool_list_pending_reports_an_undecodable_entry`.
+    /// `spool_list_pending_reports_an_undecodable_entry`,
+    /// `spool_list_pending_ignores_the_exhausted_subdirectory`.
     pub fn list_pending(&self) -> Result<PendingListing, SpoolError> {
         let read = match std::fs::read_dir(&self.root) {
             Ok(read) => read,
@@ -549,6 +667,86 @@ enum SpoolReadFailure {
     Io(#[from] std::io::Error),
     #[error("decode: {0}")]
     Decode(#[from] serde_json::Error),
+}
+
+/// One entry as described by its filename alone — no file was opened.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EntryMeta {
+    /// When console accepted the delivery. Sorts first so a plain sort is an
+    /// age sort.
+    pub received_at_unix_ms: u64,
+    /// The sanitised delivery id from the filename.
+    pub delivery_id: String,
+    /// Absolute path of the entry file.
+    pub path: PathBuf,
+}
+
+/// Result of one [`Spool::scan_metadata`] pass.
+#[derive(Debug, Default, Clone)]
+pub struct SpoolMetadata {
+    /// Live entries still eligible for relay, oldest first.
+    pub live: Vec<EntryMeta>,
+    /// Entries console has given up relaying, oldest first.
+    pub exhausted: Vec<EntryMeta>,
+    /// `.json` files whose name does not parse, with the reason.
+    pub unparsable: Vec<(PathBuf, String)>,
+}
+
+/// Fill `out` from `dir` using filenames only.
+///
+/// `required` mirrors [`Spool`]'s `opened` flag: when true a missing directory
+/// is an error, when false it is an empty set.
+fn collect_metadata(
+    dir: &Path,
+    required: bool,
+    out: &mut Vec<EntryMeta>,
+    unparsable: &mut Vec<(PathBuf, String)>,
+) -> Result<(), SpoolError> {
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => return Ok(()),
+        Err(source) => {
+            return Err(SpoolError::ReadDir {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    for dirent in read {
+        let dirent = dirent.map_err(|source| SpoolError::ReadDir {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = dirent.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        match path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(parse_entry_filename)
+        {
+            Some((received_at_unix_ms, delivery_id)) => out.push(EntryMeta {
+                received_at_unix_ms,
+                delivery_id,
+                path,
+            }),
+            None => unparsable.push((path, "filename does not carry a receipt timestamp".into())),
+        }
+    }
+    Ok(())
+}
+
+/// Split `<received_at_unix_ms:013>-<delivery id>.json` back into its parts.
+///
+/// The inverse of [`Spool::entry_path`]'s format. Returns `None` for any name
+/// that does not match, so a stray file is reported rather than silently
+/// treated as age zero (which would read as the oldest entry in the spool).
+fn parse_entry_filename(name: &str) -> Option<(u64, String)> {
+    let stem = name.strip_suffix(".json")?;
+    let (ts, id) = stem.split_once('-')?;
+    let received = ts.parse::<u64>().ok()?;
+    Some((received, id.to_string()))
 }
 
 /// `fsync` a directory so a rename or unlink within it is durable.

@@ -1,20 +1,33 @@
 //! Oldest-pending-age as a red health state on `/api/console/metrics/*`.
 //!
 //! Why: ADR-0034 §2 — "A pending entry older than a threshold is a **red**
-//! health state … not a `warn!` line in a log nobody reads." The trap this
-//! module is shaped to avoid is one level down from that: a threshold evaluated
-//! only inside a background poll loop is fail-quiet again, because a loop that
-//! silently stops leaves the last cached value looking healthy forever. So the
-//! scan runs **on the request**, against the directory, every time — there is
-//! no cache to go stale, and a scan that fails is itself red rather than empty.
+//! health state … not a `warn!` line in a log nobody reads." Two traps sit one
+//! level below that, and this module is shaped around both.
 //!
-//! What: [`scan_health`] reads the spool, computes pending count, oldest age,
-//! and total failed attempts, and classifies. [`to_report`] wraps the result in
-//! the workspace-standard `ConsoleMetricsReport` so the existing console
-//! dashboard renders it with no new contract.
+//! The first: a threshold evaluated only inside a background poll loop is
+//! fail-quiet again, because a loop that silently stops leaves the last cached
+//! value looking healthy forever. So the scan runs **on the request**, against
+//! the directory, every time — no cache to go stale, and a scan that fails is
+//! itself red rather than empty.
+//!
+//! The second: a signal that goes red and then never changes is the same log
+//! line wearing a status field. Exhausted entries are by construction the
+//! oldest, so computing `oldest_pending_*` across the whole spool pins those
+//! diagnostics to the first poisoned delivery permanently — day 30's genuinely
+//! new failure moves nothing an operator or alert rule reads. So exhausted
+//! entries get their own count and ids, and `oldest_pending_*` describes the
+//! oldest **live** entry, which is the one still changing.
+//!
+//! What: [`scan_health`] takes a filename-only census
+//! ([`Spool::scan_metadata`], which opens nothing) and decodes exactly one
+//! entry — the oldest live one — for its attempt count and last error.
+//! [`to_report`] wraps the result in the workspace-standard
+//! `ConsoleMetricsReport` so the existing dashboard renders it with no new
+//! contract.
 //!
 //! Test: `webhook/tests.rs` — `health_*` cases cover empty, young-pending,
-//! aged-pending, undecodable-entry, and unreadable-spool.
+//! aged-pending, exhausted-alongside-live, undecodable-entry, unreadable-spool,
+//! and a vanished spool directory.
 
 use std::time::Duration;
 
@@ -32,16 +45,21 @@ pub const DEFAULT_RED_AFTER: Duration = Duration::from_secs(600);
 
 /// Bumped when [`SpoolHealth`]'s shape changes, per the `console_metrics`
 /// contract.
-pub const METRICS_SCHEMA_VERSION: u32 = 1;
+pub const METRICS_SCHEMA_VERSION: u32 = 2;
 
 /// Service id this report is published under.
 pub const WEBHOOK_SERVICE_ID: &str = "trusty-console-webhooks";
 
+/// Most exhausted delivery ids listed individually before the payload is
+/// truncated. The count is always exact; the list is a sample.
+const MAX_LISTED_EXHAUSTED: usize = 10;
+
 /// What one on-demand scan of the spool found.
 ///
-/// Why: an operator diagnosing a stuck webhook needs the age, the count, and
-/// the failing delivery's id and last error, all in the one payload the
-/// dashboard already fetches.
+/// Why: an operator diagnosing a stuck webhook needs the age, the counts, and
+/// the failing delivery's id and last error, in the one payload the dashboard
+/// already fetches — and needs them to keep *moving* as new deliveries fail,
+/// which is why the live and exhausted sets are reported separately.
 /// What: serialised as the `metrics` object of a `ConsoleMetricsReport`.
 /// `scan_error` being `Some` is always accompanied by `status: Error`.
 /// Test: every `health_*` case in `webhook/tests.rs`.
@@ -49,20 +67,35 @@ pub const WEBHOOK_SERVICE_ID: &str = "trusty-console-webhooks";
 pub struct SpoolHealth {
     /// Coarse classification; see [`scan_health`] for the rules.
     pub status: ServiceHealth,
-    /// How many decodable entries are still pending.
+    /// Live entries still eligible for relay.
     pub pending: usize,
-    /// Age of the oldest pending entry, in seconds.
+    /// Entries console has stopped retrying. Non-zero always means red, and
+    /// always means an operator has to act — nothing clears these on its own.
+    pub exhausted: usize,
+    /// Delivery ids of exhausted entries, up to [`MAX_LISTED_EXHAUSTED`].
+    pub exhausted_delivery_ids: Vec<String>,
+    /// Age of the oldest exhausted entry, in seconds.
+    pub oldest_exhausted_age_secs: Option<u64>,
+    /// Age of the oldest **live** entry, in seconds.
+    ///
+    /// Deliberately excludes exhausted entries: they are permanently the
+    /// oldest, so including them freezes this field at the first poisoned
+    /// delivery and it stops reporting anything new.
     pub oldest_pending_age_secs: Option<u64>,
-    /// Delivery id of the oldest pending entry.
+    /// Delivery id of the oldest live entry.
     pub oldest_pending_delivery_id: Option<String>,
-    /// Why the oldest pending entry's last relay attempt failed.
+    /// Why the oldest live entry's last relay attempt failed.
     pub oldest_pending_last_error: Option<String>,
-    /// Sum of failed attempts across every pending entry.
-    pub total_failed_attempts: u64,
+    /// How many attempts the oldest live entry has already burned.
+    ///
+    /// Replaces a spool-wide attempt total, which cost one JSON decode per
+    /// entry on every metrics request. The oldest live entry's count is the
+    /// actionable number and costs exactly one decode.
+    pub oldest_pending_attempts: Option<u32>,
     /// Threshold in force for this scan.
     pub red_after_secs: u64,
-    /// Entries present on disk that could not be read or decoded, with reasons.
-    /// Never empty while `status` is `Ok`.
+    /// Entries present on disk that could not be read or whose name did not
+    /// parse, with reasons. Never empty while `status` is `Ok`.
     pub undecodable: Vec<String>,
     /// Why the scan itself failed, if it did.
     pub scan_error: Option<String>,
@@ -75,12 +108,18 @@ pub struct SpoolHealth {
 /// that itself depends on a background task still running does not do that.
 ///
 /// What: classification, in order —
-/// 1. the scan failed → `Error`, with `scan_error` set;
-/// 2. any entry on disk could not be decoded → `Error` (an unreadable pending
-///    delivery is not a healthy one);
-/// 3. the oldest pending entry is at least `red_after` old → `Error`;
-/// 4. anything is pending → `Degraded`;
-/// 5. otherwise → `Ok`.
+/// 1. the census failed → `Error`, with `scan_error` set;
+/// 2. a file on disk could not be read or named → `Error`;
+/// 3. any entry is exhausted → `Error` (nothing clears those without an
+///    operator);
+/// 4. the oldest **live** entry is at least `red_after` old → `Error`;
+/// 5. anything is live-pending → `Degraded`;
+/// 6. otherwise → `Ok`.
+///
+/// Cost: one `read_dir` per directory and at most one JSON decode — of the
+/// oldest live entry, for its attempt count and last error. If that decode
+/// fails the entry is reported through `undecodable` rather than the scan being
+/// abandoned.
 ///
 /// `now_unix_ms` is a parameter so the age rules are testable without sleeping.
 /// An entry whose timestamp is in the future yields age `0` rather than
@@ -89,52 +128,59 @@ pub struct SpoolHealth {
 /// Test: `health_reports_ok_on_an_empty_spool`,
 /// `health_reports_degraded_for_a_young_pending_entry`,
 /// `health_reports_error_once_the_oldest_entry_passes_the_threshold`,
+/// `health_diagnostics_track_the_live_entry_not_the_exhausted_one`,
 /// `health_reports_error_for_an_undecodable_entry`,
-/// `health_reports_error_when_the_spool_cannot_be_read`.
+/// `health_reports_error_when_the_spool_cannot_be_read`,
+/// `health_reports_error_when_the_spool_directory_is_gone`.
 pub fn scan_health(spool: &Spool, now_unix_ms: u64, red_after: Duration) -> SpoolHealth {
     let red_after_secs = red_after.as_secs();
+    let age_of = |at: u64| now_unix_ms.saturating_sub(at).div_euclid(1000);
 
-    let listing = match spool.list_pending() {
-        Ok(listing) => listing,
+    let census = match spool.scan_metadata() {
+        Ok(census) => census,
         Err(e) => {
             return SpoolHealth {
                 status: ServiceHealth::Error,
-                pending: 0,
-                oldest_pending_age_secs: None,
-                oldest_pending_delivery_id: None,
-                oldest_pending_last_error: None,
-                total_failed_attempts: 0,
                 red_after_secs,
-                undecodable: Vec::new(),
                 // A spool that cannot be read is NOT an empty spool. Reporting
                 // it healthy is the fail-quiet shape this module exists to
                 // remove.
                 scan_error: Some(format!("{e}")),
+                ..SpoolHealth::empty(red_after_secs)
             };
         }
     };
 
-    let oldest = listing.pending.first();
-    let oldest_age_secs = oldest.map(|p| {
-        now_unix_ms
-            .saturating_sub(p.entry.received_at_unix_ms)
-            .div_euclid(1000)
-    });
-    let total_failed_attempts: u64 = listing
-        .pending
-        .iter()
-        .map(|p| u64::from(p.entry.attempts))
-        .sum();
-    let undecodable: Vec<String> = listing
-        .undecodable
+    let mut undecodable: Vec<String> = census
+        .unparsable
         .iter()
         .map(|(path, reason)| format!("{}: {reason}", path.display()))
         .collect();
 
-    let aged_out = oldest_age_secs.is_some_and(|age| age >= red_after_secs);
-    let status = if !undecodable.is_empty() || aged_out {
+    // Exactly one decode: the oldest live entry, for the two fields its
+    // filename cannot carry.
+    let oldest_live = census.live.first();
+    let (oldest_pending_last_error, oldest_pending_attempts) = match oldest_live {
+        Some(meta) => match spool.load(&meta.path) {
+            Ok(entry) => (entry.last_error, Some(entry.attempts)),
+            Err(e) => {
+                undecodable.push(format!("{}: {e}", meta.path.display()));
+                (None, None)
+            }
+        },
+        None => (None, None),
+    };
+
+    let oldest_pending_age_secs = oldest_live.map(|m| age_of(m.received_at_unix_ms));
+    let oldest_exhausted_age_secs = census
+        .exhausted
+        .first()
+        .map(|m| age_of(m.received_at_unix_ms));
+    let aged_out = oldest_pending_age_secs.is_some_and(|age| age >= red_after_secs);
+
+    let status = if !undecodable.is_empty() || !census.exhausted.is_empty() || aged_out {
         ServiceHealth::Error
-    } else if listing.pending.is_empty() {
+    } else if census.live.is_empty() {
         ServiceHealth::Ok
     } else {
         ServiceHealth::Degraded
@@ -142,14 +188,56 @@ pub fn scan_health(spool: &Spool, now_unix_ms: u64, red_after: Duration) -> Spoo
 
     SpoolHealth {
         status,
-        pending: listing.pending.len(),
-        oldest_pending_age_secs: oldest_age_secs,
-        oldest_pending_delivery_id: oldest.map(|p| p.entry.delivery_id.clone()),
-        oldest_pending_last_error: oldest.and_then(|p| p.entry.last_error.clone()),
-        total_failed_attempts,
+        pending: census.live.len(),
+        exhausted: census.exhausted.len(),
+        exhausted_delivery_ids: census
+            .exhausted
+            .iter()
+            .take(MAX_LISTED_EXHAUSTED)
+            .map(|m| m.delivery_id.clone())
+            .collect(),
+        oldest_exhausted_age_secs,
+        oldest_pending_age_secs,
+        oldest_pending_delivery_id: oldest_live.map(|m| m.delivery_id.clone()),
+        oldest_pending_last_error,
+        oldest_pending_attempts,
         red_after_secs,
         undecodable,
         scan_error: None,
+    }
+}
+
+/// A red report for a scan that could not run at all.
+///
+/// Why: the caller that needs this is `WebhookIngress::health`, when the
+/// blocking task carrying the scan fails to join. "The scan did not happen" is
+/// not "the spool is empty", and only one of those is safe to render green.
+/// Test: covered by the same rule as `health_reports_error_when_the_spool_cannot_be_read`.
+pub fn scan_failed(red_after: Duration, reason: String) -> SpoolHealth {
+    SpoolHealth {
+        status: ServiceHealth::Error,
+        scan_error: Some(reason),
+        ..SpoolHealth::empty(red_after.as_secs())
+    }
+}
+
+impl SpoolHealth {
+    /// A healthy, empty report — the base every classification starts from.
+    fn empty(red_after_secs: u64) -> Self {
+        Self {
+            status: ServiceHealth::Ok,
+            pending: 0,
+            exhausted: 0,
+            exhausted_delivery_ids: Vec::new(),
+            oldest_exhausted_age_secs: None,
+            oldest_pending_age_secs: None,
+            oldest_pending_delivery_id: None,
+            oldest_pending_last_error: None,
+            oldest_pending_attempts: None,
+            red_after_secs,
+            undecodable: Vec::new(),
+            scan_error: None,
+        }
     }
 }
 

@@ -246,11 +246,49 @@ impl WebhookIngress {
         &self.spool
     }
 
+    /// Run one blocking spool operation off the async runtime.
+    ///
+    /// Why: every spool call does real filesystem work — `persist_new` alone
+    /// fsyncs a file and a directory, and a census `read_dir`s two of them.
+    /// Doing that inline stalls a runtime worker thread, and the ingest path
+    /// runs it twice per delivery while the metrics route runs it per request.
+    /// What: `spawn_blocking` over a cloned [`Spool`] (a `PathBuf` and a flag,
+    /// so cloning is free). A join failure — the blocking pool shutting down
+    /// mid-operation — is surfaced as an error rather than silently swallowed.
+    /// Test: exercised by every async case; the correctness of each operation
+    /// is covered by its own `spool_*` case.
+    async fn blocking<T, F>(&self, op: F) -> Result<T, SpoolError>
+    where
+        F: FnOnce(Spool) -> Result<T, SpoolError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let spool = (*self.spool).clone();
+        match tokio::task::spawn_blocking(move || op(spool)).await {
+            Ok(result) => result,
+            Err(join) => Err(SpoolError::PrepareDir {
+                path: self.spool.root().to_path_buf(),
+                source: std::io::Error::other(format!("spool task did not complete: {join}")),
+            }),
+        }
+    }
+
     /// Scan the spool and classify its health, now.
     ///
-    /// Deliberately not cached — see [`health`]'s module docs.
-    pub fn health(&self) -> SpoolHealth {
-        health::scan_health(&self.spool, now_unix_ms(), self.red_after)
+    /// Deliberately not cached — see [`health`]'s module docs. The scan is
+    /// filesystem work, so it runs off the async runtime.
+    pub async fn health(&self) -> SpoolHealth {
+        let red_after = self.red_after;
+        let now = now_unix_ms();
+        let spool = (*self.spool).clone();
+        match tokio::task::spawn_blocking(move || health::scan_health(&spool, now, red_after)).await
+        {
+            Ok(health) => health,
+            // A scan that could not run is not a healthy spool.
+            Err(join) => health::scan_failed(
+                red_after,
+                format!("health scan task did not complete: {join}"),
+            ),
+        }
     }
 
     /// Verify, spool, relay — in that order.
@@ -320,7 +358,11 @@ impl WebhookIngress {
         // logged-and-accepted delivery. `persist_new` refuses to overwrite: the
         // entry already at that path may be one console has acknowledged, and
         // GitHub will never re-send it.
-        let path = match self.spool.persist_new(&entry) {
+        let to_write = entry.clone();
+        let path = match self
+            .blocking(move |spool| spool.persist_new(&to_write))
+            .await
+        {
             Ok(path) => path,
             Err(e) => {
                 let already = matches!(e, SpoolError::AlreadyExists { .. });
@@ -344,7 +386,7 @@ impl WebhookIngress {
         let outcome = match self.claims.claim(&path) {
             Some(_claim) => {
                 let outcome = relay.deliver(&entry).await;
-                let bookkeeping_error = self.settle(&path, &mut entry, &outcome);
+                let bookkeeping_error = self.settle(&path, &mut entry, &outcome).await;
                 return IngestOutcome::Accepted {
                     delivery_id,
                     relay: outcome,
@@ -378,14 +420,18 @@ impl WebhookIngress {
     /// Both are the safe direction.
     /// Test: `ingest_accepts_and_deletes_on_an_explicit_ack`,
     /// `relay_failure_leaves_a_pending_entry_with_an_incremented_attempt_count`.
-    fn settle(
+    async fn settle(
         &self,
         path: &std::path::Path,
         entry: &mut SpoolEntry,
         outcome: &RelayOutcome,
     ) -> Option<String> {
         if outcome.is_acked() {
-            return match self.spool.remove_acked(path) {
+            let acked_path = path.to_path_buf();
+            return match self
+                .blocking(move |spool| spool.remove_acked(&acked_path))
+                .await
+            {
                 Ok(()) => None,
                 Err(e) => {
                     tracing::error!(
@@ -399,11 +445,19 @@ impl WebhookIngress {
             };
         }
 
-        match self
-            .spool
-            .record_attempt(entry, outcome.reason().to_string(), now_unix_ms())
-        {
-            Ok(_) => {
+        let mut updated = entry.clone();
+        let reason = outcome.reason().to_string();
+        let now = now_unix_ms();
+        let written = self
+            .blocking(move |spool| {
+                spool
+                    .record_attempt(&mut updated, reason, now)
+                    .map(|_| updated)
+            })
+            .await;
+        match written {
+            Ok(after) => {
+                *entry = after;
                 tracing::warn!(
                     delivery_id = %entry.delivery_id,
                     attempts = entry.attempts,
@@ -452,7 +506,7 @@ impl WebhookIngress {
     /// `sweep_honours_backoff_between_ticks`,
     /// `sweep_stops_relaying_an_exhausted_entry`.
     pub async fn retry_pending_once(&self) -> SweepReport {
-        let listing = match self.spool.list_pending() {
+        let listing = match self.blocking(|spool| spool.list_pending()).await {
             Ok(listing) => listing,
             Err(e) => {
                 tracing::error!(error = %e, "webhook retry sweep could not read the spool");
@@ -482,7 +536,25 @@ impl WebhookIngress {
                 continue;
             };
             if self.backoff.is_exhausted(&entry) {
+                // Move it out of the live set. Leaving it here would make every
+                // later sweep and every metrics request read and decode it
+                // forever, and would pin the oldest-pending diagnostics to it so
+                // a genuinely new failure changed nothing an operator reads.
+                // It is kept, not deleted — it is still an unacknowledged
+                // webhook, and it keeps the health signal red.
                 report.exhausted += 1;
+                let quarantine_path = pending.path.clone();
+                if let Err(e) = self
+                    .blocking(move |spool| spool.quarantine(&quarantine_path))
+                    .await
+                {
+                    tracing::error!(
+                        delivery_id = %entry.delivery_id,
+                        error = %e,
+                        "could not move an exhausted entry aside; it stays in the live set"
+                    );
+                    report.bookkeeping_failures += 1;
+                }
                 continue;
             }
             if !self.backoff.is_due(&entry, now) {
@@ -500,7 +572,11 @@ impl WebhookIngress {
             } else {
                 report.still_pending += 1;
             }
-            if self.settle(&pending.path, &mut entry, &outcome).is_some() {
+            if self
+                .settle(&pending.path, &mut entry, &outcome)
+                .await
+                .is_some()
+            {
                 report.bookkeeping_failures += 1;
             }
         }
@@ -606,7 +682,7 @@ pub async fn webhook_handler(
 pub async fn metrics_webhooks_handler(
     State(ingress): State<WebhookIngress>,
 ) -> axum::response::Response {
-    axum::Json(health::to_report(&ingress.health())).into_response()
+    axum::Json(health::to_report(&ingress.health().await)).into_response()
 }
 
 /// Milliseconds since the Unix epoch, saturating at 0 before it.
