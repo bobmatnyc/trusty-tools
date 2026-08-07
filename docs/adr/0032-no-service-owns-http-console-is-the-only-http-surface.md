@@ -1,6 +1,14 @@
 # 0032. No trusty-\* service owns an HTTP daemon; UDS is the inter-service transport; `trusty-console` is the only HTTP surface
 
-- **Status:** Accepted
+- **Status:** Accepted — **Amended by
+  [0034](0034-webhook-ingress-console-relays-over-uds-to-a-supervised-on-demand-process.md)**
+  (2026-08-07 owner ruling "Console relays over UDS." closes the Open
+  Question below: console terminates the webhook's HTTP request, verifies
+  HMAC once, spools the payload durably before acknowledging, and relays
+  over UDS to a console-supervised on-demand process). This ADR's Decision
+  remains in force in full; its Context/Decision/Consequences are left as
+  originally accepted per the ADR immutability rule (DOC-46 §4), and
+  ADR-0034 is the record of the amendment.
 - **Date:** 2026-08-07
 - **Accepted:** 2026-08-07 (owner ruling, verbatim below)
 - **Scope:** Workspace-wide (every trusty-\* daemon that currently binds HTTP:
