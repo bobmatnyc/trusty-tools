@@ -1,6 +1,6 @@
 # 0031. Transport by purpose: inter-crate same-host traffic over UDS; all external traffic through one shared HTTP server
 
-- **Status:** Proposed
+- **Status:** Proposed — access-control premise corrected by #5099 (see the correction note in Decision Drivers)
 - **Date:** 2026-08-06
 - **Scope:** Workspace-wide (the tool path of every trusty-\* daemon:
   trusty-search, trusty-memory, trusty-analyze, trusty-review,
@@ -269,6 +269,19 @@ Not performance — the measurements above rule that out. Three other grounds:
    **strengthens** it — the per-daemon bind posture and origin-guard reasoning
    collapse into a file permission, enforced by the kernel rather than by each
    daemon remembering to wrap its router.
+
+> 🔴 **Correction (#5099, 2026-08-07).** The `0600` socket this section rests on
+> did not exist when this ADR was written. No production code in the workspace
+> called `set_permissions` on any socket — every hit was a test fixture — so
+> sockets were created at the process umask, commonly `0755`, and the embedder
+> and BM25 conventions placed them in `$TMPDIR` falling back to a
+> world-writable `/tmp`. The access-control argument above was therefore
+> aspirational, not a description of the system. It became true in
+> [#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099), which added
+> `trusty_common::uds` (`0700` directory, `0600` socket, peer-uid check on
+> accept, per-uid scratch directory) and routed all four bind sites through it.
+> The Decision text above is left unedited per DOC-46 §4; this note records that
+> its premise was a requirement rather than an existing property.
 2. **Port lifecycle.** Sockets have no port-allocation problem: no
    auto-selection across a range (trusty-memory scans 7070–7079 today), no
    collisions, no `http_addr` file to poll for a dynamic port, no stale-port

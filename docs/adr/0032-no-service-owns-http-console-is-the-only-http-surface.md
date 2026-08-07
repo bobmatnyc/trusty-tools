@@ -9,6 +9,9 @@
   remains in force in full; its Context/Decision/Consequences are left as
   originally accepted per the ADR immutability rule (DOC-46 §4), and
   ADR-0034 is the record of the amendment.
+  Its `0600` access-control premise is separately corrected by
+  [#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099) — see the
+  correction note in Consequences.
 - **Date:** 2026-08-07
 - **Accepted:** 2026-08-07 (owner ruling, verbatim below)
 - **Scope:** Workspace-wide (every trusty-\* daemon that currently binds HTTP:
@@ -133,6 +136,15 @@ Concretely:
   `docs/reference/threat-model.md` exists to audit — a `0600`-permissioned
   socket in a user-owned directory replaces a loopback TCP port reachable by
   any local process, which is a stronger guarantee, not a weaker one.
+
+> 🔴 **Correction (#5099, 2026-08-07).** The `0600`-permissioned socket cited
+> here was not implemented anywhere in the workspace when this ADR was written;
+> see ADR-0031's matching correction note. It became true in
+> [#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099). Note also that
+> the "UDS listener/dial module in `trusty-common`, mounted by every daemon"
+> assumed above still does not exist as a *transport*; #5099 supplied only its
+> security layer, and [#5089](https://github.com/bobmatnyc/trusty-tools/issues/5089)
+> step 1 builds the framing and dialing on top.
 - Unblocks [#5028](https://github.com/bobmatnyc/trusty-tools/issues/5028):
   trusty-analyze and trusty-review can now be built as on-demand processes
   rather than always-listening daemons, because their inter-service surface

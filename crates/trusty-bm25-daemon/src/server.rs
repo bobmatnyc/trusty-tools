@@ -33,11 +33,14 @@ use crate::protocol::{
 /// Why: extracted so the binary's startup sequence (cleanup → bind) is
 /// readable and so tests can exercise the same bind path against a tempfile
 /// socket.
-/// What: returns the `UnixListener` ready to accept connections. The caller
-/// must have already removed any stale socket file at `path`.
-/// Test: covered by the integration test.
+/// What: returns the `UnixListener` ready to accept connections, bound through
+/// [`trusty_common::uds::bind_hardened`] so the containing directory is `0700`
+/// and the socket `0600` before the first accept (#5099 — this bind used to be
+/// bare, leaving the socket at the process umask). The caller must have already
+/// removed any stale socket file at `path`.
+/// Test: `bind_listener_produces_a_0600_socket`, plus the integration test.
 pub fn bind_listener(path: &Path) -> Result<UnixListener> {
-    UnixListener::bind(path)
+    trusty_common::uds::bind_hardened(path)
         .with_context(|| format!("bind unix domain socket at {}", path.display()))
 }
 
@@ -46,13 +49,19 @@ pub fn bind_listener(path: &Path) -> Result<UnixListener> {
 /// Why: a single-threaded accept loop with detached per-connection tasks
 /// scales well for the daemon's expected load (a handful of in-host
 /// clients, short-lived requests) without the complexity of a thread pool.
-/// What: loops `listener.accept().await`; on each accept, clones the
-/// `BatchQueue` handle and spawns [`handle_connection`].
+/// What: loops `listener.accept().await`; on each accept, verifies the peer's
+/// uid matches this process's own (#5099), then clones the `BatchQueue` handle
+/// and spawns [`handle_connection`]. A foreign-uid peer is dropped without being
+/// served.
 /// Test: covered by the integration test.
 pub async fn run_accept_loop(listener: UnixListener, queue: Arc<BatchQueue>) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                if let Err(e) = trusty_common::uds::ensure_peer_is_self(&stream) {
+                    tracing::warn!("rejected UDS connection: {e}");
+                    continue;
+                }
                 let queue = Arc::clone(&queue);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, queue).await {
@@ -337,6 +346,25 @@ mod tests {
         // Keep the TempDir alive — `rebuild` and write batches flush the
         // on-disk snapshot, so the data dir must outlive the queue.
         (BatchQueue::new(index, BatchConfig::default()), dir)
+    }
+
+    /// #5099 regression: the daemon's own bind path must produce a 0600 socket
+    /// in a 0700 directory. Against the pre-fix commit this bind was bare and
+    /// the socket came back at the process umask (0755 under 022).
+    #[tokio::test]
+    async fn bind_listener_produces_a_0600_socket() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sockets");
+        let sock = dir.join("bm25.sock");
+
+        let _listener = bind_listener(&sock).expect("bind");
+
+        let mode =
+            |p: &std::path::Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode(&sock), 0o600, "socket must be 0600");
+        assert_eq!(mode(&dir), 0o700, "socket dir must be 0700");
     }
 
     #[tokio::test]

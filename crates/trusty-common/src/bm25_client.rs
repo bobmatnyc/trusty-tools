@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 /// JSON-RPC protocol version string. Must match the daemon's expectation.
 const JSONRPC_VERSION: &str = "2.0";
@@ -94,17 +93,18 @@ pub fn is_method_not_found(err: &anyhow::Error) -> bool {
 /// Why: callers (the client, the daemon's startup, and operators reading
 /// `lsof`) must all agree on where the per-palace socket lives. Keying the
 /// filename by palace name keeps multiple palaces isolated from each other.
-/// What: `$TMPDIR/trusty-bm25-<palace>.sock`. Falls back to `/tmp` when
-/// `TMPDIR` is unset, empty, or whitespace. The palace name is taken
-/// verbatim — callers are expected to have sanitised it already (the palace
-/// id is already kebab-case / underscore-safe).
+/// What: `<$TMPDIR or /tmp>/trusty-<uid>/trusty-bm25-<palace>.sock`. The palace
+/// name is taken verbatim — callers are expected to have sanitised it already
+/// (the palace id is already kebab-case / underscore-safe).
+///
+/// #5099: the socket used to sit directly in `$TMPDIR`, falling back to `/tmp`.
+/// On a Linux host with `TMPDIR` unset that is a world-writable directory that
+/// cannot be narrowed, so the uid-keyed subdirectory from
+/// [`crate::uds::scratch_socket_dir`] is interposed and held at `0700`.
+///
 /// Test: `socket_path_uses_tmpdir_and_palace_name`.
 pub fn socket_path_for_palace(palace: &str) -> PathBuf {
-    let dir = match std::env::var("TMPDIR") {
-        Ok(p) if !p.trim().is_empty() => PathBuf::from(p),
-        _ => PathBuf::from("/tmp"),
-    };
-    dir.join(format!("trusty-bm25-{palace}.sock"))
+    crate::uds::scratch_socket_dir().join(format!("trusty-bm25-{palace}.sock"))
 }
 
 /// One BM25 search hit returned by the daemon.
@@ -353,7 +353,11 @@ impl Bm25Client {
         method: &'static str,
         params: &P,
     ) -> Result<R> {
-        let stream = UnixStream::connect(&self.socket_path)
+        // #5099: verify the directory and socket before trusting them. A daemon
+        // predating the hardening still answers at this path, and the
+        // supervisor adopts an existing socket rather than spawning, so the
+        // daemon's own checks may never run.
+        let stream = crate::uds::connect_hardened(&self.socket_path)
             .await
             .with_context(|| {
                 format!(
@@ -521,7 +525,13 @@ mod tests {
             fname.ends_with(".sock"),
             "filename must end with .sock: {fname}"
         );
-        assert!(p.parent().is_some());
+        // #5099: the parent must be the uid-keyed directory the daemon holds
+        // at 0700, not a bare `$TMPDIR` (or worse, a world-writable `/tmp`).
+        assert_eq!(
+            p.parent(),
+            Some(crate::uds::scratch_socket_dir().as_path()),
+            "socket must live in the per-uid scratch socket directory"
+        );
     }
 
     #[test]

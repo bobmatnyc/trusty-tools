@@ -727,6 +727,25 @@ pub mod daemon_addr;
 /// Test: covered via daemon_addr integration tests.
 pub mod health_probe;
 
+/// Unix-domain-socket permission enforcement (issue #5099).
+///
+/// Why: ADR-0031 and ADR-0032 both argue for UDS over loopback TCP on the
+/// strength of a `0600` socket, and no production code created one — every
+/// `set_permissions` hit in the workspace was a test fixture. Four bind sites
+/// each called `UnixListener::bind` bare. This is the single entry point they
+/// now share, so the permission contract cannot drift between them.
+/// What: Exposes [`uds::bind_hardened`] (`0700` directory, `0600` socket),
+/// [`uds::prepare_socket_dir`], [`uds::scratch_socket_dir`] (the per-uid
+/// replacement for the `$TMPDIR`-with-`/tmp`-fallback convention), and
+/// [`uds::ensure_peer_is_self`] (`SO_PEERCRED` / `getpeereid`).
+/// Test: `cargo test -p trusty-common --features uds uds::` — the `--features`
+/// flag is load-bearing. `uds` is not a default feature, so the bare
+/// `-p trusty-common` form compiles the module out and reports 0 tests run
+/// while exiting 0. CI's `cargo test --workspace` enables it via feature
+/// unification from `trusty-embedderd` and `trusty-bm25-daemon`.
+#[cfg(all(unix, feature = "uds"))]
+pub mod uds;
+
 /// Global tracing subscriber initialisation helpers.
 ///
 /// Why: Every trusty-* binary needs the same verbosity ladder, `RUST_LOG`

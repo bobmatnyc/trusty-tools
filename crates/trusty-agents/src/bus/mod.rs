@@ -71,15 +71,14 @@ impl MessageBus {
     /// and assert the envelope arrives.
     pub async fn start(project_id: &str) -> Result<Arc<Self>> {
         let socket_path = Self::socket_path_for(project_id)?;
-        if let Some(parent) = socket_path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
         // Remove stale socket from a previous run.
         if socket_path.exists() {
             fs::remove_file(&socket_path).await.ok();
         }
 
-        let listener = UnixListener::bind(&socket_path)?;
+        // #5099: was `create_dir_all` + a bare bind, so both the sockets
+        // directory and the socket landed at the process umask.
+        let listener = trusty_common::uds::bind_hardened(&socket_path)?;
         let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
 
         let bus = Arc::new(Self {
@@ -255,6 +254,11 @@ async fn accept_loop(listener: UnixListener, tx: broadcast::Sender<BusEnvelope>)
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                // #5099: a foreign-uid peer is dropped without being served.
+                if let Err(e) = trusty_common::uds::ensure_peer_is_self(&stream) {
+                    tracing::warn!(error = %e, "bus accept_loop: rejected connection");
+                    continue;
+                }
                 let tx_clone = tx.clone();
                 tokio::spawn(handle_connection(stream, tx_clone));
             }
