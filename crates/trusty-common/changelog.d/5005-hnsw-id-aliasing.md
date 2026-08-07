@@ -5,3 +5,5 @@ Fixed
   - `upsert` refuses an id that already has a `VECTORS` row: it allocates past it, or fails with `IdAllocationFailed` — it never overwrites
   - `PalaceHandle::embed_health` and `palace_reembed` now carry an `AliasAudit`: key presence alone reported a false all-clear for this class, and `is_healthy()` is now false when any drawer is aliased
   - an alias audit that could not run is `AliasAudit::Unavailable`, not zeros; `is_healthy()` is false for it, so a failed scan can never be read as a clean palace
+  - new `PalaceHandle::repair_aliases`: the operator surface for the repair, which had no caller at all. Dry-run by default; a real run frees the whole collision group and then re-audits, and reports `Repaired` only when that verification ran and came back clean. `Partial` and `Unavailable` are distinct outcomes and neither is a success
+  - `UsearchStore::unalias` now returns `UnaliasOutcome`, carrying the keys it freed but could not parse back into a drawer id instead of dropping them — those drawers would otherwise be missing from the operator's re-embed worklist inside a reported success

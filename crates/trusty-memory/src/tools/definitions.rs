@@ -308,6 +308,18 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                 }
             },
             {
+                "name": "palace_unalias",
+                "description": "#5005: free drawers whose vector was destroyed by an id collision (`palace_reembed` reports these as `aliased`), so a re-embed can repair them. Defaults to a dry run. Branch on `outcome` (clean/planned/repaired/partial/unavailable), never on the id counts — `partial` and `unavailable` are not successes. Run `palace_reembed` afterwards to make the freed drawers findable again.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":  {"type": "string"},
+                        "dry_run": {"type": "boolean", "description": "Name the drawer ids that would be freed; delete nothing. Default true."}
+                    },
+                    "required": palace_compact_required,
+                }
+            },
+            {
                 "name": "add_alias",
                 "description": "Add a short→full alias (e.g. tga → trusty-git-analytics) to the prompt-facts surface. Asserts the alias as a hot KG triple and refreshes the session-init prompt cache.",
                 "inputSchema": {

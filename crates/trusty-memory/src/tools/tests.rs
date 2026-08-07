@@ -102,6 +102,7 @@ fn tool_definitions_drops_palace_required_when_default_set() {
         ("palace_info", true),
         ("palace_compact", true),
         ("palace_reembed", true),
+        ("palace_unalias", true),
         ("kg_assert", true),
         ("kg_query", true),
         // Issue #664: add_alias and discover_aliases now include `palace`
@@ -139,7 +140,8 @@ fn tool_definitions_lists_all_tools() {
     // #1722) + 3 room tools (room_list, room_create, room_rename, ADR-0027 T6)
     // + 3 wing tools (wing_list, wing_create, wing_rename, ADR-0027 T9 / #4809)
     // + 1 repair tool (palace_reembed, #4906)
-    assert_eq!(tools.len(), 44);
+    // + 1 alias-repair tool (palace_unalias, #5005)
+    assert_eq!(tools.len(), 45);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -158,6 +160,7 @@ fn tool_definitions_lists_all_tools() {
         "palace_info",
         "palace_compact",
         "palace_reembed",
+        "palace_unalias",
         "kg_assert",
         "kg_query",
         "memory_recall_all",
@@ -236,6 +239,46 @@ async fn dispatch_palace_reembed_dry_run_reports_counts() {
     assert_eq!(out["repaired"], 0);
     assert!(out["drawer_count"].is_number());
     assert!(out["vector_count"].is_number());
+}
+
+/// Why (#5005): `unalias` had zero call sites — the repair existed as code an
+/// operator could not run. The claim this makes is that it is now reachable
+/// through `dispatch_tool`, defaults to a dry run like `palace_reembed`, and
+/// reports an id SET rather than a count (the count-based all-clear is the
+/// defect the ticket is about). It also runs inside the daemon for the same
+/// reason `palace_reembed` does: the daemon holds the writer lock.
+/// What: creates a palace and calls `palace_unalias` with no arguments,
+/// asserting the default is a dry run, the outcome word is `clean` on a palace
+/// with nothing aliased, and the payload carries `freed_ids` as an array.
+/// Test: itself. Removing the `palace_unalias` dispatch arm makes this an
+/// unknown-tool error; defaulting `dry_run` to false fails the first assertion.
+#[tokio::test]
+async fn dispatch_palace_unalias_dry_run_names_ids_and_writes_nothing() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "unalias-test"}))
+        .await
+        .expect("palace_create");
+    let out = dispatch_tool(&state, "palace_unalias", json!({"palace": "unalias-test"}))
+        .await
+        .expect("palace_unalias must be dispatchable");
+    assert_eq!(out["dry_run"], true, "must default to a dry run: {out}");
+    assert_eq!(
+        out["outcome"], "clean",
+        "a palace with no collision is clean, not repaired: {out}"
+    );
+    assert_eq!(out["success"], true);
+    assert!(
+        out["freed_ids"]
+            .as_array()
+            .expect("freed_ids array")
+            .is_empty(),
+        "an id SET, empty here — never a bare count: {out}"
+    );
+    assert_eq!(
+        out["reembed_required"], false,
+        "nothing was freed, so nothing is owed"
+    );
+    assert!(out["error"].is_null(), "a clean run has no error: {out}");
 }
 
 /// Why (issue #1714): `force=true` bypasses slug validation with no

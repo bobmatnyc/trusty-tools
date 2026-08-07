@@ -16,7 +16,9 @@
 use super::deferred_embed::{
     EmbedLoss, RetryPolicy, embed_and_store, embed_store_or_record, record_loss,
 };
-use super::embed_repair::{AliasAudit, EmbedHealth, VectorBackfillOptions};
+use super::embed_repair::{
+    AliasAudit, AliasRepairOptions, AliasRepairOutcome, EmbedHealth, VectorBackfillOptions,
+};
 use super::embedder::seed_shared_embedder_with_mock;
 use super::handle::PalaceHandle;
 use crate::embedder::MockEmbedder;
@@ -846,9 +848,13 @@ fn unalias_marks_the_whole_group_for_reembed() {
 
     let freed = handle.vector_store.unalias().expect("unalias");
     assert_eq!(
-        freed.len(),
+        freed.freed.len(),
         3,
         "the whole group is freed, not just the losers"
+    );
+    assert!(
+        freed.unparsed_keys.is_empty(),
+        "every key in this fixture is a real uuid"
     );
 
     let after = handle.embed_health();
@@ -936,4 +942,388 @@ fn alias_audit_failure_is_never_reported_as_clean() {
         Some(&[][..]),
         "a measured-clean audit exposes an EMPTY list — what a zero legitimately means"
     );
+}
+
+// ── #5005 repair surface: `PalaceHandle::repair_aliases` ─────────────────────
+
+/// Seed a three-drawer collision with DISTINCT content and return the drawer
+/// ids, sorted.
+///
+/// Why: `seed_aliased_vector_file` above uses one content string for all three,
+/// which is enough to test the audit arithmetic but cannot show that a repaired
+/// drawer becomes retrievable BY ITS OWN CONTENT — with identical text every
+/// drawer answers every query. The recall proof needs them distinguishable.
+/// What: builds three drawers with unrelated content, writes the aliased redb
+/// file, registers them on the handle, and returns `(handle, ids)`.
+/// Test: used by `repair_aliases_*` and
+/// `repair_aliases_then_reembed_makes_a_lost_drawer_retrievable`.
+fn seed_distinct_alias_group(dir: &std::path::Path) -> (PalaceHandle, Vec<Uuid>, Vec<String>) {
+    let room = Uuid::new_v4();
+    let contents = [
+        "Rust ownership and borrowing rules",
+        "Postgres autovacuum and index bloat",
+        "Kubernetes pod eviction under memory pressure",
+    ];
+    let drawers: Vec<Drawer> = contents.iter().map(|c| Drawer::new(room, *c)).collect();
+    let mut ids: Vec<Uuid> = drawers.iter().map(|d| d.id).collect();
+    ids.sort();
+    seed_aliased_vector_file(dir, 4242, &ids);
+
+    let handle = make_handle(dir);
+    // Keep content aligned with the id it belongs to, so a recall assertion can
+    // ask "does THIS drawer answer ITS OWN query".
+    let mut by_id: Vec<(Uuid, String)> =
+        drawers.iter().map(|d| (d.id, d.content.clone())).collect();
+    by_id.sort_by_key(|(id, _)| *id);
+    for d in drawers {
+        handle.add_drawer(d);
+    }
+    let ordered_content = by_id.into_iter().map(|(_, c)| c).collect();
+    (handle, ids, ordered_content)
+}
+
+/// Why (#5005): the repair deletes `VECTOR_KEYS` rows. An operator has to be
+/// able to see exactly which drawers that will touch before it happens — the
+/// same reason `palace_reembed` defaults to a dry run, with more at stake.
+/// A dry run that silently repaired, or that reported a count instead of the
+/// ids, would leave the operator unable to check the tool's work.
+/// What: runs `repair_aliases` with the DEFAULT options, asserts the outcome is
+/// `Planned`, that it names all three drawer ids, and that the palace is
+/// byte-for-byte unrepaired afterwards (still 3 keys on 1 id, still 0 missing).
+/// Test: itself. Making `Default` return `dry_run: false`, or having the
+/// dry-run branch fall through to `unalias`, flips the palace to 3-missing and
+/// fails the unchanged-state assertions.
+#[test]
+fn repair_aliases_dry_run_names_the_group_and_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (handle, ids, _) = seed_distinct_alias_group(dir.path());
+
+    let report = handle
+        .repair_aliases(AliasRepairOptions::default())
+        .expect("dry run must not error");
+
+    assert_eq!(report.outcome.as_str(), "planned");
+    assert!(
+        report.dry_run,
+        "the DEFAULT must be a dry run, not merely available as one"
+    );
+    assert!(
+        !report.outcome.is_success(),
+        "a dry run repaired nothing, so it is not a success"
+    );
+    assert_eq!(
+        report.freed_ids, ids,
+        "the plan must name every id it would free, not count them"
+    );
+    assert!(
+        report.after.is_none(),
+        "a dry run wrote nothing, so there is nothing to verify"
+    );
+    assert!(
+        !report.reembed_required(),
+        "nothing was freed, so nothing needs a re-embed"
+    );
+
+    // Nothing changed: the collision is still there, untouched.
+    let health = handle.embed_health();
+    assert_eq!(
+        health.alias_audit.counts(),
+        Some((3, 1)),
+        "a dry run must leave all three keys on the one id"
+    );
+    assert!(
+        health.missing_vector_ids.is_empty(),
+        "a dry run must not turn the aliased drawers into missing ones"
+    );
+}
+
+/// Why (#5005): this is the repair the PR was missing. Stopping new aliasing
+/// leaves the already-destroyed drawers destroyed, and `unalias` had zero call
+/// sites — an operator could see the damage and had no way to act on it.
+/// What: frees a real three-way collision through the operator surface and
+/// asserts the four things that make the result trustworthy: the outcome is
+/// `Repaired`, the freed set is the exact id set (not a count), the palace
+/// verifies clean AFTER the write, and the freed drawers are flagged as needing
+/// a re-embed. Then runs it a second time to prove idempotence.
+/// Test: itself. Making `repair_aliases` skip the `unalias` call leaves the
+/// audit at (3, 1) and the outcome at `planned`; skipping the post-repair audit
+/// leaves `after` at `None`.
+#[test]
+fn repair_aliases_frees_the_group_and_verifies_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (handle, ids, _) = seed_distinct_alias_group(dir.path());
+
+    let report = handle
+        .repair_aliases(AliasRepairOptions { dry_run: false })
+        .expect("repair must run");
+
+    assert_eq!(report.outcome.as_str(), "repaired");
+    assert!(report.outcome.is_success());
+    assert_eq!(
+        report.freed_ids, ids,
+        "every member of the group is freed and named"
+    );
+    assert_eq!(
+        report.before.aliased_drawer_ids().map(<[Uuid]>::len),
+        Some(3),
+        "the before-audit is preserved so the operator can see what was found"
+    );
+    let after = report
+        .after
+        .as_ref()
+        .expect("a real repair must be verified, not assumed");
+    assert!(
+        after.is_clean(),
+        "`repaired` is only reachable through a clean verification audit"
+    );
+    assert!(
+        report.reembed_required(),
+        "the freed drawers have no vector until a backfill runs"
+    );
+
+    // The palace state agrees with the report.
+    let health = handle.embed_health();
+    assert!(
+        health.alias_audit.is_clean(),
+        "no group survives the repair"
+    );
+    let mut missing = health.missing_vector_ids.clone();
+    missing.sort();
+    assert_eq!(
+        missing, ids,
+        "freed drawers read as ordinary missing, which the backfill repairs"
+    );
+
+    // Idempotent: a second run finds no group, frees nothing, writes nothing.
+    let again = handle
+        .repair_aliases(AliasRepairOptions { dry_run: false })
+        .expect("second run must not error");
+    assert_eq!(again.outcome.as_str(), "clean");
+    assert!(
+        again.freed_ids.is_empty(),
+        "a second run must not double-repair"
+    );
+    assert!(
+        !again.reembed_required(),
+        "a no-op run owes the operator no follow-up"
+    );
+    let mut still_missing = handle.embed_health().missing_vector_ids;
+    still_missing.sort();
+    assert_eq!(
+        still_missing, ids,
+        "the second run must not have freed or resurrected anything"
+    );
+}
+
+/// Why (#5005, and the whole reason this ticket exists): the defect was a
+/// success-shaped report over real loss. A repair that wrote something and then
+/// could not confirm the palace is clean must NOT report success — otherwise it
+/// reproduces the original bug in the tool built to fix it.
+/// What: frees a group whose keys are NOT all valid uuids. The redb write
+/// succeeds and the post-audit comes back clean, so every count-based check
+/// would read "done" — but one freed key has no drawer id, so the operator's
+/// re-embed worklist is incomplete. Asserts the outcome is `partial`, is not a
+/// success, and names the key it could not resolve.
+/// Test: itself. Dropping `unparsed_keys` from the `Repaired` guard — i.e.
+/// `still_aliased.is_empty() && not_freed.is_empty()` alone — makes the outcome
+/// `repaired` and fails every assertion here.
+#[test]
+fn repair_aliases_never_reports_success_over_a_partial_repair() {
+    use crate::memory_core::store::kg_store::{VECTOR_KEYS, VECTORS};
+    use redb::Database;
+
+    let dir = tempfile::tempdir().unwrap();
+    let room = Uuid::new_v4();
+    let drawers: Vec<Drawer> = (0..2).map(|_| Drawer::new(room, "aliased")).collect();
+    let mut ids: Vec<Uuid> = drawers.iter().map(|d| d.id).collect();
+    ids.sort();
+
+    // A key that is not a uuid, sharing the id with two real drawers. Written
+    // at the redb level because no public API can produce it.
+    {
+        let db = Database::create(dir.path().join("idx.usearch.redb")).expect("create");
+        let encoded = postcard::to_allocvec(&vec![0.05_f32; 384]).expect("encode");
+        let wtx = db.begin_write().expect("begin");
+        {
+            let mut vectors = wtx.open_table(VECTORS).expect("vectors");
+            let mut keys = wtx.open_table(VECTOR_KEYS).expect("keys");
+            vectors.insert(4242_u64, encoded.as_slice()).expect("vec");
+            for u in &ids {
+                keys.insert(u.to_string().as_str(), 4242_u64).expect("key");
+            }
+            keys.insert("not-a-uuid", 4242_u64).expect("bad key");
+        }
+        wtx.commit().expect("commit");
+    }
+
+    let handle = make_handle(dir.path());
+    for d in drawers {
+        handle.add_drawer(d);
+    }
+
+    let report = handle
+        .repair_aliases(AliasRepairOptions { dry_run: false })
+        .expect("repair must run");
+
+    assert_eq!(
+        report.outcome.as_str(),
+        "partial",
+        "a repair that cannot name everything it freed is not a success"
+    );
+    assert!(
+        !report.outcome.is_success(),
+        "`is_success` is what a caller branches on; it must be false here"
+    );
+    match &report.outcome {
+        AliasRepairOutcome::Partial { unparsed_keys, .. } => assert_eq!(
+            unparsed_keys,
+            &["not-a-uuid".to_string()],
+            "the unnameable key must be surfaced, not swallowed"
+        ),
+        other => panic!("expected Partial, got {other:?}"),
+    }
+    // The contrast that proves the assertion is about the unnameable key and
+    // not about leftover aliasing: the palace IS clean afterwards.
+    assert!(
+        report.after.as_ref().expect("verification ran").is_clean(),
+        "the redb write itself succeeded — `partial` here is about the worklist"
+    );
+}
+
+/// Why (#5005): the MCP layer branches on `is_success()` to decide whether the
+/// palace may be treated as repaired, so an `Unavailable` outcome that answered
+/// `true` there would ship the exact defect this ticket exists to remove — a
+/// failure reported as a pass. `Unavailable` is what `repair_aliases` returns
+/// when the alias scan cannot run, i.e. when nothing at all is known.
+/// What: asserts the two outcomes that must NOT read as done — `Unavailable`
+/// and `Partial` — are both `is_success() == false` and carry distinct words,
+/// against the two that must (`Clean`, `Repaired`).
+///
+/// Coverage note: this asserts the CONTRACT, not the I/O failure that triggers
+/// it. `UsearchStore::alias_audit` can only fail on a redb read error, and
+/// every fixture that breaks that read also breaks `UsearchStore::new` — the
+/// store cannot be constructed in the state that would exercise the branch
+/// end-to-end. `repair_aliases_never_reports_success_over_a_partial_repair`
+/// covers the other non-success ending through the real code path.
+/// Test: itself. Making `is_success` `!matches!(self, Self::Planned)` — the
+/// natural wrong simplification — passes `Unavailable` and `Partial` and fails
+/// here.
+#[test]
+fn an_unavailable_or_partial_repair_is_never_a_success() {
+    let unavailable = AliasRepairOutcome::Unavailable {
+        reason: "redb read failed".to_string(),
+    };
+    assert_eq!(unavailable.as_str(), "unavailable");
+    assert!(
+        !unavailable.is_success(),
+        "nothing is known about this palace, which is a block and not a pass"
+    );
+
+    let partial = AliasRepairOutcome::Partial {
+        still_aliased: vec![Uuid::new_v4()],
+        not_freed: Vec::new(),
+        unparsed_keys: Vec::new(),
+    };
+    assert_eq!(partial.as_str(), "partial");
+    assert!(
+        !partial.is_success(),
+        "a repair that left a collision behind is not done"
+    );
+
+    // The contrast that keeps the assertions above about failure specifically,
+    // and not about `is_success` being false for everything.
+    assert!(AliasRepairOutcome::Clean.is_success());
+    assert!(AliasRepairOutcome::Repaired.is_success());
+    assert!(
+        !AliasRepairOutcome::Planned.is_success(),
+        "a dry run repaired nothing"
+    );
+}
+
+/// Why (#5005 / #4834): this is the end-to-end claim the repair makes — a
+/// drawer that was durable and permanently unretrievable becomes retrievable
+/// again. Every other test here asserts on table arithmetic; a test that proves
+/// `unalias` is CALLED proves nothing about whether recall works afterwards.
+/// This one drives the operator's real sequence: repair, then re-embed, then
+/// search, and asserts on what a user would actually experience.
+/// What: seeds a three-way collision over drawers with distinct content, finds
+/// the members that their OWN content cannot retrieve (the collision collapses
+/// the group to one reachable uuid), runs `repair_aliases` then
+/// `backfill_missing_vectors`, and asserts every previously-unretrievable
+/// drawer now answers its own query.
+/// Test: itself. Skipping the `repair_aliases` call leaves the drawers with
+/// keys, so the backfill reports 0 missing and the final recall still misses
+/// them — the fail-before state this asserts against.
+#[tokio::test]
+async fn repair_aliases_then_reembed_makes_a_lost_drawer_retrievable() {
+    seed_shared_embedder_with_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let (handle, ids, contents) = seed_distinct_alias_group(dir.path());
+    let embedder = super::embedder::shared_embedder().await.unwrap();
+
+    let finds_itself = |id: Uuid, query: &str| {
+        let handle = &handle;
+        let embedder = embedder.clone();
+        let query = query.to_string();
+        async move {
+            super::layers::retrieve_l2(handle, embedder.as_ref(), &query, None, 10)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.drawer.id == id)
+        }
+    };
+
+    // Fail-before: the collision collapses the group onto one reachable uuid,
+    // so at least two drawers cannot be found by their own content.
+    let mut lost: Vec<(Uuid, String)> = Vec::new();
+    for (id, content) in ids.iter().zip(contents.iter()) {
+        if !finds_itself(*id, content).await {
+            lost.push((*id, content.clone()));
+        }
+    }
+    assert!(
+        lost.len() >= 2,
+        "an aliased group of 3 shares one vector row, so at most one member can \
+         be reachable — got {} unretrievable",
+        lost.len()
+    );
+    // And the health surface calls this palace fully covered, which is #5005.
+    assert!(
+        handle.embed_health().missing_vector_ids.is_empty(),
+        "the false all-clear: every lost drawer still HAS a vector key"
+    );
+
+    // Repair, then re-embed — the operator's documented sequence.
+    let repair = handle
+        .repair_aliases(AliasRepairOptions { dry_run: false })
+        .expect("repair");
+    assert_eq!(repair.outcome.as_str(), "repaired");
+    assert!(repair.reembed_required(), "the repair says so itself");
+
+    let backfill = handle
+        .backfill_missing_vectors(VectorBackfillOptions {
+            dry_run: false,
+            limit: None,
+            retry: RetryPolicy::instant(2),
+        })
+        .await
+        .expect("backfill");
+    assert_eq!(
+        backfill.repaired, 3,
+        "all three need and get a fresh vector"
+    );
+    assert!(backfill.still_missing_ids.is_empty());
+
+    // Pass-after: every previously-unretrievable drawer answers its own query.
+    for (id, content) in &lost {
+        assert!(
+            finds_itself(*id, content).await,
+            "drawer {id} was durable and unretrievable; after repair + re-embed \
+             its own content must find it"
+        );
+    }
+    // And the palace is healthy on both conditions, not just the count.
+    let health = handle.embed_health();
+    assert!(health.is_healthy(), "clean audit AND no missing drawers");
 }

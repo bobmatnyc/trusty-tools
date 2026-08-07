@@ -320,6 +320,79 @@ pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Resu
     }))
 }
 
+/// `palace_unalias` — free drawers destroyed by a vector-id collision so a
+/// re-embed can repair them.
+///
+/// Why (#5005): the allocator fix stops NEW aliasing and `palace_reembed` now
+/// makes existing aliasing visible, but neither repairs it — `unalias` had no
+/// caller at all, so an operator could see the damage and not act on it. The
+/// three drawers still blocking #4834 need this surface. It runs inside the
+/// daemon for the same reason `palace_reembed` does: the daemon holds the
+/// palace's writer lock, so a CLI would only get a read-only snapshot.
+/// What: `dry_run` (the default) names the exact drawer ids it would free and
+/// writes nothing. `dry_run: false` frees the whole collision group, then
+/// re-audits — `outcome` is `"repaired"` only when that verification ran and
+/// came back clean. Idempotent: a second run reports `"clean"` and frees
+/// nothing. The freed drawers still need a `palace_reembed` run to become
+/// findable, which `reembed_required` says outright.
+///
+/// 🔴 `outcome` is the field to branch on, never `freed_ids.len()`. `"partial"`
+/// and `"unavailable"` both carry ids and neither is a success.
+/// Test: `dispatch_palace_unalias_dry_run_names_ids_and_writes_nothing`.
+pub(crate) async fn handle_palace_unalias(state: &AppState, args: Value) -> Result<Value> {
+    use trusty_common::memory_core::retrieval::{AliasRepairOptions, AliasRepairOutcome};
+    let palace = resolve_palace(state, &args, "palace_unalias")?;
+    let handle = open_palace_handle(state, &palace)?;
+    // Defaults to a dry run for the same reason `palace_reembed` does, and with
+    // more at stake: this one deletes vector keys.
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let report =
+        tokio::task::spawn_blocking(move || handle.repair_aliases(AliasRepairOptions { dry_run }))
+            .await
+            .context("join palace_unalias")??;
+
+    let ids = |v: &[Uuid]| v.iter().map(|i| i.to_string()).collect::<Vec<_>>();
+    let (still_aliased_ids, not_freed_ids, unparsed_keys) = match &report.outcome {
+        AliasRepairOutcome::Partial {
+            still_aliased,
+            not_freed,
+            unparsed_keys,
+        } => (
+            Some(ids(still_aliased)),
+            Some(ids(not_freed)),
+            Some(unparsed_keys.clone()),
+        ),
+        _ => (None, None, None),
+    };
+    let error = match &report.outcome {
+        AliasRepairOutcome::Unavailable { reason } => Some(reason.as_str()),
+        _ => None,
+    };
+    Ok(json!({
+        "palace": report.palace_id,
+        "dry_run": report.dry_run,
+        // Branch on this. `"clean"` and `"repaired"` are the only successes.
+        "outcome": report.outcome.as_str(),
+        "success": report.outcome.is_success(),
+        // The id SET, never a bare count: #5005 was a count reporting all-clear
+        // over real loss, and these ids are also the re-embed worklist.
+        "freed_ids": ids(&report.freed_ids),
+        "aliased_before_ids": report.before.aliased_drawer_ids().map(ids),
+        // Present only on a partial repair, which is exactly when a caller must
+        // not read the run as done.
+        "still_aliased_ids": still_aliased_ids,
+        "not_freed_ids": not_freed_ids,
+        "unparsed_keys": unparsed_keys,
+        "error": error,
+        // Freeing a group turns an invisible drawer into an ordinary missing
+        // one; only `palace_reembed` makes it retrievable again.
+        "reembed_required": report.reembed_required(),
+    }))
+}
+
 /// One word for how the #5005 alias audit went, for the `palace_reembed` payload.
 ///
 /// Why: a caller has to be able to tell "no drawer is aliased" from "the scan

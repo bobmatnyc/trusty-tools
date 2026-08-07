@@ -174,6 +174,26 @@ pub struct VectorHit {
     pub score: f32,
 }
 
+/// What one `unalias` run freed, including anything it could not name.
+///
+/// Why (#5005): the freed ids ARE the operator's worklist — each one is a
+/// drawer that now has no vector and needs a re-embed. A key removed from
+/// `VECTOR_KEYS` but dropped from the returned list because it would not parse
+/// is a drawer nobody knows to repair, reported inside a success. That is the
+/// count-based all-clear this ticket exists to remove, one layer down, so the
+/// unparseable keys are carried rather than discarded.
+/// What: `freed` is the parseable drawer ids; `unparsed_keys` is every raw key
+/// that was freed and could not be read back as a `Uuid`. A non-empty
+/// `unparsed_keys` means the worklist is incomplete.
+/// Test: `repair_aliases_never_reports_success_over_a_partial_repair`.
+#[derive(Debug, Clone, Default)]
+pub struct UnaliasOutcome {
+    /// Drawer ids freed by this run — the re-embed worklist.
+    pub freed: Vec<Uuid>,
+    /// Keys freed that are not valid uuids, so they have no drawer id.
+    pub unparsed_keys: Vec<String>,
+}
+
 /// Result summary returned by `UsearchStore::compact_orphans`.
 ///
 /// Why: CLI / MCP callers need a structured report (not just a count) so they
@@ -436,22 +456,33 @@ impl UsearchStore {
 
     /// Unmap every drawer caught in an id collision so a re-embed repairs it.
     ///
-    /// 🔴 Not wired to any CLI or MCP surface, and never run against a live
-    /// palace in the PR that added it (#5005).
-    ///
     /// Why: see [`HnswStore::unalias`] — the reachable member of a collision
     /// group is no more trustworthy than the unreachable ones, so the repair
     /// has to free the whole group.
-    /// What: delegates to `HnswStore::unalias` and returns the freed drawer
-    /// ids, which then read as ordinary "missing" to `embed_health`.
-    /// Test: `unalias_marks_the_whole_group_for_reembed` in
-    /// `embed_repair_tests`.
-    pub fn unalias(&self) -> Result<Vec<Uuid>> {
-        let freed = self.inner.unalias().context("unalias: free aliased keys")?;
-        Ok(freed
-            .iter()
-            .filter_map(|s| Uuid::parse_str(s).ok())
-            .collect())
+    /// What: delegates to `HnswStore::unalias` and splits the freed raw keys
+    /// into parseable drawer ids and unnameable leftovers. The freed drawers
+    /// then read as ordinary "missing" to `embed_health`. Callers should route
+    /// through [`PalaceHandle::repair_aliases`], which adds the dry run and the
+    /// post-repair verification; this is the raw primitive.
+    /// Test: `unalias_marks_the_whole_group_for_reembed`,
+    /// `repair_aliases_never_reports_success_over_a_partial_repair`.
+    pub fn unalias(&self) -> Result<UnaliasOutcome> {
+        let raw = self.inner.unalias().context("unalias: free aliased keys")?;
+        let mut out = UnaliasOutcome::default();
+        for key in raw {
+            match Uuid::parse_str(&key) {
+                Ok(u) => out.freed.push(u),
+                Err(e) => {
+                    tracing::error!(
+                        key = %key,
+                        "#5005: unalias freed a key that is not a uuid, so no drawer id \
+                         can be reported for it: {e}"
+                    );
+                    out.unparsed_keys.push(key);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Remove vector entries whose drawer IDs are not in `valid_ids`.
