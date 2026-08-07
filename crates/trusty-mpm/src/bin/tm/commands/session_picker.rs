@@ -137,7 +137,7 @@ pub(crate) struct PickerScope {
     pub(crate) sort: SessionSortArg,
     /// Case-insensitive substring filter re-applied after every re-fetch
     /// (#3483); `None` shows every (live) session.
-    pub(crate) term: Option<String>,
+    pub(crate) term: Option<SessionFilter>,
 }
 
 impl PickerScope {
@@ -319,48 +319,106 @@ fn join_non_empty(words: &[String]) -> Option<String> {
     }
 }
 
-/// Case-insensitive substring filter over a session's visible identifying
-/// columns (#3483).
+/// Which columns a filter term is matched against.
 ///
-/// Why: the operator scans `id`, `name`, the project slug, `state`, and `task`
-/// on the rendered table/picker — the filter should match anything they can
-/// actually see, not an internal-only field.
-/// What: keeps a session when `term` (lowercased) is a substring of ANY of:
-/// `id`, `name`, `source_id` (project), `state`, `task`. A `None`/absent field
-/// is simply skipped. `term = None` is a no-op (returns `sessions` unchanged).
+/// Why: `tm ls <term>` and `tm f <pattern>` share one filter/sort/render path
+/// but ask different questions. `tm ls` matches everything the operator can see
+/// on the row, which is the right default when they are hunting and only half
+/// remember where the string lives. `tm f` is the narrow tool: "show me the
+/// sessions CALLED this", and a task description mentioning the word must not
+/// pad the answer. The distinction is data on the filter, not a second
+/// filtering function, so neither behaviour can drift from the other.
+/// What: [`Visible`](FilterScope::Visible) matches `id`, `name`, `source_id`,
+/// `state`, and `task`; [`Name`](FilterScope::Name) matches `name` only.
+/// Test: `filter_sessions_by_name_ignores_non_name_columns`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilterScope {
+    /// Every column the table renders (`tm ls <term>`, #3483).
+    Visible,
+    /// The `NAME` column only (`tm f <pattern>`).
+    Name,
+}
+
+/// A case-insensitive substring filter plus the columns it applies to.
+///
+/// Why: see [`FilterScope`] — the scope has to ride along with the term through
+/// `run_ls_connector` → `session_ls` → the picker's re-fetch loop, so the
+/// picker keeps filtering the way the invoking command asked.
+/// What: an owned lowercase-compared needle and its [`FilterScope`]. Construct
+/// via [`SessionFilter::visible`] or [`SessionFilter::name`].
+/// Test: `filter_sessions_by_term_*`, `filter_sessions_by_name_*`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionFilter {
+    /// The needle, already lowercased at construction.
+    needle_lower: String,
+    /// Which columns [`SessionFilter::matches`] reads.
+    scope: FilterScope,
+}
+
+impl SessionFilter {
+    /// Filter over every visible column — the `tm ls` grammar's behaviour.
+    pub(crate) fn visible(term: impl AsRef<str>) -> Self {
+        Self::new(term, FilterScope::Visible)
+    }
+
+    /// Filter over the `NAME` column only — `tm f <pattern>`.
+    pub(crate) fn name(term: impl AsRef<str>) -> Self {
+        Self::new(term, FilterScope::Name)
+    }
+
+    fn new(term: impl AsRef<str>, scope: FilterScope) -> Self {
+        Self {
+            needle_lower: term.as_ref().to_lowercase(),
+            scope,
+        }
+    }
+
+    /// Does `s` match this filter?
+    ///
+    /// Why: a `None`/absent optional column must be skipped rather than treated
+    /// as an empty string, which every term would trivially "contain".
+    /// What: case-insensitive `contains` over the columns [`Self::scope`]
+    /// selects.
+    /// Test: `filter_sessions_by_term_*`, `filter_sessions_by_name_*`.
+    pub(crate) fn matches(&self, s: &ManagedSessionSummary) -> bool {
+        let fields: &[Option<&str>] = match self.scope {
+            FilterScope::Visible => &[
+                Some(s.id.as_str()),
+                Some(s.name.as_str()),
+                s.source_id.as_deref(),
+                Some(s.state.as_str()),
+                s.task.as_deref(),
+            ],
+            FilterScope::Name => &[Some(s.name.as_str())],
+        };
+        fields
+            .iter()
+            .flatten()
+            .any(|field| field.to_lowercase().contains(&self.needle_lower))
+    }
+}
+
+/// Apply a [`SessionFilter`] to a session list (#3483).
+///
+/// Why: the static table and the interactive picker must filter identically, so
+/// both call this rather than open-coding the predicate.
+/// What: keeps the sessions [`SessionFilter::matches`] accepts. `filter = None`
+/// is a no-op (returns `sessions` unchanged).
 /// Test: `filter_sessions_by_term_matches_name`,
 /// `filter_sessions_by_term_matches_task`,
 /// `filter_sessions_by_term_matches_source_id`,
 /// `filter_sessions_by_term_is_case_insensitive`,
 /// `filter_sessions_by_term_no_match_returns_empty`,
-/// `filter_sessions_by_term_none_is_noop`.
+/// `filter_sessions_by_term_none_is_noop`,
+/// `filter_sessions_by_name_ignores_non_name_columns`.
 pub(crate) fn filter_sessions_by_term(
     sessions: Vec<ManagedSessionSummary>,
-    term: Option<&str>,
+    filter: Option<&SessionFilter>,
 ) -> Vec<ManagedSessionSummary> {
-    let Some(term) = term else {
+    let Some(filter) = filter else {
         return sessions;
     };
-    let needle = term.to_lowercase();
-    sessions
-        .into_iter()
-        .filter(|s| session_matches_term(s, &needle))
-        .collect()
-}
-
-/// Pure predicate backing [`filter_sessions_by_term`]; `needle_lower` must
-/// already be lowercased.
-fn session_matches_term(s: &ManagedSessionSummary, needle_lower: &str) -> bool {
-    [
-        Some(s.id.as_str()),
-        Some(s.name.as_str()),
-        s.source_id.as_deref(),
-        Some(s.state.as_str()),
-        s.task.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|field| field.to_lowercase().contains(needle_lower))
+    sessions.into_iter().filter(|s| filter.matches(s)).collect()
 }
 
 /// The attached→active→everything-else group a session belongs in (owner
@@ -609,7 +667,7 @@ pub(crate) fn next_launch_slot(sessions: &[ManagedSessionSummary]) -> u32 {
 /// Test: `guided_picker_numeric_deleted_slot_blocked`,
 /// `guided_picker_bare_enter_unresumable_session_blocked`,
 /// `guided_picker_numeric_unresumable_session_blocked`.
-fn decide_for_index(
+pub(crate) fn decide_for_index(
     sessions: &[ManagedSessionSummary],
     idx: usize,
     bare_enter_needs_restart: bool,
@@ -1040,7 +1098,7 @@ pub(crate) async fn run_tty_picker(
         // Issue TBD: re-apply the scope's filter/sort so the redisplayed menu
         // never drifts from the one the operator picked against.
         sessions = fetch_live_sessions(client, url, scope.source_id.as_deref(), false).await?;
-        sessions = filter_sessions_by_term(sessions, scope.term.as_deref());
+        sessions = filter_sessions_by_term(sessions, scope.term.as_ref());
         sort_sessions(&mut sessions, scope.sort);
     }
     Ok(())
@@ -1091,7 +1149,7 @@ pub(crate) async fn run_ls_connector(
     current: bool,
     all: bool,
     sort: SessionSortArg,
-    term: Option<String>,
+    term: Option<SessionFilter>,
 ) -> anyhow::Result<()> {
     // `--current` derives the source_id from the cwd git remote, exactly like
     // `tm session ls --current`. `--source-id` and `--current` are mutually
@@ -1133,7 +1191,7 @@ pub(crate) async fn run_ls_connector(
             .await;
         }
     };
-    let mut sessions = filter_sessions_by_term(sessions, term.as_deref());
+    let mut sessions = filter_sessions_by_term(sessions, term.as_ref());
     sort_sessions(&mut sessions, sort);
 
     if !should_show_picker(stdin_tty, stdout_tty, json, all, sessions.len()) {
