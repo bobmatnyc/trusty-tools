@@ -639,6 +639,45 @@ impl SweepOutcome {
     }
 }
 
+/// Every palace id present under `data_root`.
+///
+/// Why not `PalaceStore::list_palaces`: it returns `Ok` while silently dropping
+/// any palace whose `palace.json` fails to decode, and any `read_dir` entry
+/// that errors. The sweep would read that `Ok` as a complete enumeration, so an
+/// undecodable palace would be absent from the count, absent from the repair
+/// queue, and the sweep would still log `all coverage verified` — the same
+/// fail-open as the LRU enumeration, one layer further out. This enumerates
+/// ids, not metadata, so a palace with unreadable metadata is still SEEN; the
+/// sweep then fails to open it and records it as unopenable.
+///
+/// An errored directory entry fails the whole enumeration rather than
+/// shrinking it, because a partial list is indistinguishable from a short one
+/// and the caller can only tell "verified everything" from "verified what I
+/// happened to see" if the difference reaches it.
+///
+/// What: returns the name of every immediate subdirectory holding a
+/// `palace.json`.
+/// Test: `startup_sweep_counts_an_undecodable_palace_instead_of_skipping_it`,
+/// `a_sweep_that_cannot_enumerate_verifies_nothing`.
+fn palace_ids_on_disk(data_root: &std::path::Path) -> anyhow::Result<Vec<String>> {
+    let mut ids = Vec::new();
+    for entry in std::fs::read_dir(data_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.join("palace.json").is_file() {
+            continue;
+        }
+        match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => ids.push(name.to_string()),
+            None => anyhow::bail!(
+                "palace directory name is not valid UTF-8: {}",
+                path.display()
+            ),
+        }
+    }
+    Ok(ids)
+}
+
 /// Sweep every palace ON DISK that has drawers, serially.
 ///
 /// Why the disk and not the registry: `registry.list()` snapshots the LRU key
@@ -653,20 +692,19 @@ impl SweepOutcome {
 /// Holding the opened `Arc` for the palace's whole backfill also removes the
 /// mid-sweep-eviction hole — the idle ticker is armed before this runs, and a
 /// borrowed LRU entry could vanish underneath it.
-/// What: enumerates with `PalaceRegistry::list_palaces` and hydrates each with
-/// `open_palace` on the blocking pool (serial, so cold opens do not thrash the
-/// 64-slot LRU). Every palace that cannot be enumerated, cannot be opened, or
-/// cannot be verified is reported and queued for repair. A failed enumeration
-/// verifies NOTHING and says so — it never reports a clean sweep.
+/// What: enumerates palace ids straight off the data root and hydrates each
+/// with `open_palace` on the blocking pool (serial, so cold opens do not thrash
+/// the 64-slot LRU). Every palace that cannot be enumerated, cannot be opened,
+/// or cannot be verified is reported and queued for repair. A failed
+/// enumeration verifies NOTHING and says so — it never reports a clean sweep.
 /// Test: `startup_sweep_enumerates_every_palace_on_disk`,
-/// `startup_sweep_marks_unopenable_palaces_instead_of_skipping_them`.
+/// `startup_sweep_marks_unopenable_palaces_instead_of_skipping_them`,
+/// `startup_sweep_counts_an_undecodable_palace_instead_of_skipping_it`,
+/// `a_sweep_that_cannot_enumerate_verifies_nothing`.
 pub async fn run_startup_sweep(state: &AppState) -> SweepOutcome {
     let started = Instant::now();
     let root = state.data_root.clone();
-    let listed = tokio::task::spawn_blocking(move || {
-        trusty_common::memory_core::registry::PalaceRegistry::list_palaces(&root)
-    })
-    .await;
+    let listed = tokio::task::spawn_blocking(move || palace_ids_on_disk(&root)).await;
 
     let palaces = match listed {
         Ok(Ok(p)) => p,
@@ -692,7 +730,7 @@ pub async fn run_startup_sweep(state: &AppState) -> SweepOutcome {
     };
 
     for palace in palaces {
-        let id = palace.id.clone();
+        let id = trusty_common::memory_core::palace::PalaceId::new(palace.clone());
         let registry = std::sync::Arc::clone(&state.registry);
         let root = state.data_root.clone();
         let opened = tokio::task::spawn_blocking(move || registry.open_palace(&root, &id)).await;
@@ -701,31 +739,38 @@ pub async fn run_startup_sweep(state: &AppState) -> SweepOutcome {
             Ok(Err(e)) => {
                 // A palace we cannot open is a palace we cannot verify. Queue
                 // it rather than skipping it into the "all verified" tally.
-                tracing::error!(palace = %palace.id, "bm25 backfill: could not open palace: {e:#}");
+                tracing::error!(palace = %palace, "bm25 backfill: could not open palace: {e:#}");
                 out.unopenable += 1;
-                crate::bm25_repair::mark_dirty(state, palace.id.as_str());
+                crate::bm25_repair::mark_dirty(state, &palace);
                 continue;
             }
             Err(e) => {
-                tracing::error!(palace = %palace.id, "bm25 backfill: open task failed: {e}");
+                tracing::error!(palace = %palace, "bm25 backfill: open task failed: {e}");
                 out.unopenable += 1;
-                crate::bm25_repair::mark_dirty(state, palace.id.as_str());
+                crate::bm25_repair::mark_dirty(state, &palace);
                 continue;
             }
         };
 
-        // A palace with no drawers has nothing that could be missing, so it is
-        // covered by definition — skipping it is not a gap. This is what keeps
-        // the sweep from starting ~80 daemons to tell each it has nothing to do.
+        // A palace whose served drawer table is empty has no id that could be
+        // missing from the index, so it is covered — skipping it is not a gap.
+        // The justification is `handle.drawers` specifically, NOT "the palace
+        // has no data": `open_with_intent` falls back to an empty table when
+        // `load_drawers` fails, and `load_drawers` itself skips undecodable
+        // rows, so drawers CAN be absent here while sitting in redb. That stays
+        // correct only because `handle.drawers` is what every lane serves from,
+        // vector included — coverage is defined relative to what the palace
+        // serves, not to what is on disk behind it. Change where the lanes read
+        // from and this skip stops being safe.
         if handle.drawers.read().is_empty() {
             continue;
         }
 
-        let report = backfill_state_palace(state, &handle, palace.id.as_str(), false).await;
+        let report = backfill_state_palace(state, &handle, &palace, false).await;
         out.swept += 1;
         if !report.fully_indexed() {
             out.incomplete += 1;
-            crate::bm25_repair::mark_dirty(state, palace.id.as_str());
+            crate::bm25_repair::mark_dirty(state, &palace);
         }
     }
 

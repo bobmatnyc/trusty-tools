@@ -621,6 +621,52 @@ async fn startup_sweep_marks_unopenable_palaces_instead_of_skipping_them() {
     );
 }
 
+/// Why (#5048 re-review): `PalaceStore::list_palaces` returns `Ok` while
+/// silently dropping any palace whose `palace.json` fails to decode. Routing
+/// the sweep through it made that palace absent from the count AND absent from
+/// the repair queue, while `all_verified()` still read true — a clean log line
+/// over a palace the sweep never knew existed. The enumeration now yields ids
+/// off the directory, so an undecodable palace is seen, fails to open, and is
+/// recorded.
+///
+/// A palace in this state is dark to the whole memory system, not just to
+/// BM25 — `open_palace` fails for every caller — so the sweep's job is to
+/// report it, not to repair it.
+/// What: persists a real palace, then corrupts its `palace.json`.
+/// Test: this test itself. Enumerate via `PalaceStore::list_palaces` instead
+/// and `enumerated` drops to `Some(0)` with an empty queue and a clean verdict.
+#[tokio::test]
+async fn startup_sweep_counts_an_undecodable_palace_instead_of_skipping_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    create_palaces_on_disk(&AppState::new(root.clone()), 1);
+
+    std::fs::write(
+        root.join("sweep-0").join("palace.json"),
+        b"{ not valid json",
+    )
+    .expect("corrupt palace.json");
+
+    let cold = AppState::new(root);
+    let out = run_startup_sweep(&cold).await;
+
+    assert_eq!(
+        out.enumerated,
+        Some(1),
+        "a palace whose metadata will not decode must still be SEEN"
+    );
+    assert_eq!(out.unopenable, 1, "and recorded as unopenable");
+    assert!(
+        !out.all_verified(),
+        "a sweep that could not read a palace must never report clean"
+    );
+    assert_eq!(
+        crate::bm25_repair::dirty_palaces(&cold),
+        vec!["sweep-0".to_string()],
+        "and queued, so the state is visible rather than silent"
+    );
+}
+
 /// Why: a failed enumeration is the outermost fail-open — the sweep would run
 /// its loop zero times and report a clean result over the entire corpus. It
 /// must verify nothing and say so.

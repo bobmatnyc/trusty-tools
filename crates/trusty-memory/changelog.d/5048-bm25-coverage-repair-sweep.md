@@ -15,3 +15,10 @@ Added
 - The repair pass resolves palaces with `open_palace`, which hydrates. A dirty
   palace that went idle and was evicted was previously dropped from the queue
   permanently, so its gap waited for a restart.
+- Sweep enumeration reads palace ids off the data root rather than
+  `PalaceStore::list_palaces`, which returns `Ok` while silently dropping any
+  palace whose `palace.json` will not decode. Such a palace was absent from the
+  count and from the repair queue while the sweep still logged clean; it is now
+  seen, recorded as unopenable, and queued.
+- A closed BM25 index queue marks its palace dirty, matching the full-queue
+  arm. Both lose the write identically.

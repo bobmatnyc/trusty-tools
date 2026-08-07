@@ -1025,11 +1025,9 @@ fn spawn_startup_tasks(state: &AppState) {
         );
         tracing::info!(loops = n, "dream_scheduler: {n} loop(s) running (#1529)");
 
-        // BM25 backfill sweep. Must run AFTER hydration — before it, the
-        // registry is empty and the sweep would find nothing to index. A no-op
-        // while the lexical lane is off, which is every deployment until the
-        // default is flipped: `spawn_startup_backfill` returns immediately when
-        // `bm25_client` is `None`.
+        // BM25 backfill sweep. A no-op while the lexical lane is off, which is
+        // every deployment until the default is flipped: `spawn_startup_backfill`
+        // returns immediately when `bm25_client` is `None`.
         trusty_memory::bm25_backfill::spawn_startup_backfill(&bg_state);
 
         // BM25 coverage repair sweep. The write path drops on a full queue,

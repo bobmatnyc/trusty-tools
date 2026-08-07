@@ -236,6 +236,15 @@ pub fn spawn_repair_sweep(state: &AppState) {
         ticker.tick().await;
         loop {
             ticker.tick().await;
+            // Hardening note (#5048 re-review), not a guarantee: a panic
+            // inside `run_repair_pass` aborts this task and silently disarms
+            // the sweep for the process lifetime, with the queue still growing
+            // and nothing draining it. No panic source is identified in the
+            // pass today — every fallible step returns `Result` — so this is
+            // recorded rather than guarded. What the pass DOES guarantee is
+            // that such an abort loses no work: entries leave the queue only
+            // on verified coverage, so every gap is still queued for whatever
+            // runs next.
             let (attempted, repaired) = run_repair_pass(&state).await;
             if attempted > 0 {
                 tracing::info!(attempted, repaired, "bm25 repair: pass complete");

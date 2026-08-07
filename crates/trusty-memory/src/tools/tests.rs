@@ -3422,3 +3422,44 @@ async fn a_daemon_that_will_not_spawn_queues_the_palace_for_repair() {
         "a daemon that will not spawn lost the write and must queue the palace"
     );
 }
+
+/// Why (#5048 re-review): `Full` marked the palace dirty and `Closed`, three
+/// lines below it, logged at `debug!` and returned. Both lose the write
+/// identically — the drawer never reaches the index and nothing remembers that
+/// it did not. Fixing one arm and leaving its sibling is the shape #4683
+/// shipped with.
+/// What: drops the receiver so `try_send` returns `Closed`, then enqueues.
+/// Test: this test itself. Remove the `mark_dirty` from the `Closed` arm and
+/// the queue stays empty.
+#[tokio::test]
+async fn a_closed_index_queue_queues_the_palace_for_repair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut state = AppState::new(tmp.path().to_path_buf());
+
+    // Swap in a sender whose receiver is dropped. Waiting for the real worker
+    // to exit would race its spawn; this closes the channel deterministically.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+    drop(rx);
+    state.bm25_index_tx = tx;
+
+    assert!(
+        matches!(
+            state.bm25_index_tx.try_send(Bm25IndexRequest {
+                palace: "default".to_string(),
+                drawer_id: Uuid::new_v4().to_string(),
+                content: "probe".to_string(),
+                data_dir: state.data_root.join("default"),
+            }),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+        ),
+        "precondition: the queue must actually be closed, not merely full"
+    );
+
+    bm25_index_enqueue(&state, "default", Uuid::new_v4(), "content that is lost");
+
+    assert_eq!(
+        crate::bm25_repair::dirty_palaces(&state),
+        vec!["default".to_string()],
+        "a closed queue loses the write as completely as a full one and must queue repair"
+    );
+}
