@@ -354,7 +354,11 @@ impl Bm25Client {
         method: &'static str,
         params: &P,
     ) -> Result<R> {
-        let stream = UnixStream::connect(&self.socket_path)
+        // #5099: verify the directory and socket before trusting them. A daemon
+        // predating the hardening still answers at this path, and the
+        // supervisor adopts an existing socket rather than spawning, so the
+        // daemon's own checks may never run.
+        let stream = crate::uds::connect_hardened(&self.socket_path)
             .await
             .with_context(|| {
                 format!(

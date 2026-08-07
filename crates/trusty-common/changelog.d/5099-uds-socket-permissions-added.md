@@ -14,3 +14,14 @@ Added
   bits an enforced boundary rather than a documented intention. Gated behind a
   new `uds` feature, implied by `bm25-client` and `embedder-client`; adds no new
   dependency (`libc` moves from a macOS-only to a `cfg(unix)` target dependency).
+- **`uds::connect_hardened` — the dialer's half of the same contract.** Hardening
+  only the bind side left every client trusting whatever sat at the path: a
+  daemon predating the change still answers, and `Bm25Supervisor` adopts an
+  existing socket rather than spawning, so the daemon's own ownership check may
+  never run. `connect_hardened` refuses unless the containing directory is a
+  non-symlink `0700` directory owned by this uid and the socket is a non-symlink
+  socket owned by this uid at `0600`. `bm25_client` and `UdsEmbedderClient` now
+  dial through it.
+- **`uds::check_sun_path_budget`** turns the kernel's bare `invalid argument`
+  into a diagnostic naming the platform's `sun_path` capacity (104 on macOS, 108
+  on Linux), the actual byte length, and the offending path.

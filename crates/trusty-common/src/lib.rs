@@ -738,7 +738,11 @@ pub mod health_probe;
 /// [`uds::prepare_socket_dir`], [`uds::scratch_socket_dir`] (the per-uid
 /// replacement for the `$TMPDIR`-with-`/tmp`-fallback convention), and
 /// [`uds::ensure_peer_is_self`] (`SO_PEERCRED` / `getpeereid`).
-/// Test: `cargo test -p trusty-common -- uds::`.
+/// Test: `cargo test -p trusty-common --features uds uds::` — the `--features`
+/// flag is load-bearing. `uds` is not a default feature, so the bare
+/// `-p trusty-common` form compiles the module out and reports 0 tests run
+/// while exiting 0. CI's `cargo test --workspace` enables it via feature
+/// unification from `trusty-embedderd` and `trusty-bm25-daemon`.
 #[cfg(all(unix, feature = "uds"))]
 pub mod uds;
 

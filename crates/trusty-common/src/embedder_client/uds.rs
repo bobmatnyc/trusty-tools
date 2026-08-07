@@ -182,12 +182,15 @@ impl EmbedderClient for UdsEmbedderClient {
         // Open a fresh connection. UDS connect on a local socket is typically
         // sub-millisecond, so the simplicity of one-connection-per-call is
         // justified in Phase 1.
-        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
-            EmbedderError::Uds(format!(
-                "connect to {} failed: {e}",
-                self.socket_path.display()
-            ))
-        })?;
+        // #5099: verify the directory and socket before trusting them.
+        let stream = crate::uds::connect_hardened(&self.socket_path)
+            .await
+            .map_err(|e| {
+                EmbedderError::Uds(format!(
+                    "connect to {} failed: {e}",
+                    self.socket_path.display()
+                ))
+            })?;
         let (read_half, mut write_half) = stream.into_split();
 
         // Build and send the request frame.
