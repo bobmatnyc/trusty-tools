@@ -11,6 +11,12 @@
 #       a dressed-up existence check.
 #     - missing-source.tsv points at a docs/ path that does not exist, which is
 #       what a rename or deletion in docs/ looks like to the manifest.
+#   forbidden-internal-suffix.tsv covers the third case, which has no tree rule
+#   behind it: docs/reference/ is mixed-audience, so the internal half of a split
+#   (docs/reference/config-convention-internal.md, PR #5107) sits one row away
+#   from its published half. It must fail as FORBIDDEN, not as MISSING — the
+#   suffix rule has to run BEFORE the existence check, or the boundary would
+#   quietly start depending on which branch happens to be checked out.
 #
 # What: runs the gate against each fixture in scripts/test-data/public-docs/ and
 #   asserts both the exit status and, for failures, that the expected finding
@@ -37,6 +43,7 @@ CASES="clean.tsv${TAB}0${TAB}-
 missing-source.tsv${TAB}1${TAB}MISSING
 forbidden-specs.tsv${TAB}1${TAB}FORBIDDEN
 forbidden-nested.tsv${TAB}1${TAB}FORBIDDEN
+forbidden-internal-suffix.tsv${TAB}1${TAB}FORBIDDEN
 escapes-docs.tsv${TAB}1${TAB}ESCAPES-DOCS
 dup-route.tsv${TAB}1${TAB}DUP-ROUTE
 bad-record.tsv${TAB}1${TAB}BAD-RECORD

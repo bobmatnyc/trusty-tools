@@ -18,7 +18,7 @@
 # What: reads docs/public-manifest.tsv and fails on any of:
 #     MISSING       a PAGE source that is not an existing file
 #     ESCAPES-DOCS  a source outside docs/, absolute, or containing `..`
-#     FORBIDDEN     a source inside a DO-NOT-PUBLISH tree
+#     FORBIDDEN     a source inside a DO-NOT-PUBLISH tree, or named `*-internal.md`
 #     NOT-MARKDOWN  a source that is not `.md`
 #     DUP-ROUTE     two PAGE rows claiming the same route
 #     DUP-SOURCE    two PAGE rows publishing the same source
@@ -130,6 +130,15 @@ sessions
 regression-testing
 _archive"
 
+# A mixed-audience directory has no tree rule to lean on: docs/reference/ holds
+# both public references and internal ones side by side, so the FIRST internal
+# file split out of a published one (docs/reference/config-convention-internal.md,
+# PR #5107) sits one row away from its public half with nothing structural
+# separating them. `-internal.md` is the naming convention for that split, and
+# this makes it mechanical: a source whose basename ends `-internal.md` can never
+# be published, wherever it lives.
+FORBIDDEN_SUFFIX="-internal.md"
+
 fail=0
 lineno=0
 sections=""       # newline-separated section ids seen
@@ -231,9 +240,16 @@ while IFS= read -r raw || [[ -n "$raw" ]]; do
           ;;
       esac
 
-      # Defense in depth — see the header. Top-level trees by prefix ...
+      # Defense in depth — see the header. The `-internal.md` suffix first,
+      # because it is the only rule that reaches into a mixed-audience
+      # directory ...
       forbidden_hit=""
-      while IFS= read -r tree; do
+      case "$src" in
+        *"$FORBIDDEN_SUFFIX") forbidden_hit="*${FORBIDDEN_SUFFIX}" ;;
+      esac
+
+      # ... then the top-level trees by prefix ...
+      while [[ -z "$forbidden_hit" ]] && IFS= read -r tree; do
         [[ -z "$tree" ]] && continue
         case "$src" in
           "$tree"*)
@@ -243,7 +259,7 @@ while IFS= read -r raw || [[ -n "$raw" ]]; do
         esac
       done <<<"$FORBIDDEN_TREES"
 
-      # ... and the same kinds nested under a per-crate tree.
+      # ... and finally the same kinds nested under a per-crate tree.
       if [[ -z "$forbidden_hit" ]]; then
         while IFS= read -r seg; do
           [[ -z "$seg" ]] && continue
@@ -257,7 +273,7 @@ while IFS= read -r raw || [[ -n "$raw" ]]; do
       fi
 
       if [[ -n "$forbidden_hit" ]]; then
-        report FORBIDDEN "$lineno" "source '${src}' resolves into the DO-NOT-PUBLISH tree '${forbidden_hit}'"
+        report FORBIDDEN "$lineno" "source '${src}' matches the DO-NOT-PUBLISH rule '${forbidden_hit}'"
         continue
       fi
 
@@ -308,8 +324,8 @@ if [[ "$fail" -ne 0 ]]; then
 
 The public documentation manifest is an ALLOWLIST (${MANIFEST}).
 Every PAGE row must name an existing .md file under docs/ that is outside the
-DO-NOT-PUBLISH trees, with a unique route. Fix the rows above — never widen the
-boundary to make this gate green.
+DO-NOT-PUBLISH trees and not named \`*-internal.md\`, with a unique route. Fix the
+rows above — never widen the boundary to make this gate green.
 EOF
   exit 1
 fi

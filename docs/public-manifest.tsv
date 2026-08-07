@@ -77,6 +77,7 @@ PAGE	guides	docs/trusty-git-analytics/user/user-guide.md	/guides/trusty-git-anal
 
 SECTION	reference	Reference
 PAGE	reference	docs/architecture/harnesses.md	/reference/harnesses	Harnesses
+PAGE	reference	docs/reference/config-convention.md	/reference/config-convention	Configuration Convention
 PAGE	reference	docs/reference/environment-variables.md	/reference/environment-variables	Environment Variables
 PAGE	reference	docs/reference/running-mcp-servers.md	/reference/running-mcp-servers	Running MCP Servers Locally
 PAGE	reference	docs/reference/ide-setup.md	/reference/ide-setup	IDE Setup
