@@ -4,7 +4,7 @@
 //! CTO ops SQLite DB (`~/Duetto/cto/data/cto.db`) for
 //! headcount/budget/risks/work-classification queries. The query *engine*
 //! lives in `trusty-cto-db`; this module owns the reusable *service adapter*
-//! (schema emission + dispatch) so open-mpm, trusty-izzie, and future
+//! (schema emission + dispatch) so trusty-agents, trusty-izzie, and future
 //! consumers stop re-deriving it. Calling `trusty_cto_db::handle_tool_call`
 //! in-process keeps the path short and the data on-host (no MCP subprocess,
 //! no OAuth churn).
@@ -35,7 +35,7 @@ pub const CTO_DB_TOOL_NAMES: &[&str] = &[
 /// Outcome of a CTO DB service call.
 ///
 /// Why: `tc-services` must stay host-agnostic — it cannot know about
-/// open-mpm's `ToolResult` or any other host's result type. This plain enum
+/// trusty-agents's `ToolResult` or any other host's result type. This plain enum
 /// lets each host translate the outcome into its own representation.
 /// What: `Ok` carries the serialised JSON result; `Err` carries a
 /// human-readable, recoverable error message (a missing DB or schema drift

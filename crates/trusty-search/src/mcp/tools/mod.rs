@@ -225,7 +225,7 @@ impl McpServer {
                 return Response::ok(id, serde_json::json!({ "tools": tools }));
             }
             // OpenRPC 1.3.2 discovery — see `mcp::openrpc`. Returns the
-            // full service description so orchestrators (open-mpm, etc.)
+            // full service description so orchestrators (trusty-agents, etc.)
             // can introspect every tool and its required
             // `search.read`/`search.write` scope without bespoke adapters.
             "rpc.discover" => {

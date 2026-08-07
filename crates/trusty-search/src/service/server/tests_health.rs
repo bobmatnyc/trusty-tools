@@ -27,7 +27,7 @@ fn base_global_search_request(query: &str, top_k: usize) -> GlobalSearchRequest 
     }
 }
 
-/// Why: `/health` is consumed by external probes (open-mpm,
+/// Why: `/health` is consumed by external probes (trusty-agents,
 /// `ensure_daemon_running`) — the contract `{ status, version, indexes,
 /// uptime_secs }` must remain stable.
 /// What: Builds an AppState with N registered indexes and asserts the

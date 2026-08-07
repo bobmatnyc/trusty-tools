@@ -123,7 +123,7 @@ pub const WINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wings");
 /// Test: `store::wings::tests::wing_create_is_idempotent`.
 pub const WING_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("wing_keys");
 
-/// Payload store (for `open-mpm`'s `TrustyBackedMemoryStore`).
+/// Payload store (for `trusty-agents`'s `TrustyBackedMemoryStore`).
 ///
 /// Why: Payloads are namespaced by segment and addressed by id; share the
 ///      same redb env as the KG so payload + KG ops can ride a single

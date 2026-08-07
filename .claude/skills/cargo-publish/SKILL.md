@@ -380,7 +380,7 @@ Use the **crate package name** from `Cargo.toml`, NOT the directory name.
 - `trusty-git-analytics` → `-p tga` → tag: **`tga-v1.4.2`** ✓
 - `trusty-search` → `-p trusty-search` → tag: **`trusty-search-v0.13.1`** ✓
 - `trusty-common` → `-p trusty-common` → tag: **`trusty-common-v0.8.0`** ✓
-- `open-mpm` → `-p open-mpm` → tag: **`open-mpm-v0.2.3`** ✓
+- `trusty-agents` → `-p trusty-agents` → tag: **`trusty-agents-v0.2.3`** ✓
 
 > **tga tag aliases (issue #1128):** the binary-release workflow accepts **both**
 > `tga-v<version>` and `trusty-git-analytics-v<version>` — they resolve to the
@@ -402,7 +402,6 @@ Most match (`crates/trusty-search/` → `-p trusty-search`).
 
 **Exceptions** (always verify `Cargo.toml`):
 - `crates/trusty-git-analytics/` → `name = "tga"` → `-p tga`
-- `crates/open-mpm/` → `name = "open-mpm"` → `-p open-mpm`
 
 If `cargo -p <name>` returns "package not found":
 ```bash

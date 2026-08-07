@@ -88,7 +88,7 @@ pub(crate) fn banner_lines(app: &ReplApp, width: usize) -> Vec<Line<'static>> {
     // Right column rows: app title + recent activity + commands.
     let mut right_rows: Vec<(String, Style)> = Vec::new();
     right_rows.push((
-        format!(" Open MPM v{}", version),
+        format!(" trusty-agents v{}", version),
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -256,7 +256,7 @@ pub(crate) fn draw_banner(f: &mut ratatui::Frame, app: &ReplApp, area: Rect) {
     let mut right_lines: Vec<Line> = Vec::with_capacity(12);
     // App title — prominent at the top of the right column.
     right_lines.push(Line::from(Span::styled(
-        format!(" Open MPM v{}", version),
+        format!(" trusty-agents v{}", version),
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),

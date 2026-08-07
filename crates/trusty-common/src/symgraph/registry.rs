@@ -6,7 +6,7 @@
 //! inputs. SHA-256 hashing makes drift detectable.
 //! What: `SymbolId`, `SymbolKind`, `SymbolEntry`, and `SymbolRegistry` —
 //! the registry persists as canonical sorted JSON at
-//! `.open-mpm/state/symbol-registry.json`.
+//! `.trusty-agents/state/symbol-registry.json`.
 //! Test: `cargo test ast::registry` — covers id construction, hash
 //! stability, sorted-on-insert, save/load round-trip, and stale-hash
 //! detection.
@@ -152,7 +152,7 @@ pub struct SymbolRegistry {
 }
 
 impl SymbolRegistry {
-    const REGISTRY_PATH: &'static str = ".open-mpm/state/symbol-registry.json";
+    const REGISTRY_PATH: &'static str = ".trusty-agents/state/symbol-registry.json";
     const VERSION: u32 = 1;
 
     /// New empty registry rooted at `project_root`.
@@ -229,7 +229,7 @@ impl SymbolRegistry {
         self.project_root.join(Self::REGISTRY_PATH)
     }
 
-    /// Load the registry from `.open-mpm/state/symbol-registry.json`.
+    /// Load the registry from `.trusty-agents/state/symbol-registry.json`.
     ///
     /// Why: Persistence allows the parse and emit phases to run as
     /// separate CLI invocations.

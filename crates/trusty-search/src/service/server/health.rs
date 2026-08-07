@@ -262,7 +262,7 @@ fn bootstrap_state_str(state: BootstrapState) -> &'static str {
 pub(super) async fn health_handler(
     State(state): State<Arc<SearchAppState>>,
 ) -> Json<HealthResponse> {
-    // Why: open-mpm (and other external integrators) probe `/health` to detect
+    // Why: trusty-agents (and other external integrators) probe `/health` to detect
     // a running trusty-search daemon before spawning their own. Including
     // `indexes` count lets the caller verify the daemon is not only alive but
     // also has the expected registry populated (issue #34).
@@ -275,7 +275,7 @@ pub(super) async fn health_handler(
     // Issue #1006 — Option B: this handler MUST NOT block on any contended
     // lock. An embed stall (CoreML/CUDA) can hold `embedder_slot` in a write
     // lock for up to 30 s; `.await`-ing it here would block the health handler
-    // for the same duration, causing external probes (trusty-review, open-mpm)
+    // for the same duration, causing external probes (trusty-review, trusty-agents)
     // to see a false "daemon down". All lock accesses below use either the
     // watch-based `is_embedder_ready()` (no lock) or `try_read()` / `try_lock()`
     // (returns immediately rather than parking the handler).

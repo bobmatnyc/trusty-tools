@@ -11,8 +11,8 @@ VERSION_UI := $(shell cargo metadata --no-deps --format-version 1 --manifest-pat
 # Why: The UI is embedded into the binary via rust-embed at compile time. If
 # you run `cargo build` without rebuilding the UI first, the embedded assets
 # are stale. After building, `make install` deploys wrapper scripts to
-# ~/.local/bin and ~/.cargo/bin so `open-mpm` on PATH always resolves to
-# target/release/open-mpm with .env.local auto-loaded.
+# ~/.local/bin and ~/.cargo/bin so `tagent` on PATH always resolves to
+# target/release/tagent with .env.local auto-loaded.
 build: ui-check
 	cargo build --release
 	@$(MAKE) install
@@ -23,17 +23,17 @@ build-release:
 	cargo build --release
 
 # Install the freshly built release binary and deploy the wrapper script.
-# The wrapper (~/.local/bin/open-mpm and ~/.cargo/bin/open-mpm) loads
+# The wrapper (~/.local/bin/tagent and ~/.cargo/bin/tagent) loads
 # .env.local automatically and supports the --llm-skills convenience flag.
 # ~/.cargo/bin takes PATH precedence over ~/.local/bin (rustup puts it first),
 # so both locations receive the same wrapper to ensure the correct binary runs.
-# Wrapper template: scripts/open-mpm-wrapper.sh
+# Wrapper template: scripts/tagent-wrapper.sh
 # Install helper:   scripts/install-wrapper.sh
 install:
 	cargo build --release
 	@bash scripts/install-wrapper.sh
 	@echo "Restart the API server to load the new binary:"
-	@echo "  pkill -f 'open-mpm --api' && open-mpm --api --port 7654 &"
+	@echo "  pkill -f 'tagent --api' && tagent --api --port 7654 &"
 
 test:
 	cargo test
@@ -51,18 +51,18 @@ lint: clippy fmt
 
 # ── Release builds both harness binary and Tauri app ─────────────────────────
 # Uses the wrapper-script installer (not cargo install --path .) so that
-# ~/.cargo/bin/open-mpm remains the .env.local-loading wrapper, not a raw binary.
+# ~/.cargo/bin/tagent remains the .env.local-loading wrapper, not a raw binary.
 release: ui-build
 	cargo build --release
 	@bash scripts/install-wrapper.sh
-	@echo "Installed open-mpm wrapper -> ~/.cargo/bin/open-mpm and ~/.local/bin/open-mpm"
+	@echo "Installed tagent wrapper -> ~/.cargo/bin/tagent and ~/.local/bin/tagent"
 
 version:
 	@echo $(VERSION)
 
 version-full:
-	@echo "open-mpm:    $(VERSION)"
-	@echo "open-mpm-ui: $(VERSION_UI)"
+	@echo "tagent:    $(VERSION)"
+	@echo "tagent-ui: $(VERSION_UI)"
 
 clean: ui-clean
 	cargo clean
@@ -144,23 +144,23 @@ ui-build:
 	@if [ ! -d ui/node_modules ]; then cd ui && pnpm install --frozen-lockfile; fi
 	cd ui && pnpm tauri build
 
-# Launch Tauri in hot-reload dev mode (also starts open-mpm sidecar)
+# Launch Tauri in hot-reload dev mode (also starts tagent sidecar)
 ui-dev:
 	@if [ ! -d ui/node_modules ]; then cd ui && pnpm install --frozen-lockfile; fi
 	cd ui && pnpm tauri dev
 
-# Launch the UI as a web app (requires `open-mpm --api` running separately).
-# Vite's `/api` proxy forwards requests to VITE_OMPM_PORT (defaults to 7654).
+# Launch the UI as a web app (requires `tagent --api` running separately).
+# Vite's `/api` proxy forwards requests to VITE_TAGENT_PORT (defaults to 7654).
 ui-web:
 	@echo "Start the API server first: cargo run -- --api --port 7654"
 	@if [ ! -d ui/node_modules ]; then cd ui && pnpm install --frozen-lockfile; fi
-	cd ui && VITE_OMPM_PORT=7654 pnpm dev
+	cd ui && VITE_TAGENT_PORT=7654 pnpm dev
 
-# Run Playwright browser smoke tests against a running open-mpm --api server.
-# Requires: server running at OMPM_URL (default http://localhost:7654).
-# Usage: make ui-test  OR  OMPM_URL=http://localhost:8080 make ui-test
+# Run Playwright browser smoke tests against a running tagent --api server.
+# Requires: server running at TAGENT_URL (default http://localhost:7654).
+# Usage: make ui-test  OR  TAGENT_URL=http://localhost:8080 make ui-test
 ui-test:
-	@echo "Running Playwright smoke tests against $${OMPM_URL:-http://localhost:7654}..."
+	@echo "Running Playwright smoke tests against $${TAGENT_URL:-http://localhost:7654}..."
 	@if [ ! -d ui/node_modules ]; then cd ui && pnpm install --frozen-lockfile; fi
 	cd ui && pnpm test
 

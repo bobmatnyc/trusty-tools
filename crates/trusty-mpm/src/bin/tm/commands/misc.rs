@@ -23,7 +23,7 @@ use crate::types::EventRow;
 /// the spawn side and gating the hook handler on the same var keeps the
 /// suppression cheap, explicit, and process-local. Re-exporting the shared
 /// constant from `trusty_common::claude_config` ensures the spawn site
-/// (`open-mpm`) and this consumer never drift apart on the literal name.
+/// (`trusty-agents`) and this consumer never drift apart on the literal name.
 /// What: thin alias for
 /// [`trusty_common::claude_config::CLAUDE_MPM_SUB_AGENT_ENV_VAR`]. Presence
 /// is what matters; the canonical value used by spawn helpers is `"1"`.

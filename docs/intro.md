@@ -16,11 +16,11 @@ This book is built from the `docs/` tree. Documentation is organized **by crate*
 - **Per-crate sections** — each crate's specification, design, research, user,
   and developer docs, plus its crate-specific decision records. Full spec
   coverage (PRD + Architecture + Components + Decisions) is complete for all
-  major crates: **open-mpm**, **trusty-mpm**, **trusty-search**,
+  major crates: **trusty-agents**, **trusty-mpm**, **trusty-search**,
   **trusty-memory**, **trusty-analyze**, **trusty-common**, and
   **trusty-git-analytics**. Lighter-tier library and sidecar crates
   (**trusty-embedderd**, **trusty-bm25-daemon**, **trusty-gworkspace**,
-  **trusty-cto-db**, **tc-services**, **open-mpm-agent-api**, **open-mpm-local**)
+  **trusty-cto-db**, **tc-services**, **trusty-agents-common**, **trusty-agents-local**)
   each carry an Overview and a `SPEC.md`.
 
 ## Conventions

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Harness inspection test runner (dry-run + live modes).
 #
-# Why: End-to-end validates the `open-mpm inspect` command produces the
+# Why: End-to-end validates the `tagent inspect` command produces the
 # expected agent routing for each entry in the harness test suite. Dry-run
 # (default) exercises registry routing with no LLM cost. Live mode
 # (`--live`) additionally runs one PM LLM turn per task and compares the
 # PM's delegation decision against the static prediction.
-# What: For each hard-coded task, spawns `open-mpm inspect --task "..."`
+# What: For each hard-coded task, spawns `tagent inspect --task "..."`
 # (with or without `--dry-run`), parses the JSON output, compares the
 # chosen agent against the expected agent name, and prints PASS / FAIL
 # with a running tally. Exits non-zero when any task fails.
@@ -21,10 +21,10 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BINARY="$PROJECT_ROOT/target/debug/open-mpm"
+BINARY="$PROJECT_ROOT/target/debug/tagent"
 
 if [ ! -f "$BINARY" ]; then
-  echo "Building open-mpm..."
+  echo "Building tagent..."
   cargo build --manifest-path="$PROJECT_ROOT/Cargo.toml"
 fi
 

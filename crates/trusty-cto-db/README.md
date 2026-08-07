@@ -97,7 +97,7 @@ Migrations are versioned and applied automatically. To add a new migration:
 - **tc-services**: High-level service layer queries
 - **directory MCP**: User and org lookups
 - **trusty-mpm**: Person context and preferences
-- **open-mpm**: Agent context and role-based access control
+- **trusty-agents**: Agent context and role-based access control
 
 ### Sync Sources
 

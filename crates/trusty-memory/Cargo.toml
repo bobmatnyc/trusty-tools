@@ -14,7 +14,7 @@ exclude = [".fastembed_cache/", "ui/node_modules/**"]
 
 [lib]
 # Why: Explicit `rlib` keeps the crate linkable as a Rust library from
-#      host processes (open-mpm) that want to register `MemoryMcpService`
+#      host processes (trusty-agents) that want to register `MemoryMcpService`
 #      directly via the shared `ServiceDescriptor` trait, rather than
 #      spawning a separate MCP stdio child. Matches the rest of the
 #      trusty-* ecosystem (see trusty-mcp-core) for consistency.
@@ -32,7 +32,7 @@ name = "trusty-memory"
 path = "src/main.rs"
 # Why: `serve` / `start` boot the axum HTTP/SSE daemon, so the binary needs
 #      the `axum-server` feature compiled in. Listing it here keeps
-#      `--no-default-features` library builds (e.g. open-mpm in-process linker
+#      `--no-default-features` library builds (e.g. trusty-agents in-process linker
 #      that only wants `MemoryMcpService`) from accidentally trying to build
 #      this binary without axum and failing to link `run_http_*`.
 required-features = ["axum-server"]
@@ -77,7 +77,7 @@ path = "src/bin/mcp_bridge.rs"
 
 [dependencies]
 # Why: `axum-server` is gated on this crate's own `axum-server` feature so
-#      downstream library consumers (e.g. `open-mpm` linking
+#      downstream library consumers (e.g. `trusty-agents` linking
 #      `trusty_memory::MemoryMcpService`) can drop the axum/tower-http
 #      surface entirely by setting `default-features = false`. The default
 #      build for the binary path keeps `axum-server` on (see [features]
@@ -105,7 +105,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 # Why (issue #226): axum + tower-http are HTTP-server only. Gating them behind
 #      the `axum-server` feature mirrors the rule already enforced in
-#      `trusty-common` and lets `open-mpm` (which only links
+#      `trusty-common` and lets `trusty-agents` (which only links
 #      `MemoryMcpService` for in-process `rpc.discover` merging) build a
 #      slimmer dependency tree by setting `default-features = false`.
 axum = { workspace = true, optional = true }
@@ -183,7 +183,7 @@ chrono = { workspace = true }
 
 [features]
 # Why (issue #226): library consumers that only need `MemoryMcpService` for
-#      in-process MCP discovery (e.g. `open-mpm`) should not be forced to
+#      in-process MCP discovery (e.g. `trusty-agents`) should not be forced to
 #      compile the axum + tower-http HTTP/SSE surface. Mirrors the
 #      `trusty-common` pattern where `axum-server` gates the same crates.
 # Defaults to `axum-server` so the `trusty-memory` / `trusty-bm25-daemon`
