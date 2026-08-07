@@ -129,6 +129,7 @@ impl TmuxAdapter {
             None,
             trusty_common::tmux::DEFAULT_TMUX_HISTORY_LIMIT,
             trusty_common::tmux::DEFAULT_TMUX_MOUSE,
+            trusty_common::tmux::DEFAULT_TMUX_ALTERNATE_SCREEN,
             false,
             Some(cmd),
         )
