@@ -145,7 +145,8 @@ pub struct DaemonConfig {
 /// wedged worker costs a bounded delay rather than an unkillable process.
 /// What: 2 seconds.
 /// Test: exercised by every shutdown path; the durability guarantee it
-/// protects is asserted by `a_reaped_palace_respawns_on_next_use`.
+/// protects is asserted by
+/// `tests/shutdown_flush.rs::shutdown_flushes_the_open_write_window`.
 const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Run the BM25 daemon to completion.
@@ -164,6 +165,38 @@ const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 /// Test: end-to-end coverage in `tests/bm25_daemon.rs` (spawns the binary
 /// and drives it over the UDS protocol).
 pub async fn run(config: DaemonConfig) -> Result<()> {
+    // Install the signal handlers BEFORE any of the startup work in
+    // `run_until`, so a SIGTERM arriving during snapshot load or socket bind
+    // reaches our shutdown path rather than the kernel's default disposition.
+    let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+    let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
+    run_until(config, async move {
+        tokio::select! {
+            _ = sigterm.recv() => tracing::info!("received SIGTERM — shutting down"),
+            _ = sigint.recv() => tracing::info!("received SIGINT — shutting down"),
+        }
+    })
+    .await
+}
+
+/// Run the daemon until `shutdown` resolves, then flush and clean up.
+///
+/// Why: the durability guarantee this function carries — that a shutdown
+/// flushes the write window still open in the batch worker — was only
+/// reachable through a real SIGTERM, which makes its regression test both
+/// `#[ignore]`-able and timing-dependent. Taking the shutdown trigger as a
+/// parameter lets a test fire it at an exact moment with no signals involved,
+/// so reverting the flush below fails the test deterministically instead of
+/// probabilistically. [`run`] supplies the real SIGTERM/SIGINT trigger and is
+/// otherwise identical.
+/// What: loads the snapshot, starts the batch worker, binds the socket, and
+/// races the accept loop against `shutdown`. Whichever wins, the snapshot is
+/// flushed (bounded by [`SHUTDOWN_FLUSH_TIMEOUT`]) and the socket file removed.
+/// Test: `tests/shutdown_flush.rs::shutdown_flushes_the_open_write_window`.
+pub async fn run_until<S>(config: DaemonConfig, shutdown: S) -> Result<()>
+where
+    S: std::future::Future<Output = ()>,
+{
     let DaemonConfig {
         palace,
         data_dir,
@@ -221,16 +254,8 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     let shutdown_queue = Arc::clone(&queue);
     let accept = tokio::spawn(server::run_accept_loop(listener, queue));
 
-    let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
-    let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
-
     tokio::select! {
-        _ = sigterm.recv() => {
-            tracing::info!("received SIGTERM — shutting down");
-        }
-        _ = sigint.recv() => {
-            tracing::info!("received SIGINT — shutting down");
-        }
+        _ = shutdown => {}
         _ = accept => {
             // The accept loop never returns in normal operation.
             tracing::warn!("accept loop exited unexpectedly");

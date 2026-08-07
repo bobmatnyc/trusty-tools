@@ -4,18 +4,24 @@
 //! the 500-SLOC cap, the same way `worker_liveness_tests.rs` is. Wired back in
 //! via `#[path] mod tests;`.
 //! What: covers the fail-open statuses (lane off, daemon absent, wedged
-//! daemon), the coverage predicate, and the drawer-extraction filter. The
-//! lossless-under-saturation property needs a real daemon and lives in
-//! `tests/bm25_backfill_e2e.rs`.
+//! daemon), the coverage predicate, and the drawer-extraction filter. Every
+//! test here calls the production function it names — a test that restates the
+//! logic inline passes against a deleted implementation, which is how three of
+//! these came to prove nothing. The lossless-under-saturation property needs a
+//! real daemon and lives in `tests/bm25_backfill_e2e.rs`.
 //! Test: this *is* the test file.
 
 use super::*;
+use trusty_common::memory_core::palace::Drawer;
+use uuid::Uuid;
 
 /// Why: with the lane off, a backfill must be a reported no-op — not an error
 /// that a caller has to catch, and not a silent success that makes an
 /// unindexed palace look covered.
-/// What: an `AppState` with no BM25 client, backfilled against a palace that
-/// does not need to exist because the check precedes any I/O.
+/// What: calls `backfill_state_palace` against an `AppState` with no BM25
+/// client. The lane check precedes every use of the handle, so a bare in-memory
+/// handle is enough to reach it — the point is that the REAL function is what
+/// produces the status, not a report built by hand.
 /// Test: this test itself.
 #[tokio::test]
 async fn backfill_state_palace_is_disabled_without_a_client() {
@@ -26,11 +32,47 @@ async fn backfill_state_palace_is_disabled_without_a_client() {
         "the lane must still be off by default — this PR does not flip it"
     );
 
-    // `backfill_state_palace` short-circuits on the client check before it
-    // touches the handle, so the Disabled path is reachable without one.
-    let report = BackfillReport::short_circuit("anything", BackfillStatus::Disabled, 0);
+    let handle = test_handle(tmp.path(), &["some content"]);
+    let report = backfill_state_palace(&state, &handle, "anything", false).await;
+
     assert_eq!(report.status, BackfillStatus::Disabled);
+    assert_eq!(
+        report.missing_after, None,
+        "a run that never happened has verified nothing"
+    );
     assert!(!report.fully_indexed());
+}
+
+/// Build an in-memory `PalaceHandle` holding one drawer per content string.
+///
+/// Why: the disabled and blank-filter paths need a real handle so the tests can
+/// call the production functions rather than restate them. Nothing here touches
+/// disk — `PalaceHandle::new` takes an in-memory vector store and KG.
+/// What: an empty palace with the given drawer contents pushed in.
+/// Test: used by the tests above and below.
+fn test_handle(
+    dir: &std::path::Path,
+    contents: &[&str],
+) -> trusty_common::memory_core::retrieval::PalaceHandle {
+    use trusty_common::memory_core::palace::PalaceId;
+    use trusty_common::memory_core::store::kg::KnowledgeGraph;
+    use trusty_common::memory_core::store::vector::UsearchStore;
+
+    let vs = UsearchStore::new(dir.join("idx.usearch"), 384).expect("vector store");
+    let kg = KnowledgeGraph::open(&dir.join("kg.db")).expect("kg");
+    let handle = trusty_common::memory_core::retrieval::PalaceHandle::new(
+        PalaceId::new("unit-test"),
+        String::new(),
+        vs,
+        kg,
+    );
+    {
+        let mut drawers = handle.drawers.write();
+        for c in contents {
+            drawers.push(Drawer::new(Uuid::new_v4(), *c));
+        }
+    }
+    handle
 }
 
 /// Why (fail-open, daemon absent): pointing the feeder at a socket nothing is
@@ -44,7 +86,7 @@ async fn backfill_state_palace_is_disabled_without_a_client() {
 async fn backfill_reports_daemon_unavailable_when_socket_is_dead() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let socket = tmp.path().join("nothing-here.sock");
-    let docs = vec![("d1".to_string(), "alpha beta".to_string())];
+    let docs = PalaceDocs::from_pairs(vec![("d1".to_string(), "alpha beta".to_string())]);
 
     let started = std::time::Instant::now();
     let report = backfill_palace(&socket, "ghost", docs, false).await;
@@ -52,6 +94,7 @@ async fn backfill_reports_daemon_unavailable_when_socket_is_dead() {
     assert_eq!(report.status, BackfillStatus::DaemonUnavailable);
     assert_eq!(report.indexed, 0);
     assert_eq!(report.drawers_total, 1);
+    assert_eq!(report.missing_after, None);
     assert!(!report.fully_indexed());
     assert!(
         started.elapsed() < OP_TIMEOUT,
@@ -64,9 +107,8 @@ async fn backfill_reports_daemon_unavailable_when_socket_is_dead() {
 /// the only thing standing between that and a stalled sweep, so it needs a
 /// test that actually produces the condition.
 /// What: binds a listener that accepts connections and then does nothing, and
-/// asserts the pre-flight `stats` gives up and reports the daemon unavailable.
-/// Uses a short local timeout budget by asserting on the status rather than
-/// waiting the full deadline — the test tolerates the 10 s worst case.
+/// asserts the pre-flight coverage probe gives up and reports the daemon
+/// unavailable.
 /// Test: this test itself.
 #[tokio::test]
 async fn backfill_gives_up_on_a_socket_that_never_answers() {
@@ -81,39 +123,63 @@ async fn backfill_gives_up_on_a_socket_that_never_answers() {
         }
     });
 
-    let docs = vec![("d1".to_string(), "alpha".to_string())];
+    let docs = PalaceDocs::from_pairs(vec![("d1".to_string(), "alpha".to_string())]);
     let report = backfill_palace(&socket, "silent", docs, false).await;
     assert_eq!(
         report.status,
         BackfillStatus::DaemonUnavailable,
         "a wedged daemon must be reported, not waited on forever"
     );
+    assert!(!report.fully_indexed());
 
     accepted.abort();
 }
 
-/// Why (fail-open, empty palace): a palace with nothing to index is fully
-/// indexed by definition. Reporting it as `Partial` would make a healthy
-/// no-op look like a failure and would keep the startup sweep retrying it.
+/// Why (fail-open, empty palace): a palace with nothing indexable is fully
+/// indexed by definition — there is no id that could be missing. It is the one
+/// case where coverage is established without asking the daemon, and it must
+/// not require a daemon to be reachable.
 /// Test: this test itself.
 #[tokio::test]
 async fn empty_palace_is_already_indexed() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let socket = tmp.path().join("unused.sock");
-    let report = backfill_palace(&socket, "empty", Vec::new(), false).await;
+    let report = backfill_palace(&socket, "empty", PalaceDocs::default(), false).await;
     assert_eq!(report.status, BackfillStatus::AlreadyIndexed);
     assert!(report.fully_indexed());
+    assert_eq!(report.missing_after, Some(0));
     assert_eq!(report.drawers_total, 0);
 }
 
-/// Why: this predicate is what a caller uses to decide whether an empty BM25
-/// result is trustworthy. It must be answered from the daemon's own read-back
-/// count, so a `Completed` run whose post-run `stats` failed reports `false` —
-/// "I sent everything" is not the same claim as "the daemon holds everything".
-/// What: walks the four interesting shapes of a completed report.
+/// Why: a palace of nothing but blank drawers has nothing to index, so it is
+/// covered — but its `drawers_total` must still report the drawers it holds,
+/// otherwise the report lies about the palace's size.
+/// Test: this test itself.
+#[tokio::test]
+async fn a_palace_of_only_blank_drawers_is_covered_and_counted() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("unused.sock");
+    let docs = PalaceDocs {
+        docs: Vec::new(),
+        skipped_empty: 3,
+    };
+    let report = backfill_palace(&socket, "blanks", docs, false).await;
+    assert!(report.fully_indexed());
+    assert_eq!(report.drawers_total, 3, "the palace holds three drawers");
+    assert_eq!(report.skipped_empty, 3);
+}
+
+/// Why: this predicate is the alarm the whole design rests on. It previously
+/// answered from `stats.doc_count >= drawers_total`, a COUNT comparison — and
+/// because trusty-memory issues no BM25 `delete`, stale documents accumulate
+/// until that comparison is satisfied by a corpus sharing no ids with the
+/// palace. It must now be answerable only by a verified, empty missing set.
+/// What: walks every shape of report, including the one that broke it — a
+/// daemon holding MORE documents than the palace has drawers while still
+/// missing one of them.
 /// Test: this test itself.
 #[test]
-fn fully_indexed_requires_a_read_back_count() {
+fn fully_indexed_requires_a_verified_empty_missing_set() {
     let base = BackfillReport {
         palace: "p".into(),
         status: BackfillStatus::Completed,
@@ -121,73 +187,286 @@ fn fully_indexed_requires_a_read_back_count() {
         skipped_empty: 0,
         indexed: 10,
         failed: 0,
+        missing_after: Some(0),
         final_doc_count: Some(10),
         elapsed_ms: 1,
     };
     assert!(base.fully_indexed());
 
-    let no_readback = BackfillReport {
-        final_doc_count: None,
+    // The regression: a corpus bloated with stale documents satisfies every
+    // count comparison while still missing a live drawer.
+    let stale_bloat = BackfillReport {
+        missing_after: Some(1),
+        final_doc_count: Some(400),
         ..base.clone()
     };
     assert!(
-        !no_readback.fully_indexed(),
+        !stale_bloat.fully_indexed(),
+        "400 documents cannot cover 10 drawers when one of the 10 is absent"
+    );
+    assert_eq!(stale_bloat.stale_doc_estimate(), Some(390));
+
+    let no_verification = BackfillReport {
+        missing_after: None,
+        ..base.clone()
+    };
+    assert!(
+        !no_verification.fully_indexed(),
         "an unverifiable run must not claim coverage"
     );
 
-    let short = BackfillReport {
-        final_doc_count: Some(9),
-        ..base.clone()
-    };
-    assert!(
-        !short.fully_indexed(),
-        "the daemon holding fewer docs than the palace has drawers is not coverage"
+    // Status alone must not be able to satisfy the predicate — this is the
+    // exact fail-open the `AlreadyIndexed` arm used to have.
+    for status in [
+        BackfillStatus::AlreadyIndexed,
+        BackfillStatus::Completed,
+        BackfillStatus::Partial,
+        BackfillStatus::DaemonUnavailable,
+        BackfillStatus::Disabled,
+    ] {
+        let unverified = BackfillReport {
+            status,
+            missing_after: None,
+            ..base.clone()
+        };
+        assert!(
+            !unverified.fully_indexed(),
+            "{status:?} must not claim coverage without a verified missing set"
+        );
+    }
+}
+
+/// Why: a short-circuit report is produced by paths that did no work and
+/// verified nothing. If its constructor defaulted `missing_after` to `Some(0)`
+/// the whole predicate would invert.
+/// Test: this test itself.
+#[test]
+fn short_circuit_reports_are_never_covered() {
+    for status in [
+        BackfillStatus::Disabled,
+        BackfillStatus::DaemonUnavailable,
+        BackfillStatus::Partial,
+    ] {
+        let r = BackfillReport::short_circuit("p", status, 7);
+        assert_eq!(r.missing_after, None);
+        assert!(!r.fully_indexed(), "{status:?}");
+        assert_eq!(r.drawers_total, 7);
+    }
+}
+
+/// Why: stale-document drift is what broke the old predicate. It must be
+/// visible to an operator and must never feed back into a coverage decision.
+/// Test: this test itself.
+#[test]
+fn stale_doc_estimate_is_reported_not_acted_on() {
+    let mut r = BackfillReport::short_circuit("p", BackfillStatus::Completed, 10);
+    r.skipped_empty = 2;
+    r.missing_after = Some(0);
+    r.final_doc_count = Some(50);
+    assert_eq!(
+        r.stale_doc_estimate(),
+        Some(42),
+        "8 indexable drawers, 50 documents held"
     );
+    assert!(r.fully_indexed(), "stale documents do not remove coverage");
 
-    let partial = BackfillReport {
-        status: BackfillStatus::Partial,
-        ..base.clone()
-    };
-    assert!(!partial.fully_indexed());
-
-    let unavailable = BackfillReport {
-        status: BackfillStatus::DaemonUnavailable,
-        ..base
-    };
-    assert!(!unavailable.fully_indexed());
+    r.final_doc_count = Some(3);
+    assert_eq!(r.stale_doc_estimate(), Some(0), "never negative");
+    r.final_doc_count = None;
+    assert_eq!(r.stale_doc_estimate(), None);
 }
 
 /// Why: a blank drawer indexes zero tokens and can never produce a hit, but it
-/// WOULD inflate the daemon's `doc_count`. Since `doc_count` is the figure the
-/// coverage comparison is built on, submitting blanks would let an
-/// under-indexed palace read as fully indexed.
-/// What: pins the filter to non-whitespace content.
+/// WOULD add a document to the daemon's corpus. It must be dropped from the
+/// submission set and still counted in the palace's size, because a report that
+/// silently forgets blank drawers understates what the palace holds.
+/// What: calls the production splitter with real `Drawer` values — the earlier
+/// version of this test re-implemented the filter inline and passed whether or
+/// not `docs_from_drawers` existed.
 /// Test: this test itself.
 #[test]
-fn palace_docs_skips_blank_drawers() {
-    // The filter is the load-bearing part; assert it directly rather than
-    // standing up a full palace on disk.
-    let contents = ["real content", "", "   ", "\n\t", "also real"];
-    let kept: Vec<&str> = contents
+fn docs_from_drawers_splits_blank_from_indexable() {
+    let room = Uuid::new_v4();
+    let drawers: Vec<Drawer> = ["real content", "", "   ", "\n\t", "also real"]
         .iter()
-        .copied()
-        .filter(|c| !c.trim().is_empty())
+        .map(|c| Drawer::new(room, *c))
         .collect();
-    assert_eq!(kept, vec!["real content", "also real"]);
+
+    let split = docs_from_drawers(&drawers);
+
+    let texts: Vec<&str> = split.docs.iter().map(|(_, t)| t.as_str()).collect();
+    assert_eq!(texts, vec!["real content", "also real"]);
+    assert_eq!(split.skipped_empty, 3);
+    assert_eq!(split.drawers_total(), 5);
+    for (id, _) in &split.docs {
+        assert!(
+            drawers.iter().any(|d| d.id.to_string() == *id),
+            "doc ids must be the drawer ids the coverage probe will ask about"
+        );
+    }
+}
+
+/// Why: `palace_docs` is the lock-holding wrapper the production path uses; a
+/// test that only exercises the inner splitter would not catch a wrapper that
+/// read the wrong field.
+/// Test: this test itself.
+#[test]
+fn palace_docs_reads_the_drawer_table() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let handle = test_handle(tmp.path(), &["alpha", "  ", "beta"]);
+    let split = palace_docs(&handle);
+    assert_eq!(split.docs.len(), 2);
+    assert_eq!(split.skipped_empty, 1);
+    assert_eq!(split.drawers_total(), 3);
 }
 
 /// Why: the opt-out exists so an operator can keep the lane on while deferring
 /// the sweep. If it were wired to the lane check instead, saying "not now"
 /// would also say "not ever".
-/// What: with no client the sweep is skipped regardless; this pins that the
-/// env var is read as an exact `"1"`, matching every other trusty-* flag.
+/// What: calls the production guard with each value set in the environment —
+/// the earlier version compared a locally-built `Ok(value).as_deref()` against
+/// `Ok("1")`, which is the guard's source restated, not the guard.
 /// Test: this test itself.
 #[test]
 fn startup_backfill_respects_the_opt_out() {
     assert_eq!(ENV_NO_BACKFILL, "TRUSTY_BM25_NO_BACKFILL");
-    // The sweep's guard is `== Ok("1")`; anything else must not disable it.
+    let prev = std::env::var(ENV_NO_BACKFILL).ok();
+
     for (value, expected) in [("1", true), ("0", false), ("true", false), ("", false)] {
-        let disabled = Ok::<&str, ()>(value).as_deref() == Ok("1");
-        assert_eq!(disabled, expected, "value {value:?}");
+        // SAFETY: test-only env mutation, restored below. No other test in
+        // this module reads this variable.
+        unsafe { std::env::set_var(ENV_NO_BACKFILL, value) };
+        assert_eq!(startup_backfill_opted_out(), expected, "value {value:?}");
     }
+
+    // SAFETY: same invariant — restoring the captured prior value.
+    unsafe { std::env::remove_var(ENV_NO_BACKFILL) };
+    assert!(
+        !startup_backfill_opted_out(),
+        "an unset variable must leave the sweep enabled"
+    );
+    if let Some(v) = prev {
+        // SAFETY: restoring the caller's environment.
+        unsafe { std::env::set_var(ENV_NO_BACKFILL, v) };
+    }
+}
+
+/// Spawn a stub daemon that answers every frame with `reply`, counting frames.
+///
+/// Why: the coverage probe's three outcomes and its chunking both need a
+/// controllable peer. A real daemon cannot be made to answer `-32601`, and a
+/// test that constructs the `Coverage` value by hand would restate the
+/// classification instead of exercising it.
+/// What: binds `socket`, and for every newline-delimited request writes
+/// `reply(seen)` back. Returns the shared request counter and the task handle.
+/// Test: used by the two tests below.
+fn stub_daemon(
+    socket: std::path::PathBuf,
+    reply: fn(usize) -> String,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&seen);
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind stub daemon");
+    let handle = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let counter = std::sync::Arc::clone(&counter);
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let out = format!("{}\n", reply(n));
+                    if write_half.write_all(out.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    line.clear();
+                }
+            });
+        }
+    });
+    (seen, handle)
+}
+
+/// Why: the three ways a coverage probe can end are three different operator
+/// situations, and only one of them may skip work. Collapsing "the daemon is
+/// too old to answer" into "the daemon is gone" sends an operator hunting a
+/// dead socket that is in fact serving; collapsing either into "covered" is
+/// the fail-open this whole module exists to remove.
+/// What: drives the real `probe_coverage` against stub daemons answering a
+/// clean result, a `-32601`, and an internal error.
+/// Test: this test itself.
+#[tokio::test]
+async fn coverage_probe_classifies_the_three_failure_modes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ids = vec!["a".to_string(), "b".to_string()];
+
+    let ok = tmp.path().join("ok.sock");
+    let (_n, h) = stub_daemon(ok.clone(), |_| {
+        r#"{"jsonrpc":"2.0","result":{"missing":["b"],"checked":2},"id":1}"#.to_string()
+    });
+    let client = Bm25Client::new(ok);
+    assert_eq!(
+        probe_coverage(&client, "p", &ids).await,
+        Coverage::Missing(1)
+    );
+    h.abort();
+
+    let old = tmp.path().join("old.sock");
+    let (_n, h) = stub_daemon(old.clone(), |_| {
+        r#"{"jsonrpc":"2.0","error":{"code":-32601,"message":"unknown method: missing_docs"},"id":1}"#
+            .to_string()
+    });
+    let client = Bm25Client::new(old);
+    assert_eq!(
+        probe_coverage(&client, "p", &ids).await,
+        Coverage::Unsupported,
+        "a daemon that predates the op must be reported as such, never as covered"
+    );
+    h.abort();
+
+    let broken = tmp.path().join("broken.sock");
+    let (_n, h) = stub_daemon(broken.clone(), |_| {
+        r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"index poisoned"},"id":1}"#.to_string()
+    });
+    let client = Bm25Client::new(broken);
+    assert_eq!(
+        probe_coverage(&client, "p", &ids).await,
+        Coverage::Unreachable
+    );
+    h.abort();
+}
+
+/// Why: the wire framing is one JSON line per request, so an unchunked probe
+/// over the largest palace on this host would build a single ~50 KB frame.
+/// Chunking must not change the answer — the missing counts have to sum.
+/// What: 600 ids against a chunk size of 256 must produce exactly three
+/// requests, and the per-chunk missing sets must add up.
+/// Test: this test itself.
+#[tokio::test]
+async fn coverage_probe_chunks_large_id_sets() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("chunked.sock");
+    // Each chunk reports exactly one missing doc, so three chunks sum to three.
+    let (seen, h) = stub_daemon(socket.clone(), |_| {
+        r#"{"jsonrpc":"2.0","result":{"missing":["x"],"checked":1},"id":1}"#.to_string()
+    });
+    let ids: Vec<String> = (0..600).map(|i| format!("d{i}")).collect();
+    let client = Bm25Client::new(socket);
+
+    assert_eq!(
+        probe_coverage(&client, "p", &ids).await,
+        Coverage::Missing(3),
+        "the missing sets of every chunk must sum"
+    );
+    assert_eq!(
+        seen.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "600 ids at a chunk size of {COVERAGE_CHUNK} must be three requests"
+    );
+    h.abort();
 }

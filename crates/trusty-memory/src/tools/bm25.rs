@@ -123,7 +123,11 @@ pub struct Bm25IndexRequest {
 /// and calls `client.index()`. Errors are logged at `warn!` and dropped —
 /// BM25 indexing is best-effort and the drawer is durable in redb regardless.
 /// If `client` is `None` (env var not set at startup) the worker still runs
-/// and silently drops every request, which keeps the channel drained.
+/// and silently drops every request, which keeps the channel drained — that is
+/// not a coverage gap, because the lane is off.
+/// A request the worker accepts but cannot land (daemon spawn refused, index
+/// call failed) DOES mark the palace in `dirty`, so the repair sweep re-runs
+/// the backfill instead of the gap surviving until the next restart.
 /// Test: indirectly covered by the integration tests in
 /// `trusty-bm25-daemon/tests/`; `bm25_index_queue_drops_when_full` covers the
 /// back-pressure behaviour.
@@ -131,6 +135,7 @@ pub fn spawn_bm25_index_worker(
     mut rx: tokio::sync::mpsc::Receiver<Bm25IndexRequest>,
     client: Option<std::sync::Arc<trusty_common::bm25_client::Bm25Client>>,
     supervisor: Option<std::sync::Arc<crate::bm25_supervisor::Bm25Supervisor>>,
+    dirty: crate::bm25_repair::DirtyPalaces,
 ) {
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
@@ -144,6 +149,10 @@ pub fn spawn_bm25_index_worker(
             // the daemon will be retried on the next request.
             if let Some(sup) = supervisor.as_ref() {
                 if let Err(e) = sup.ensure_running(&req.palace, &req.data_dir).await {
+                    // The write did not land. Same reasoning as the dropped
+                    // enqueue: queue the palace so a repair pass re-runs the
+                    // backfill rather than leaving the gap until restart.
+                    dirty.insert(req.palace.clone());
                     tracing::warn!(
                         palace = %req.palace,
                         "bm25 supervisor failed to start daemon for index (non-fatal): {e:#}"
@@ -152,6 +161,7 @@ pub fn spawn_bm25_index_worker(
                 }
             }
             if let Err(e) = client.index(&req.drawer_id, &req.content).await {
+                dirty.insert(req.palace.clone());
                 tracing::warn!(
                     palace = %req.palace,
                     drawer_id = %req.drawer_id,
@@ -189,10 +199,15 @@ pub(crate) fn bm25_index_enqueue(state: &AppState, palace: &str, drawer_id: Uuid
     match state.bm25_index_tx.try_send(req) {
         Ok(()) => {}
         Err(tokio::sync::mpsc::error::TrySendError::Full(req)) => {
+            // #5048 review: a drop is only an acceptable trade if something
+            // repairs it. Mark the palace so the periodic repair sweep
+            // re-runs the lossless backfill instead of the coverage gap
+            // surviving until the next daemon restart.
+            crate::bm25_repair::mark_dirty(state, &req.palace);
             tracing::warn!(
                 palace = %req.palace,
                 drawer_id = %req.drawer_id,
-                "BM25 index queue full — skipping drawer {}",
+                "BM25 index queue full — dropped drawer {}, palace queued for repair",
                 req.drawer_id
             );
         }

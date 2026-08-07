@@ -20,7 +20,7 @@
 use std::path::PathBuf;
 
 use trusty_common::bm25_client::Bm25Client;
-use trusty_memory::bm25_backfill::{backfill_palace, BackfillStatus};
+use trusty_memory::bm25_backfill::{backfill_palace, BackfillStatus, PalaceDocs};
 use trusty_memory::bm25_supervisor::Bm25Supervisor;
 use trusty_memory::tools::BM25_INDEX_QUEUE_CAPACITY;
 
@@ -110,8 +110,15 @@ async fn backfill_indexes_every_drawer_without_drops() {
         .await
         .expect("supervisor must spawn the daemon");
 
+    let docs_for_drift = docs.clone();
     let started = std::time::Instant::now();
-    let report = backfill_palace(&socket, &palace, docs.clone(), false).await;
+    let report = backfill_palace(
+        &socket,
+        &palace,
+        PalaceDocs::from_pairs(docs.clone()),
+        false,
+    )
+    .await;
     let elapsed = started.elapsed();
 
     assert_eq!(
@@ -144,10 +151,45 @@ async fn backfill_indexes_every_drawer_without_drops() {
     );
 
     // Idempotent: a second run sees full coverage and does no work.
-    let again = backfill_palace(&socket, &palace, docs, false).await;
+    let again = backfill_palace(&socket, &palace, PalaceDocs::from_pairs(docs), false).await;
     assert_eq!(again.status, BackfillStatus::AlreadyIndexed);
     assert_eq!(again.indexed, 0, "a covered palace must not be re-fed");
+    assert_eq!(
+        again.missing_after,
+        Some(0),
+        "the skip must be a VERIFIED set"
+    );
     assert!(again.fully_indexed());
+
+    // The identity guarantee: a corpus inflated with documents the palace does
+    // not have must NOT read as coverage. Against the old count-based
+    // predicate, deleting one live doc and adding two stale ones leaves
+    // `doc_count` above the drawer count and `AlreadyIndexed` claims full
+    // coverage over a palace missing a drawer.
+    client.delete("drawer-7").await.expect("delete a live doc");
+    for i in 0..2 {
+        client
+            .index(&format!("stale-{i}"), "a drawer the palace no longer has")
+            .await
+            .expect("seed a stale doc");
+    }
+    let drifted = backfill_palace(
+        &socket,
+        &palace,
+        PalaceDocs::from_pairs(docs_for_drift),
+        false,
+    )
+    .await;
+    assert!(
+        drifted.final_doc_count.unwrap() > drifted.drawers_total,
+        "precondition: the corpus is larger than the palace, so every count \
+         comparison reports coverage"
+    );
+    assert_eq!(
+        drifted.indexed, doc_count,
+        "the missing drawer must have triggered a real run, not the skip"
+    );
+    assert!(drifted.fully_indexed(), "and the run must have repaired it");
 
     supervisor.shutdown().await;
 }
@@ -191,13 +233,14 @@ async fn partial_index_is_detected_and_repaired() {
     let mid = client.stats().await.expect("stats");
     assert_eq!(mid.doc_count, total / 2, "seed must be half the corpus");
 
-    let report = backfill_palace(&socket, &palace, docs, false).await;
+    let report = backfill_palace(&socket, &palace, PalaceDocs::from_pairs(docs), false).await;
     assert_eq!(
         report.status,
         BackfillStatus::Completed,
         "a shortfall must trigger a real run, not the already-indexed skip: {report:?}"
     );
     assert_eq!(report.indexed, total);
+    assert_eq!(report.missing_after, Some(0));
     assert_eq!(report.final_doc_count, Some(total));
     assert!(report.fully_indexed());
 

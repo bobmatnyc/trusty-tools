@@ -76,6 +76,7 @@ pub mod activity;
 pub mod attribution;
 pub mod authz;
 pub mod bm25_backfill;
+pub mod bm25_repair;
 pub mod bm25_supervisor;
 pub mod bootstrap;
 /// Autonomous Dreamer scheduler — spawns per-palace dream loops on daemon startup.
@@ -578,6 +579,18 @@ pub struct AppState {
     /// Test: `bm25_index_queue_drops_when_full` exercises the full-queue
     /// branch via `bm25_index_enqueue`.
     pub bm25_index_tx: tokio::sync::mpsc::Sender<tools::Bm25IndexRequest>,
+    /// Palaces whose BM25 coverage is known to be incomplete (#5048 review).
+    ///
+    /// Why: `bm25_index_enqueue` drops on a full queue so `memory_remember`
+    /// never waits on daemon RTT. That trade is only defensible if a drop is
+    /// actually repaired, and before this field the sole production trigger for
+    /// a backfill was daemon startup — so a drop stayed invisible until the
+    /// next restart. Every observer of lost coverage marks the palace here and
+    /// [`bm25_repair::spawn_repair_sweep`] consumes it on an interval.
+    /// What: a `DashSet` of palace ids, shared by every `AppState` clone.
+    /// Idempotent — forty drops for one palace queue one repair.
+    /// Test: `bm25_repair_tests.rs`, `bm25_index_queue_drops_when_full`.
+    pub bm25_dirty: bm25_repair::DirtyPalaces,
     /// Cached result of the startup update check (issue #537).
     ///
     /// Why: `/health` should report `update_available` without hitting crates.io
@@ -635,7 +648,8 @@ impl AppState {
         // `bm25_client` / `bm25_supervisor` start as `None`; the builder
         // `with_bm25_client_from_env` rebuilds the worker with the real
         // client + supervisor once env-gated opt-in is resolved.
-        tools::spawn_bm25_index_worker(bm25_index_rx, None, None);
+        let bm25_dirty: bm25_repair::DirtyPalaces = Arc::new(dashmap::DashSet::new());
+        tools::spawn_bm25_index_worker(bm25_index_rx, None, None, Arc::clone(&bm25_dirty));
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Idle-to-disk: honour TRUSTY_MEMORY_MAX_OPEN_PALACES (default 64)
@@ -676,6 +690,7 @@ impl AppState {
             palace_names: Arc::new(dashmap::DashMap::new()),
             pin_project_map: Arc::new(dashmap::DashMap::new()),
             bm25_index_tx,
+            bm25_dirty,
             update_available: Arc::new(std::sync::Mutex::new(None)),
             // Start in Warming state; flipped to Ready by spawn_startup_tasks
             // once the embedder warm-up succeeds (issues #910/#911).
@@ -770,6 +785,7 @@ impl AppState {
                 rx,
                 self.bm25_client.clone(),
                 self.bm25_supervisor.clone(),
+                Arc::clone(&self.bm25_dirty),
             );
             self.bm25_index_tx = tx;
             tracing::info!(

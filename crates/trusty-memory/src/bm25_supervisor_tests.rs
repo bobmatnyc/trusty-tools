@@ -460,3 +460,30 @@ async fn shutdown_does_not_count_as_a_limit_reap() {
     assert_eq!(sup.supervised_count().await, 0);
     assert_eq!(sup.reaped_count(), 0);
 }
+
+/// Why (#5048 review): the supervisor's SIGTERM patience must exceed the
+/// daemon's own shutdown-flush budget with margin. At an equal budget the
+/// SIGKILL lands inside the flush the durability fix added and the open write
+/// window is lost. Pinning the relationship here means a future tightening of
+/// either number has to be a deliberate choice.
+/// What: asserts the patience is strictly greater than
+/// `trusty_bm25_daemon`'s 2 s `SHUTDOWN_FLUSH_TIMEOUT`, with real margin.
+/// Test: this test itself.
+#[test]
+fn sigterm_patience_exceeds_the_daemon_flush_budget() {
+    // The daemon's own budget. Not importable — `trusty-memory` depends on the
+    // daemon crate only for the bundled binary shim, and the constant is
+    // private — so it is restated with a pointer, the same way the BM25 client
+    // restates the wire method names.
+    let daemon_flush_budget = Duration::from_secs(2);
+    assert!(
+        SIGTERM_PATIENCE > daemon_flush_budget,
+        "the supervisor must outwait the daemon's flush: {SIGTERM_PATIENCE:?} vs \
+         {daemon_flush_budget:?}"
+    );
+    assert!(
+        SIGTERM_PATIENCE - daemon_flush_budget >= Duration::from_secs(2),
+        "leave room for signal delivery, socket cleanup and process exit on top \
+         of the flush itself"
+    );
+}

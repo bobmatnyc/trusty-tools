@@ -131,6 +131,16 @@ const SPAWN_PROBE_TIMEOUT: Duration = Duration::from_millis(3000);
 /// the full 3 s budget when the daemon is ready in ~20 ms.
 const INITIAL_PROBE_INTERVAL: Duration = Duration::from_millis(20);
 
+/// How long the supervisor waits after SIGTERM before escalating to SIGKILL.
+///
+/// Why: strictly greater than the daemon's own `SHUTDOWN_FLUSH_TIMEOUT` (2 s),
+/// because the daemon needs signal delivery, the flush itself, socket cleanup
+/// and exit inside this window. An equal budget means the SIGKILL can land
+/// mid-flush and lose the write window the flush exists to save.
+/// What: 5 seconds.
+/// Test: `sigterm_patience_exceeds_the_daemon_flush_budget`.
+const SIGTERM_PATIENCE: Duration = Duration::from_secs(5);
+
 /// Ceiling on the exponential backoff so we never sleep longer than 250 ms
 /// between probes — at the 3 s budget this gives ~16 probes which is more
 /// than enough to catch any reasonable startup latency.
@@ -214,6 +224,19 @@ pub struct Bm25Supervisor {
     /// Count of children reaped by the cap or the RSS limit (never by
     /// `shutdown`). Observability + test assertion surface.
     reaped: std::sync::atomic::AtomicU64,
+    /// Count of `trusty-bm25-daemon` child processes this supervisor has
+    /// launched.
+    ///
+    /// Why: without it, a double spawn is invisible from outside. Two racing
+    /// callers for one palace both launch a daemon; the loser's bind fails
+    /// with EADDRINUSE and its process dies, and the map still ends up holding
+    /// exactly one entry — so `supervised_count()` reports the same number
+    /// whether the serialisation worked or not. Counting launches is what
+    /// makes `spawn_gate` a claim a test can falsify.
+    /// What: monotonic, incremented once per successful `Command::spawn`
+    /// regardless of whether the socket probe later succeeds.
+    /// Test: `concurrent_callers_for_one_palace_spawn_exactly_one_daemon`.
+    spawned: std::sync::atomic::AtomicU64,
 }
 
 impl Bm25Supervisor {
@@ -250,6 +273,7 @@ impl Bm25Supervisor {
             rss_limit_mb,
             clock: std::sync::atomic::AtomicU64::new(0),
             reaped: std::sync::atomic::AtomicU64::new(0),
+            spawned: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -273,6 +297,19 @@ impl Bm25Supervisor {
     /// Test: `exceeding_the_cap_reaps_the_least_recently_used`.
     pub fn reaped_count(&self) -> u64 {
         self.reaped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many daemon processes this supervisor has launched.
+    ///
+    /// Why: this is the only externally-visible difference between "spawns are
+    /// serialised" and "spawns race". A double spawn leaves the map holding
+    /// one entry either way — the loser's daemon fails its bind and dies — so
+    /// `supervised_count()` cannot tell the two apart and a test written
+    /// against it passes with `spawn_gate` deleted.
+    /// What: monotonic count of successful `Command::spawn` calls.
+    /// Test: `concurrent_callers_for_one_palace_spawn_exactly_one_daemon`.
+    pub fn spawned_count(&self) -> u64 {
+        self.spawned.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Ensure a `trusty-bm25-daemon` is running for `palace` and return the
@@ -359,6 +396,10 @@ impl Bm25Supervisor {
             locate_bm25_daemon_binary().context("locate trusty-bm25-daemon binary for spawn")?;
         let child = spawn_child(&binary, palace, data_dir)
             .await
+            .inspect(|_| {
+                self.spawned
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })
             .with_context(|| {
                 format!(
                     "spawn trusty-bm25-daemon {} for palace {palace}",
@@ -421,7 +462,7 @@ impl Bm25Supervisor {
     /// be read) is removed from the map and `None` is returned, so the caller
     /// falls through to a fresh spawn. Removing a corpse does NOT count as a
     /// reap — nothing was reclaimed.
-    /// Test: `dead_child_is_evicted_and_respawned` (e2e).
+    /// Test: `a_dead_child_is_evicted_and_respawned` (e2e).
     async fn lookup_live(&self, palace: &str) -> Option<PathBuf> {
         let stamp = self.tick();
         let mut guard = self.children.lock().await;
@@ -473,11 +514,11 @@ impl Bm25Supervisor {
     /// platform where the read is unavailable. Second, while the survivors
     /// plus `headroom` would exceed `max_live`, the least-recently-used
     /// survivor is selected. Victims are removed from the map under the lock,
-    /// then terminated with the lock released so a 2 s SIGTERM wait never
-    /// blocks another palace's lookup.
+    /// then terminated with the lock released so the SIGTERM wait never blocks
+    /// another palace's lookup.
     /// Test: `exceeding_the_cap_reaps_the_least_recently_used`,
     /// `over_rss_limit_children_are_reaped`,
-    /// `unmeasurable_rss_does_not_reap`.
+    /// `over_rss_limit_is_false_without_a_measurement`.
     async fn enforce_limits(&self, headroom: usize) {
         let mut victims: Vec<(String, ChildHandle, &'static str)> = Vec::new();
         {
@@ -800,9 +841,14 @@ async fn spawn_child(binary: &Path, palace: &str, data_dir: &Path) -> Result<Chi
 /// Send SIGTERM, wait briefly, then SIGKILL if still alive.
 ///
 /// Why: a clean SIGTERM lets the daemon flush its BM25 snapshot and
-/// remove its socket; a SIGKILL is the fallback if the daemon hangs.
-/// 2 s is comfortably larger than the daemon's flush window (the batch
-/// queue's coalescing window is 100 ms by default).
+/// remove its socket; a SIGKILL is the fallback if the daemon hangs. The wait
+/// must exceed the daemon's OWN shutdown budget with margin, not merely match
+/// it: `trusty-bm25-daemon` allows itself 2 s for the shutdown flush
+/// (`lib.rs`'s `SHUTDOWN_FLUSH_TIMEOUT`) and still needs signal delivery,
+/// socket cleanup, and process exit on top. At an equal 2 s the SIGKILL landed
+/// inside the very flush the durability fix added — no corruption, since the
+/// flush is tmp+rename, but the window's writes were lost. 5 s leaves 3 s of
+/// margin over the daemon's worst case.
 /// What: on Unix sends SIGTERM via `nix::sys::signal::kill` would add a
 /// dep, so we use `tokio::process::Child::start_kill` on the doomsday
 /// path and `Child::kill` (which sends SIGKILL) only as a fallback.
@@ -826,8 +872,8 @@ async fn terminate_child(child: &mut Child) -> Result<()> {
         }
     }
 
-    // Give the child up to 2 s to exit on its own.
-    let wait_result = tokio::time::timeout(Duration::from_millis(2000), child.wait()).await;
+    // Give the child longer than its own flush budget to exit on its own.
+    let wait_result = tokio::time::timeout(SIGTERM_PATIENCE, child.wait()).await;
     match wait_result {
         Ok(Ok(status)) => {
             tracing::debug!(?status, "bm25 daemon exited after SIGTERM");
@@ -838,7 +884,9 @@ async fn terminate_child(child: &mut Child) -> Result<()> {
             // Still alive — force-kill. `kill()` here is tokio's
             // method which sends SIGKILL and waits, so by the time it
             // returns the process is definitely gone.
-            tracing::warn!("bm25 daemon ignored SIGTERM after 2s — sending SIGKILL");
+            tracing::warn!(
+                "bm25 daemon ignored SIGTERM after {SIGTERM_PATIENCE:?} — sending SIGKILL"
+            );
             child
                 .kill()
                 .await

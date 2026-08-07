@@ -78,6 +78,10 @@ enum Op {
     Flush {
         reply: oneshot::Sender<Result<usize>>,
     },
+    MissingDocs {
+        doc_ids: Vec<String>,
+        reply: oneshot::Sender<Result<Vec<String>>>,
+    },
 }
 
 /// Configuration for the write-coalescing window and size.
@@ -240,6 +244,31 @@ impl BatchQueue {
             .map_err(|_| anyhow!("bm25 batch worker dropped reply channel"))?
     }
 
+    /// Which of `doc_ids` the live index does not hold.
+    ///
+    /// Why: this is the coverage question `stats` cannot answer. A backfiller
+    /// comparing counts declares a palace covered as soon as the daemon holds
+    /// enough documents, regardless of WHICH documents those are — so a corpus
+    /// carrying stale entries reads as complete over drawers it has never
+    /// seen. Asking by id removes the inference entirely.
+    /// What: sends `Op::MissingDocs`; the worker answers it inline (like
+    /// `Search` and `Stats`) so it never waits out the write-coalescing
+    /// window, and so the answer includes writes acked but not yet flushed.
+    /// Test: `batch_queue_missing_docs_sees_pending_writes`.
+    pub async fn missing_docs(&self, doc_ids: Vec<String>) -> Result<Vec<String>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Op::MissingDocs {
+                doc_ids,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow!("bm25 batch worker channel closed"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("bm25 batch worker dropped reply channel"))?
+    }
+
     /// Run a BM25 search against the live index.
     ///
     /// Why: search is read-only but still flows through the worker so the
@@ -317,6 +346,10 @@ async fn batch_worker(mut rx: mpsc::Receiver<Op>, mut index: PalaceBm25Index, co
                 let _ = reply.send(flush_now(&mut index));
                 continue;
             }
+            Op::MissingDocs { doc_ids, reply } => {
+                let _ = reply.send(Ok(index.missing_docs(&doc_ids)));
+                continue;
+            }
             Op::Rebuild { reply } => {
                 let new_count = index.rebuild();
                 let flush_result = index
@@ -358,6 +391,13 @@ async fn batch_worker(mut rx: mpsc::Receiver<Op>, mut index: PalaceBm25Index, co
                         // figures a backfiller reads mid-run never lag behind
                         // the acks it has already collected.
                         let _ = reply.send(Ok(stats_of(&index)));
+                    }
+                    Some(Op::MissingDocs { doc_ids, reply }) => {
+                        // Same race-freedom argument as `Search` and `Stats`:
+                        // every write dispatched before this op is already
+                        // applied, so a coverage check taken mid-run never
+                        // reports a document missing that was already acked.
+                        let _ = reply.send(Ok(index.missing_docs(&doc_ids)));
                     }
                     Some(Op::Flush { reply }) => {
                         // Flushing mid-batch is safe and is the whole point:
@@ -470,7 +510,11 @@ fn apply_write_op(index: &mut PalaceBm25Index, op: Op) {
         }
         // Caller guarantees only write ops reach here; treat anything else
         // as a programmer error in this module.
-        Op::Search { .. } | Op::Rebuild { .. } | Op::Stats { .. } | Op::Flush { .. } => {
+        Op::Search { .. }
+        | Op::Rebuild { .. }
+        | Op::Stats { .. }
+        | Op::Flush { .. }
+        | Op::MissingDocs { .. } => {
             tracing::error!("apply_write_op called with non-write op — this is a bug");
         }
     }
@@ -572,6 +616,31 @@ mod tests {
         let s = q.stats().await.unwrap();
         assert_eq!(s.doc_count, 3, "stats must see un-flushed writes");
         assert_eq!(s.total_text_bytes, 14);
+    }
+
+    /// Why: a coverage check taken while a backfill is still running must see
+    /// every document the daemon has already acked, otherwise the backfiller
+    /// re-sends work it landed — or, on the post-run check, reports a document
+    /// missing that is sitting un-flushed in the open write window and marks a
+    /// complete palace incomplete.
+    /// What: indexes two docs and asks about three WITHOUT sleeping past the
+    /// coalescing window; only the never-sent id comes back.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn batch_queue_missing_docs_sees_pending_writes() {
+        let (q, _dir) = fresh_queue();
+        let asked = vec!["d1".to_string(), "d2".to_string(), "d3".to_string()];
+        assert_eq!(q.missing_docs(asked.clone()).await.unwrap(), asked);
+
+        q.index_doc("d1".into(), "alpha".into()).await.unwrap();
+        q.index_doc("d2".into(), "beta".into()).await.unwrap();
+
+        // No sleep — deliberately inside the coalescing window.
+        assert_eq!(
+            q.missing_docs(asked).await.unwrap(),
+            vec!["d3".to_string()],
+            "missing_docs must see un-flushed writes"
+        );
     }
 
     /// Why: a backfiller distinguishes "not indexed" from "indexed, no hits"

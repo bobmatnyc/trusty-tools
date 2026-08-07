@@ -220,6 +220,25 @@ impl PalaceBm25Index {
         self.docs.values().map(|t| t.len() as u64).sum()
     }
 
+    /// Which of `doc_ids` this index does not hold.
+    ///
+    /// Why: coverage is a SET question, and [`Self::doc_count`] answers a
+    /// different one. The two agree only while the index holds exactly the
+    /// caller's documents and nothing else; one stale document left behind by
+    /// a delete that never happened is enough to make the count report
+    /// coverage the set does not have. Answering by id removes the inference.
+    /// What: retains the requested ids absent from `docs`, in request order.
+    /// Duplicated request ids are reported once per occurrence — the caller
+    /// owns de-duplication. O(n log m) over the requested ids.
+    /// Test: `missing_docs_answers_by_identity_not_count`.
+    pub fn missing_docs(&self, doc_ids: &[String]) -> Vec<String> {
+        doc_ids
+            .iter()
+            .filter(|id| !self.docs.contains_key(*id))
+            .cloned()
+            .collect()
+    }
+
     /// Snapshot path the daemon writes to. Exposed for diagnostics / tests.
     #[allow(dead_code)] // public for diagnostics; consumed by tests
     pub fn snapshot_path(&self) -> &Path {
@@ -394,6 +413,35 @@ mod tests {
         idx.rebuild();
         assert_eq!(idx.doc_count(), 0);
         assert_eq!(idx.total_text_bytes(), 0);
+    }
+
+    /// Why: this is the assertion that separates identity from counting. The
+    /// index below holds TWO documents and the caller asks about TWO ids, so
+    /// every count comparison — `doc_count >= asked`, `doc_count == asked` —
+    /// reports full coverage. Only one of the two ids is actually present.
+    /// What: indexes `a` and a leftover `stale`, then asks about `a` and `b`.
+    /// Test: this test itself.
+    #[test]
+    fn missing_docs_answers_by_identity_not_count() {
+        let dir = tempdir();
+        let mut idx = PalaceBm25Index::load_or_create(dir.path()).unwrap();
+        idx.index_doc("a", "alpha");
+        idx.index_doc("stale", "a drawer that was deleted from the palace");
+
+        let asked = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            idx.doc_count(),
+            asked.len(),
+            "precondition: the count comparison is satisfied and still wrong"
+        );
+        assert_eq!(idx.missing_docs(&asked), vec!["b".to_string()]);
+
+        idx.index_doc("b", "beta");
+        assert!(idx.missing_docs(&asked).is_empty());
+        assert!(
+            idx.missing_docs(&[]).is_empty(),
+            "an empty request is trivially covered"
+        );
     }
 
     #[test]

@@ -21,12 +21,27 @@
 //! previous write to land". Nothing can be dropped because nothing is ever
 //! offered to a full queue.
 //!
+//! Coverage is established by IDENTITY, never by counting. `stats.doc_count`
+//! is a count over the daemon's whole corpus, and trusty-memory issues no BM25
+//! `delete` on the forget path (#5053), so the corpus accumulates documents
+//! for drawers the palace no longer has. Once those stale documents outnumber
+//! the ones still missing, `doc_count >= drawer_count` is satisfied by a
+//! corpus that shares no ids with the palace at all. Every coverage decision
+//! here — the pre-flight skip, the post-run verdict, and
+//! [`BackfillReport::fully_indexed`] — therefore goes through
+//! `Bm25Client::missing_docs`, which answers about the exact set of drawer ids
+//! being asked about. A coverage question that could not be asked reports
+//! `None`, never `covered`.
+//!
 //! What: [`backfill_palace`] drives the feeder against a socket; [`palace_docs`]
 //! extracts the `(drawer_id, text)` pairs; [`backfill_state_palace`] wires both
 //! to an [`AppState`] and its spawn supervisor; [`spawn_startup_backfill`]
 //! sweeps every palace that has drawers, serially, when the lane is enabled.
 //! Idempotent throughout — the daemon's `upsert_document` is keyed by `doc_id`,
 //! so a re-run overwrites rather than duplicating.
+//!
+//! Repair after a drop is handled by [`crate::bm25_repair`], which consumes the
+//! dirty flags `bm25_index_enqueue` sets when it drops on a full queue.
 //!
 //! Fail-open: every failure mode degrades to a reported status, never an error
 //! that propagates into a caller's request path and never an unbounded wait.
@@ -39,7 +54,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use trusty_common::bm25_client::Bm25Client;
+use trusty_common::bm25_client::{is_method_not_found, Bm25Client};
+use trusty_common::memory_core::palace::Drawer;
 use trusty_common::memory_core::retrieval::PalaceHandle;
 
 use crate::AppState;
@@ -52,7 +68,7 @@ use crate::AppState;
 /// enough that a wedged daemon costs one document's delay rather than stalling
 /// the sweep behind it forever. A backfill that can hang is a backfill that can
 /// hold a startup task open indefinitely.
-/// What: 10 seconds, applied per `index` / `stats` call.
+/// What: 10 seconds, applied per `index` / `missing_docs` call.
 /// Test: `backfill_reports_daemon_unavailable_when_socket_is_dead`.
 const OP_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -65,6 +81,16 @@ const OP_TIMEOUT: Duration = Duration::from_secs(10);
 /// What: 120 seconds. On expiry the feeder stops and reports what landed.
 /// Test: covered by construction; the counters make a truncated run visible.
 const PALACE_BUDGET: Duration = Duration::from_secs(120);
+
+/// How many doc ids one `missing_docs` request carries.
+///
+/// Why: the wire framing is one newline-terminated JSON line per request, so
+/// a 1311-id palace would otherwise build a single ~50 KB frame. Chunking
+/// bounds the frame and the daemon's per-request allocation without changing
+/// the answer — coverage is the union of the chunks' missing sets.
+/// What: 256 ids per request.
+/// Test: `coverage_probe_chunks_large_id_sets` (e2e).
+const COVERAGE_CHUNK: usize = 256;
 
 /// Environment opt-out for the startup sweep.
 ///
@@ -82,8 +108,8 @@ pub const ENV_NO_BACKFILL: &str = "TRUSTY_BM25_NO_BACKFILL";
 /// Why: a caller (and an operator reading logs) needs to tell "nothing to do"
 /// from "could not do it" from "did it, partially". Collapsing those into a
 /// bool is how a partially-indexed palace comes to look finished.
-/// What: five terminal states. Only [`Self::Completed`] means the daemon's
-/// corpus is known to cover the palace.
+/// What: five terminal states, all advisory — the load-bearing claim is
+/// [`BackfillReport::fully_indexed`], which no status can satisfy on its own.
 /// Test: `bm25_backfill_tests.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackfillStatus {
@@ -92,30 +118,32 @@ pub enum BackfillStatus {
     /// The daemon could not be reached or started. Recall degrades to
     /// vector-only; a later run can repair.
     DaemonUnavailable,
-    /// The daemon already holds a document for every drawer.
+    /// The daemon was already verified to hold a document for every drawer.
     AlreadyIndexed,
     /// Every drawer was submitted and acked.
     Completed,
-    /// Some drawers failed or the time budget expired. The index is usable but
-    /// incomplete; a re-run repairs it.
+    /// Some drawers failed, the time budget expired, or coverage could not be
+    /// verified. The index may be usable but is not known complete; a re-run
+    /// repairs it.
     Partial,
 }
 
 /// What one backfill run did.
 ///
 /// Why: the counters are the evidence that separates "the lane is on" from
-/// "the lane has content". `final_doc_count` in particular is read back from
-/// the daemon rather than inferred from the submissions, so a run that acked
-/// 1311 documents into a daemon that kept 200 reports the discrepancy instead
-/// of claiming success.
-/// What: plain owned counters; `final_doc_count` is `None` when the post-run
-/// `stats` call itself failed.
+/// "the lane has content". `missing_after` in particular is read back from the
+/// daemon BY DRAWER ID rather than inferred from the submissions or from a
+/// corpus count, so a run that acked 1311 documents into a daemon holding a
+/// different 1311 reports the discrepancy instead of claiming success.
+/// What: plain owned counters. `missing_after` is `None` when the post-run
+/// coverage probe itself failed — which reads as "not covered", never as
+/// "covered".
 /// Test: `bm25_backfill_tests.rs`.
 #[derive(Debug, Clone)]
 pub struct BackfillReport {
     pub palace: String,
     pub status: BackfillStatus,
-    /// Drawers the palace holds.
+    /// Drawers the palace holds, including the blank ones.
     pub drawers_total: usize,
     /// Drawers with no indexable text, skipped without being submitted.
     pub skipped_empty: usize,
@@ -123,13 +151,25 @@ pub struct BackfillReport {
     pub indexed: usize,
     /// Documents that errored or timed out.
     pub failed: usize,
-    /// `doc_count` the daemon reported after the run.
+    /// How many of this palace's drawer ids the daemon still does NOT hold,
+    /// asked by id after the run. `None` when the question could not be
+    /// answered at all.
+    pub missing_after: Option<usize>,
+    /// `doc_count` the daemon reported after the run — observability only.
+    /// Larger than `drawers_total - skipped_empty` means stale documents for
+    /// drawers this palace no longer has (#5053). Never a coverage signal.
     pub final_doc_count: Option<usize>,
     pub elapsed_ms: u64,
 }
 
 impl BackfillReport {
     /// Terminal report for a run that never started.
+    ///
+    /// Why: a run that never started has, by construction, verified nothing —
+    /// so `missing_after` starts as `None` and only the genuinely-empty case
+    /// overrides it.
+    /// What: zeroed counters with `missing_after: None`.
+    /// Test: `short_circuit_reports_are_never_covered`.
     fn short_circuit(palace: &str, status: BackfillStatus, drawers_total: usize) -> Self {
         Self {
             palace: palace.to_string(),
@@ -138,30 +178,74 @@ impl BackfillReport {
             skipped_empty: 0,
             indexed: 0,
             failed: 0,
+            missing_after: None,
             final_doc_count: None,
             elapsed_ms: 0,
         }
     }
 
-    /// True when the daemon is known to hold every drawer this palace has.
+    /// True when the daemon is known to hold a document for every drawer.
     ///
-    /// Why: this is the question the whole module exists to answer, and it must
-    /// be answered from the daemon's own reported count — not from how many
-    /// writes we believe we sent.
-    /// What: `true` for `AlreadyIndexed`, or for `Completed` whose read-back
-    /// count covers the non-empty drawers. Anything else, including a
-    /// `Completed` run whose read-back failed, is `false`.
-    /// Test: `fully_indexed_requires_a_read_back_count`.
+    /// Why: this is the question the whole module exists to answer, and it is
+    /// the alarm the design rests on — so it must be a SET statement, not an
+    /// arithmetic one. The previous version compared the daemon's `doc_count`
+    /// against the palace's drawer count; because trusty-memory issues no BM25
+    /// `delete`, stale documents accumulate and that comparison eventually
+    /// returns `true` over a palace the daemon has never indexed.
+    /// What: `true` only when a post-run probe asked the daemon about every one
+    /// of this palace's drawer ids and it named none as missing. A probe that
+    /// failed, timed out, or was never run leaves `None` and reports `false`.
+    /// No status alone can satisfy it.
+    /// Test: `fully_indexed_requires_a_verified_empty_missing_set`.
     pub fn fully_indexed(&self) -> bool {
-        match self.status {
-            BackfillStatus::AlreadyIndexed => true,
-            BackfillStatus::Completed => self
-                .final_doc_count
-                // `saturating_sub` because the alternative is a debug panic in
-                // a coverage predicate — an inconsistent report should read as
-                // "not covered", not take the daemon down.
-                .is_some_and(|n| n >= self.drawers_total.saturating_sub(self.skipped_empty)),
-            _ => false,
+        self.missing_after == Some(0)
+    }
+
+    /// Stale documents the daemon holds beyond this palace's indexable drawers.
+    ///
+    /// Why: this is the count whose growth broke the old predicate, and an
+    /// operator should be able to see it climbing rather than discover it when
+    /// coverage starts lying. Reported, never acted on.
+    /// What: `final_doc_count` minus the indexable drawer count, floored at
+    /// zero; `None` when the count was not read.
+    /// Test: `stale_doc_estimate_is_reported_not_acted_on`.
+    pub fn stale_doc_estimate(&self) -> Option<usize> {
+        let indexable = self.drawers_total.saturating_sub(self.skipped_empty);
+        self.final_doc_count.map(|n| n.saturating_sub(indexable))
+    }
+}
+
+/// A palace's drawers, split into what is worth indexing and what is not.
+///
+/// Why: the two numbers a report needs — how many drawers exist and how many
+/// carry no indexable text — can only be taken together, under one read of the
+/// drawer lock. Deriving `skipped_empty` at a second call site is how the field
+/// ended up permanently zero and the `drawers_total` doc ended up wrong.
+/// What: `docs` is the `(doc_id, text)` pairs to submit; `skipped_empty` is how
+/// many drawers were dropped for having no non-whitespace content.
+/// Test: `docs_from_drawers_splits_blank_from_indexable`.
+#[derive(Debug, Clone, Default)]
+pub struct PalaceDocs {
+    pub docs: Vec<(String, String)>,
+    pub skipped_empty: usize,
+}
+
+impl PalaceDocs {
+    /// Every drawer the palace holds, indexable or not.
+    pub fn drawers_total(&self) -> usize {
+        self.docs.len() + self.skipped_empty
+    }
+
+    /// Build from `(doc_id, text)` pairs that are already known indexable.
+    ///
+    /// Why: tests and callers driving the feeder directly have pairs, not a
+    /// palace, and should not have to fabricate a drawer table to use it.
+    /// What: takes the pairs verbatim with `skipped_empty: 0`.
+    /// Test: used throughout `tests/bm25_backfill_e2e.rs`.
+    pub fn from_pairs(docs: Vec<(String, String)>) -> Self {
+        Self {
+            docs,
+            skipped_empty: 0,
         }
     }
 }
@@ -172,18 +256,90 @@ impl BackfillReport {
 /// across an `.await`. Materialising the pairs up front costs one clone of
 /// single-digit MB of text — the entire corpus across ~99 palaces is that
 /// size — and removes the lock from the async path entirely.
-/// What: clones `(id.to_string(), content)` for every drawer whose content has
-/// non-whitespace text. Empty drawers are omitted: indexing zero tokens can
-/// never produce a hit, so submitting them would inflate the daemon's
-/// `doc_count` and break the coverage comparison this module relies on.
-/// Test: `palace_docs_skips_blank_drawers`.
-pub fn palace_docs(handle: &PalaceHandle) -> Vec<(String, String)> {
+/// What: one read of the lock, delegating the split to [`docs_from_drawers`].
+/// Test: `docs_from_drawers_splits_blank_from_indexable`.
+pub fn palace_docs(handle: &PalaceHandle) -> PalaceDocs {
     let drawers = handle.drawers.read();
-    drawers
-        .iter()
-        .filter(|d| !d.content.trim().is_empty())
-        .map(|d| (d.id.to_string(), d.content.clone()))
-        .collect()
+    docs_from_drawers(&drawers)
+}
+
+/// Split a drawer slice into indexable pairs and a blank count.
+///
+/// Why: separated from the lock so the filter — the load-bearing part — can be
+/// exercised directly rather than restated in a test.
+/// What: clones `(id.to_string(), content)` for every drawer whose content has
+/// non-whitespace text, and counts the rest. Empty drawers are omitted because
+/// indexing zero tokens can never produce a hit, so submitting them would only
+/// inflate the daemon's corpus.
+/// Test: `docs_from_drawers_splits_blank_from_indexable`.
+pub fn docs_from_drawers(drawers: &[Drawer]) -> PalaceDocs {
+    let mut docs = Vec::with_capacity(drawers.len());
+    let mut skipped_empty = 0usize;
+    for d in drawers {
+        if d.content.trim().is_empty() {
+            skipped_empty += 1;
+        } else {
+            docs.push((d.id.to_string(), d.content.clone()));
+        }
+    }
+    PalaceDocs {
+        docs,
+        skipped_empty,
+    }
+}
+
+/// Outcome of asking the daemon which drawer ids it is missing.
+///
+/// Why: three answers, three different actions. "None missing" is the only one
+/// that may skip work or claim coverage; the other two must not be collapsed
+/// into it, and must not be collapsed into each other either — an outdated
+/// daemon and an absent one send an operator after different problems.
+/// What: `Missing(n)` carries a verified count; the other two carry no claim.
+/// Test: `coverage_probe_classifies_the_three_failure_modes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Coverage {
+    /// The daemon answered: this many of the ids asked about are absent.
+    Missing(usize),
+    /// The daemon answered `-32601` — it predates the `missing_docs` op.
+    Unsupported,
+    /// The daemon could not be reached, or did not answer in time.
+    Unreachable,
+}
+
+/// Ask the daemon which of `ids` it does not hold, in bounded chunks.
+///
+/// Why: the coverage claim must never be inferred. This is the only place that
+/// produces one, so every caller — pre-flight skip, post-run verdict — reaches
+/// the same answer through the same failure classification.
+/// What: chunks by [`COVERAGE_CHUNK`] under [`OP_TIMEOUT`] each and sums the
+/// missing sets. Any chunk failing aborts with the corresponding non-answer;
+/// a partial sum is not a coverage answer.
+/// Test: `coverage_probe_classifies_the_three_failure_modes`.
+async fn probe_coverage(client: &Bm25Client, palace: &str, ids: &[String]) -> Coverage {
+    let mut missing = 0usize;
+    for chunk in ids.chunks(COVERAGE_CHUNK) {
+        match tokio::time::timeout(OP_TIMEOUT, client.missing_docs(chunk)).await {
+            Ok(Ok(cov)) => missing += cov.missing.len(),
+            Ok(Err(e)) if is_method_not_found(&e) => {
+                tracing::error!(
+                    palace = %palace,
+                    "bm25 backfill: daemon does not implement `missing_docs` — it predates \
+                     0.2.0. Coverage CANNOT be verified for this palace; upgrade the daemon. \
+                     Reporting the palace as incomplete rather than guessing: {e:#}"
+                );
+                return Coverage::Unsupported;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(palace = %palace, "bm25 backfill: coverage probe failed: {e:#}");
+                return Coverage::Unreachable;
+            }
+            Err(_) => {
+                tracing::warn!(palace = %palace, "bm25 backfill: coverage probe timed out");
+                return Coverage::Unreachable;
+            }
+        }
+    }
+    Coverage::Missing(missing)
 }
 
 /// Feed a palace's documents to a BM25 daemon, losslessly.
@@ -194,69 +350,84 @@ pub fn palace_docs(handle: &PalaceHandle) -> Vec<(String, String)> {
 /// `index` call awaits the daemon's ack, and the daemon's own intake channel
 /// applies real backpressure (`send().await`) behind that ack.
 /// What: submits `docs` one at a time under [`OP_TIMEOUT`], stopping early if
-/// [`PALACE_BUDGET`] expires. Skips the whole run when a pre-flight `stats`
-/// shows the daemon already holds at least as many documents as we are about
-/// to send, unless `force`. Reads `stats` back afterwards so the report carries
-/// the daemon's own count rather than ours.
-/// Failure handling is deliberately asymmetric: a failed pre-flight `stats`
+/// [`PALACE_BUDGET`] expires. Skips the run only when a pre-flight probe named
+/// zero missing drawer ids — a verified set statement, not a count comparison
+/// — unless `force`. Probes again afterwards so the report's coverage claim is
+/// the daemon's own answer about this palace's ids.
+/// Failure handling is deliberately asymmetric: a failed pre-flight probe
 /// proceeds with the full run (doing redundant work is safe; skipping work we
-/// cannot prove is done is not), while a failed post-run `stats` leaves
-/// `final_doc_count` as `None` so `fully_indexed` reports `false`.
+/// cannot prove is done is not), while a failed post-run probe leaves
+/// `missing_after` as `None` so `fully_indexed` reports `false`.
 /// Test: `tests/bm25_backfill_e2e.rs::backfill_indexes_every_drawer_without_drops`.
 pub async fn backfill_palace(
     socket: &Path,
     palace: &str,
-    docs: Vec<(String, String)>,
+    palace_docs: PalaceDocs,
     force: bool,
 ) -> BackfillReport {
     let started = Instant::now();
     let client = Bm25Client::new(socket.to_path_buf());
+    let PalaceDocs {
+        docs,
+        skipped_empty,
+    } = palace_docs;
+    let drawers_total = docs.len() + skipped_empty;
     let total = docs.len();
 
     if total == 0 {
-        return BackfillReport::short_circuit(palace, BackfillStatus::AlreadyIndexed, 0);
+        // Nothing indexable means nothing can be missing — the one case where
+        // coverage is established without asking the daemon anything.
+        let mut report =
+            BackfillReport::short_circuit(palace, BackfillStatus::AlreadyIndexed, drawers_total);
+        report.skipped_empty = skipped_empty;
+        report.missing_after = Some(0);
+        return report;
     }
+
+    let ids: Vec<String> = docs.iter().map(|(id, _)| id.clone()).collect();
 
     // Pre-flight. A failure here is NOT a reason to skip — it is a reason to
     // do the work, because we cannot show the work is already done.
     if !force {
-        match tokio::time::timeout(OP_TIMEOUT, client.stats()).await {
-            Ok(Ok(stats)) if stats.doc_count >= total => {
+        match probe_coverage(&client, palace, &ids).await {
+            Coverage::Missing(0) => {
                 tracing::debug!(
                     palace = %palace,
-                    doc_count = stats.doc_count,
                     drawers = total,
-                    "bm25 backfill: palace already indexed — skipping"
+                    "bm25 backfill: every drawer id already present — skipping"
                 );
-                let mut report =
-                    BackfillReport::short_circuit(palace, BackfillStatus::AlreadyIndexed, total);
-                report.final_doc_count = Some(stats.doc_count);
+                let mut report = BackfillReport::short_circuit(
+                    palace,
+                    BackfillStatus::AlreadyIndexed,
+                    drawers_total,
+                );
+                report.skipped_empty = skipped_empty;
+                report.missing_after = Some(0);
+                report.final_doc_count = read_doc_count(&client, palace).await;
                 report.elapsed_ms = started.elapsed().as_millis() as u64;
+                log_stale_docs(&report);
                 return report;
             }
-            Ok(Ok(stats)) => tracing::info!(
+            Coverage::Missing(n) => tracing::info!(
                 palace = %palace,
-                indexed = stats.doc_count,
+                missing = n,
                 drawers = total,
                 "bm25 backfill: palace under-indexed — running"
             ),
+            // Fall through and do the work. The post-run probe will hit the
+            // same wall and leave `missing_after: None`, so the palace reports
+            // as incomplete rather than as silently complete.
+            Coverage::Unsupported => {}
             // The daemon is unreachable. Report it rather than spending the
             // whole budget discovering the same thing 1311 more times.
-            Ok(Err(e)) => {
-                tracing::warn!(palace = %palace, "bm25 backfill: daemon unreachable: {e:#}");
-                return BackfillReport::short_circuit(
+            Coverage::Unreachable => {
+                let mut report = BackfillReport::short_circuit(
                     palace,
                     BackfillStatus::DaemonUnavailable,
-                    total,
+                    drawers_total,
                 );
-            }
-            Err(_) => {
-                tracing::warn!(palace = %palace, "bm25 backfill: stats timed out — daemon wedged");
-                return BackfillReport::short_circuit(
-                    palace,
-                    BackfillStatus::DaemonUnavailable,
-                    total,
-                );
+                report.skipped_empty = skipped_empty;
+                return report;
             }
         }
     }
@@ -290,21 +461,14 @@ pub async fn backfill_palace(
         }
     }
 
-    // Read the coverage back from the daemon. Our own ack count is what we
-    // believe happened; this is what the daemon says happened.
-    let final_doc_count = match tokio::time::timeout(OP_TIMEOUT, client.stats()).await {
-        Ok(Ok(stats)) => Some(stats.doc_count),
-        Ok(Err(e)) => {
-            tracing::warn!(palace = %palace, "bm25 backfill: post-run stats failed: {e:#}");
-            None
-        }
-        Err(_) => {
-            tracing::warn!(palace = %palace, "bm25 backfill: post-run stats timed out");
-            None
-        }
+    // Read the coverage back from the daemon BY ID. Our own ack count is what
+    // we believe happened; this is what the daemon says it holds.
+    let missing_after = match probe_coverage(&client, palace, &ids).await {
+        Coverage::Missing(n) => Some(n),
+        Coverage::Unsupported | Coverage::Unreachable => None,
     };
 
-    let status = if failed == 0 && !truncated {
+    let status = if missing_after == Some(0) && failed == 0 && !truncated {
         BackfillStatus::Completed
     } else {
         BackfillStatus::Partial
@@ -312,23 +476,64 @@ pub async fn backfill_palace(
     let report = BackfillReport {
         palace: palace.to_string(),
         status,
-        drawers_total: total,
-        skipped_empty: 0,
+        drawers_total,
+        skipped_empty,
         indexed,
         failed,
-        final_doc_count,
+        missing_after,
+        final_doc_count: read_doc_count(&client, palace).await,
         elapsed_ms: started.elapsed().as_millis() as u64,
     };
-    tracing::info!(
-        palace = %palace,
-        ?status,
-        indexed,
-        failed,
-        final_doc_count = ?final_doc_count,
-        elapsed_ms = report.elapsed_ms,
-        "bm25 backfill finished"
-    );
+    if !report.fully_indexed() {
+        tracing::error!(
+            palace = %palace,
+            ?status,
+            indexed,
+            failed,
+            missing_after = ?missing_after,
+            "bm25 backfill did NOT establish coverage — this palace answers lexical \
+             queries from a partial corpus"
+        );
+    } else {
+        tracing::info!(
+            palace = %palace,
+            indexed,
+            elapsed_ms = report.elapsed_ms,
+            "bm25 backfill finished — coverage verified by drawer id"
+        );
+    }
+    log_stale_docs(&report);
     report
+}
+
+/// Read the daemon's corpus size for the log line. Never a coverage signal.
+async fn read_doc_count(client: &Bm25Client, palace: &str) -> Option<usize> {
+    match tokio::time::timeout(OP_TIMEOUT, client.stats()).await {
+        Ok(Ok(stats)) => Some(stats.doc_count),
+        Ok(Err(e)) => {
+            tracing::debug!(palace = %palace, "bm25 backfill: stats read failed: {e:#}");
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+/// Surface documents the daemon holds for drawers the palace no longer has.
+///
+/// Why: this drift is the disease the old count-based predicate died of, and
+/// it is invisible unless something says so out loud (#5053).
+/// What: one `warn!` when the estimate is positive. Advisory only.
+/// Test: `stale_doc_estimate_is_reported_not_acted_on`.
+fn log_stale_docs(report: &BackfillReport) {
+    if let Some(stale) = report.stale_doc_estimate().filter(|n| *n > 0) {
+        tracing::warn!(
+            palace = %report.palace,
+            stale,
+            doc_count = ?report.final_doc_count,
+            "bm25 daemon holds documents for drawers this palace no longer has — \
+             stale lexical hits are possible (see #5053)"
+        );
+    }
 }
 
 /// Resolve a palace's daemon socket, starting the daemon if needed.
@@ -362,7 +567,8 @@ async fn socket_for_palace(state: &AppState, palace: &str) -> Option<PathBuf> {
 /// each remembering to test `bm25_client.is_some()` first.
 /// What: returns [`BackfillStatus::Disabled`] when the lane is off and
 /// [`BackfillStatus::DaemonUnavailable`] when the daemon will not start —
-/// neither is an error, because neither should fail a caller's request.
+/// neither is an error, because neither should fail a caller's request, and
+/// neither reports coverage.
 /// Test: `backfill_state_palace_is_disabled_without_a_client`.
 pub async fn backfill_state_palace(
     state: &AppState,
@@ -374,14 +580,26 @@ pub async fn backfill_state_palace(
         return BackfillReport::short_circuit(palace, BackfillStatus::Disabled, 0);
     }
     let docs = palace_docs(handle);
+    let drawers_total = docs.drawers_total();
     let Some(socket) = socket_for_palace(state, palace).await else {
-        return BackfillReport::short_circuit(
-            palace,
-            BackfillStatus::DaemonUnavailable,
-            docs.len(),
-        );
+        let mut report =
+            BackfillReport::short_circuit(palace, BackfillStatus::DaemonUnavailable, drawers_total);
+        report.skipped_empty = docs.skipped_empty;
+        return report;
     };
     backfill_palace(&socket, palace, docs, force).await
+}
+
+/// Whether the startup sweep is switched off by [`ENV_NO_BACKFILL`].
+///
+/// Why: the guard has to be reachable from a test without spawning the sweep,
+/// otherwise the test restates the comparison instead of exercising it — which
+/// is how it came to pass against a deleted implementation.
+/// What: exact `"1"`, matching every other trusty-* flag; anything else, and an
+/// unset var, leave the sweep enabled.
+/// Test: `startup_backfill_respects_the_opt_out`.
+pub fn startup_backfill_opted_out() -> bool {
+    std::env::var(ENV_NO_BACKFILL).as_deref() == Ok("1")
 }
 
 /// Sweep every registered palace that has drawers, serially.
@@ -400,7 +618,7 @@ pub fn spawn_startup_backfill(state: &AppState) {
         tracing::debug!("bm25 backfill: lane disabled — skipping startup sweep");
         return;
     }
-    if std::env::var(ENV_NO_BACKFILL).as_deref() == Ok("1") {
+    if startup_backfill_opted_out() {
         tracing::info!("bm25 backfill: {ENV_NO_BACKFILL}=1 — skipping startup sweep");
         return;
     }
@@ -426,14 +644,26 @@ pub fn spawn_startup_backfill(state: &AppState) {
             swept += 1;
             if !report.fully_indexed() {
                 incomplete += 1;
+                // Queue it for the repair sweep rather than waiting for the
+                // next restart — see `bm25_repair`.
+                crate::bm25_repair::mark_dirty(&state, &palace);
             }
         }
-        tracing::info!(
-            swept,
-            incomplete,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "bm25 backfill: startup sweep complete"
-        );
+        if incomplete > 0 {
+            tracing::error!(
+                swept,
+                incomplete,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "bm25 backfill: startup sweep left palaces without verified coverage — \
+                 queued for repair"
+            );
+        } else {
+            tracing::info!(
+                swept,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "bm25 backfill: startup sweep complete, all coverage verified"
+            );
+        }
     });
 }
 

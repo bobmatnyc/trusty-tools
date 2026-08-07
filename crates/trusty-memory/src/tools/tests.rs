@@ -1778,6 +1778,15 @@ async fn bm25_index_queue_drops_when_full() {
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
         other => panic!("expected Full overflow, got {other:?}"),
     }
+
+    // #5048 review: dropping is only defensible if something repairs the drop.
+    // Removing the `mark_dirty` call from `bm25_index_enqueue`'s `Full` arm
+    // leaves this list empty and the coverage gap unrepaired until restart.
+    assert_eq!(
+        crate::bm25_repair::dirty_palaces(&state),
+        vec!["default".to_string()],
+        "a dropped index op must queue its palace for coverage repair"
+    );
 }
 
 // -------------------------------------------------------------------------
