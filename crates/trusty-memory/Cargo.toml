@@ -169,6 +169,9 @@ open = "5"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# #5005: encode a real 384-dim vector when seeding a synthetic id collision
+# into a palace's index redb, so HnswStore's dimension check accepts the file.
+postcard = { workspace = true }
 tower = { workspace = true }
 serial_test = { workspace = true }
 # Issue #1722: `task_mcp` integration tests drive `seed_shared_embedder_with_mock`

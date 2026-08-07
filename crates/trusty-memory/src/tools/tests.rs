@@ -102,6 +102,7 @@ fn tool_definitions_drops_palace_required_when_default_set() {
         ("palace_info", true),
         ("palace_compact", true),
         ("palace_reembed", true),
+        ("palace_unalias", true),
         ("kg_assert", true),
         ("kg_query", true),
         // Issue #664: add_alias and discover_aliases now include `palace`
@@ -139,7 +140,8 @@ fn tool_definitions_lists_all_tools() {
     // #1722) + 3 room tools (room_list, room_create, room_rename, ADR-0027 T6)
     // + 3 wing tools (wing_list, wing_create, wing_rename, ADR-0027 T9 / #4809)
     // + 1 repair tool (palace_reembed, #4906)
-    assert_eq!(tools.len(), 44);
+    // + 1 alias-repair tool (palace_unalias, #5005)
+    assert_eq!(tools.len(), 45);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -158,6 +160,7 @@ fn tool_definitions_lists_all_tools() {
         "palace_info",
         "palace_compact",
         "palace_reembed",
+        "palace_unalias",
         "kg_assert",
         "kg_query",
         "memory_recall_all",
@@ -236,6 +239,46 @@ async fn dispatch_palace_reembed_dry_run_reports_counts() {
     assert_eq!(out["repaired"], 0);
     assert!(out["drawer_count"].is_number());
     assert!(out["vector_count"].is_number());
+}
+
+/// Why (#5005): `unalias` had zero call sites — the repair existed as code an
+/// operator could not run. The claim this makes is that it is now reachable
+/// through `dispatch_tool`, defaults to a dry run like `palace_reembed`, and
+/// reports an id SET rather than a count (the count-based all-clear is the
+/// defect the ticket is about). It also runs inside the daemon for the same
+/// reason `palace_reembed` does: the daemon holds the writer lock.
+/// What: creates a palace and calls `palace_unalias` with no arguments,
+/// asserting the default is a dry run, the outcome word is `clean` on a palace
+/// with nothing aliased, and the payload carries `freed_ids` as an array.
+/// Test: itself. Removing the `palace_unalias` dispatch arm makes this an
+/// unknown-tool error; defaulting `dry_run` to false fails the first assertion.
+#[tokio::test]
+async fn dispatch_palace_unalias_dry_run_names_ids_and_writes_nothing() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "unalias-test"}))
+        .await
+        .expect("palace_create");
+    let out = dispatch_tool(&state, "palace_unalias", json!({"palace": "unalias-test"}))
+        .await
+        .expect("palace_unalias must be dispatchable");
+    assert_eq!(out["dry_run"], true, "must default to a dry run: {out}");
+    assert_eq!(
+        out["outcome"], "clean",
+        "a palace with no collision is clean, not repaired: {out}"
+    );
+    assert_eq!(out["success"], true);
+    assert!(
+        out["freed_ids"]
+            .as_array()
+            .expect("freed_ids array")
+            .is_empty(),
+        "an id SET, empty here — never a bare count: {out}"
+    );
+    assert_eq!(
+        out["reembed_required"], false,
+        "nothing was freed, so nothing is owed"
+    );
+    assert!(out["error"].is_null(), "a clean run has no error: {out}");
 }
 
 /// Why (issue #1714): `force=true` bypasses slug validation with no
@@ -3461,5 +3504,107 @@ async fn a_closed_index_queue_queues_the_palace_for_repair() {
         crate::bm25_repair::dirty_palaces(&state),
         vec!["default".to_string()],
         "a closed queue loses the write as completely as a full one and must queue repair"
+    );
+}
+
+/// Why (#5005 review): every `palace_unalias` test that reached `dispatch_tool`
+/// ran against an empty palace, so the only daemon-level outcome ever observed
+/// was `clean` — the branch that does nothing. The success path was proven at
+/// the store layer and assumed through the tool: nothing had shown that a real
+/// collision survives arg parsing, the `is_read_only()` routing a dry run skips,
+/// and JSON serialization to arrive as a non-empty `freed_ids`. An unobserved
+/// happy path is not a proven one, and this is the path #4834's deletion gate
+/// will call.
+/// What: seeds two drawer uuids onto one `vector_id` in the palace's own
+/// `index.usearch.redb`, then drives `palace_unalias` with `dry_run: false`
+/// through `dispatch_tool`, asserting `outcome: "repaired"`, both uuids named
+/// in `freed_ids`, and `reembed_required: true`. A second call must then report
+/// `clean` and free nothing — idempotence observed at the tool surface, not
+/// just at the store.
+/// Test: itself. Routing the write path through the read-only lock, or letting
+/// `freed_ids` serialize as a count, fails it.
+#[tokio::test]
+async fn dispatch_palace_unalias_frees_a_real_collision_and_is_idempotent() {
+    use redb::{Database, TableDefinition};
+    const VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("vectors");
+    const VECTOR_KEYS: TableDefinition<&str, u64> = TableDefinition::new("vector_keys");
+
+    let (state, tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "collide"}))
+        .await
+        .expect("palace_create");
+
+    // Two drawers, one shared vector id — the collision this PR repairs.
+    let a = uuid::Uuid::new_v4();
+    let b = uuid::Uuid::new_v4();
+    let shared_id: u64 = 7;
+    {
+        // Drop the cached handle so the palace releases its flock; the next
+        // dispatch reopens the file and sees the seeded collision.
+        state.registry.remove(&PalaceId::new("collide"));
+        let db = Database::create(tmp.path().join("collide/index.usearch.redb"))
+            .expect("open palace vector redb");
+        let wtx = db.begin_write().expect("begin");
+        {
+            let mut vectors = wtx.open_table(VECTORS).expect("vectors");
+            let mut keys = wtx.open_table(VECTOR_KEYS).expect("keys");
+            let encoded = postcard::to_allocvec(&vec![0.05_f32; 384]).expect("encode vector");
+            vectors.insert(shared_id, encoded.as_slice()).expect("vec");
+            keys.insert(a.to_string().as_str(), shared_id)
+                .expect("key a");
+            keys.insert(b.to_string().as_str(), shared_id)
+                .expect("key b");
+        }
+        wtx.commit().expect("commit");
+        drop(db); // release the flock before the palace reopens the file
+    }
+
+    let out = dispatch_tool(
+        &state,
+        "palace_unalias",
+        json!({"palace": "collide", "dry_run": false}),
+    )
+    .await
+    .expect("palace_unalias must dispatch on the write path");
+
+    assert_eq!(out["dry_run"], false, "explicit write run: {out}");
+    assert_eq!(
+        out["outcome"], "repaired",
+        "a real collision must repair, not report clean: {out}"
+    );
+    assert_eq!(out["success"], true, "{out}");
+    let freed: Vec<String> = out["freed_ids"]
+        .as_array()
+        .expect("freed_ids array")
+        .iter()
+        .map(|v| v.as_str().expect("uuid string").to_string())
+        .collect();
+    assert_eq!(freed.len(), 2, "both members of the group: {out}");
+    assert!(freed.contains(&a.to_string()), "{a} missing: {out}");
+    assert!(freed.contains(&b.to_string()), "{b} missing: {out}");
+    assert_eq!(
+        out["reembed_required"], true,
+        "freed drawers are owed a re-embed: {out}"
+    );
+    assert!(out["error"].is_null(), "{out}");
+
+    // Idempotence at the tool surface: the collision is gone, not just reported.
+    let again = dispatch_tool(
+        &state,
+        "palace_unalias",
+        json!({"palace": "collide", "dry_run": false}),
+    )
+    .await
+    .expect("second palace_unalias");
+    assert_eq!(
+        again["outcome"], "clean",
+        "the repair must be durable, not repeatable: {again}"
+    );
+    assert!(
+        again["freed_ids"]
+            .as_array()
+            .expect("freed_ids array")
+            .is_empty(),
+        "nothing left to free: {again}"
     );
 }

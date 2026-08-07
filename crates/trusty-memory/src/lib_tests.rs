@@ -98,8 +98,8 @@ async fn tools_list_returns_all_tools() {
     // issue #1722 adds `task_add`, `task_list`, `task_complete`;
     // ADR-0027 T6 (#4805) adds `room_list`, `room_create`, `room_rename`;
     // ADR-0027 T9 (#4809) adds `wing_list`, `wing_create`, `wing_rename`;
-    // #4906 adds `palace_reembed`.
-    assert_eq!(tools.len(), 44);
+    // #4906 adds `palace_reembed`; #5005 adds `palace_unalias`.
+    assert_eq!(tools.len(), 45);
 }
 
 #[tokio::test]
