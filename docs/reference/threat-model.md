@@ -25,6 +25,34 @@ the full context, the rejected full-UDS alternative, and the consistency
 vetting against ADR-0011/ADR-0017. This document does not restate that
 reasoning — it is the compliance inventory the ADR promises.
 
+**[ADR-0031 — transport by purpose](../adr/0031-uds-for-inter-crate-transport-http-for-external.md)**
+(Proposed) sits on a different axis and does **not** amend this doctrine.
+ADR-0018 governs bind-address reachability; ADR-0031 governs which local
+transport inter-crate callers use to reach an already-loopback-bound daemon —
+UDS for inter-crate same-host traffic, one shared HTTP server for everything
+external. **Nothing has migrated**, so the inventory below still describes the
+live topology. Whatever HTTP remains under ADR-0031 stays governed by ADR-0018
+exactly as written, and ADR-0031 authorises no new off-loopback binding. If
+adopted it would *strengthen* this doctrine's goal: a loopback TCP port is
+reachable by any local process, a `0600` socket is not. See ADR-0031 for the
+classification test.
+
+**Two things this table does not show, worth stating so it is not misread:**
+
+1. **It is an inventory of HTTP surfaces, not of the whole transport topology.**
+   Two daemons have no HTTP surface and therefore no row:
+   **trusty-bm25-daemon** (per-palace Unix-socket JSON-RPC; the subprocess owns
+   the index and is itself the writer lock) and **trusty-embedderd** (Unix
+   socket + stdio). Their absence is correct here, not an omission.
+2. **Each daemon's stdio/MCP surface is a client of its own HTTP daemon, not a
+   separate surface.** `trusty-memory serve --stdio` is a pure proxy to
+   `POST /rpc` and never opens redb (#1078); trusty-search's and
+   trusty-analyze's MCP servers are HTTP clients of theirs. So the "native MCP
+   stdio bridge" listed among the direct clients below reaches the daemon
+   through the same loopback port as everything else, and inherits the same
+   guard. If ADR-0031's tool paths later move off HTTP, these rows will need to
+   distinguish a daemon's remaining management routes from its tool routes.
+
 ## Client inventory
 
 Ports and bind defaults below were verified against `origin/main` at the time
