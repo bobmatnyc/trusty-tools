@@ -67,6 +67,85 @@ fn ensure_project_indexed_returns_derived_id_when_daemon_down() {
     assert_eq!(id, Some(expected), "id is the git-root basename");
 }
 
+/// A test process gets `SkippedUnderTest`, never a claim of registration
+/// (#5065 review).
+///
+/// Why: this is the whole point of the reporting variant. The id-only return
+/// is `Some(id)` here, identical to a genuine 2xx registration, which is why
+/// trusty-mpm's worktree hook could log `worktree index registered` for a call
+/// that never left the process. The report has to say otherwise, and the test
+/// harness is the one branch every `cargo test` run exercises for free.
+/// What: calls the reporting entry point on a real git-rooted temp project
+/// under the default (test-harness-detected) environment and asserts the id
+/// still comes back while `registration` is `SkippedUnderTest` — not
+/// `Confirmed`.
+/// Test: this test.
+#[test]
+fn reporting_says_skipped_under_test_harness() {
+    let project = scratch_dir("report-skip");
+    fs::create_dir_all(project.join(".git")).unwrap();
+
+    let report = ensure_project_indexed_reporting(&project, IndexOptions::default());
+
+    let _ = fs::remove_dir_all(&project);
+
+    assert_eq!(
+        report.registration,
+        IndexRegistration::SkippedUnderTest,
+        "a test process suppresses the write (#4255) and must say so"
+    );
+    assert!(
+        report.index_id.is_some(),
+        "the id is still returned — the fail-open contract is unchanged"
+    );
+}
+
+/// With no discoverable daemon, the report says `DaemonUnreachable` (#5065
+/// review).
+///
+/// Why: the failure mode #5045 measured at ~94% is "the daemon was not there",
+/// and it is exactly the one the id-only return renders invisible. Opting out
+/// of the #4255 harness guard is what makes this branch reachable at all; the
+/// empty data dir then guarantees `resolve_daemon_base_url` finds no address
+/// file, so no HTTP request is ever built and the operator's real daemon is
+/// never touched despite the opt-in.
+/// What: sets `TRUSTY_ALLOW_PRODUCTION_STATE=1` and points the data dir at an
+/// empty temp dir, then asserts the reported registration is
+/// `DaemonUnreachable` while the id is still returned.
+/// Test: this test.
+#[test]
+fn reporting_says_daemon_unreachable_when_no_daemon_is_discoverable() {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let data_dir = scratch_dir("report-nodaemon-data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let project = scratch_dir("report-nodaemon");
+    fs::create_dir_all(project.join(".git")).unwrap();
+
+    // SAFETY: guarded by ENV_LOCK; both vars are removed below before returning.
+    unsafe {
+        std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+        std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
+    }
+
+    let report = ensure_project_indexed_reporting(&project, IndexOptions::default());
+
+    unsafe {
+        std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
+        std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+    }
+    let _ = fs::remove_dir_all(&project);
+    let _ = fs::remove_dir_all(&data_dir);
+
+    assert_eq!(
+        report.registration,
+        IndexRegistration::DaemonUnreachable,
+        "no address file means nothing was sent — that is not a registration"
+    );
+    assert!(report.index_id.is_some(), "the id is still returned");
+}
+
 #[test]
 fn ensure_project_indexed_none_for_root() {
     // Derivation yields an empty id for the filesystem root, so the helper
@@ -237,7 +316,14 @@ fn create_index_request_body_respects_allow_sensitive_path_param() {
         Path::new("/private/var/folders/xx/scratch-project"),
     ] {
         for allow in [true, false] {
-            let body = create_index_request_body("my-index", root, allow);
+            let body = create_index_request_body(
+                "my-index",
+                root,
+                IndexOptions {
+                    allow_sensitive_path: allow,
+                    ..IndexOptions::default()
+                },
+            );
             assert_eq!(
                 body.get("allow_sensitive_path"),
                 Some(&serde_json::Value::Bool(allow)),
@@ -249,6 +335,73 @@ fn create_index_request_body_respects_allow_sensitive_path_param() {
             );
         }
     }
+}
+
+/// `IndexOptions::skip_vector` reaches the `POST /indexes` wire body, and the
+/// two option flags are independent (#5060).
+///
+/// Why: a worktree index is registered BM25+KG-only by asking the daemon for
+/// `skip_vector: true`. If that flag were dropped between [`IndexOptions`] and
+/// the request body, every worktree would silently embed again — the exact
+/// cost this change exists to avoid, and invisible without an assertion,
+/// because the index would still be created and still answer queries. The
+/// cross-product also pins that `skip_vector` is not accidentally aliased to
+/// `allow_sensitive_path` (the failure mode a second positional `bool` would
+/// have invited).
+/// What: builds the body for all four `(allow_sensitive_path, skip_vector)`
+/// combinations and asserts each field independently equals what was passed.
+/// Test: this test.
+#[test]
+fn create_index_request_body_sets_skip_vector() {
+    let root = Path::new("/Users/dev/projects/my-repo/.worktrees/feat-x");
+    for allow in [true, false] {
+        for skip_vector in [true, false] {
+            let body = create_index_request_body(
+                "feat-x",
+                root,
+                IndexOptions {
+                    allow_sensitive_path: allow,
+                    skip_vector,
+                },
+            );
+            assert_eq!(
+                body.get("skip_vector"),
+                Some(&serde_json::Value::Bool(skip_vector)),
+                "body must set skip_vector: {skip_vector} (allow={allow})"
+            );
+            assert_eq!(
+                body.get("allow_sensitive_path"),
+                Some(&serde_json::Value::Bool(allow)),
+                "skip_vector must not disturb allow_sensitive_path"
+            );
+        }
+    }
+}
+
+/// `IndexOptions::default()` reproduces the pre-#5060 two-argument call.
+///
+/// Why: [`ensure_project_indexed`] is now a wrapper over
+/// [`ensure_project_indexed_with`]. If `IndexOptions`' default ever gained a
+/// non-`false` `skip_vector`, every existing caller (session launch, tcode
+/// task start) would silently stop embedding — a behaviour change with no
+/// visible error. This pins the default as the compatibility contract.
+/// What: asserts the body built from `IndexOptions::default()` is identical to
+/// one built with both flags explicitly `false`.
+/// Test: this test.
+#[test]
+fn index_options_default_matches_legacy_ensure_call() {
+    let root = Path::new("/Users/dev/projects/my-repo");
+    assert_eq!(
+        create_index_request_body("my-repo", root, IndexOptions::default()),
+        create_index_request_body(
+            "my-repo",
+            root,
+            IndexOptions {
+                allow_sensitive_path: false,
+                skip_vector: false,
+            }
+        )
+    );
 }
 
 /// End-to-end regression for issue #2914: `ensure_project_indexed`'s
@@ -661,4 +814,43 @@ fn index_files_inner_never_writes_to_a_daemon_under_test() {
          from a test process (issue #4255)"
     );
     let _ = fs::remove_dir_all(&root);
+}
+
+/// The `with_*` setters produce exactly what field construction would (#5065
+/// review).
+///
+/// Why: `#[non_exhaustive]` makes the setters the ONLY way another crate can
+/// build a non-default `IndexOptions`, so a setter that assigned the wrong
+/// field would silently flip an out-of-crate caller's intent — trusty-mpm asks
+/// for `skip_vector`, and getting `allow_sensitive_path` instead would both
+/// embed every worktree and disarm the denylist. In-crate tests can still use
+/// field construction, which is what makes that comparison possible here.
+/// What: asserts each setter equals the field-constructed value, and that
+/// chaining both sets both.
+/// Test: this test.
+#[test]
+fn index_options_builders_match_field_construction() {
+    assert_eq!(
+        IndexOptions::default().with_skip_vector(true),
+        IndexOptions {
+            allow_sensitive_path: false,
+            skip_vector: true,
+        }
+    );
+    assert_eq!(
+        IndexOptions::default().with_allow_sensitive_path(true),
+        IndexOptions {
+            allow_sensitive_path: true,
+            skip_vector: false,
+        }
+    );
+    assert_eq!(
+        IndexOptions::default()
+            .with_skip_vector(true)
+            .with_allow_sensitive_path(true),
+        IndexOptions {
+            allow_sensitive_path: true,
+            skip_vector: true,
+        }
+    );
 }

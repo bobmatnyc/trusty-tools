@@ -150,6 +150,7 @@ pub mod update_check;
 pub mod version_staleness;
 pub mod workspace_liveness;
 pub mod workspace_scan;
+pub mod worktree_index;
 pub mod worktree_naming;
 
 pub use connect::{ResolveResult, SessionSummary, resolve_target};
