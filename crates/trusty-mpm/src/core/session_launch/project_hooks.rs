@@ -39,13 +39,22 @@ use crate::core::standalone::hooks::{is_mpm_hook_command, mpm_hook_additions_wit
 /// `PreToolUse` and `SessionStart` — sources for more than one of the three —
 /// end up with multiple handler groups (PM-guard + tm-hook, or trusty-memory +
 /// tm-hook) rather than one clobbering the other.
+/// `inject_prompt_context` is the `[hooks] prompt_context` config key (#5034):
+/// `true` (the default) keeps the `UserPromptSubmit` entry; `false` drops that
+/// event key entirely and leaves every other source untouched.
 /// Test: `project_managed_hook_additions_combines_all_three_sources`,
-/// `project_managed_hook_additions_is_stable_across_calls`.
-pub(super) fn project_managed_hook_additions() -> serde_json::Value {
+/// `project_managed_hook_additions_is_stable_across_calls`,
+/// `project_managed_hook_additions_omits_prompt_context_when_disabled`.
+pub(super) fn project_managed_hook_additions(inject_prompt_context: bool) -> serde_json::Value {
     let mut hooks: serde_json::Value =
         serde_json::from_str(TRUSTY_MEMORY_HOOKS).expect("bundled hook block is valid JSON");
     if let Some(obj) = hooks.as_object_mut() {
         obj.insert("PreToolUse".to_string(), pm_guard_hook_value());
+        // #5034: the opt-out drops only this one event. `SessionStart` (also a
+        // TRUSTY_MEMORY_HOOKS key) and every other source stay as they are.
+        if !inject_prompt_context {
+            obj.remove("UserPromptSubmit");
+        }
     }
 
     let triad = mpm_hook_additions_with_exe(None);
@@ -71,6 +80,28 @@ pub(super) fn project_managed_hook_additions() -> serde_json::Value {
     }
 
     serde_json::json!({ "hooks": hooks })
+}
+
+/// Every hook event key trusty-mpm owns at the project tier, regardless of
+/// which ones the current config asks to write.
+///
+/// Why (#5034): [`super::settings::write_project_hooks`] strips its own prior
+/// entries only for the events it is about to write. Deriving that strip list
+/// from the toggled-down additions would make the opt-out a no-op on any
+/// project launched at least once with the hook enabled — the stale
+/// `UserPromptSubmit` entry would sit in `.claude/settings.json` forever,
+/// still firing, because the strip no longer covered that key. The strip
+/// domain must therefore be the full owned set, not the write set.
+/// What: the event keys of [`project_managed_hook_additions`]`(true)` — a
+/// superset of every toggled variant by construction, so it cannot drift as
+/// toggles are added.
+/// Test: `project_managed_hook_events_is_a_superset_of_every_variant`,
+/// `write_project_hooks_strips_stale_prompt_context_when_disabled`.
+pub(super) fn project_managed_hook_events() -> Vec<String> {
+    project_managed_hook_additions(true)["hooks"]
+        .as_object()
+        .map(|events| events.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Recognise a hook command belonging to ANY of the three project-tier

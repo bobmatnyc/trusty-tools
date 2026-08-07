@@ -1012,7 +1012,11 @@ fn prepare_session_inner(
     // daemon's managed launch excludes the user tier where that triad would
     // otherwise be provisioned. Non-fatal: the session still launches, it
     // just won't record memory or lifecycle events via the hooks.
-    let hooks_written = match write_project_hooks(project_dir) {
+    //
+    // #5034: `[hooks] prompt_context = false` suppresses the per-prompt
+    // `trusty-memory prompt-context` injection (and strips one a prior launch
+    // wrote). Default `true` — every other hook is written either way.
+    let hooks_written = match write_project_hooks(project_dir, config.hooks.prompt_context) {
         Ok(()) => true,
         Err(err) => {
             tracing::warn!("failed to write trusty-mpm project hooks: {err}");
