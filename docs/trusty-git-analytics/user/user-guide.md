@@ -54,10 +54,15 @@ is on your `PATH`.
 ```bash
 git clone https://github.com/bobmatnyc/trusty-tools
 cd trusty-tools
-cargo build --release -p tga
-# Binary is at: target/release/tga
-cp target/release/tga /usr/local/bin/tga
+cargo install --path crates/trusty-git-analytics --locked
+# Binary: ~/.cargo/bin/tga
 ```
+
+Do not `cp`/copy a locally built `target/release/tga` onto an existing PATH
+location by hand — on macOS this can leave a stale kernel code-signing
+(`cdhash`) cache behind, and the next run of that path is killed as an
+invalid signature (indistinguishable from an OOM kill). `cargo install`
+writes atomically and keeps the cache consistent.
 
 ### Option C: Pre-built binaries
 
@@ -70,6 +75,9 @@ Download the binary for your platform, make it executable, and place it on your 
 # Example for macOS arm64
 chmod +x tga-aarch64-apple-darwin
 mv tga-aarch64-apple-darwin /usr/local/bin/tga
+# macOS only: regenerate the signature after a manual move, for the same
+# cdhash-cache reason as above
+codesign --force --sign - /usr/local/bin/tga
 ```
 
 ### Verify installation
