@@ -180,17 +180,19 @@ impl CtrlSocket {
     /// Why: Encapsulates parent-dir creation + stale-file cleanup + the
     /// actual bind, which would otherwise be duplicated between the
     /// controller startup path and any future "restart the listener" code.
-    /// What: Creates `~/.trusty-agents/sockets/`, removes any stale file at
-    /// `path`, then binds. Caller is responsible for `tokio::spawn`-ing the
-    /// accept loop and removing the socket file on shutdown.
-    /// Test: `bind_creates_listener_and_replaces_stale_file`.
+    /// What: removes any stale file at `path`, then binds through
+    /// [`trusty_common::uds::bind_hardened`], which creates
+    /// `~/.trusty-agents/sockets/` at `0700` and narrows the socket to `0600`
+    /// before the first accept (#5099 — this used to be `create_dir_all` plus a
+    /// bare bind, so both landed at the process umask). Caller is responsible
+    /// for `tokio::spawn`-ing the accept loop and removing the socket file on
+    /// shutdown.
+    /// Test: `bind_creates_listener_and_replaces_stale_file`,
+    /// `bind_produces_a_0600_socket_in_a_0700_dir`.
     pub async fn bind(path: &Path) -> io::Result<UnixListener> {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         // Remove stale socket before binding (otherwise bind fails with EADDRINUSE).
         Self::cleanup(path);
-        UnixListener::bind(path)
+        trusty_common::uds::bind_hardened(path).map_err(io::Error::other)
     }
 
     /// Singleton-safe bind: probe first, only clobber a confirmed-dead socket.
@@ -213,8 +215,11 @@ impl CtrlSocket {
     /// `bind_singleton_binds_when_socket_absent`, and
     /// `bind_singleton_binds_over_stale_socket`.
     pub async fn bind_singleton(path: &Path, timeout: Duration) -> io::Result<BindOutcome> {
+        // #5099: harden the directory BEFORE probing. The probe can succeed
+        // against a socket sitting in a wide directory, and the takeover branch
+        // below must not be the only path that narrows it.
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            trusty_common::uds::prepare_socket_dir(parent).map_err(io::Error::other)?;
         }
         match Self::probe(path, timeout).await {
             // A controller answered — refuse to clobber; hand the stream back.
@@ -222,7 +227,8 @@ impl CtrlSocket {
             // Stale socket (or no socket at all): safe to take over.
             Err(e) if is_connection_refused(&e) || e.kind() == io::ErrorKind::TimedOut => {
                 Self::cleanup(path);
-                Ok(BindOutcome::Bound(UnixListener::bind(path)?))
+                let listener = trusty_common::uds::bind_hardened(path).map_err(io::Error::other)?;
+                Ok(BindOutcome::Bound(listener))
             }
             // Any other error (permission denied, etc.): do NOT clobber.
             Err(e) => Err(e),
@@ -252,6 +258,47 @@ impl CtrlSocket {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// #5099 regression: `CtrlSocket::bind` must produce a 0600 socket in a
+    /// 0700 directory. Against the pre-fix commit it used `create_dir_all`
+    /// plus a bare bind, so both landed at the process umask (0755/0755).
+    #[tokio::test]
+    async fn bind_produces_a_0600_socket_in_a_0700_dir() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sockets");
+        let sock = dir.join("p.ctrl.sock");
+
+        let _listener = CtrlSocket::bind(&sock).await.expect("bind");
+
+        let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode(&sock), 0o600, "ctrl socket must be 0600");
+        assert_eq!(mode(&dir), 0o700, "ctrl socket dir must be 0700");
+    }
+
+    /// #5099: the singleton path hardens the directory before probing, so a
+    /// takeover of a stale socket also lands 0600/0700.
+    #[tokio::test]
+    async fn bind_singleton_hardens_the_socket_it_takes_over() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sockets");
+        let sock = dir.join("p.ctrl.sock");
+
+        let outcome = CtrlSocket::bind_singleton_default(&sock)
+            .await
+            .expect("bind singleton");
+        assert!(
+            matches!(outcome, BindOutcome::Bound(_)),
+            "must win the race"
+        );
+
+        let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode(&sock), 0o600, "ctrl socket must be 0600");
+        assert_eq!(mode(&dir), 0o700, "ctrl socket dir must be 0700");
+    }
 
     #[test]
     fn sanitize_project_id_replaces_unsafe_chars() {

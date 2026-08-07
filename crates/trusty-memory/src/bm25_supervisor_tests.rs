@@ -102,7 +102,7 @@ async fn already_running_skips_spawn() {
     // a sibling test that ran first.
     let _g = EnvGuard::remove(ENV_EXTERNAL_BM25);
     // Use a very short palace name. The canonical socket path is
-    // `$TMPDIR/trusty-bm25-<palace>.sock`, and macOS' `$TMPDIR`
+    // `$TMPDIR/trusty-<uid>/trusty-bm25-<palace>.sock`, and macOS' `$TMPDIR`
     // (`/var/folders/.../T/`) is already long, so we keep the palace
     // fragment to a handful of characters to avoid SUN_LEN errors.
     // Use the low bits of process PID to disambiguate concurrent
@@ -111,8 +111,11 @@ async fn already_running_skips_spawn() {
     let socket = socket_path_for_palace(&palace);
     // Clean up any leftover socket from a previous failed test.
     let _ = std::fs::remove_file(&socket);
+    // #5099: bind the way the real daemon does. A bare `UnixListener::bind`
+    // here fails with ENOENT now that the canonical path sits inside a
+    // uid-keyed directory that only `bind_hardened` creates.
     let listener =
-        tokio::net::UnixListener::bind(&socket).expect("bind dummy listener at canonical path");
+        trusty_common::uds::bind_hardened(&socket).expect("bind dummy listener at canonical path");
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let sup = Bm25Supervisor::new();

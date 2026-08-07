@@ -44,7 +44,7 @@ crate-type = ["rlib"]
 # `bundled-ort` feature below now carries that requirement instead, and it is
 # on by default (see `default` below) so the zero-config `cargo install`
 # experience on modern glibc is unchanged.
-trusty-common = { workspace = true, features = ["embedder", "embedder-client"] }
+trusty-common = { workspace = true, features = ["embedder", "embedder-client", "uds"] }
 
 # CLI argument parsing.
 clap = { workspace = true }

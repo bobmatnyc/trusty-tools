@@ -54,10 +54,11 @@ fn arm() {
 
 /// Short, collision-free palace name.
 ///
-/// Why: the socket path is `$TMPDIR/trusty-bm25-<palace>.sock` and macOS'
-/// `$TMPDIR` is already ~50 bytes, so a long palace name blows past the
-/// kernel's `sun_path` limit and the bind fails for reasons unrelated to the
-/// behaviour under test.
+/// Why: the socket path is `$TMPDIR/trusty-<uid>/trusty-bm25-<palace>.sock` and
+/// macOS' `$TMPDIR` is already ~50 bytes, so a long palace name blows past the
+/// kernel's `sun_path` limit (104 on macOS) and the bind fails for reasons
+/// unrelated to the behaviour under test. #5099 spent 11 of those bytes on the
+/// uid-keyed directory, leaving roughly 26 characters for the palace fragment.
 /// What: a two-character prefix plus the low bits of the pid.
 fn palace(prefix: &str, n: usize) -> String {
     format!("{prefix}{:x}{n}", std::process::id() & 0xfff)

@@ -117,19 +117,20 @@ impl UdsEmbedderClient {
         }
     }
 
-    /// Default socket path under `$TMPDIR` (or `/tmp` if unset).
+    /// Default socket path in the per-uid scratch socket directory.
     ///
     /// Why: matches `trusty-embedderd`'s own default socket path so callers
     /// can construct a client with no explicit configuration.
-    /// What: returns `<TMPDIR>/trusty-embedderd.sock`. Falls back to `/tmp`
-    /// when `TMPDIR` is unset or empty (typical on Linux servers).
+    /// What: returns `<$TMPDIR or /tmp>/trusty-<uid>/trusty-embedderd.sock`.
+    ///
+    /// #5099: the socket used to sit directly in `$TMPDIR`, falling back to a
+    /// world-writable `/tmp` when `TMPDIR` was unset. The uid-keyed
+    /// subdirectory from [`crate::uds::scratch_socket_dir`] is what the daemon
+    /// can hold at `0700`.
+    ///
     /// Test: `default_socket_path_uses_tmpdir`.
     pub fn default_path() -> PathBuf {
-        let dir = match std::env::var("TMPDIR") {
-            Ok(p) if !p.trim().is_empty() => PathBuf::from(p),
-            _ => PathBuf::from("/tmp"),
-        };
-        dir.join(SOCKET_FILENAME)
+        crate::uds::scratch_socket_dir().join(SOCKET_FILENAME)
     }
 
     /// The socket path this client is configured to use.
@@ -326,7 +327,13 @@ mod tests {
             Some(SOCKET_FILENAME),
             "default path must end with {SOCKET_FILENAME}"
         );
-        assert!(p.parent().is_some(), "must have a parent directory");
+        // #5099: the parent must be the uid-keyed directory the daemon holds
+        // at 0700, not a bare `$TMPDIR` (or worse, a world-writable `/tmp`).
+        assert_eq!(
+            p.parent(),
+            Some(crate::uds::scratch_socket_dir().as_path()),
+            "default path must live in the per-uid scratch socket directory"
+        );
     }
 
     #[test]
