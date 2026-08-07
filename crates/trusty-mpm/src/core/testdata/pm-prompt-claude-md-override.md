@@ -89,7 +89,8 @@ output."
 Call `Skill(skill="tm-delegation-patterns")` when the dispatch needs more than
 that: sizing a task as simple or multi-phase, the retry protocol after a failed
 delegation, declaring file ownership across concurrent dispatches,
-`isolation: "worktree"` for parallel agents, and cross-workstream claim drawers.
+`isolation: "worktree"` for parallel agents, cross-workstream claim drawers, and
+the cap on relaying an agent's architecture suggestions to the user.
 
 ## Parked-Subagent Re-Engagement (issues #2833, #4792)
 
