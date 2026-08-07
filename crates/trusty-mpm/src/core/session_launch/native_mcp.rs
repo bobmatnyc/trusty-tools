@@ -494,13 +494,35 @@ pub(super) fn route_mcp_secrets_to_env_local(
 /// `is_env_local_actually_ignored_true_when_excluded`,
 /// `is_env_local_actually_ignored_false_when_tracked`.
 pub(super) fn is_env_local_actually_ignored(project_path: &Path) -> bool {
+    is_actually_git_ignored(project_path, ENV_LOCAL_FILENAME)
+}
+
+/// Ask git whether `filename` would actually be excluded from `git add`.
+///
+/// Why: this is [`is_env_local_actually_ignored`]'s implementation, taking the
+/// filename as a parameter so `.mcp.json` can ask the identical question
+/// (#4181) without a second copy of the spawn. The two callers want the answer
+/// for opposite reasons — `.env.local` treats "not ignored" as fail-closed
+/// (skip secret delivery entirely), `.mcp.json` treats it as warn-and-continue
+/// — but the QUESTION is one question, and the `disclaimed_output` spawn
+/// contract behind it must not drift between them.
+/// What: runs `git -C <project_path> check-ignore -q -- <filename>` and
+/// returns whether it exited `0`. Every non-zero exit — "not ignored", not a
+/// repo, no `git` binary — is `false`. Never panics. See
+/// [`is_env_local_actually_ignored`]'s doc for why the spawn captures output
+/// and why it routes through [`disclaimed_output`].
+/// Test: `is_env_local_actually_ignored_true_when_excluded`,
+/// `is_env_local_actually_ignored_false_when_tracked`,
+/// `is_env_local_actually_ignored_false_when_not_excluded_at_all`,
+/// `exclude_mcp_json_warns_when_repo_tracks_it` (#4181).
+pub(super) fn is_actually_git_ignored(project_path: &Path, filename: &str) -> bool {
     let args = [
         "-C".to_string(),
         project_path.to_string_lossy().to_string(),
         "check-ignore".to_string(),
         "-q".to_string(),
         "--".to_string(),
-        ENV_LOCAL_FILENAME.to_string(),
+        filename.to_string(),
     ];
     disclaimed_output("git", &args).is_ok_and(|output| output.status.success())
 }
@@ -529,12 +551,40 @@ pub(super) fn is_env_local_actually_ignored(project_path: &Path) -> bool {
 /// #4181.
 /// What: calls [`ensure_git_excluded`] with `.mcp.json`, logging a `warn!` on
 /// failure. Returns nothing — the caller has no decision to make.
-/// Test: `ensure_git_excluded_adds_mcp_json`.
-pub(super) fn exclude_mcp_json_from_git(project_path: &Path) {
+///
+/// `pub(crate)`, not `pub(super)`, because `prepare_session_inner` is not the
+/// only place the injectors run: `runtime::claude_code::prepare_managed_config`
+/// re-runs the same four of them on every spawn/resume, and two of its three
+/// callers (`spawn_resume`, `build_inplace_resume_command`) reach it with NO
+/// `prepare_session*` anywhere in their chain. Both write sites must exclude,
+/// or the resume paths reintroduce exactly the dirty tracked file this
+/// function exists to prevent.
+/// Test: `ensure_git_excluded_adds_mcp_json`,
+/// `exclude_mcp_json_warns_when_repo_tracks_it`.
+pub(crate) fn exclude_mcp_json_from_git(project_path: &Path) {
     if let Err(err) = ensure_git_excluded(project_path, mcp_config::MCP_JSON) {
         tracing::warn!(
             "could not git-exclude `{}` in {} ({err}) — MCP injection continues; this \
              workspace may show a dirty `{}` after launch",
+            mcp_config::MCP_JSON,
+            project_path.display(),
+            mcp_config::MCP_JSON
+        );
+        return;
+    }
+    // #4181, code-critic follow-up: the append above SUCCEEDS on a repo that
+    // already tracks `.mcp.json`, because `info/exclude` never applies to a
+    // path in the index — so the `Err` arm alone leaves that operator with no
+    // signal at all while their tracked file gets dirtied on every launch. Ask
+    // git for the real answer and say so. Still non-fatal: nothing tm can do
+    // about a foreign repo's index, and refusing to inject would drop the
+    // #3934/#3950 force-overwrite.
+    if !is_actually_git_ignored(project_path, mcp_config::MCP_JSON) {
+        tracing::warn!(
+            "`{}` is still not ignored in {} after adding it to info/exclude — this \
+             repository most likely TRACKS it, and `info/exclude` cannot override the \
+             index. Managed sessions will keep dirtying it; run `git rm --cached {}` \
+             to fix (see #4181)",
             mcp_config::MCP_JSON,
             project_path.display(),
             mcp_config::MCP_JSON

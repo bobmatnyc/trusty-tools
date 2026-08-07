@@ -168,6 +168,22 @@ pub(crate) use settings::{
     inject_trusty_memory_mcp, inject_trusty_mpm_mcp, inject_trusty_review_mcp,
 };
 
+/// Re-export of the `.mcp.json` git-exclusion guard (#4181) for the OTHER
+/// site that runs the injectors.
+///
+/// Why: `prepare_session_inner` is not the only writer.
+/// `runtime::claude_code::prepare_managed_config` re-runs the same four
+/// injectors on every spawn/resume, and `spawn_resume` /
+/// `build_inplace_resume_command` reach it with no `prepare_session*` in their
+/// chain at all. Exporting the guard is what lets that second site hold the
+/// same invariant instead of silently reintroducing a dirty tracked file.
+/// What: re-exports [`native_mcp::exclude_mcp_json_from_git`] — a plain
+/// re-export, no logic of its own.
+/// Test: the guard's own behavior is pinned by
+/// `ensure_git_excluded_adds_mcp_json`; the second call site by
+/// `prepare_managed_config_excludes_mcp_json_from_git`.
+pub(crate) use native_mcp::exclude_mcp_json_from_git;
+
 /// Re-export of the resume-time worktree/upstream sync primitives (issue
 /// #2647) for reuse by `daemon::managed_routes::lifecycle::resume_managed`.
 ///

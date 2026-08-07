@@ -17,8 +17,9 @@
 //! Test: this file IS the test module.
 
 use super::native_mcp::{
-    NATIVE_TRUSTY_MCP_SERVERS, ensure_git_excluded, inject_native_trusty_mcps_from,
-    is_env_local_actually_ignored, merge_env_file, split_public_and_secret_env,
+    NATIVE_TRUSTY_MCP_SERVERS, ensure_git_excluded, exclude_mcp_json_from_git,
+    inject_native_trusty_mcps_from, is_actually_git_ignored, is_env_local_actually_ignored,
+    merge_env_file, split_public_and_secret_env,
 };
 use super::settings::preseed_workspace_trust;
 use serde_json::{Value, json};
@@ -459,6 +460,43 @@ fn is_env_local_actually_ignored_false_when_tracked() {
     assert!(!is_env_local_actually_ignored(ws.path()));
 }
 
+/// #4181, code-critic follow-up on PR #5070: a repo that TRACKS `.mcp.json`
+/// gets a warning, because the exclude write silently succeeds there.
+///
+/// Why: `ensure_git_excluded` returns `Ok` on such a repo — `info/exclude`
+/// never applies to a path already in the index — so the `Err`-arm warning
+/// never fires and the operator gets no signal at all while every managed
+/// launch dirties their tracked file. That is the foreign-repo seam this PR
+/// cannot fix (tm will not rewrite another repo's index), and an unfixable
+/// seam with no diagnostic is just a silent one.
+/// What: tracks and commits a `.mcp.json`, calls `exclude_mcp_json_from_git`,
+/// and asserts the gate that drives the warning — git still reports the file
+/// as NOT ignored, which is the exact condition the second `warn!` fires on.
+///
+/// Asserts the gate rather than capturing the log line deliberately: the
+/// `tracing::subscriber::with_default` capture used elsewhere in this crate is
+/// a documented order-dependent flake (#4931, a thread-local subscriber loses
+/// to any global one another test installs), and this file runs in that same
+/// binary. The gate is deterministic and is what actually decides the warning.
+/// Test: itself; `ensure_git_excluded_adds_mcp_json` covers the untracked path
+/// where the exclusion genuinely takes effect.
+#[test]
+fn exclude_mcp_json_warns_when_repo_tracks_it() {
+    let ws = tempdir().unwrap();
+    git_init(ws.path());
+    std::fs::write(ws.path().join(".mcp.json"), "{}\n").unwrap();
+    git_commit_file(ws.path(), ".mcp.json");
+
+    // Must not panic and must not fail the launch — this is best-effort.
+    exclude_mcp_json_from_git(ws.path());
+
+    assert!(
+        !is_actually_git_ignored(ws.path(), ".mcp.json"),
+        "a TRACKED .mcp.json must still report as not-ignored after info/exclude — \
+         this is the condition the operator warning fires on (#4181)"
+    );
+}
+
 #[test]
 fn is_env_local_actually_ignored_false_when_not_excluded_at_all() {
     let ws = tempdir().unwrap();
@@ -830,27 +868,42 @@ fn ensure_git_excluded_adds_mcp_json() {
 /// #4181: `info/exclude` lives in the SHARED common git dir, so concurrent
 /// managed sessions in one project all append to the same file.
 ///
-/// Why: the trap in moving any write to a shared location is two writers with
-/// different content. Here both entries must survive — a lost `.env.local`
-/// line silently reopens the #2739 secret leak, and a lost `.mcp.json` line
-/// reopens this issue.
-/// What: eight threads race two different filenames against one repo, then
-/// asserts both lines are present and no line was corrupted by interleaving.
+/// Why: the trap in moving any write to a shared location is the lost-update
+/// race — writer A reads the file, writer B reads the same bytes and writes
+/// its own line, then A writes back what it read plus ITS line, discarding B's.
+/// A lost `.env.local` line silently reopens the #2739 secret leak; a lost
+/// `.mcp.json` line reopens this issue. `O_APPEND` is what forecloses it, and
+/// only a genuinely concurrent test can show that.
+///
+/// The earlier form of this test raced eight threads over just two filenames
+/// and passed even under a read-modify-write implementation (code-critic
+/// MEDIUM on PR #5070) — with so few distinct entries the early
+/// already-present return skipped almost every writer, so the window barely
+/// opened. Sixteen threads over sixteen DISTINCT filenames, released together
+/// from a barrier, forces every one of them through the read-then-write
+/// window simultaneously: under read-modify-write at least one line is
+/// reliably lost.
+/// What: sixteen barrier-synchronised threads each add a distinct filename to
+/// one repo, then asserts all sixteen lines are present and no line was
+/// corrupted by interleaving.
 #[test]
 fn ensure_git_excluded_is_concurrency_safe() {
     let ws = tempdir().unwrap();
     git_init(ws.path());
     let root = ws.path().to_path_buf();
 
+    const WRITERS: usize = 16;
+    let names: Vec<String> = (0..WRITERS).map(|i| format!(".probe-{i:02}")).collect();
+    let barrier = std::sync::Barrier::new(WRITERS);
+
     std::thread::scope(|scope| {
-        for i in 0..8 {
+        for name in &names {
             let root = root.clone();
+            let barrier = &barrier;
             scope.spawn(move || {
-                let name = if i % 2 == 0 {
-                    ".mcp.json"
-                } else {
-                    ".env.local"
-                };
+                // Every writer reaches the read-then-write window together —
+                // without this the threads serialise and the race never opens.
+                barrier.wait();
                 ensure_git_excluded(&root, name).expect("concurrent call succeeds");
             });
         }
@@ -865,19 +918,20 @@ fn ensure_git_excluded_is_concurrency_safe() {
     let rel = String::from_utf8_lossy(&raw.stdout).trim().to_string();
     let content = std::fs::read_to_string(ws.path().join(rel)).unwrap();
 
-    // Both entries survived the race, each on a line of its own. A duplicate
+    // Every entry survived the race, each on a line of its own. A duplicate
     // is acceptable (git treats it identically); a MISSING or SPLICED line is
     // not.
-    for name in [".mcp.json", ".env.local"] {
+    for name in &names {
         assert!(
             content.lines().any(|l| l.trim() == name),
-            "{name} must survive concurrent appends; exclude file was:\n{content}"
+            "{name} must survive concurrent appends — a lost line means the write is \
+             read-modify-write, not O_APPEND; exclude file was:\n{content}"
         );
     }
     for line in content.lines() {
         let t = line.trim();
         assert!(
-            t.is_empty() || t.starts_with('#') || t == ".mcp.json" || t == ".env.local",
+            t.is_empty() || t.starts_with('#') || names.iter().any(|n| n == t),
             "interleaved append corrupted a line: {t:?}\nfull file:\n{content}"
         );
     }
