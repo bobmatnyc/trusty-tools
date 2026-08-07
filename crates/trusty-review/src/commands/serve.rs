@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info};
 
 use trusty_review::{
     config::ReviewConfig,
@@ -68,6 +68,28 @@ pub struct ServeArgs {
     pub stdio: bool,
 }
 
+// ─── dedup requirement ───────────────────────────────────────────────────────
+
+/// Whether a server mode needs the durable dedup claim store (#5064).
+///
+/// Why: `dedup.redb` guards against posting the same review comment twice, so
+/// a mode that can post must have it and a mode that cannot post has no reason
+/// to touch the file at all. Before #5064 both modes attempted the open and
+/// swallowed the failure at `warn!`, which meant the posting-capable mode could
+/// start with no idempotency and still look healthy.
+/// What: a two-state declaration made at the call site; `build_app_state`
+/// either opens the store and propagates any failure, or never touches it.
+/// Test: `stdio_mode_never_creates_the_dedup_file`,
+/// `http_mode_opens_the_dedup_store`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DedupNeed {
+    /// This mode may post GitHub comments; a store it cannot open is fatal.
+    Required,
+    /// This mode never posts (`allow_posting: false` on every code path), so
+    /// the store is not opened.
+    NotNeeded,
+}
+
 // ─── handler ─────────────────────────────────────────────────────────────────
 
 /// Execute the `serve` subcommand.
@@ -96,16 +118,19 @@ pub async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
         let (state_tx, state_rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
         let config_for_bg = config.clone();
         tokio::spawn(async move {
-            let value: DeferredStateValue = match build_app_state(config_for_bg).await {
-                Ok(state) => {
-                    info!("trusty-review AppState ready — tool calls now accepted");
-                    Some(Ok(Arc::new(state)))
-                }
-                Err(e) => {
-                    error!("trusty-review AppState build failed: {e:#}");
-                    Some(Err(format!("{e:#}")))
-                }
-            };
+            // #5064: the MCP surface hardcodes `allow_posting: false`, so it
+            // never reaches the dedup write path and must not open the file.
+            let value: DeferredStateValue =
+                match build_app_state(config_for_bg, DedupNeed::NotNeeded).await {
+                    Ok(state) => {
+                        info!("trusty-review AppState ready — tool calls now accepted");
+                        Some(Ok(Arc::new(state)))
+                    }
+                    Err(e) => {
+                        error!("trusty-review AppState build failed: {e:#}");
+                        Some(Err(format!("{e:#}")))
+                    }
+                };
             // Ignore SendError: it means the stdio loop already exited (EOF).
             let _ = state_tx.send(value);
         });
@@ -113,7 +138,10 @@ pub async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
     }
 
     // ── HTTP mode: synchronous build (no strict startup deadline) ────────────
-    let state = build_app_state(config.clone()).await?;
+    // #5064: the webhook handler runs `allow_posting: true`, so this mode must
+    // not start without the dedup store — a missing claim gate means duplicate
+    // comments on a redelivered webhook.
+    let state = build_app_state(config.clone(), DedupNeed::Required).await?;
 
     use std::net::SocketAddr;
     let addr: SocketAddr = format!("{}:{}", args.bind, args.port)
@@ -142,11 +170,13 @@ pub async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
 /// auto-derive #661).
 /// What: builds the reviewer and verifier LLM providers, resolves the search
 /// index from the daemon, constructs HTTP search/analyze clients, opens the
-/// durable dedup store, and wraps everything in `AppState`.
-/// Test: covered transitively by handler unit tests that inject fakes;
-/// `resolve_index` wiring covered by `build_app_state_resolve_index_called`
-/// in `commands/serve_tests.rs`.
-async fn build_app_state(mut config: ReviewConfig) -> Result<AppState> {
+/// durable dedup store *if `dedup_need` says this mode can post* (#5064), and
+/// wraps everything in `AppState`. A `Required` store that cannot be opened is
+/// returned as `Err` — it is never downgraded to `dedup: None`.
+/// Test: `stdio_mode_never_creates_the_dedup_file`,
+/// `http_mode_opens_the_dedup_store`; handler behaviour covered transitively by
+/// unit tests that inject fakes.
+async fn build_app_state(mut config: ReviewConfig, dedup_need: DedupNeed) -> Result<AppState> {
     let reviewer_model = config.role_models.reviewer.model.clone();
     let default_provider = config.role_models.reviewer.provider.clone();
     let llm = build_provider(&reviewer_model, &default_provider, &config)
@@ -172,20 +202,7 @@ async fn build_app_state(mut config: ReviewConfig) -> Result<AppState> {
     let analyze = SubprocessAnalyzeClient::from_config(&config)
         .map_err(|e| anyhow::anyhow!("failed to build analyze HTTP client: {e}"))?;
 
-    let dedup_path = config.log_dir.join("dedup.redb");
-    let dedup = match trusty_review::store::DedupStore::open(&dedup_path) {
-        Ok(store) => {
-            info!(path = %dedup_path.display(), "dedup store opened");
-            Some(Arc::new(store))
-        }
-        Err(e) => {
-            warn!(
-                path = %dedup_path.display(),
-                "failed to open dedup store (continuing without it): {e}"
-            );
-            None
-        }
-    };
+    let dedup = open_dedup_for(&config, dedup_need)?;
 
     Ok(AppState::with_verifier_and_dedup(
         config,
@@ -196,3 +213,46 @@ async fn build_app_state(mut config: ReviewConfig) -> Result<AppState> {
         dedup,
     ))
 }
+
+/// Open the durable dedup claim store, or decline to open it (#5064).
+///
+/// Why: this is the single place where "does this server mode need dedup" turns
+/// into a filesystem action, so neither branch can drift into the other's
+/// behaviour. `NotNeeded` must not create or lock the file — that is what put
+/// `serve --stdio` in contention with the HTTP daemon and, under ADR-0034, with
+/// a console-spawned webhook worker. `Required` must not swallow a failure —
+/// a posting-capable server without a claim gate double-posts on redelivery
+/// while every health signal still reads green.
+/// What: returns `Ok(None)` without touching the filesystem for `NotNeeded`;
+/// for `Required` returns the opened store or propagates the error.
+/// Test: `stdio_mode_never_creates_the_dedup_file`,
+/// `http_mode_opens_the_dedup_store`, `http_mode_propagates_a_dedup_failure`.
+fn open_dedup_for(
+    config: &ReviewConfig,
+    need: DedupNeed,
+) -> Result<Option<Arc<trusty_review::store::DedupStore>>> {
+    let dedup_path = config.log_dir.join("dedup.redb");
+    match need {
+        DedupNeed::NotNeeded => {
+            debug!(
+                path = %dedup_path.display(),
+                "dedup store not opened — this mode never posts (#5064)"
+            );
+            Ok(None)
+        }
+        DedupNeed::Required => {
+            let store = trusty_review::store::DedupStore::open(&dedup_path).with_context(|| {
+                format!(
+                    "dedup store at {} is required by a posting-capable server mode",
+                    dedup_path.display()
+                )
+            })?;
+            info!(path = %dedup_path.display(), "dedup store opened");
+            Ok(Some(Arc::new(store)))
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "serve_tests.rs"]
+mod tests;
