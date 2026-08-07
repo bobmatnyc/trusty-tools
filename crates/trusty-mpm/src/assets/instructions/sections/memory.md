@@ -6,3 +6,6 @@ re-fetch that baseline on every delegation.
 
 Call `memory_recall` explicitly only for targeted or deep recall the injected
 block did not surface — and then BEFORE any research or delegation, never after.
+
+`MEMORY.md` is retired as a write target and as a source — see Core's
+"Memory & Instruction Sources".
