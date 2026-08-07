@@ -47,6 +47,7 @@ fn filter_drawers_by_deny_tags_handles_edge_cases() {
         content: "irrelevant".into(),
         tags: tags.iter().map(|s| s.to_string()).collect(),
         layer: Some(2),
+        score: Some(0.9),
     };
 
     // Empty deny list → passthrough.
@@ -130,12 +131,16 @@ fn compose_injection_truncates_at_cap() {
     // 4 KB byte cap. Drawer previews are already capped at
     // DRAWER_PREVIEW_CHARS so the cap-trigger has to come from the
     // global section.
-    let big_global = "## Big block\n".to_string() + &"- fact line\n".repeat(500);
+    // #5037 raised INJECTION_BYTE_CAP from 4 KB to 8 KB; size the fixture off
+    // the constant so the next raise cannot silently stop exercising truncation.
+    let lines = INJECTION_BYTE_CAP / "- fact line\n".len() + 64;
+    let big_global = "## Big block\n".to_string() + &"- fact line\n".repeat(lines);
     let drawers: Vec<RecalledDrawer> = (0..5)
         .map(|i| RecalledDrawer {
             content: format!("drawer {i} content"),
             tags: vec!["tag1".into()],
             layer: Some(2),
+            score: Some(0.9),
         })
         .collect();
     let triples: Vec<RawTriple> = (0..5)
@@ -145,7 +150,7 @@ fn compose_injection_truncates_at_cap() {
             object: "object".into(),
         })
         .collect();
-    let out = compose_injection(Some(&big_global), &drawers, &triples, Some("alpha"));
+    let out = compose_injection(Some(&big_global), &drawers, 0, &triples, Some("alpha"));
     assert!(
         out.len() <= INJECTION_BYTE_CAP,
         "expected len <= cap; got {}",
@@ -169,8 +174,214 @@ fn compose_injection_truncates_at_cap() {
 #[test]
 fn compose_injection_empty_inputs_yields_empty() {
     use format::compose_injection;
-    let out = compose_injection(None, &[], &[], Some("alpha"));
+    let out = compose_injection(None, &[], 0, &[], Some("alpha"));
     assert!(out.is_empty(), "got: {out:?}");
+}
+
+/// Why (issue #5037): the truncation budget was raised from 4 KB to 8 KB
+/// alongside the relevance floor. Pin the new ceiling explicitly so a future
+/// edit cannot quietly shrink it back and blame the floor for lost content.
+/// What: asserts the constant and that `compose_injection` respects it.
+/// Test: itself.
+#[test]
+fn injection_byte_cap_is_eight_kib() {
+    assert_eq!(INJECTION_BYTE_CAP, 8 * 1024);
+    assert_eq!(DEFAULT_TOP_K, 12, "requirement 2: max size raised from 5");
+}
+
+/// Why (issue #5037, requirement 1 + the primary probe): "what is the capital
+/// of France" returned five drawers all scoring exactly `0.15` — the
+/// `L1_NO_SIMILARITY_PENALTY` floor — and the reader could not tell them from a
+/// genuine `0.56` hit. That set must now be empty.
+/// What: five 0.15-scored drawers through the relevance filter at the shipped
+/// default; asserts nothing survives and all five are counted as withheld.
+/// Test: itself.
+#[test]
+fn relevance_floor_drops_all_noise_drawers() {
+    use filter::{filter_drawers_by_relevance_floor, RecalledDrawer};
+    let noise: Vec<RecalledDrawer> = (0..5)
+        .map(|i| RecalledDrawer {
+            content: format!("off-topic session drawer {i}"),
+            tags: vec!["signal".into()],
+            layer: Some(1),
+            // The exact value `rescore_l1_by_similarity` assigns an essential
+            // drawer the HNSW search never returned.
+            score: Some(0.15),
+        })
+        .collect();
+    let out = filter_drawers_by_relevance_floor(noise, DEFAULT_RELEVANCE_FLOOR);
+    assert!(
+        out.kept.is_empty(),
+        "0.15 L1-penalty drawers must not reach the injection; got {:?}",
+        out.kept.len()
+    );
+    assert_eq!(out.withheld, 5, "all five must be counted for the notice");
+}
+
+/// Why (issue #5037): a floor that also cut real matches would trade one defect
+/// for a worse one. `0.56` is the measured median of the self-retrieval signal
+/// population against the live palace.
+/// What: one genuine hit among four noise drawers; asserts only the hit
+/// survives, in order, with the rest counted.
+/// Test: itself.
+#[test]
+fn relevance_floor_keeps_high_scoring_drawer() {
+    use filter::{filter_drawers_by_relevance_floor, RecalledDrawer};
+    let make = |content: &str, score: f32| RecalledDrawer {
+        content: content.into(),
+        tags: Vec::new(),
+        layer: Some(2),
+        score: Some(score),
+    };
+    let mixed = vec![
+        make("genuine on-topic hit about rust integration", 0.56),
+        make("noise a", 0.15),
+        make("noise b", 0.15),
+        make("noise c", 0.2446),
+        make("noise d", 0.3439),
+    ];
+    let out = filter_drawers_by_relevance_floor(mixed, DEFAULT_RELEVANCE_FLOOR);
+    assert_eq!(out.kept.len(), 1, "the genuine hit must survive");
+    assert!(out.kept[0].content.contains("genuine on-topic hit"));
+    assert_eq!(out.withheld, 4);
+}
+
+/// Why (issue #5037): a drawer whose `score` the daemon did not send is
+/// unjudgeable. Dropping it would let a wire-format change silently empty every
+/// injection — the fail-open inversion this fix exists to prevent.
+/// What: a drawer with `score: None` through the filter at the default floor.
+/// Test: itself.
+#[test]
+fn relevance_floor_keeps_drawer_without_score() {
+    use filter::{filter_drawers_by_relevance_floor, RecalledDrawer};
+    let drawers = vec![RecalledDrawer {
+        content: "daemon predates the score field".into(),
+        tags: Vec::new(),
+        layer: Some(2),
+        score: None,
+    }];
+    let out = filter_drawers_by_relevance_floor(drawers, DEFAULT_RELEVANCE_FLOOR);
+    assert_eq!(out.kept.len(), 1, "unknown score must not mean dropped");
+    assert_eq!(out.withheld, 0);
+}
+
+/// Why (issue #5037, requirement 4): a partial drop must tell the reader more
+/// exists, so "the model saw everything relevant" is never assumed wrongly.
+/// What: composes with two kept drawers and three withheld; asserts the count
+/// and the `memory_recall` pointer both render.
+/// Test: itself.
+#[test]
+fn compose_injection_announces_withheld_drawers() {
+    use filter::RecalledDrawer;
+    use format::compose_injection;
+    let drawers: Vec<RecalledDrawer> = (0..2)
+        .map(|i| RecalledDrawer {
+            content: format!("kept drawer {i}"),
+            tags: Vec::new(),
+            layer: Some(2),
+            score: Some(0.7),
+        })
+        .collect();
+    let out = compose_injection(None, &drawers, 3, &[], Some("alpha"));
+    assert!(out.contains("kept drawer 0"), "kept content must render");
+    assert!(
+        out.contains("3 further memories withheld"),
+        "the withheld count must be visible; got:\n{out}"
+    );
+    assert!(
+        out.contains("memory_recall"),
+        "the notice must point at how to see past the floor; got:\n{out}"
+    );
+}
+
+/// Why (issue #5037, requirement 4 — the case the ruling calls out): returning
+/// zero drawers where five noisy ones used to appear is correct, but only if it
+/// is visible. Silence must be distinguishable from nothing-existed.
+/// What: composes with zero kept and five withheld, then with zero of both.
+/// Asserts the first announces itself and the second stays silent — an empty
+/// palace has nothing to announce.
+/// Test: itself.
+#[test]
+fn compose_injection_announces_total_silence() {
+    use format::compose_injection;
+    let silenced = compose_injection(None, &[], 5, &[], Some("alpha"));
+    assert!(
+        !silenced.is_empty(),
+        "an all-withheld recall must not render as an empty injection"
+    );
+    assert!(
+        silenced.contains("cleared the relevance floor") && silenced.contains('5'),
+        "total silence must be announced with its count; got:\n{silenced}"
+    );
+    assert!(
+        silenced.contains("Nothing is missing from the palace"),
+        "the notice must distinguish withheld from absent; got:\n{silenced}"
+    );
+
+    let nothing_existed = compose_injection(None, &[], 0, &[], Some("alpha"));
+    assert!(
+        nothing_existed.is_empty(),
+        "zero candidates is not a withheld recall; got:\n{nothing_existed}"
+    );
+}
+
+/// Why (issue #5037): the floor is required to be *configurable*, including
+/// settable to zero to restore pre-fix behaviour. The clamp is the only thing
+/// standing between an operator typo and a disabled or total-blackout gate.
+/// What: exercises `clamp_floor` across unset, valid, zero, out-of-range,
+/// unparseable, and NaN inputs.
+/// Test: itself.
+#[test]
+fn configured_relevance_floor_clamps_to_bounds() {
+    assert_eq!(clamp_floor(None), DEFAULT_RELEVANCE_FLOOR);
+    assert_eq!(clamp_floor(Some("0.5")), 0.5);
+    assert_eq!(clamp_floor(Some(" 0.42 ")), 0.42);
+    assert_eq!(clamp_floor(Some("0")), 0.0, "zero must disable the gate");
+    assert_eq!(clamp_floor(Some("-3")), 0.0);
+    assert_eq!(clamp_floor(Some("9")), 1.0);
+    assert_eq!(clamp_floor(Some("banana")), DEFAULT_RELEVANCE_FLOOR);
+    assert_eq!(clamp_floor(Some("NaN")), DEFAULT_RELEVANCE_FLOOR);
+}
+
+/// Why (issue #5037, requirement 2): the K ceiling moved with the default, and
+/// a ceiling below the default would silently cap every operator override.
+/// What: exercises `clamp_top_k` across unset, valid, zero, over-ceiling, and
+/// unparseable inputs.
+/// Test: itself.
+#[test]
+fn configured_top_k_clamps_to_bounds() {
+    assert_eq!(clamp_top_k(None), DEFAULT_TOP_K);
+    assert_eq!(clamp_top_k(Some("7")), 7);
+    assert_eq!(clamp_top_k(Some("0")), DEFAULT_TOP_K);
+    assert_eq!(clamp_top_k(Some("999")), MAX_TOP_K);
+    assert_eq!(clamp_top_k(Some("nope")), DEFAULT_TOP_K);
+}
+
+/// Why (issue #5037, requirement 3): the recall query must be the whole user
+/// input. `hook_prompt_excerpt` exists a few lines away in the same module and
+/// truncates for telemetry — wiring it into the query by mistake would fragment
+/// every recall silently. Pin that `parse_user_prompt` hands back the prompt
+/// entire.
+/// What: a 12,000-character prompt through `parse_user_prompt`; asserts the
+/// result is byte-identical, and that the telemetry excerpt is not.
+/// Test: itself.
+#[test]
+fn recall_query_is_the_whole_prompt() {
+    let long: String = "explain the retrieval floor and why it matters. "
+        .repeat(400)
+        .trim_end()
+        .to_string();
+    assert!(long.len() > 12_000, "fixture must exceed any plausible cap");
+    let payload = serde_json::json!({ "prompt": long, "cwd": "/tmp" }).to_string();
+
+    let parsed = parse_user_prompt(&payload);
+    assert_eq!(parsed, long, "the recall query must not be truncated");
+
+    // The telemetry excerpt IS truncated — that asymmetry is the point.
+    assert!(
+        crate::hook_prompt_excerpt(&parsed).len() < parsed.len(),
+        "excerpt helper must stay distinct from the query path"
+    );
 }
 
 /// Why (issue #125): when Claude Code invokes the UserPromptSubmit hook,
@@ -346,6 +557,80 @@ async fn prompt_context_recalls_palace_drawers() {
     assert!(
         elapsed_ms < 5_000,
         "prompt-context too slow ({elapsed_ms}ms) — investigate"
+    );
+
+    addr_handle.shutdown().await;
+}
+
+/// Why (issue #5037, end to end): the unit tests above pin the floor over
+/// synthetic scores. This one proves the whole chain — real embedder, real HTTP
+/// recall, real `score` on the wire, real filter — turns an off-topic prompt
+/// into zero injected drawers plus a visible withheld notice, which is the
+/// behaviour the probe found missing ("what is the capital of France" returned
+/// five drawers at 0.15, rendered as if they matched).
+/// What: populates a palace with three Rust/Python/KG drawers, then submits a
+/// prompt about none of them. Asserts no drawer content reaches the injection,
+/// and that the block says results were withheld rather than going silent.
+/// Test: itself.
+/// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+#[cfg(feature = "axum-server")]
+#[tokio::test]
+async fn prompt_context_off_topic_prompt_withholds_and_says_so() {
+    let _guard = crate::commands::env_test_lock().lock().await;
+    unsafe {
+        std::env::remove_var(ENV_MIN_SCORE);
+        std::env::remove_var(ENV_RECALL_DENY_TAGS);
+    }
+    let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+        spin_up_test_daemon_with_palace("prompt-ctx-floor-e2e").await;
+
+    for (text, tags) in [
+        (
+            "Rust integration uses tokio for async tasks and serde for JSON encoding",
+            vec!["rust", "tokio"],
+        ),
+        (
+            "Python bindings ship via PyO3 with custom ABI shims for the runtime",
+            vec!["python", "pyo3"],
+        ),
+        (
+            "Knowledge graph stores triples in redb with valid_from intervals per edge",
+            vec!["kg", "redb"],
+        ),
+    ] {
+        let tags_json: Vec<serde_json::Value> = tags.iter().map(|t| json!(t)).collect();
+        let _ = crate::tools::dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": slug,
+                "text": text,
+                "room": "General",
+                "tags": tags_json,
+            }),
+        )
+        .await
+        .expect("memory_remember");
+    }
+
+    // The probe query from #5037 — nothing in this palace answers it.
+    let payload = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": project_dir.to_string_lossy(),
+        "prompt": "what is the capital of France"
+    })
+    .to_string();
+    let body = build_injection_body(&payload).await;
+
+    for leaked in ["tokio", "PyO3", "valid_from"] {
+        assert!(
+            !body.contains(leaked),
+            "off-topic prompt must not inject `{leaked}`; got:\n{body}"
+        );
+    }
+    assert!(
+        body.contains("relevance floor"),
+        "a withheld recall must announce itself, not go silent; got:\n{body}"
     );
 
     addr_handle.shutdown().await;

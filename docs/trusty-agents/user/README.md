@@ -1,6 +1,6 @@
-# open-mpm — User Documentation
+# trusty-agents — User Documentation
 
-For people installing and using open-mpm.
+For people installing and using trusty-agents (binary `tagent`).
 
 ## Contents
 
@@ -8,9 +8,9 @@ For people installing and using open-mpm.
 |---|---|
 | [quickstart.md](./quickstart.md) | Install, configure, and run your first workflow. |
 | [cli-reference.md](./cli-reference.md) | Every flag, every mode. |
-| [configuration.md](./configuration.md) | `.open-mpm/` layout, agent TOML, skill markdown, workflow JSON. |
+| [configuration.md](./configuration.md) | `.trusty-agents/` layout, agent TOML, skill markdown, workflow JSON. |
 | [agents-and-skills.md](./agents-and-skills.md) | Bundled agents, custom agents, custom skills. |
 
 ---
 
-[← Back to open-mpm docs index](../README.md)
+[← Back to trusty-agents docs index](../README.md)

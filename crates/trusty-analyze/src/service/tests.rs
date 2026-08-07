@@ -664,3 +664,113 @@ async fn list_indexes_proxies_failure_to_502() {
     let (status, _) = json_get(app, "/indexes").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
 }
+
+// ── #5067: concept clustering after the neural embedder was removed ──────────
+
+/// Spawn a stub trusty-search that serves a small, real chunk corpus.
+///
+/// Why (#5067): `spawn_empty_chunk_search` short-circuits `/clusters` before it
+/// ever reaches the embedder, so it cannot show that the surviving BOW path
+/// still produces usable vectors. Clustering needs actual content.
+/// What: binds an ephemeral loopback port serving `GET /indexes/{id}/chunks`,
+/// returning six distinct chunks at `offset=0` and an empty page beyond it so
+/// the client's pager terminates.
+/// Test: used by `clusters_return_bow_vectors_for_a_live_corpus` and
+/// `clusters_reject_removed_neural_method`.
+async fn spawn_chunk_search_with_corpus() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stub = Router::new().route(
+        "/indexes/{id}/chunks",
+        axum::routing::get(
+            |q: axum::extract::Query<HashMap<String, String>>| async move {
+                let q = q.0;
+                if q.get("offset").map(String::as_str) != Some("0") {
+                    return axum::response::Json(serde_json::json!({ "chunks": [] }));
+                }
+                let bodies = [
+                    "fn authenticate(user: User) -> Result<Session> { verify_password(user) }",
+                    "fn authorize(session: Session) -> bool { session.scopes.contains(\"admin\") }",
+                    "fn parse_config(path: &Path) -> Config { toml::from_str(&read(path)) }",
+                    "fn merge_config(a: Config, b: Config) -> Config { a.overlay(b) }",
+                    "fn render_chart(series: &[Point]) -> Svg { svg::plot(series) }",
+                    "fn render_legend(labels: &[String]) -> Svg { svg::legend(labels) }",
+                ];
+                let chunks: Vec<serde_json::Value> = bodies
+                    .iter()
+                    .enumerate()
+                    .map(|(i, content)| {
+                        serde_json::json!({
+                            "id": format!("src/lib.rs:{i}:{}", i + 3),
+                            "file": "src/lib.rs",
+                            "start_line": i,
+                            "end_line": i + 3,
+                            "content": content,
+                        })
+                    })
+                    .collect();
+                axum::response::Json(serde_json::json!({ "chunks": chunks }))
+            },
+        ),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, stub).await.ok();
+    });
+    format!("http://{addr}")
+}
+
+/// Why (#5067): removing the neural embedder must not remove clustering. This
+/// is the "used path still works" half of the fix — the endpoint every real
+/// caller (`trusty-console`, the MCP `cluster_concepts` tool, the embedded UI)
+/// actually hits has to keep returning usable vectors, now sourced from the
+/// state's BOW embedder rather than a model loaded at boot.
+/// What: with a six-chunk corpus, `/clusters?k=3` answers 200 with
+/// `method: "bow"`, the BOW embedder's 256 dimensions, all six chunks
+/// accounted for, and non-empty clusters.
+/// Test: this test.
+#[tokio::test]
+async fn clusters_return_bow_vectors_for_a_live_corpus() {
+    let tmp = TempDir::new().unwrap();
+    let search_base = spawn_chunk_search_with_corpus().await;
+    let app = build_router(state_in_with_search(tmp.path(), &search_base));
+    let (status, body) = json_get(app, "/indexes/demo/clusters?k=3").await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["method"], "bow");
+    assert_eq!(body["dim"], 256);
+    assert_eq!(body["chunk_count"], 6);
+    let clusters = body["clusters"].as_array().expect("clusters array");
+    assert!(!clusters.is_empty(), "no clusters produced: {body}");
+    let members: usize = clusters
+        .iter()
+        .map(|c| c["members"].as_array().map(Vec::len).unwrap_or(0))
+        .sum();
+    assert_eq!(members, 6, "every chunk must land in a cluster: {body}");
+}
+
+/// Why (#5067): the pre-fix daemon answered `method=neural` with BOW vectors
+/// whenever the model had failed to load — it logged a warning at startup and
+/// then said nothing to the caller. Deleting the backend while still accepting
+/// the parameter would make that substitution permanent and invisible. A caller
+/// asking for an embedder that no longer exists has to be told.
+/// What: `/clusters?method=neural` answers 400 with a JSON error naming the
+/// rejected value, instead of 200 and hashed vectors.
+/// Test: this test.
+#[tokio::test]
+async fn clusters_reject_removed_neural_method() {
+    let tmp = TempDir::new().unwrap();
+    let search_base = spawn_chunk_search_with_corpus().await;
+    let app = build_router(state_in_with_search(tmp.path(), &search_base));
+    let (status, body) = json_get(app, "/indexes/demo/clusters?k=3&method=neural").await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "`method=neural` must be rejected, not silently served by BOW; body: {body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("neural") && msg.contains("bow"),
+        "the error must name the rejected value and the supported one: {body}"
+    );
+}

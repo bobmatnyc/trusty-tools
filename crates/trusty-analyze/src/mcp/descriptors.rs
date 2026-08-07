@@ -138,14 +138,15 @@ pub fn base_tool_descriptors() -> Value {
         },
         {
             "name": "cluster_concepts",
-            "description": "Group chunks into concept clusters using k-means over embeddings (BOW or neural)",
+            "description": "Group chunks into concept clusters using k-means over hashed bag-of-words embeddings",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "index":    { "type": "string" },
                     "index_id": { "type": "string" },
                     "k":        { "type": "number" },
-                    "method":   { "type": "string", "description": "Embedding method: 'bow' (default, fast) or 'neural' (semantic, requires fastembed model)" }
+                    // #5067: 'neural' was removed along with the fastembed embedder.
+                    "method":   { "type": "string", "enum": ["bow"], "description": "Embedding method. Only 'bow' is supported; it is the default." }
                 }
             }
         },

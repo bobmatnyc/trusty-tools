@@ -538,6 +538,15 @@ pub fn create_session_worktree(
     }
 
     info!(worktree = %worktree_path.display(), "inproject: per-session worktree created");
+
+    // #5060: register this worktree with trusty-search NOW rather than waiting
+    // for a session to launch in it. Fire-and-forget on a detached thread — a
+    // cold BM25+KG walk of a large repo takes ~35s, and worktree creation must
+    // never wait on it. The index is BM25+KG only (no embeddings); see
+    // `core::worktree_index`. Its teardown is already owned by
+    // `session_manager::search_gc`, which derives the same id (#2033).
+    crate::core::worktree_index::index_new_worktree_in_background(worktree_path.clone());
+
     Ok(worktree_path)
 }
 

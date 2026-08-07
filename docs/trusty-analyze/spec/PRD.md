@@ -171,10 +171,13 @@ shipped code.
 
 - **FR-6.1 (✅)** k-means (Lloyd + k-means++) concept clustering over chunk
   embeddings; returns labelled clusters with cohesion. *(`core/concept_cluster.rs`)*
-- **FR-6.2 (✅)** Two embedder backends: BoW hashed (always available,
-  deterministic) and neural (fastembed all-MiniLM-L6-v2, 384-dim). Neural load
-  failure degrades gracefully to BoW. *(`embedder/`, `main.rs` serve path)*
-- **FR-6.3 (✅)** Clusters endpoint/tool with `k` and `method=bow|neural`.
+- **FR-6.2 (✅)** One embedder backend: BoW hashed — deterministic, always
+  available, no model and no network. The fastembed neural backend was removed
+  in #5067: nothing selected it, yet it was constructed at every daemon boot
+  and its untimed hf-hub request blocked startup for as long as the request
+  took. *(`embedder/`)*
+- **FR-6.3 (✅)** Clusters endpoint/tool with `k` and `method=bow`. Any other
+  `method` value is rejected with HTTP 400 rather than silently served by BoW.
   *(`/indexes/:id/clusters`, MCP `cluster_concepts`)*
 
 ### 4.7 Refactor, Review & LLM Deep Analysis
@@ -267,11 +270,12 @@ shipped code.
   in-flight requests before exiting (`with_graceful_shutdown`). Use
   `launchctl bootout` (SIGTERM) rather than `launchctl kickstart -k` (SIGKILL).
   *(`service/mod.rs`; issue #534/#535)*
-- **FR-12.7 (✅)** ORT backend is feature-selectable: `bundled-ort` (default,
-  static libs, glibc ≥ 2.38), `load-dynamic` (system `libonnxruntime.so`, glibc
-  < 2.38), `cuda` (load-dynamic + CUDA acceleration). Install on glibc < 2.38
-  with `--no-default-features --features http-server,load-dynamic` and set
-  `ORT_DYLIB_PATH`. *(`Cargo.toml`; issue #536/#538)*
+- **FR-12.7 (withdrawn — #5067)** ORT backend selection (`bundled-ort` /
+  `load-dynamic` / `cuda`, issue #536/#538) no longer exists. Those features
+  only ever chose a runtime for the neural clustering embedder; removing that
+  embedder removed ONNX Runtime from the crate entirely. One install command
+  now works on every host, with no `ORT_DYLIB_PATH` and no per-glibc variant.
+  *(`Cargo.toml`)*
 
 ### 4.13 Output & Reporting
 

@@ -11269,7 +11269,6 @@ dependencies = [
  "colored 2.2.0",
  "dashmap 6.2.1",
  "dirs 5.0.1",
- "fastembed",
  "futures",
  "futures-util",
  "hex",
@@ -11578,7 +11577,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -11760,7 +11759,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",

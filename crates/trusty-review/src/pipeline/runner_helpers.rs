@@ -214,6 +214,23 @@ pub(super) async fn resolve_diff_token(
     })
 }
 
+/// Whether an aborting review holds the dedup claim for its head SHA (#5064).
+///
+/// Why: `abort_dry` releases the claim so a retry can re-run the SHA. That is
+/// correct only when this process acquired it. A review aborting *because* the
+/// claim failed holds nothing — releasing there removes whatever record is on
+/// disk, including a `Completed` one written by another process, which reopens
+/// the duplicate-comment hole the abort exists to close.
+/// What: `Held` releases the claim; `NotHeld` leaves the store untouched.
+/// Test: `failed_claim_abort_does_not_delete_another_processes_record`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DedupClaim {
+    /// This review acquired the claim; the abort must release it.
+    Held,
+    /// This review never acquired the claim; the abort must not write.
+    NotHeld,
+}
+
 /// Finalise an *aborted* review as dry-run only, releasing the dedup claim.
 ///
 /// Why: a review that aborts before producing a real verdict (diff-load failure
@@ -221,31 +238,38 @@ pub(super) async fn resolve_diff_token(
 /// fail-safe APPROVE/UNKNOWN.  It must also *release* its dedup claim so a later
 /// retry (e.g. once the LLM recovers) can re-run instead of being suppressed.
 /// What: syncs `findings_count` to `findings.len()` (#1877), releases the
-/// in-progress dedup claim (fail-safe on error), writes the dry-run log so the
-/// failure is inspectable, prints when requested, and returns the result
-/// flagged `dry_run = true`.
+/// in-progress dedup claim when `claim` is `Held` (fail-safe on error), writes
+/// the dry-run log so the failure is inspectable, prints when requested, and
+/// returns the result flagged `dry_run = true`.
 /// Test: `run_review_fail_safe_on_llm_error`, `run_review_missing_diff_file_sets_error`,
-/// `findings_count_matches_len_on_abort`.
-pub(super) fn abort_dry(
+/// `findings_count_matches_len_on_abort`,
+/// `failed_claim_abort_does_not_delete_another_processes_record`.
+pub(super) async fn abort_dry(
     mut result: ReviewResult,
     config: &ReviewConfig,
     input: &ReviewInput,
     deps: &ReviewDeps,
+    claim: DedupClaim,
 ) -> ReviewResult {
     result.dry_run = true;
     // #1877: keep the authoritative findings_count in sync at this canonical
     // early-abort exit point, regardless of which guard triggered the abort.
     result.findings_count = result.findings.len();
     // Release the in-progress claim so a retry can re-run this head SHA.
-    if !result.head_sha.is_empty()
+    // #5064: only when this review actually acquired it — see `DedupClaim`.
+    if claim == DedupClaim::Held
+        && !result.head_sha.is_empty()
         && let Some(store) = deps.dedup.as_ref()
-        && let Err(e) = store.release(
-            &result.owner,
-            &result.repo,
-            result.pr_number,
-            &result.head_sha,
-        )
+        && let Err(e) = store
+            .release(
+                &result.owner,
+                &result.repo,
+                result.pr_number,
+                &result.head_sha,
+            )
+            .await
     {
+        // Non-fatal: nothing was posted, and the InProgress record ages out.
         warn!("dedup release() after abort failed (non-fatal): {e}");
     }
     if input.write_log {

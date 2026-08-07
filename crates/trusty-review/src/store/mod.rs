@@ -13,10 +13,12 @@
 //! Test: each submodule carries its own unit tests.
 
 pub mod dedup;
+pub mod dedup_open;
 pub mod in_flight;
 pub mod outcome_store;
 
 pub use dedup::{ClaimOutcome, DedupError, DedupStore};
+pub use dedup_open::{DedupNeed, open_for as open_dedup_for};
 pub use in_flight::{InFlightGuard, InFlightRegistry};
 pub use outcome_store::{OutcomeError, OutcomeRecord, OutcomeStore};
 

@@ -16,6 +16,10 @@ use trusty_analyze::mcp::AnalyzerMcpServer;
 use trusty_analyze::service::DEFAULT_PORT;
 
 mod commands;
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod main_tests;
 use commands::daemon as daemon_cmds;
 use commands::daemon_guard::ensure_daemon_running;
 use commands::port::{handle_port, PortFormat};
@@ -79,15 +83,19 @@ enum Cmd {
         /// Exposes `POST /mcp` and `GET /mcp/sse`.
         #[arg(long)]
         mcp_port: Option<u16>,
-        /// Path to the fastembed model cache. If the model is not present
-        /// here, the neural embedder fails to load and the daemon falls
-        /// back to BOW clustering.
-        #[arg(
-            long,
-            default_value = ".fastembed_cache",
-            env = "TRUSTY_FASTEMBED_CACHE"
-        )]
-        fastembed_cache: PathBuf,
+        /// Deprecated no-op, kept so existing launchd plists and shell
+        /// wrappers that pass it keep starting.
+        ///
+        /// Why (#5067): this pointed at the cache for the neural clustering
+        /// embedder. That embedder is gone — it was loaded at every boot,
+        /// selected by nobody, and its untimed hf-hub request blocked the
+        /// daemon's bind for as long as the request took. Removing the flag
+        /// outright would turn an unnecessary startup stall into an
+        /// unnecessary startup failure for anyone still passing it.
+        /// What: accepted and ignored; hidden from `--help`.
+        /// Test: `serve_accepts_deprecated_fastembed_cache_flag`.
+        #[arg(long, hide = true, env = "TRUSTY_FASTEMBED_CACHE")]
+        fastembed_cache: Option<PathBuf>,
     },
     /// One-shot complexity report for a registered index.
     Analyze {
@@ -408,8 +416,9 @@ async fn main() -> Result<()> {
             port,
             mcp,
             mcp_port,
-            fastembed_cache,
-        } => run_serve(search, facts_path, port, mcp, mcp_port, fastembed_cache).await,
+            // #5067: accepted for backward compatibility, deliberately unused.
+            fastembed_cache: _,
+        } => run_serve(search, facts_path, port, mcp, mcp_port).await,
         Cmd::Analyze { index_id, top_k } => {
             let chunks = search
                 .get_chunks(&index_id)
