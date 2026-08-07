@@ -118,43 +118,49 @@ pub async fn review_github_pr_handler(
 
 /// Why: GitHub can push `pull_request` events to this endpoint so PRs are
 /// reviewed automatically the moment they open or update — no CI step needed.
-/// What: verifies the `X-Hub-Signature-256` HMAC against `GITHUB_WEBHOOK_SECRET`
-/// (skipped with a warning when the secret is unset), checks the event is a
-/// `pull_request` with an actionable `action`, extracts the PR coordinates,
-/// spawns a background task to fetch+analyze+comment, and returns 202 Accepted
-/// immediately so GitHub's delivery doesn't time out.
-/// Test: `webhook_rejects_bad_signature` (401 path) and
+/// The HMAC is the only thing proving a delivery came from GitHub, so an
+/// unset secret rejects every delivery rather than trusting the payload
+/// (#5173; matches `trusty-review`'s `handle_github_webhook`).
+/// What: requires a non-empty secret from app state or `GITHUB_WEBHOOK_SECRET`
+/// and verifies `X-Hub-Signature-256` against it (401 on either failure),
+/// checks the event is a `pull_request` with an actionable `action`, extracts
+/// the PR coordinates, spawns a background task to fetch+analyze+comment, and
+/// returns 202 Accepted immediately so GitHub's delivery doesn't time out.
+/// Test: `webhook_rejects_when_no_secret_configured` (unset-secret 401),
+/// `webhook_rejects_bad_signature` (bad-HMAC 401), and
 /// `webhook_ignores_non_pr_event` (202 + no work) cover the guard rails.
 pub async fn github_webhook_handler(
     State(state): State<Arc<AnalyzerAppState>>,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, ApiError> {
-    // 1. Signature verification (when a secret is configured). The secret
-    //    comes from app state if set, otherwise from GITHUB_WEBHOOK_SECRET.
+    // 1. Signature verification. The secret comes from app state if set,
+    //    otherwise from GITHUB_WEBHOOK_SECRET.
     let secret = state
         .webhook_secret
         .clone()
         .or_else(|| std::env::var("GITHUB_WEBHOOK_SECRET").ok())
         .filter(|s| !s.is_empty());
-    match secret {
-        Some(secret) => {
-            let sig = headers
-                .get("X-Hub-Signature-256")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            if !crate::core::verify_webhook_signature(&secret, &body, sig) {
-                return Err(ApiError {
-                    status: StatusCode::UNAUTHORIZED,
-                    message: "X-Hub-Signature-256 verification failed".to_string(),
-                });
-            }
-        }
-        None => {
-            tracing::warn!(
-                "no webhook secret configured — skipping webhook signature verification"
-            );
-        }
+    // #5173: an unset secret rejects — skipping verification let any network
+    // peer inject PR coordinates into the analyze pipeline.
+    let Some(secret) = secret else {
+        tracing::warn!(
+            "GITHUB_WEBHOOK_SECRET is not configured — rejecting webhook delivery with 401"
+        );
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "webhook secret not configured".to_string(),
+        });
+    };
+    let sig = headers
+        .get("X-Hub-Signature-256")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !crate::core::verify_webhook_signature(&secret, &body, sig) {
+        return Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "X-Hub-Signature-256 verification failed".to_string(),
+        });
     }
 
     // 2. Only handle pull_request events.

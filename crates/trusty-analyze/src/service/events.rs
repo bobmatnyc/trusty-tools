@@ -120,9 +120,11 @@ pub struct AnalyzerAppState {
     /// vars are process-global and unsafe to mutate from concurrent tests.
     /// Threading the secret through state lets tests inject it deterministically
     /// while production still falls back to the env var.
-    /// What: `Some(secret)` forces verification; `None` falls back to the env
-    /// var (and skips verification when that is also unset).
-    /// Test: `webhook_rejects_bad_signature` injects `Some(...)` here.
+    /// What: `Some(secret)` forces verification against that secret; `None`
+    /// falls back to the env var, and when that is also unset or empty the
+    /// handler rejects every delivery with 401 (#5173).
+    /// Test: `webhook_rejects_bad_signature` injects `Some(...)` here;
+    /// `webhook_rejects_when_no_secret_configured` covers the `None` case.
     pub webhook_secret: Option<String>,
     /// OpenRouter API key used by the `POST /analyze/deep` endpoint.
     ///
