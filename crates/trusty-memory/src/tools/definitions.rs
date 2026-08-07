@@ -296,7 +296,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "palace_reembed",
-                "description": "#4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. Defaults to a dry run.",
+                "description": "#4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. Defaults to a dry run. #5005: `missing: 0` does NOT mean every drawer is findable — a drawer lost to an id collision has a vector row and is still unreachable. Before treating this report as a complete account of what is retrievable — and ALWAYS before deleting a drawer on the strength of it — read `alias_audit`: act only on `is_clean: true`, and run `palace_unalias` first when it is false. Read `alias_audit.key_rows` vs `distinct_vector_ids` directly if you need the raw counts; they cannot be masked.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

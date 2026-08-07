@@ -735,8 +735,10 @@ impl HnswStore {
 
     /// Unmap every drawer caught in an id collision so a re-embed can repair it.
     ///
-    /// 🔴 Not wired to any CLI or MCP surface, and never run against a live
-    /// palace in the PR that added it (#5005) — see that PR's body.
+    /// 🔴 Never run against a live palace in the PR that added it (#5005) — the
+    /// coverage below is all synthetic collisions. Reached from the
+    /// `palace_unalias` MCP tool via `PalaceHandle::repair_aliases`, which
+    /// defaults to a dry run.
     ///
     /// Why: when N uuids alias onto one `vector_id`, the single surviving
     /// `VECTORS` row holds whichever vector was written LAST, and search

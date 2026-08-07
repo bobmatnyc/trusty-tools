@@ -338,7 +338,9 @@ pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Resu
 ///
 /// 🔴 `outcome` is the field to branch on, never `freed_ids.len()`. `"partial"`
 /// and `"unavailable"` both carry ids and neither is a success.
-/// Test: `dispatch_palace_unalias_dry_run_names_ids_and_writes_nothing`.
+/// Test: `dispatch_palace_unalias_dry_run_names_ids_and_writes_nothing`, and
+/// `dispatch_palace_unalias_frees_a_real_collision_and_is_idempotent` for the
+/// write path (#5005 review: the success path had only ever run empty).
 pub(crate) async fn handle_palace_unalias(state: &AppState, args: Value) -> Result<Value> {
     use trusty_common::memory_core::retrieval::{AliasRepairOptions, AliasRepairOutcome};
     let palace = resolve_palace(state, &args, "palace_unalias")?;

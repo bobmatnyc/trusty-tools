@@ -11641,6 +11641,7 @@ dependencies = [
  "mime_guess",
  "open",
  "parking_lot",
+ "postcard",
  "redb 4.1.0",
  "reqwest 0.12.28",
  "rust-embed",
