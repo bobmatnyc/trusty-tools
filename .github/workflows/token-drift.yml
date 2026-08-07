@@ -24,9 +24,17 @@
 # verdict on the real crates isn't trustworthy either.
 name: Token drift
 
+# NOT in branch protection's required-checks list (verified via
+# `gh api repos/.../branches/main/protection`, #5094), so a `paths-ignore` here
+# carries none of the "required check skipped -> pending forever" risk that
+# rules it out for ci.yml / line-cap.yml. `website/**` is excluded because it
+# is not one of the 7 enforced UI crates. `docs/**` stays IN scope:
+# docs/design/UI/design-system/tokens.css is this gate's canonical source.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "website/**"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
     # (opened/synchronize/reopened) and is the event a base-branch RETARGET
@@ -35,6 +43,8 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+    paths-ignore:
+      - "website/**"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push

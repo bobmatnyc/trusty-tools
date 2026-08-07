@@ -44,9 +44,20 @@
 #    not "loudly".
 name: Version parity
 
+# NOT in branch protection's required-checks list (verified via
+# `gh api repos/.../branches/main/protection`, #5094), so a `paths-ignore` here
+# carries none of the "required check skipped -> pending forever" risk that
+# rules it out for ci.yml / line-cap.yml. Both jobs compare `crates/*/Cargo.toml`
+# / `crates/*/src/**` against crates.io only — neither `website/**` nor
+# `docs/**` can move either verdict, so both are excluded. The push trigger's
+# exclusion cannot open a coverage gap: the `schedule` trigger below re-asks
+# the same question every 3 hours independent of what (if anything) pushed.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
   # Every three hours. Fine-grained enough that a publish is caught in one
   # working session, coarse enough to stay well inside crates.io's API-usage
   # policy (~21 sparse-index GETs + a tarball per published crate, per run).
@@ -60,6 +71,9 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
   workflow_dispatch: {}
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous

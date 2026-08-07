@@ -11,9 +11,18 @@
 # its own lightweight job (matches ci.yml / line-cap.yml's checkout style).
 name: Test pointers
 
+# NOT in branch protection's required-checks list (verified via
+# `gh api repos/.../branches/main/protection`, #5094), so a `paths-ignore` here
+# carries none of the "required check skipped -> pending forever" risk that
+# rules it out for ci.yml / line-cap.yml. The gate only scans tracked `.rs`
+# files (scripts/check_test_pointers.sh), so neither `website/**` nor
+# `docs/**` can move its verdict — both are excluded.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
     # (opened/synchronize/reopened) and is the event a base-branch RETARGET
@@ -22,6 +31,9 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push

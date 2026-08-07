@@ -100,6 +100,10 @@ assert_eq "PR template"           "true"  "$(docs_only_of '.github/PULL_REQUEST_
 assert_eq "docs-only multi-file"  "true"  "$(docs_only_of 'docs/a.md
 README.md
 crates/trusty-mpm/changelog.d/1-x.md')"
+assert_eq "website/ tree"         "true"  "$(docs_only_of 'website/src/routes/+page.svelte')"
+assert_eq "website/ nested asset" "true"  "$(docs_only_of 'website/static/img/logo.svg')"
+assert_eq "website-only multi-file" "true" "$(docs_only_of 'website/package.json
+docs/a.md')"
 
 assert_eq "rust source"           "false" "$(docs_only_of 'crates/trusty-mpm/src/lib.rs')"
 assert_eq "Cargo.toml"            "false" "$(docs_only_of 'Cargo.toml')"
@@ -112,6 +116,8 @@ assert_eq "UI source"             "false" "$(docs_only_of 'crates/trusty-agents/
 assert_eq "embedded .md asset"    "false" "$(docs_only_of 'crates/trusty-code/src/assets/agents/ops.md')"
 assert_eq "nested fragment"       "false" "$(docs_only_of 'crates/x/changelog.d/sub/1.md')"
 assert_eq "mixed docs + code"     "false" "$(docs_only_of 'docs/a.md
+crates/trusty-mpm/src/lib.rs')"
+assert_eq "mixed website + code"  "false" "$(docs_only_of 'website/src/routes/+page.svelte
 crates/trusty-mpm/src/lib.rs')"
 assert_eq "empty (fail closed)"   "false" "$(docs_only_of '')"
 
