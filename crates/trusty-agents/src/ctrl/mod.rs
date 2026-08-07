@@ -37,7 +37,7 @@ mod tests;
 
 pub use socket::{
     BindOutcome, CtrlSocket, ctrl_socket_path, cwd_project_id, is_connection_refused,
-    is_stale_socket,
+    is_stale_socket_for_owner,
 };
 pub use supervisor::{CtrlSupervisor, SupervisorOutcome};
 

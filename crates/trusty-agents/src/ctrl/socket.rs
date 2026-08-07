@@ -164,18 +164,31 @@ fn is_untrusted_socket(err: &io::Error) -> bool {
         })
 }
 
-/// True when nothing trustworthy is listening at the path, so unlinking it and
-/// binding fresh is safe.
+/// True when the path holds nothing this process should preserve, **for a
+/// caller that owns the path and is about to bind it**.
 ///
-/// Why: [`is_connection_refused`] answers a narrower question — "did the
-/// kernel say nobody is there?" — and #5089 step 1a added a second way to get
-/// the same practical answer: a socket that is there but fails verification.
-/// Callers deciding whether to clobber want the union; callers classifying the
-/// errno want [`is_connection_refused`] unchanged.
+/// 🔴 **Precondition — owner only.** Do not use this to decide whether to
+/// unlink a socket some *other* process may be serving. `UntrustedSocket`
+/// covers four socket-level reasons (wrong mode, wrong owner, symlink, not a
+/// socket) and one that is not about the socket at all: **the containing
+/// directory is not `0700`**. That last arm is true of a perfectly healthy
+/// `0600` socket with a live process behind it, condemned for its directory's
+/// mode. [`CtrlSocket::bind_singleton`] may act on it because it calls
+/// `prepare_socket_dir` *before* probing — so the directory arm is unreachable
+/// there — and because it binds the path it just unlinked. A caller with
+/// neither property must use [`is_connection_refused`], which fires only when
+/// the kernel says nobody is listening. #5089 review: the argv-forward client
+/// path used this predicate and unlinked live controllers.
+///
+/// Why: refusing to dial an unverifiable socket would otherwise brick the
+/// project — nothing would replace the bad socket. This is what lets the owner
+/// self-heal. It does not relax the check; the untrusted socket is still never
+/// written to.
 /// What: [`is_connection_refused`] OR a `UdsSecurityError::UntrustedSocket`.
 /// Test: `probe_refuses_a_socket_that_fails_verification`,
-/// `bind_singleton_takes_over_a_socket_that_fails_verification`.
-pub fn is_stale_socket(err: &io::Error) -> bool {
+/// `bind_singleton_takes_over_a_socket_that_fails_verification`,
+/// `a_live_controller_in_a_wide_directory_is_not_client_clobberable`.
+pub fn is_stale_socket_for_owner(err: &io::Error) -> bool {
     is_connection_refused(err) || is_untrusted_socket(err)
 }
 
@@ -219,7 +232,7 @@ impl CtrlSocket {
     /// (not `0600`, not owned by this uid, in a directory that is not `0700`)
     /// is now an error rather than an open stream. Callers that classified the
     /// old `ENOTSOCK`/`ConnectionRefused` errors with [`is_connection_refused`]
-    /// must use [`is_stale_socket`] to keep treating "nothing usable is here"
+    /// must use [`is_stale_socket_for_owner`] to keep treating "nothing usable is here"
     /// as takeover-safe.
     /// Test: `probe_times_out_when_no_listener`,
     /// `probe_refuses_a_socket_that_fails_verification`,
@@ -289,7 +302,7 @@ impl CtrlSocket {
             // A controller answered — refuse to clobber; hand the stream back.
             Ok(stream) => Ok(BindOutcome::AlreadyRunning(stream)),
             // Stale, unverifiable, or no socket at all: safe to take over.
-            Err(e) if is_stale_socket(&e) || e.kind() == io::ErrorKind::TimedOut => {
+            Err(e) if is_stale_socket_for_owner(&e) || e.kind() == io::ErrorKind::TimedOut => {
                 Self::cleanup(path);
                 let listener = trusty_common::uds::bind_hardened(path).map_err(io::Error::other)?;
                 Ok(BindOutcome::Bound(listener))
@@ -382,7 +395,7 @@ mod tests {
             .await
             .expect_err("probe must refuse a socket that is not 0600");
         assert!(
-            is_stale_socket(&err),
+            is_stale_socket_for_owner(&err),
             "an unverifiable socket must be classified takeover-safe: {err}"
         );
     }
@@ -409,6 +422,50 @@ mod tests {
         );
         let mode = std::fs::metadata(&sock).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the replacement socket must be 0600");
+    }
+
+    /// #5089 review, HIGH: the argv-forward client path must not unlink a live
+    /// controller's socket. A sockets directory at the process umask — the
+    /// pre-#5124 on-disk state of every upgrading install — makes the probe
+    /// fail on the *directory*, while the socket itself is a healthy 0600 with
+    /// a live listener behind it. `is_stale_socket_for_owner` says "take over"
+    /// here, which is correct only for `bind_singleton` (it hardens the
+    /// directory first and binds what it unlinks). The client predicate must
+    /// say no, and the incumbent must still be there afterwards.
+    #[tokio::test]
+    async fn a_live_controller_in_a_wide_directory_is_not_client_clobberable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sockets");
+        let sock = dir.join("incumbent.ctrl.sock");
+        let _incumbent = CtrlSocket::bind(&sock).await.expect("bind incumbent");
+        // Regress the directory to the pre-#5124 state. The socket is untouched.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("widen dir");
+
+        let err = CtrlSocket::probe_default(&sock)
+            .await
+            .expect_err("a wide directory must fail verification");
+        assert!(
+            !is_connection_refused(&err),
+            "the kernel never said nobody is home, so a client may NOT unlink: {err}"
+        );
+        assert!(
+            is_stale_socket_for_owner(&err),
+            "the owner predicate does fire here — that is why a client must not use it: {err}"
+        );
+
+        // Nothing unlinked the incumbent, and it was healthy all along: repair
+        // the directory and the very same listener answers.
+        assert!(
+            sock.exists(),
+            "the incumbent's socket must still be present"
+        );
+        trusty_common::uds::prepare_socket_dir(&dir).expect("repair dir");
+        let stream = CtrlSocket::probe_default(&sock)
+            .await
+            .expect("the incumbent must still be reachable once the dir is repaired");
+        drop(stream);
     }
 
     #[test]
@@ -474,10 +531,10 @@ mod tests {
         let result = CtrlSocket::probe(&path, Duration::from_millis(50)).await;
         // No file exists, so connect returns NotFound (or ConnectionRefused
         // on some platforms). Either way it should be classified as
-        // "controller not present" via `is_stale_socket`.
+        // "controller not present" via `is_stale_socket_for_owner`.
         let err = result.expect_err("expected probe failure");
         assert!(
-            is_stale_socket(&err) || err.kind() == io::ErrorKind::TimedOut,
+            is_stale_socket_for_owner(&err) || err.kind() == io::ErrorKind::TimedOut,
             "unexpected probe error kind: {:?} ({err})",
             err.kind()
         );
