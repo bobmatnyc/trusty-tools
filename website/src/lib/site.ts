@@ -12,9 +12,11 @@
  * while `crates/` currently holds 27 directories, so any number printed here
  * would ship one of two wrong answers and drift again on the next crate.
  *
- * Test: `src/lib/site.test.ts` asserts the install commands and the MSRV stay
- * in sync with README.md, that every named crate exists under `crates/`, and
- * that no entry is left as placeholder text.
+ * Test: `src/lib/site.test.ts` grounds each install command in the repository
+ * rather than in prose docs — the bootstrap URL resolves to a tracked file,
+ * `cargo install --path` names a real crate, `tctl` names real stable-set
+ * members — and pins the MSRV and Tier-1 platforms against their source of
+ * truth.
  */
 
 export const GITHUB_URL = 'https://github.com/bobmatnyc/trusty-tools';
@@ -120,32 +122,67 @@ export interface InstallOption {
 	command: string;
 }
 
-/** Install paths, transcribed from README.md's "Installation" section. */
+/**
+ * Why: an earlier revision took these from root `README.md` and
+ * `docs/installation-tiers-draft.md`. Neither is a trustworthy source — the
+ * draft is self-labelled and excluded from publication, and the README
+ * undercounts the tap and omits a supported platform. The verified source is
+ * `docs/research/install-paths-by-audience.md` (#5109), which checked all nine
+ * install paths against crates.io and the release tooling and recommends
+ * centring on `tctl`. Every command below was additionally re-verified on
+ * 2026-08-07; see `site.test.ts` for what is machine-checked.
+ *
+ * What: three paths, in the order the research recommends them.
+ */
 export const INSTALL_OPTIONS: InstallOption[] = [
 	{
-		id: 'bootstrap',
-		title: 'Bootstrap installer',
-		note: 'No Rust toolchain required. Downloads a SHA-256 verified binary.',
+		// install.sh is tracked at the repo root and its raw URL returns 200;
+		// `tctl install trusty-search --dry-run` resolves and exits 0.
+		id: 'tctl',
+		title: 'Bootstrap, then tctl',
+		note: 'Recommended. No Rust toolchain needed on a supported platform. Resolves the runtime dependency graph, and keeps macOS signing grants stable across upgrades.',
 		command:
-			'curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh'
+			'curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh\ntctl install'
 	},
 	{
+		// Tap `bobmatnyc/homebrew-trusty` carries ten formulae; every
+		// darwin-arm64 asset URL returned HTTP 200 on 2026-08-07. The
+		// fully-qualified formula name is what the tap's own README documents.
 		id: 'homebrew',
 		title: 'Homebrew',
-		note: 'Six published binaries live in the tap.',
-		command: 'brew tap bobmatnyc/trusty\nbrew install trusty-search'
+		note: 'Ten formulae in the tap. Installs one binary, without the dependency resolution tctl does.',
+		command: 'brew tap bobmatnyc/trusty\nbrew install bobmatnyc/trusty/trusty-search'
 	},
 	{
+		// `cargo install --path` — never `cargo build` plus a copy. A plain `cp`
+		// over an on-PATH binary leaves a stale macOS cdhash cache and the next
+		// exec is SIGKILLed (CLAUDE.md, "CRITICAL macOS note").
 		id: 'cargo',
 		title: 'From source',
-		note: 'Requires Rust 1.94 or newer.',
-		command: 'git clone https://github.com/bobmatnyc/trusty-tools\ncargo build --release'
+		note: 'Requires Rust 1.94. cargo install writes atomically — never copy a built binary onto your PATH on macOS.',
+		command:
+			'git clone https://github.com/bobmatnyc/trusty-tools\ncd trusty-tools\ncargo install --path crates/trusty-search --locked'
 	}
 ];
 
-/** Facts stated verbatim in README.md's "Workspace Info". */
+/** The seven crates `tctl install` manages, from `stable_set.rs`. */
+export const STABLE_SET = [
+	'trusty-search',
+	'trusty-memory',
+	'trusty-analyze',
+	'trusty-review',
+	'tga',
+	'trusty-console',
+	'trusty-mpm'
+];
+
+/**
+ * MSRV is `rust-version` in the root Cargo.toml. Platforms are the three
+ * Tier-1 triples in `crates/trusty-installer/src/download/platform.rs` — root
+ * README.md lists only two and omits Linux arm64.
+ */
 export const FACTS: { label: string; value: string }[] = [
 	{ label: 'License', value: 'MIT' },
 	{ label: 'MSRV', value: 'Rust 1.94' },
-	{ label: 'Platforms', value: 'macOS (Apple Silicon), Linux (x86_64)' }
+	{ label: 'Prebuilt for', value: 'macOS arm64, Linux x86_64, Linux arm64' }
 ];

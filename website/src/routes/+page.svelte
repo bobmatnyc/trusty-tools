@@ -1,5 +1,12 @@
 <script lang="ts">
-	import { CRATE_GROUPS, FACTS, FLAGSHIPS, GITHUB_URL, INSTALL_OPTIONS } from '$lib/site';
+	import {
+		CRATE_GROUPS,
+		FACTS,
+		FLAGSHIPS,
+		GITHUB_URL,
+		INSTALL_OPTIONS,
+		STABLE_SET
+	} from '$lib/site';
 
 	const description =
 		'trusty-tools is one Cargo workspace for the trusty-* ecosystem: hybrid code search, a memory palace, and a code-analysis sidecar, each with an MCP server.';
@@ -112,6 +119,10 @@
 <!-- INSTALL -->
 <section class="mx-auto max-w-content px-4 py-16 sm:px-6">
 	<h2 id="install" class="scroll-mt-24 font-display text-2xl font-bold sm:text-3xl">Install</h2>
+	<p class="mt-3 max-w-2xl text-foundry-secondary">
+		A bare <code class="text-sm">tctl install</code> brings up the seven managed crates in dependency
+		order. Name one to install just that crate and whatever it needs at runtime.
+	</p>
 	<div class="mt-8 grid gap-6 lg:grid-cols-3">
 		{#each INSTALL_OPTIONS as option (option.id)}
 			<!-- `min-w-0`: a grid item's automatic minimum size is its content's
@@ -126,9 +137,13 @@
 			</div>
 		{/each}
 	</div>
-	<p class="mt-6 text-sm text-foundry-secondary">
-		The bootstrap installer verifies every downloaded binary against its published SHA-256 checksum.
-		The install script itself is unsigned — read it first if you need higher assurance.
+	<p class="mt-6 max-w-3xl text-sm text-foundry-secondary">
+		<span class="eyebrow">Managed by tctl</span><br />
+		<span class="font-mono">{STABLE_SET.join(' · ')}</span>
+	</p>
+	<p class="mt-6 max-w-3xl text-sm text-foundry-secondary">
+		The bootstrap installer verifies every downloaded tarball against its published SHA-256
+		checksum. The install script itself is unsigned — read it first if you need higher assurance.
 	</p>
 </section>
 
