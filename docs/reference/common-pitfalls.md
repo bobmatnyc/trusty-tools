@@ -74,9 +74,8 @@ links an ONNX Runtime build that requires glibc >= 2.38; AL2023 ships glibc
 architecture — `x86_64-linux-al2023`, or `aarch64-linux-al2023` on Graviton
 (#2533 follow-up to PR #4822) — which is already configured with
 `load-dynamic`, or reinstall with
-`--no-default-features --features load-dynamic` (`trusty-search`) /
-`--no-default-features --features http-server,load-dynamic`
-(`trusty-analyze`) plus `ORT_DYLIB_PATH` pointing at a host-compatible
+`--no-default-features --features load-dynamic` (`trusty-search`)
+plus `ORT_DYLIB_PATH` pointing at a host-compatible
 `libonnxruntime.so`. See each crate's README ("AL2023 / glibc < 2.38 hosts")
 and issue #2222. On a mismatched host, `trusty-embedderd`'s startup now fails
 fast with an explicit glibc-version error instead of hanging for up to

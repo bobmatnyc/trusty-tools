@@ -22,8 +22,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
-    bow_embedding, cluster as run_cluster, extract_doc_comments, extract_kg_from_scip,
-    ClusterResult, NerExtractor, ScipIngestSummary,
+    cluster as run_cluster, extract_doc_comments, extract_kg_from_scip, ClusterResult,
+    NerExtractor, ScipIngestSummary,
 };
 use crate::embedder::{Embedder, EmbedderKind};
 use crate::service::events::{fetch_chunks, AnalyzerAppState, AnalyzerEvent, ApiError};
@@ -165,10 +165,42 @@ pub async fn entities_for_index(
 pub struct ClusterQueryParams {
     /// Number of clusters to compute. Defaults to 8, clamped to [1, 50].
     pub k: Option<usize>,
-    /// Embedding method: `"bow"` (default, deterministic 256-dim) or
-    /// `"neural"` (fastembed all-MiniLM-L6-v2, 384-dim).
+    /// Embedding method. `"bow"` (deterministic 256-dim) is the only accepted
+    /// value and the default.
+    ///
+    /// Why (#5067): `"neural"` used to be accepted here. It is now rejected
+    /// with a 400 rather than quietly served by BOW, because the pre-fix
+    /// daemon already did the quiet thing — when the model failed to load it
+    /// logged a warning, installed BOW, and kept answering `method=neural`
+    /// requests with hashed vectors. Removing the backend without removing the
+    /// parameter value would make that silence permanent.
+    ///
+    /// Kept as a `String` rather than an `EmbedderKind` so the rejection is
+    /// this service's own JSON `{"error": ...}` naming the bad value, not
+    /// axum's plain-text "failed to deserialize query string".
     #[serde(default)]
-    pub method: Option<EmbedderKind>,
+    pub method: Option<String>,
+}
+
+/// Resolve the `method` query parameter to an embedder.
+///
+/// Why (#5067): the only accepted value is `bow`, and anything else — in
+/// practice the removed `neural` — has to be refused rather than quietly
+/// treated as `bow`.
+/// What: `None` yields the default; `"bow"` yields `Bow`; anything else is a
+/// 400 naming the offending value.
+/// Test: `clusters_reject_removed_neural_method`,
+/// `clusters_return_bow_vectors_for_a_live_corpus`.
+fn resolve_method(method: Option<&str>) -> Result<EmbedderKind, ApiError> {
+    match method {
+        None => Ok(EmbedderKind::default()),
+        Some(m) if m.eq_ignore_ascii_case(EmbedderKind::Bow.as_str()) => Ok(EmbedderKind::Bow),
+        Some(other) => Err(ApiError::bad_request(format!(
+            "unknown embedding method '{other}'; only '{}' is supported \
+             (the neural backend was removed in #5067)",
+            EmbedderKind::Bow.as_str()
+        ))),
+    }
 }
 
 #[derive(Serialize)]
@@ -183,7 +215,7 @@ pub struct ClusterResponseItem {
 #[derive(Serialize)]
 pub struct ClusterResponse {
     pub k: usize,
-    /// Which embedder produced the vectors (`"bow"` or `"neural"`).
+    /// Which embedder produced the vectors. Always `"bow"` since #5067.
     pub method: String,
     /// Dimension of the embedding vectors used.
     pub dim: usize,
@@ -206,20 +238,30 @@ fn cluster_items_from(r: ClusterResult) -> Vec<ClusterResponseItem> {
 }
 
 /// Why: surfaces "what themes does this codebase contain?" without needing a
-/// full knowledge graph or neural embedder. Useful for codebase exploration
-/// and high-level summaries.
-/// What: fetches chunks for `index`, derives a 256-dim bag-of-words vector
-/// per chunk, runs seeded k-means, and returns the cluster assignments.
-/// Test: covered indirectly by trusty-analyzer-core's `concept_cluster` tests;
-/// the route wiring is exercised by `clusters_route_returns_502_when_search_down`.
+/// full knowledge graph. Useful for codebase exploration and high-level
+/// summaries.
+/// What: fetches chunks for `index`, embeds each one through the state's
+/// embedder, runs seeded k-means, and returns the cluster assignments.
+///
+/// Why (#5067): this used to branch on `method`, with the neural arm deferring
+/// to a model the daemon had loaded at boot and wrapping it in `spawn_blocking`
+/// because ONNX inference could block for hundreds of milliseconds. Both are
+/// gone. The remaining embedder is pure hashing — infallible, no I/O, nothing
+/// to fall back from — so the error-swallowing fallback that used to sit here
+/// is gone too: there is no failure left for it to hide.
+///
+/// Test: `clusters_return_bow_vectors_for_a_live_corpus`,
+/// `clusters_reject_removed_neural_method`, and the route wiring in
+/// `clusters_route_returns_502_when_search_down`.
 pub async fn clusters_for_index(
     State(state): State<Arc<AnalyzerAppState>>,
     Path(id): Path<String>,
     Query(params): Query<ClusterQueryParams>,
 ) -> Result<Json<ClusterResponse>, ApiError> {
-    const BOW_DIM: usize = 256;
     let k = params.k.unwrap_or(8).clamp(1, 50);
-    let method = params.method.clone().unwrap_or_default();
+    // #5067: refuse an unknown method before doing any work, so a caller asking
+    // for the removed neural backend is told rather than silently given BOW.
+    let method = resolve_method(params.method.as_deref())?;
     let chunks = fetch_chunks(&state, &id).await?;
     if chunks.is_empty() {
         return Ok(Json(ClusterResponse {
@@ -232,68 +274,13 @@ pub async fn clusters_for_index(
         }));
     }
 
-    // Resolve embedder. For neural, defer to the shared state embedder (which
-    // may itself be BOW if fastembed failed to load at startup). For BOW,
-    // the bow_embedding free function is called directly — no BowEmbedder
-    // allocation needed.
-    let neural_embedder: Arc<dyn Embedder> = state.embedder.clone();
-    let effective_kind_initial: EmbedderKind = match method {
-        EmbedderKind::Neural => neural_embedder.kind(),
-        EmbedderKind::Bow => EmbedderKind::Bow,
-    };
+    let embedder: &dyn Embedder = state.embedder.as_ref();
+    let dim = embedder.dim();
+    let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
+    let vecs = embedder
+        .embed_batch(&texts)
+        .map_err(|e| ApiError::internal(format!("embed cluster corpus: {e:#}")))?;
 
-    // Why: `NeuralEmbedder::embed_batch` holds a `std::sync::Mutex` over ONNX
-    // inference, which can block for tens-to-hundreds of milliseconds. Running
-    // it directly on a tokio executor thread starves other async tasks queued
-    // on that thread. `spawn_blocking` moves the call onto a dedicated blocking
-    // thread pool so the executor stays responsive.
-    // What: converts the chunk contents to owned `String`s (required to cross
-    // the `'static` closure boundary), clones the `Arc<dyn Embedder>`, then
-    // awaits the blocking join handle. Join-error is mapped to a warn + BOW
-    // fallback so the endpoint never 500s on a temporary model hiccup.
-    // Test: the existing cluster endpoint tests (e.g. `cluster_endpoint_bow`)
-    // exercise this path; the spawn_blocking wrapping does not change observable
-    // outputs, only prevents executor starvation.
-
-    // Owned strings are needed both for the Neural spawn_blocking closure
-    // (which requires 'static) and for the BOW fallback path.
-    let owned_texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-
-    let embed_result: anyhow::Result<(Vec<Vec<f32>>, EmbedderKind, usize)> = match method {
-        EmbedderKind::Neural => {
-            let embedder_arc = Arc::clone(&neural_embedder);
-            let dim = embedder_arc.dim();
-            let texts_for_task = owned_texts.clone();
-            tokio::task::spawn_blocking(move || {
-                let refs: Vec<&str> = texts_for_task.iter().map(String::as_str).collect();
-                embedder_arc.embed_batch(&refs)
-            })
-            .await
-            .unwrap_or_else(|e| Err(anyhow::anyhow!("embed_batch task panicked: {e}")))
-            .map(|v| (v, EmbedderKind::Neural, dim))
-        }
-        EmbedderKind::Bow => {
-            let vecs: Vec<Vec<f32>> = owned_texts
-                .iter()
-                .map(|t| bow_embedding(t, BOW_DIM))
-                .collect();
-            Ok((vecs, EmbedderKind::Bow, BOW_DIM))
-        }
-    };
-    let (vecs, effective_kind, dim) = match embed_result {
-        Ok(triple) => triple,
-        Err(e) => {
-            tracing::warn!(
-                "embedder ({:?}) failed ({e:#}); falling back to BOW",
-                effective_kind_initial
-            );
-            let fallback: Vec<Vec<f32>> = owned_texts
-                .iter()
-                .map(|t| bow_embedding(t, BOW_DIM))
-                .collect();
-            (fallback, EmbedderKind::Bow, BOW_DIM)
-        }
-    };
     let embeddings: Vec<(String, Vec<f32>)> = chunks
         .iter()
         .zip(vecs)
@@ -303,7 +290,7 @@ pub async fn clusters_for_index(
     let iterations = result.iterations;
     Ok(Json(ClusterResponse {
         k,
-        method: effective_kind.as_str().to_string(),
+        method: embedder.kind().as_str().to_string(),
         dim,
         iterations,
         chunk_count: chunks.len(),

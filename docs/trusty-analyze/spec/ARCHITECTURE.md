@@ -22,7 +22,7 @@ from `trusty-search` over HTTP and computes analysis in-process.
 │   - authoritative corpus  │   GET /indexes                  │   lang/   tree-sitter adapters│
 │   - GET /health           │ ◄────────── proxied ──────────  │   service/ axum HTTP API      │
 └──────────────────────────┘                                 │   mcp/    stdio + HTTP/SSE    │
-        ▲  hard dependency                                    │   embedder/ BoW | neural     │
+        ▲  hard dependency                                    │   embedder/ BoW              │
         │  (startup health check)                             │   redb facts store (owned)   │
         └─────────────────────────────────────────────────── │   /ui embedded dashboard     │
                                                               └────────────────────────────┘
@@ -61,7 +61,7 @@ top-level module re-exporting its old public API.
 |---|---|---|
 | `core/` | Analysis engines + the trusty-search HTTP client | `core/mod.rs` |
 | `lang/` | `LanguageAnalyzer` trait, detection, 14 tree-sitter adapters | `lang/mod.rs`, `lang/adapters/` |
-| `embedder/` | BoW + neural embedding backends | `embedder/mod.rs` |
+| `embedder/` | BoW embedding backend | `embedder/mod.rs` |
 | `mcp/` | MCP server: dispatcher + stdio + HTTP/SSE transports | `mcp/mod.rs` |
 | `service/` | axum HTTP daemon + embedded UI (feature-gated) | `service/mod.rs`, `service/ui.rs` |
 | `types/` | serde wire-format types shared across the HTTP/MCP boundary | `types/mod.rs` |
@@ -101,7 +101,7 @@ top-level module re-exporting its old public API.
 4. Grade      A–F per chunk → QualityReport per index         (core/quality.rs)
 5. Graph      registry.analyze(&chunks) → per-lang KgGraph    (core/registry.rs, lang/)
 6. Link       merge duplicate nodes across windows            (core/linker.rs)
-7. Cluster    k-means over BoW/neural embeddings              (core/concept_cluster.rs)
+7. Cluster    k-means over BoW embeddings                     (core/concept_cluster.rs)
 8. Refactor   complexity+smells → suggestions                 (core/refactor.rs)
 9. Review     parse diff, cross-ref corpus → ReviewReport     (core/review.rs)
 10. Serve     axum HTTP + MCP (stdio/SSE) → JSON              (service/, mcp/)
@@ -240,9 +240,10 @@ the async worker threads.
   trusty-search; the analyzer never opens trusty-search's redb files.
 - **PID file (✅):** `start`/`stop`/`status` use a PID file under
   `~/.trusty-analyze/` (`commands/daemon.rs`).
-- **Embedding model cache (🟡):** neural embedder loads fastembed from
-  `--fastembed-cache` (default `.fastembed_cache`, env `TRUSTY_FASTEMBED_CACHE`);
-  load failure is non-fatal and degrades to BoW.
+- **Embedding model cache:** none since #5067. Boot loads no model, so there
+  is no cache to warm and no load failure to degrade from. `--fastembed-cache`
+  is retained as a hidden no-op purely so an installed launchd plist that
+  passes it keeps starting.
 
 ---
 
@@ -253,7 +254,7 @@ the async worker threads.
 | `--search-url` / `TRUSTY_SEARCH_URL` | `http://127.0.0.1:7878` | trusty-search daemon address |
 | `--port` / `TRUSTY_ANALYZER_PORT` | `7879` | Analyzer listen port (auto-increments if busy) |
 | `--facts-path` / `TRUSTY_ANALYZER_FACTS` | `trusty-analyze.facts.redb` | redb facts file |
-| `--fastembed-cache` / `TRUSTY_FASTEMBED_CACHE` | `.fastembed_cache` | Neural model cache dir |
+| `--fastembed-cache` / `TRUSTY_FASTEMBED_CACHE` | — | Deprecated no-op, accepted and ignored (#5067) |
 | `--mcp` | off | Run MCP stdio loop in the `serve` process |
 | `--mcp-port` | off | Run MCP HTTP/SSE on a separate port |
 | `OPENROUTER_API_KEY` | — | Deep-analysis LLM key (OpenRouter path); returns 400 if absent and a non-Bedrock model is selected |
@@ -262,26 +263,23 @@ the async worker threads.
 | `AWS_REGION` | — | Fallback AWS region for Bedrock (overridden by `TRUSTY_AWS_REGION`). |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | — | Standard AWS credential chain for Bedrock. Env vars, `~/.aws/credentials`, IAM roles, and SSO are all supported. No API key is required when a `bedrock/` model is selected. |
 | `GITHUB_TOKEN` | — | PR diff fetch + comment post for `review-pr` |
-| `ORT_DYLIB_PATH` | — | Path to `libonnxruntime.so` on glibc < 2.38 hosts (requires `--no-default-features --features http-server,load-dynamic`; see #536). |
 | `RUST_LOG` | `info` (via `init_tracing(1)`) | Tracing filter (stderr only) |
 
-Cargo features: `default = ["http-server", "bundled-ort"]`; `http-server` (axum
-stack); `bundled-ort` (static ORT libs via fastembed, glibc ≥ 2.38);
-`load-dynamic` (system `libonnxruntime.so`, glibc < 2.38; requires
-`--no-default-features`); `cuda` (CUDA acceleration; requires
-`--no-default-features`); `ner` (`dep:ort` + `dep:tokenizers`).
+Cargo features: `default = ["http-server"]`; `http-server` (axum stack);
+`ner` (`dep:ort` + `dep:tokenizers`, off by default, reads a local model file
+and never downloads).
 
 > **Bedrock note (#531):** `trusty-common` must be built with the `bedrock`
 > feature (already included in `trusty-analyze`'s dependency declaration:
 > `trusty-common = { workspace = true, features = [..., "bedrock"] }`). No
 > additional crate flag is needed by callers.
 
-> **ORT backend note (#536 / #538):** prior to v0.4.0 the ORT backend was
-> hard-coded to `ort-download-binaries` (bundled static libs). It is now
-> feature-selectable: `bundled-ort` (default, glibc ≥ 2.38), `load-dynamic`
-> (system ORT, glibc < 2.38 / Amazon Linux 2023), `cuda`
-> (load-dynamic + CUDA). The `ner` feature no longer carries its own ORT
-> backend; it composes with whichever ORT feature is active.
+> **ORT backend note (#536 / #538, withdrawn by #5067):** the selectable ORT
+> backends (`bundled-ort` / `load-dynamic` / `cuda`) existed only to pick a
+> runtime for the neural clustering embedder. That embedder was removed, so
+> the crate links no ONNX Runtime, publishes no Amazon Linux 2023 asset, and
+> needs no `ORT_DYLIB_PATH`. The `ner` feature keeps `dep:ort` for its own
+> local-file model and is off by default.
 
 ---
 
@@ -318,8 +316,8 @@ The audited tree differs materially from the in-crate `CLAUDE.md` / `README.md`:
 - **HTTP routes:** ~20 (incl. diagnostics/graph/entities/ner/review/deep/webhook),
   not 8.
 - **Adapters:** 14 fully implemented, not "Python/Java/Go stubbed".
-- **Cargo features:** `default = ["http-server", "bundled-ort"]` (not just
-  `http-server`); `load-dynamic` and `cuda` features added in #536.
+- **Cargo features:** `default = ["http-server"]`; the `bundled-ort` /
+  `load-dynamic` / `cuda` features added in #536 were removed in #5067.
 - **LLM routing:** deep analysis now supports both OpenRouter and AWS Bedrock
   via the `TRUSTY_LLM_MODEL` `bedrock/` prefix (#531).
 - **Version:** v0.4.1 (was v0.1.10 at original spec authoring).
