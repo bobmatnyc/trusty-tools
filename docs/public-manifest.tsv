@@ -1,0 +1,102 @@
+# public-manifest.tsv — the ALLOWLIST of docs/ pages the public website may publish.
+#
+# Why: docs/ holds 463 markdown files, most of them internal engineering
+#   material — ADRs, behavior-contract specs, research, plans, PRDs,
+#   presentations, design notes, runbooks. docs/SUMMARY.md (the mdBook nav)
+#   cannot serve as the public list because it deliberately mixes those in: the
+#   internal book is KEPT, and this file is a second, narrower view of the same
+#   tree. Publication is one-way and search-indexed, so the boundary is an
+#   ALLOWLIST: a page absent from this file is not public, and no wildcard,
+#   directory rule, or denylist can make it public.
+#
+# What: one line per published page, in nav order. Two record types, tab-separated:
+#
+#     SECTION <id>          <title>
+#     PAGE    <section-id>  <source>  <route>  <title>
+#
+#   SECTION rows declare nav sections; their FILE ORDER is their nav order.
+#   PAGE rows attach to the most recent SECTION; their FILE ORDER is their order
+#   within it. There is no numeric sort key, so inserting a page never renumbers
+#   its neighbours.
+#
+#     source  repo-relative path to the markdown source. Must be an existing
+#             file under docs/, and must not resolve into a DO-NOT-PUBLISH tree.
+#     route   the public URL path. Must start with `/` and be unique.
+#     title   nav/page title.
+#
+#   Blank lines and `#` comment lines are ignored. Fields are separated by a
+#   single TAB; no field may contain a tab.
+#
+# Format choice: TSV, matching this repo's five other machine-readable gate
+#   tables (.line-cap-allowlist.tsv, .sld-lint-allowlist.tsv, ...). One page per
+#   line is what makes a security boundary reviewable — the count of added lines
+#   in a diff IS the count of newly-public pages, which nested JSON hides. It
+#   also parses with zero dependencies on both sides: `IFS=$'\t' read` in the
+#   bash gate (no jq in CI) and `split('\n').map(l => l.split('\t'))` in the
+#   SvelteKit build (no YAML/TOML parser).
+#
+# Gate: scripts/check_public_docs.sh — fails when a source is missing, escapes
+#   docs/, lands in a DO-NOT-PUBLISH tree, or when a route is duplicated.
+#   Self-test: scripts/check_public_docs_selftest.sh
+#
+# DO-NOT-PUBLISH trees (owner decision, enforced independently of this file by
+#   the gate): docs/adr, docs/specs, docs/research, docs/plans, docs/prd,
+#   docs/presentations, docs/design, docs/runbooks — plus the same KINDS nested
+#   under a per-crate tree (docs/<crate>/{research,design,spec,decisions,
+#   sessions,regression-testing,_archive}/).
+#
+# NAMING AN INTERNAL DOC — `*-internal.md`
+#
+#   Most of docs/ separates audiences by directory, so the tree rules above are
+#   enough. docs/reference/ does not: it holds public references and internal
+#   engineering references side by side, and a new internal file there has no
+#   structural marker distinguishing it from a publishable neighbour.
+#
+#   So: when an internal doc must live in a mixed-audience directory, name it
+#   `<topic>-internal.md`. The gate REFUSES to publish any source with that
+#   suffix, wherever it sits, which makes the boundary hold even if someone
+#   later adds a row for it by accident. The first case is the split of
+#   docs/reference/config-convention.md (public) from
+#   docs/reference/config-convention-internal.md (crate-authoring guidance).
+#
+#   Corollary: never give the suffix to a file you intend to publish. Renaming
+#   it is the fix, not adding a manifest row.
+#
+# Issue: #5096 (epic #5092).
+
+SECTION	getting-started	Getting Started
+PAGE	getting-started	docs/intro.md	/	Introduction
+PAGE	getting-started	docs/getting-started/README.md	/getting-started	Getting Started
+PAGE	getting-started	docs/getting-started/install-and-run-tm.md	/getting-started/install	Install and Run trusty-mpm
+PAGE	getting-started	docs/getting-started/claude-mpm-vs-trusty-mpm.md	/getting-started/claude-mpm-vs-trusty-mpm	Coming from claude-mpm
+
+SECTION	installation	Installation
+PAGE	installation	docs/distribution/INSTALL-CONVENTION.md	/installation/convention	Installation Convention
+
+SECTION	tools	Tools
+PAGE	tools	docs/trusty-mpm/README.md	/tools/trusty-mpm	trusty-mpm
+PAGE	tools	docs/trusty-agents/README.md	/tools/trusty-agents	trusty-agents
+PAGE	tools	docs/trusty-search/README.md	/tools/trusty-search	trusty-search
+PAGE	tools	docs/trusty-memory/README.md	/tools/trusty-memory	trusty-memory
+PAGE	tools	docs/trusty-analyze/README.md	/tools/trusty-analyze	trusty-analyze
+PAGE	tools	docs/trusty-git-analytics/README.md	/tools/trusty-git-analytics	trusty-git-analytics
+PAGE	tools	docs/trusty-code/README.md	/tools/trusty-code	trusty-code
+PAGE	tools	docs/trusty-common/README.md	/tools/trusty-common	trusty-common
+PAGE	tools	docs/trusty-embedderd/README.md	/tools/trusty-embedderd	trusty-embedderd
+PAGE	tools	docs/trusty-bm25-daemon/README.md	/tools/trusty-bm25-daemon	trusty-bm25-daemon
+PAGE	tools	docs/trusty-console/README.md	/tools/trusty-console	trusty-console
+
+SECTION	guides	User Guides
+PAGE	guides	docs/trusty-agents/user/quickstart.md	/guides/trusty-agents/quickstart	trusty-agents Quickstart
+PAGE	guides	docs/trusty-agents/user/cli-reference.md	/guides/trusty-agents/cli-reference	trusty-agents CLI Reference
+PAGE	guides	docs/trusty-agents/user/configuration.md	/guides/trusty-agents/configuration	trusty-agents Configuration
+PAGE	guides	docs/trusty-agents/user/agents-and-skills.md	/guides/trusty-agents/agents-and-skills	Agents and Skills
+PAGE	guides	docs/trusty-git-analytics/user/README.md	/guides/trusty-git-analytics	trusty-git-analytics User Guide
+PAGE	guides	docs/trusty-git-analytics/user/user-guide.md	/guides/trusty-git-analytics/user-guide	Using tga
+
+SECTION	reference	Reference
+PAGE	reference	docs/architecture/harnesses.md	/reference/harnesses	Harnesses
+PAGE	reference	docs/reference/config-convention.md	/reference/config-convention	Configuration Convention
+PAGE	reference	docs/reference/environment-variables.md	/reference/environment-variables	Environment Variables
+PAGE	reference	docs/reference/running-mcp-servers.md	/reference/running-mcp-servers	Running MCP Servers Locally
+PAGE	reference	docs/reference/ide-setup.md	/reference/ide-setup	IDE Setup

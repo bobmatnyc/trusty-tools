@@ -1,13 +1,13 @@
-# open-mpm-local — MPM Local Execution Plugin
+# trusty-agents-local — Local Execution Plugin
 
-**Purpose**: Plugin shim for MPM that executes tasks locally (Bash, file operations, process spawning).
+**Purpose**: Plugin shim for trusty-agents that executes tasks locally (Bash, file operations, process spawning).
 
-**License**: Elastic License 2.0
+**License**: MIT
 
 ## Design
 
 - **Local-only execution**: No remote dispatch, all work runs on local machine
-- **Plugin interface**: Implements MPM agent-api contract for orchestrator compatibility
+- **Plugin interface**: Implements the trusty-agents-common contract for orchestrator compatibility
 - **Resource isolation**: Process namespaces and file permission checks
 - **Command sandboxing**: Restricted command whitelist and argument validation
 
@@ -45,8 +45,8 @@ sandbox_root = "/tmp"
 
 ## Integration Points
 
-- **open-mpm orchestrator**: Agent-api implementation
-- **MPM agents**: Dispatch local tasks via orchestrator
+- **trusty-agents orchestrator**: trusty-agents-common contract implementation
+- **trusty-agents sub-agents**: Dispatch local tasks via orchestrator
 - **File system**: Access restricted to configured sandbox root
 
 ## Security Notes
@@ -58,5 +58,5 @@ sandbox_root = "/tmp"
 
 ## See Also
 
-- `crates/open-mpm-local/README.md` for full API
-- `crates/open-mpm/README.md` for orchestrator context
+- [`crates/trusty-agents-local/README.md`](../../crates/trusty-agents-local/README.md) for full API
+- [`crates/trusty-agents/README.md`](../../crates/trusty-agents/README.md) for orchestrator context

@@ -1,43 +1,44 @@
 # Configuration
 
-open-mpm reads its configuration from `.open-mpm/` in the current working
-directory. The same layout works for the harness's own checkout and for any
-project that uses open-mpm as a dependency.
+`tagent` (trusty-agents) reads its configuration from `.trusty-agents/` in the
+current working directory. The same layout works for the harness's own
+checkout and for any project that uses trusty-agents as a dependency.
 
 ## Directory layout
 
 ```
-.open-mpm/
+.trusty-agents/
 ├── agents/              # Agent TOML configs (pm.toml, python-engineer.toml, …)
-├── skills/              # Skill markdown files (project-local)
-├── workflows/           # Workflow JSON definitions
-├── tasks/               # Optional: bake-off task files (level-1.txt …)
-├── agent-templates/     # Starter templates for user-authored agents
-└── state/               # Runtime state (gitignored)
-    ├── build.json       # Monotonic build counter
-    ├── history/         # HistoryIndexer turn log
-    ├── code/            # redb+usearch code index
-    ├── sessions/<id>/   # Per-invocation turn logs
-    ├── worktrees/       # Git worktrees for parallel wave-loop phases
-    ├── processes.json   # Tracked sub-agent PIDs
-    ├── initialized      # Marker that init has run
-    └── project-index.md # Auto-generated project summary
+├── skills/               # Skill markdown files (project-local)
+├── skill-sources.toml   # Optional: extra/remote skill source config (see below)
+├── workflows/            # Workflow JSON definitions
+├── tasks/                # Optional: bake-off task files (level-1.txt …)
+├── agent-templates/      # Starter templates for user-authored agents
+└── state/                # Runtime state (gitignored)
+    ├── build.json        # Monotonic build counter
+    ├── history/           # HistoryIndexer turn log
+    ├── code/              # redb+usearch code index
+    ├── sessions/<id>/     # Per-invocation turn logs
+    ├── worktrees/         # Git worktrees for parallel wave-loop phases
+    ├── processes.json     # Tracked sub-agent PIDs
+    ├── initialized        # Marker that init has run
+    └── project-index.md   # Auto-generated project summary
 ```
 
-User-global state lives under `~/.open-mpm/`:
+User-global state lives under `~/.trusty-agents/`:
 
 ```
-~/.open-mpm/
-├── projects.json        # Global project registry
-├── sockets/<name>.sock  # MessageBus UNIX sockets for cross-project relay
-├── skills/files/        # Globally-shared skills
-├── memory/              # Shared memory stores
-└── sessions/            # Cross-session audit logs (pm-messages.jsonl)
+~/.trusty-agents/
+├── projects.json         # Global project registry
+├── sockets/<name>.sock   # MessageBus UNIX sockets for cross-project relay
+├── skills/                # Globally-shared skills (see discovery order below)
+├── memory/                # Shared memory stores
+└── sessions/               # Cross-session audit logs (pm-messages.jsonl)
 ```
 
 ## Agent TOML
 
-`.open-mpm/agents/<name>.toml`:
+`.trusty-agents/agents/<name>.toml`:
 
 ```toml
 [agent]
@@ -89,7 +90,7 @@ include = ["python-async-patterns", "pytest-best-practices"]
 
 ## Skill markdown
 
-`.open-mpm/skills/<name>.md` (or `~/.open-mpm/skills/files/`):
+`.trusty-agents/skills/<name>.md` (or `~/.trusty-agents/skills/`):
 
 ```markdown
 ---
@@ -106,21 +107,25 @@ Use `asyncio.TaskGroup` for structured concurrency:
 ```
 
 The YAML frontmatter is optional but recommended. Without it, the filename
-stem becomes the skill name. Tags are used by `open-mpm skills list --tag`
+stem becomes the skill name. Tags are used by `tagent skills list --tag`
 and by the `skill_loader` tool.
 
 ### Discovery order (highest priority first)
 
-1. `<project>/.claude/skills/` (claude-mpm compatible)
-2. `~/.claude/skills/` (claude-mpm compatible global)
-3. `~/.open-mpm/skills/files/` (open-mpm global)
-4. `<project>/.open-mpm/skills/` (project-local)
+By default, skills are discovered from two local sources:
 
-The first match wins.
+1. `<project>/.trusty-agents/skills/` (priority 10)
+2. `~/.trusty-agents/skills/` (priority 5)
+
+The first source to define a given skill name wins. Add project-local
+overrides — an extra local directory, or a remote git repository of shared
+skills — via `.trusty-agents/skill-sources.toml`; each entry sets its own
+`priority`. Run `tagent skills sources` to see the resolved, ordered list of
+directories actually scanned.
 
 ## Workflow JSON
 
-`.open-mpm/workflows/<name>.json`:
+`.trusty-agents/workflows/<name>.json`:
 
 ```json
 {
@@ -180,11 +185,11 @@ See [cli-reference.md](./cli-reference.md#environment-variables).
 
 ## Project initialization
 
-Running `open-mpm` in a directory for the first time:
+Running `tagent` in a directory for the first time:
 
-1. Creates `.open-mpm/` if missing
-2. Drops `.open-mpm/state/initialized` marker
+1. Creates `.trusty-agents/` if missing
+2. Drops `.trusty-agents/state/initialized` marker
 3. Builds an initial code index of the working tree
-4. Registers the project in `~/.open-mpm/projects.json`
+4. Registers the project in `~/.trusty-agents/projects.json`
 
 Force re-initialization with `--reinit`.

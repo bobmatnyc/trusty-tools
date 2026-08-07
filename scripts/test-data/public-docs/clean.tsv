@@ -1,0 +1,3 @@
+SECTION	docs	Docs
+PAGE	docs	docs/intro.md	/	Introduction
+PAGE	docs	docs/reference/ide-setup.md	/reference/ide-setup	IDE Setup

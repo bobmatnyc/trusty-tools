@@ -17,12 +17,18 @@ use super::{DRAWER_PREVIEW_CHARS, INJECTION_BYTE_CAP};
 /// where each piece came from so it can weigh them appropriately.
 /// What: appends sections in priority order (workspace facts → drawers →
 /// KG triples), each separated by a blank line. Truncates at
-/// [`INJECTION_BYTE_CAP`] bytes with a `…` marker.
+/// [`INJECTION_BYTE_CAP`] bytes with a `…` marker. `withheld` is how many
+/// drawers the relevance floor dropped (#5037); when it is non-zero the drawer
+/// section carries the [`withheld_notice`] line, including when every drawer was
+/// dropped and there is otherwise no section at all.
 /// Test: `compose_injection_truncates_at_cap`,
+/// `compose_injection_announces_withheld_drawers`,
+/// `compose_injection_announces_total_silence`,
 /// `prompt_context_recalls_palace_drawers`.
 pub(super) fn compose_injection(
     global_facts: Option<&str>,
     drawers: &[RecalledDrawer],
+    withheld: usize,
     triples: &[RawTriple],
     palace_slug: Option<&str>,
 ) -> String {
@@ -30,7 +36,7 @@ pub(super) fn compose_injection(
     if let Some(facts) = global_facts {
         push_section(&mut out, facts.trim_end());
     }
-    if !drawers.is_empty() {
+    if !drawers.is_empty() || withheld > 0 {
         let mut section = String::new();
         if let Some(slug) = palace_slug {
             section.push_str(&format!("## Relevant memories from palace `{slug}`\n"));
@@ -52,6 +58,10 @@ pub(super) fn compose_injection(
                 section.push(')');
                 section.push('_');
             }
+            section.push('\n');
+        }
+        if withheld > 0 {
+            section.push_str(&withheld_notice(withheld, drawers.is_empty()));
             section.push('\n');
         }
         push_section(&mut out, section.trim_end());
@@ -80,6 +90,36 @@ pub(super) fn compose_injection(
         out.push(ELLIPSIS);
     }
     out
+}
+
+/// Render the "results were withheld" line for the drawer section.
+///
+/// Why (issue #5037, requirement 4): the relevance floor is allowed to return
+/// zero drawers where five noisy ones used to appear — that is the correct
+/// outcome for a prompt with no good match. It is only correct if the reader can
+/// tell it apart from "this palace holds nothing", because those two call for
+/// opposite next actions: one means search harder, the other means store
+/// something first. Without this line the floor would have swapped a visible
+/// wrong answer for an invisible one.
+/// What: one italic Markdown line naming the count, worded differently for a
+/// partial drop and a total one, and pointing at `memory_recall` as the way to
+/// see past the floor.
+/// Test: `compose_injection_announces_withheld_drawers`,
+/// `compose_injection_announces_total_silence`.
+pub(super) fn withheld_notice(withheld: usize, nothing_kept: bool) -> String {
+    let plural = if withheld == 1 { "memory" } else { "memories" };
+    if nothing_kept {
+        format!(
+            "_(No stored {plural} cleared the relevance floor for this prompt — \
+             {withheld} withheld as too weak a match. Nothing is missing from the \
+             palace; call `memory_recall` to search it directly.)_"
+        )
+    } else {
+        format!(
+            "_({withheld} further {plural} withheld below the relevance floor — \
+             call `memory_recall` for the full ranked set.)_"
+        )
+    }
 }
 
 /// Append `section` to `out` separated by a blank line when `out`
