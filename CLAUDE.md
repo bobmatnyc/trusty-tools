@@ -146,6 +146,12 @@ TEST_CAP raised #4074):**
 | Production source files | **500 SLOC** |
 | Test / benchmark files | **3000 SLOC** |
 
+Comments, doc comments (`//`, `///`, `//!`, `/* … */`), and blank lines do
+**not** count toward the cap — only non-comment code lines in tracked `.rs`
+files do (e.g. `crates/trusty-common/src/lib.rs` is 809 raw lines but 113
+SLOC). Exact counting definition:
+[docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
+
 A file is classified as a **test/benchmark file** when ANY of these match:
 - basename is exactly `tests.rs`
 - basename ends with `_test.rs` or `_tests.rs`
