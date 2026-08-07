@@ -67,7 +67,15 @@ const CLAIMS: TableDefinition<&str, &str> = TableDefinition::new("dedup_claims")
 /// (de)serialisation failures.
 /// Test: error variants are surfaced via the public methods; `Display` is
 /// derived by thiserror.
+///
+/// `#[non_exhaustive]`: adding `Contended` cost trusty-review a 0.x breaking
+/// bump purely because an external exhaustive `match` could no longer compile.
+/// The attribute makes every future variant additive instead, so the next one
+/// costs nothing — the same hardening #5065 applied to `trusty-common`'s
+/// `IndexOptions`. It only constrains matching; external callers can still
+/// construct existing variants.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DedupError {
     /// Opening or creating the redb database failed.
     #[error("dedup store open failed: {0}")]
