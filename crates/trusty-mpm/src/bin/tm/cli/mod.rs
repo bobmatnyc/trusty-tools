@@ -929,6 +929,28 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
+    /// Find a session by NAME, filtering as you type — `tm f [pattern]`.
+    ///
+    /// Why: `tm ls <term>` is a one-shot filter over every visible column, so a
+    /// wrong guess means retyping the whole command, and a task description
+    /// mentioning "api" pads the answer to "which sessions are CALLED
+    /// api-something". `tm f` keeps the list on screen and narrows it per
+    /// keystroke against the NAME only, which is the lookup an operator with
+    /// ~90 sessions runs constantly. `tm ls` is unchanged — it stays the
+    /// one-shot, pipeable listing.
+    /// What: opens the type-to-filter picker. `[pattern]` seeds the filter box;
+    /// typing narrows, Up/Down select, Enter opens the highlighted session (the
+    /// same resume path the numbered picker uses), Esc cancels, Backspace edits,
+    /// Ctrl-U clears. Matching is case-insensitive substring on the name.
+    /// Piped, `--json`, `--all`, or `TERM=dumb` never enter raw mode: they print
+    /// the same static filtered table `tm ls` would.
+    /// Test: `cli_parses_f_pattern`, `cli_parses_f_multi_word_pattern`,
+    /// `cli_parses_f_bare_is_allowed`, `cli_parses_f_json`,
+    /// `cli_f_source_id_and_current_conflict`; the fallback gate by
+    /// `interactive_filter_allowed_*`.
+    #[command(name = "f")]
+    F(FindArgs),
+
     /// Clone or refresh the managed workspace for a registered alias (DOC-24).
     ///
     /// Why: `load` is the idempotent step that materializes a registered alias
@@ -1324,4 +1346,42 @@ pub(crate) struct ReinstallArgs {
     /// Skip the `--binary` confirmation prompt.
     #[arg(long, requires = "binary")]
     pub(crate) yes: bool,
+}
+
+/// Flags for [`Command::F`] (`tm f`).
+///
+/// Why: same reason as [`ReinstallArgs`] — five fields as a struct variant make
+/// the `main.rs` dispatch arm wrap onto seven lines, and that file sits against
+/// the 500-SLOC production cap. Flattened by clap, so the parsed CLI surface is
+/// identical to the inline form.
+/// What: the pattern seed plus the four `tm ls`-mirroring flags.
+/// Test: `cli_parses_f_pattern`, `cli_parses_f_bare_is_allowed`,
+/// `cli_parses_f_json`, `cli_f_source_id_and_current_conflict`.
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct FindArgs {
+    /// Substring to seed the filter with (case-insensitive, name only).
+    ///
+    /// Optional — bare `tm f` opens the picker with an empty filter box.
+    /// Multiple words are joined with a single space and matched as one
+    /// substring.
+    #[arg(value_name = "PATTERN", num_args = 0..)]
+    pub(crate) pattern: Vec<String>,
+    /// Output the raw daemon managed-session JSON (byte-for-byte
+    /// passthrough), forcing static output even on a TTY.
+    ///
+    /// As with `tm ls --json`, the passthrough is the complete unfiltered
+    /// fleet — scripts consuming it do their own filtering.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Also restrict to this `owner/repo` slug (passed to the daemon).
+    #[arg(long)]
+    pub(crate) source_id: Option<String>,
+    /// Derive `source_id` from the cwd's git remote.
+    ///
+    /// Mutually exclusive with `--source-id`; passing both is a parse error.
+    #[arg(long, conflicts_with = "source_id")]
+    pub(crate) current: bool,
+    /// Include decommissioned tombstone sessions (forces static output).
+    #[arg(long)]
+    pub(crate) all: bool,
 }

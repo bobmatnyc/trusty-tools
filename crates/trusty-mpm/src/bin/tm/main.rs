@@ -576,11 +576,18 @@ async fn main() -> anyhow::Result<()> {
                 // #2311: bare `tm ls` is the interactive managed-session connector
                 // (TTY-aware; static + pipeable when non-TTY / --json / --all / 0).
                 let (sort, term) = commands::session_picker::parse_ls_terms(&terms);
+                // #3483 scope: `tm ls <term>` matches every visible column.
+                let filter = term.map(commands::session_picker::SessionFilter::visible);
                 commands::session_picker::run_ls_connector(
-                    &client, &url, json, source_id, current, all, sort, term,
+                    &client, &url, json, source_id, current, all, sort, filter,
                 )
                 .await
             }
+        }
+        // `tm f [pattern]` — the type-to-filter picker. It gates on TTY-ness
+        // BEFORE touching raw mode and degrades to the static filtered table.
+        Some(Command::F(args)) => {
+            commands::session_picker_filter::run_f_command(&client, &url, args).await
         }
         Some(Command::Load { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;

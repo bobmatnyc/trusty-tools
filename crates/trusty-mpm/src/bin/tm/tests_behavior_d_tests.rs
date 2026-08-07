@@ -924,7 +924,7 @@ fn ls_connector_should_show_picker_flags_and_empty_static() {
 // `sort_sessions` are the pure list operations it feeds.
 
 use crate::commands::session_picker::{
-    SessionSortArg, filter_sessions_by_term, parse_ls_terms, sort_sessions,
+    SessionFilter, SessionSortArg, filter_sessions_by_term, parse_ls_terms, sort_sessions,
 };
 
 /// Bare `tm ls` (no positional words) → default sort, no filter.
@@ -1058,7 +1058,7 @@ fn filter_sessions_by_term_matches_name() {
         ls_test_session("api-worker", "active", None, None, None, None),
         ls_test_session("web-frontend", "active", None, None, None, None),
     ];
-    let out = filter_sessions_by_term(sessions, Some("API"));
+    let out = filter_sessions_by_term(sessions, Some(&SessionFilter::visible("API")));
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].name, "api-worker");
 }
@@ -1070,7 +1070,7 @@ fn filter_sessions_by_term_matches_task() {
         ls_test_session("s1", "active", None, None, None, Some("fix the login bug")),
         ls_test_session("s2", "active", None, None, None, Some("write docs")),
     ];
-    let out = filter_sessions_by_term(sessions, Some("login"));
+    let out = filter_sessions_by_term(sessions, Some(&SessionFilter::visible("login")));
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].name, "s1");
 }
@@ -1089,7 +1089,7 @@ fn filter_sessions_by_term_matches_source_id() {
         ),
         ls_test_session("s2", "active", None, None, Some("other/repo"), None),
     ];
-    let out = filter_sessions_by_term(sessions, Some("trusty-tools"));
+    let out = filter_sessions_by_term(sessions, Some(&SessionFilter::visible("trusty-tools")));
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].name, "s1");
 }
@@ -1099,17 +1099,23 @@ fn filter_sessions_by_term_matches_source_id() {
 fn filter_sessions_by_term_is_case_insensitive() {
     let sessions = vec![ls_test_session("MyApp", "ACTIVE", None, None, None, None)];
     assert_eq!(
-        filter_sessions_by_term(sessions.clone(), Some("myapp")).len(),
+        filter_sessions_by_term(sessions.clone(), Some(&SessionFilter::visible("myapp"))).len(),
         1
     );
-    assert_eq!(filter_sessions_by_term(sessions, Some("active")).len(), 1);
+    assert_eq!(
+        filter_sessions_by_term(sessions, Some(&SessionFilter::visible("active"))).len(),
+        1
+    );
 }
 
 /// A filter matching nothing returns an empty result (not an error).
 #[test]
 fn filter_sessions_by_term_no_match_returns_empty() {
     let sessions = vec![ls_test_session("s1", "active", None, None, None, None)];
-    let out = filter_sessions_by_term(sessions, Some("nonexistent-substring"));
+    let out = filter_sessions_by_term(
+        sessions,
+        Some(&SessionFilter::visible("nonexistent-substring")),
+    );
     assert!(out.is_empty(), "no match must yield an empty result");
 }
 
@@ -1301,7 +1307,7 @@ fn filter_and_sort_combined() {
             None,
         ),
     ];
-    let mut filtered = filter_sessions_by_term(sessions, Some("api"));
+    let mut filtered = filter_sessions_by_term(sessions, Some(&SessionFilter::visible("api")));
     assert_eq!(
         filtered.len(),
         2,
@@ -3484,4 +3490,114 @@ async fn session_ls_json_never_refetches_after_pruning() {
     );
 
     handle.abort();
+}
+
+// ── `tm f` — the type-to-filter picker's CLI surface ─────────────────────────
+//
+// `f` is a new top-level command under `infer_subcommands = true`. No other
+// subcommand starts with `f`, so it shadows nothing; these tests pin that the
+// exact spelling resolves to `Command::F` and that its flags mirror `ls`.
+
+/// `tm f api` captures the pattern positionally.
+#[test]
+fn cli_parses_f_pattern() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "f", "api"]).unwrap();
+    match cli.command.unwrap() {
+        Command::F(a) => assert_eq!(a.pattern, vec!["api".to_string()]),
+        other => panic!("expected top-level f, got {other:?}"),
+    }
+}
+
+/// Multi-word patterns are captured in order; the handler joins them with a
+/// single space. Unlike `ls`, the first word is NEVER a sort keyword — `alpha`
+/// here is part of the pattern.
+#[test]
+fn cli_parses_f_multi_word_pattern() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "f", "alpha", "api"]).unwrap();
+    match cli.command.unwrap() {
+        Command::F(a) => {
+            assert_eq!(a.pattern, vec!["alpha".to_string(), "api".to_string()])
+        }
+        other => panic!("expected top-level f, got {other:?}"),
+    }
+}
+
+/// Bare `tm f` opens the picker with an empty filter box — the pattern is a
+/// seed, not a required argument.
+#[test]
+fn cli_parses_f_bare_is_allowed() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "f"]).unwrap();
+    match cli.command.unwrap() {
+        Command::F(a) => assert!(a.pattern.is_empty()),
+        other => panic!("expected top-level f, got {other:?}"),
+    }
+}
+
+/// `--json` parses and rides alongside the pattern; the handler uses it to skip
+/// the interactive path entirely.
+#[test]
+fn cli_parses_f_json() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "f", "--json", "api"]).unwrap();
+    match cli.command.unwrap() {
+        Command::F(a) => {
+            assert_eq!(a.pattern, vec!["api".to_string()]);
+            assert!(a.json);
+        }
+        other => panic!("expected top-level f --json, got {other:?}"),
+    }
+}
+
+/// `--source-id` and `--current` are mutually exclusive, matching `tm ls`.
+#[test]
+fn cli_f_source_id_and_current_conflict() {
+    let err = Cli::try_parse_from([
+        "trusty-mpm",
+        "f",
+        "--source-id",
+        "owner/repo",
+        "--current",
+        "api",
+    ]);
+    assert!(err.is_err(), "--source-id and --current must conflict");
+}
+
+/// `tm f` must not shadow any pre-existing subcommand. Under
+/// `infer_subcommands`, an `f` that collided with (say) a hypothetical `fix`
+/// would either resolve to that command or error as ambiguous — this pins that
+/// it resolves to `Command::F` itself.
+#[test]
+fn cli_f_does_not_shadow_another_subcommand() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "f", "x"]).unwrap();
+    assert!(matches!(cli.command, Some(Command::F(_))));
+}
+
+/// `tm f`'s NAME-only scope is the reason it exists next to `tm ls <term>`,
+/// whose scope stays every visible column. Both scopes go through the SAME
+/// `filter_sessions_by_term`, so this pins that the scope — not a second
+/// filter function — is what differs.
+#[test]
+fn filter_sessions_by_name_ignores_non_name_columns() {
+    let sessions = vec![
+        ls_test_session(
+            "tm-alpha-01",
+            "active",
+            None,
+            None,
+            Some("acme/api-server"),
+            Some("fix the api"),
+        ),
+        ls_test_session("tm-api-02", "active", None, None, None, None),
+    ];
+    let by_name = filter_sessions_by_term(sessions.clone(), Some(&SessionFilter::name("api")));
+    assert_eq!(
+        by_name.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        vec!["tm-api-02"],
+        "NAME scope must ignore a matching task and project slug"
+    );
+    let by_visible = filter_sessions_by_term(sessions, Some(&SessionFilter::visible("api")));
+    assert_eq!(
+        by_visible.len(),
+        2,
+        "the ls scope still matches task/source_id"
+    );
 }
