@@ -155,6 +155,14 @@ A file is classified as a **test/benchmark file** when ANY of these match:
 
 All other tracked `.rs` files are **production files**, capped at 500 SLOC.
 
+🟡 **Inline `#[cfg(test)] mod <name> { … }` bodies do not count (#5153).** Add
+tests to a 460-SLOC module without splitting it. Only that exact shape is
+excluded — `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an
+`fn`/`impl`/`use`, and predicates like `all(test, …)` or `any(test, …)` are all
+still counted, as is any test module whose brace balance is skewed by a brace
+inside a string literal. The matcher is line-based and fails closed: it can
+raise a false cap violation, never silently drop production code.
+
 🔴 Mechanically enforced by `scripts/check_line_cap.sh` in CI and the pre-commit
 hook (#610) — a new tracked file over its cap **cannot merge**. Never turn this
 gate green by deleting, `#[ignore]`-ing, or excluding a file from the count;
