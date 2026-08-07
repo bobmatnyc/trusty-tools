@@ -52,9 +52,9 @@ is on your `PATH`.
 ### Option B: Build from source
 
 ```bash
-git clone https://github.com/bobmatnyc/trusty-git-analytics
-cd trusty-git-analytics
-cargo build --release
+git clone https://github.com/bobmatnyc/trusty-tools
+cd trusty-tools
+cargo build --release -p tga
 # Binary is at: target/release/tga
 cp target/release/tga /usr/local/bin/tga
 ```
@@ -63,7 +63,7 @@ cp target/release/tga /usr/local/bin/tga
 
 Pre-built binaries for macOS (x86_64 and aarch64), Linux (x86_64), and Windows (x86_64)
 are published on the
-[GitHub Releases page](https://github.com/bobmatnyc/trusty-git-analytics/releases).
+[GitHub Releases page](https://github.com/bobmatnyc/trusty-tools/releases).
 Download the binary for your platform, make it executable, and place it on your `PATH`:
 
 ```bash
