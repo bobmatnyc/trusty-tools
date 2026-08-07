@@ -85,10 +85,24 @@ impl McpServer {
     /// What: GETs `{base_url}{path}` with `query` appended as a properly-encoded
     /// query string, then mirrors [`Self::get`]'s status-then-decode handling.
     /// Test: `list_chunks` cursor arm exercises this via the dispatch tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) async fn get_query(
         &self,
         path: &str,
         query: &[(&str, String)],
+    ) -> Result<Value, DispatchError> {
+        self.get_query_scoped(path, query, None).await
+    }
+
+    /// [`Self::get_query`] scoped to an index, so a 404 on the session's
+    /// advertised index becomes `INDEX_NOT_READY` (issue #4715).
+    ///
+    /// Test: `list_chunks_on_unindexed_pin_returns_index_not_ready`.
+    pub(super) async fn get_query_scoped(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        index_id: Option<&str>,
     ) -> Result<Value, DispatchError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
@@ -104,6 +118,11 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("read {url}: {e}")))?;
         if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND {
+                if let Some(e) = self.classify_index_miss(index_id) {
+                    return Err(e);
+                }
+            }
             return Err(DispatchError::Transport(format!(
                 "GET {url} returned {status}: {text}"
             )));

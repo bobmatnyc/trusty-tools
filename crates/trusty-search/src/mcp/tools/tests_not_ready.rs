@@ -48,6 +48,7 @@ async fn spawn_status_daemon(status: u16, body: Value) -> String {
         .route("/indexes/{id}/search", post(handler))
         .route("/indexes/{id}/grep", post(handler))
         .route("/indexes/{id}/status", get(handler))
+        .route("/indexes/{id}/chunks", get(handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -249,6 +250,46 @@ async fn index_status_on_unindexed_pin_returns_index_not_ready() {
         .await;
     let err = resp.error.expect("index_status must fail loudly");
     assert_eq!(err.code, INDEX_NOT_READY_CODE);
+}
+
+/// `list_chunks` reports the same state as its `index_status` neighbour.
+///
+/// Why: routing it is only safe because `get_index_chunks_handler` now rules
+/// out the cold store before it 404s — see `service::server::tests_4715`.
+#[tokio::test]
+async fn list_chunks_on_unindexed_pin_returns_index_not_ready() {
+    let base =
+        spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
+    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let resp = server
+        .dispatch(req("list_chunks", serde_json::json!({})))
+        .await;
+    let err = resp.error.expect("list_chunks must fail loudly");
+    assert_eq!(err.code, INDEX_NOT_READY_CODE);
+    assert_eq!(err.data.expect("payload")["error_code"], INDEX_NOT_READY);
+}
+
+/// A 503 from a routed endpoint — the daemon's "registered but not resident"
+/// answer — must NOT be classified as never-indexed.
+///
+/// Why: this is the misclassification pointing the other way. A cold-parked
+/// index was built; saying it never was is the same defect this PR removes.
+#[tokio::test]
+async fn non_resident_503_is_not_classified_as_never_indexed() {
+    let base = spawn_status_daemon(
+        503,
+        serde_json::json!({ "error": "index_not_resident", "message": "restoring" }),
+    )
+    .await;
+    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let resp = server
+        .dispatch(req("index_status", serde_json::json!({})))
+        .await;
+    let err = resp.error.expect("503 is still an error");
+    assert_ne!(
+        err.code, INDEX_NOT_READY_CODE,
+        "a built-but-not-resident index must not be reported as never built"
+    );
 }
 
 /// The pinned `grep` tool is index-backed, so it reports the same state rather

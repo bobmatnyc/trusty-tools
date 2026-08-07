@@ -74,7 +74,17 @@ impl McpServer {
     /// caller falls through to its existing error path unchanged. Pure
     /// comparison over data already held — it has no fallible step that could
     /// degrade a real failure into a success or an empty result.
-    /// Test: `classify_index_miss_only_fires_for_the_pinned_index`.
+    ///
+    /// **Invariant this depends on.** Only route an endpoint through the
+    /// `*_scoped` HTTP helpers when its daemon handler returns 404 *only* for
+    /// an id absent from the hot registry, the cold store, AND the failed set.
+    /// A handler that 404s on a bare hot-registry miss reports a cold-parked
+    /// index — one that was built and merely is not resident — as one that was
+    /// never built, which is this bug pointed the other way. `service::server::
+    /// tests_4715` pins that rule for every currently-routed handler.
+    ///
+    /// Test: `classify_index_miss_only_fires_for_the_pinned_index`;
+    /// `cold_parked_index_status_is_503_not_404` guards the invariant.
     pub(super) fn classify_index_miss(&self, index_id: Option<&str>) -> Option<DispatchError> {
         let id = index_id?;
         if self.pinned_index.as_deref() != Some(id) {

@@ -176,9 +176,15 @@ pub(super) async fn dispatch_index_tool(
                 // the query string.
                 query.push(("after", after.to_string()));
             }
+            // #4715: index-scoped like its `index_status` neighbour — a
+            // never-indexed pin gets the same not-ready answer here.
             Some(
                 server
-                    .get_query(&format!("/indexes/{index_id}/chunks"), &query)
+                    .get_query_scoped(
+                        &format!("/indexes/{index_id}/chunks"),
+                        &query,
+                        Some(&index_id),
+                    )
                     .await,
             )
         }

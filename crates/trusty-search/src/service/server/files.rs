@@ -127,7 +127,15 @@ pub(super) async fn get_index_chunks_handler(
     Query(params): Query<ChunksParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+    // #4715: 404 must mean "no such index anywhere", not "not resident" —
+    // see `index_status_handler` for why the MCP layer depends on that.
+    let handle = match state.registry.get(&index_id) {
+        Some(h) => h,
+        None if state.cold_store.contains(&index_id) || state.cold_store.is_failed(&index_id) => {
+            return Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        None => return Err(StatusCode::NOT_FOUND),
+    };
     let limit = params.limit.min(MAX_CHUNKS_LIMIT);
     let indexer = handle.indexer.read().await;
 
@@ -270,10 +278,28 @@ pub(super) async fn grep_handler(
         )
     })?;
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or((
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({ "error": format!("unknown index: {}", index_id.0) })),
-    ))?;
+    // #4715: same rule as `index_status_handler` — a cold-parked index exists.
+    let handle = match state.registry.get(&index_id) {
+        Some(h) => h,
+        None if state.cold_store.contains(&index_id) || state.cold_store.is_failed(&index_id) => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "index_not_resident",
+                    "message": format!(
+                        "index '{}' is registered but not loaded — retry after it restores",
+                        index_id.0
+                    ),
+                })),
+            ))
+        }
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("unknown index: {}", index_id.0) })),
+            ))
+        }
+    };
 
     let started = std::time::Instant::now();
     let mut matches = Vec::new();
