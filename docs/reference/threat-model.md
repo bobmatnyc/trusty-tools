@@ -65,14 +65,25 @@ the daemons' listener setup code moves independently of this doc.
 | **trusty-memory** | `127.0.0.1:7070`–`7079` (auto-selects next free); `--http` accepts any explicit addr | **Yes** — router-wide `SelfOrigins` guard (`web/mod.rs`) | Yes (`memory` → `trusty-memory`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge — a pure HTTP proxy forwarding JSON-RPC to the daemon's own `/rpc` (no local tool logic), embedded UI, console proxy |
 | **trusty-analyze** | `127.0.0.1:7879` (`commands/port.rs::DEFAULT_PORT`) | **Yes** — router-wide `SelfOrigins` guard (`service/routes.rs`) | Yes (`analyze` → `trusty-analyze`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge, embedded UI, console proxy, **direct GitHub webhook** (`POST /webhooks/github` — see Known Gaps) |
 | **trusty-review** | `127.0.0.1:7891` | **Yes** — `SelfOrigins` guard wraps all routes (`service/routes.rs`) | Yes (`review` → `trusty-review`) | No embedded UI | CLI, console proxy, HMAC-verified GitHub webhook (signature check is independent of the origin guard) |
-| **trusty-agents** | **`0.0.0.0:7654`** (LAN-reachable by default) — optional bearer auth, **off by default** | **No** | **No** — not yet in the allowlist | Yes, separate `agents-ui` crate | CLI, native MCP stdio bridge, `agents-ui` (Tauri, talks directly to the `0.0.0.0` API), any host on the LAN (this is the gap) |
+| **trusty-agents** | `127.0.0.1:8080` (`--port`; 7654 is the conventional dev/UI port, passed explicitly). `--bind` is an explicit non-loopback opt-in that `serve_with_config` **refuses to start without `--api-token`** (`api/server/routes.rs`) | **Yes** — router-wide `SelfOrigins` guard via `with_guarded_middleware` (`api/server/routes.rs::build_router_with_origins`) | Yes (`agents` → `trusty-agents`, #3331) | Yes, separate `agents-ui` crate | CLI, native MCP stdio bridge, `agents-ui` (Tauri — writes go over Tauri IPC, not HTTP), console proxy |
 | **trusty-mpm** | `127.0.0.1:7880` | **Yes** — `guard_router` wraps the listener with the `SelfOrigins` guard (`daemon/api/origin_guard.rs`) | Yes (`mpm` → `trusty-mpm`, #1849 Phase 1) | No embedded UI (separate `trusty-mpm-gui` Tauri app) | CLI (`tm`), native MCP stdio bridge, `trusty-mpm-gui` (talks **directly** to the daemon, not gateway-first — migration tracked as [#3333](https://github.com/bobmatnyc/trusty-tools/issues/3333), #1849 Phase 2), console proxy |
 | **trusty-console** | `127.0.0.1:7788` by default; `--tailscale` widens to a dual listener (loopback + tailnet IP); Funnel mode (ADR-0017, Proposed) layers public HTTPS on top | Yes — the original router-wide guard this pattern was lifted from (`crates/trusty-common/src/server/origin_guard.rs` docs the provenance: #3268/#3269/#3280) | n/a — console is the proxy, not a proxied target (`full_id("console")` is explicitly `None`) | Yes, the dashboard SPA | Browsers (local or, in `--tailscale`/Funnel mode, remote), every CLI/UI above via the reverse proxy, and — the **sole off-loopback surface** per ADR-0018 |
 
-**One item above is still in progress:** trusty-agents'
-bind/guard/allowlist fix (#3329, epic #3328). The trusty-mpm `--tailscale`
-listener removal (#3330) and trusty-review origin guard (#3332) are resolved in
-this version.
+**Every row above is now resolved.** trusty-agents' bind/guard/allowlist fix
+(#3329, epic #3328) landed in [#3341](https://github.com/bobmatnyc/trusty-tools/pull/3341)
+together with the console `agents` proxy route (#3331); the trusty-mpm
+`--tailscale` listener removal (#3330) and trusty-review origin guard (#3332)
+were resolved earlier.
+
+**Remote access to trusty-agents goes through trusty-console**, not through a
+direct bind. Per [ADR-0018](../adr/0018-loopback-only-doctrine.md) console is
+the sole off-loopback surface and the only component that widens over
+Tailscale, and [ADR-0031](../adr/0031-uds-for-inter-crate-transport-http-for-external.md) routes all
+external comms through the one shared HTTP server. trusty-agents publishes its
+bound address to the standard `http_addr` discovery file so the console proxy
+resolves `/api/agents/*` to it. The `--bind` escape hatch remains for the case
+console cannot cover, which is why it is token-gated at startup rather than
+merely discouraged.
 
 ## Why the guard fails open on a missing `Origin` header
 
@@ -129,9 +140,10 @@ firing a cross-origin write.
 - **trusty-agents' undeclared 7th HTTP surface.** `crates/trusty-agents/src/search/service/mod.rs`
   runs a per-project search-as-a-service daemon in the background (PID
   tracked at `.trusty-agents/state/search.pid`). It does not appear in any
-  daemon inventory, port table, or (until this document) threat model; it is
-  not currently subject to the loopback-only doctrine's enforcement and is
-  not wrapped by the shared write-origin guard. Tracked as
+  daemon inventory, port table, or (until this document) threat model. It does
+  bind loopback — `TcpListener::bind("127.0.0.1:0")`, hardcoded, so there is no
+  configuration that widens it — but that is incidental rather than enforced,
+  and it is not wrapped by the shared write-origin guard. Tracked as
   [#3335](https://github.com/bobmatnyc/trusty-tools/issues/3335) — needs
   either formal declaration (loopback bind + guard) or retirement.
 

@@ -153,3 +153,46 @@ async fn non_loopback_without_token_refuses_start() {
         "refusal should point at the console proxy as the intended remote path, got: {msg}"
     );
 }
+
+/// Why: #3329's control is the DEFAULT bind, not the refusal — the refusal only
+/// fires once something has already chosen a non-loopback address.
+/// `non_loopback_without_token_refuses_start` covers that branch; nothing
+/// pinned the default itself, so flipping `unauthenticated` back to `0.0.0.0`
+/// would restore the original LAN exposure with every other test still green.
+/// This is the assertion that fails against the pre-#3341 code, where the
+/// server bound `0.0.0.0` unconditionally.
+/// What: asserts the no-token constructor binds a loopback address.
+/// Test: this test.
+#[test]
+fn unauthenticated_config_binds_loopback() {
+    let cfg = ApiConfig::unauthenticated(7654);
+    assert!(
+        cfg.bind.is_loopback(),
+        "the unauthenticated default must bind loopback, got {}",
+        cfg.bind
+    );
+}
+
+/// Why: `--bind` is parsed independently in `runtime::startup` (raw argv) and
+/// `runtime::mode_dispatch` (clap). Both now route through
+/// `ApiConfig::with_bind`, so this pins the shared default once instead of
+/// trusting two open-coded `unwrap_or`s to stay in agreement.
+/// What: absent `--bind` resolves to loopback; an explicit address is taken
+/// verbatim so `serve_with_config` can apply the token gate to it.
+/// Test: this test.
+#[test]
+fn unspecified_bind_defaults_to_loopback() {
+    assert!(
+        ApiConfig::with_bind(None, 7654, None).bind.is_loopback(),
+        "omitting --bind must resolve to loopback"
+    );
+    let explicit = ApiConfig::with_bind(
+        Some(std::net::Ipv4Addr::UNSPECIFIED.into()),
+        7654,
+        Some("tok".to_string()),
+    );
+    assert!(
+        !explicit.bind.is_loopback(),
+        "an explicit --bind must be passed through verbatim for the token gate to judge"
+    );
+}
