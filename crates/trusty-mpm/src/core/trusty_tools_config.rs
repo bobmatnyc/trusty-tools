@@ -231,7 +231,17 @@ pub const MIN_TMUX_HISTORY_LIMIT: u32 = 1_000;
 /// [`MIN_TMUX_HISTORY_LIMIT`]) lives in [`resolve_tmux_options`], not here —
 /// this is purely the on-disk shape.
 /// Test: `tmux_config_yaml_round_trip`.
+///
+/// `#[non_exhaustive]` (#5151): this section is designed to grow — it went from
+/// two fields to three when `alternate_screen` landed, and adding a `pub` field
+/// to an exhaustively-constructible struct is a SemVer break, because external
+/// code can no longer use a struct literal. Marking it non-exhaustive makes
+/// every future field addition non-breaking by construction. Downstream code
+/// builds one via [`Default`] plus field assignment, or gets one from
+/// [`TrustyToolsConfig::load`]; reading fields is unaffected. Same treatment
+/// `trusty-common`'s `IndexOptions` got in #5065.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TmuxConfig {
     /// Scrollback lines retained per pane (tmux `history-limit`).
     ///
@@ -286,7 +296,12 @@ pub struct TmuxConfig {
 /// What: `history_limit`, `mouse` and `alternate_screen`, all always
 /// populated.
 /// Test: `tmux_options_default_when_no_config`, `tmux_options_config_override`.
+///
+/// `#[non_exhaustive]` (#5151): tracks [`TmuxConfig`] field-for-field, so it
+/// grows whenever that does — see its doc for why the attribute is here.
+/// [`resolve_tmux_options`] is the only intended way to obtain one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolvedTmuxOptions {
     /// Scrollback lines retained per pane.
     pub history_limit: u32,

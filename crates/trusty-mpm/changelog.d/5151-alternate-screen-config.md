@@ -5,3 +5,5 @@ Added
   Turning it off is server-wide in effect: every trusty-* managed session shares one tmux server, so `vim`, `less`, `htop` and `man` also stop restoring the screen they covered, each leaving its final frame smeared into the scrollback on exit. It is not retroactive either — anything already written while the alternate screen was up stays unrecoverable.
 
   The option rides the existing verified apply path (`start-server` → `set-option` → `show-options` readback, retried, before `new-session`), and its readback queries the same `-wg` scope the set writes, so a wrong-scope set cannot verify green.
+
+- `TmuxConfig` and `ResolvedTmuxOptions` are now `#[non_exhaustive]`, so this field addition — and every future one to a section designed to grow — is not a SemVer break. Construction from outside the crate goes through `Default` plus field assignment or `resolve_tmux_options`; field reads are unaffected. Same treatment `trusty-common`'s `IndexOptions` got in [#5065](https://github.com/bobmatnyc/trusty-tools/pull/5065).
