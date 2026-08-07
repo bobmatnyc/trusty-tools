@@ -137,6 +137,10 @@ _archive"
 # separating them. `-internal.md` is the naming convention for that split, and
 # this makes it mechanical: a source whose basename ends `-internal.md` can never
 # be published, wherever it lives.
+#
+# The convention is documented for AUTHORS in docs/public-manifest.tsv's header,
+# under "NAMING AN INTERNAL DOC" — a rule that only exists inside the gate that
+# enforces it is a trap, however right the rule is.
 FORBIDDEN_SUFFIX="-internal.md"
 
 fail=0
@@ -245,11 +249,15 @@ while IFS= read -r raw || [[ -n "$raw" ]]; do
       # directory ...
       forbidden_hit=""
       case "$src" in
-        *"$FORBIDDEN_SUFFIX") forbidden_hit="*${FORBIDDEN_SUFFIX}" ;;
+        *"$FORBIDDEN_SUFFIX")
+          report FORBIDDEN "$lineno" \
+            "source '${src}' is named '*${FORBIDDEN_SUFFIX}', the suffix that marks a docs/ file as never-public. Either rename the file without the suffix if it is meant to be published, or delete this row."
+          continue
+          ;;
       esac
 
       # ... then the top-level trees by prefix ...
-      while [[ -z "$forbidden_hit" ]] && IFS= read -r tree; do
+      while IFS= read -r tree; do
         [[ -z "$tree" ]] && continue
         case "$src" in
           "$tree"*)
@@ -273,7 +281,8 @@ while IFS= read -r raw || [[ -n "$raw" ]]; do
       fi
 
       if [[ -n "$forbidden_hit" ]]; then
-        report FORBIDDEN "$lineno" "source '${src}' matches the DO-NOT-PUBLISH rule '${forbidden_hit}'"
+        report FORBIDDEN "$lineno" \
+          "source '${src}' is inside the DO-NOT-PUBLISH tree '${forbidden_hit}'. That tree is never published; delete this row."
         continue
       fi
 
@@ -326,6 +335,9 @@ The public documentation manifest is an ALLOWLIST (${MANIFEST}).
 Every PAGE row must name an existing .md file under docs/ that is outside the
 DO-NOT-PUBLISH trees and not named \`*-internal.md\`, with a unique route. Fix the
 rows above — never widen the boundary to make this gate green.
+
+Both rules, and the \`*-internal.md\` naming convention for internal docs that
+live in a mixed-audience directory, are documented in that file's header.
 EOF
   exit 1
 fi

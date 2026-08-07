@@ -41,7 +41,26 @@
 #
 # DO-NOT-PUBLISH trees (owner decision, enforced independently of this file by
 #   the gate): docs/adr, docs/specs, docs/research, docs/plans, docs/prd,
-#   docs/presentations, docs/design, docs/runbooks.
+#   docs/presentations, docs/design, docs/runbooks — plus the same KINDS nested
+#   under a per-crate tree (docs/<crate>/{research,design,spec,decisions,
+#   sessions,regression-testing,_archive}/).
+#
+# NAMING AN INTERNAL DOC — `*-internal.md`
+#
+#   Most of docs/ separates audiences by directory, so the tree rules above are
+#   enough. docs/reference/ does not: it holds public references and internal
+#   engineering references side by side, and a new internal file there has no
+#   structural marker distinguishing it from a publishable neighbour.
+#
+#   So: when an internal doc must live in a mixed-audience directory, name it
+#   `<topic>-internal.md`. The gate REFUSES to publish any source with that
+#   suffix, wherever it sits, which makes the boundary hold even if someone
+#   later adds a row for it by accident. The first case is the split of
+#   docs/reference/config-convention.md (public) from
+#   docs/reference/config-convention-internal.md (crate-authoring guidance).
+#
+#   Corollary: never give the suffix to a file you intend to publish. Renaming
+#   it is the fix, not adding a manifest row.
 #
 # Issue: #5096 (epic #5092).
 
