@@ -1,11 +1,14 @@
 //! Server configuration + bearer-token auth middleware (#181).
 //!
-//! Why: The server binds `0.0.0.0`, so any process on the LAN can reach the
-//! REST API + UI. Bearer-token auth, configurable per launch, gates the
-//! sensitive `/api/*` routes while exempting health/config/events probes and
-//! the embedded UI assets.
-//! What: `ApiConfig` carries the port + optional token; `auth_middleware`
-//! enforces the token; `ApiClientConfig` tells the UI whether auth is needed.
+//! Why: The server binds loopback (`127.0.0.1`) by default, so auth is not the
+//! control that keeps it off the LAN — the bind is (#3329). Bearer-token auth
+//! covers the one case the bind cannot: an operator who explicitly opts into a
+//! non-loopback `--bind`, which `serve_with_config` refuses to start without a
+//! token. It gates the sensitive `/api/*` routes while exempting
+//! health/config/events probes and the embedded UI assets.
+//! What: `ApiConfig` carries the bind + port + optional token;
+//! `auth_middleware` enforces the token; `ApiClientConfig` tells the UI whether
+//! auth is needed.
 //! Test: `auth_middleware_*` and `config_endpoint_*` in `super::tests`.
 
 use axum::{
@@ -57,6 +60,26 @@ impl ApiConfig {
             token: None,
         }
     }
+
+    /// Build a config from an optional operator-supplied bind. (#3329)
+    ///
+    /// Why: `--bind` is parsed in two independent places — the `--api` early
+    /// dispatch in `runtime::startup` (raw argv, so the Tauri sidecar can skip
+    /// PM state init) and the clap path in `runtime::mode_dispatch`. Both must
+    /// apply the same loopback default; an `unwrap_or(LOCALHOST)` open-coded at
+    /// each site leaves a security-relevant default free to drift between them.
+    /// `serve_with_config` still enforces the doctrine whatever this returns,
+    /// so this is defence in depth rather than the primary control.
+    /// What: `None` → `127.0.0.1`. `Some(ip)` is taken verbatim; a non-loopback
+    /// `ip` is then refused by `serve_with_config` unless `token` is `Some`.
+    /// Test: `unspecified_bind_defaults_to_loopback`.
+    pub fn with_bind(bind: Option<std::net::IpAddr>, port: u16, token: Option<String>) -> Self {
+        Self {
+            bind: bind.unwrap_or_else(|| std::net::Ipv4Addr::LOCALHOST.into()),
+            port,
+            token,
+        }
+    }
 }
 
 /// Wrapper used by the auth middleware so axum can extract the optional
@@ -90,10 +113,13 @@ pub(super) fn bearer_token_matches(expected: &str, provided: &str) -> bool {
 
 /// Bearer-token authentication middleware. (#181)
 ///
-/// Why: The server binds `0.0.0.0`, so any process on the LAN can reach the
-/// REST API + UI. When the operator sets a token, we reject requests that
-/// don't present it. We deliberately exempt `GET /api/health` so probes from
-/// load balancers or healthchecks don't need credentials, and exempt the
+/// Why: On the loopback default this middleware is not installed at all — a
+/// local caller reaches every route, which is the accepted posture for a
+/// same-host daemon (#3329). It exists for the non-loopback `--bind` opt-in,
+/// where `serve_with_config` requires a token: there, any host that can route
+/// to the port must present it. We deliberately exempt `GET /api/health` so
+/// probes from load balancers or healthchecks don't need credentials, and
+/// exempt the
 /// embedded UI's static assets so a browser can load `index.html` and obtain
 /// the token via `/api/config` before issuing authenticated requests.
 /// What: For requests under `/api/*` (other than `/api/health`), checks
