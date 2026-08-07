@@ -759,6 +759,20 @@ pub mod uds;
 #[cfg(feature = "webhook-hmac")]
 pub mod webhook_hmac;
 
+/// Console->target webhook relay wire contract (#5089 step 3, ADR-0034 §3).
+///
+/// Why: the sender (`trusty-console`) and the receivers (`trusty-review`,
+/// `trusty-analyze`) cannot depend on each other, so a method name or field
+/// list held by only one half is two copies waiting to drift.
+/// What: Exposes [`webhook_relay::RELAY_METHOD`], the borrowed
+/// [`webhook_relay::RelayFrame`] the sender writes, the owned
+/// [`webhook_relay::RelayRequest`] a receiver reads, and
+/// [`webhook_relay::RelayResponse`], whose `ack` is the only thing that
+/// licenses the sender to delete its spool entry.
+/// Test: `cargo test -p trusty-common --features webhook-relay webhook_relay::`.
+#[cfg(feature = "webhook-relay")]
+pub mod webhook_relay;
+
 /// Global tracing subscriber initialisation helpers.
 ///
 /// Why: Every trusty-* binary needs the same verbosity ladder, `RUST_LOG`

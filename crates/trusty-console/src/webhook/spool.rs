@@ -11,12 +11,18 @@
 //! and its directory.
 //!
 //! What: one JSON file per delivery under
-//! `resolve_data_dir("trusty-console")/webhook-spool/`. [`Spool::persist`]
-//! writes a temp file, `fsync`s it, renames it into place, then `fsync`s the
-//! directory so the rename itself survives a crash. [`Spool::record_attempt`]
-//! rewrites an entry through the same sequence with a bumped attempt count.
+//! `resolve_data_dir("trusty-console")/webhook-spool/`. [`Spool::persist_new`]
+//! writes a temp file, `fsync`s it, links it into place — refusing to clobber an
+//! entry already there — then `fsync`s the directory so the new name survives a
+//! crash. [`Spool::persist_update`] is the same sequence committing with
+//! `rename`, for [`Spool::record_attempt`]'s deliberate overwrite.
 //! [`Spool::remove_acked`] is the only deletion path and is reachable only from
 //! an explicit target acknowledgement.
+//!
+//! 🔴 [`Spool::list_pending`] answers a missing directory with an error, not an
+//! empty listing, for any spool that was successfully opened. An unreadable
+//! spool reported as "nothing pending" makes the health scan green while every
+//! delivery 500s.
 //!
 //! 🔴 Every fallible step here returns an error to the caller. Nothing in this
 //! module logs-and-continues, because a swallowed spool failure is exactly the
@@ -109,6 +115,18 @@ pub enum SpoolError {
         source: std::io::Error,
     },
 
+    /// An entry already exists at the path a fresh delivery derives.
+    ///
+    /// Defensive: GitHub always sends `X-GitHub-Delivery`, so two deliveries
+    /// only collide when the header is absent AND they land in the same
+    /// millisecond. Refusing is still the right answer — clobbering would
+    /// destroy a delivery that has already been acknowledged.
+    #[error("a spool entry already exists at {path}; refusing to clobber it")]
+    AlreadyExists {
+        /// Path that was already taken.
+        path: PathBuf,
+    },
+
     /// Listing the spool failed. Surfaced as a red health state rather than an
     /// empty (and therefore falsely healthy) listing.
     #[error("read spool directory {path}: {source}")]
@@ -133,22 +151,11 @@ pub enum SpoolError {
 
 /// What console proves to the target about a relayed body (ADR-0034 §3).
 ///
-/// Why: the target trusts this assertion because only a same-uid process could
-/// have written it through a `0600` socket. Recording the algorithm and key id
-/// explicitly — rather than letting the target infer "it came over UDS so it is
-/// fine" — is what keeps the trust boundary named rather than assumed.
-/// What: three fields, all serialised into the relay frame verbatim.
-/// Test: `relay_frame_carries_provenance_and_byte_exact_body`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Provenance {
-    /// Algorithm console checked, e.g. `hmac-sha256`.
-    pub algorithm: String,
-    /// Which secret was used, by name — never the secret itself.
-    pub key_id: String,
-    /// Whether verification succeeded. Always `true` for a spooled entry:
-    /// console refuses an unverified delivery before it reaches the spool.
-    pub verified: bool,
-}
+/// Re-exported from `trusty_common::webhook_relay` rather than defined here:
+/// step 4's receivers live in `trusty-review` and `trusty-analyze`, which
+/// cannot depend on the console, so the type has to sit where both halves read
+/// it.
+pub use trusty_common::webhook_relay::Provenance;
 
 /// One spooled delivery.
 ///
@@ -205,6 +212,16 @@ pub struct PendingEntry {
 #[derive(Debug, Clone)]
 pub struct Spool {
     root: PathBuf,
+    /// Whether this spool's directory was successfully created at construction.
+    ///
+    /// 🔴 Load-bearing for the health signal, not bookkeeping. Once the
+    /// directory has been created, its later absence means it was *removed* or
+    /// its volume unmounted — a broken ingress, not an empty one. Without this
+    /// flag `list_pending` cannot tell "never written" from "gone", and
+    /// answering `ErrorKind::NotFound` with an empty listing makes
+    /// `scan_health` report green while every `POST /api/webhooks/{source}`
+    /// 500s. See [`Spool::list_pending`].
+    opened: bool,
 }
 
 impl Spool {
@@ -212,18 +229,26 @@ impl Spool {
     ///
     /// Why: lets a caller construct the spool before deciding whether it can be
     /// created, and lets a test point one at a path that will fail on write.
-    /// What: stores the path. No I/O.
+    /// What: stores the path. No I/O, and the spool is NOT marked opened — an
+    /// absent directory under this constructor is genuinely "never written".
     /// Test: `spool_persist_fails_when_the_root_is_not_a_directory`.
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            opened: false,
+        }
     }
 
     /// Bind a spool to `root`, creating it at `0700`.
     ///
-    /// Test: `spool_open_creates_the_directory_at_0700`.
+    /// What: creates the directory and records that it existed, which is what
+    /// makes a later `ENOENT` a failure rather than an empty listing.
+    /// Test: `spool_open_creates_the_directory_at_0700`,
+    /// `health_reports_error_when_the_spool_directory_is_gone`.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, SpoolError> {
-        let spool = Self::at(root);
+        let mut spool = Self::at(root);
         spool.prepare_dir()?;
+        spool.opened = true;
         Ok(spool)
     }
 
@@ -270,16 +295,24 @@ impl Spool {
         ))
     }
 
-    /// Write `entry` durably. Returns the path it now occupies.
+    /// Write a NEW entry durably, refusing to overwrite an existing one.
     ///
     /// Why: this call returning `Ok` is the ONLY thing that licenses console to
     /// send GitHub a `202`. ADR-0034 §2: "Console returns `202` **only after**
-    /// the delivery … is written and fsync'd to a spool."
+    /// the delivery … is written and fsync'd to a spool." Refusing to clobber
+    /// matters because the entry already at that path may be a delivery console
+    /// has already acknowledged; overwriting it would destroy work GitHub will
+    /// never re-send. (Defensive: GitHub always sends `X-GitHub-Delivery`, so
+    /// two deliveries only collide when the header is absent and they land in
+    /// the same millisecond.)
     ///
-    /// What: encode → write temp → `sync_all` the file → rename into place →
-    /// `sync_all` the directory. The file fsync makes the bytes durable; the
-    /// directory fsync makes the *name* durable, without which a crash can
-    /// leave the entry unreachable even though its data reached the platter.
+    /// What: encode → write temp with `create_new` → `sync_all` the file →
+    /// `hard_link` into place → unlink the temp → `sync_all` the directory.
+    /// `hard_link` rather than `rename` because rename silently replaces the
+    /// destination while link fails with `EEXIST` — the atomic refusal this
+    /// needs. The file fsync makes the bytes durable; the directory fsync makes
+    /// the *name* durable, without which a crash can leave the entry
+    /// unreachable even though its data reached the platter.
     ///
     /// # Errors
     ///
@@ -288,31 +321,51 @@ impl Spool {
     ///
     /// Test: `spool_persists_and_reloads_an_entry_byte_exact`,
     /// `spool_persist_fails_when_the_root_is_not_a_directory`,
-    /// `spool_persist_fails_when_the_final_path_is_occupied_by_a_directory`.
-    pub fn persist(&self, entry: &SpoolEntry) -> Result<PathBuf, SpoolError> {
+    /// `spool_persist_new_refuses_to_clobber_an_existing_entry`.
+    pub fn persist_new(&self, entry: &SpoolEntry) -> Result<PathBuf, SpoolError> {
         let final_path = self.entry_path(entry);
-        let tmp_path = final_path.with_extension("json.tmp");
+        let tmp_path = self.write_temp(entry, &final_path)?;
 
-        let bytes = serde_json::to_vec_pretty(entry).map_err(|source| SpoolError::Encode {
-            delivery_id: entry.delivery_id.clone(),
-            source,
+        std::fs::hard_link(&tmp_path, &final_path).map_err(|source| {
+            let _ = std::fs::remove_file(&tmp_path);
+            if source.kind() == std::io::ErrorKind::AlreadyExists {
+                SpoolError::AlreadyExists {
+                    path: final_path.clone(),
+                }
+            } else {
+                SpoolError::Commit {
+                    from: tmp_path.clone(),
+                    to: final_path.clone(),
+                    source,
+                }
+            }
         })?;
+        // The temp name is redundant once the entry is linked under its real
+        // one; the inode survives until the last link goes.
+        let _ = std::fs::remove_file(&tmp_path);
 
-        let write = || -> std::io::Result<()> {
-            let mut file = File::create(&tmp_path)?;
-            file.set_permissions(Permissions::from_mode(SPOOL_FILE_MODE))?;
-            file.write_all(&bytes)?;
-            file.sync_all()
-        };
-        write().map_err(|source| SpoolError::Write {
-            path: tmp_path.clone(),
-            source,
-        })?;
+        sync_dir(&self.root)?;
+        Ok(final_path)
+    }
+
+    /// Rewrite an entry that already exists, replacing it atomically.
+    ///
+    /// Why: [`Spool::record_attempt`] needs clobber semantics — updating the
+    /// attempt count IS overwriting the previous version of the same delivery.
+    /// Split from [`Spool::persist_new`] so the two intents cannot be confused
+    /// at a call site.
+    /// What: identical to `persist_new` except it commits with `rename`, which
+    /// replaces the destination.
+    /// Test: `spool_record_attempt_increments_durably`,
+    /// `spool_persist_update_fails_when_the_final_path_is_a_directory`.
+    pub fn persist_update(&self, entry: &SpoolEntry) -> Result<PathBuf, SpoolError> {
+        let final_path = self.entry_path(entry);
+        let tmp_path = self.write_temp(entry, &final_path)?;
 
         std::fs::rename(&tmp_path, &final_path).map_err(|source| {
             // Leaving the temp file behind on a failed rename would accumulate
-            // junk that the health scan then has to ignore; drop it here, and
-            // let the rename error stand as the reported failure.
+            // junk the health scan then has to ignore; drop it here, and let
+            // the rename error stand as the reported failure.
             let _ = std::fs::remove_file(&tmp_path);
             SpoolError::Commit {
                 from: tmp_path.clone(),
@@ -325,6 +378,40 @@ impl Spool {
         Ok(final_path)
     }
 
+    /// Encode `entry` into a fresh, fsync'd temp file beside `final_path`.
+    ///
+    /// The temp name carries the process id and a nanosecond stamp so two
+    /// in-process writers targeting the same entry cannot share one, and uses
+    /// `create_new` so a leftover from a crashed run is never appended to.
+    fn write_temp(&self, entry: &SpoolEntry, final_path: &Path) -> Result<PathBuf, SpoolError> {
+        let bytes = serde_json::to_vec_pretty(entry).map_err(|source| SpoolError::Encode {
+            delivery_id: entry.delivery_id.clone(),
+            source,
+        })?;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_path =
+            final_path.with_extension(format!("json.{}.{stamp}.tmp", std::process::id()));
+
+        let write = || -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            file.set_permissions(Permissions::from_mode(SPOOL_FILE_MODE))?;
+            file.write_all(&bytes)?;
+            file.sync_all()
+        };
+        write().map_err(|source| SpoolError::Write {
+            path: tmp_path.clone(),
+            source,
+        })?;
+        Ok(tmp_path)
+    }
+
     /// Record one failed relay attempt against a spooled entry.
     ///
     /// Why: ADR-0034 §2 — "Relay failure … leaves the spool entry `pending`
@@ -332,9 +419,15 @@ impl Spool {
     /// The durable count is what a stuck delivery is diagnosed from; a
     /// `tracing::warn!` is explicitly forbidden as the sole record.
     /// What: bumps `attempts`, stores `reason` and the attempt time, and
-    /// rewrites the entry through the same durable sequence as
-    /// [`Spool::persist`]. Mutates `entry` in place so the caller sees the new
-    /// count.
+    /// rewrites the entry through [`Spool::persist_update`]. Mutates `entry` in
+    /// place so the caller sees the new count.
+    ///
+    /// The rewrite copies the whole entry, body included. That cost is bounded
+    /// by [`super::BackoffPolicy`], which spaces retries exponentially and stops
+    /// them entirely at `max_attempts` — without it a permanently unrelayable
+    /// delivery would rewrite its own body plus two `fsync`s every sweep tick,
+    /// forever.
+    ///
     /// Test: `spool_record_attempt_increments_durably`,
     /// `relay_failure_leaves_a_pending_entry_with_an_incremented_attempt_count`.
     pub fn record_attempt(
@@ -346,7 +439,7 @@ impl Spool {
         entry.attempts = entry.attempts.saturating_add(1);
         entry.last_error = Some(reason);
         entry.last_attempt_at_unix_ms = Some(now_unix_ms);
-        self.persist(entry)
+        self.persist_update(entry)
     }
 
     /// Delete an entry the target has explicitly acknowledged.
@@ -388,9 +481,16 @@ impl Spool {
     pub fn list_pending(&self) -> Result<PendingListing, SpoolError> {
         let read = match std::fs::read_dir(&self.root) {
             Ok(read) => read,
-            // A spool that has never been written is legitimately empty; any
-            // other read failure is not.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // 🔴 An absent directory is only "legitimately empty" for a spool
+            // that was never opened. For an opened one it means the directory
+            // was removed or its volume unmounted, which breaks ingress
+            // completely — reporting that as an empty listing is what makes
+            // `scan_health` answer green while every delivery 500s. That is the
+            // fail-quiet shape one level below the one this module exists to
+            // remove (ADR-0034 Consequences, "A spool that silently stops being
+            // written reintroduces exactly the failure it was built to
+            // prevent").
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !self.opened => {
                 return Ok(PendingListing::default());
             }
             Err(source) => {

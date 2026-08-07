@@ -52,7 +52,7 @@ mime_guess         = { workspace = true }
 # `axum-server` (#3304): the shared same-origin write guard the console consumes
 # via `routes::origin_guard`. `uds` + `webhook-hmac` (#5089 step 3): the hardened
 # UDS dial/framing the webhook relay uses and the single GitHub HMAC verifier.
-trusty-common      = { workspace = true, features = ["stdio-mcp-client", "console-metrics", "config-cli", "axum-server", "uds", "webhook-hmac"] }
+trusty-common      = { workspace = true, features = ["stdio-mcp-client", "console-metrics", "config-cli", "axum-server", "uds", "webhook-hmac", "webhook-relay"] }
 reqwest            = { workspace = true }
 thiserror          = { workspace = true }
 # Spool entries hold the raw webhook body byte-exact; base64 keeps the JSON

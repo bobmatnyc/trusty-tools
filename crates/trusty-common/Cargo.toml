@@ -346,6 +346,14 @@ uds-supervisor = ["uds"]
 # copies in trusty-analyze and trusty-review. Pulls in `hmac`, and turns on the
 # `sha2` / `hex` deps this crate already declares optional.
 webhook-hmac = ["dep:hmac", "dep:sha2", "dep:hex"]
+# Enables the `webhook_relay` module: the console->target relay wire contract
+# (issue #5089 step 3, ADR-0034 §3). The sender is trusty-console and the
+# receivers are trusty-review / trusty-analyze, neither of which can depend on
+# the console — so the frame, its owned counterpart, and the ack-bearing
+# response live here where both halves read them. Implies `webhook-hmac`
+# because the frame's provenance record describes that verification. Adds no
+# new dependencies beyond `serde` / `serde_json`, already unconditional.
+webhook-relay = ["webhook-hmac"]
 # Bundle the ONNX Runtime static libs via fastembed's
 # `ort-download-binaries-native-tls`. Right choice for macOS and modern
 # Linux (glibc ≥ 2.38). Mutually exclusive with `embedder-load-dynamic`

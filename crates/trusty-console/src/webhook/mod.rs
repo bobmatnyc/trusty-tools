@@ -35,6 +35,7 @@
 
 pub mod health;
 pub mod relay;
+pub mod schedule;
 pub mod spool;
 
 #[cfg(test)]
@@ -57,7 +58,33 @@ use trusty_common::webhook_hmac::{HMAC_ALGORITHM, SIGNATURE_HEADER, SignatureVer
 
 use health::{DEFAULT_RED_AFTER, SpoolHealth};
 use relay::{RelayOutcome, UdsRelay};
-use spool::{Provenance, SPOOL_SCHEMA_VERSION, Spool, SpoolEntry};
+use schedule::ClaimSet;
+use spool::{Provenance, SPOOL_SCHEMA_VERSION, Spool, SpoolEntry, SpoolError};
+
+pub use schedule::BackoffPolicy;
+
+/// Most entries one sweep pass will relay.
+///
+/// Why: the sweep is serial and each relay can burn its full timeout, so an
+/// unbounded pass can outlast its own tick interval. Backoff already keeps the
+/// due set small; this bounds the pathological case where it is not. Entries
+/// left over are simply relayed on the next tick — they stay pending and
+/// durable in the meantime.
+const SWEEP_BUDGET: usize = 32;
+
+/// Largest webhook body the ingress route accepts.
+///
+/// Why: axum's `DefaultBodyLimit` is 2 MiB, and a rejection there happens
+/// *before* this module's handler runs — no spool entry, no metric, no log,
+/// just a 413 GitHub records and nobody reads. That is the invisible drop the
+/// whole step exists to remove, arriving through the framework instead of the
+/// code. GitHub payloads are legal to 25 MB and `push` / `pull_request` bodies
+/// routinely exceed 2 MiB, so the default silently refuses real deliveries.
+/// What: 25 MiB, matching GitHub's documented ceiling. Applied only to the
+/// webhook sub-router (`server::build_router_with_webhooks`), so the proxy and
+/// SPA routes keep the framework default.
+/// Test: `route_accepts_a_body_larger_than_the_axum_default_limit`.
+pub const MAX_WEBHOOK_BODY_BYTES: usize = 25 * 1024 * 1024;
 
 /// Environment variable holding the shared webhook secret.
 pub const SECRET_ENV: &str = "GITHUB_WEBHOOK_SECRET";
@@ -126,6 +153,11 @@ pub struct WebhookIngress {
     key_id: Arc<String>,
     targets: Arc<BTreeMap<String, UdsRelay>>,
     red_after: Duration,
+    /// Which entries are being relayed right now, so the sweep and the request
+    /// path cannot both relay one delivery. See [`schedule::ClaimSet`].
+    claims: ClaimSet,
+    /// When a pending entry becomes eligible for another attempt.
+    backoff: BackoffPolicy,
 }
 
 impl WebhookIngress {
@@ -144,6 +176,8 @@ impl WebhookIngress {
                     .collect::<BTreeMap<_, _>>(),
             ),
             red_after: DEFAULT_RED_AFTER,
+            claims: ClaimSet::new(),
+            backoff: BackoffPolicy::default(),
         }
     }
 
@@ -153,13 +187,32 @@ impl WebhookIngress {
         self
     }
 
+    /// Override the retry schedule.
+    ///
+    /// Test: the `sweep_*` and `backoff_*` cases use a zeroed grace so a sweep
+    /// runs without waiting out the real 5 s hold-off.
+    pub fn with_backoff(mut self, backoff: BackoffPolicy) -> Self {
+        self.backoff = backoff;
+        self
+    }
+
+    /// The retry schedule in force.
+    pub fn backoff(&self) -> BackoffPolicy {
+        self.backoff
+    }
+
     /// Production wiring: spool under the console data dir, secret from
     /// [`SECRET_ENV`], and one target per relay-capable service.
     ///
-    /// Why: the socket paths follow #5099's hardened per-uid scratch directory
-    /// rather than the bare `$TMPDIR` convention ADR-0034 §3 rejects. Nothing
-    /// binds them until step 4; dialling an absent socket is a clean
-    /// `Unreachable`.
+    /// Why: the socket paths come from `trusty_common::uds::scratch_socket_dir`,
+    /// the shared entry point #5099 built. That is `$TMPDIR/trusty-<uid>` with a
+    /// `/tmp` fallback — the *base* ADR-0034 §3 names, but not the exposure it
+    /// objects to: the uid-keyed subdirectory is created at `0700` and owned by
+    /// this process, and `connect_hardened` re-verifies owner and mode before
+    /// dialling. #5099 supersedes §3's "use the service state directory instead"
+    /// path rule by making the scratch path satisfy the property §3 wanted.
+    /// Nothing binds these sockets until step 4; dialling an absent one is a
+    /// clean `Unreachable`.
     /// What: creates the spool directory eagerly so a misconfigured data dir
     /// fails at startup rather than on the first delivery.
     ///
@@ -264,14 +317,18 @@ impl WebhookIngress {
         };
 
         // Step 3 — durable BEFORE the ack. A failure here is a 5xx, never a
-        // logged-and-accepted delivery.
-        let path = match self.spool.persist(&entry) {
+        // logged-and-accepted delivery. `persist_new` refuses to overwrite: the
+        // entry already at that path may be one console has acknowledged, and
+        // GitHub will never re-send it.
+        let path = match self.spool.persist_new(&entry) {
             Ok(path) => path,
             Err(e) => {
+                let already = matches!(e, SpoolError::AlreadyExists { .. });
                 tracing::error!(
                     source,
                     delivery_id = %delivery_id,
                     error = %e,
+                    already_spooled = already,
                     "spool write failed — refusing the delivery so GitHub keeps it redeliverable"
                 );
                 return IngestOutcome::SpoolFailed {
@@ -280,14 +337,32 @@ impl WebhookIngress {
             }
         };
 
-        // Step 4 — relay, and record what happened durably either way.
-        let outcome = relay.deliver(&entry).await;
-        let bookkeeping_error = self.settle(&path, &mut entry, &outcome);
+        // Step 4 — relay, and record what happened durably either way. The
+        // claim is what stops a sweep tick landing inside the relay window from
+        // sending the same delivery a second time; it is released on drop, so a
+        // panicking relay cannot wedge the entry.
+        let outcome = match self.claims.claim(&path) {
+            Some(_claim) => {
+                let outcome = relay.deliver(&entry).await;
+                let bookkeeping_error = self.settle(&path, &mut entry, &outcome);
+                return IngestOutcome::Accepted {
+                    delivery_id,
+                    relay: outcome,
+                    bookkeeping_error,
+                };
+            }
+            // Someone else is already relaying this exact path. The delivery is
+            // durable, so acknowledging is still correct; the in-flight relay
+            // (or the next sweep) settles it.
+            None => RelayOutcome::Unreachable {
+                reason: "another relay for this entry is already in flight".to_string(),
+            },
+        };
 
         IngestOutcome::Accepted {
             delivery_id,
             relay: outcome,
-            bookkeeping_error,
+            bookkeeping_error: None,
         }
     }
 
@@ -349,15 +424,33 @@ impl WebhookIngress {
         }
     }
 
-    /// Re-attempt every pending delivery once.
+    /// Re-attempt every pending delivery that is due, once.
     ///
-    /// Why: ADR-0034 §2 — "Console retries with backoff." A background loop
-    /// calls this; detection does not depend on that loop still running,
-    /// because [`WebhookIngress::health`] scans on the request.
-    /// What: relays each pending entry, deleting only on an explicit ack.
-    /// Returns per-sweep counts so a caller can log or assert on them.
+    /// Why: ADR-0034 §2 — "Console retries with backoff." Three guards, each
+    /// closing a different failure:
+    ///
+    /// - **Backoff** ([`BackoffPolicy::is_due`]) — without it every pending
+    ///   entry is re-relayed on every tick and each non-ack rewrites the whole
+    ///   base64 body plus two `fsync`s. Until step 4 binds a listener that is
+    ///   every delivery, forever.
+    /// - **Claims** ([`schedule::ClaimSet`]) — without them a tick landing
+    ///   inside the ≤5 s relay window sends a delivery the request path is
+    ///   still sending. One delivery, two relays.
+    /// - **[`SWEEP_BUDGET`]** — the pass is serial and each relay can burn its
+    ///   full timeout, so an unbounded pass can outlast its own tick interval.
+    ///
+    /// Nothing any guard skips is dropped: it stays pending, durable, and
+    /// visible to [`WebhookIngress::health`], which scans on the request rather
+    /// than trusting this loop to still be alive.
+    ///
+    /// What: relays each due entry, deleting only on an explicit ack. Returns
+    /// per-sweep counts.
+    ///
     /// Test: `retry_sweep_acks_and_clears_a_pending_entry`,
-    /// `retry_sweep_leaves_an_unrelayable_entry_pending_with_more_attempts`.
+    /// `retry_sweep_leaves_an_unrelayable_entry_pending_with_more_attempts`,
+    /// `sweep_does_not_relay_an_entry_the_request_path_is_still_relaying`,
+    /// `sweep_honours_backoff_between_ticks`,
+    /// `sweep_stops_relaying_an_exhausted_entry`.
     pub async fn retry_pending_once(&self) -> SweepReport {
         let listing = match self.spool.list_pending() {
             Ok(listing) => listing,
@@ -374,7 +467,12 @@ impl WebhookIngress {
             undecodable: listing.undecodable.len(),
             ..SweepReport::default()
         };
+        let now = now_unix_ms();
         for pending in listing.pending {
+            if report.acked + report.still_pending >= SWEEP_BUDGET {
+                report.deferred += 1;
+                continue;
+            }
             let mut entry = pending.entry;
             let Some(relay) = self.targets.get(&entry.source) else {
                 // A target removed from the config leaves its deliveries on
@@ -383,6 +481,19 @@ impl WebhookIngress {
                 report.orphaned += 1;
                 continue;
             };
+            if self.backoff.is_exhausted(&entry) {
+                report.exhausted += 1;
+                continue;
+            }
+            if !self.backoff.is_due(&entry, now) {
+                report.not_due += 1;
+                continue;
+            }
+            let Some(_claim) = self.claims.claim(&pending.path) else {
+                report.in_flight += 1;
+                continue;
+            };
+
             let outcome = relay.deliver(&entry).await;
             if outcome.is_acked() {
                 report.acked += 1;
@@ -398,12 +509,25 @@ impl WebhookIngress {
 }
 
 /// Counts from one [`WebhookIngress::retry_pending_once`] pass.
+///
+/// Every pending entry lands in exactly one bucket, so the counts account for
+/// the whole spool — a delivery that vanishes from all of them is a bug the
+/// tests can see.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SweepReport {
     /// Entries a target acknowledged and that were removed.
     pub acked: usize,
-    /// Entries that stayed pending.
+    /// Entries relayed this pass that stayed pending.
     pub still_pending: usize,
+    /// Entries not yet eligible under the backoff schedule.
+    pub not_due: usize,
+    /// Entries past `max_attempts` — never retried again, never deleted, and
+    /// holding the health signal red until an operator intervenes.
+    pub exhausted: usize,
+    /// Entries another relay was already handling.
+    pub in_flight: usize,
+    /// Entries left for the next tick by [`SWEEP_BUDGET`].
+    pub deferred: usize,
     /// Entries whose `source` no longer maps to a configured target.
     pub orphaned: usize,
     /// Entries on disk that could not be decoded.
@@ -537,10 +661,18 @@ pub fn start_retry_sweep(ingress: WebhookIngress, interval: Duration) {
         loop {
             ticker.tick().await;
             let report = ingress.retry_pending_once().await;
-            if report.acked > 0 || report.still_pending > 0 || report.scan_error.is_some() {
+            if report.acked > 0
+                || report.still_pending > 0
+                || report.exhausted > 0
+                || report.scan_error.is_some()
+            {
                 tracing::info!(
                     acked = report.acked,
                     still_pending = report.still_pending,
+                    not_due = report.not_due,
+                    exhausted = report.exhausted,
+                    in_flight = report.in_flight,
+                    deferred = report.deferred,
                     orphaned = report.orphaned,
                     undecodable = report.undecodable,
                     "webhook retry sweep completed"

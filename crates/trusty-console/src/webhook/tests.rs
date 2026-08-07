@@ -14,8 +14,8 @@
 //! Against the pre-fix handlers every one of those is a `202` plus a log line.
 
 use super::*;
-use crate::webhook::relay::RELAY_METHOD;
 use crate::webhook::spool::{PendingListing, SPOOL_SCHEMA_VERSION, SpoolError};
+use trusty_common::webhook_relay::RELAY_METHOD;
 
 use std::collections::BTreeMap;
 use std::path::Path as StdPath;
@@ -45,6 +45,9 @@ enum StubTarget {
     RpcError,
     /// Accept the connection, read the frame, then hang up without answering.
     ConnectThenHangUp,
+    /// Answer `ack` only after a delay, so a second relay has time to race the
+    /// first. This is what makes the sweep-versus-request window observable.
+    AckAfter(Duration),
 }
 
 /// Frames a stub captured, so a test can assert on what console actually sent.
@@ -66,8 +69,11 @@ fn spawn_target(dir: &StdPath, behaviour: StubTarget, count: usize) -> (PathBuf,
             if let Ok(frame) = serde_json::from_slice::<serde_json::Value>(&raw) {
                 sink.lock().await.push(frame);
             }
+            if let StubTarget::AckAfter(delay) = behaviour {
+                tokio::time::sleep(delay).await;
+            }
             let reply: Option<&[u8]> = match behaviour {
-                StubTarget::Ack => Some(br#"{"result":{"ack":true}}"#),
+                StubTarget::Ack | StubTarget::AckAfter(_) => Some(br#"{"result":{"ack":true}}"#),
                 StubTarget::ResultWithoutAck => Some(br#"{"result":{}}"#),
                 StubTarget::RpcError => {
                     Some(br#"{"error":{"code":-32000,"message":"store locked"}}"#)
@@ -84,15 +90,35 @@ fn spawn_target(dir: &StdPath, behaviour: StubTarget, count: usize) -> (PathBuf,
     (socket, captured)
 }
 
+/// A schedule that admits every pending entry immediately.
+///
+/// Most cases here are asserting on relay and spool behaviour, not on timing;
+/// the real 5 s grace and 30 s base would make each of them sleep. The
+/// `backoff_*` and `sweep_honours_*` cases use the real policy instead.
+fn no_backoff() -> BackoffPolicy {
+    BackoffPolicy {
+        first_attempt_grace: Duration::ZERO,
+        base: Duration::ZERO,
+        ceiling: Duration::ZERO,
+        max_attempts: u32::MAX,
+    }
+}
+
 /// An ingress whose single `review` target points at `socket`.
 fn ingress_for(spool: Spool, socket: PathBuf) -> WebhookIngress {
+    ingress_with(spool, socket, Duration::from_secs(2)).with_backoff(no_backoff())
+}
+
+/// [`ingress_for`] keeping the production backoff schedule and taking an
+/// explicit relay timeout.
+fn ingress_with(spool: Spool, socket: PathBuf, relay_timeout: Duration) -> WebhookIngress {
     WebhookIngress::new(
         spool,
         SECRET.to_string(),
         SECRET_ENV.to_string(),
         vec![Target {
             source: "review".to_string(),
-            relay: UdsRelay::new(socket).with_timeout(Duration::from_secs(2)),
+            relay: UdsRelay::new(socket).with_timeout(relay_timeout),
         }],
     )
 }
@@ -111,6 +137,18 @@ fn signed_headers(body: &[u8], delivery: &str) -> HeaderMap {
 
 fn listing_of(spool: &Spool) -> PendingListing {
     spool.list_pending().expect("list spool")
+}
+
+/// How many uncommitted temp files the spool directory holds.
+///
+/// Every failure path must clean up after itself; a leaked temp file is junk
+/// the health scan then has to learn to ignore.
+fn temp_files_in(spool: &Spool) -> usize {
+    std::fs::read_dir(spool.root())
+        .expect("read spool root")
+        .filter_map(Result::ok)
+        .filter(|e| e.path().to_string_lossy().ends_with(".tmp"))
+        .count()
 }
 
 fn sample_entry(delivery_id: &str, received_at_unix_ms: u64) -> SpoolEntry {
@@ -155,7 +193,7 @@ fn spool_persists_and_reloads_an_entry_byte_exact() {
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
     let entry = sample_entry("d-1", 1_700_000_000_000);
 
-    let path = spool.persist(&entry).expect("durable write");
+    let path = spool.persist_new(&entry).expect("durable write");
     assert!(path.exists(), "the entry must be on disk before any ack");
 
     let listing = listing_of(&spool);
@@ -185,7 +223,7 @@ fn spool_persist_fails_when_the_root_is_not_a_directory() {
 
     let spool = Spool::at(&root);
     let err = spool
-        .persist(&sample_entry("d-1", 1))
+        .persist_new(&sample_entry("d-1", 1))
         .expect_err("a delivery that cannot be written must not report success");
     assert!(
         matches!(
@@ -197,22 +235,60 @@ fn spool_persist_fails_when_the_root_is_not_a_directory() {
 }
 
 #[test]
-fn spool_persist_fails_when_the_final_path_is_occupied_by_a_directory() {
-    // Second failure point: the write lands but the atomic rename cannot.
+fn spool_persist_new_refuses_to_clobber_an_existing_entry() {
+    // The entry already at that path may be one console has ALREADY
+    // acknowledged. Overwriting it destroys a delivery GitHub will never
+    // re-send, so `persist_new` commits with `hard_link` (atomic EEXIST) rather
+    // than `rename` (silent replace).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let first = sample_entry("d-collide", 1_700_000_000_000);
+    spool.persist_new(&first).expect("first write");
+
+    // Same millisecond, same (missing-header-derived) id: the collision case.
+    let mut second = sample_entry("d-collide", 1_700_000_000_000);
+    second.event = "issues".to_string();
+
+    let err = spool
+        .persist_new(&second)
+        .expect_err("clobbering an existing entry must not report success");
+    assert!(
+        matches!(err, SpoolError::AlreadyExists { .. }),
+        "expected AlreadyExists, got {err:?}"
+    );
+
+    let listing = listing_of(&spool);
+    assert_eq!(listing.pending.len(), 1);
+    assert_eq!(
+        listing.pending[0].entry, first,
+        "the entry already on disk must survive untouched"
+    );
+    assert_eq!(
+        temp_files_in(&spool),
+        0,
+        "a refused write must not leave its temp file behind"
+    );
+}
+
+#[test]
+fn spool_persist_update_fails_when_the_final_path_is_a_directory() {
+    // `record_attempt` wants clobber semantics, so it commits with `rename` —
+    // which still has to fail loudly when the destination cannot be replaced.
     let tmp = tempfile::tempdir().expect("tempdir");
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
     let entry = sample_entry("d-1", 1_700_000_000_000);
     std::fs::create_dir_all(spool.entry_path(&entry)).expect("occupy the final path");
 
     let err = spool
-        .persist(&entry)
-        .expect_err("a delivery that cannot be committed must not report success");
+        .persist_update(&entry)
+        .expect_err("a rewrite that cannot be committed must not report success");
     assert!(
         matches!(err, SpoolError::Commit { .. }),
         "expected Commit, got {err:?}"
     );
-    assert!(
-        !spool.entry_path(&entry).with_extension("json.tmp").exists(),
+    assert_eq!(
+        temp_files_in(&spool),
+        0,
         "a failed commit must not leave its temp file behind"
     );
 }
@@ -222,7 +298,7 @@ fn spool_record_attempt_increments_durably() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
     let mut entry = sample_entry("d-1", 1_700_000_000_000);
-    spool.persist(&entry).expect("durable write");
+    spool.persist_new(&entry).expect("durable write");
 
     spool
         .record_attempt(&mut entry, "no listener".to_string(), 1_700_000_005_000)
@@ -244,7 +320,7 @@ fn spool_remove_acked_deletes_the_entry() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
     let entry = sample_entry("d-1", 1);
-    let path = spool.persist(&entry).expect("durable write");
+    let path = spool.persist_new(&entry).expect("durable write");
 
     spool.remove_acked(&path).expect("remove");
     assert!(listing_of(&spool).pending.is_empty());
@@ -281,7 +357,9 @@ fn spool_list_pending_orders_oldest_first() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
     for (id, at) in [("c", 300u64), ("a", 100), ("b", 200)] {
-        spool.persist(&sample_entry(id, at)).expect("durable write");
+        spool
+            .persist_new(&sample_entry(id, at))
+            .expect("durable write");
     }
     let ids: Vec<String> = listing_of(&spool)
         .pending
@@ -609,7 +687,7 @@ fn health_reports_degraded_for_a_young_pending_entry() {
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
     let now = 1_700_000_000_000u64;
     spool
-        .persist(&sample_entry("d-young", now - 30_000))
+        .persist_new(&sample_entry("d-young", now - 30_000))
         .expect("durable write");
 
     let h = health::scan_health(&spool, now, Duration::from_secs(600));
@@ -627,9 +705,9 @@ fn health_reports_error_once_the_oldest_entry_passes_the_threshold() {
     let mut aged = sample_entry("d-aged", now - 900_000); // 15 minutes
     aged.attempts = 14;
     aged.last_error = Some("no listener bound".to_string());
-    spool.persist(&aged).expect("durable write");
+    spool.persist_new(&aged).expect("durable write");
     spool
-        .persist(&sample_entry("d-young", now - 1_000))
+        .persist_new(&sample_entry("d-young", now - 1_000))
         .expect("durable write");
 
     let h = health::scan_health(&spool, now, Duration::from_secs(600));
@@ -686,7 +764,7 @@ async fn retry_sweep_acks_and_clears_a_pending_entry() {
     let ingress = ingress_for(spool, socket);
     ingress
         .spool()
-        .persist(&sample_entry("d-1", 1_700_000_000_000))
+        .persist_new(&sample_entry("d-1", 1_700_000_000_000))
         .expect("durable write");
 
     let report = ingress.retry_pending_once().await;
@@ -702,7 +780,7 @@ async fn retry_sweep_leaves_an_unrelayable_entry_pending_with_more_attempts() {
     let ingress = ingress_for(spool, tmp.path().join("sockets").join("absent.sock"));
     ingress
         .spool()
-        .persist(&sample_entry("d-1", 1_700_000_000_000))
+        .persist_new(&sample_entry("d-1", 1_700_000_000_000))
         .expect("durable write");
 
     for expected in 1..=3u32 {
@@ -726,7 +804,7 @@ async fn retry_sweep_reports_an_orphaned_entry_without_deleting_it() {
     let ingress = ingress_for(spool, tmp.path().join("sockets").join("absent.sock"));
     let mut orphan = sample_entry("d-orphan", 1_700_000_000_000);
     orphan.source = "retired-target".to_string();
-    ingress.spool().persist(&orphan).expect("durable write");
+    ingress.spool().persist_new(&orphan).expect("durable write");
 
     let report = ingress.retry_pending_once().await;
     assert_eq!(report.orphaned, 1);
@@ -943,7 +1021,7 @@ async fn metrics_route_reports_red_for_an_aged_pending_entry() {
         .with_red_after(Duration::from_secs(0));
     ingress
         .spool()
-        .persist(&sample_entry("d-stuck", 1))
+        .persist_new(&sample_entry("d-stuck", 1))
         .expect("durable write");
 
     let (status, body) = get_json(router_for(ingress), "/api/console/metrics/webhooks").await;
@@ -1132,4 +1210,422 @@ async fn integration_from_env_fails_closed_when_the_secret_is_unset() {
     );
     swap_env(SECRET_ENV, prior_secret.as_deref());
     outcome
+}
+
+// ─── concurrency: one delivery, one relay ───────────────────────────────────
+
+#[tokio::test]
+async fn sweep_does_not_relay_an_entry_the_request_path_is_still_relaying() {
+    // 🔴 Fails against the pre-fix head: the sweep listed every `.json` with no
+    // claim and no age filter, so a tick landing inside the relay window
+    // re-sent a delivery `ingest` was still sending. One delivery, two relays —
+    // and with at-least-once semantics the target sees a genuine duplicate.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    // Serves up to 4 connections, so a second relay WOULD be answered if one
+    // were made. The count is the assertion, not the stub's capacity.
+    let (socket, captured) = spawn_target(
+        tmp.path(),
+        StubTarget::AckAfter(Duration::from_millis(600)),
+        4,
+    );
+    let ingress = ingress_for(spool, socket);
+
+    let requester = {
+        let ingress = ingress.clone();
+        tokio::spawn(async move {
+            ingress
+                .ingest("review", &signed_headers(BODY, "d-race"), BODY)
+                .await
+        })
+    };
+
+    // Land the sweep squarely inside the in-flight relay.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let sweep = ingress.retry_pending_once().await;
+    assert_eq!(
+        sweep.in_flight, 1,
+        "the sweep must see the entry as claimed, not free to relay"
+    );
+    assert_eq!(sweep.acked, 0);
+    assert_eq!(sweep.still_pending, 0);
+
+    let outcome = requester.await.expect("ingest task");
+    match outcome {
+        IngestOutcome::Accepted { relay, .. } => assert!(relay.is_acked()),
+        other => panic!("expected Accepted, got {other:?}"),
+    }
+
+    assert_eq!(
+        captured.lock().await.len(),
+        1,
+        "one delivery must produce exactly one relay"
+    );
+    assert!(listing_of(ingress.spool()).pending.is_empty());
+
+    // The claim must be released once the relay settles, not leaked — a leaked
+    // claim would make the entry permanently unrelayable if it were still
+    // pending. A follow-up sweep reporting nothing in flight is that proof.
+    let after = ingress.retry_pending_once().await;
+    assert_eq!(after.in_flight, 0, "the claim must not outlive the relay");
+}
+
+#[tokio::test]
+async fn two_concurrent_sweeps_relay_each_entry_only_once() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let (socket, captured) = spawn_target(
+        tmp.path(),
+        StubTarget::AckAfter(Duration::from_millis(400)),
+        6,
+    );
+    let ingress = ingress_for(spool, socket);
+    for id in ["d-a", "d-b"] {
+        ingress
+            .spool()
+            .persist_new(&sample_entry(id, 1_700_000_000_000))
+            .expect("durable write");
+    }
+
+    let (left, right) = tokio::join!(
+        {
+            let i = ingress.clone();
+            async move { i.retry_pending_once().await }
+        },
+        {
+            let i = ingress.clone();
+            async move { i.retry_pending_once().await }
+        }
+    );
+
+    assert_eq!(
+        left.acked + right.acked,
+        2,
+        "both entries must be acknowledged exactly once between the two passes"
+    );
+    assert_eq!(
+        captured.lock().await.len(),
+        2,
+        "two entries must produce exactly two relays across two overlapping sweeps"
+    );
+    assert!(listing_of(ingress.spool()).pending.is_empty());
+}
+
+#[tokio::test]
+async fn two_concurrent_deliveries_are_each_spooled_and_relayed_once() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let (socket, captured) = spawn_target(
+        tmp.path(),
+        StubTarget::AckAfter(Duration::from_millis(200)),
+        6,
+    );
+    let ingress = ingress_for(spool, socket);
+
+    let a = {
+        let i = ingress.clone();
+        tokio::spawn(async move {
+            i.ingest("review", &signed_headers(BODY, "d-one"), BODY)
+                .await
+        })
+    };
+    let b = {
+        let i = ingress.clone();
+        tokio::spawn(async move {
+            i.ingest("review", &signed_headers(BODY, "d-two"), BODY)
+                .await
+        })
+    };
+
+    for handle in [a, b] {
+        match handle.await.expect("ingest task") {
+            IngestOutcome::Accepted { relay, .. } => assert!(relay.is_acked()),
+            other => panic!("expected Accepted, got {other:?}"),
+        }
+    }
+    assert_eq!(captured.lock().await.len(), 2);
+    assert!(listing_of(ingress.spool()).pending.is_empty());
+}
+
+#[test]
+fn claim_set_refuses_a_second_claim_on_the_same_path() {
+    let claims = schedule::ClaimSet::new();
+    let path = std::path::Path::new("/tmp/spool/entry.json");
+    let first = claims.claim(path).expect("first claim");
+    assert!(
+        claims.claim(path).is_none(),
+        "a claimed entry must not be claimable twice"
+    );
+    assert_eq!(claims.len(), 1);
+    drop(first);
+    assert!(
+        claims.claim(path).is_some(),
+        "the claim must be released on drop"
+    );
+}
+
+#[test]
+fn claim_set_releases_on_drop_even_when_the_holder_panics() {
+    // A relay that panics must not leave its entry permanently unrelayable.
+    let claims = schedule::ClaimSet::new();
+    let path = std::path::Path::new("/tmp/spool/entry.json");
+    let result = std::panic::catch_unwind({
+        let claims = claims.clone();
+        move || {
+            let _held = claims.claim(path).expect("claim");
+            panic!("relay blew up");
+        }
+    });
+    assert!(result.is_err());
+    assert!(claims.is_empty(), "the claim must not outlive the panic");
+    assert!(claims.claim(path).is_some());
+}
+
+// ─── backoff ────────────────────────────────────────────────────────────────
+
+#[test]
+fn backoff_holds_off_a_freshly_spooled_entry() {
+    // The request path may still be relaying it; the sweep must not race in.
+    let policy = BackoffPolicy::default();
+    let now = 1_700_000_000_000u64;
+    let entry = sample_entry("d-1", now);
+    assert!(!policy.is_due(&entry, now));
+    assert!(!policy.is_due(&entry, now + 4_000));
+    assert!(policy.is_due(&entry, now + policy.first_attempt_grace.as_millis() as u64));
+}
+
+#[test]
+fn backoff_spacing_grows_with_attempts() {
+    let policy = BackoffPolicy::default();
+    assert_eq!(policy.delay_after(1), Duration::from_secs(30));
+    assert_eq!(policy.delay_after(2), Duration::from_secs(60));
+    assert_eq!(policy.delay_after(3), Duration::from_secs(120));
+    assert_eq!(policy.delay_after(4), Duration::from_secs(240));
+}
+
+#[test]
+fn backoff_respects_the_ceiling() {
+    let policy = BackoffPolicy::default();
+    for attempts in [10u32, 20, 1_000, u32::MAX - 1] {
+        assert_eq!(
+            policy.delay_after(attempts),
+            policy.ceiling,
+            "attempts={attempts} must clamp to the ceiling, never wrap to a short delay"
+        );
+    }
+}
+
+#[test]
+fn backoff_admits_an_entry_past_its_delay() {
+    let policy = BackoffPolicy::default();
+    let now = 1_700_000_000_000u64;
+    let mut entry = sample_entry("d-1", now - 1_000_000);
+    entry.attempts = 2;
+    entry.last_attempt_at_unix_ms = Some(now - 59_000);
+    assert!(
+        !policy.is_due(&entry, now),
+        "59s < the 60s delay for attempt 2"
+    );
+    entry.last_attempt_at_unix_ms = Some(now - 61_000);
+    assert!(policy.is_due(&entry, now));
+}
+
+#[test]
+fn backoff_stops_at_max_attempts() {
+    // An exhausted entry is never relayed again — and never deleted. It holds
+    // the health signal red until an operator intervenes, which is the honest
+    // state for an undeliverable webhook.
+    let policy = BackoffPolicy::default();
+    let now = 1_700_000_000_000u64;
+    let mut entry = sample_entry("d-1", 1);
+    entry.attempts = policy.max_attempts;
+    entry.last_attempt_at_unix_ms = Some(1);
+    assert!(policy.is_exhausted(&entry));
+    assert!(!policy.is_due(&entry, now), "no elapsed time can revive it");
+}
+
+#[tokio::test]
+async fn sweep_honours_backoff_between_ticks() {
+    // 🔴 Fails against the pre-fix head, which relayed every pending entry on
+    // every tick and rewrote its whole body plus two fsyncs each time.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    // Real schedule, but no first-attempt grace so the first pass runs at once.
+    let policy = BackoffPolicy {
+        first_attempt_grace: Duration::ZERO,
+        ..BackoffPolicy::default()
+    };
+    let ingress = ingress_with(
+        spool,
+        tmp.path().join("sockets").join("absent.sock"),
+        Duration::from_millis(300),
+    )
+    .with_backoff(policy);
+    ingress
+        .spool()
+        .persist_new(&sample_entry("d-1", 1_700_000_000_000))
+        .expect("durable write");
+
+    let first = ingress.retry_pending_once().await;
+    assert_eq!(first.still_pending, 1, "the first pass relays it");
+
+    let second = ingress.retry_pending_once().await;
+    assert_eq!(
+        second.not_due, 1,
+        "the second pass must respect the 30s spacing, not relay again"
+    );
+    assert_eq!(second.still_pending, 0);
+
+    let listing = listing_of(ingress.spool());
+    assert_eq!(
+        listing.pending.len(),
+        1,
+        "and it is still pending, not lost"
+    );
+    assert_eq!(
+        listing.pending[0].entry.attempts, 1,
+        "a skipped pass must not bump the attempt count or rewrite the body"
+    );
+}
+
+#[tokio::test]
+async fn sweep_stops_relaying_an_exhausted_entry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let policy = BackoffPolicy {
+        first_attempt_grace: Duration::ZERO,
+        base: Duration::ZERO,
+        ceiling: Duration::ZERO,
+        max_attempts: 3,
+    };
+    let ingress = ingress_with(
+        spool,
+        tmp.path().join("sockets").join("absent.sock"),
+        Duration::from_millis(300),
+    )
+    .with_backoff(policy);
+    ingress
+        .spool()
+        .persist_new(&sample_entry("d-1", 1_700_000_000_000))
+        .expect("durable write");
+
+    for _ in 0..3 {
+        assert_eq!(ingress.retry_pending_once().await.still_pending, 1);
+    }
+    let report = ingress.retry_pending_once().await;
+    assert_eq!(report.exhausted, 1);
+    assert_eq!(report.still_pending, 0);
+
+    let listing = listing_of(ingress.spool());
+    assert_eq!(
+        listing.pending.len(),
+        1,
+        "giving up on relaying is not the same as discarding the delivery"
+    );
+    assert_eq!(listing.pending[0].entry.attempts, 3);
+    assert_eq!(
+        ingress.health().status,
+        ServiceHealth::Error,
+        "an entry we have given up relaying must hold the health signal red"
+    );
+}
+
+// ─── HIGH-3: an absent spool directory is red, not green ────────────────────
+
+#[test]
+fn health_reports_error_when_the_spool_directory_is_gone() {
+    // 🔴 Fails against the pre-fix head, which answered ENOENT with an empty
+    // listing: the console data dir removed (or its volume unmounted) made
+    // every POST 500 while `/api/console/metrics/webhooks` reported
+    // {"status":"ok","pending":0}. Ingress dead, alarm green.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("spool");
+    let spool = Spool::open(&root).expect("open spool");
+    spool
+        .persist_new(&sample_entry("d-1", 1_700_000_000_000))
+        .expect("durable write");
+
+    std::fs::remove_dir_all(&root).expect("simulate the directory going away");
+
+    let h = health::scan_health(&spool, 1_700_000_100_000, Duration::from_secs(600));
+    assert_eq!(
+        h.status,
+        ServiceHealth::Error,
+        "a spool whose directory vanished is broken, not empty"
+    );
+    assert!(
+        h.scan_error.is_some(),
+        "and the reason must be reported: {h:?}"
+    );
+}
+
+#[test]
+fn a_never_opened_spool_directory_is_still_legitimately_empty() {
+    // The other side of the same rule: `Spool::at` on a path that was never
+    // created has genuinely nothing pending, and must not report red.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::at(tmp.path().join("never-created"));
+    let listing = spool.list_pending().expect("an unopened spool lists empty");
+    assert!(listing.pending.is_empty());
+    let h = health::scan_health(&spool, 1_700_000_000_000, Duration::from_secs(600));
+    assert_eq!(h.status, ServiceHealth::Ok);
+    assert_eq!(h.scan_error, None);
+}
+
+#[tokio::test]
+async fn metrics_route_reports_red_when_the_spool_directory_is_gone() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("spool");
+    let spool = Spool::open(&root).expect("open spool");
+    let ingress = ingress_for(spool, tmp.path().join("sockets").join("absent.sock"));
+    std::fs::remove_dir_all(&root).expect("simulate the directory going away");
+
+    let (status, body) = get_json(router_for(ingress), "/api/console/metrics/webhooks").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "error");
+    assert!(body["metrics"]["scan_error"].is_string());
+}
+
+// ─── body limit ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn route_accepts_a_body_larger_than_the_axum_default_limit() {
+    // 🔴 Fails against the pre-fix head: axum's 2 MiB DefaultBodyLimit 413s a
+    // 3 MiB delivery BEFORE the handler runs — no spool entry, no metric, no
+    // log. GitHub payloads are legal to 25 MB and push/pull_request bodies
+    // routinely exceed 2 MiB.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let ingress = ingress_for(spool, tmp.path().join("sockets").join("absent.sock"));
+
+    let big = format!(
+        r#"{{"action":"opened","filler":"{}"}}"#,
+        "x".repeat(3 * 1024 * 1024)
+    );
+    let body = big.as_bytes();
+
+    let (status, json) = post_webhook(
+        router_for(ingress.clone()),
+        "review",
+        body,
+        signed_headers(body, "d-big"),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "a 3 MiB delivery must reach the handler, not be 413'd by the framework"
+    );
+    assert_eq!(json["delivery_id"], "d-big");
+
+    let listing = listing_of(ingress.spool());
+    assert_eq!(listing.pending.len(), 1);
+    assert_eq!(
+        BASE64
+            .decode(&listing.pending[0].entry.body_b64)
+            .expect("decode"),
+        body,
+        "and the whole 3 MiB must be spooled byte-exact"
+    );
 }

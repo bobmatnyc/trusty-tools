@@ -454,7 +454,18 @@ fn build_router_inner(
                     "/api/console/metrics/webhooks",
                     get(crate::webhook::metrics_webhooks_handler),
                 )
-                .with_state(ingress),
+                .with_state(ingress)
+                // axum's DefaultBodyLimit is 2 MiB, which silently 413s a real
+                // delivery before the handler runs: no spool entry, no metric,
+                // no ack — the exact invisible drop this route exists to
+                // prevent. GitHub payloads are legal to 25 MB and `push` /
+                // `pull_request` bodies routinely pass 2 MiB. Scoped to this
+                // sub-router so the proxy and SPA routes keep the default.
+                // (`trusty-search` sets 64 MiB the same way, at
+                // `service/server/mod.rs:251`.)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::webhook::MAX_WEBHOOK_BODY_BYTES,
+                )),
         ),
         None => core,
     };
