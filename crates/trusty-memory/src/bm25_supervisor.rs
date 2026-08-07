@@ -122,9 +122,34 @@ pub const DEFAULT_RSS_LIMIT_MB: u64 = 512;
 /// fast on a misconfigured spawn. Mirrors the trusty-search supervisor's
 /// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS=30` default but scaled down
 /// because BM25 has no model-loading step.
+///
+/// 🔴 INVARIANT, and it is per-service, not universal: this must exceed the
+/// supervised service's cold-start work. The 10x gap against the embedder's
+/// 30 s is entirely explained by BM25 having no model to load. Promoting this
+/// supervisor (#5089) with 3 s as a bare constant silently breaks the first
+/// service that loads a model, and the failure looks like a spawn timeout
+/// rather than a mistuned constant. Make it a per-service parameter there.
 /// What: 3 seconds (3000 ms).
 /// Test: covered indirectly by the integration test's spawn path.
 const SPAWN_PROBE_TIMEOUT: Duration = Duration::from_millis(3000);
+
+/// How long the supervisor waits after SIGTERM before escalating to SIGKILL.
+const SIGTERM_PATIENCE_SECS: u64 = 5;
+
+// 🔴 The invariant SIGTERM_PATIENCE is justified by, enforced at compile time
+// rather than in prose (#5085). This number is NOT free-standing: it means
+// "longer than the supervised daemon's own flush budget, with margin", and a
+// SIGKILL landing inside that flush discards acked writes. Bound to the real
+// `SHUTDOWN_FLUSH_TIMEOUT` rather than a copy of it, so raising the daemon's
+// budget past ours fails the build instead of silently truncating a flush.
+// Any service promoted onto this supervisor (#5089) must re-derive it from ITS
+// flush budget — a bare `5` carried across is wrong for the first service that
+// needs longer.
+const _: () = assert!(
+    SIGTERM_PATIENCE_SECS > trusty_bm25_daemon::SHUTDOWN_FLUSH_TIMEOUT.as_secs(),
+    "SIGTERM patience must exceed the daemon's own shutdown-flush budget, or \
+     the SIGKILL lands mid-flush and discards acked writes"
+);
 
 /// Initial polling interval used to probe the socket after spawn; doubled
 /// on each miss up to a ceiling so we don't busy-wait but also don't sleep
@@ -137,9 +162,10 @@ const INITIAL_PROBE_INTERVAL: Duration = Duration::from_millis(20);
 /// because the daemon needs signal delivery, the flush itself, socket cleanup
 /// and exit inside this window. An equal budget means the SIGKILL can land
 /// mid-flush and lose the write window the flush exists to save.
-/// What: 5 seconds.
+/// What: 5 seconds, guarded by a static assertion against the daemon's real
+/// `SHUTDOWN_FLUSH_TIMEOUT` that fails the build if the margin is ever erased.
 /// Test: `sigterm_patience_exceeds_the_daemon_flush_budget`.
-const SIGTERM_PATIENCE: Duration = Duration::from_secs(5);
+const SIGTERM_PATIENCE: Duration = Duration::from_secs(SIGTERM_PATIENCE_SECS);
 
 /// Ceiling on the exponential backoff so we never sleep longer than 250 ms
 /// between probes — at the 3 s budget this gives ~16 probes which is more
@@ -237,6 +263,31 @@ pub struct Bm25Supervisor {
     /// regardless of whether the socket probe later succeeds.
     /// Test: `concurrent_callers_for_one_palace_spawn_exactly_one_daemon`.
     spawned: std::sync::atomic::AtomicU64,
+    /// Children evicted by [`Self::lookup_live`] that are still ALIVE and owe
+    /// a graceful shutdown.
+    ///
+    /// Why (#5085): every other eviction in this module removes a corpse — the
+    /// `Ok(Some(status))` arm evicts a child that has already exited, so
+    /// dropping the handle is free. The unserved-socket arm is the first that
+    /// evicts a LIVE child, and a live BM25 daemon holds acked-but-unflushed
+    /// documents: writes are acked on the in-memory apply and only written at
+    /// the end of the batch window, so the `kill_on_drop` SIGKILL that a bare
+    /// drop performs would discard them with nothing left to recover from.
+    /// `trusty-bm25-daemon`'s shutdown flush exists precisely for this
+    /// supervisor and only runs on SIGTERM.
+    ///
+    /// Why a queue rather than a detached kill task: the doomed daemon unlinks
+    /// the socket path as the last step of its own shutdown. Terminating it
+    /// concurrently with the respawn would let that unlink land AFTER the
+    /// replacement bound the same path, leaving the replacement alive and
+    /// permanently unreachable — this very bug, reintroduced by its own fix.
+    /// Draining the queue under the spawn gate, before the replacement is
+    /// spawned, orders the two so that cannot happen.
+    /// What: `(palace, handle)` pairs pushed by `lookup_live` (a lock and a
+    /// push, so the fast path never waits on a kill) and drained by
+    /// [`Self::reap_doomed`].
+    /// Test: `an_evicted_live_child_is_given_a_chance_to_flush`.
+    doomed: Mutex<Vec<(String, ChildHandle)>>,
 }
 
 impl Bm25Supervisor {
@@ -274,6 +325,7 @@ impl Bm25Supervisor {
             clock: std::sync::atomic::AtomicU64::new(0),
             reaped: std::sync::atomic::AtomicU64::new(0),
             spawned: std::sync::atomic::AtomicU64::new(0),
+            doomed: Mutex::new(Vec::new()),
         }
     }
 
@@ -370,6 +422,13 @@ impl Bm25Supervisor {
         if let Some(path) = self.lookup_live(palace).await {
             return Ok(path);
         }
+
+        // #5085: settle any live child the lookups above evicted BEFORE the
+        // socket is probed or rebound. The doomed daemon flushes its acked
+        // writes and unlinks this very path on its way out, so letting it
+        // overlap the respawn would strand the replacement on an unlinked
+        // socket — the same fail-open this eviction path exists to close.
+        self.reap_doomed().await;
 
         // ── (3a) Socket-already-bound check ────────────────────────────────
         // If some other process (a previously-spawned daemon we lost the
@@ -473,9 +532,12 @@ impl Bm25Supervisor {
     /// child that has exited, whose status cannot be read, or whose socket
     /// answers [`SocketVerdict::NotServing`] is removed from the map and `None`
     /// is returned, so the caller falls through to a fresh spawn. An
-    /// [`SocketVerdict::Inconclusive`] probe keeps the child: a saturated
-    /// accept backlog is a busy daemon, not a dead one, and reaping on it would
-    /// turn load into a respawn storm. Removing a corpse does NOT count as a
+    /// [`SocketVerdict::Inconclusive`] probe keeps the child, so an
+    /// unanswerable connect never turns load into a respawn storm — but note
+    /// that on macOS/BSD a saturated backlog is NOT inconclusive, it is
+    /// ECONNREFUSED; see [`SocketVerdict`] for why that is safe here. A child
+    /// evicted while still alive is handed to [`Self::doomed`] rather than
+    /// dropped, because it owes a flush. Removing a corpse does NOT count as a
     /// reap — nothing was reclaimed.
     ///
     /// The probe runs with the map lock released, so a slow connect never
@@ -533,11 +595,62 @@ impl Bm25Supervisor {
             pid = ?pid,
             "bm25 daemon is not serving its socket — evicting and respawning"
         );
-        let mut guard = self.children.lock().await;
-        if guard.get(palace).map(|h| h.child.id()) == Some(pid) {
-            guard.remove(palace);
+        let evicted = {
+            let mut guard = self.children.lock().await;
+            // #5085: identify the child by pid so a replacement spawned while
+            // the probe ran is never evicted on this call's stale verdict. Two
+            // unreadable pids must not alias into "same child", so an absent
+            // pid on either side is never a match.
+            let same_child = matches!(
+                (pid, guard.get(palace).and_then(|h| h.child.id())),
+                (Some(ours), Some(current)) if ours == current
+            );
+            if same_child {
+                guard.remove(palace)
+            } else {
+                None
+            }
+        };
+        if let Some(handle) = evicted {
+            // #5085: this child is alive and owes a flush — see `doomed`.
+            self.doomed.lock().await.push((palace.to_string(), handle));
         }
         None
+    }
+
+    /// SIGTERM every child `lookup_live` evicted while it was still alive, and
+    /// wait for each to exit.
+    ///
+    /// Why (#5085): see the [`Self::doomed`] field. A live daemon holds acked
+    /// documents that only its own SIGTERM handler writes, and it unlinks the
+    /// shared socket path on its way out — so it must be fully gone before a
+    /// replacement binds that path.
+    /// What: drains the queue and, for each child, runs the same
+    /// `terminate_child` + `remove_socket_file` sequence `enforce_limits` and
+    /// `shutdown` use. Callers must hold the spawn gate, which is what orders
+    /// this before the respawn. Does NOT increment `reaped` — this is a
+    /// restart, not a reclamation. A no-op (one uncontended lock) when nothing
+    /// has been evicted, which is the overwhelmingly common case.
+    /// Test: `an_evicted_live_child_is_given_a_chance_to_flush`.
+    async fn reap_doomed(&self) {
+        let doomed: Vec<(String, ChildHandle)> = {
+            let mut guard = self.doomed.lock().await;
+            if guard.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *guard)
+        };
+        for (palace, mut handle) in doomed {
+            tracing::info!(
+                palace = %palace,
+                pid = ?handle.child.id(),
+                "bm25 supervisor: gracefully terminating an evicted daemon so it can flush"
+            );
+            if let Err(e) = terminate_child(&mut handle.child).await {
+                tracing::warn!(palace = %palace, "bm25 daemon graceful termination error: {e:#}");
+            }
+            remove_socket_file(&palace, &handle.socket_path).await;
+        }
     }
 
     /// Bring the live-daemon population within both limits, leaving room for
@@ -628,6 +741,8 @@ impl Bm25Supervisor {
     /// the integration test asserts the child is reaped and the socket
     /// file removed.
     pub async fn shutdown(&self) {
+        // #5085: a child evicted but never respawned still owes a flush.
+        self.reap_doomed().await;
         let mut guard = self.children.lock().await;
         let handles: Vec<(String, ChildHandle)> = guard.drain().collect();
         drop(guard);
@@ -790,16 +905,30 @@ fn rss_limit_from_env() -> Option<u64> {
 /// What a connect attempt says about whether anything is serving a socket.
 ///
 /// Why (#5085): the spawn path only ever needed "did it answer, yes or no",
-/// but eviction needs a third answer. Evicting a live daemon because one
-/// connect did not complete would turn a load spike into a respawn storm —
-/// the daemon is killed, a replacement is spawned into the same contention,
-/// and the cycle repeats. Separating "nothing is listening" from "I could not
-/// tell" keeps eviction to the case the kernel is unambiguous about.
-/// What: `NotServing` is reserved for errors that prove no listener is bound
-/// to the path — ENOENT and ECONNREFUSED. A timeout or any other errno
-/// (EAGAIN from a saturated backlog, EPERM) is `Inconclusive` and leaves the
-/// child alone.
+/// but eviction needs a third answer. Evicting a daemon because one connect
+/// did not complete would turn a load spike into a respawn storm — the daemon
+/// is killed, a replacement is spawned into the same contention, and the cycle
+/// repeats. Separating "I could not tell" from a definite answer keeps
+/// eviction off the ambiguous cases.
+///
+/// What ECONNREFUSED does NOT tell you: it is not exclusively "no listener".
+/// On macOS/BSD a bound listener whose accept queue is full answers connects
+/// with ECONNREFUSED too (`unp_connect` rejects once `so_qlen >= so_qlimit`),
+/// so on those platforms a saturated backlog is indistinguishable from a dead
+/// one — measured directly: `listen(1)`, never accept, six non-blocking
+/// connects, connect 0 OK and connects 1-5 all ECONNREFUSED. Linux instead
+/// queues to the backlog and only then refuses. What keeps that from causing
+/// spurious evictions here is not this classification but the daemon's shape:
+/// tokio's default backlog is 1024 and `run_accept_loop` spawns a task per
+/// connection rather than serving inline, so the queue does not saturate. A
+/// service that accepts inline, or sets a small backlog, would break that
+/// assumption — which matters for the #5089 promotion, not for BM25 today.
+///
+/// What: `NotServing` covers ENOENT and ECONNREFUSED. A timeout or any other
+/// errno (EPERM, and Linux's EAGAIN) is `Inconclusive` and leaves the child
+/// alone.
 /// Test: `probe_verdict_reports_not_serving_for_a_missing_socket`,
+/// `probe_verdict_reports_not_serving_for_a_stale_socket_file`,
 /// `probe_verdict_reports_serving_for_a_bound_socket`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SocketVerdict {

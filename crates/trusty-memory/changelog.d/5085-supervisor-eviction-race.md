@@ -7,4 +7,6 @@ Fixed
   between closing its listener and becoming reapable. Liveness is now backed by
   the socket the caller is about to use, and eviction fires only when the kernel
   proves nothing is listening (ENOENT/ECONNREFUSED) so a busy daemon is never
-  mistaken for a dead one.
+  mistaken for a dead one. A daemon evicted this way is still running, so it is
+  now given a SIGTERM and time to flush its acked writes before the replacement
+  takes over its socket, rather than being SIGKILLed on the spot.
