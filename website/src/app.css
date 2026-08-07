@@ -203,4 +203,131 @@
 	.eyebrow {
 		@apply font-mono text-xs uppercase tracking-[0.18em] text-foundry-secondary;
 	}
+
+	/* Documentation prose (#5098). Every foreground/background pair used here
+	   is pinned by `src/lib/docs/prose-contrast.test.ts`, which recomputes the
+	   ratios from `app.css` itself in BOTH themes. Three canonical tokens are
+	   routed around and appear nowhere below:
+	     --color-text-muted on the page ground   3.87:1 light
+	     --color-primary on --color-surface-raised 4.50:1 (so no link may sit
+	       on a raised surface — hence the table head uses the CARD ground,
+	       where the same link is 5.47:1)
+	     --color-warning on the page ground      3.18:1 light
+	   Body copy is text-primary (14.39:1 / 14.45:1); anything quieter is
+	   text-secondary (5.86:1 / 9.04:1), never muted. */
+	.doc-prose {
+		@apply text-foundry-text;
+	}
+
+	.doc-prose > * + * {
+		@apply mt-4;
+	}
+
+	.doc-prose h1 {
+		@apply mt-0 font-display text-3xl font-bold tracking-tight sm:text-4xl;
+	}
+
+	.doc-prose h2 {
+		@apply mt-12 border-b border-foundry-border pb-2 font-display text-2xl font-semibold tracking-tight;
+	}
+
+	.doc-prose h3 {
+		@apply mt-8 font-display text-xl font-semibold;
+	}
+
+	.doc-prose h4,
+	.doc-prose h5,
+	.doc-prose h6 {
+		@apply mt-6 font-semibold;
+	}
+
+	.doc-prose a {
+		@apply text-foundry-primary underline decoration-1 underline-offset-2 hover:decoration-2;
+	}
+
+	/* A link that leaves the site says so. The 147 links into unpublished
+	   parts of the repository all carry this. */
+	.doc-prose a.doc-link-external::after {
+		content: '\2197';
+		font-size: 0.75em;
+		vertical-align: super;
+		margin-left: 0.15em;
+	}
+
+	.doc-prose ul {
+		@apply list-disc pl-6;
+	}
+
+	.doc-prose ol {
+		@apply list-decimal pl-6;
+	}
+
+	.doc-prose li + li,
+	.doc-prose li > ul,
+	.doc-prose li > ol {
+		@apply mt-1;
+	}
+
+	.doc-prose li::marker {
+		@apply text-foundry-secondary;
+	}
+
+	.doc-prose blockquote {
+		@apply border-l-[3px] border-foundry-border-strong pl-4 text-foundry-secondary;
+	}
+
+	.doc-prose hr {
+		@apply my-8 border-foundry-border;
+	}
+
+	/* Inline code sets NO colour, deliberately: inside a link it must stay
+	   link-coloured (5.47:1 on this ground), and in body copy it inherits
+	   text-primary (16.18:1). Setting a colour here would break the first. */
+	.doc-prose :not(pre) > code {
+		@apply rounded-sm border border-foundry-border bg-foundry-card px-1 py-px text-[0.9em];
+	}
+
+	.doc-prose pre {
+		@apply relative overflow-x-auto rounded border-[1.5px] border-foundry-border bg-foundry-raised p-4 pt-7 text-sm leading-relaxed;
+	}
+
+	.doc-prose pre > code {
+		@apply border-0 bg-transparent p-0 text-inherit;
+	}
+
+	/* The fenced block's language hint, lifted onto the <pre> by render.ts. */
+	.doc-prose pre[data-lang]::before {
+		content: attr(data-lang);
+		@apply absolute right-3 top-2 font-mono text-[10px] uppercase tracking-wider text-foundry-secondary;
+	}
+
+	/* Wide tables scroll inside this wrapper so the PAGE never scrolls
+	   sideways. render.ts inserts it around every table. */
+	.doc-table {
+		@apply my-6 overflow-x-auto rounded border-[1.5px] border-foundry-border;
+	}
+
+	.doc-prose table {
+		@apply w-full border-collapse text-left text-sm;
+	}
+
+	.doc-prose thead {
+		@apply bg-foundry-card;
+	}
+
+	.doc-prose th {
+		@apply border-b-[1.5px] border-foundry-border px-3 py-2 font-semibold;
+	}
+
+	.doc-prose td {
+		@apply border-b border-foundry-border px-3 py-2 align-top;
+	}
+
+	.doc-prose tbody tr:last-child td {
+		@apply border-b-0;
+	}
+
+	.doc-prose input[type='checkbox'] {
+		@apply mr-2 align-middle accent-foundry-primary;
+	}
 }
