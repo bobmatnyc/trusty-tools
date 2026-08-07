@@ -104,6 +104,61 @@ use std::path::Path;
 /// `ensure_project_indexed_none_for_root`,
 /// `ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body`.
 pub fn ensure_project_indexed(project_root: &Path, allow_sensitive_path: bool) -> Option<String> {
+    ensure_project_indexed_with(
+        project_root,
+        IndexOptions {
+            allow_sensitive_path,
+            ..IndexOptions::default()
+        },
+    )
+}
+
+/// Per-call knobs for [`ensure_project_indexed_with`] (#5060).
+///
+/// Why: [`ensure_project_indexed`] grew a second orthogonal dimension when
+/// trusty-mpm began registering an index for a git WORKTREE at the moment the
+/// worktree is created. A worktree differs from its base checkout by a small
+/// diff: its exact text (BM25) and its symbol graph (KG) are branch-specific
+/// and must be worktree-accurate, but conceptual similarity is not — it does
+/// not change because a branch moved a few functions. So the expensive lane
+/// (embedding) is built once on the base checkout and the cheap lanes are
+/// built per worktree. A struct rather than a third positional `bool` keeps
+/// the two flags from being silently transposed at a call site.
+/// What: a plain options bag whose `Default` reproduces the pre-#5060
+/// behaviour exactly (`allow_sensitive_path: false`, `skip_vector: false`), so
+/// [`ensure_project_indexed`] stays a one-line wrapper and no existing caller
+/// changes behaviour.
+/// Test: `index_options_default_matches_legacy_ensure_call`,
+/// `create_index_request_body_sets_skip_vector`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexOptions {
+    /// Forwarded to `POST /indexes`' `allow_sensitive_path` field — see
+    /// [`ensure_project_indexed`]'s doc comment for when `true` is correct.
+    pub allow_sensitive_path: bool,
+
+    /// When `true`, ask the daemon to register this index with its vector
+    /// lane permanently suppressed (`skip_vector`, trusty-search issue #2984
+    /// Phase 1): the embedder is never invoked, the semantic stage is marked
+    /// `Skipped`, and the index's reported `search_capabilities` omit
+    /// `vector`. BM25 and KG are built as normal.
+    pub skip_vector: bool,
+}
+
+/// [`ensure_project_indexed`] with explicit per-call [`IndexOptions`] (#5060).
+///
+/// Why: see [`IndexOptions`]. Kept as the ONE implementation (the two-argument
+/// [`ensure_project_indexed`] delegates here) so the register-then-populate
+/// sequence can never drift between the session-launch, task-start, and
+/// worktree-creation callers.
+/// What: identical to [`ensure_project_indexed`] in every respect except that
+/// `opts.skip_vector` is threaded into the `POST /indexes` body. Same
+/// fail-open contract: every failed step is logged and swallowed, and the
+/// derived id is always returned so the caller can pin it even when the daemon
+/// is unreachable.
+/// Test: `ensure_project_indexed_returns_derived_id_when_daemon_down`,
+/// `ensure_project_indexed_none_for_root`,
+/// `create_index_request_body_sets_skip_vector`.
+pub fn ensure_project_indexed_with(project_root: &Path, opts: IndexOptions) -> Option<String> {
     let root = crate::resolve_project_root(project_root);
     let index_id = crate::derive_index_id(&root);
     if index_id.trim().is_empty() {
@@ -126,7 +181,7 @@ pub fn ensure_project_indexed(project_root: &Path, allow_sensitive_path: bool) -
     // index on first reindex.
     match crate::resolve_daemon_base_url("trusty-search") {
         Some(base) => {
-            best_effort_create_index(&base, &index_id, &root, allow_sensitive_path);
+            best_effort_create_index(&base, &index_id, &root, opts);
             best_effort_trigger_reindex(&base, &index_id);
         }
         None => {
@@ -511,16 +566,22 @@ fn index_file_request_body(rel_path: &str, content: &str) -> serde_json::Value {
 /// (credential dirs, sensitive file names, top-level home dirs) — see
 /// `trusty-search::allowlist::is_denied_allowing_sensitive_path`'s doc comment
 /// for exactly what stays enforced.
-/// Test: `create_index_request_body_respects_allow_sensitive_path_param`.
-fn create_index_request_body(
-    index_id: &str,
-    root: &Path,
-    allow_sensitive_path: bool,
-) -> serde_json::Value {
+///
+/// `skip_vector` (#5060) asks the daemon to register the index with its vector
+/// lane permanently suppressed — see [`IndexOptions::skip_vector`]. It is sent
+/// unconditionally (as `false` for every pre-#5060 caller) because the
+/// daemon's `CreateIndexRequest` field is `Option<bool>` with `None` and
+/// `Some(false)` both meaning "build the vector lane": an explicit `false` is
+/// byte-for-byte equivalent to omitting it, and keeping the field present
+/// makes the request shape uniform across callers.
+/// Test: `create_index_request_body_respects_allow_sensitive_path_param`,
+/// `create_index_request_body_sets_skip_vector`.
+fn create_index_request_body(index_id: &str, root: &Path, opts: IndexOptions) -> serde_json::Value {
     serde_json::json!({
         "id": index_id,
         "root_path": root.to_string_lossy(),
-        "allow_sensitive_path": allow_sensitive_path,
+        "allow_sensitive_path": opts.allow_sensitive_path,
+        "skip_vector": opts.skip_vector,
     })
 }
 
@@ -546,9 +607,9 @@ fn create_index_request_body(
 /// must NOT stall when the daemon is slow or unreachable.
 /// Test: exercised via `ensure_project_indexed_returns_derived_id_when_daemon_down`
 /// (daemon-down path); the live HTTP path is covered by integration use.
-fn best_effort_create_index(base: &str, index_id: &str, root: &Path, allow_sensitive_path: bool) {
+fn best_effort_create_index(base: &str, index_id: &str, root: &Path, opts: IndexOptions) {
     let url = format!("{base}/indexes");
-    let body = create_index_request_body(index_id, root, allow_sensitive_path);
+    let body = create_index_request_body(index_id, root, opts);
     let index_id = index_id.to_string();
     let root_display = root.display().to_string();
 

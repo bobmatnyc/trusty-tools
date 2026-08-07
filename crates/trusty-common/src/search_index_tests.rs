@@ -237,7 +237,14 @@ fn create_index_request_body_respects_allow_sensitive_path_param() {
         Path::new("/private/var/folders/xx/scratch-project"),
     ] {
         for allow in [true, false] {
-            let body = create_index_request_body("my-index", root, allow);
+            let body = create_index_request_body(
+                "my-index",
+                root,
+                IndexOptions {
+                    allow_sensitive_path: allow,
+                    ..IndexOptions::default()
+                },
+            );
             assert_eq!(
                 body.get("allow_sensitive_path"),
                 Some(&serde_json::Value::Bool(allow)),
@@ -249,6 +256,73 @@ fn create_index_request_body_respects_allow_sensitive_path_param() {
             );
         }
     }
+}
+
+/// `IndexOptions::skip_vector` reaches the `POST /indexes` wire body, and the
+/// two option flags are independent (#5060).
+///
+/// Why: a worktree index is registered BM25+KG-only by asking the daemon for
+/// `skip_vector: true`. If that flag were dropped between [`IndexOptions`] and
+/// the request body, every worktree would silently embed again — the exact
+/// cost this change exists to avoid, and invisible without an assertion,
+/// because the index would still be created and still answer queries. The
+/// cross-product also pins that `skip_vector` is not accidentally aliased to
+/// `allow_sensitive_path` (the failure mode a second positional `bool` would
+/// have invited).
+/// What: builds the body for all four `(allow_sensitive_path, skip_vector)`
+/// combinations and asserts each field independently equals what was passed.
+/// Test: this test.
+#[test]
+fn create_index_request_body_sets_skip_vector() {
+    let root = Path::new("/Users/dev/projects/my-repo/.worktrees/feat-x");
+    for allow in [true, false] {
+        for skip_vector in [true, false] {
+            let body = create_index_request_body(
+                "feat-x",
+                root,
+                IndexOptions {
+                    allow_sensitive_path: allow,
+                    skip_vector,
+                },
+            );
+            assert_eq!(
+                body.get("skip_vector"),
+                Some(&serde_json::Value::Bool(skip_vector)),
+                "body must set skip_vector: {skip_vector} (allow={allow})"
+            );
+            assert_eq!(
+                body.get("allow_sensitive_path"),
+                Some(&serde_json::Value::Bool(allow)),
+                "skip_vector must not disturb allow_sensitive_path"
+            );
+        }
+    }
+}
+
+/// `IndexOptions::default()` reproduces the pre-#5060 two-argument call.
+///
+/// Why: [`ensure_project_indexed`] is now a wrapper over
+/// [`ensure_project_indexed_with`]. If `IndexOptions`' default ever gained a
+/// non-`false` `skip_vector`, every existing caller (session launch, tcode
+/// task start) would silently stop embedding — a behaviour change with no
+/// visible error. This pins the default as the compatibility contract.
+/// What: asserts the body built from `IndexOptions::default()` is identical to
+/// one built with both flags explicitly `false`.
+/// Test: this test.
+#[test]
+fn index_options_default_matches_legacy_ensure_call() {
+    let root = Path::new("/Users/dev/projects/my-repo");
+    assert_eq!(
+        create_index_request_body("my-repo", root, IndexOptions::default()),
+        create_index_request_body(
+            "my-repo",
+            root,
+            IndexOptions {
+                allow_sensitive_path: false,
+                skip_vector: false,
+            }
+        )
+    );
 }
 
 /// End-to-end regression for issue #2914: `ensure_project_indexed`'s
