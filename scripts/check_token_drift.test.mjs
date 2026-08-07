@@ -34,6 +34,7 @@ import path from "node:path";
 
 import {
   ENFORCED,
+  REPO_ROOT,
   checkCrate,
   parseCanonical,
   parseCanonicalFromSource,
@@ -313,4 +314,60 @@ test("hex mode: a missing dark block throws (disk-based)", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Repo-root-relative `file` resolution (#5095)
+//
+// Every ENFORCED entry today sits under `crates/`, so nothing yet proves that
+// `file` is resolved as repo-root-relative rather than crate-relative. The
+// website (#5092) sits at the repo ROOT, so if a future refactor folded a
+// `crates/` prefix into resolveCrateFilePath every existing entry would keep
+// passing and registering the website would silently become a code change.
+// This fixture is written inside REPO_ROOT — not tmpdir like the tests above —
+// precisely because the root-relative branch is the thing under test.
+// ---------------------------------------------------------------------------
+
+function withRootFixture(css, fn) {
+  const dir = mkdtempSync(path.join(REPO_ROOT, ".token-drift-fixture-"));
+  try {
+    writeFileSync(path.join(dir, "app.css"), css);
+    return fn(path.join(path.basename(dir), "app.css"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const ROOT_FIXTURE_CSS = `
+:root {
+  --color-foo: 17 34 51;
+}
+
+.dark {
+  --color-foo: 68 85 102;
+}
+`;
+
+test("an enforced entry outside crates/ resolves relative to the repo root", () => {
+  const canonical = parseCanonicalFromSource(CANONICAL_SOURCE, "inline");
+  withRootFixture(ROOT_FIXTURE_CSS, (relPath) => {
+    assert.ok(!relPath.startsWith("crates/"), "fixture must live outside crates/");
+    // No parsedOverride, so this exercises the real disk read through
+    // resolveCrateFilePath rather than an injected declaration map.
+    const diffs = checkCrate(makeFixtureCrate({ name: "website", file: relPath }), canonical);
+    assert.equal(diffs.comparedCount, 2, "expected one comparison per theme");
+    assert.equal(diffs.length, 0, JSON.stringify(diffs));
+  });
+});
+
+test("a root-relative entry still DETECTS drift (not a vacuous pass)", () => {
+  const canonical = parseCanonicalFromSource(CANONICAL_SOURCE, "inline");
+  const drifted = ROOT_FIXTURE_CSS.replace("--color-foo: 17 34 51;", "--color-foo: 1 2 3;");
+  withRootFixture(drifted, (relPath) => {
+    const diffs = checkCrate(makeFixtureCrate({ name: "website", file: relPath }), canonical);
+    assert.equal(diffs.length, 1);
+    assert.equal(diffs[0].theme, "light");
+    assert.equal(diffs[0].var, "--color-foo");
+    assert.match(diffs[0].actual, /1 2 3/);
+  });
 });
