@@ -161,6 +161,17 @@ pub struct CatchupJson {
     pub recent_commits: Vec<CommitSummary>,
     /// Recent memory-palace drawers since the watermark.
     pub recent_memory: Vec<RecentMemoryJson>,
+    /// How many paused sessions were withheld because they could not be dated.
+    ///
+    /// Why: an empty `sessions` array means "nothing paused since your last
+    /// catch-up" — unless this is non-zero, in which case sessions DID exist
+    /// and were withheld. The watermark advances either way, so without this
+    /// count a withheld session is invisible to the caller forever and there is
+    /// nothing to tell them to re-run with `full` (#5072).
+    /// What: [`session_finder::FilteredSessions::dropped_undatable`]; always 0
+    /// when `full` is set, since a full catch-up applies no watermark.
+    /// Test: `generate_catchup_json_reports_undatable_drop_count`.
+    pub undatable_sessions_dropped: usize,
 }
 
 /// Generate a structured (JSON) catch-up digest for the given options.
@@ -188,15 +199,18 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
         load_catchup_state(&palace_id).map(|s| s.last_catchup_at)
     };
 
-    let sessions = match find_paused_sessions(&opts.project_dir) {
-        Ok(sessions) => {
-            // #5072: shared fail-closed predicate — see `filter_sessions_since`.
-            let sessions = filter_sessions_since(sessions, watermark);
-            sessions.iter().map(paused_session_to_json).collect()
+    // #5072: shared fail-closed predicate — see `filter_sessions_since`.
+    let (sessions, undatable_sessions_dropped) = match find_paused_sessions(&opts.project_dir) {
+        Ok(found) => {
+            let filtered = filter_sessions_since(found, watermark);
+            (
+                filtered.kept.iter().map(paused_session_to_json).collect(),
+                filtered.dropped_undatable,
+            )
         }
         Err(e) => {
             eprintln!("catchup: warning: could not scan paused sessions: {e}");
-            Vec::new()
+            (Vec::new(), 0)
         }
     };
 
@@ -235,6 +249,7 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
         sessions,
         recent_commits,
         recent_memory,
+        undatable_sessions_dropped,
     }
 }
 
@@ -426,6 +441,62 @@ mod tests {
                 .iter()
                 .map(|s| s.source_file.clone())
                 .collect::<Vec<_>>()
+        );
+        // Both files are datable — the hand-written one by its mtime — so
+        // nothing was withheld; they simply predate 2099.
+        assert_eq!(json.undatable_sessions_dropped, 0);
+    }
+
+    /// Why: the withheld count is a receipt, not diagnostics — the watermark
+    /// advances past a withheld session and never returns for it, so a caller
+    /// seeing an empty `sessions` array must be able to tell "nothing paused"
+    /// from "sessions existed and could not be dated" (#5072).
+    /// What: seeds a claude-mpm session whose recorded `paused_at` is
+    /// unparseable AND whose mtime is unreadable — achieved by deleting the
+    /// file after load is impossible, so this asserts the plumbing instead: a
+    /// datable-but-too-old corpus reports 0, proving the count tracks undatable
+    /// exclusions specifically rather than every filtered-out session.
+    /// Test: itself, with `filter_sessions_since_reports_dropped_count` pinning
+    /// the counting rule directly.
+    #[tokio::test]
+    async fn generate_catchup_json_reports_undatable_drop_count() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(&tmp);
+        let sessions_dir = tmp.path().join(".trusty-mpm").join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("session-20260101-000000.md"),
+            "## Summary\nOld.\n",
+        )
+        .unwrap();
+
+        let palace_id = derive_palace_id_for(tmp.path());
+        save_catchup_state(
+            &palace_id,
+            &CatchupState {
+                last_catchup_at: "2099-01-01T00:00:00Z".parse().unwrap(),
+                palace_id: palace_id.clone(),
+                last_git_sha: None,
+            },
+        )
+        .unwrap();
+
+        let opts = CatchupOptions {
+            project_dir: tmp.path().to_path_buf(),
+            memory_url: "http://127.0.0.1:19999".to_string(),
+            include_git: false,
+            include_palace: false,
+            git_limit: 50,
+            drawer_limit: 15,
+            full: false,
+        };
+
+        let json = generate_catchup_json(&opts).await;
+        assert!(json.sessions.is_empty());
+        assert_eq!(
+            json.undatable_sessions_dropped, 0,
+            "a merely-too-old session is filtered, not withheld — the count \
+             must not conflate the two"
         );
     }
 

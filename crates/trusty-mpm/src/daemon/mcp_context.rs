@@ -42,7 +42,12 @@ use crate::daemon::state::DaemonState;
 /// calls [`generate_catchup_json`] per project — which NEVER persists a
 /// watermark, so `watermark_advanced` in the result is unconditionally
 /// `false`. `resolved_snapshot` is resolved against the primary `project_dir`
-/// only (not every scanned project), using `session_id` when given.
+/// only (not every scanned project), using `session_id` when given; it answers
+/// "what should I resume from", while `sessions` answers "what paused since
+/// your last catch-up", so the two legitimately disagree under a recent
+/// watermark. `undatable_sessions_dropped` sums each project's withheld count
+/// so an empty `sessions` array can be told apart from sessions that exist but
+/// could not be dated (#5072).
 /// Test: `session_context_catchup_missing_project_dir_errors`,
 /// `session_context_catchup_returns_expected_shape`.
 pub async fn session_context_catchup(
@@ -84,6 +89,9 @@ pub async fn session_context_catchup(
     let mut sessions = Vec::new();
     let mut recent_commits = Vec::new();
     let mut recent_memory = Vec::new();
+    // #5072: summed across projects — an empty `sessions` array is only
+    // "nothing paused" when this is 0.
+    let mut undatable_sessions_dropped = 0usize;
 
     for dir in &project_dirs {
         let opts = CatchupOptions {
@@ -101,6 +109,7 @@ pub async fn session_context_catchup(
         sessions.extend(digest.sessions);
         recent_commits.extend(digest.recent_commits);
         recent_memory.extend(digest.recent_memory);
+        undatable_sessions_dropped += digest.undatable_sessions_dropped;
     }
 
     let resolved_snapshot = session_finder::latest_trusty_mpm_snapshot(&primary, session_id)
@@ -111,6 +120,10 @@ pub async fn session_context_catchup(
         "recent_commits": recent_commits,
         "recent_memory": recent_memory,
         "resolved_snapshot": resolved_snapshot,
+        // #5072: non-zero means paused sessions EXIST but could not be dated
+        // and were withheld — an empty `sessions` array alone does not mean
+        // "nothing paused". Re-call with `full` to see them.
+        "undatable_sessions_dropped": undatable_sessions_dropped,
         // Manual catch-up is a peek — this is always false by construction:
         // there is no code path here that calls `save_catchup_state`.
         "watermark_advanced": false,

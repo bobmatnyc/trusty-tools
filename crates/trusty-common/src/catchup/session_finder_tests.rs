@@ -434,6 +434,34 @@ fn find_orders_undated_snapshot_by_mtime() {
     }
 }
 
+/// A genuinely undatable session: no file behind it, so no mtime to fall back
+/// on, and an unparseable recorded timestamp. This is the ONLY shape that
+/// still yields `sort_key() == None` after #5072 — a session read from disk
+/// always has an mtime.
+fn undatable_session() -> PausedSession {
+    let s = PausedSession::ClaudeMpm {
+        session: ClaudeMpmSession {
+            paused_at: Some("not-a-timestamp".to_string()),
+            source_mtime: None,
+            ..Default::default()
+        },
+    };
+    assert!(
+        s.sort_key().is_none(),
+        "fixture must actually be undatable, or the tests below prove nothing"
+    );
+    s
+}
+
+fn dated_session(ts: &str) -> PausedSession {
+    PausedSession::ClaudeMpm {
+        session: ClaudeMpmSession {
+            paused_at: Some(ts.to_string()),
+            ..Default::default()
+        },
+    }
+}
+
 /// Why: issue #5072 — `filter(|s| s.sort_key().is_none_or(|ts| ts > wm))`
 /// admitted every session whose timestamp could not be derived, so the ONE
 /// record that survived a recent watermark was the undatable one while every
@@ -443,46 +471,97 @@ fn find_orders_undated_snapshot_by_mtime() {
 /// Test: itself.
 #[test]
 fn filter_sessions_since_drops_undatable_session() {
-    let undatable = PausedSession::ClaudeMpm {
-        session: ClaudeMpmSession {
-            paused_at: Some("not-a-timestamp".to_string()),
-            ..Default::default()
-        },
-    };
-    let newer = PausedSession::ClaudeMpm {
-        session: ClaudeMpmSession {
-            paused_at: Some("2026-08-06T21:13:05Z".to_string()),
-            ..Default::default()
-        },
-    };
     let wm: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().unwrap();
-
-    let kept = filter_sessions_since(vec![undatable, newer], Some(wm));
+    let out = filter_sessions_since(
+        vec![undatable_session(), dated_session("2026-08-06T21:13:05Z")],
+        Some(wm),
+    );
     assert_eq!(
-        kept.len(),
+        out.kept.len(),
         1,
         "only the datable, newer-than-watermark session survives"
     );
     assert_eq!(
-        kept[0].sort_key(),
+        out.kept[0].sort_key(),
         Some("2026-08-06T21:13:05Z".parse::<DateTime<Utc>>().unwrap())
+    );
+}
+
+/// Why: the watermark advances past a withheld session and never returns for
+/// it, so the count is a receipt the caller must receive — a stderr warning is
+/// invisible to an MCP client reading a JSON body (#5072).
+/// What: two undatable sessions and one that merely predates the watermark;
+/// only the two undatable ones are counted, and one datable session is kept.
+/// Test: itself.
+#[test]
+fn filter_sessions_since_reports_dropped_count() {
+    let wm: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().unwrap();
+    let out = filter_sessions_since(
+        vec![
+            undatable_session(),
+            undatable_session(),
+            dated_session("2026-07-01T00:00:00Z"), // too old — not "undatable"
+            dated_session("2026-08-06T21:13:05Z"),
+        ],
+        Some(wm),
+    );
+    assert_eq!(out.kept.len(), 1);
+    assert_eq!(
+        out.dropped_undatable, 2,
+        "only undatable exclusions are counted, never merely-too-old ones"
     );
 }
 
 /// Why: `full=true` (no watermark) must never drop anything — the fail-closed
 /// rule above applies only when there is a watermark to compare against.
-/// What: with `None` as the watermark, both sessions survive.
+/// What: with `None` as the watermark, both sessions survive and nothing is
+/// reported as withheld.
 /// Test: itself.
 #[test]
 fn filter_sessions_since_keeps_everything_without_watermark() {
-    let undatable = PausedSession::ClaudeMpm {
-        session: ClaudeMpmSession::default(),
-    };
-    let dated = PausedSession::ClaudeMpm {
-        session: ClaudeMpmSession {
-            paused_at: Some("2026-08-06T21:13:05Z".to_string()),
-            ..Default::default()
-        },
-    };
-    assert_eq!(filter_sessions_since(vec![undatable, dated], None).len(), 2);
+    let out = filter_sessions_since(
+        vec![undatable_session(), dated_session("2026-08-06T21:13:05Z")],
+        None,
+    );
+    assert_eq!(out.kept.len(), 2);
+    assert_eq!(out.dropped_undatable, 0);
+}
+
+/// Why: fail-closed filtering applies to BOTH `PausedSession` variants, but the
+/// #5072 mtime rescue initially covered only `TrustyMpm`. A claude-mpm JSON
+/// carrying nothing but `session_id` deserialises with `paused_at: None`
+/// (`roundtrip_partial_json_uses_defaults` pins that), so it would have gone
+/// from "appears in every digest" straight to "silently withheld from all of
+/// them" — a regression on the arm the fix did not rescue.
+/// What: loads such a file through the real loader and asserts it survives a
+/// watermark it postdates, dated by its mtime.
+/// Test: itself.
+#[test]
+fn claude_mpm_session_with_no_paused_at_is_dated_by_mtime() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".claude-mpm").join("sessions");
+    fs::create_dir_all(&sdir).unwrap();
+    let p = write_file(
+        &sdir,
+        "session-legacy.json",
+        r#"{"session_id":"legacy-only-id"}"#,
+    );
+    set_mtime(&p, "2026-08-06T21:13:05Z".parse().unwrap());
+
+    let sessions = find_paused_sessions(tmp.path()).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].sort_key(),
+        Some("2026-08-06T21:13:05Z".parse::<DateTime<Utc>>().unwrap()),
+        "a claude-mpm session with no paused_at must be dated by its file mtime"
+    );
+
+    let wm: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().unwrap();
+    let out = filter_sessions_since(sessions, Some(wm));
+    assert_eq!(
+        out.kept.len(),
+        1,
+        "and must survive a watermark it postdates"
+    );
+    assert_eq!(out.dropped_undatable, 0);
 }

@@ -58,19 +58,31 @@ pub enum PausedSession {
 }
 
 impl PausedSession {
-    /// Return a sortable pause timestamp, or `None` if not parseable.
+    /// Return a sortable pause timestamp, or `None` when the session cannot be
+    /// dated at all.
     ///
-    /// Why: needed to sort sessions newest-first regardless of format.
-    /// What: for `TrustyMpm` returns `paused_at` directly; for `ClaudeMpm`
-    /// parses the ISO-8601 `paused_at` string.
-    /// Test: covered by `find_orders_newest_first`.
+    /// Why: needed to sort sessions newest-first regardless of format — and,
+    /// since #5072, to decide watermark membership, where `None` means
+    /// "excluded" rather than "always included". Both variants therefore get
+    /// the same file-mtime fallback, so neither arm can go undatable merely
+    /// because its recorded timestamp is missing or malformed.
+    /// What: for `TrustyMpm` returns `paused_at`, which the parser already
+    /// backfills from mtime. For `ClaudeMpm` parses the ISO-8601 `paused_at`
+    /// string, falling back to
+    /// [`ClaudeMpmSession::source_mtime`](crate::catchup::mpm_session::ClaudeMpmSession::source_mtime).
+    /// `None` survives only for a session with no file behind it.
+    /// Test: `find_orders_newest_first`,
+    /// `claude_mpm_session_with_no_paused_at_is_dated_by_mtime`.
     pub fn sort_key(&self) -> Option<DateTime<Utc>> {
         match self {
             PausedSession::TrustyMpm { paused_at, .. } => *paused_at,
             PausedSession::ClaudeMpm { session } => session
                 .paused_at
                 .as_deref()
-                .and_then(|s| s.parse::<DateTime<Utc>>().ok()),
+                .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+                // #5072: same mtime rescue the TrustyMpm arm gets, so
+                // fail-closed filtering applies symmetrically to both.
+                .or(session.source_mtime),
         }
     }
 }
@@ -123,6 +135,28 @@ pub fn find_paused_sessions(project_dir: &Path) -> anyhow::Result<Vec<PausedSess
     Ok(sessions)
 }
 
+/// The outcome of a watermark filter: what survived, and what was withheld.
+///
+/// Why: the count is not diagnostics, it is a receipt. The watermark advances
+/// after a catch-up whether or not a session was withheld, so a withheld
+/// session falls outside every future window permanently — the caller must be
+/// able to tell "nothing paused since your last catch-up" apart from "N
+/// sessions existed and could not be dated" and re-run with `full`. A stderr
+/// warning is not a receipt when the consumer is an MCP client reading a JSON
+/// body (#5072).
+/// What: `kept` is the filtered list; `dropped_undatable` counts sessions
+/// excluded solely because [`PausedSession::sort_key`] returned `None`. It is
+/// always 0 when there is no watermark.
+/// Test: `filter_sessions_since_reports_dropped_count`,
+/// `generate_catchup_json_reports_undatable_drop_count`.
+#[derive(Debug, Default)]
+pub struct FilteredSessions {
+    /// Sessions that provably postdate the watermark.
+    pub kept: Vec<PausedSession>,
+    /// How many sessions were withheld because they could not be dated.
+    pub dropped_undatable: usize,
+}
+
 /// Retain only the sessions that provably paused after `watermark`.
 ///
 /// Why: this predicate previously lived, copy-pasted, in both
@@ -134,47 +168,62 @@ pub fn find_paused_sessions(project_dir: &Path) -> anyhow::Result<Vec<PausedSess
 /// dated was correctly filtered out. On a real project that inverted the
 /// digest: the one undatable record survived and dozens of newer well-formed
 /// snapshots did not (#5072). "Sessions since T" is not a claim an undatable
-/// record can satisfy, so it is now excluded — and the exclusion is logged
-/// rather than silent, because a dropped record is a real (if bounded) loss.
-/// What: with no watermark (a `full` catch-up) returns `sessions` untouched.
-/// With a watermark, keeps only sessions whose [`PausedSession::sort_key`] is
-/// `Some` and strictly greater, warning on stderr for each drop.
+/// record can satisfy, so it is now excluded — but the exclusion is reported in
+/// the return value, not merely logged, because the watermark advances past a
+/// withheld session and never comes back for it.
+/// What: with no watermark (a `full` catch-up) returns every session and a zero
+/// count. With a watermark, keeps only sessions whose
+/// [`PausedSession::sort_key`] is `Some` and strictly greater, counting the
+/// undatable exclusions and warning on stderr for each.
 /// Test: `filter_sessions_since_drops_undatable_session`,
 /// `filter_sessions_since_keeps_everything_without_watermark`,
+/// `filter_sessions_since_reports_dropped_count`,
 /// `generate_catchup_json_excludes_undatable_session_behind_watermark`.
 pub fn filter_sessions_since(
     sessions: Vec<PausedSession>,
     watermark: Option<DateTime<Utc>>,
-) -> Vec<PausedSession> {
+) -> FilteredSessions {
     let Some(wm) = watermark else {
-        return sessions;
+        return FilteredSessions {
+            kept: sessions,
+            dropped_undatable: 0,
+        };
     };
-    sessions
-        .into_iter()
+    let mut out = FilteredSessions::default();
+    for s in sessions {
         // #5072: fail-closed — an undatable session cannot be shown to postdate
-        // the watermark, so it is dropped instead of admitted unconditionally.
-        .filter(|s| match s.sort_key() {
-            Some(ts) => ts > wm,
+        // the watermark, so it is withheld instead of admitted unconditionally.
+        match s.sort_key() {
+            Some(ts) if ts > wm => out.kept.push(s),
+            Some(_) => {}
             None => {
+                out.dropped_undatable += 1;
                 eprintln!(
-                    "catchup: warning: dropping a paused session with no derivable \
+                    "catchup: warning: withholding a paused session with no derivable \
                      pause timestamp from the since-{wm} digest; re-run with \
                      full=true to see it"
                 );
-                false
             }
-        })
-        .collect()
+        }
+    }
+    out
 }
 
 /// Read a file's modification time as a UTC instant.
 ///
-/// Why: the fallback source for [`PausedSession::TrustyMpm::paused_at`] when a
-/// snapshot's filename carries no `YYYYMMDD-HHMMSS` stamp (#5072).
+/// Why: the fallback pause instant for both [`PausedSession`] variants when the
+/// recorded one is missing or unparseable (#5072). It is a fallback, not an
+/// equal: mtime tracks the last WRITE, not the pause, so editing an old
+/// hand-written snapshot re-dates it to the edit and promotes it to the head of
+/// the digest. Acceptable because the alternative is an undatable record, which
+/// [`filter_sessions_since`] drops entirely — a stale-but-present ordering beats
+/// an absent session. It does not fire on a fresh clone: `.trusty-mpm/` and
+/// `.claude-mpm/` are gitignored, so no snapshot carries a checkout mtime.
 /// What: `metadata().modified()`, converted to `DateTime<Utc>`; `None` when the
 /// platform or filesystem cannot supply one.
-/// Test: `parse_falls_back_to_mtime_when_filename_lacks_timestamp`.
-fn mtime_utc(path: &Path) -> Option<DateTime<Utc>> {
+/// Test: `parse_falls_back_to_mtime_when_filename_lacks_timestamp`,
+/// `claude_mpm_session_with_no_paused_at_is_dated_by_mtime`.
+pub(crate) fn mtime_utc(path: &Path) -> Option<DateTime<Utc>> {
     std::fs::metadata(path)
         .ok()?
         .modified()
