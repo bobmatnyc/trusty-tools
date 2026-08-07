@@ -22,6 +22,15 @@
 //! apply here. Runs on a `multi_thread` runtime with a `JoinSet` so the callers
 //! are genuinely simultaneous rather than interleaved by a single executor.
 //!
+//! Every test is `#[serial]`. The concurrency each one exercises is INTERNAL —
+//! simultaneous callers into one supervisor — and none of it needs a sibling
+//! test running alongside. What sharing the binary does provide is
+//! interference: these tests spawn real daemons, mutate process-global env, and
+//! resolve socket paths from one `$TMPDIR`.
+//! `a_child_behind_a_stale_socket_file_is_evicted_and_respawned` failed 3 runs
+//! in 5 when parallel and 0 in 3 when serial, so the isolation is load-bearing,
+//! not decorative. This serialises the file; it removes no coverage.
+//!
 //! Test: this *is* the test file.
 
 use std::sync::Arc;
@@ -36,9 +45,15 @@ use trusty_memory::bm25_supervisor::{Bm25Supervisor, ENV_EXTERNAL_BM25};
 /// siblings, neither of which reliably holds the daemon when the test binary
 /// runs from `target/*/deps/`. `CARGO_BIN_EXE_*` is resolved at compile time
 /// and cargo guarantees the binary exists before the test runs.
-/// What: sets `TRUSTY_BM25_DAEMON_BIN` and clears external mode. Process-global
-/// and set identically by every test in this binary, so there is nothing to
-/// race.
+/// What: sets `TRUSTY_BM25_DAEMON_BIN` and clears external mode. Also pins the
+/// spawned daemons' write window at 10 minutes (#5085): the batch worker
+/// otherwise flushes its snapshot ~50 ms after a write, which would let
+/// `an_evicted_live_child_is_given_a_chance_to_flush` pass on the periodic
+/// flush rather than on the shutdown flush it exists to prove. Ten minutes
+/// outlasts any run of this binary, so only a graceful SIGTERM can produce the
+/// snapshot. The other tests here never assert on flushing, so a long window is
+/// inert for them. Process-global and set identically by every test in this
+/// binary, so there is nothing to race.
 /// Test: used by every test below.
 fn arm() {
     // SAFETY: test-only env mutation. Every test in this binary writes the
@@ -48,6 +63,7 @@ fn arm() {
             "TRUSTY_BM25_DAEMON_BIN",
             env!("CARGO_BIN_EXE_trusty-bm25-daemon"),
         );
+        std::env::set_var("TRUSTY_BM25_WRITE_WINDOW_MS", "600000");
         std::env::remove_var(ENV_EXTERNAL_BM25);
     }
 }
@@ -79,6 +95,7 @@ fn clear_socket(name: &str) {
 /// the same socket back.
 /// Test: this test itself. Remove `let _spawn = self.spawn_gate.lock().await;`
 /// from `ensure_running` and this reads 8, not 1.
+#[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_callers_for_one_palace_spawn_exactly_one_daemon() {
     arm();
@@ -141,6 +158,7 @@ async fn concurrent_callers_for_one_palace_spawn_exactly_one_daemon() {
 /// What: six simultaneous callers for six distinct palaces against a cap of
 /// two. The resident population must land at the cap, not at six.
 /// Test: this test itself. Remove the spawn gate and this reads 6, not 2.
+#[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_concurrent_fanout_never_exceeds_the_cap() {
     arm();
@@ -202,6 +220,7 @@ async fn a_concurrent_fanout_never_exceeds_the_cap() {
 /// the orphaned socket file so the adoption path cannot mask the restart, then
 /// calls `ensure_running` again and asserts a second launch happened.
 /// Test: this test itself.
+#[serial_test::serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dead_child_is_evicted_and_respawned() {
     arm();
@@ -240,6 +259,178 @@ async fn a_dead_child_is_evicted_and_respawned() {
 
     sup.shutdown().await;
     clear_socket(&name);
+}
+
+/// Why (#5085): the deterministic half of `a_dead_child_is_evicted_and_respawned`.
+/// That test kills the daemon and then races the kernel — `try_wait()` reports a
+/// SIGKILLed child alive until it finishes tearing down, so for a window the
+/// supervisor's fast path handed back a socket nothing was listening on. The
+/// window is microseconds on an idle host (which is why 62 local runs found
+/// nothing) and milliseconds on a contended CI runner. This test pins the SAME
+/// `lookup_live` state — child un-reaped, socket unserved — without any timing
+/// dependence, by unlinking the socket while the daemon keeps running. The
+/// child is then alive by `try_wait()` FOREVER, so a supervisor that trusts
+/// `try_wait()` alone fails this on every run rather than one in twelve.
+///
+/// It is also a real production state in its own right: a `$TMPDIR` reaper that
+/// unlinks the socket leaves a daemon that is alive and permanently unreachable.
+/// What: spawn, unlink the socket out from under the live daemon, call
+/// `ensure_running` again, and require a second launch.
+/// Test: this test itself. Revert `lookup_live` to a bare `try_wait()` check and
+/// this reads 1, not 2.
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_child_that_stopped_serving_is_evicted_and_respawned() {
+    arm();
+    let name = palace("u", 0);
+    clear_socket(&name);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sup = Bm25Supervisor::with_limits(4, None);
+
+    let socket = sup
+        .ensure_running(&name, tmp.path())
+        .await
+        .expect("first spawn");
+    assert_eq!(sup.spawned_count(), 1);
+    assert_eq!(sup.supervised_count().await, 1);
+
+    // The daemon keeps running; only its socket goes away. `try_wait()` will
+    // report this child alive indefinitely, so nothing here is a race.
+    std::fs::remove_file(&socket).expect("unlink the live daemon's socket");
+
+    let respawned = sup
+        .ensure_running(&name, tmp.path())
+        .await
+        .expect("an unreachable daemon must be evicted and a fresh one spawned");
+    assert_eq!(respawned, socket);
+    assert_eq!(
+        sup.spawned_count(),
+        2,
+        "a child that is no longer serving its socket must be replaced — \
+         try_wait() reporting it un-reaped is not evidence that it is serving"
+    );
+    assert_eq!(sup.supervised_count().await, 1);
+    assert_eq!(
+        sup.reaped_count(),
+        0,
+        "evicting an unreachable child reclaims nothing and must not count as a reap"
+    );
+
+    sup.shutdown().await;
+    clear_socket(&name);
+}
+
+/// Why (#5085): the two tests above unlink the socket, so `lookup_live` sees
+/// ENOENT. The race in the field produces the OTHER `NotServing` errno — the
+/// crashed daemon leaves its socket file on disk and connects get
+/// ECONNREFUSED. Nothing exercised that variant end-to-end, so the eviction
+/// path could have keyed on `NotFound` alone and still looked covered.
+/// What: same shape as the test above, but the socket path is left occupied by
+/// a stale file (bind, then drop the listener) instead of removed.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_behind_a_stale_socket_file_is_evicted_and_respawned() {
+    arm();
+    let name = palace("r", 0);
+    clear_socket(&name);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sup = Bm25Supervisor::with_limits(4, None);
+
+    let socket = sup
+        .ensure_running(&name, tmp.path())
+        .await
+        .expect("first spawn");
+    assert_eq!(sup.spawned_count(), 1);
+
+    // Leave a socket file with nothing behind it: connects now get
+    // ECONNREFUSED rather than ENOENT, which is what a real crash leaves.
+    std::fs::remove_file(&socket).expect("unlink the live daemon's socket");
+    let stale = tokio::net::UnixListener::bind(&socket).expect("bind a stale socket file");
+    drop(stale);
+    assert!(socket.exists(), "the stale socket file must be on disk");
+
+    sup.ensure_running(&name, tmp.path())
+        .await
+        .expect("a daemon behind a stale socket must be evicted and respawned");
+    assert_eq!(
+        sup.spawned_count(),
+        2,
+        "ECONNREFUSED proves nothing is listening just as ENOENT does"
+    );
+    assert_eq!(sup.supervised_count().await, 1);
+
+    sup.shutdown().await;
+    clear_socket(&name);
+}
+
+/// Why (#5085 review): the eviction added for this issue is the first one in
+/// the module that removes a child which is still ALIVE. Every other eviction
+/// removes a corpse, so dropping the handle — and letting `kill_on_drop`
+/// SIGKILL it — costs nothing. Here it costs data: BM25 acks a write on the
+/// in-memory apply and only writes it out at the end of the batch window, and
+/// `trusty-bm25-daemon`'s shutdown flush (which exists for this supervisor)
+/// runs only on SIGTERM. A SIGKILLed evictee therefore drops acked documents
+/// with nothing left to recover them from — the supervisor cannot reach
+/// `mark_dirty`, so no repair sweep ever revisits the palace.
+/// What: index a document, then evict the daemon while that write is still
+/// inside the open window, and require the document to reach the evictee's own
+/// snapshot. `arm()` pins the write window at 10 minutes so the periodic batch
+/// flush provably cannot be what wrote it — only the shutdown flush can. The
+/// replacement is spawned into a DIFFERENT data dir so it cannot write the
+/// snapshot being asserted on.
+/// Test: this test itself. Replace `reap_doomed` with a bare drop of the
+/// handle and the snapshot never gains the document.
+#[serial_test::serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_evicted_live_child_is_given_a_chance_to_flush() {
+    arm();
+    let name = palace("g", 0);
+    clear_socket(&name);
+    let evictee_dir = tempfile::tempdir().expect("tempdir");
+    let replacement_dir = tempfile::tempdir().expect("tempdir");
+    let sup = Bm25Supervisor::with_limits(4, None);
+
+    let socket = sup
+        .ensure_running(&name, evictee_dir.path())
+        .await
+        .expect("first spawn");
+    assert_eq!(sup.spawned_count(), 1);
+
+    // Acked by the daemon, but held in the open write window — see `arm()`.
+    trusty_common::bm25_client::Bm25Client::new(socket.clone())
+        .index("doc-5085", "flush me before you evict me")
+        .await
+        .expect("index a document into the daemon we are about to evict");
+
+    let snapshot = evictee_dir.path().join("bm25_index.json");
+    assert!(
+        !snapshot_contains(&snapshot, "doc-5085"),
+        "precondition: the write must still be unflushed, or this test proves nothing"
+    );
+
+    // Make the daemon unreachable so `ensure_running` evicts it while alive.
+    std::fs::remove_file(&socket).expect("unlink the live daemon's socket");
+    sup.ensure_running(&name, replacement_dir.path())
+        .await
+        .expect("respawn");
+    assert_eq!(sup.spawned_count(), 2);
+
+    assert!(
+        snapshot_contains(&snapshot, "doc-5085"),
+        "the evicted daemon was killed without a chance to flush — an acked \
+         document was lost. Snapshot at {}: {:?}",
+        snapshot.display(),
+        std::fs::read_to_string(&snapshot).ok()
+    );
+
+    sup.shutdown().await;
+    clear_socket(&name);
+}
+
+/// Whether the BM25 snapshot on disk records `doc_id`.
+fn snapshot_contains(snapshot: &std::path::Path, doc_id: &str) -> bool {
+    std::fs::read_to_string(snapshot).is_ok_and(|s| s.contains(doc_id))
 }
 
 /// SIGKILL whatever is listening on `socket`, then remove the socket file.
