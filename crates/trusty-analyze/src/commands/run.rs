@@ -10,7 +10,6 @@
 //! smoke tests documented on each `Cmd` variant.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
@@ -18,9 +17,6 @@ use clap::ValueEnum;
 use trusty_analyze::core::FactStore;
 use trusty_analyze::core::TrustySearchClient;
 use trusty_analyze::core::{overlay_path_beside_facts, ScipOverlayStore};
-#[cfg(any(feature = "bundled-ort", feature = "load-dynamic", feature = "cuda"))]
-use trusty_analyze::embedder::NeuralEmbedder;
-use trusty_analyze::embedder::{BowEmbedder, Embedder};
 use trusty_analyze::mcp::AnalyzerMcpServer;
 use trusty_analyze::service::{serve, AnalyzerAppState};
 
@@ -37,11 +33,18 @@ pub enum OutputFormat {
 ///
 /// Why: `serve` is the process entry point for the daemon and the single most
 /// complex CLI arm; keeping it in one focused function documents the startup
-/// sequence (search dependency check → embedder load → optional MCP servers).
-/// What: probes trusty-search, opens the facts store, loads the neural (or BOW
-/// fallback) embedder, warns on a missing OpenRouter key, optionally starts the
-/// MCP HTTP/SSE server, then serves the HTTP daemon (with an inline MCP stdio
-/// loop when `mcp` is set).
+/// sequence (search dependency check → stores → optional MCP servers).
+/// What: probes trusty-search, opens the facts and SCIP overlay stores, warns
+/// on a missing OpenRouter key, optionally starts the MCP HTTP/SSE server, then
+/// serves the HTTP daemon (with an inline MCP stdio loop when `mcp` is set).
+///
+/// Why (#5067): there is no embedder-load step here any more. It used to sit
+/// between the store opens and the MCP servers, constructing a fastembed model
+/// nothing selected; the hf-hub request it made had no timeout and blocked the
+/// bind for as long as it ran (31m46s measured). The state's embedder is now
+/// `BowEmbedder`, set by `AnalyzerAppState::new`, which touches neither disk
+/// nor network — so boot performs no fallible initialization to report.
+///
 /// Test: run `trusty-analyze serve` without trusty-search running and verify
 /// exit code 1; with it running the daemon binds and answers `/health`.
 pub async fn run_serve(
@@ -50,7 +53,6 @@ pub async fn run_serve(
     port: u16,
     mcp: bool,
     mcp_port: Option<u16>,
-    fastembed_cache: PathBuf,
 ) -> Result<()> {
     // Hard dependency: refuse to start if trusty-search is unreachable.
     // Why: there is no standalone/offline mode — every analysis operation
@@ -75,46 +77,9 @@ pub async fn run_serve(
     let scip_overlays = ScipOverlayStore::open(&overlay_path)
         .with_context(|| format!("open SCIP overlay store at {}", overlay_path.display()))?;
 
-    // Try to load the neural embedder. Failure is non-fatal: we fall
-    // back to BOW so the daemon still serves clustering requests.
-    // Why: keeping the daemon resilient when the ONNX model is
-    // missing (CI, fresh machines, offline) is more valuable than
-    // hard-failing on startup.
-    //
-    // Why (issue #536): when no ORT backend feature is compiled in
-    // (e.g. --no-default-features --features http-server with no
-    // bundled-ort / load-dynamic / cuda), NeuralEmbedder is not
-    // available at all. The cfg block below falls through to BOW
-    // without requiring any runtime check.
-    #[cfg(any(feature = "bundled-ort", feature = "load-dynamic", feature = "cuda"))]
-    let embedder: Arc<dyn Embedder> = match NeuralEmbedder::new(Some(&fastembed_cache)) {
-        Ok(e) => {
-            tracing::info!("neural embedder loaded from {}", fastembed_cache.display());
-            Arc::new(e)
-        }
-        Err(e) => {
-            tracing::warn!(
-                "neural embedder failed to load from {} ({e:#}); using BOW",
-                fastembed_cache.display()
-            );
-            Arc::new(BowEmbedder::default())
-        }
-    };
-    // When no ORT backend feature is compiled in, always use BOW.
-    // The fastembed_cache path is unused in this build variant; the
-    // let _ suppresses the dead-variable lint without removing the
-    // CLI argument (operators still pass --fastembed-cache even if it
-    // has no effect, so we keep the option for forward compatibility).
-    #[cfg(not(any(feature = "bundled-ort", feature = "load-dynamic", feature = "cuda")))]
-    let embedder: Arc<dyn Embedder> = {
-        let _ = &fastembed_cache;
-        tracing::info!(
-            "no ORT backend compiled in; using BOW embedder \
-             (build with bundled-ort, load-dynamic, or cuda for neural embeddings)"
-        );
-        Arc::new(BowEmbedder::default())
-    };
-    let state = AnalyzerAppState::new(search, facts, scip_overlays).with_embedder(embedder);
+    // #5067: no embedder is constructed here. `AnalyzerAppState::new` installs
+    // the infallible BOW embedder; nothing on this path loads a model.
+    let state = AnalyzerAppState::new(search, facts, scip_overlays);
 
     // Warn at startup when OPENROUTER_API_KEY is absent so operators
     // notice the gap before any deep-analysis call returns a 400.

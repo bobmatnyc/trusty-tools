@@ -67,9 +67,13 @@ pub struct AnalyzerAppState {
     pub search: TrustySearchClient,
     pub facts: FactStore,
     pub registry: Arc<AnalyzerRegistry>,
-    /// Neural / BOW embedder used by `/indexes/{id}/clusters` when the request
-    /// asks for `method=neural`. Falls back to a fresh `BowEmbedder` when the
-    /// request asks for `method=bow` (the default).
+    /// Embedder used by `/indexes/{id}/clusters`.
+    ///
+    /// Why (#5067): this used to be swapped out at boot by `run_serve` for a
+    /// fastembed model, and that swap is what stalled startup. It is now always
+    /// the `BowEmbedder` that `new` installs — construction is pure, so no
+    /// caller can make this field cost a network round trip.
+    /// Test: `analyze_declares_no_in_process_model_deps`.
     pub embedder: Arc<dyn Embedder>,
     /// Per-index SCIP-derived knowledge graph overlay, populated by
     /// `POST /indexes/{id}/scip`. Merged into the response of

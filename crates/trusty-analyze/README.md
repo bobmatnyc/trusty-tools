@@ -56,62 +56,22 @@ Check the Releases page for the exact artifact names for your version.
 
 ### Install with cargo
 
-**Standard install — macOS arm64 or Linux glibc ≥ 2.38:**
+**Standard install — every supported host:**
 
 ```bash
 cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze --locked
 ```
 
-The default build bundles a prebuilt ONNX Runtime (via `fastembed/ort-download-binaries`)
-for the neural concept-clustering embedder. This is the correct choice for macOS and
-any Linux host with glibc 2.38 or later.
+The build links no ONNX Runtime and downloads no model. Concept clustering uses a
+deterministic hashed bag-of-words embedder.
 
-**Amazon Linux 2023 / glibc < 2.38 (system ORT):**
+> **#5067:** earlier releases defaulted to `bundled-ort`, which pulled in a
+> fastembed/ONNX neural clustering embedder. No caller ever selected it, yet the
+> daemon constructed it at every boot and the untimed Hugging Face request that
+> construction made blocked startup for as long as the request took — 31m46s in
+> one measured production boot. The embedder, the `bundled-ort` / `load-dynamic`
+> / `cuda` features, and the separate Amazon Linux 2023 install path are all gone.
 
-The bundled ONNX Runtime static library (included by the default `bundled-ort` feature)
-is built against glibc 2.38. Linking it on AL2023 (glibc 2.34) or any other host with
-an older glibc fails at link time with an unresolved `__isoc23_strtol` symbol (glibc
-2.38-only). The `load-dynamic` feature bypasses the static bundle entirely: `ort` loads
-`libonnxruntime.so` via `libloading` at runtime instead of linking it at build time.
-
-Step 1 — install a glibc-compatible ONNX Runtime. The official Microsoft CPU release
-is built against glibc 2.17 and runs on AL2023 without issues:
-
-```bash
-# ORT 1.24.2 CPU (matches the version used by ort-sys 2.0.0-rc.12 / fastembed 5.x)
-ORT_VERSION=1.24.2
-curl -fsSL \
-  "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
-  | sudo tar xz -C /opt
-sudo ln -sf "/opt/onnxruntime-linux-x64-${ORT_VERSION}" /opt/onnxruntime
-```
-
-Step 2 — build without the bundled ORT:
-
-```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze \
-    --locked --no-default-features --features http-server,load-dynamic
-```
-
-Step 3 — export `ORT_DYLIB_PATH` and start the daemon:
-
-```bash
-export ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so
-trusty-analyze serve --search-url http://127.0.0.1:7878
-```
-
-Add `ORT_DYLIB_PATH` to your shell profile or systemd/launchd service unit so it
-persists across restarts. The exact ORT version (`1.24.2`) must match what
-`ort-sys`/`fastembed` expects; see the `ort-sys` version in `Cargo.lock` to
-confirm the version before upgrading ORT.
-
-If no system ORT is available, install without any ORT backend. The daemon will still
-run with the deterministic BoW embedder (no semantic clustering):
-
-```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze \
-    --locked --no-default-features --features http-server
-```
 
 The installed binary is named `trusty-analyze`.
 
@@ -189,7 +149,7 @@ Falls back to `7879` when no daemon is running.
 - Code smell detection with configurable thresholds and named categories
 - Quality grade aggregation (A–F) per file and per index
 - Git blame temporal decay scoring (stale high-complexity code surfaces first)
-- Concept clustering (k-means over embeddings, BoW or neural)
+- Concept clustering (k-means over hashed bag-of-words embeddings)
 - Facts store: `(subject, predicate, object)` knowledge triples, persisted in redb
 - SCIP protobuf ingest for LSP-quality symbol data
 - Full HTTP API + MCP stdio server (every endpoint has a tool equivalent)
@@ -248,7 +208,7 @@ GET  /health
 GET  /indexes/:id/complexity_hotspots[?top_k=N]
 GET  /indexes/:id/smells[?category=<name>]
 GET  /indexes/:id/quality
-GET  /indexes/:id/clusters?k=N&method=bow|neural
+GET  /indexes/:id/clusters?k=N&method=bow
 GET  /facts[?subject=<s>&predicate=<p>]
 POST /facts
 DELETE /facts/:id
@@ -315,19 +275,10 @@ accumulation, recommendations extraction) is identical.
 | Flag | Description |
 |---|---|
 | `http-server` | Axum HTTP daemon (enabled by default). Required for the `trusty-analyze` binary. |
-| `bundled-ort` | **Default.** Bundle the static ONNX Runtime libs via fastembed. Requires glibc ≥ 2.38. |
-| `load-dynamic` | Load ONNX Runtime dynamically from `ORT_DYLIB_PATH`. Use on glibc < 2.38 (AL2023). Mutually exclusive with `bundled-ort`. |
-| `cuda` | GPU-accelerated embedding via ONNX Runtime CUDA EP. Always pair with `--no-default-features`. |
-| `ner` | Optional ONNX-backed named entity recognition (separate model file required). |
+| `ner` | Optional ONNX-backed named entity recognition (separate model file required). Off by default; not on the boot path. |
 
-### ORT backend selection summary
-
-| Host | Recommended install command |
-|---|---|
-| macOS, Linux glibc ≥ 2.38 | `cargo install trusty-analyze` (default, bundled ORT) |
-| Amazon Linux 2023 / glibc 2.34 | `cargo install trusty-analyze --no-default-features --features http-server,load-dynamic` + `ORT_DYLIB_PATH` |
-| No ONNX Runtime available | `cargo install trusty-analyze --no-default-features --features http-server` (BoW fallback) |
-| CUDA GPU | `cargo install trusty-analyze --no-default-features --features http-server,cuda` + `ORT_DYLIB_PATH` |
+`bundled-ort`, `load-dynamic`, and `cuda` were removed in #5067 along with the
+neural clustering embedder. One install command works on every host.
 
 ## Architecture
 

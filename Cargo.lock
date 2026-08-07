@@ -11269,7 +11269,6 @@ dependencies = [
  "colored 2.2.0",
  "dashmap 6.2.1",
  "dirs 5.0.1",
- "fastembed",
  "futures",
  "futures-util",
  "hex",
