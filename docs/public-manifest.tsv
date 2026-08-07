@@ -56,18 +56,27 @@ PAGE	installation	docs/distribution/INSTALL-CONVENTION.md	/installation/conventi
 
 SECTION	tools	Tools
 PAGE	tools	docs/trusty-mpm/README.md	/tools/trusty-mpm	trusty-mpm
+PAGE	tools	docs/trusty-agents/README.md	/tools/trusty-agents	trusty-agents
 PAGE	tools	docs/trusty-search/README.md	/tools/trusty-search	trusty-search
 PAGE	tools	docs/trusty-memory/README.md	/tools/trusty-memory	trusty-memory
 PAGE	tools	docs/trusty-analyze/README.md	/tools/trusty-analyze	trusty-analyze
 PAGE	tools	docs/trusty-git-analytics/README.md	/tools/trusty-git-analytics	trusty-git-analytics
 PAGE	tools	docs/trusty-code/README.md	/tools/trusty-code	trusty-code
 PAGE	tools	docs/trusty-common/README.md	/tools/trusty-common	trusty-common
+PAGE	tools	docs/trusty-embedderd/README.md	/tools/trusty-embedderd	trusty-embedderd
+PAGE	tools	docs/trusty-bm25-daemon/README.md	/tools/trusty-bm25-daemon	trusty-bm25-daemon
+PAGE	tools	docs/trusty-console/README.md	/tools/trusty-console	trusty-console
 
 SECTION	guides	User Guides
+PAGE	guides	docs/trusty-agents/user/quickstart.md	/guides/trusty-agents/quickstart	trusty-agents Quickstart
+PAGE	guides	docs/trusty-agents/user/cli-reference.md	/guides/trusty-agents/cli-reference	trusty-agents CLI Reference
+PAGE	guides	docs/trusty-agents/user/configuration.md	/guides/trusty-agents/configuration	trusty-agents Configuration
+PAGE	guides	docs/trusty-agents/user/agents-and-skills.md	/guides/trusty-agents/agents-and-skills	Agents and Skills
 PAGE	guides	docs/trusty-git-analytics/user/README.md	/guides/trusty-git-analytics	trusty-git-analytics User Guide
 PAGE	guides	docs/trusty-git-analytics/user/user-guide.md	/guides/trusty-git-analytics/user-guide	Using tga
 
 SECTION	reference	Reference
+PAGE	reference	docs/architecture/harnesses.md	/reference/harnesses	Harnesses
 PAGE	reference	docs/reference/environment-variables.md	/reference/environment-variables	Environment Variables
 PAGE	reference	docs/reference/running-mcp-servers.md	/reference/running-mcp-servers	Running MCP Servers Locally
 PAGE	reference	docs/reference/ide-setup.md	/reference/ide-setup	IDE Setup
