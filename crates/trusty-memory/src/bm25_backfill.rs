@@ -157,7 +157,10 @@ impl BackfillReport {
             BackfillStatus::AlreadyIndexed => true,
             BackfillStatus::Completed => self
                 .final_doc_count
-                .is_some_and(|n| n >= self.drawers_total - self.skipped_empty),
+                // `saturating_sub` because the alternative is a debug panic in
+                // a coverage predicate — an inconsistent report should read as
+                // "not covered", not take the daemon down.
+                .is_some_and(|n| n >= self.drawers_total.saturating_sub(self.skipped_empty)),
             _ => false,
         }
     }
