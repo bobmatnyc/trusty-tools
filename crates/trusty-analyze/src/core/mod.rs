@@ -27,6 +27,7 @@ pub mod github;
 pub mod linker;
 pub mod ner;
 pub mod quality;
+pub mod redb_open;
 pub mod refactor;
 pub mod registry;
 pub mod review;

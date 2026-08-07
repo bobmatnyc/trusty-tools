@@ -42,10 +42,40 @@ pub struct GraphQueryParams {
 /// symbols. Answering in a header keeps the JSON body a bare `KgGraph`, so
 /// every existing consumer is unaffected.
 /// What: `present` when an overlay row exists for this index (even a
-/// zero-node one), `absent` when none has ever been ingested.
+/// zero-node one), `absent` when none has ever been ingested. It describes the
+/// overlay's existence, not the body — a `?language=` filter that removes every
+/// SCIP node still reports `present`.
 /// Test: `graph_marks_scip_overlay_present_after_ingest`,
 /// `graph_marks_scip_overlay_absent_without_ingest`.
 pub const SCIP_OVERLAY_HEADER: &str = "x-scip-overlay";
+
+/// Read one index's overlay off the blocking pool.
+///
+/// Why: `ScipOverlayStore::get` opens a synchronous redb read transaction, and
+/// redb serialises read-transaction *acquisition* against any in-flight write
+/// commit — the same executor stall `handlers/facts.rs` moved off the runtime
+/// after issue #67. A `/graph` read landing mid-`put` would block a tokio
+/// worker while a whole-repository `KgGraph` is fsynced.
+/// What: clones the store (cheap — `Arc<Database>`) into `spawn_blocking` and
+/// maps both the join error and the store error to 500. A read failure is
+/// never degraded to "no overlay": that would reintroduce the
+/// indistinguishable emptiness of #5049.
+/// Test: `scip_overlay_survives_state_rebuild`,
+/// `graph_marks_scip_overlay_present_after_ingest`.
+async fn read_overlay(
+    state: &AnalyzerAppState,
+    id: &str,
+) -> Result<Option<crate::core::ScipOverlayRecord>, ApiError> {
+    let store = state.scip_overlays.clone();
+    let index_id = id.to_string();
+    tokio::task::spawn_blocking(move || store.get(&index_id))
+        .await
+        .map_err(|e| ApiError::internal(format!("read SCIP overlay task panicked: {e}")))?
+        .map_err(|e| {
+            tracing::error!("read SCIP overlay for {id} failed: {e:#}");
+            ApiError::internal(format!("read SCIP overlay for {id}: {e:#}"))
+        })
+}
 
 /// Why: Phase 2 surfaces the language-neutral knowledge graph to consumers
 /// (Claude Code, web UIs, etc.) so they can navigate symbols across files.
@@ -70,10 +100,7 @@ pub async fn graph_for_index(
     // #5049: a read failure is surfaced as 500 rather than treated as
     // "no overlay" — silently degrading to the tree-sitter-only graph is the
     // exact indistinguishable-emptiness this endpoint is being fixed for.
-    let overlay = state.scip_overlays.get(&id).map_err(|e| {
-        tracing::error!("read SCIP overlay for {id} failed: {e:#}");
-        ApiError::internal(format!("read SCIP overlay for {id}: {e:#}"))
-    })?;
+    let overlay = read_overlay(&state, &id).await?;
     let overlay_header = HeaderValue::from_static(if overlay.is_some() {
         "present"
     } else {
@@ -354,10 +381,18 @@ pub async fn ingest_scip(
         ApiError::bad_request(format!("invalid SCIP protobuf: {e:#}"))
     })?;
     let symbols_ingested = summary.kg_nodes;
-    state.scip_overlays.put(&id, graph).map_err(|e| {
-        tracing::error!("persist SCIP overlay for {id} failed: {e:#}");
-        ApiError::internal(format!("persist SCIP overlay for {id}: {e:#}"))
-    })?;
+    // Why: the write serialises a whole-repository `KgGraph` to JSON and
+    // fsyncs it — the most expensive blocking call in this module. Same
+    // `spawn_blocking` convention as `handlers/facts.rs` (issue #67).
+    let store = state.scip_overlays.clone();
+    let index_id = id.clone();
+    tokio::task::spawn_blocking(move || store.put(&index_id, graph))
+        .await
+        .map_err(|e| ApiError::internal(format!("persist SCIP overlay task panicked: {e}")))?
+        .map_err(|e| {
+            tracing::error!("persist SCIP overlay for {id} failed: {e:#}");
+            ApiError::internal(format!("persist SCIP overlay for {id}: {e:#}"))
+        })?;
     state.emit(AnalyzerEvent::ScipIngested {
         index_id: id.clone(),
         symbols_ingested,
@@ -392,10 +427,7 @@ pub async fn scip_overlay_status(
     State(state): State<Arc<AnalyzerAppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ScipOverlayStatus>, ApiError> {
-    let record = state.scip_overlays.get(&id).map_err(|e| {
-        tracing::error!("read SCIP overlay for {id} failed: {e:#}");
-        ApiError::internal(format!("read SCIP overlay for {id}: {e:#}"))
-    })?;
+    let record = read_overlay(&state, &id).await?;
     let record = record.ok_or_else(|| {
         ApiError::not_found(format!("no SCIP overlay has been ingested for index {id}"))
     })?;

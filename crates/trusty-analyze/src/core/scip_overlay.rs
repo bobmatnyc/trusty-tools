@@ -14,10 +14,14 @@
 //! SCIP for this index, `Some(record)` whose graph has zero nodes means
 //! somebody ingested a SCIP index that contained no symbols.
 //!
-//! Unlike [`crate::core::FactStore`], an unreadable database here is NOT
-//! recreated empty. Facts are re-derivable from source; an uploaded SCIP
-//! index is not, and silently replacing it with an empty store is the same
-//! silent data loss this module exists to fix.
+//! An unreadable database is handled exactly the way [`crate::core::FactStore`]
+//! handles one, through the shared [`crate::core::redb_open`] policy: an
+//! obsolete on-disk format is renamed aside and the store starts empty, while
+//! a transient open failure stays fatal. Neither store deletes anything.
+//! Quarantining is safe here specifically because of the other half of this
+//! module — after a quarantine `GET /indexes/{id}/scip` answers 404, which
+//! honestly reports that no overlay is available rather than serving a graph
+//! that silently lost one.
 //!
 //! Test: `overlay_round_trips_across_reopen`, `absent_overlay_reads_as_none`,
 //! `empty_overlay_is_distinguishable_from_absent`, `put_overwrites_prior_overlay`.
@@ -33,6 +37,10 @@ use serde::{Deserialize, Serialize};
 use crate::types::KgGraph;
 
 const SCIP_OVERLAY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("scip_overlays");
+
+/// Quarantine suffix for a `scip_overlays.redb` whose on-disk format redb can
+/// no longer read.
+const OVERLAY_QUARANTINE_SUFFIX: &str = ".quarantined";
 
 /// One index's ingested SCIP overlay plus the time it was ingested.
 ///
@@ -80,16 +88,26 @@ pub struct ScipOverlayStore {
 impl ScipOverlayStore {
     /// Open (creating if absent) the overlay redb at `path`.
     ///
-    /// Why: the daemon must fail to start rather than serve a store it could
-    /// not read — an unreadable overlay database means every subsequent
-    /// `/graph` response would silently drop overlays that are still on disk,
-    /// which is exactly the failure mode #5049 is about.
-    /// What: `Database::create` plus a write txn that materialises the table so
-    /// reads against a brand-new file succeed. Any open error propagates.
-    /// Test: `overlay_round_trips_across_reopen`, `corrupt_db_fails_open_loudly`.
+    /// Why: SCIP is one optional feature, and its sidecar file must not be able
+    /// to hold the whole daemon down. redb's on-disk format has already gone
+    /// obsolete once here (#702), and refusing to boot on the next bump would
+    /// take facts, smells, review, clusters, NER and the MCP surface with it —
+    /// while the only remedy, deleting the file, destroys the overlays anyway.
+    /// What: delegates to [`crate::core::redb_open::open_or_quarantine`], so an
+    /// obsolete format is renamed to `*.quarantined` and the store starts empty
+    /// with a loud `ERROR`, while a transient open failure stays fatal. Then a
+    /// write txn materialises the table so reads on a brand-new file succeed.
+    /// Test: `overlay_round_trips_across_reopen`,
+    /// `incompatible_overlay_db_is_quarantined`,
+    /// `unopenable_overlay_path_propagates_error`.
     pub fn open(path: &Path) -> Result<Self> {
-        let db = Database::create(path)
-            .with_context(|| format!("open SCIP overlay redb at {}", path.display()))?;
+        let db = crate::core::redb_open::open_or_quarantine(
+            path,
+            OVERLAY_QUARANTINE_SUFFIX,
+            "SCIP overlay",
+            "re-ingest SCIP (POST /indexes/{id}/scip) for every affected index; \
+             until then GET /indexes/{id}/scip reports 404 for them",
+        )?;
         let txn = db.begin_write().context("begin overlay init txn")?;
         {
             let _t = txn
@@ -105,11 +123,10 @@ impl ScipOverlayStore {
     /// Why: a re-ingest supersedes the previous SCIP index rather than merging
     /// with it — SCIP output is a whole-repository snapshot, so unioning two
     /// generations would resurrect symbols the newer index deliberately dropped.
-    /// What: writes a fresh [`ScipOverlayRecord`] with `ingested_at = now` and
-    /// commits. Returns the record so the handler can report it without a
-    /// second read.
+    /// What: writes a fresh [`ScipOverlayRecord`] with `ingested_at = now` in
+    /// one transaction, so there is no partially-applied overlay.
     /// Test: `put_overwrites_prior_overlay`.
-    pub fn put(&self, index_id: &str, graph: KgGraph) -> Result<ScipOverlayRecord> {
+    pub fn put(&self, index_id: &str, graph: KgGraph) -> Result<()> {
         let record = ScipOverlayRecord {
             index_id: index_id.to_string(),
             graph,
@@ -126,7 +143,7 @@ impl ScipOverlayStore {
                 .context("insert SCIP overlay")?;
         }
         txn.commit().context("commit overlay put txn")?;
-        Ok(record)
+        Ok(())
     }
 
     /// Read the overlay for `index_id`.
@@ -252,24 +269,67 @@ mod tests {
         assert_eq!(rec.graph.nodes[0].name, "new");
     }
 
-    /// Why: an unreadable overlay database must stop the daemon, not be
-    /// silently replaced with an empty one — a fresh empty store would drop
-    /// overlays that are still on disk, reproducing #5049 by another route.
-    /// This is the deliberate difference from `FactStore::open`, which does
-    /// recreate because facts are re-derivable.
-    /// What: writes garbage to the path and asserts `open` returns `Err`.
+    /// Why: an obsolete overlay format must not take the daemon down — SCIP is
+    /// one optional feature and every other endpoint is independent of it. The
+    /// file is preserved rather than deleted, and the reset is honest because
+    /// `get` then reports `None`, which the HTTP layer serves as 404.
+    /// What: writes garbage to the path, asserts `open` succeeds, the original
+    /// bytes are preserved under `*.quarantined`, and the fresh store reads as
+    /// absent rather than as an empty graph.
     /// Test: this test.
     #[test]
-    fn corrupt_db_fails_open_loudly() {
+    fn incompatible_overlay_db_is_quarantined() {
         use std::io::Write;
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("o.redb");
+        let path = tmp.path().join("scip_overlays.redb");
         std::fs::File::create(&path)
             .and_then(|mut f| f.write_all(&[0xABu8; 4096]))
             .unwrap();
+
+        let store =
+            ScipOverlayStore::open(&path).expect("an obsolete overlay format must not be fatal");
+
+        let backup = tmp.path().join("scip_overlays.redb.quarantined");
+        assert!(backup.exists(), "the unreadable file must be preserved");
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            vec![0xABu8; 4096],
+            "quarantine must move the bytes, not truncate them"
+        );
+        assert!(
+            store.get("anything").unwrap().is_none(),
+            "a quarantined store reads as absent (404), not as an empty graph"
+        );
+    }
+
+    /// Why: the counterpart to the quarantine, and the arm that makes the
+    /// classification load-bearing. A path that merely cannot be opened right
+    /// now — permissions, disk, a lock — must stay fatal; moving it aside and
+    /// starting empty would destroy data that is still good.
+    /// What: puts a *directory* where the database belongs. `Database::create`
+    /// fails with an IO error that is not `InvalidData`, so the error must
+    /// propagate and the path must be left exactly as it was. A directory is
+    /// deliberate: `rename` would succeed on it, so a store that quarantined
+    /// every error class instead of the obsolete-format one would open cleanly
+    /// here and this assertion is what catches that.
+    /// Test: this test.
+    #[test]
+    fn unopenable_overlay_path_propagates_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("scip_overlays.redb");
+        std::fs::create_dir(&path).unwrap();
+
         assert!(
             ScipOverlayStore::open(&path).is_err(),
-            "an unreadable overlay db must not open as an empty store"
+            "a non-format open failure must not be recovered"
+        );
+        assert!(
+            path.is_dir(),
+            "a transient failure must leave the path untouched, not quarantine it"
+        );
+        assert!(
+            !tmp.path().join("scip_overlays.redb.quarantined").exists(),
+            "only an obsolete on-disk format may be quarantined"
         );
     }
 }
