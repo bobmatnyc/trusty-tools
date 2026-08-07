@@ -146,6 +146,13 @@ TEST_CAP raised #4074):**
 | Production source files | **500 SLOC** |
 | Test / benchmark files | **3000 SLOC** |
 
+**SLOC counts code lines only** — blank lines, `//` comments, `///` and `//!`
+doc comments, and `/* … */` block comments (nesting included) are stripped
+before counting, so documentation never costs cap budget and the Why/What/Test
+mandate above never competes with this cap. A line of code with a trailing `//`
+comment still counts as 1; stripping is not a credit, so adding comments never
+lowers a file's SLOC.
+
 A file is classified as a **test/benchmark file** when ANY of these match:
 - basename is exactly `tests.rs`
 - basename ends with `_test.rs` or `_tests.rs`
