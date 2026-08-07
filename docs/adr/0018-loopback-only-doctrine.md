@@ -1,6 +1,11 @@
 # 0018. Loopback-only doctrine: `trusty-console` is the sole off-loopback HTTP surface
 
-- **Status:** Accepted
+- **Status:** Superseded by [0032](0032-no-service-owns-http-console-is-the-only-http-surface.md)
+  (2026-08-07 owner ruling: no sibling daemon runs its own HTTP server at
+  all — not even loopback-only — inter-service traffic moves to UDS, and
+  only `trusty-console` keeps HTTP). This ADR's Context/Decision/Consequences
+  are left as originally accepted per the ADR immutability rule (DOC-46 §4);
+  see ADR-0032 for the reversal record.
 - **Date:** 2026-07-19
 - **Accepted:** 2026-07-19 (owner sign-off — Bob approved option (b) of the
   retire-direct-binds brief; tracked by epic #3328)

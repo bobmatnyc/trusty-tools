@@ -1,5 +1,22 @@
 # HTTP Trust-Boundary Threat Model
 
+🔴 **This document's per-daemon inventory is superseded and needs revision.**
+[ADR-0032](../adr/0032-no-service-owns-http-console-is-the-only-http-surface.md)
+(2026-08-07 owner ruling) reverses the premise this table is built on: no
+sibling daemon runs its own HTTP server at all, loopback-only included —
+inter-service traffic moves to UDS, and only `trusty-console` keeps HTTP.
+[ADR-0018](../adr/0018-loopback-only-doctrine.md), the doctrine this document
+was written to audit compliance against, is now `Superseded by 0032`. The
+bind/guard/console-proxy-allowlist table below still describes the **live**
+topology as of this writing (nothing has migrated), so it is not yet wrong
+about current reality — but it is no longer a description of the target
+architecture, and most of its columns (per-daemon bind address, origin
+guard) stop applying once a daemon has no HTTP listener to guard.
+Re-deriving this table for the UDS topology is implementation work gated on
+an open question ADR-0032 does not resolve — see that ADR's Open Questions
+section (webhook ingress for on-demand processes) — and is out of scope for
+this update. Read ADR-0032 before treating any row below as prescriptive.
+
 This is the authoritative reference for **who can reach which trusty-\* HTTP
 surface, from where, and what stops them.** It exists because the
 2026-07-19 architecture review (`docs/research/architecture-review-2026-07-19.md`,
