@@ -44,6 +44,25 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// unreachable host fails fast.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
 
+/// How old a `.worktrees` root must be before a 0-chunk index rooted at it is
+/// eligible for deletion (#5065 review).
+///
+/// Why: `chunk_count == 0` used to mean "created and abandoned", because the
+/// index was minted at session LAUNCH, by which point the session record
+/// already claimed the path and [`is_orphan_index`]'s claimed-by-a-live-session
+/// check covered the whole population window. #5060 mints it at worktree
+/// CREATION instead, before any record exists, and the index legitimately reads
+/// 0 chunks for the entire lexical walk — 33.5 s measured on this workspace,
+/// longer on a bigger one. The sweep runs every 60 s (`daemon/mod.rs`), so
+/// without a grace window the sweep can delete a brand-new worktree's index out
+/// from under the walk that is populating it.
+///
+/// 300 s is one sweep interval plus ~4x the measured walk. Erring long is
+/// nearly free: the only cost of an over-long window is that a genuinely
+/// abandoned 0-chunk index survives a few extra sweeps, and the sweep runs
+/// forever. Erring short deletes live work.
+const ORPHAN_GRACE: Duration = Duration::from_secs(300);
+
 /// Whether — and under which id — a session's workspace should lose its
 /// trusty-search index on decommission (#2033).
 ///
@@ -175,15 +194,26 @@ pub(super) struct IndexSnapshot {
 /// touches a manually-registered, persistent, non-session project index),
 /// (b) neither `entry.root_path` nor its canonicalized form appears in
 /// `in_use_workspace_paths` (a live session still claims this root), and (c)
-/// `entry.chunk_count == 0` OR `entry.root_path` no longer exists on disk.
+/// `entry.root_path` no longer exists on disk, OR `entry.chunk_count == 0` and
+/// the root is at least `grace` old.
+///
+/// The grace window (#5065 review) applies ONLY to the 0-chunk half: an index
+/// whose root is gone from disk is unambiguously an orphan at any age, and
+/// there is nothing left to stat. See [`ORPHAN_GRACE`] for why the 0-chunk half
+/// needs one at all. Age is read from the root directory's creation time,
+/// falling back to its mtime where the filesystem has no birth time; the
+/// fallback's failure mode is a slightly longer window, never a shorter one.
 /// Test: `is_orphan_index_false_for_non_worktree_root`,
 /// `is_orphan_index_false_when_claimed_by_active_session`,
 /// `is_orphan_index_true_for_zero_chunk_unclaimed_worktree`,
 /// `is_orphan_index_true_for_deleted_root_path`,
-/// `is_orphan_index_false_for_populated_unclaimed_worktree_that_still_exists`.
+/// `is_orphan_index_false_for_populated_unclaimed_worktree_that_still_exists`,
+/// `is_orphan_index_spares_a_freshly_created_worktree_root`,
+/// `is_orphan_index_grace_does_not_protect_a_root_that_is_gone`.
 pub(super) fn is_orphan_index(
     entry: &IndexSnapshot,
     active_workspace_paths: &HashSet<PathBuf>,
+    grace: Duration,
 ) -> bool {
     if !is_session_worktree(&entry.root_path) {
         return false;
@@ -196,7 +226,31 @@ pub(super) fn is_orphan_index(
     if active_workspace_paths.contains(&canonical) {
         return false;
     }
-    entry.chunk_count == 0 || !entry.root_path.exists()
+    if !entry.root_path.exists() {
+        return true;
+    }
+    entry.chunk_count == 0 && !root_is_within_grace(&entry.root_path, grace)
+}
+
+/// Is `root` younger than `grace` — i.e. too new for a 0-chunk reading to mean
+/// anything (#5065 review)?
+///
+/// Why: isolated so the age rule is one testable place rather than a clause
+/// buried in [`is_orphan_index`], and so the metadata fallback order is stated
+/// once.
+/// What: prefers the directory's creation time and falls back to its mtime when
+/// the platform or filesystem has no birth time. Returns `false` when neither
+/// is readable — an unreadable root gets no protection, matching the rest of
+/// this module's bias toward reclaiming what it cannot account for.
+/// Test: `is_orphan_index_spares_a_freshly_created_worktree_root`.
+fn root_is_within_grace(root: &Path, grace: Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(root) else {
+        return false;
+    };
+    let Ok(stamp) = meta.created().or_else(|_| meta.modified()) else {
+        return false;
+    };
+    stamp.elapsed().map(|age| age < grace).unwrap_or(true) // a future timestamp (clock skew) reads as brand new
 }
 
 /// Fetch `(id, root_path)` for every index registered with the daemon.
@@ -319,7 +373,7 @@ impl SessionManager {
                 root_path,
                 chunk_count,
             };
-            if is_orphan_index(&snapshot, &active_workspace_paths) {
+            if is_orphan_index(&snapshot, &active_workspace_paths, ORPHAN_GRACE) {
                 candidates.push(id);
             }
         }
@@ -428,6 +482,12 @@ mod tests {
     }
 
     // ---- is_orphan_index ---------------------------------------------------
+    //
+    // A fixture root is created moments before the assertion, so every test
+    // asserting the pre-#5065 "0 chunks means orphan" rule passes
+    // `Duration::ZERO` to opt out of the age check. The two grace tests below
+    // pass the real `ORPHAN_GRACE` — that split is the point: the first group
+    // pins the rule for an AGED root, the second pins that a NEW one is spared.
 
     #[test]
     fn is_orphan_index_false_for_non_worktree_root() {
@@ -436,7 +496,7 @@ mod tests {
             root_path: PathBuf::from("/Users/dev/persistent-project"),
             chunk_count: 0,
         };
-        assert!(!is_orphan_index(&entry, &HashSet::new()));
+        assert!(!is_orphan_index(&entry, &HashSet::new(), Duration::ZERO));
     }
 
     #[test]
@@ -450,7 +510,7 @@ mod tests {
             chunk_count: 0,
         };
         let active: HashSet<PathBuf> = [wt].into_iter().collect();
-        assert!(!is_orphan_index(&entry, &active));
+        assert!(!is_orphan_index(&entry, &active, Duration::ZERO));
     }
 
     #[test]
@@ -463,7 +523,7 @@ mod tests {
             root_path: wt,
             chunk_count: 0,
         };
-        assert!(is_orphan_index(&entry, &HashSet::new()));
+        assert!(is_orphan_index(&entry, &HashSet::new(), Duration::ZERO));
     }
 
     #[test]
@@ -476,7 +536,7 @@ mod tests {
             root_path: PathBuf::from("/nonexistent/owner/repo/.worktrees/gone-session"),
             chunk_count: 500,
         };
-        assert!(is_orphan_index(&entry, &HashSet::new()));
+        assert!(is_orphan_index(&entry, &HashSet::new(), Duration::ZERO));
     }
 
     #[test]
@@ -492,6 +552,60 @@ mod tests {
             root_path: wt,
             chunk_count: 42,
         };
-        assert!(!is_orphan_index(&entry, &HashSet::new()));
+        assert!(!is_orphan_index(&entry, &HashSet::new(), Duration::ZERO));
+    }
+
+    /// Regression for the #5060 creation-time race (#5065 review): a
+    /// just-created worktree root is spared even though its index reads 0
+    /// chunks and no session record claims it yet.
+    ///
+    /// Why: this is the exact state #5060 introduces and holds for the whole
+    /// ~33.5 s lexical walk. Worktree creation registers the index BEFORE any
+    /// session record carries `workspace_path`, so the sweep's
+    /// claimed-by-a-live-session check — which covered this window when the
+    /// index was minted at LAUNCH — no longer does. The sweep runs every 60 s,
+    /// so it lands inside the window and deletes the index out from under the
+    /// walk populating it. The consequence is not just a lost index: session
+    /// launch then re-creates it with the vector lane on, undoing the
+    /// BM25+KG-only ruling.
+    /// What: builds the precise racing state (fresh `.worktrees` root, 0
+    /// chunks, unclaimed) and asserts it is NOT an orphan under the real
+    /// `ORPHAN_GRACE`. `is_orphan_index_true_for_zero_chunk_unclaimed_worktree`
+    /// above pins that the same shape IS still reclaimed once aged, so this is
+    /// a delay, not a blanket exemption.
+    /// Test: this test.
+    #[test]
+    fn is_orphan_index_spares_a_freshly_created_worktree_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = worktree_path(tmp.path(), "just-created");
+        std::fs::create_dir_all(&wt).unwrap();
+        let entry = IndexSnapshot {
+            id: "just-created".into(),
+            root_path: wt,
+            chunk_count: 0,
+        };
+        assert!(
+            !is_orphan_index(&entry, &HashSet::new(), ORPHAN_GRACE),
+            "a worktree created seconds ago reads 0 chunks because its walk is \
+             still running — deleting it here is the #5060 race"
+        );
+    }
+
+    /// The grace window protects a POPULATING index, never a vanished one.
+    ///
+    /// Why: the obvious way to write the grace check is to gate the whole
+    /// orphan verdict on age. That would make a worktree whose directory was
+    /// removed moments ago unreclaimable for the whole window, and — because
+    /// the root cannot be stat'd at all — the age read would have to guess.
+    /// The window belongs to the 0-chunk half only.
+    /// Test: this test.
+    #[test]
+    fn is_orphan_index_grace_does_not_protect_a_root_that_is_gone() {
+        let entry = IndexSnapshot {
+            id: "vanished".into(),
+            root_path: PathBuf::from("/nonexistent/owner/repo/.worktrees/vanished"),
+            chunk_count: 0,
+        };
+        assert!(is_orphan_index(&entry, &HashSet::new(), ORPHAN_GRACE));
     }
 }

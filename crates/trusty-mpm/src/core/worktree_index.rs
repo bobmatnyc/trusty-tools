@@ -27,6 +27,34 @@
 //! sync-under-threshold path: worktree creation and session launch never wait
 //! on indexing at any repo size.
 //!
+//! Disk cost, which dominates the wall-clock cost (#5065 review): every index
+//! trusty-search creates is COLOCATED — `create_index_handler` hardcodes
+//! `colocated: true`, so the store lands in `<worktree>/.trusty-search/`. Indexing
+//! at creation therefore multiplies on-disk index storage by the number of LIVE
+//! worktrees. `skip_vector` does not shrink that much: it suppresses
+//! `hnsw.usearch`, but the corpus and KG live in `index.redb`, which has no
+//! embeddings table, and the redb is the bigger file. Measured on this repo:
+//!
+//! | store | `index.redb` | `hnsw.usearch` |
+//! |---|---|---|
+//! | base checkout (full index) | 2.19 GiB | 777 MiB |
+//! | a `skip_vector` worktree | 1.48 GiB | 1.8 KiB (empty) |
+//! | a vector-bearing worktree | 1.00 GiB | 121 MiB |
+//!
+//! So the BM25+KG ruling buys back the HNSW file and roughly nothing else: a
+//! worktree index still costs ~1–1.5 GiB. At the 59 live worktrees this repo
+//! carries that is a peak on the order of 60–90 GB.
+//!
+//! Budget, stated so the tradeoff is explicit rather than discovered: this is
+//! PEAK usage, not a leak. The store lives inside the worktree directory, so
+//! `git worktree remove` reclaims it in full, and `session_manager::search_gc`
+//! plus the #2033 orphan sweep reclaim the daemon-side registration. The cost
+//! scales with worktrees you are actively keeping, and a fleet large enough to
+//! matter is already spending comparable disk on the checkouts themselves.
+//! Gating creation-time indexing on repo size, or routing worktree indexes to
+//! non-colocated storage, are the two levers if that budget stops holding;
+//! neither is taken here (the second needs a trusty-search change).
+//!
 //! Idempotence: the daemon's `POST /indexes` is find-or-create and its reindex
 //! trigger is freshness-gated (skipped when the index already holds chunks
 //! indexed within the last hour), so a second call against an already-indexed
@@ -50,14 +78,28 @@ use tracing::{debug, info, warn};
 /// scraping logs — and the "do not fail open silently" requirement needs each
 /// skip reason to be distinguishable in a test. Returning a typed outcome lets
 /// the decision logic be exercised synchronously and off the daemon.
-/// What: `Registered` carries the derived index id; the other variants name
-/// the specific reason nothing was registered.
+/// What: `Registered` carries the derived index id and means the daemon
+/// CONFIRMED the index with a 2xx; the other variants name the specific reason
+/// nothing is known to have been registered.
 /// Test: `skips_path_that_is_not_a_worktree`, `skips_missing_path`,
-/// `registers_index_for_real_worktree`.
+/// `reports_unconfirmed_rather_than_registered_when_the_daemon_never_answered`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeIndexOutcome {
-    /// An index was registered (or found already registered) under this id.
+    /// The daemon confirmed an index under this id (created, or already
+    /// present — `POST /indexes` is find-or-create).
     Registered(String),
+    /// The id was derived and a registration was REQUESTED, but the daemon
+    /// never confirmed it: unreachable, non-2xx, or suppressed because this is
+    /// a test process. The worktree is NOT known to be indexed — #5045 measured
+    /// the daemon-absent case at ~94% of worktrees, so this is the common
+    /// outcome, not an exotic one, and nothing may treat it as success.
+    RegistrationUnconfirmed {
+        /// The derived index id. Reported so a log line can name it, never so
+        /// a caller can pin it as if the index existed.
+        index_id: String,
+        /// Which of the three non-confirmations happened.
+        reason: trusty_common::search_index::IndexRegistration,
+    },
     /// The path does not exist, or is not a directory.
     PathMissing,
     /// The path exists but is not a git worktree — a plain clone, or no repo
@@ -78,12 +120,17 @@ pub enum WorktreeIndexOutcome {
 /// accidentally add a blocking one.
 /// What: spawns a detached OS thread running [`index_new_worktree`] and
 /// returns immediately. The thread is never joined; every failure inside it is
-/// logged and swallowed. A failure IS discoverable: a worktree whose index
-/// never materialised fails `tm doctor`'s existing `search` check, which
-/// probes the index id derived from the current project directory (see
-/// `daemon::doctor::check_search` / `expected_search_index_id`). #5045 owns
-/// widening that check to sweep every live worktree; this module deliberately
-/// adds no second doctor check.
+/// logged and swallowed.
+///
+/// How a failure surfaces (#5065 review): in this process, as a `warn` naming
+/// the outcome — [`index_new_worktree`] distinguishes a confirmed registration
+/// from a requested-but-unconfirmed one, so the log never claims a success it
+/// did not observe. It does NOT surface through `tm doctor`'s existing `search`
+/// check: that probes only the index id derived from the CURRENT project
+/// directory (`daemon::doctor::check_search` / `expected_search_index_id`), so
+/// it sees nothing for the other ~58 worktrees — which is the blind spot #5045
+/// documents. #5093 adds the pin-resolution check that actually sweeps; this
+/// module deliberately adds no second doctor check.
 /// Test: `background_entry_point_routes_through_spawn_detached`; the
 /// never-block guarantee itself is pinned by
 /// `spawn_detached_returns_before_work_finishes`, and the decision logic by
@@ -97,6 +144,15 @@ pub fn index_new_worktree_in_background(worktree_path: PathBuf) {
                     worktree = %worktree_path.display(),
                     index_id = %id,
                     "worktree index registered (BM25+KG, no vector lane) — #5060"
+                );
+            }
+            WorktreeIndexOutcome::RegistrationUnconfirmed { index_id, reason } => {
+                warn!(
+                    worktree = %worktree_path.display(),
+                    index_id = %index_id,
+                    ?reason,
+                    "worktree index REQUESTED but not confirmed — the worktree is \
+                     not known to be indexed (#5065)"
                 );
             }
             other => {
@@ -135,11 +191,15 @@ fn spawn_detached<F: FnOnce() + Send + 'static>(work: F) {
 /// test harness (`trusty_common::search_index` refuses daemon writes from a
 /// test process, #4255), so every branch below is exercised for real while the
 /// operator's registry stays untouched.
-/// What: three guards, then registration. (1) the path must exist and be a
+/// What: two guards, then registration. (1) the path must exist and be a
 /// directory; (2) it must be a git WORKTREE, not a plain clone — see
-/// [`is_git_worktree`]; (3) the derived index id must be non-empty. On
-/// success, delegates to `trusty_common::search_index::ensure_project_indexed_with`
-/// with `skip_vector: true` and `allow_sensitive_path: false`.
+/// [`is_git_worktree`]. Then delegates to
+/// `trusty_common::search_index::ensure_project_indexed_reporting` with
+/// `skip_vector: true` and the default `allow_sensitive_path: false`, and maps
+/// its report onto this module's outcome: `Confirmed` becomes `Registered`,
+/// everything else becomes `RegistrationUnconfirmed`. An empty derived id needs
+/// no guard of its own — the shared helper performs the identical check and
+/// reports `index_id: None`, which maps to `EmptyIndexId`.
 ///
 /// Opt-in model: this adds no new bypass and no new grant. `POST /indexes`
 /// enforces trusty-search's hard denylist (credential dirs, `.env`, OS-temp
@@ -149,7 +209,8 @@ fn spawn_detached<F: FnOnce() + Send + 'static>(work: F) {
 /// input: only a path trusty-mpm itself just created as a worktree reaches
 /// here, never an arbitrary cwd.
 /// Test: `skips_missing_path`, `skips_path_that_is_not_a_worktree`,
-/// `registers_index_for_real_worktree`, `is_idempotent_for_same_worktree`.
+/// `registers_index_for_real_worktree`, `is_idempotent_for_same_worktree`,
+/// `reports_unconfirmed_rather_than_registered_when_the_daemon_never_answered`.
 pub fn index_new_worktree(worktree_path: &Path) -> WorktreeIndexOutcome {
     if !worktree_path.is_dir() {
         warn!(
@@ -167,27 +228,27 @@ pub fn index_new_worktree(worktree_path: &Path) -> WorktreeIndexOutcome {
         return WorktreeIndexOutcome::NotAWorktree;
     }
 
-    let index_id = trusty_common::derive_index_id(worktree_path);
-    if index_id.trim().is_empty() {
+    // `skip_vector: true` is the whole point (see the module doc): BM25 + KG
+    // are built worktree-accurate, embeddings are not built at all. The
+    // defaulted `allow_sensitive_path: false` mirrors `register_project_index`
+    // (#2914) — a worktree is always a real directory inside a real repo, never
+    // a legitimately OS-temp root, so the denylist stays armed.
+    let opts = trusty_common::search_index::IndexOptions::default().with_skip_vector(true);
+    let report = trusty_common::search_index::ensure_project_indexed_reporting(worktree_path, opts);
+
+    let Some(index_id) = report.index_id else {
         warn!(
             worktree = %worktree_path.display(),
             "worktree index skipped: derived index id is empty"
         );
         return WorktreeIndexOutcome::EmptyIndexId;
-    }
-
-    // `skip_vector: true` is the whole point (see the module doc): BM25 + KG
-    // are built worktree-accurate, embeddings are not built at all.
-    // `allow_sensitive_path: false` mirrors `register_project_index` (#2914) —
-    // a worktree is always a real directory inside a real repo, never a
-    // legitimately OS-temp root, so the denylist stays armed.
-    let opts = trusty_common::search_index::IndexOptions {
-        allow_sensitive_path: false,
-        skip_vector: true,
     };
-    match trusty_common::search_index::ensure_project_indexed_with(worktree_path, opts) {
-        Some(id) => WorktreeIndexOutcome::Registered(id),
-        None => WorktreeIndexOutcome::EmptyIndexId,
+
+    match report.registration {
+        trusty_common::search_index::IndexRegistration::Confirmed => {
+            WorktreeIndexOutcome::Registered(index_id)
+        }
+        reason => WorktreeIndexOutcome::RegistrationUnconfirmed { index_id, reason },
     }
 }
 

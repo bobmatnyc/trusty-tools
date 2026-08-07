@@ -16,6 +16,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use trusty_common::search_index::IndexRegistration;
+
 use super::{WorktreeIndexOutcome, index_new_worktree, index_new_worktree_in_background};
 
 /// Run `git <args>` inside `dir`, returning whether it succeeded.
@@ -160,10 +162,51 @@ fn registers_index_for_real_worktree() {
     );
     assert_eq!(
         index_new_worktree(&fx.worktree),
-        WorktreeIndexOutcome::Registered("feat-index-on-create".to_string()),
+        WorktreeIndexOutcome::RegistrationUnconfirmed {
+            index_id: "feat-index-on-create".to_string(),
+            reason: IndexRegistration::SkippedUnderTest,
+        },
         "index id must be the worktree's own basename, not {:?}",
         fx.base.file_name()
     );
+}
+
+/// A registration the daemon never confirmed reports as UNCONFIRMED, not as
+/// `Registered` (#5065 review).
+///
+/// Why: `ensure_project_indexed_with` returns `Some(id)` whether the daemon
+/// answered 2xx, answered 500, or was never contacted at all. Mapping that
+/// `Some` straight onto `Registered` made this module log `worktree index
+/// registered` for a call that never left the process — announcing a success it
+/// never observed, in the one enum whose stated purpose (`WorktreeIndexOutcome`
+/// doc) is to keep outcomes distinguishable. #5045 measured the daemon-absent
+/// case at ~94% of worktrees, so the un-distinguished outcome was the COMMON
+/// one.
+/// What: runs the real entry point under the #4255 test harness, where the
+/// daemon write is suppressed and therefore provably unconfirmed, and asserts
+/// the outcome is `RegistrationUnconfirmed` carrying the reason — while still
+/// carrying the derived id, since the fail-open contract is unchanged.
+/// `registers_index_for_real_worktree` above pins the same thing from the
+/// id-derivation angle.
+/// Test: this test.
+#[test]
+fn reports_unconfirmed_rather_than_registered_when_the_daemon_never_answered() {
+    let Some(fx) = fixture("feat-unconfirmed") else {
+        eprintln!("skipping: git unavailable in this environment");
+        return;
+    };
+    let outcome = index_new_worktree(&fx.worktree);
+
+    assert!(
+        !matches!(outcome, WorktreeIndexOutcome::Registered(_)),
+        "nothing confirmed this index — `Registered` would be a success we \
+         never observed, got {outcome:?}"
+    );
+    let WorktreeIndexOutcome::RegistrationUnconfirmed { index_id, reason } = outcome else {
+        panic!("expected RegistrationUnconfirmed, got {outcome:?}");
+    };
+    assert_eq!(index_id, "feat-unconfirmed", "the id is still reported");
+    assert_eq!(reason, IndexRegistration::SkippedUnderTest);
 }
 
 /// Re-running against an already-registered worktree is a cheap, stable no-op.
@@ -184,7 +227,10 @@ fn is_idempotent_for_same_worktree() {
     assert_eq!(first, second);
     assert_eq!(
         first,
-        WorktreeIndexOutcome::Registered("feat-idempotent".to_string())
+        WorktreeIndexOutcome::RegistrationUnconfirmed {
+            index_id: "feat-idempotent".to_string(),
+            reason: IndexRegistration::SkippedUnderTest,
+        }
     );
 }
 
