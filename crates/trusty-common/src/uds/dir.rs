@@ -24,6 +24,32 @@ use std::path::Path;
 
 use super::{SOCKET_DIR_MODE, UdsSecurityError, peer::self_uid};
 
+/// Name the file type an `lstat` found, for a diagnostic that says what is
+/// actually there rather than only what was expected.
+///
+/// Test: `classify_existing_dir_rejects_a_regular_file` asserts the rendered
+/// message names the type.
+pub(crate) fn describe_file_type(ft: &std::fs::FileType) -> &'static str {
+    use std::os::unix::fs::FileTypeExt as _;
+    if ft.is_dir() {
+        "directory"
+    } else if ft.is_file() {
+        "regular file"
+    } else if ft.is_symlink() {
+        "symlink"
+    } else if ft.is_socket() {
+        "socket"
+    } else if ft.is_fifo() {
+        "fifo"
+    } else if ft.is_block_device() {
+        "block device"
+    } else if ft.is_char_device() {
+        "character device"
+    } else {
+        "unknown file type"
+    }
+}
+
 /// What [`prepare_socket_dir`] must do about a directory that already exists.
 ///
 /// Why: separating the decision from the syscalls makes the refusal paths —
@@ -52,17 +78,27 @@ pub(crate) enum DirVerdict {
 /// chmod'd the target. Then rejects a foreign owner, then reports whether the
 /// mode needs narrowing.
 ///
-/// `is_symlink`, `owner`, and `mode` must come from `symlink_metadata` (i.e.
-/// `lstat`), never `metadata` — passing followed values reintroduces the bug
-/// this function exists to prevent.
+/// The file-type assertion comes second, before ownership. Without it a regular
+/// file owned by this uid at the socket-dir path passed both remaining checks,
+/// was classified [`DirVerdict::Narrow`], and got chmod'd to `0700` before
+/// `bind` failed `ENOTDIR` — mangling the mode of a file this process did not
+/// create, and reporting neither the cause nor what it actually found
+/// (#5099 review round 2, finding 1).
+///
+/// `is_symlink`, `is_dir`, `owner`, and `mode` must come from
+/// `symlink_metadata` (i.e. `lstat`), never `metadata` — passing followed values
+/// reintroduces the bug this function exists to prevent.
 ///
 /// Test: `classify_existing_dir_rejects_a_symlink`,
+/// `classify_existing_dir_rejects_a_regular_file`,
 /// `classify_existing_dir_rejects_a_foreign_owner`,
 /// `classify_existing_dir_narrows_a_wide_dir`,
 /// `classify_existing_dir_accepts_an_already_correct_dir`.
 pub(crate) fn classify_existing_dir(
     path: &Path,
     is_symlink: bool,
+    is_dir: bool,
+    found: &str,
     owner: u32,
     mode: u32,
     own_uid: u32,
@@ -70,6 +106,12 @@ pub(crate) fn classify_existing_dir(
     if is_symlink {
         return Err(UdsSecurityError::SymlinkDir {
             path: path.to_path_buf(),
+        });
+    }
+    if !is_dir {
+        return Err(UdsSecurityError::NotADirectory {
+            path: path.to_path_buf(),
+            found: found.to_string(),
         });
     }
     if owner != own_uid {
@@ -104,7 +146,8 @@ pub(crate) fn classify_existing_dir(
 /// same ordering bug one level up. Ancestors are created with the default mode
 /// because only the leaf holds sockets. If `dir` already exists, its `lstat`
 /// results go through [`classify_existing_dir`]: a symlink is refused, a
-/// foreign owner is refused, and a wider mode is narrowed.
+/// non-directory is refused before anything can chmod it, a foreign owner is
+/// refused, and a wider mode is narrowed.
 ///
 /// **Residual race, deliberately not chased:** an attacker who can write to the
 /// parent could in principle swap the directory for a symlink between the
@@ -115,7 +158,9 @@ pub(crate) fn classify_existing_dir(
 ///
 /// Test: `prepare_socket_dir_creates_at_0700`,
 /// `prepare_socket_dir_narrows_a_wide_existing_dir`,
-/// `prepare_socket_dir_rejects_a_symlink`, `prepare_socket_dir_is_idempotent`.
+/// `prepare_socket_dir_rejects_a_symlink`,
+/// `prepare_socket_dir_rejects_a_regular_file_without_chmodding_it`,
+/// `prepare_socket_dir_is_idempotent`.
 pub fn prepare_socket_dir(dir: &Path) -> Result<(), UdsSecurityError> {
     // `Path::parent` yields `Some("")` for a bare relative name; `create_dir_all`
     // on an empty path fails, so filter it out rather than branching twice.
@@ -146,9 +191,12 @@ pub fn prepare_socket_dir(dir: &Path) -> Result<(), UdsSecurityError> {
         path: dir.to_path_buf(),
         source,
     })?;
+    let ftype = meta.file_type();
     let verdict = classify_existing_dir(
         dir,
-        meta.file_type().is_symlink(),
+        ftype.is_symlink(),
+        ftype.is_dir(),
+        describe_file_type(&ftype),
         meta.uid(),
         meta.permissions().mode(),
         self_uid(),

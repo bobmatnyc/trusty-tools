@@ -120,7 +120,7 @@ fn classify_existing_dir_rejects_a_symlink() {
     // reports the TARGET's owner and mode, so a link pointing at any directory
     // this uid happens to own would otherwise pass the owner check — and
     // `set_permissions` would then chmod the target.
-    let err = classify_existing_dir(Path::new("/tmp/x"), true, 501, 0o700, 501)
+    let err = classify_existing_dir(Path::new("/tmp/x"), true, false, "symlink", 501, 0o700, 501)
         .expect_err("a symlink must be refused even when owner and mode look right");
     assert!(
         matches!(err, UdsSecurityError::SymlinkDir { .. }),
@@ -129,8 +129,43 @@ fn classify_existing_dir_rejects_a_symlink() {
 }
 
 #[test]
+fn classify_existing_dir_rejects_a_regular_file() {
+    // Why: review round 2, finding 1. A regular file owned by this uid at the
+    // socket-dir path passed the symlink AND owner checks, was classified
+    // `Narrow`, and got chmod'd to 0700 before `bind` failed ENOTDIR.
+    let err = classify_existing_dir(
+        Path::new("/tmp/x"),
+        false,
+        false,
+        "regular file",
+        501,
+        0o644,
+        501,
+    )
+    .expect_err("a non-directory must be refused");
+    match err {
+        UdsSecurityError::NotADirectory { ref found, .. } => {
+            assert_eq!(found, "regular file", "diagnostic must name what was found");
+        }
+        other => panic!("expected NotADirectory, got {other:?}"),
+    }
+}
+
+#[test]
+fn classify_existing_dir_checks_file_type_before_owner() {
+    // Why: a foreign-owned non-directory must report NotADirectory. Reporting
+    // ForeignDirOwner would imply the path was a directory worth chmodding.
+    let err = classify_existing_dir(Path::new("/tmp/x"), false, false, "fifo", 999, 0o777, 501)
+        .expect_err("no");
+    assert!(
+        matches!(err, UdsSecurityError::NotADirectory { .. }),
+        "file type must be checked before ownership, got {err:?}"
+    );
+}
+
+#[test]
 fn classify_existing_dir_rejects_a_foreign_owner() {
-    let err = classify_existing_dir(Path::new("/tmp/x"), false, 0, 0o700, 501)
+    let err = classify_existing_dir(Path::new("/tmp/x"), false, true, "directory", 0, 0o700, 501)
         .expect_err("a root-owned directory must be refused");
     match err {
         UdsSecurityError::ForeignDirOwner {
@@ -144,13 +179,31 @@ fn classify_existing_dir_rejects_a_foreign_owner() {
 
 #[test]
 fn classify_existing_dir_narrows_a_wide_dir() {
-    let v = classify_existing_dir(Path::new("/tmp/x"), false, 501, 0o755, 501).expect("ours");
+    let v = classify_existing_dir(
+        Path::new("/tmp/x"),
+        false,
+        true,
+        "directory",
+        501,
+        0o755,
+        501,
+    )
+    .expect("ours");
     assert_eq!(v, DirVerdict::Narrow);
 }
 
 #[test]
 fn classify_existing_dir_accepts_an_already_correct_dir() {
-    let v = classify_existing_dir(Path::new("/tmp/x"), false, 501, 0o700, 501).expect("ours");
+    let v = classify_existing_dir(
+        Path::new("/tmp/x"),
+        false,
+        true,
+        "directory",
+        501,
+        0o700,
+        501,
+    )
+    .expect("ours");
     assert_eq!(v, DirVerdict::Accept);
 }
 
@@ -158,7 +211,8 @@ fn classify_existing_dir_accepts_an_already_correct_dir() {
 fn classify_existing_dir_checks_symlink_before_owner() {
     // Why: ordering matters. An attacker-owned symlink must report SymlinkDir,
     // not ForeignDirOwner — the latter would imply the path itself was checked.
-    let err = classify_existing_dir(Path::new("/tmp/x"), true, 999, 0o777, 501).expect_err("no");
+    let err = classify_existing_dir(Path::new("/tmp/x"), true, false, "symlink", 999, 0o777, 501)
+        .expect_err("no");
     assert!(
         matches!(err, UdsSecurityError::SymlinkDir { .. }),
         "symlink must be rejected before ownership is considered, got {err:?}"
@@ -233,6 +287,31 @@ fn prepare_socket_dir_rejects_a_symlink() {
         mode_of(&target),
         0o777,
         "the symlink target must NOT have been chmod'd"
+    );
+}
+
+#[test]
+fn prepare_socket_dir_rejects_a_regular_file_without_chmodding_it() {
+    // Why: the end-to-end half of review-round-2 finding 1. The pre-fix code
+    // chmod'd this file to 0700 on its way to an ENOTDIR from `bind`; the mode
+    // assertion is what proves the file was left alone.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let planted = tmp.path().join("sockets");
+    std::fs::write(&planted, b"not a directory").expect("plant file");
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+    let err = prepare_socket_dir(&planted).expect_err("a non-directory must be refused");
+
+    match err {
+        UdsSecurityError::NotADirectory { ref found, .. } => {
+            assert_eq!(found, "regular file");
+        }
+        other => panic!("expected NotADirectory, got {other:?}"),
+    }
+    assert_eq!(
+        mode_of(&planted),
+        0o644,
+        "the planted file must NOT have been chmod'd"
     );
 }
 
@@ -381,6 +460,39 @@ async fn connect_hardened_refuses_a_regular_file() {
         }
         other => panic!("expected UntrustedSocket, got {other:?}"),
     }
+}
+
+#[test]
+fn verify_socket_for_connect_reports_a_stat_failure_as_stat_not_create() {
+    // Why: review round 2, finding 2. A dialer creates nothing, so a failed
+    // stat used to surface as "create socket directory …" — naming an action
+    // never attempted.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let missing = tmp.path().join("absent").join("t.sock");
+
+    let err = verify_socket_for_connect(&missing).expect_err("must fail");
+
+    assert!(
+        matches!(err, UdsSecurityError::StatForConnect { .. }),
+        "expected StatForConnect, got {err:?}"
+    );
+    assert!(
+        !err.to_string().contains("create socket directory"),
+        "a dialer must not claim it was creating anything: {err}"
+    );
+}
+
+#[test]
+fn verify_socket_for_connect_refuses_a_regular_file_as_the_directory() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let planted = tmp.path().join("sockets");
+    std::fs::write(&planted, b"not a directory").expect("plant file");
+
+    let err = verify_socket_for_connect(&planted.join("t.sock")).expect_err("must refuse");
+    assert!(
+        matches!(err, UdsSecurityError::NotADirectory { .. }),
+        "expected NotADirectory, got {err:?}"
+    );
 }
 
 #[test]

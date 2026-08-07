@@ -29,7 +29,8 @@
 //! this module can be handed: a caller that points it at a directory an
 //! attacker can rename or unlink entries in retains a residual swap race that
 //! only `openat`/`fchmod` on a directory fd could close. Symlink pre-creation,
-//! which is the practical version of that attack, is refused outright — see
+//! which is the practical version of that attack, is refused outright, as is a
+//! non-directory sitting at the socket-directory path — see
 //! [`dir::prepare_socket_dir`]. Root is not defended against and cannot be.
 //!
 //! Deliberately not a transport: there is no framing or JSON-RPC here. #5089
@@ -114,6 +115,17 @@ pub enum UdsSecurityError {
         path: PathBuf,
     },
 
+    /// The socket-directory path exists but is not a directory. Refused before
+    /// anything chmods it — a regular file here used to be narrowed to `0700`
+    /// on its way to a confusing `ENOTDIR` from `bind` (#5099 review round 2).
+    #[error("socket directory {path} is a {found}, not a directory")]
+    NotADirectory {
+        /// The offending path.
+        path: PathBuf,
+        /// What `lstat` actually found there.
+        found: String,
+    },
+
     /// The directory already existed but belongs to a different uid. Repairing
     /// its mode would not make it safe — another user controls its contents —
     /// so this fails closed instead.
@@ -168,6 +180,19 @@ pub enum UdsSecurityError {
         path: PathBuf,
         /// Which property failed.
         reason: String,
+    },
+
+    /// Could not `lstat` a path while verifying it ahead of a connect. Distinct
+    /// from [`UdsSecurityError::CreateDir`]: a dialer creates nothing, so
+    /// reporting a creation failure there named an action never attempted
+    /// (#5099 review round 2, finding 2).
+    #[error("stat {path} while verifying it for connect: {source}")]
+    StatForConnect {
+        /// Path that could not be stat'd.
+        path: PathBuf,
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
     },
 
     /// `UnixStream::connect` failed.
@@ -380,13 +405,19 @@ pub fn verify_socket_for_connect(path: &Path) -> Result<(), UdsSecurityError> {
 
     let parent = socket_parent(path)?;
     let dmeta =
-        std::fs::symlink_metadata(parent).map_err(|source| UdsSecurityError::CreateDir {
+        std::fs::symlink_metadata(parent).map_err(|source| UdsSecurityError::StatForConnect {
             path: parent.to_path_buf(),
             source,
         })?;
     if dmeta.file_type().is_symlink() {
         return Err(UdsSecurityError::SymlinkDir {
             path: parent.to_path_buf(),
+        });
+    }
+    if !dmeta.file_type().is_dir() {
+        return Err(UdsSecurityError::NotADirectory {
+            path: parent.to_path_buf(),
+            found: dir::describe_file_type(&dmeta.file_type()).to_string(),
         });
     }
     if dmeta.uid() != own {
@@ -404,10 +435,11 @@ pub fn verify_socket_for_connect(path: &Path) -> Result<(), UdsSecurityError> {
         )));
     }
 
-    let smeta = std::fs::symlink_metadata(path).map_err(|source| UdsSecurityError::Connect {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let smeta =
+        std::fs::symlink_metadata(path).map_err(|source| UdsSecurityError::StatForConnect {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let ftype = smeta.file_type();
     if ftype.is_symlink() {
         return Err(refuse("socket path is a symlink".to_string()));
