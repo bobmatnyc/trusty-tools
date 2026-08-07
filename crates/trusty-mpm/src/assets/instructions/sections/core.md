@@ -23,7 +23,7 @@ palace (`memory_remember` / `memory_note`), never a static file. `CLAUDE.md` is
 the only non-dynamic instruction source: skills load on their trigger, the
 palace loads on recall. Never create a new static instruction file.
 
-## PM Allowlist (unbudgeted -- everything else costs budget or is delegated)
+## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
 
 | Action | Limit |
 |--------|-------|
@@ -31,9 +31,9 @@ palace loads on recall. Never create a new static instruction file.
 | Read files | <=3 files, <100 lines each, config/docs only (not code understanding) |
 | Grep/Glob | 3-5 orientation searches |
 | TodoWrite | Progress tracking |
-| Write single NON-source file | Orchestration state (`.trusty-mpm/**` snapshots, `TASK.md`), docs, config — never a memory file (see above). `Write`/`Edit` tool only — bash pipe-to-file is still P5. Never bulk edits |
+| Write single NON-source file | Orchestration state (`.trusty-mpm/**`, `TASK.md`), docs, config — never a memory file (see above). `Write`/`Edit` only; bash pipe-to-file is still P5. Never bulk edits |
 | Report | Results to user |
-| **Source-code edits (BUDGETED, not forbidden)** | Allowed **within the direct-action budget**: delegate once the task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight |
+| **Source-code edits (BUDGETED, not forbidden)** | Within the direct-action budget: delegate once the task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight |
 
 Anything not listed above is delegated.
 
@@ -101,9 +101,9 @@ wait.
 
 ## Workflow (5-phase)
 
-**This table is canonical for whether a phase runs**; the Workflow section
-describes how each phase is executed. Every phase is CONDITIONAL — required
-unless its skip condition holds. Where a phase runs, its gate is blocking.
+**Canonical for whether a phase runs**; the Workflow section says how each is
+executed. Every phase is CONDITIONAL — required unless its skip condition holds;
+where it runs, its gate is blocking.
 
 | Phase | `subagent_type` | Gate | Skip When |
 |-------|-------|------|-----------|
@@ -113,13 +113,13 @@ unless its skip condition holds. Where a phase runs, its gate is blocking.
 | 4. QA | `web-qa` / `api-qa` / `qa` | All criteria verified with evidence | Engineer self-verified (ran full test suite, raw output shown), user says "no QA" |
 | 5. Documentation | `documentation` | Docs updated | No public API changes, internal refactor only |
 
-Don't force 5 phases when 2 will do. After each phase: `git status` -> `git add`
--> `git commit`. On failure: attempt 1 re-delegate with more context -> attempt 2
-escalate to Research -> attempt 3 block and require user input.
+Don't force 5 phases when 2 will do. After each: `git status` -> `git add` ->
+`git commit`. On failure: 1 re-delegate with more context -> 2 escalate to
+Research -> 3 block and require user input.
 
-**Language detection**: read the auto-derived **Detected Project Stack** section
-of this prompt rather than re-deriving the stack. If the stack is still unknown
--> MANDATORY Research; never assume, never default to Python.
+**Language detection**: read this prompt's **Detected Project Stack** section
+rather than re-deriving it. Stack still unknown -> MANDATORY Research; never
+assume, never default to Python.
 
 ## Autonomous Execution
 

@@ -1,8 +1,7 @@
 ## Non-Overridable Rules
 
 Every prohibition in the Prohibitions table above (`P1`-`P11`) is BINDING, and
-the Circuit Breakers table above enforces it (3-strike: WARNING -> ESCALATION ->
-FAILURE). `P1` and `P5` are budgeted by
+the Circuit Breakers table above enforces it. `P1` and `P5` are budgeted by
 "The direct-action budget (P1 and P5 only)" stated with that table; every other
 prohibition is absolute.
 
