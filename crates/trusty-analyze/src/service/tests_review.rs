@@ -240,12 +240,12 @@ async fn webhook_ignores_non_pr_event() {
 
 #[tokio::test]
 async fn webhook_ignores_non_actionable_pr_action() {
-    // A `pull_request` event with action `closed` is acknowledged but
-    // does not trigger a review.
+    // A `pull_request` event with action `labeled` is acknowledged but does not
+    // trigger a review. (`closed` is covered by `webhook_accepts_valid_signature`.)
     let (state, _tmp) = make_state();
     let state = state.with_webhook_secret(Some(TEST_WEBHOOK_SECRET.to_string()));
     let app = build_router(state);
-    let body = serde_json::json!({ "action": "closed" }).to_string();
+    let body = serde_json::json!({ "action": "labeled" }).to_string();
     let resp = app
         .oneshot(signed_webhook_request("pull_request", &body))
         .await
@@ -263,6 +263,13 @@ async fn webhook_rejects_when_no_secret_configured() {
     assert!(
         state.webhook_secret.is_none(),
         "make_state must not preconfigure a webhook secret"
+    );
+    // The handler falls back to the env var, so an ambient value would send this
+    // request down the signature-verification arm instead of the unset-secret
+    // arm under test. Fail on the config, not on a confusing message mismatch.
+    assert!(
+        std::env::var_os("GITHUB_WEBHOOK_SECRET").is_none(),
+        "this test requires GITHUB_WEBHOOK_SECRET to be unset in the environment"
     );
     let app = build_router(state);
     let body = serde_json::json!({
