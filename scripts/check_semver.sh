@@ -13,10 +13,22 @@
 #   Cargo.toml always pairs local source with local dependency. The break is
 #   only visible against the REGISTRY, which is what this gate compares to.
 #
-# What: for every crate whose `crates/<crate>/src/**` changed in the PR, resolves
-#   the latest non-yanked version on crates.io and runs `cargo semver-checks`
-#   against it. A crate needs a check only when its declared version does not
-#   already carry a breaking bump; see "Already-breaking" below.
+# What: for one or more crates, resolves the latest non-yanked version on
+#   crates.io and runs `cargo semver-checks` against it. A crate needs a check
+#   only when its declared version does not already carry a breaking bump; see
+#   "Already-breaking" below. Crate selection is either explicit (`--crate`) or,
+#   with no arguments, every crate whose `crates/<crate>/src/**` changed against
+#   a base ref.
+#
+# Where this runs (#5149, moved from per-PR): the BLOCKING caller is
+#   `scripts/preflight-publish.sh` CHECK 5, which runs immediately before
+#   `cargo publish` and whose nonzero exit is the documented absolute stop — so
+#   a break is caught while the upload can still be prevented, not after
+#   crates.io has made it permanent. `.github/workflows/semver-checks.yml` runs
+#   the same command on every `<crate>-v<version>` tag push as a second,
+#   independent report. The per-PR trigger was removed: installing the pinned
+#   tool and warming a cold rustdoc cache cost 20+ minutes on every PR, and a
+#   SemVer break only matters when something is actually published.
 #
 # Baseline policy — SCOPED TO PUBLISHED CRATES, and an absent baseline is a
 #   RECORDED SKIP, never a silent one:
@@ -55,11 +67,15 @@
 #   silent hole.
 #
 # Usage:
+#   bash scripts/check_semver.sh --crate trusty-common # one crate (release path)
+#   bash scripts/check_semver.sh --probe trusty-common # baseline decision only
 #   bash scripts/check_semver.sh                       # diff vs origin/main
 #   bash scripts/check_semver.sh --base <ref>          # explicit base
-#   bash scripts/check_semver.sh --crate trusty-common # one crate, ignore diff
-#   bash scripts/check_semver.sh --probe trusty-common # baseline decision only
 #   SEMVER_GATE_BASE=<ref> bash scripts/check_semver.sh
+#
+#   `--crate` accepts either the crates.io package name (`tga`) or the crates/
+#   directory name (`trusty-git-analytics`), so a release tag's prefix can be
+#   handed straight to it in either accepted form (#1128).
 #
 # Exit: 0 when every checked crate is SemVer-clean (or is a recorded skip);
 #   1 when a crate needs a bump it does not have, or when the gate itself could
@@ -110,7 +126,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h | --help)
-      sed -n '2,90p' "$0" >&2
+      sed -n '2,89p' "$0" >&2
       exit 0
       ;;
     *)
@@ -305,6 +321,10 @@ elif mode == "dir":
             print(p["name"])
             break
 
+elif mode == "exists":
+    want = sys.argv[3]
+    print("yes" if any(p["name"] == want for p in meta["packages"]) else "no")
+
 elif mode == "features":
     crate = sys.argv[3]
     excluded = set(filter(None, sys.argv[4].split()))
@@ -349,6 +369,44 @@ dir_to_crate() {
   python3 "$PY_HELPER" dir "$META_FILE" "$REPO_ROOT" "$1"
 }
 
+# resolve_crate <name-or-dir> — print the package name for either a crates.io
+# package name (`tga`) or a crates/ directory name (`trusty-git-analytics`).
+#
+# Why: the release-time caller has a git tag, and a tag prefix is whichever of
+# the two the tagger used — `tga-v1.4.2` and `trusty-git-analytics-v1.4.2` are
+# both accepted tags for the same crate (#1128). Accepting both here mirrors
+# preflight-publish.sh's resolver so this workspace keeps ONE lookup convention.
+resolve_crate() {
+  local want="$1" name
+  if [[ "$(python3 "$PY_HELPER" exists "$META_FILE" "$want")" == "yes" ]]; then
+    echo "$want"
+    return 0
+  fi
+  name="$(dir_to_crate "$want")"
+  if [[ -n "$name" ]]; then
+    echo "$name"
+    return 0
+  fi
+  echo "FAIL: '${want}' is neither a workspace package name nor a crates/ directory." >&2
+  return 1
+}
+
+# require_tool — cargo-semver-checks must be installed, and its absence is a
+# HARD FAIL with a remedy, never a skip. This is the gate's last fail-open
+# surface on the release path: preflight-publish.sh runs it as the final barrier
+# before `cargo publish`, so "the tool wasn't there" reporting green would put
+# the repo back in the state that yanked trusty-analyze 0.7.3 (#4088).
+require_tool() {
+  if cargo semver-checks --version > /dev/null 2>&1; then
+    return 0
+  fi
+  echo "FAIL: TOOL ERROR — 'cargo semver-checks' is not installed." >&2
+  echo "      Install it before publishing:" >&2
+  echo "        cargo install cargo-semver-checks@0.50.0 --locked" >&2
+  echo "      A missing tool is NOT a pass (issue #5050)." >&2
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # --probe: report the baseline decision for one crate and stop. Exists so the
 # self-test can drive the registry probe — the gate's only fail-open surface —
@@ -372,7 +430,14 @@ fi
 CANDIDATES=""
 
 if [[ -n "$EXPLICIT_CRATES" ]]; then
-  CANDIDATES="$(printf '%s' "$EXPLICIT_CRATES" | grep -v '^$' | LC_ALL=C sort -u)"
+  while IFS= read -r want; do
+    [[ -z "$want" ]] && continue
+    if ! name="$(resolve_crate "$want")"; then
+      exit 1
+    fi
+    CANDIDATES="${CANDIDATES}${name}"$'\n'
+  done <<<"$(printf '%s' "$EXPLICIT_CRATES" | grep -v '^$')"
+  CANDIDATES="$(printf '%s' "$CANDIDATES" | grep -v '^$' | LC_ALL=C sort -u)"
   SCANNED="(explicit)"
 else
   if ! MERGE_BASE="$(git merge-base "$BASE" HEAD 2>/dev/null)"; then
@@ -472,6 +537,13 @@ while IFS= read -r crate; do
     echo "SKIP ${crate}: ${baseline} -> ${current} is already a major release — every lint is inapplicable"
     skipped=$((skipped + 1))
     continue
+  fi
+
+  # Checked lazily — a run whose every candidate skipped never needed the tool,
+  # and demanding it there would be friction with no coverage behind it.
+  if [[ -z "${TOOL_OK:-}" ]]; then
+    require_tool || exit 1
+    TOOL_OK=1
   fi
 
   if ! feature_args "$crate" > "${SCRATCH}/features.txt"; then
