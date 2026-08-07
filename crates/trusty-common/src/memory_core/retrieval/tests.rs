@@ -1922,9 +1922,15 @@ fn vec_at_cosine(reference: &[f32], cos: f32, seed: usize) -> Vec<f32> {
 /// Why (#4904): `hnsw_rs` recall on a two-point graph is not reliable — the
 /// pre-existing `dream_cycle_merges_duplicates` failure is the same shape, a
 /// top-3 search over two vectors that intermittently returns one. A ranking
-/// assertion must not inherit that. Padding the index to a couple of dozen
-/// points makes the search effectively exhaustive, so what the test observes is
-/// the scoring order and nothing else.
+/// assertion must not inherit that, so the index is padded to a couple of dozen
+/// points before anything is asserted about ordering.
+///
+/// #5162 corrects what that padding buys. It does NOT make the search
+/// exhaustive, as this comment used to claim: measured over 20,000 builds of
+/// this fixture, the miss rate is 0.3–0.6% at every pool size from 6 to 42
+/// points, because the miss is a connectivity property of the layer-0 graph and
+/// not a density one. See [`ranking_fixture_with_both_candidates`] for the
+/// measurement and for what the ranking tests do about it.
 /// What: inserts `n` drawers at cosines stepping down from 0.60, each on its own
 /// orthogonal direction, with mid-range importance so they cannot dominate under
 /// either the old or the new formula.
@@ -1990,8 +1996,6 @@ fn rank_score_keeps_importance_a_tiebreaker() {
 #[tokio::test]
 async fn l2_ranks_similar_low_importance_above_less_similar_high_importance() {
     init_embedder();
-    let dir = tempdir().unwrap();
-    let handle = make_handle(dir.path());
     let embedder = shared_embedder().await.unwrap();
 
     let query = "context budget startup memory migration duplicate deletion";
@@ -2001,29 +2005,7 @@ async fn l2_ranks_similar_low_importance_above_less_similar_high_importance() {
         .unwrap()
         .remove(0);
 
-    let room_id = Uuid::new_v4();
-
-    let mut on_topic = Drawer::new(room_id, "the fact the user was actually asking for");
-    on_topic.importance = 0.05;
-    let on_topic_id = on_topic.id;
-
-    let mut loud = Drawer::new(room_id, "an unrelated but maximally important drawer");
-    loud.importance = 1.0;
-    let loud_id = loud.id;
-
-    handle
-        .vector_store
-        .upsert(on_topic_id, vec_at_cosine(&qv, 0.80, 0))
-        .await
-        .unwrap();
-    handle
-        .vector_store
-        .upsert(loud_id, vec_at_cosine(&qv, 0.75, 1))
-        .await
-        .unwrap();
-    handle.add_drawer(on_topic);
-    handle.add_drawer(loud);
-    pad_index(&handle, &qv, 24).await;
+    let (_dir, handle, on_topic_id, loud_id) = ranking_fixture_with_both_candidates(&qv).await;
 
     let results = retrieve_l2(&handle, embedder.as_ref(), query, None, 5)
         .await
@@ -2037,9 +2019,93 @@ async fn l2_ranks_similar_low_importance_above_less_similar_high_importance() {
         results[0].drawer.id,
         results.iter().map(|r| r.score).collect::<Vec<_>>()
     );
+    // #5162: this assertion used to carry no evidence, so the CI failure it
+    // produced said only "expected the high-importance drawer second" and the
+    // investigation had to reconstruct the scores from scratch. Dump the same
+    // components the first assertion does.
     assert!(
         uuid_prefix_eq(results[1].drawer.id, loud_id),
-        "expected the high-importance drawer second"
+        "expected the high-importance drawer second, got {:?} \
+         (order={:?} scores={:?})",
+        results[1].drawer.id,
+        results.iter().map(|r| r.drawer.id).collect::<Vec<_>>(),
+        results.iter().map(|r| r.score).collect::<Vec<_>>()
+    );
+}
+
+/// Build the #4904 ranking fixture on an index whose candidate pool provably
+/// contains both drawers.
+///
+/// Why (#5162): `hnsw_rs` seeds its level-assignment RNG from OS entropy inside
+/// `Hnsw::new`, so every index build is a different random graph, and layer-0
+/// neighbour lists are pruned by Navarro's heuristic. Some of those graphs leave
+/// the 0.75-cosine drawer unreachable from the descent pivot — `search` walks
+/// the pivot's connected component and returns 15–20 of the 26 points, never
+/// offering that drawer as a candidate at all. Measured over 20,000 builds of
+/// this exact fixture: 85 misses (0.42%), always the runner-up and never the
+/// winner, which is precisely the shape of the `main` failure — `results[0]`
+/// held, `results[1]` did not. It is not density: the rate is 0.3–0.6% at every
+/// pool size from 6 to 42 points, and neither `set_keeping_pruned` (58/20,000)
+/// nor `set_extend_candidates` (90/20,000) removes it.
+///
+/// Whether the approximate index surfaces a candidate is a property of the
+/// index, with its own tests. It is not the ranking rule this test is named for,
+/// and it must not decide whether that rule looks broken.
+/// What: rebuilds the fixture until `vector_store::search` returns a full
+/// candidate pool containing both drawers, then hands it back. The retry
+/// condition reads the CANDIDATE POOL only, never the ranked output, so it
+/// cannot mask a ranking regression: a broken `rank_score` still yields a pool
+/// with both drawers on the first attempt and still fails the assertions.
+/// Test: `l2_ranks_similar_low_importance_above_less_similar_high_importance`.
+async fn ranking_fixture_with_both_candidates(
+    qv: &[f32],
+) -> (tempfile::TempDir, PalaceHandle, Uuid, Uuid) {
+    // At a 0.42% per-build miss rate, 12 attempts leave a 4e-30 chance of
+    // exhausting them — the assertion below is a corruption check, not a
+    // flake budget.
+    const MAX_ATTEMPTS: usize = 12;
+    // The pool `retrieve_l2` will see: top_k=5 over-fetches 3x.
+    const POOL: usize = 15;
+
+    for _ in 0..MAX_ATTEMPTS {
+        let dir = tempdir().unwrap();
+        let handle = make_handle(dir.path());
+        let room_id = Uuid::new_v4();
+
+        let mut on_topic = Drawer::new(room_id, "the fact the user was actually asking for");
+        on_topic.importance = 0.05;
+        let on_topic_id = on_topic.id;
+
+        let mut loud = Drawer::new(room_id, "an unrelated but maximally important drawer");
+        loud.importance = 1.0;
+        let loud_id = loud.id;
+
+        handle
+            .vector_store
+            .upsert(on_topic_id, vec_at_cosine(qv, 0.80, 0))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(loud_id, vec_at_cosine(qv, 0.75, 1))
+            .await
+            .unwrap();
+        handle.add_drawer(on_topic);
+        handle.add_drawer(loud);
+        pad_index(&handle, qv, 24).await;
+
+        let pool = handle.vector_store.search(qv, POOL).await.unwrap();
+        let has_both = [on_topic_id, loud_id]
+            .iter()
+            .all(|id| pool.iter().any(|h| uuid_prefix_eq(h.drawer_id, *id)));
+        if has_both && pool.len() == POOL {
+            return (dir, handle, on_topic_id, loud_id);
+        }
+    }
+    panic!(
+        "{MAX_ATTEMPTS} index builds in a row failed to surface both ranking \
+         drawers in a {POOL}-candidate pool; at the measured 0.42% miss rate \
+         that is not chance — the vector store or the fixture is broken"
     );
 }
 
