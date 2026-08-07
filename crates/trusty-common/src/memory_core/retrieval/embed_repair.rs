@@ -136,7 +136,7 @@ impl PalaceHandle {
             .drawers
             .read()
             .iter()
-            .filter(|d| !(d.is_expired_at(now) && !d.is_tier_c()))
+            .filter(|d| !d.is_expired_at(now) || d.is_tier_c())
             .map(|d| d.id)
             .collect();
         let missing_vector_ids: Vec<Uuid> = live
