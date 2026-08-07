@@ -108,6 +108,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "trusty-search sidecar reachability + expected-index-present probe (bounded by `PROBE_TIMEOUT`).",
     ),
     (
+        "search_index_pin",
+        "Resolves the index id the project's `.mcp.json` actually PINS (`trusty-search serve --index <id>`) against `GET /indexes/{id}/status`, and FAILS on a 404 — the pin names an index the daemon does not have, so every `search`/`grep` call in the session returns \"unknown index\". Index registration is fail-open at every step, so the pin advances even when creation failed and the `search` check above still reports healthy; 4 of 75 live worktrees had an index when this was measured. Read-only; never creates or reindexes (issue #5045).",
+    ),
+    (
         "worktrees",
         "No orphaned git worktrees under the managed workspace root (Fix 1b, #1840).",
     ),
