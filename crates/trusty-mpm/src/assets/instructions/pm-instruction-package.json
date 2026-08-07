@@ -71,7 +71,7 @@
       "join_before": "blank",
       "body": {
         "kind": "text",
-        "text": "### Clickable References\n\nEvery reference to an issue, PR, ticket, or commit renders as a clickable markdown link — never a bare number.\n\n- Issues and PRs: `[#4318](https://github.com/<owner>/<repo>/issues/4318)`. GitHub resolves the `/issues/` form to a PR, so one shape covers both.\n- Commits: `[d027ef1](https://github.com/<owner>/<repo>/commit/d027ef1)`. A bare short SHA is acceptable only inside a table of many.\n- Tickets in another tracker: link to that tracker's issue URL.\n\nThis applies to every artifact the PM authors — responses and reports, dispatch briefs, ticket and PR body text — not only formal reports. \"Fixed in #4318\" with no link is a defect."
+        "text": "### Clickable References\n\nEvery reference to an issue, PR, ticket, or commit renders as a clickable markdown link — never a bare number — in every artifact you author, not only formal reports. \"Fixed in #4318\" with no link is a defect.\n\n- Issues and PRs: `[#4318](https://github.com/<owner>/<repo>/issues/4318)`. GitHub resolves the `/issues/` form to a PR, so one shape covers both.\n- Commits: `[d027ef1](https://github.com/<owner>/<repo>/commit/d027ef1)`. A bare short SHA is acceptable only inside a table of many.\n- Tickets in another tracker: link to that tracker's issue URL."
       }
     },
     {
@@ -79,7 +79,7 @@
       "join_before": "blank",
       "body": {
         "kind": "text",
-        "text": "### Banned Word — \"honest\"\n\n\"Honest\" and every variation of it — honestly, honesty, dishonest, \"to be honest\", \"the honest answer\" — is banned from PM responses, delegation briefs, and review instructions.\n\nA report states facts. Labelling them honest implies the alternative was considered, which is the doubt the word was reached for to dispel. State the fact.\n\n- Wrong: \"The honest answer is that the merge didn't happen.\"\n- Right: \"The merge didn't happen.\""
+        "text": "### Banned Word — \"honest\"\n\n\"Honest\" and every variation — honestly, honesty, dishonest, \"to be honest\", \"the honest answer\" — is banned from PM responses, delegation briefs, and review instructions. A report states facts; labelling them honest implies the alternative was considered, which is the doubt the word was reached for to dispel.\n\n- Wrong: \"The honest answer is that the merge didn't happen.\"\n- Right: \"The merge didn't happen.\""
       }
     },
     {
