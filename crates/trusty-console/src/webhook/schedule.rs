@@ -45,7 +45,7 @@ use super::spool::SpoolEntry;
 /// `delivery_id` dedup step 4 owes is the real cross-process answer.
 ///
 /// Test: `claim_set_refuses_a_second_claim_on_the_same_path`,
-/// `claim_set_releases_on_drop`.
+/// `claim_set_releases_on_drop_even_when_the_holder_panics`.
 #[derive(Debug, Clone, Default)]
 pub struct ClaimSet {
     held: Arc<Mutex<HashSet<PathBuf>>>,

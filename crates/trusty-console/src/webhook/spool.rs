@@ -495,7 +495,7 @@ impl Spool {
     /// What: `rename` into [`EXHAUSTED_DIR_NAME`], then `fsync` both
     /// directories so the move survives a crash. Returns the new path.
     /// Test: `spool_quarantine_moves_an_entry_out_of_the_live_set`,
-    /// `sweep_quarantines_an_exhausted_entry`.
+    /// `sweep_quarantines_an_exhausted_entry_and_stops_paying_for_it`.
     pub fn quarantine(&self, path: &Path) -> Result<PathBuf, SpoolError> {
         let dest_dir = self.exhausted_root();
         std::fs::create_dir_all(&dest_dir).map_err(|source| SpoolError::PrepareDir {
