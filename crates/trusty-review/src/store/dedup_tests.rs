@@ -9,6 +9,8 @@
 //! Test: this file.
 
 use super::*;
+use crate::store::dedup_open::{DedupNeed, open_for};
+use std::time::{Duration, Instant};
 
 /// Env var naming a `dedup.redb` that a re-exec'd child process should hold
 /// open. Set only by `cross_process_holder_serialises_rather_than_locking_out`.
@@ -52,7 +54,7 @@ fn incompatible_dedup_db_is_recreated() {
     );
     // Fresh store: a claim against any SHA succeeds (no stale history).
     assert_eq!(
-        store.claim("o", "r", 1, "sha").unwrap(),
+        store.claim_blocking("o", "r", 1, "sha").unwrap(),
         ClaimOutcome::Claimed
     );
 }
@@ -60,7 +62,9 @@ fn incompatible_dedup_db_is_recreated() {
 #[test]
 fn first_claim_succeeds() {
     let (store, _d) = temp_store();
-    let outcome = store.claim("acme", "backend", 42, "sha-abc").unwrap();
+    let outcome = store
+        .claim_blocking("acme", "backend", 42, "sha-abc")
+        .unwrap();
     assert_eq!(outcome, ClaimOutcome::Claimed);
 }
 
@@ -70,11 +74,15 @@ fn concurrent_in_progress_skips() {
     // (and not stale) is skipped — another worker owns it.
     let (store, _d) = temp_store();
     assert_eq!(
-        store.claim("acme", "backend", 42, "sha-abc").unwrap(),
+        store
+            .claim_blocking("acme", "backend", 42, "sha-abc")
+            .unwrap(),
         ClaimOutcome::Claimed
     );
     assert_eq!(
-        store.claim("acme", "backend", 42, "sha-abc").unwrap(),
+        store
+            .claim_blocking("acme", "backend", 42, "sha-abc")
+            .unwrap(),
         ClaimOutcome::Skipped
     );
 }
@@ -83,13 +91,19 @@ fn concurrent_in_progress_skips() {
 fn claim_then_skip_after_complete() {
     let (store, _d) = temp_store();
     assert_eq!(
-        store.claim("acme", "backend", 42, "sha-abc").unwrap(),
+        store
+            .claim_blocking("acme", "backend", 42, "sha-abc")
+            .unwrap(),
         ClaimOutcome::Claimed
     );
-    store.complete("acme", "backend", 42, "sha-abc").unwrap();
+    store
+        .complete_blocking("acme", "backend", 42, "sha-abc")
+        .unwrap();
     // After completion, re-claiming the same SHA must be skipped.
     assert_eq!(
-        store.claim("acme", "backend", 42, "sha-abc").unwrap(),
+        store
+            .claim_blocking("acme", "backend", 42, "sha-abc")
+            .unwrap(),
         ClaimOutcome::Skipped
     );
 }
@@ -98,13 +112,19 @@ fn claim_then_skip_after_complete() {
 fn claim_allows_after_release() {
     let (store, _d) = temp_store();
     assert_eq!(
-        store.claim("acme", "backend", 42, "sha-abc").unwrap(),
+        store
+            .claim_blocking("acme", "backend", 42, "sha-abc")
+            .unwrap(),
         ClaimOutcome::Claimed
     );
     // Release (e.g. review aborted) → the SHA can be claimed again.
-    store.release("acme", "backend", 42, "sha-abc").unwrap();
+    store
+        .release_blocking("acme", "backend", 42, "sha-abc")
+        .unwrap();
     assert_eq!(
-        store.claim("acme", "backend", 42, "sha-abc").unwrap(),
+        store
+            .claim_blocking("acme", "backend", 42, "sha-abc")
+            .unwrap(),
         ClaimOutcome::Claimed
     );
 }
@@ -112,11 +132,17 @@ fn claim_allows_after_release() {
 #[test]
 fn different_sha_not_skipped() {
     let (store, _d) = temp_store();
-    store.claim("acme", "backend", 42, "sha-abc").unwrap();
-    store.complete("acme", "backend", 42, "sha-abc").unwrap();
+    store
+        .claim_blocking("acme", "backend", 42, "sha-abc")
+        .unwrap();
+    store
+        .complete_blocking("acme", "backend", 42, "sha-abc")
+        .unwrap();
     // A new head SHA on the same PR is a fresh review.
     assert_eq!(
-        store.claim("acme", "backend", 42, "sha-def").unwrap(),
+        store
+            .claim_blocking("acme", "backend", 42, "sha-def")
+            .unwrap(),
         ClaimOutcome::Claimed
     );
 }
@@ -146,7 +172,9 @@ fn stale_in_progress_is_reclaimable() {
     }
 
     assert_eq!(
-        store.claim("acme", "backend", 42, "sha-stale").unwrap(),
+        store
+            .claim_blocking("acme", "backend", 42, "sha-stale")
+            .unwrap(),
         ClaimOutcome::Claimed,
         "a stale in-progress claim must be reclaimable"
     );
@@ -172,14 +200,15 @@ fn two_stores_on_one_path_both_work() {
         .expect("a second holder of the same dedup.redb must not be locked out (#5064)");
 
     assert_eq!(
-        a.claim("acme", "backend", 42, "sha-abc").unwrap(),
+        a.claim_blocking("acme", "backend", 42, "sha-abc").unwrap(),
         ClaimOutcome::Claimed
     );
-    a.complete("acme", "backend", 42, "sha-abc").unwrap();
+    a.complete_blocking("acme", "backend", 42, "sha-abc")
+        .unwrap();
 
     // The point of the store is shared state: b must see a's completed claim.
     assert_eq!(
-        b.claim("acme", "backend", 42, "sha-abc").unwrap(),
+        b.claim_blocking("acme", "backend", 42, "sha-abc").unwrap(),
         ClaimOutcome::Skipped,
         "the second holder must observe the first holder's completed claim"
     );
@@ -202,7 +231,7 @@ fn store_holds_no_lock_between_operations() {
 
     // And it still works afterwards.
     assert_eq!(
-        store.claim("acme", "backend", 1, "sha").unwrap(),
+        store.claim_blocking("acme", "backend", 1, "sha").unwrap(),
         ClaimOutcome::Claimed
     );
 }
@@ -232,7 +261,7 @@ fn concurrent_threads_claim_exactly_once() {
             std::thread::spawn(move || -> Result<ClaimOutcome, DedupError> {
                 let store = DedupStore::open(&path)?;
                 barrier.wait();
-                store.claim("acme", "backend", 42, "sha-race")
+                store.claim_blocking("acme", "backend", 42, "sha-race")
             })
         })
         .collect();
@@ -264,7 +293,7 @@ fn held_lock_that_never_releases_reports_contention() {
 
     let holder = Database::create(&path).expect("holder takes the exclusive lock");
     let err = store
-        .claim("acme", "backend", 42, "sha-x")
+        .claim_blocking("acme", "backend", 42, "sha-x")
         .expect_err("a permanently-held lock must surface as an error, never as silent no-dedup");
     assert!(
         matches!(err, DedupError::Contended { .. }),
@@ -274,7 +303,9 @@ fn held_lock_that_never_releases_reports_contention() {
 
     // Once the holder releases, the very same store works again.
     assert_eq!(
-        store.claim("acme", "backend", 42, "sha-x").unwrap(),
+        store
+            .claim_blocking("acme", "backend", 42, "sha-x")
+            .unwrap(),
         ClaimOutcome::Claimed
     );
 }
@@ -340,10 +371,234 @@ fn cross_process_holder_serialises_rather_than_locking_out() {
     }
 
     let outcome = store
-        .claim("acme", "backend", 42, "sha-xproc")
+        .claim_blocking("acme", "backend", 42, "sha-xproc")
         .expect("claim must wait out the other process, not fail");
     assert_eq!(outcome, ClaimOutcome::Claimed);
 
     let status = child.wait().expect("child wait");
     assert!(status.success(), "lock-holder child failed: {status}");
+}
+
+// ─── #5064 review round 2 ────────────────────────────────────────────────────
+
+/// Why: the #702 rename-aside recovery used to run once per process, at
+/// startup, under redb's own exclusive lock. Making the open per-operation lets
+/// several processes recover at once, and an unguarded rename is data loss: a
+/// recoverer that read the old unreadable file renames away the *fresh*
+/// database a sibling has already committed claims into. The guard is a sidecar
+/// lock plus a re-check, so at most one process rebuilds and a loser adopts the
+/// winner's database instead of renaming it.
+///
+/// What: a winner takes the recovery-lock sidecar, and while holding it clears
+/// the unreadable file, rebuilds, and commits a claim. A second recoverer starts
+/// from the unreadable file and must (a) wait for the sidecar rather than
+/// rebuild immediately, and (b) come back to the winner's database with the
+/// claim intact.
+///
+/// The loss ordering itself — a recoverer renaming away a database committed
+/// during its own microsecond-wide window — is not reachable deterministically
+/// without a test hook inside the production open path, so this asserts the
+/// guard that closes it: the wait. An unguarded recovery ignores the sidecar
+/// and returns immediately, which is what makes this red.
+/// Test: this test.
+#[test]
+fn concurrent_recovery_waits_and_adopts_the_winners_database() {
+    use std::io::Write;
+    use std::sync::mpsc;
+
+    /// How long the winner holds the recovery lock.
+    const HOLD: Duration = Duration::from_millis(250);
+    /// Slack below `HOLD` that still proves the recoverer waited.
+    const MIN_WAIT: Duration = Duration::from_millis(120);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dedup.redb");
+    let lock_path =
+        crate::store::dedup_open::sibling(&path, crate::store::dedup_open::RECOVERY_LOCK_SUFFIX);
+
+    // Unreadable file: any opener enters the recovery path.
+    std::fs::File::create(&path)
+        .and_then(|mut f| f.write_all(&[0xABu8; 4096]))
+        .unwrap();
+
+    let (holding_tx, holding_rx) = mpsc::channel();
+    let (winner_path, winner_lock) = (path.clone(), lock_path.clone());
+    let winner = std::thread::spawn(move || {
+        let lock = std::fs::File::create(&winner_lock).expect("create recovery lock");
+        lock.lock().expect("take recovery lock");
+        holding_tx.send(()).expect("signal");
+        // Hold first, so the other recoverer observes the *unreadable* file and
+        // genuinely enters the recovery path, then rebuild under the lock.
+        std::thread::sleep(HOLD);
+        std::fs::remove_file(&winner_path).expect("clear the unreadable file");
+        {
+            let store = DedupStore::open(&winner_path).expect("winner rebuilds");
+            store
+                .claim_blocking("acme", "backend", 42, "sha-won")
+                .expect("winner claims");
+            store
+                .complete_blocking("acme", "backend", 42, "sha-won")
+                .expect("winner completes");
+        }
+        drop(lock);
+    });
+
+    holding_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("winner took the recovery lock");
+
+    let started = Instant::now();
+    let store =
+        DedupStore::open(&path).expect("the losing recoverer must still get a usable store");
+    let waited = started.elapsed();
+    winner.join().unwrap();
+
+    assert!(
+        waited >= MIN_WAIT,
+        "recovery is not serialised — the second recoverer rebuilt immediately \
+         instead of waiting for the recovery lock (waited {waited:?})"
+    );
+    assert_eq!(
+        store
+            .claim_blocking("acme", "backend", 42, "sha-won")
+            .unwrap(),
+        ClaimOutcome::Skipped,
+        "the winner's completed claim must survive — a loser must adopt the \
+         rebuilt database, never rename it away"
+    );
+}
+
+/// Why: `claim_blocking` sleeps for up to two seconds on the file lock, and the
+/// webhook review runs inside a `tokio::spawn`ed task. Blocking a runtime
+/// worker that long stalls every other task on it.
+/// What: on a single-worker runtime, holds the lock from a plain thread and
+/// runs the async `claim` concurrently with a short `tokio::time::sleep`. The
+/// timer must fire while the claim is still waiting — proof the wait is not
+/// occupying the only worker.
+/// Test: this test. Fails if `claim` runs its blocking body on the worker: the
+/// timer cannot be polled until the claim returns.
+#[tokio::test(flavor = "current_thread")]
+async fn async_claim_runs_off_the_runtime_worker() {
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dedup.redb");
+    let store = Arc::new(DedupStore::open(&path).expect("open"));
+
+    let hold_path = path.clone();
+    let (released_tx, released_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let db = Database::create(&hold_path).expect("holder takes the lock");
+        std::thread::sleep(Duration::from_millis(300));
+        drop(db);
+        let _ = released_tx.send(());
+    });
+
+    let timer_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&timer_fired);
+    let timer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let outcome = store
+        .claim("acme", "backend", 42, "sha-async")
+        .await
+        .expect("claim must wait out the holder");
+    assert_eq!(outcome, ClaimOutcome::Claimed);
+    assert!(
+        timer_fired.load(std::sync::atomic::Ordering::SeqCst),
+        "the runtime worker was blocked — a 50ms timer did not fire during a 300ms lock wait"
+    );
+
+    timer.await.unwrap();
+    released_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder released");
+    holder.join().unwrap();
+}
+
+/// Why: the async wrappers must not change the claim lifecycle, only where it
+/// runs.
+/// What: claim → complete → re-claim → release → re-claim through the async
+/// surface, asserting the same outcomes the blocking tests assert.
+/// Test: this test.
+#[tokio::test]
+async fn async_claim_complete_release_round_trip() {
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(DedupStore::open(&dir.path().join("dedup.redb")).expect("open"));
+
+    assert_eq!(
+        store.claim("acme", "backend", 7, "sha-1").await.unwrap(),
+        ClaimOutcome::Claimed
+    );
+    store.complete("acme", "backend", 7, "sha-1").await.unwrap();
+    assert_eq!(
+        store.claim("acme", "backend", 7, "sha-1").await.unwrap(),
+        ClaimOutcome::Skipped
+    );
+    store.release("acme", "backend", 7, "sha-1").await.unwrap();
+    assert_eq!(
+        store.claim("acme", "backend", 7, "sha-1").await.unwrap(),
+        ClaimOutcome::Claimed
+    );
+}
+
+/// Why: `serve --stdio` and the embedded MCP `AppState` never post, so they
+/// have no reason to create — or lock — the shared file.
+/// What: `NotNeeded` returns `None` and leaves the filesystem untouched.
+/// Test: this test.
+#[test]
+fn open_for_not_needed_touches_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let dedup = open_for(dir.path(), DedupNeed::NotNeeded).expect("must not fail");
+    assert!(dedup.is_none(), "a non-posting mode must hold no store");
+    assert!(
+        !dir.path().join("dedup.redb").exists(),
+        "a non-posting mode must not create dedup.redb (#5064)"
+    );
+}
+
+/// Why: the HTTP/webhook mode posts, so it must have the claim gate.
+/// What: `Required` opens the store and creates the file.
+/// Test: this test.
+#[test]
+fn open_for_required_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let dedup = open_for(dir.path(), DedupNeed::Required).expect("must open");
+    assert!(dedup.is_some());
+    assert!(dir.path().join("dedup.redb").exists());
+}
+
+/// Why: the fail-open shape #5064 exists to remove — an unopenable store
+/// downgraded to `None`, leaving a posting-capable server with no idempotency
+/// and a green health signal.
+/// What: makes `dedup.redb` a directory so the open cannot succeed, then
+/// asserts the error propagates instead of becoming `None`.
+/// Test: this test.
+#[test]
+fn open_for_required_propagates_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("dedup.redb")).unwrap();
+    let err = open_for(dir.path(), DedupNeed::Required)
+        .expect_err("an unopenable required store must be an error, not `None`");
+    assert!(
+        matches!(err, DedupError::Open(_)),
+        "expected DedupError::Open, got {err:?}"
+    );
+}
+
+/// Why: the ADR-0034 topology — a console-spawned webhook worker and the HTTP
+/// daemon are both posting-capable and both point at one `--log-dir`.
+/// What: two `Required` opens on the same log dir must both succeed.
+/// Test: this test. Fails before the fix at the second open.
+#[test]
+fn two_posting_servers_share_a_log_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = open_for(dir.path(), DedupNeed::Required).expect("first server");
+    let second = open_for(dir.path(), DedupNeed::Required)
+        .expect("a second posting-capable server on the same --log-dir must open too (#5064)");
+    assert!(first.is_some() && second.is_some());
 }

@@ -1847,3 +1847,71 @@ fn build_author_rationale_single_field_only() {
         "absent description must not render a heading"
     );
 }
+
+// ─── #5064: the dedup claim gate fails closed ────────────────────────────────
+
+/// Why: this is the arm that made #5064 dangerous. The store now refuses to
+/// start without a claim gate, but the *operation* path used to log
+/// `"dedup claim failed (proceeding without dedup)"` and review anyway — so a
+/// stuck holder produced an ungated live comment, and another on redelivery.
+/// A stuck holder is not hypothetical: a rolling upgrade where a pre-fix
+/// `serve --stdio` is still running produces exactly one.
+/// What: `Contended` must map to `Abort`, never `Proceed`.
+/// Test: this test.
+#[test]
+fn classify_claim_contended_aborts() {
+    let gate = classify_claim(Err(DedupError::Contended {
+        path: "/tmp/dedup.redb".to_string(),
+        waited_ms: 2000,
+    }));
+    match gate {
+        ClaimGate::Abort(reason) => assert!(
+            reason.contains("locked"),
+            "the abort reason must name the contention: {reason}"
+        ),
+        ClaimGate::Proceed => {
+            panic!("a contended claim must NOT proceed — that posts an ungated comment (#5064)")
+        }
+        ClaimGate::DuplicateSkip => panic!("a contended claim is not a duplicate"),
+    }
+}
+
+/// Why: every `DedupError` means the same thing operationally — the gate did
+/// not engage — so the fail-closed rule cannot be special-cased to one variant.
+/// What: `Open`, `Transaction`, and `Serde` all abort too.
+/// Test: this test.
+#[test]
+fn classify_claim_open_error_aborts() {
+    for err in [
+        DedupError::Open("no such file".to_string()),
+        DedupError::Transaction("commit failed".to_string()),
+        DedupError::Serde("bad json".to_string()),
+    ] {
+        assert!(
+            matches!(classify_claim(Err(err)), ClaimGate::Abort(_)),
+            "every store error must abort — the gate did not engage"
+        );
+    }
+}
+
+/// Why: the fail-closed rule must not break the happy path.
+/// What: `Claimed` proceeds.
+/// Test: this test.
+#[test]
+fn classify_claim_claimed_proceeds() {
+    assert!(matches!(
+        classify_claim(Ok(ClaimOutcome::Claimed)),
+        ClaimGate::Proceed
+    ));
+}
+
+/// Why: a completed review for this SHA is the case dedup exists to catch.
+/// What: `Skipped` is a duplicate, distinct from an abort.
+/// Test: this test.
+#[test]
+fn classify_claim_skipped_is_duplicate() {
+    assert!(matches!(
+        classify_claim(Ok(ClaimOutcome::Skipped)),
+        ClaimGate::DuplicateSkip
+    ));
+}

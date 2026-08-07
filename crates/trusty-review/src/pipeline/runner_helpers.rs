@@ -226,7 +226,7 @@ pub(super) async fn resolve_diff_token(
 /// flagged `dry_run = true`.
 /// Test: `run_review_fail_safe_on_llm_error`, `run_review_missing_diff_file_sets_error`,
 /// `findings_count_matches_len_on_abort`.
-pub(super) fn abort_dry(
+pub(super) async fn abort_dry(
     mut result: ReviewResult,
     config: &ReviewConfig,
     input: &ReviewInput,
@@ -239,13 +239,16 @@ pub(super) fn abort_dry(
     // Release the in-progress claim so a retry can re-run this head SHA.
     if !result.head_sha.is_empty()
         && let Some(store) = deps.dedup.as_ref()
-        && let Err(e) = store.release(
-            &result.owner,
-            &result.repo,
-            result.pr_number,
-            &result.head_sha,
-        )
+        && let Err(e) = store
+            .release(
+                &result.owner,
+                &result.repo,
+                result.pr_number,
+                &result.head_sha,
+            )
+            .await
     {
+        // Non-fatal: nothing was posted, and the InProgress record ages out.
         warn!("dedup release() after abort failed (non-fatal): {e}");
     }
     if input.write_log {

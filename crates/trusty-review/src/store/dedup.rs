@@ -18,35 +18,33 @@
 //! locks every other process out of the same `dedup.redb`. `DedupStore`
 //! therefore holds only a path: it opens redb for the duration of one operation
 //! and drops it again, so concurrent holders serialise instead of colliding.
+//! The open/lock/recovery plumbing lives in `dedup_open.rs`.
 //!
-//! Fail-safe: every method returns a typed `DedupError`, but the caller (the
-//! runner) is expected to *log and proceed* on error — a store failure must
-//! never crash or block a review.
+//! Error contract (#5064): a failed operation means the claim gate did NOT
+//! engage — the caller does not know whether this head SHA was already
+//! reviewed, and cannot record that it is reviewing it now. Callers must
+//! therefore **abort without posting**, never log-and-proceed. A dropped
+//! review is recoverable (GitHub redelivers); a duplicate comment is not.
+//! `pipeline::runner::classify_claim` is the single place that decision is
+//! made.
+//!
+//! Blocking: the `*_blocking` methods sleep while waiting for the file lock and
+//! must never run on an async runtime worker. Async callers use the `async`
+//! methods, which move the work to a blocking thread.
 //!
 //! Test: `claim_then_skip_after_complete`, `claim_allows_after_release`,
 //! `stale_in_progress_is_reclaimable`, `different_sha_not_skipped`,
 //! `two_stores_on_one_path_both_work`, `concurrent_threads_claim_exactly_once`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
+use super::dedup_open::open_dedup_db_waiting;
 use crate::config::constants::DEDUP_STALE_SECS;
-
-/// How long an operation waits for another holder to release `dedup.redb`
-/// before failing loudly (#5064).
-///
-/// Each holder now keeps the lock only for a single open + write transaction +
-/// fsync, so a wait longer than a second means something is genuinely wrong
-/// rather than merely busy. A bounded budget also keeps the blocking window on
-/// an async runtime worker short.
-const LOCK_WAIT_BUDGET: Duration = Duration::from_secs(2);
-
-/// Poll interval while waiting out a concurrent holder's lock.
-const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// redb table: composite key → serialised `ClaimRecord` (JSON).
 ///
@@ -61,8 +59,10 @@ const CLAIMS: TableDefinition<&str, &str> = TableDefinition::new("dedup_claims")
 /// Errors produced by the dedup store.
 ///
 /// Why: a typed enum lets the caller distinguish "store unavailable" from
-/// "serialisation bug" in logs, even though the policy for both is the same
-/// (log + proceed).
+/// "serialisation bug" in logs. #5064: the *policy* is the same for every
+/// variant — the claim gate did not engage, so the caller aborts without
+/// posting — but the diagnosis differs, and `Contended` in particular tells an
+/// operator to look for a second holder rather than a corrupt file.
 /// What: wraps redb's database/transaction/table/commit errors plus JSON
 /// (de)serialisation failures.
 /// Test: error variants are surfaced via the public methods; `Display` is
@@ -136,94 +136,6 @@ pub enum ClaimOutcome {
     Claimed,
     /// A completed review already exists for this SHA; skip.
     Skipped,
-}
-
-/// Outcome of one non-blocking attempt to open `dedup.redb`.
-///
-/// Why: #5064 needs "someone else holds the lock right now" to be a retryable
-/// state, not an error — collapsing it into `DedupError::Open` is what let the
-/// caller mistake contention for an unusable store and continue without one.
-/// What: `Ready` carries the opened database; `Locked` means redb reported
-/// `DatabaseAlreadyOpen` and the caller may retry.
-/// Test: `two_stores_on_one_path_both_work` exercises the `Locked` → `Ready`
-/// transition; `held_lock_that_never_releases_reports_contention` the timeout.
-enum OpenAttempt {
-    /// The database was opened; the caller owns the exclusive lock.
-    Ready(Box<Database>),
-    /// Another holder has the exclusive lock; retryable.
-    Locked,
-}
-
-/// Try once to open the dedup redb at `path`, recreating it empty on an
-/// incompatible (redb-2.x) format (issue #702).
-///
-/// Why: redb 4.x cannot open a `dedup.redb` written by redb 2.x. The dedup
-/// store is a best-effort idempotency cache, so on that error we move the stale
-/// file aside (`*.v2-incompatible`) and create a fresh empty store rather than
-/// crashing — losing the history at most causes one duplicate review.
-/// What: on `DatabaseAlreadyOpen` returns [`OpenAttempt::Locked`]; on
-/// `UpgradeRequired` / `RepairAborted` it renames the file aside, logs an
-/// `ERROR`, and retries the create; other errors map to `DedupError::Open`.
-/// Test: `incompatible_dedup_db_is_recreated`.
-fn try_open_dedup_db(path: &Path) -> Result<OpenAttempt, DedupError> {
-    match Database::create(path) {
-        Ok(db) => Ok(OpenAttempt::Ready(Box::new(db))),
-        // #5064: contention is transient — hand it back for the retry loop.
-        Err(redb::DatabaseError::DatabaseAlreadyOpen) => Ok(OpenAttempt::Locked),
-        Err(e) if super::redb_error_is_incompatible_format(&e) => {
-            let mut backup = path.as_os_str().to_os_string();
-            backup.push(".v2-incompatible");
-            let backup = std::path::PathBuf::from(backup);
-            std::fs::rename(path, &backup).map_err(|io| {
-                DedupError::Open(format!(
-                    "incompatible-format dedup redb at {} could not be backed up: {io}",
-                    path.display()
-                ))
-            })?;
-            tracing::error!(
-                path = %path.display(),
-                backup = %backup.display(),
-                error = %e,
-                "dedup redb is in an incompatible/old format (redb 2.x); moved it aside and \
-                 creating a fresh empty dedup store"
-            );
-            Database::create(path)
-                .map(|db| OpenAttempt::Ready(Box::new(db)))
-                .map_err(|e| DedupError::Open(e.to_string()))
-        }
-        Err(e) => Err(DedupError::Open(e.to_string())),
-    }
-}
-
-/// Open the dedup redb at `path`, waiting out a concurrent holder's exclusive
-/// lock (#5064).
-///
-/// Why: `dedup.redb` now has several legitimate openers — the HTTP daemon, a
-/// console-spawned webhook worker, and the CLI — and redb's lock is exclusive.
-/// Waiting turns a collision into a short serialisation instead of a lost
-/// store, which is the only outcome that preserves the claim gate.
-/// What: retries [`try_open_dedup_db`] every [`LOCK_POLL_INTERVAL`] until it
-/// succeeds or [`LOCK_WAIT_BUDGET`] elapses, then returns
-/// [`DedupError::Contended`]. Non-contention errors propagate immediately.
-/// Test: `two_stores_on_one_path_both_work`,
-/// `held_lock_that_never_releases_reports_contention`.
-fn open_dedup_db_waiting(path: &Path) -> Result<Box<Database>, DedupError> {
-    let started = Instant::now();
-    loop {
-        match try_open_dedup_db(path)? {
-            OpenAttempt::Ready(db) => return Ok(db),
-            OpenAttempt::Locked => {
-                let waited = started.elapsed();
-                if waited >= LOCK_WAIT_BUDGET {
-                    return Err(DedupError::Contended {
-                        path: path.display().to_string(),
-                        waited_ms: u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
-                    });
-                }
-                std::thread::sleep(LOCK_POLL_INTERVAL);
-            }
-        }
-    }
 }
 
 // ─── Store ──────────────────────────────────────────────────────────────────────
@@ -308,7 +220,7 @@ impl DedupStore {
     /// process" contract is enforced. Every public method routes through it, so
     /// no code path can accidentally retain the exclusive lock.
     /// What: takes the in-process `gate`, opens redb (waiting out a concurrent
-    /// holder up to [`LOCK_WAIT_BUDGET`]), runs `f`, then drops the database.
+    /// holder up to the lock-wait budget), runs `f`, then drops the database.
     /// A poisoned `gate` is recovered rather than propagated: the guarded state
     /// is `()`, and the durable state lives in redb, which is re-opened here.
     /// Test: `concurrent_threads_claim_exactly_once`,
@@ -326,6 +238,9 @@ impl DedupStore {
 
     /// Attempt to claim a review for `(owner, repo, pr, head_sha)`.
     ///
+    /// **Blocking** — waits on the redb file lock. Async callers must use
+    /// [`DedupStore::claim`], never this directly (#5064).
+    ///
     /// Why: this is the idempotency gate — it must atomically decide whether the
     /// caller runs the review or skips because a completed one already exists.
     /// What: within one write transaction, reads any existing record: a
@@ -334,7 +249,7 @@ impl DedupStore {
     /// writes a fresh `InProgress` claim and returns `Claimed`.
     /// Test: `claim_then_skip_after_complete`, `concurrent_in_progress_skips`,
     /// `stale_in_progress_is_reclaimable`.
-    pub fn claim(
+    pub fn claim_blocking(
         &self,
         owner: &str,
         repo: &str,
@@ -397,11 +312,13 @@ impl DedupStore {
 
     /// Mark a claimed review as completed (idempotency-defining state).
     ///
+    /// **Blocking** — see [`DedupStore::complete`] for the async form.
+    ///
     /// Why: only a completed claim suppresses future re-runs; this is called on
     /// successful review finish.
     /// What: overwrites the record with a `Completed` state and fresh timestamp.
     /// Test: `claim_then_skip_after_complete`.
-    pub fn complete(
+    pub fn complete_blocking(
         &self,
         owner: &str,
         repo: &str,
@@ -413,11 +330,13 @@ impl DedupStore {
 
     /// Release an in-progress claim without marking it completed.
     ///
+    /// **Blocking** — see [`DedupStore::release`] for the async form.
+    ///
     /// Why: if a review aborts (error, panic-recovery, shutdown) the claim must
     /// be dropped so a later attempt can re-run instead of being suppressed.
     /// What: removes the record for the key entirely.
     /// Test: `claim_allows_after_release`.
-    pub fn release(
+    pub fn release_blocking(
         &self,
         owner: &str,
         repo: &str,
@@ -481,6 +400,93 @@ impl DedupStore {
     /// Build the composite key string for a review.
     fn key(owner: &str, repo: &str, pr: u64, head_sha: &str) -> String {
         format!("{owner}/{repo}/{pr}/{head_sha}")
+    }
+}
+
+// ─── Async surface ──────────────────────────────────────────────────────────────
+
+/// Async wrappers for every store operation (#5064).
+///
+/// Why: the blocking methods sleep for up to two seconds waiting on the redb
+/// file lock, and every production caller runs inside tokio — the webhook
+/// review runs in a `tokio::spawn`ed task. Blocking a runtime worker for that
+/// long stalls every other task on it. These wrappers move the work to a
+/// blocking thread so the wait costs a task, not a worker.
+/// What: each clones the `Arc` and the string arguments (`spawn_blocking`
+/// requires `'static`) and forwards to the matching `*_blocking` method. A
+/// join failure — a panic in the closure, or runtime shutdown — surfaces as
+/// `DedupError::Transaction` rather than being unwrapped, so it reaches the
+/// same fail-closed path as any other store failure.
+/// Test: `async_claim_runs_off_the_runtime_worker`,
+/// `async_claim_complete_release_round_trip`.
+impl DedupStore {
+    /// Async [`DedupStore::claim_blocking`].
+    pub async fn claim(
+        self: &Arc<Self>,
+        owner: &str,
+        repo: &str,
+        pr: u64,
+        head_sha: &str,
+    ) -> Result<ClaimOutcome, DedupError> {
+        let (this, owner, repo, sha) = self.owned_args(owner, repo, head_sha);
+        spawn_store_op(move || this.claim_blocking(&owner, &repo, pr, &sha)).await
+    }
+
+    /// Async [`DedupStore::complete_blocking`].
+    pub async fn complete(
+        self: &Arc<Self>,
+        owner: &str,
+        repo: &str,
+        pr: u64,
+        head_sha: &str,
+    ) -> Result<(), DedupError> {
+        let (this, owner, repo, sha) = self.owned_args(owner, repo, head_sha);
+        spawn_store_op(move || this.complete_blocking(&owner, &repo, pr, &sha)).await
+    }
+
+    /// Async [`DedupStore::release_blocking`].
+    pub async fn release(
+        self: &Arc<Self>,
+        owner: &str,
+        repo: &str,
+        pr: u64,
+        head_sha: &str,
+    ) -> Result<(), DedupError> {
+        let (this, owner, repo, sha) = self.owned_args(owner, repo, head_sha);
+        spawn_store_op(move || this.release_blocking(&owner, &repo, pr, &sha)).await
+    }
+
+    /// Clone the arguments `spawn_blocking`'s `'static` bound requires.
+    fn owned_args(
+        self: &Arc<Self>,
+        owner: &str,
+        repo: &str,
+        head_sha: &str,
+    ) -> (Arc<Self>, String, String, String) {
+        (
+            Arc::clone(self),
+            owner.to_string(),
+            repo.to_string(),
+            head_sha.to_string(),
+        )
+    }
+}
+
+/// Run one blocking store operation off the async runtime's worker threads.
+///
+/// Why: see the `impl` block above — the file-lock wait must not occupy a
+/// tokio worker.
+/// What: `spawn_blocking` plus join-error mapping; the closure's own
+/// `DedupError` passes through untouched.
+/// Test: `async_claim_runs_off_the_runtime_worker`.
+async fn spawn_store_op<T: Send + 'static>(
+    op: impl FnOnce() -> Result<T, DedupError> + Send + 'static,
+) -> Result<T, DedupError> {
+    match tokio::task::spawn_blocking(op).await {
+        Ok(result) => result,
+        Err(join) => Err(DedupError::Transaction(format!(
+            "dedup store task did not complete: {join}"
+        ))),
     }
 }
 

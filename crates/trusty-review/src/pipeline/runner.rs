@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::runner_coverage::load_coverage_contrib;
 use super::runner_helpers::{
@@ -43,7 +43,7 @@ use crate::{
         verify::maybe_verify,
         voice_config::build_voice_config,
     },
-    store::{ClaimOutcome, DedupStore},
+    store::{ClaimOutcome, DedupError, DedupStore},
 };
 
 // ─── Pipeline input ───────────────────────────────────────────────────────────
@@ -244,8 +244,8 @@ pub async fn run_review(
         && !head_sha.is_empty()
         && let Some(store) = deps.dedup.as_ref()
     {
-        match store.claim(&owner, &repo, pr_number, &head_sha) {
-            Ok(ClaimOutcome::Skipped) => {
+        match classify_claim(store.claim(&owner, &repo, pr_number, &head_sha).await) {
+            ClaimGate::DuplicateSkip => {
                 info!(
                     owner = %owner,
                     repo = %repo,
@@ -262,11 +262,20 @@ pub async fn run_review(
                 result.findings_count = result.findings.len();
                 return result;
             }
-            Ok(ClaimOutcome::Claimed) => {
+            ClaimGate::Proceed => {
                 debug!(head_sha = %head_sha, "dedup: claimed review slot");
             }
-            Err(e) => {
-                warn!("dedup claim failed (proceeding without dedup): {e}");
+            // #5064: the claim gate did not engage — abort rather than post.
+            ClaimGate::Abort(reason) => {
+                error!(
+                    owner = %owner,
+                    repo = %repo,
+                    pr = pr_number,
+                    head_sha = %head_sha,
+                    "dedup claim failed — aborting without posting: {reason}"
+                );
+                result.error = Some(format!("dedup claim unavailable: {reason}"));
+                return abort_dry(result, config, &input, &deps).await;
             }
         }
     }
@@ -281,7 +290,7 @@ pub async fn run_review(
         Err(e) => {
             warn!("failed to resolve GitHub token for diff fetch: {e}");
             result.error = Some(format!("GitHub token resolution failed: {e}"));
-            return abort_dry(result, config, &input, &deps);
+            return abort_dry(result, config, &input, &deps).await;
         }
     };
 
@@ -292,7 +301,7 @@ pub async fn run_review(
         Err(e) => {
             warn!("failed to load diff: {e}");
             result.error = Some(format!("diff load failed: {e}"));
-            return abort_dry(result, config, &input, &deps);
+            return abort_dry(result, config, &input, &deps).await;
         }
     };
     let filtered = DiffAnalyzer::default().analyze(&raw_diff).await;
@@ -353,7 +362,7 @@ pub async fn run_review(
              may be invisible; could not review",
             orig = raw_diff.len(),
         ));
-        return abort_dry(result, config, &input, &deps);
+        return abort_dry(result, config, &input, &deps).await;
     }
 
     // ── Step 4: extract identifiers for context retrieval ─────────────────
@@ -383,7 +392,7 @@ pub async fn run_review(
                 result.dry_run = true;
                 // Return WITHOUT finalize_review so a skipped review is never posted.
                 // Release any dedup claim so a retry (once the dep recovers) can re-run.
-                return abort_dry(result, config, &input, &deps);
+                return abort_dry(result, config, &input, &deps).await;
             }
             GateOutcome::Degraded(reason) => {
                 warn!("required-context gate: proceeding DEGRADED (non-authoritative) — {reason}");
@@ -482,7 +491,7 @@ pub async fn run_review(
             warn!("LLM call failed: {e} — applying fail-safe UNKNOWN (fail-closed, #1241)");
             result.verdict = Verdict::Unknown;
             result.error = Some(format!("LLM error: {e}"));
-            return abort_dry(result, config, &input, &deps);
+            return abort_dry(result, config, &input, &deps).await;
         }
     };
 
@@ -528,7 +537,7 @@ pub async fn run_review(
             "review output truncated at token ceiling ({}/{} tokens) — could not review",
             llm_resp.output_tokens, requested_max_tokens
         ));
-        return abort_dry(result, config, &input, &deps);
+        return abort_dry(result, config, &input, &deps).await;
     }
 
     // ── Step 7: parse verdict + findings ──────────────────────────────────
@@ -794,6 +803,47 @@ fn is_truncated(finish_reason: Option<&str>, output_tokens: u32, max_tokens: u32
     }
     let threshold = (f64::from(max_tokens) * truncation_token_ratio()).ceil() as u32;
     output_tokens >= threshold
+}
+
+// ─── Dedup claim gate (#5064) ────────────────────────────────────────────────
+
+/// What the runner does with a `claim()` outcome.
+///
+/// Why: naming the three outcomes makes the fail-closed rule reviewable in one
+/// place. It used to be an inline `match` whose error arm proceeded with the
+/// review, so a store failure produced an ungated live comment — and on the
+/// next redelivery, another one.
+/// What: `Proceed` owns the slot; `DuplicateSkip` short-circuits a completed
+/// review; `Abort` carries the reason a claim could not be established.
+/// Test: `classify_claim_*` in `runner_tests.rs`.
+pub(super) enum ClaimGate {
+    /// This caller owns the review slot.
+    Proceed,
+    /// A completed review already exists for this head SHA.
+    DuplicateSkip,
+    /// The claim gate did not engage; abort without posting.
+    Abort(String),
+}
+
+/// Decide what a `claim()` result means for the review about to run.
+///
+/// Why: #5064 — every `DedupError` means the same thing operationally. The
+/// caller does not know whether this head SHA was already reviewed, and could
+/// not record that it is reviewing it now. Proceeding posts an unguarded
+/// comment; aborting drops a review that GitHub will redeliver. A dropped
+/// review is recoverable, a duplicate comment is not, so every error aborts —
+/// `Contended` included, which is the variant a stuck sibling process produces
+/// during a rolling upgrade.
+/// What: maps `Ok(Claimed)` → `Proceed`, `Ok(Skipped)` → `DuplicateSkip`, and
+/// every `Err` → `Abort` carrying the error's `Display`.
+/// Test: `classify_claim_contended_aborts`, `classify_claim_open_error_aborts`,
+/// `classify_claim_claimed_proceeds`, `classify_claim_skipped_is_duplicate`.
+pub(super) fn classify_claim(outcome: Result<ClaimOutcome, DedupError>) -> ClaimGate {
+    match outcome {
+        Ok(ClaimOutcome::Claimed) => ClaimGate::Proceed,
+        Ok(ClaimOutcome::Skipped) => ClaimGate::DuplicateSkip,
+        Err(e) => ClaimGate::Abort(e.to_string()),
+    }
 }
 
 #[cfg(test)]

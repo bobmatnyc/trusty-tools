@@ -121,7 +121,7 @@ pub(super) async fn run_mapreduce_branch(
              could not review"
                 .to_string(),
         );
-        return abort_dry(result, config, input, deps);
+        return abort_dry(result, config, input, deps).await;
     }
 
     // When the synthesis pass (#1663) ran successfully, `reduced.grade` carries

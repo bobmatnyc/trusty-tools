@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     config::ReviewConfig,
@@ -254,15 +254,20 @@ pub async fn finalize_review(
                     // Mark the dedup claim complete so retries are suppressed.
                     if let Some(store) = post_ctx.dedup
                         && !post_ctx.head_sha.is_empty()
-                        && let Err(e) = store.complete(
-                            post_ctx.owner,
-                            post_ctx.repo,
-                            post_ctx.pr,
-                            post_ctx.head_sha,
-                        )
+                        && let Err(e) = store
+                            .complete(
+                                post_ctx.owner,
+                                post_ctx.repo,
+                                post_ctx.pr,
+                                post_ctx.head_sha,
+                            )
+                            .await
                     {
-                        // Fail-safe: a dedup write failure must not fail the review.
-                        warn!("dedup complete() failed (non-fatal): {e}");
+                        // #5064: the comment is already posted, so there is
+                        // nothing left to fail closed on. The InProgress claim
+                        // still suppresses redelivery until it ages out, but an
+                        // operator needs to see this, so it is an error.
+                        error!("dedup complete() failed after a live post: {e}");
                     }
                 }
                 Err(e) => {
