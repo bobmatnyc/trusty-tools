@@ -514,9 +514,9 @@ trusty-search doctor [--fix]                         # 6-check diagnostic + auto
 trusty-search ui [--port N]                          # open web management UI in browser
 trusty-search convert project|all [--dry-run]        # migrate from mcp-vector-search
 trusty-search serve [--http <addr>]                  # MCP stdio (default) or HTTP/SSE
-trusty-search port                                   # print daemon port to stdout (bare: 7879)
-trusty-search port --addr                            # print host:port (127.0.0.1:7879)
-trusty-search port --json                            # print {"addr":"127.0.0.1","port":7879}
+trusty-search port                                   # print daemon port to stdout (bare: 7878)
+trusty-search port --addr                            # print host:port (127.0.0.1:7878)
+trusty-search port --json                            # print {"addr":"127.0.0.1","port":7878}
 # Shell substitution idiom (stdout is clean — log lines go to stderr):
 curl http://127.0.0.1:$(trusty-search port)/health
 # Aliases preserved for backward compatibility:
