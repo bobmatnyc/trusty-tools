@@ -1039,6 +1039,12 @@ fn prepare_session_inner(
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::ConfiguringMcp,
     );
+
+    // #4181: keep `.mcp.json` out of git's index BEFORE any injector writes to
+    // it — see `native_mcp::exclude_mcp_json_from_git` for why, and why a
+    // failure here must not stop the injectors below.
+    native_mcp::exclude_mcp_json_from_git(project_dir);
+
     let mut trusty_memory_injected = false;
     if plan.inject_trusty_memory {
         // Pin the project's palace via `env.TRUSTY_MEMORY_PALACE` (issue #1605).

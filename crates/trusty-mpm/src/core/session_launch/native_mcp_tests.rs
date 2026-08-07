@@ -17,7 +17,7 @@
 //! Test: this file IS the test module.
 
 use super::native_mcp::{
-    NATIVE_TRUSTY_MCP_SERVERS, ensure_env_local_git_excluded, inject_native_trusty_mcps_from,
+    NATIVE_TRUSTY_MCP_SERVERS, ensure_git_excluded, inject_native_trusty_mcps_from,
     is_env_local_actually_ignored, merge_env_file, split_public_and_secret_env,
 };
 use super::settings::preseed_workspace_trust;
@@ -383,7 +383,7 @@ fn inject_native_skips_secrets_when_env_local_is_tracked() {
     // Why (code-critic re-review, residual HIGH on #2739): `info/exclude`
     // cannot un-track an already-tracked file. If the TARGET repo (tm ships to
     // arbitrary repos, including Duetto ones) already commits a file literally
-    // named `.env.local`, `ensure_env_local_git_excluded` still "succeeds" (the
+    // named `.env.local`, `ensure_git_excluded` still "succeeds" (the
     // append itself never errors), so without the `git check-ignore` gate the
     // injector would merge the real token into that tracked file and a routine
     // `git add -A` would stage it — the exact same leak class, relocated. This
@@ -440,7 +440,7 @@ fn inject_native_skips_secrets_when_env_local_is_tracked() {
 fn is_env_local_actually_ignored_true_when_excluded() {
     let ws = tempdir().unwrap();
     git_init(ws.path());
-    ensure_env_local_git_excluded(ws.path()).expect("exclude write succeeds");
+    ensure_git_excluded(ws.path(), ".env.local").expect("exclude write succeeds");
 
     assert!(is_env_local_actually_ignored(ws.path()));
 }
@@ -452,7 +452,7 @@ fn is_env_local_actually_ignored_false_when_tracked() {
     // Excluded via info/exclude AND tracked at the same time — git's own
     // ls-files/staging behaviour wins: a tracked path is never "ignored" in
     // the sense that matters (it will still be staged by `git add -A`).
-    ensure_env_local_git_excluded(ws.path()).expect("exclude write succeeds");
+    ensure_git_excluded(ws.path(), ".env.local").expect("exclude write succeeds");
     std::fs::write(ws.path().join(".env.local"), "X=1\n").unwrap();
     git_commit_file(ws.path(), ".env.local");
 
@@ -463,7 +463,7 @@ fn is_env_local_actually_ignored_false_when_tracked() {
 fn is_env_local_actually_ignored_false_when_not_excluded_at_all() {
     let ws = tempdir().unwrap();
     git_init(ws.path());
-    // No ensure_env_local_git_excluded call — nothing lists .env.local in
+    // No ensure_git_excluded call — nothing lists .env.local in
     // info/exclude, and it isn't tracked either.
 
     assert!(!is_env_local_actually_ignored(ws.path()));
@@ -742,14 +742,14 @@ fn split_public_and_secret_env_accepts_bare_stdio_without_type() {
     assert!(secrets.is_empty());
 }
 
-// ── ensure_env_local_git_excluded: direct unit coverage ─────────────────────
+// ── ensure_git_excluded: direct unit coverage ─────────────────────
 
 #[test]
-fn ensure_env_local_git_excluded_is_idempotent() {
+fn ensure_git_excluded_is_idempotent() {
     let ws = tempdir().unwrap();
     git_init(ws.path());
 
-    ensure_env_local_git_excluded(ws.path()).expect("first call succeeds");
+    ensure_git_excluded(ws.path(), ".env.local").expect("first call succeeds");
     let exclude_path_1 = std::process::Command::new("git")
         .arg("-C")
         .arg(ws.path())
@@ -761,7 +761,7 @@ fn ensure_env_local_git_excluded_is_idempotent() {
         .to_string();
     let content_1 = std::fs::read_to_string(ws.path().join(&path_1)).unwrap();
 
-    ensure_env_local_git_excluded(ws.path()).expect("second call succeeds");
+    ensure_git_excluded(ws.path(), ".env.local").expect("second call succeeds");
     let content_2 = std::fs::read_to_string(ws.path().join(&path_1)).unwrap();
 
     assert_eq!(content_1, content_2, "second call is a no-op");
@@ -775,11 +775,119 @@ fn ensure_env_local_git_excluded_is_idempotent() {
     );
 }
 
+/// #4181: the injected `.mcp.json` must not be a file git would stage.
+///
+/// Why: every entry the injectors write is machine- or session-specific —
+/// `trusty-search`'s `--index` pin names the ephemeral worktree, and the
+/// `tm mcp add` bridge can carry an absolute `command` path valid on exactly
+/// one machine. While that file is tracked, each managed session starts
+/// dirty and a routine `git add -A` commits an operator-specific path.
+/// What: excludes `.mcp.json` in a fresh repo, writes a real entry through
+/// the same injector `prepare_session` uses, and asks git — not the exclude
+/// file — whether the result would be staged.
 #[test]
-fn ensure_env_local_git_excluded_fails_outside_git_repo() {
+fn ensure_git_excluded_adds_mcp_json() {
+    let ws = tempdir().unwrap();
+    git_init(ws.path());
+
+    ensure_git_excluded(ws.path(), crate::core::mcp_config::MCP_JSON)
+        .expect("exclude write succeeds");
+
+    // Write a real entry the way `prepare_session` does.
+    super::settings::inject_trusty_mpm_mcp(ws.path()).expect("injection succeeds");
+    assert!(
+        ws.path().join(".mcp.json").exists(),
+        "the injector must still have written the file"
+    );
+
+    // git's own authority: `check-ignore -q` exits 0 only when the path would
+    // NOT be staged.
+    let ignored = std::process::Command::new("git")
+        .arg("-C")
+        .arg(ws.path())
+        .args(["check-ignore", "-q", "--", ".mcp.json"])
+        .status()
+        .expect("git must be on PATH");
+    assert!(
+        ignored.success(),
+        "git must report the injected .mcp.json as ignored"
+    );
+
+    // And the working tree is clean — no dirty entry for a managed session.
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(ws.path())
+        .args(["status", "--porcelain"])
+        .output()
+        .expect("git must be on PATH");
+    let out = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        !out.contains(".mcp.json"),
+        "git status must not list .mcp.json, got: {out}"
+    );
+}
+
+/// #4181: `info/exclude` lives in the SHARED common git dir, so concurrent
+/// managed sessions in one project all append to the same file.
+///
+/// Why: the trap in moving any write to a shared location is two writers with
+/// different content. Here both entries must survive — a lost `.env.local`
+/// line silently reopens the #2739 secret leak, and a lost `.mcp.json` line
+/// reopens this issue.
+/// What: eight threads race two different filenames against one repo, then
+/// asserts both lines are present and no line was corrupted by interleaving.
+#[test]
+fn ensure_git_excluded_is_concurrency_safe() {
+    let ws = tempdir().unwrap();
+    git_init(ws.path());
+    let root = ws.path().to_path_buf();
+
+    std::thread::scope(|scope| {
+        for i in 0..8 {
+            let root = root.clone();
+            scope.spawn(move || {
+                let name = if i % 2 == 0 {
+                    ".mcp.json"
+                } else {
+                    ".env.local"
+                };
+                ensure_git_excluded(&root, name).expect("concurrent call succeeds");
+            });
+        }
+    });
+
+    let raw = std::process::Command::new("git")
+        .arg("-C")
+        .arg(ws.path())
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .output()
+        .unwrap();
+    let rel = String::from_utf8_lossy(&raw.stdout).trim().to_string();
+    let content = std::fs::read_to_string(ws.path().join(rel)).unwrap();
+
+    // Both entries survived the race, each on a line of its own. A duplicate
+    // is acceptable (git treats it identically); a MISSING or SPLICED line is
+    // not.
+    for name in [".mcp.json", ".env.local"] {
+        assert!(
+            content.lines().any(|l| l.trim() == name),
+            "{name} must survive concurrent appends; exclude file was:\n{content}"
+        );
+    }
+    for line in content.lines() {
+        let t = line.trim();
+        assert!(
+            t.is_empty() || t.starts_with('#') || t == ".mcp.json" || t == ".env.local",
+            "interleaved append corrupted a line: {t:?}\nfull file:\n{content}"
+        );
+    }
+}
+
+#[test]
+fn ensure_git_excluded_fails_outside_git_repo() {
     let ws = tempdir().unwrap();
     // No git_init: this must fail, not panic.
-    let result = ensure_env_local_git_excluded(ws.path());
+    let result = ensure_git_excluded(ws.path(), ".env.local");
     assert!(result.is_err(), "a non-repo directory must return Err");
 }
 
