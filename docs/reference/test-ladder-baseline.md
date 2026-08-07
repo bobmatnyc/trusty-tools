@@ -29,6 +29,16 @@ Why `cargo test --workspace` is absent from rungs 1–3, and the "scope down,
 never scope away" line that constrains picking a lower rung, are stated with the
 ladder itself in [`CLAUDE.md`](../../CLAUDE.md) — not repeated here.
 
+## How Much Gate Output the PR Body Owes
+
+A PR body may summarise a **passing** gate as command + counts + scope —
+`cargo test -p trusty-mpm — 214 passed, 0 failed` — because the reviewer's
+question there is which rung ran, not what scrolled past.
+
+Raw output stays **mandatory** for failures, flakes, performance claims, and
+disputed results. Agent-to-PM reporting keeps raw output in all cases
+(`BASE-AGENT.md`: never summarise test results in your own words).
+
 ## Known-Environmental On This Machine — Expect These, Do Not Re-File Them
 
 | Gate | Where | Why it fails independent of your branch |

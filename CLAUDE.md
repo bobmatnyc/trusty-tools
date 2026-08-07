@@ -11,30 +11,20 @@ This is a **Rust workspace** (Cargo workspace, resolver v2, glob members
 `[workspace.package]` shares `rust-version`, `edition`, `license`, `repository`,
 and `authors` but no longer carries a version field (see #343).
 
-**MSRV**: `1.94` — driven by `aws-config` >= 1.9.0 / `aws-sdk-bedrockruntime`
->= 1.136.0, which declare `rust-version = "1.94.1"`; the let-chain
-stabilisation floor (1.88) is lower. CI enforces this with
-`dtolnay/rust-toolchain@1.94`. See `docs/adr/0029-msrv-1-94-and-edition-policy.md`.
+**MSRV**: `1.94`, enforced in CI with `dtolnay/rust-toolchain@1.94`. The
+`aws-config` / `aws-sdk-bedrockruntime` floor that drives it, and the per-crate
+edition policy, are in
+[ADR-0029](docs/adr/0029-msrv-1-94-and-edition-policy.md).
 
 ## Role & Scope
 
 `trusty-tools` is the **single source of truth** for all trusty-* AI tooling.
-It replaces seven formerly separate repos and eliminates the `[patch.crates-io]`
-dance for cross-crate development. The authoritative crate list is the
-`[workspace.members]` glob in the root `Cargo.toml`; every subdirectory under
-`crates/` with a `Cargo.toml` is a member.
-
-Key consumers of the shared libraries:
-- **trusty-agents** — agent orchestration platform (lives in `crates/trusty-agents`)
-- **trusty-search** — hybrid code search daemon + MCP server
-- **trusty-memory** — MCP frontend over the memory palace (storage lives in
-  `trusty-common`'s `memory-core` feature)
-- **trusty-analyze** — code analysis daemon (complexity, smells, quality metrics)
-
-Work touching a shared crate (e.g. `trusty-common`, `trusty-embedderd`) may
-require bumping the dependent crate's version and verifying its tests. Always
-run `cargo check` and `cargo test -p <crate>` after modifying a library crate,
-then propagate changes to all crates that depend on it before committing.
+The authoritative crate list is the `[workspace.members]` glob in the root
+`Cargo.toml`; every subdirectory under `crates/` with a `Cargo.toml` is a
+member. Per-crate purposes are in
+[docs/reference/crate-map.md](docs/reference/crate-map.md); the seven repos this
+monorepo replaced are in
+[docs/reference/former-repos.md](docs/reference/former-repos.md).
 
 ## Build and Test Commands
 
@@ -54,25 +44,18 @@ For any other invocation — release builds, feature-gated tests,
 performance regression suite, `cargo update` / `cargo audit`, or running a
 crate's binary — call `Skill(skill="cargo-commands")` rather than guessing.
 
-### Important: Crate Names vs. Directory Names
-
-**Crate names** match the `name` field in each crate's `Cargo.toml`, not necessarily the directory name.
-Most match (e.g. `crates/trusty-search/` → `-p trusty-search`) but note these exceptions:
-
-- `crates/trusty-git-analytics/` → `-p tga` (short name)
-- `crates/trusty-agents/` → `-p trusty-agents`
-
-Always verify the `name` field in the crate's `Cargo.toml` if you get a "package not found" error.
+🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from the
+crate's `Cargo.toml`, not the directory. Most match; the exceptions are in the
+Abbreviations & Aliases table below (notably `crates/trusty-git-analytics/` →
+`-p tga`). On "package not found", read the crate's `Cargo.toml`.
 
 ## Rust Test Ladder — how much testing this change needs
 
 🔴 **This ladder is the authoritative answer to "how much testing does this
 change need" for this repo.** Run the smallest deterministic gate that covers the
-change's blast radius — no less, and no more. The framework's phase-entry table
-labels a change Low / Normal / High risk; those labels map onto the rungs below
-(rungs 1–2 = Low, 3–4 = Normal, 5–6 = High). The framework does not carry a
-competing Rust matrix: when the question is *which command to run*, this table
-decides.
+change's blast radius — no less, and no more. The framework's Low / Normal / High
+risk labels map onto the rungs below (1–2 = Low, 3–4 = Normal, 5–6 = High); when
+the question is *which command to run*, this table decides.
 
 Required tests stay in the implementation PR (`tm-pr-workflow`, "One Outcome,
 One PR"). Name the rung and paste its command in the PR body so a reviewer can
@@ -105,11 +88,10 @@ below). It is never licence to make a red gate green by deleting, `#[ignore]`-in
 hard line it has always been.
 
 **Evidence detail:** a PR body may summarise a **passing** gate as command +
-counts + scope — `cargo test -p trusty-mpm — 214 passed, 0 failed` — because the
-reviewer's question there is which rung ran, not what scrolled past. Raw output
-stays **mandatory** for failures, flakes, performance claims, and disputed
-results, and agent-to-PM reporting keeps raw output in all cases
-(`BASE-AGENT.md`: never summarise test results in your own words).
+counts + scope; raw output stays **mandatory** for failures, flakes, performance
+claims, and disputed results. Full rule in
+[docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md)
+("How Much Gate Output the PR Body Owes").
 
 ### Baseline failures — the Rust specifics
 
@@ -124,61 +106,32 @@ exact report-string format: see
 
 ## Key Conventions
 
-🔴 **Rust issue boundary — what to search by before filing.** Whether a finding
-earns an issue at all is decided by the **Ticket-Promotion Gate** in the
-framework skill `tm-ticketing` (search first, the five promotion criteria, the
-confidence label, outcome-sized granularity, the six-field schema). That gate is
-not restated here — read it there. What this repo adds is *what to search by*,
-because a Cargo workspace hands you four high-signal keys a generic search
-misses:
-
-| Search key | Example | Why it finds the canonical issue |
-|---|---|---|
-| **Test name** | `execute_doctor_against_test_daemon` | Rust test names are effectively unique and get quoted verbatim in every prior report and CI log |
-| **Panic / error text** | `called Option::unwrap() on a None value`, or a `thiserror` Display string | The literal message is what people paste into issue bodies |
-| **Affected symbol** | `WatcherManager::reconcile` | Survives the file moves and module splits that break any path-based search — and this repo splits modules constantly under the 500-SLOC cap |
-| **Crate** | `-p trusty-search`, `-p tga` | Scopes to the owning workstream; expand abbreviations first (see the table below — `tm` is trusty-memory, not the binary) |
-
-Search **open and recently closed** issues on all four. A repeat failure in the
-same crate is almost always another occurrence of an existing canonical issue:
-append the run URL, SHA, command, and failure signature to that issue rather than
-filing a second one.
+🔴 **Rust issue boundary — search before filing.** Whether a finding earns an
+issue at all is decided by the **Ticket-Promotion Gate** in the framework skill
+`tm-ticketing` — read it there. What this repo adds is *what to search by*: the
+**test name**, the **panic / error text**, the **affected symbol**, and the
+**crate**. Search open and recently closed issues on all four; append to the
+canonical issue rather than filing a second one. Rationale per key:
+[docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md).
 
 🔴 **Why/What/Test doc pattern with proportional depth** — public items carry
-documentation proportional to how surprising the code is. The full three-section
-pattern (Why/What/Test) is mandatory for API entry points, design-heavy code,
-error contracts, safety/TCC behavior, and cross-crate surfaces; a single-line doc
-or lightweight pattern suffices for trivial items (simple getters, obvious
-one-liners, thin re-exports).
-
-**Full pattern (mandatory for non-obvious code):**
+documentation proportional to how surprising the code is:
 
 ```rust
-/// Why: <motivation — the problem this solves, not the mechanics>
-/// What: <mechanical description of what the item does>
-/// Test: <where coverage lives, or why it is side-effect-only / untestable>
-pub fn my_function() { … }
+/// Why: <motivation>   /// What: <mechanics>   /// Test: <where coverage lives>
 ```
 
-**Lighter touch (permitted for self-evident code):**
+The full three-section pattern is mandatory for API entry points, design-heavy
+code, error contracts, safety/TCC behavior, and cross-crate surfaces. A
+single-line doc suffices for trivial items (simple getters, obvious one-liners,
+thin re-exports) — if a competent reader's first guess is right, one line is
+complete. Defensive-reasoning paragraphs and issue-history anecdotes belong in
+linked ADRs or issues, not inline comments; use `// See <issue-or-adr>`.
+Worked examples and the four-axis model: `Skill(skill="documentation-style")`.
 
-```rust
-/// Returns the user's name.
-pub fn name(&self) -> &str { … }
-```
-
-**Judgment rule:** If a competent reader's first guess is right, a one-line doc
-is complete. Defensive-reasoning paragraphs and issue-history anecdotes belong in
-linked ADRs or issues, not inline comments — use `// See <issue-or-adr>` instead.
-This keeps the entry point dense and lets detail stay one hop away.
-
-🟡 **Ticket-attributed inline comments** — when you modify a function, class,
-or module *because of* a ticket, add a concise inline pointer at the change
-site: `// #1234: <one-line reason>`, or `// See #1234` when the ticket title
-already says it all. This is the same pointer convention as the judgment rule
-above, applied to change attribution instead of design rationale: the ticket
-reference is the pointer, never a narrative — one line, not a changelog
-embedded in comments. The full reasoning stays in the ticket.
+🟡 **Ticket-attributed inline comments** — when a ticket drives a change, leave a
+pointer at the change site: `// #1234: <one-line reason>`, or `// See #1234`. One
+line, never a narrative; the reasoning stays in the ticket.
 
 🔴 **No `unwrap()` in library code** — use `?` with `anyhow::Result` for
 application/binary code and `thiserror` for library error types. Reserve
@@ -202,15 +155,12 @@ A file is classified as a **test/benchmark file** when ANY of these match:
 
 All other tracked `.rs` files are **production files**, capped at 500 SLOC.
 
-🔴 As of issue #610 this is mechanically enforced by `scripts/check_line_cap.sh`,
-wired into CI and the pre-commit hook — a new tracked file over its cap
-**cannot merge**. Never turn this gate green by deleting, `#[ignore]`-ing, or
-excluding a file from the count; split it instead (one public module per
-logical concept, a thin `mod.rs` re-export facade, sibling single-responsibility
-files). See [docs/reference/sloc-cap.md](docs/reference/sloc-cap.md) for the
-exact SLOC counting definition, the ratchet-allowlist mechanics
-(`.line-cap-allowlist.tsv`, `--update`/`--seed`/`--force-add`), and the
-resolved #170/#171/#172 refactor history.
+🔴 Mechanically enforced by `scripts/check_line_cap.sh` in CI and the pre-commit
+hook (#610) — a new tracked file over its cap **cannot merge**. Never turn this
+gate green by deleting, `#[ignore]`-ing, or excluding a file from the count;
+split it instead. Counting definition, the split pattern, ratchet-allowlist
+mechanics, and refactor history:
+[docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
 (`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, etc.) define structured error enums with
@@ -269,12 +219,9 @@ signature, which looks exactly like an OOM kill.
 🟢 **macOS TCC scope split — read before re-granting anything:** `trusty-search`
 (and other external-volume daemons) needs **Full Disk Access**; `trusty-mpm` /
 `tm` needs the separate **App Data** category only, and must never be granted
-Full Disk Access. Every `cargo install` mints a new cdhash and voids the
-previous grant; `tctl install <crate>` re-signs with a stable Developer-ID
-identity so the grant survives reinstalls. Certificate setup, signed-install
-scripts, the `launchctl bootout` restart playbook, and orphan-listener
-verification (#873, #2558, #534, #2486, #4230) are in the release-workflow
-reference above.
+Full Disk Access. Certificate setup, signed-install scripts, the `launchctl
+bootout` restart playbook, and orphan-listener verification (#873, #2558, #534,
+#2486, #4230) are in the release-workflow reference above.
 
 ### Per-PR Changelog Fragment (issue #4476)
 
@@ -289,30 +236,18 @@ exception. Docs-only, CI-only, test-only and `testdata/` PRs may skip it.
 crates/<crate>/changelog.d/<issue-or-pr-number>-<short-slug>.md
 ```
 
-Before opening a PR, call `Skill(skill="tm-pr-workflow")` for the fragment
-format and the category line. This repo's assembler and CI-gate specifics — one
-category per fragment, fragments directly in `changelog.d/`, the `--stdout`
-preview, and why git-cliff no longer writes `CHANGELOG.md` — are in
+Fragment format and category line: `Skill(skill="tm-pr-workflow")`. Assembler
+and CI-gate specifics:
 [docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md).
 
 ## Cross-Crate Development Workflow
 
-Because all crates are in the same workspace, the `[patch.crates-io]` dance
-that was required with separate repos is no longer necessary for active
-development. Cargo resolves internal crates via path automatically.
-
-When you modify a library crate:
-1. Edit the crate under `crates/<lib>/`.
-2. Run `cargo check` to catch compilation errors across the entire workspace.
-3. Run `cargo test -p <lib>` for the modified library.
-4. Run `cargo test -p <consumer>` for each crate that depends on the library.
-5. Commit all changes together — workspace builds are atomic.
-
-When publishing a crate to crates.io:
-- The path dep in `[workspace.dependencies]` coexists with the version field,
-  so `cargo publish` sees the version and uploads correctly.
-- The `[patch.crates-io]` block in the root `Cargo.toml` ensures the in-tree
-  crates are preferred during local builds even if a published version exists.
+Cargo resolves internal crates via path automatically, so no `[patch.crates-io]`
+dance is needed during development. Modifying a library crate is **rung 4** of
+the test ladder above: `cargo check --workspace`, then `cargo test -p <consumer>`
+for each direct dependent, all committed together — workspace builds are atomic.
+Publish-time `[patch.crates-io]` semantics are in
+`Skill(skill="cargo-publish")`.
 
 ## Parallel Worktree Discipline
 
@@ -443,14 +378,10 @@ These abbreviations apply everywhere: ticket descriptions, build commands, refer
 
 ### Environment Variables
 
-> **Full environment-variable reference:** see [docs/reference/environment-variables.md](docs/reference/environment-variables.md).
-
-Key variables:
-- `OPENROUTER_API_KEY` — LLM chat via OpenRouter
-- `TRUSTY_LLM_MODEL` — LLM model for deep-analysis pass (default: `openai/gpt-4o-mini`)
-- `RUST_LOG` — Tracing filter (e.g., `RUST_LOG=debug`)
-- `SKIP_UI_BUILD` — Set to `1` to skip Svelte UI build in `build.rs`
-- `TRUSTY_NO_KG` — Set to `1` to skip knowledge-graph construction by default
+`RUST_LOG` (tracing filter) and `SKIP_UI_BUILD=1` (skip the Svelte UI build in
+`build.rs`) are the two you reach for day to day. Every variable, including
+`OPENROUTER_API_KEY`, `TRUSTY_LLM_MODEL` and `TRUSTY_NO_KG`, is in
+[docs/reference/environment-variables.md](docs/reference/environment-variables.md).
 
 ### IDE Setup
 
@@ -499,4 +430,5 @@ Full-length reference materials for less-frequent lookups:
 - **HTTP trust-boundary threat model:** [docs/reference/threat-model.md](docs/reference/threat-model.md) — per-daemon bind/guard/proxy compliance inventory for the loopback-only doctrine ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md)).
 - **Domain consolidation audit:** [docs/reference/domain-consolidation-audit.md](docs/reference/domain-consolidation-audit.md) — dated per-domain status behind the common-entry-point rule.
 - **Per-PR changelog fragments:** [docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md) — assembler and CI-gate mechanics.
-- **Rust test ladder gate commands:** [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md) — the exact command chain per rung, plus the baseline-failure protocol.
+- **Rust test ladder gate commands:** [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md) — the exact command chain per rung, the baseline-failure protocol, and how much gate output a PR body owes.
+- **Rust issue search keys:** [docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md) — why test name / panic text / symbol / crate find the canonical issue.
