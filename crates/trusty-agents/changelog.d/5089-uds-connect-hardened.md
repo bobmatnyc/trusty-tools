@@ -1,0 +1,7 @@
+Fixed
+
+- the three remaining bare `UnixStream::connect` sites now verify the socket before trusting it, so a `0600`-and-self-owned socket in a `0700` directory is the actual precondition for talking to a peer rather than a documented intention (refs [#5089](https://github.com/bobmatnyc/trusty-tools/issues/5089) step 1a)
+  - `MessageBus::send_to` writes an NDJSON payload, so it was the one that mattered: it dialled whatever answered the target path. It now routes through `trusty_common::uds::connect_hardened` and refuses a socket that fails the check instead of writing to it
+  - `MessageBus::list_running` no longer reports a socket that fails verification as a running peer — `send_to` would refuse it, so it is not reachable
+  - `CtrlSocket::probe` verifies before returning the stream. Semantics change: an existing socket that is not `0600`-self-owned is now an error rather than an open stream, so callers classifying "nothing usable is here" must use the new `is_stale_socket` instead of `is_connection_refused` (`bind_singleton` and the `mode_dispatch` argv-forward path are updated). `is_connection_refused` keeps its exact meaning
+  - refusing to dial an unverifiable ctrl socket does not brick the project: `bind_singleton` classifies it takeover-safe, unlinks it, and binds a hardened replacement. A live pre-#5099 controller whose socket is still at the process umask is replaced rather than adopted, once, on upgrade

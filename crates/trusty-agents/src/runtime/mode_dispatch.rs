@@ -381,7 +381,7 @@ pub(super) async fn dispatch_cli_mode(
                     .await
                     .map(|_| ());
             }
-            Err(e) if ctrl::is_connection_refused(&e) => {
+            Err(e) if ctrl::is_stale_socket(&e) => {
                 tracing::debug!(path = %sock_path.display(), "stale ctrl socket — cleaning up");
                 ctrl::CtrlSocket::cleanup(&sock_path);
             }
