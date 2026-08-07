@@ -36,7 +36,9 @@
 #   SvelteKit build (no YAML/TOML parser).
 #
 # Gate: scripts/check_public_docs.sh — fails when a source is missing, escapes
-#   docs/, lands in a DO-NOT-PUBLISH tree, or when a route is duplicated.
+#   docs/, lands in a DO-NOT-PUBLISH tree, or when a route is duplicated. With
+#   `--stale` it additionally checks each published page's CONTENT against
+#   docs/public-stale-terms.tsv (see "KEEPING A PUBLISHED PAGE CURRENT" below).
 #   Self-test: scripts/check_public_docs_selftest.sh
 #
 # DO-NOT-PUBLISH trees (owner decision, enforced independently of this file by
@@ -62,7 +64,32 @@
 #   Corollary: never give the suffix to a file you intend to publish. Renaming
 #   it is the fix, not adding a manifest row.
 #
-# Issue: #5096 (epic #5092).
+# KEEPING A PUBLISHED PAGE CURRENT — docs/public-stale-terms.tsv
+#
+#   Listing a page proves it EXISTS and sits inside the boundary. It proves
+#   nothing about whether what the page SAYS is still true, and four published
+#   pages were caught naming binaries and crates that no longer exist. A reader
+#   who copies `cargo install trusty-mpmd` off the public site gets an error,
+#   not a daemon, and has no source tree to check it against.
+#
+#   So retired names and install anti-patterns are declared once, in
+#   docs/public-stale-terms.tsv, and matched against every page THIS file
+#   publishes:
+#
+#       TERM   <ere>                              <remedy>
+#       WAIVE  <source>  <ere>  <count>  <reason>
+#
+#   Add a TERM when you retire a name — the rename PR is the moment the
+#   knowledge exists, and the remedy string is printed verbatim to whoever trips
+#   over it later. Add a WAIVE only when an occurrence is genuinely correct
+#   (naming a historical artifact by its recorded name, say), with a reason;
+#   waivers are a count ratchet, so raising one to cover new text fails.
+#
+#   Run it with `bash scripts/check_public_docs.sh --stale`. It is OPT-IN and
+#   wired to nothing while the current repairs are in flight (#5125); the hook
+#   and CI still run the plain gate.
+#
+# Issue: #5096 (epic #5092). STALE content check: #5125.
 
 SECTION	getting-started	Getting Started
 PAGE	getting-started	docs/intro.md	/	Introduction
