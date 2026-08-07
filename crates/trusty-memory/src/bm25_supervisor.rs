@@ -456,46 +456,88 @@ impl Bm25Supervisor {
     /// and once under the spawn gate — and the two must agree exactly,
     /// including the dead-child eviction. Two copies would be two chances to
     /// drift.
-    /// What: returns `Some(socket_path)` when the stored child is still
-    /// running, and stamps it as most-recently-used so the LRU victim choice
-    /// reflects real traffic. A child that has exited (or whose status cannot
-    /// be read) is removed from the map and `None` is returned, so the caller
-    /// falls through to a fresh spawn. Removing a corpse does NOT count as a
+    ///
+    /// Liveness is decided by TWO questions, not one (#5085). `try_wait()`
+    /// answers "has this child been reaped", which is not the same as "is it
+    /// serving": a SIGKILLed daemon closes its listening socket during
+    /// `do_exit` and only becomes reapable once the kernel finishes tearing it
+    /// down, so for that window `try_wait()` reports `Ok(None)` for a process
+    /// that is already refusing connections. Trusting it alone made this the
+    /// fast path's fail-open — the caller was handed a socket path nothing was
+    /// listening on and nothing reported a problem. The socket the caller is
+    /// about to use is the authority, so we ask it too.
+    ///
+    /// What: returns `Some(socket_path)` when the stored child is both
+    /// un-reaped AND its socket is not definitively unserved, and stamps it as
+    /// most-recently-used so the LRU victim choice reflects real traffic. A
+    /// child that has exited, whose status cannot be read, or whose socket
+    /// answers [`SocketVerdict::NotServing`] is removed from the map and `None`
+    /// is returned, so the caller falls through to a fresh spawn. An
+    /// [`SocketVerdict::Inconclusive`] probe keeps the child: a saturated
+    /// accept backlog is a busy daemon, not a dead one, and reaping on it would
+    /// turn load into a respawn storm. Removing a corpse does NOT count as a
     /// reap — nothing was reclaimed.
-    /// Test: `a_dead_child_is_evicted_and_respawned` (e2e).
+    ///
+    /// The probe runs with the map lock released, so a slow connect never
+    /// blocks another palace's lookup. Eviction then re-acquires and fires only
+    /// if the map still holds the same child, so a replacement spawned
+    /// concurrently is never evicted by this call's stale verdict.
+    /// Test: `a_dead_child_is_evicted_and_respawned` and
+    /// `a_live_child_that_stopped_serving_is_evicted_and_respawned`.
     async fn lookup_live(&self, palace: &str) -> Option<PathBuf> {
-        let stamp = self.tick();
-        let mut guard = self.children.lock().await;
-        let entry = guard.get_mut(palace)?;
-        match entry.child.try_wait() {
-            Ok(None) => {
-                entry.last_used = stamp;
-                let path = entry.socket_path.clone();
-                tracing::trace!(
-                    palace = %palace,
-                    socket = %path.display(),
-                    "bm25 supervisor: child already running"
-                );
-                Some(path)
+        // Phase 1 — under the map lock: reap check, LRU stamp, snapshot.
+        let (pid, path) = {
+            let stamp = self.tick();
+            let mut guard = self.children.lock().await;
+            let entry = guard.get_mut(palace)?;
+            match entry.child.try_wait() {
+                Ok(None) => {
+                    entry.last_used = stamp;
+                    (entry.child.id(), entry.socket_path.clone())
+                }
+                Ok(Some(status)) => {
+                    tracing::warn!(
+                        palace = %palace,
+                        ?status,
+                        "bm25 daemon exited unexpectedly — attempting one restart"
+                    );
+                    guard.remove(palace);
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        palace = %palace,
+                        "bm25 supervisor: try_wait failed: {e:#} — evicting and retrying"
+                    );
+                    guard.remove(palace);
+                    return None;
+                }
             }
-            Ok(Some(status)) => {
-                tracing::warn!(
-                    palace = %palace,
-                    ?status,
-                    "bm25 daemon exited unexpectedly — attempting one restart"
-                );
-                guard.remove(palace);
-                None
-            }
-            Err(e) => {
-                tracing::warn!(
-                    palace = %palace,
-                    "bm25 supervisor: try_wait failed: {e:#} — evicting and retrying"
-                );
-                guard.remove(palace);
-                None
-            }
+        };
+
+        // Phase 2 — lock released. #5085: an un-reaped child is not the same
+        // claim as a serving one; ask the socket the caller will actually use.
+        if probe_socket_verdict(&path).await != SocketVerdict::NotServing {
+            tracing::trace!(
+                palace = %palace,
+                socket = %path.display(),
+                "bm25 supervisor: child already running"
+            );
+            return Some(path);
         }
+
+        // Phase 3 — evict, but only if the map still holds THIS child.
+        tracing::warn!(
+            palace = %palace,
+            socket = %path.display(),
+            pid = ?pid,
+            "bm25 daemon is not serving its socket — evicting and respawning"
+        );
+        let mut guard = self.children.lock().await;
+        if guard.get(palace).map(|h| h.child.id()) == Some(pid) {
+            guard.remove(palace);
+        }
+        None
     }
 
     /// Bring the live-daemon population within both limits, leaving room for
@@ -745,24 +787,65 @@ fn rss_limit_from_env() -> Option<u64> {
     }
 }
 
+/// What a connect attempt says about whether anything is serving a socket.
+///
+/// Why (#5085): the spawn path only ever needed "did it answer, yes or no",
+/// but eviction needs a third answer. Evicting a live daemon because one
+/// connect did not complete would turn a load spike into a respawn storm —
+/// the daemon is killed, a replacement is spawned into the same contention,
+/// and the cycle repeats. Separating "nothing is listening" from "I could not
+/// tell" keeps eviction to the case the kernel is unambiguous about.
+/// What: `NotServing` is reserved for errors that prove no listener is bound
+/// to the path — ENOENT and ECONNREFUSED. A timeout or any other errno
+/// (EAGAIN from a saturated backlog, EPERM) is `Inconclusive` and leaves the
+/// child alone.
+/// Test: `probe_verdict_reports_not_serving_for_a_missing_socket`,
+/// `probe_verdict_reports_serving_for_a_bound_socket`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SocketVerdict {
+    /// A connection was accepted — something is serving this path.
+    Serving,
+    /// The kernel proved no listener is bound (ENOENT / ECONNREFUSED).
+    NotServing,
+    /// The probe could not settle the question; assume the daemon is fine.
+    Inconclusive,
+}
+
 /// Quick non-blocking probe — opens a `UnixStream`, immediately closes it.
 ///
-/// Why: we want a single yes/no answer to "is something listening on this
-/// socket right now?" without depending on `Bm25Client` (which would couple
-/// us to the BM25 wire protocol) and without spending more than a few ms.
-/// What: attempts `UnixStream::connect` with a short timeout; returns
-/// true on success. Any error (ENOENT, ECONNREFUSED, ETIMEDOUT) is
-/// interpreted as "no daemon".
-/// Test: covered indirectly — every spawn path goes through this probe
-/// in a tight loop.
-async fn probe_socket(path: &Path) -> bool {
+/// Why: we want a single answer to "is something listening on this socket
+/// right now?" without depending on `Bm25Client` (which would couple us to the
+/// BM25 wire protocol) and without spending more than a few ms.
+/// What: attempts `UnixStream::connect` with a short timeout and classifies the
+/// outcome per [`SocketVerdict`].
+/// Test: `probe_verdict_reports_not_serving_for_a_missing_socket`,
+/// `probe_verdict_reports_serving_for_a_bound_socket`.
+async fn probe_socket_verdict(path: &Path) -> SocketVerdict {
     // Use a short timeout so an unresponsive (but still bound) socket
     // doesn't stall the probe loop.
     let connect = UnixStream::connect(path);
-    matches!(
-        tokio::time::timeout(Duration::from_millis(200), connect).await,
-        Ok(Ok(_))
-    )
+    match tokio::time::timeout(Duration::from_millis(200), connect).await {
+        Ok(Ok(_)) => SocketVerdict::Serving,
+        Ok(Err(e)) => match e.kind() {
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+                SocketVerdict::NotServing
+            }
+            _ => SocketVerdict::Inconclusive,
+        },
+        Err(_elapsed) => SocketVerdict::Inconclusive,
+    }
+}
+
+/// Whether a socket is definitely accepting connections right now.
+///
+/// Why: the spawn and adoption paths only care about the affirmative case —
+/// "may I skip the spawn?" — for which anything short of a completed connect
+/// must read as no.
+/// What: true iff [`probe_socket_verdict`] returns [`SocketVerdict::Serving`].
+/// Test: covered indirectly — every spawn path goes through this probe
+/// in a tight loop.
+async fn probe_socket(path: &Path) -> bool {
+    probe_socket_verdict(path).await == SocketVerdict::Serving
 }
 
 /// Poll the socket with exponential backoff until it accepts a connection

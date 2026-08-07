@@ -242,6 +242,64 @@ async fn a_dead_child_is_evicted_and_respawned() {
     clear_socket(&name);
 }
 
+/// Why (#5085): the deterministic half of `a_dead_child_is_evicted_and_respawned`.
+/// That test kills the daemon and then races the kernel — `try_wait()` reports a
+/// SIGKILLed child alive until it finishes tearing down, so for a window the
+/// supervisor's fast path handed back a socket nothing was listening on. The
+/// window is microseconds on an idle host (which is why 62 local runs found
+/// nothing) and milliseconds on a contended CI runner. This test pins the SAME
+/// `lookup_live` state — child un-reaped, socket unserved — without any timing
+/// dependence, by unlinking the socket while the daemon keeps running. The
+/// child is then alive by `try_wait()` FOREVER, so a supervisor that trusts
+/// `try_wait()` alone fails this on every run rather than one in twelve.
+///
+/// It is also a real production state in its own right: a `$TMPDIR` reaper that
+/// unlinks the socket leaves a daemon that is alive and permanently unreachable.
+/// What: spawn, unlink the socket out from under the live daemon, call
+/// `ensure_running` again, and require a second launch.
+/// Test: this test itself. Revert `lookup_live` to a bare `try_wait()` check and
+/// this reads 1, not 2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_child_that_stopped_serving_is_evicted_and_respawned() {
+    arm();
+    let name = palace("u", 0);
+    clear_socket(&name);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sup = Bm25Supervisor::with_limits(4, None);
+
+    let socket = sup
+        .ensure_running(&name, tmp.path())
+        .await
+        .expect("first spawn");
+    assert_eq!(sup.spawned_count(), 1);
+    assert_eq!(sup.supervised_count().await, 1);
+
+    // The daemon keeps running; only its socket goes away. `try_wait()` will
+    // report this child alive indefinitely, so nothing here is a race.
+    std::fs::remove_file(&socket).expect("unlink the live daemon's socket");
+
+    let respawned = sup
+        .ensure_running(&name, tmp.path())
+        .await
+        .expect("an unreachable daemon must be evicted and a fresh one spawned");
+    assert_eq!(respawned, socket);
+    assert_eq!(
+        sup.spawned_count(),
+        2,
+        "a child that is no longer serving its socket must be replaced — \
+         try_wait() reporting it un-reaped is not evidence that it is serving"
+    );
+    assert_eq!(sup.supervised_count().await, 1);
+    assert_eq!(
+        sup.reaped_count(),
+        0,
+        "evicting an unreachable child reclaims nothing and must not count as a reap"
+    );
+
+    sup.shutdown().await;
+    clear_socket(&name);
+}
+
 /// SIGKILL whatever is listening on `socket`, then remove the socket file.
 ///
 /// Why: the supervisor must observe a dead child, not an adoptable socket. If

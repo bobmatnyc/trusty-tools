@@ -174,6 +174,46 @@ async fn probe_returns_true_for_bound_socket() {
     assert!(probe_socket(&sock).await);
 }
 
+/// Why (#5085): eviction keys off `NotServing` specifically, so an absent
+/// socket must produce that verdict and not the `Inconclusive` catch-all —
+/// otherwise a crashed daemon is never replaced.
+/// Test: this test itself.
+#[tokio::test]
+async fn probe_verdict_reports_not_serving_for_a_missing_socket() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let missing = tmp.path().join("nonexistent.sock");
+    assert_eq!(
+        probe_socket_verdict(&missing).await,
+        SocketVerdict::NotServing
+    );
+}
+
+/// Why (#5085): a stale socket file left behind by a SIGKILLed daemon answers
+/// ECONNREFUSED rather than ENOENT. That is still proof nothing is listening,
+/// and it is the shape a real crash leaves on disk.
+/// Test: this test itself.
+#[tokio::test]
+async fn probe_verdict_reports_not_serving_for_a_stale_socket_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("stale.sock");
+    // Bind then drop: the file survives, the listener does not.
+    let listener = tokio::net::UnixListener::bind(&sock).expect("bind listener");
+    drop(listener);
+    assert!(sock.exists(), "the socket file must outlive the listener");
+    assert_eq!(probe_socket_verdict(&sock).await, SocketVerdict::NotServing);
+}
+
+/// Why (#5085): a serving socket must never be classified as `NotServing`, or
+/// `lookup_live` would evict healthy daemons on every call.
+/// Test: this test itself.
+#[tokio::test]
+async fn probe_verdict_reports_serving_for_a_bound_socket() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("listen.sock");
+    let _listener = tokio::net::UnixListener::bind(&sock).expect("bind listener for probe test");
+    assert_eq!(probe_socket_verdict(&sock).await, SocketVerdict::Serving);
+}
+
 /// RAII guard for serialised env-var mutation in tests.
 ///
 /// Why: cargo test runs tests in the same process by default, so
