@@ -146,6 +146,12 @@ TEST_CAP raised #4074):**
 | Production source files | **500 SLOC** |
 | Test / benchmark files | **3000 SLOC** |
 
+Comments, doc comments (`//`, `///`, `//!`, `/* … */`), and blank lines do
+**not** count toward the cap — only non-comment code lines in tracked `.rs`
+files do (e.g. `crates/trusty-common/src/lib.rs` is 809 raw lines but 113
+SLOC). Exact counting definition:
+[docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
+
 A file is classified as a **test/benchmark file** when ANY of these match:
 - basename is exactly `tests.rs`
 - basename ends with `_test.rs` or `_tests.rs`
@@ -154,6 +160,14 @@ A file is classified as a **test/benchmark file** when ANY of these match:
 - path contains a `/benches/` directory segment
 
 All other tracked `.rs` files are **production files**, capped at 500 SLOC.
+
+🟡 **Inline `#[cfg(test)] mod <name> { … }` bodies do not count (#5153).** Add
+tests to a 460-SLOC module without splitting it. Only that exact shape is
+excluded — `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an
+`fn`/`impl`/`use`, and predicates like `all(test, …)` or `any(test, …)` are all
+still counted, as is any test module whose brace balance is skewed by a brace
+inside a string literal. The matcher is line-based and fails closed: it can
+raise a false cap violation, never silently drop production code.
 
 🔴 Mechanically enforced by `scripts/check_line_cap.sh` in CI and the pre-commit
 hook (#610) — a new tracked file over its cap **cannot merge**. Never turn this

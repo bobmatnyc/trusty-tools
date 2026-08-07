@@ -114,7 +114,9 @@ async fn backfill_reports_daemon_unavailable_when_socket_is_dead() {
 async fn backfill_gives_up_on_a_socket_that_never_answers() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let socket = tmp.path().join("silent.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).expect("bind silent listener");
+    // #5099: bind the way the real daemon does — the client verifies the
+    // directory and socket modes before connecting.
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind silent listener");
     // Accept and hold, never reply.
     let accepted = tokio::spawn(async move {
         let mut held = Vec::new();
@@ -370,7 +372,9 @@ fn stub_daemon(
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter = std::sync::Arc::clone(&seen);
-    let listener = tokio::net::UnixListener::bind(&socket).expect("bind stub daemon");
+    // #5099: bind the way the real daemon does — the client verifies the
+    // directory and socket modes before connecting.
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind stub daemon");
     let handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let counter = std::sync::Arc::clone(&counter);

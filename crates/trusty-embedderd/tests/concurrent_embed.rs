@@ -300,7 +300,9 @@ async fn concurrent_uds_requests_all_succeed() {
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(EMBED_DIM));
     let queue = Arc::new(trusty_embedderd_test_helpers::BatchQueue::new(embedder));
 
-    let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind UDS");
+    // #5099: bind the way the real daemon does — a bare bind leaves the socket
+    // and its directory at the process umask, which the client now refuses.
+    let listener = trusty_common::uds::bind_hardened(&socket_path).expect("bind UDS");
     tokio::spawn(run_mock_uds_server(listener, Arc::clone(&queue)));
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
@@ -358,7 +360,8 @@ async fn mixed_http_uds_concurrent_all_succeed() {
     });
 
     // Bind UDS.
-    let uds_listener = tokio::net::UnixListener::bind(&socket_path).expect("bind UDS");
+    // #5099: bind the way the real daemon does (see above).
+    let uds_listener = trusty_common::uds::bind_hardened(&socket_path).expect("bind UDS");
     tokio::spawn(run_mock_uds_server(uds_listener, Arc::clone(&queue)));
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;

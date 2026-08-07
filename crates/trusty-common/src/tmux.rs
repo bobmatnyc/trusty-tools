@@ -17,10 +17,11 @@
 //! consumer-specific concerns (see each crate's own thin adapter).
 //! What: [`TmuxTarget`] (session\[:pane\] addressing), [`TmuxCommand`] (a
 //! typed tmux sub-command), [`tmux_argv`] (renders a command to an argv
-//! vector), [`scrollback_option_commands`] (the two `set-option -g` entries
-//! that must land before any `new-session`), [`managed_session_commands`]
-//! (the full ordered recipe: scrollback options THEN `new-session`), and the
-//! [`DEFAULT_TMUX_HISTORY_LIMIT`]/[`DEFAULT_TMUX_MOUSE`] defaults.
+//! vector), [`scrollback_option_commands`] (the `set-option` entries that must
+//! land before any `new-session`), [`managed_session_commands`] (the full
+//! ordered recipe: scrollback options THEN `new-session`), and the
+//! [`DEFAULT_TMUX_HISTORY_LIMIT`]/[`DEFAULT_TMUX_MOUSE`]/
+//! [`DEFAULT_TMUX_ALTERNATE_SCREEN`] defaults.
 //! Test: `cargo test -p trusty-common -- tmux::` asserts the rendered argv
 //! for each command shape and the options-before-new-session ordering
 //! guarantee. Process-spawning is NOT tested here (no process is ever
@@ -236,6 +237,47 @@ pub enum TmuxCommand {
         /// tmux option name to read back (e.g. `history-limit`).
         name: String,
     },
+    /// `set-option -wg <name> <value>` — set a WINDOW-scoped tmux option
+    /// globally, so every window subsequently created on this server (and
+    /// every pane inheriting from it) observes it (#5151).
+    ///
+    /// Why: `alternate-screen` is not a server or session option like
+    /// `history-limit` and `mouse` — `man tmux` lists it under "Available
+    /// pane options", and pane options inherit from the window scope. Copying
+    /// [`TmuxCommand::SetGlobalOption`]'s `-g` invocation for it is not
+    /// obviously wrong (tmux 3.6 routes a `-g` set by option name, so it
+    /// happens to land), but the *pane*-scoped forms silently do nothing:
+    /// measured against live tmux 3.6b, `set-option -pg alternate-screen off`
+    /// and `set-option -s alternate-screen off` both exit 0, a same-flag
+    /// `show-options` readback reports `off`, and the pane STILL enters the
+    /// alternate screen (`#{alternate_on}` = 1). Only `-wg` (and the `-g`
+    /// tmux rewrites into it) actually takes effect. Modelling the window
+    /// scope as its own variant, paired with
+    /// [`TmuxCommand::ShowWindowGlobalOption`], is what keeps a caller's
+    /// set and its verification probe on the SAME scope — a probe that reads
+    /// a different scope than it wrote is a fail-open that reports success
+    /// for an option that did nothing.
+    /// What: renders `set-option -wg <name> <value>`. Carries the same
+    /// server-must-exist caveat as [`TmuxCommand::SetGlobalOption`].
+    SetWindowGlobalOption {
+        /// tmux window option name (e.g. `alternate-screen`).
+        name: String,
+        /// Option value (e.g. `"on"`, `"off"`).
+        value: String,
+    },
+    /// `show-options -wg -v <name>` — read back a WINDOW-scoped global tmux
+    /// option's CURRENT value (#5151).
+    ///
+    /// Why: the verification counterpart to
+    /// [`TmuxCommand::SetWindowGlobalOption`], and deliberately scope-matched
+    /// to it — see that variant's doc for the measured fail-open this pairing
+    /// exists to prevent.
+    /// What: renders `show-options -wg -v <name>` (`-v` prints the bare value
+    /// only, on a single line of stdout).
+    ShowWindowGlobalOption {
+        /// tmux window option name to read back (e.g. `alternate-screen`).
+        name: String,
+    },
 }
 
 /// tmux `-F` format string for `list-sessions`.
@@ -257,6 +299,16 @@ pub const HISTORY_LIMIT_OPTION: &str = "history-limit";
 /// tmux global option name for mouse-wheel scrolling / copy-mode (#2398).
 pub const MOUSE_OPTION: &str = "mouse";
 
+/// tmux WINDOW option name controlling whether programs in a pane may use the
+/// terminal's alternate screen buffer (#5151).
+///
+/// Why: worth naming separately from [`HISTORY_LIMIT_OPTION`] and
+/// [`MOUSE_OPTION`] because it lives in a different tmux option scope — see
+/// [`TmuxCommand::SetWindowGlobalOption`] for the measured consequences of
+/// getting that scope wrong.
+/// What: `"alternate-screen"`.
+pub const ALTERNATE_SCREEN_OPTION: &str = "alternate-screen";
+
 /// Built-in default tmux `history-limit` (scrollback lines) applied to every
 /// managed session (#2398, moved to this shared layer by #3004).
 ///
@@ -275,6 +327,17 @@ pub const DEFAULT_TMUX_HISTORY_LIMIT: u32 = 100_000;
 /// maps the wheel to scrolling the pane / entering copy-mode.
 /// What: `true`.
 pub const DEFAULT_TMUX_MOUSE: bool = true;
+
+/// Built-in default for whether panes may use the terminal alternate screen
+/// buffer (tmux `alternate-screen`) (#5151).
+///
+/// Why: `true` is tmux's own factory default AND the behaviour every existing
+/// managed session already has, so this knob changes nothing until an operator
+/// opts out. Defaulting to `false` would silently rewrite how every full-screen
+/// program in every pane on the shared server behaves — see
+/// [`scrollback_option_commands`] for what turning it off actually costs.
+/// What: `true`.
+pub const DEFAULT_TMUX_ALTERNATE_SCREEN: bool = true;
 
 /// Render a [`TmuxCommand`] into an argv vector suitable for `Command::args`.
 ///
@@ -416,23 +479,61 @@ pub fn tmux_argv(cmd: &TmuxCommand) -> Vec<String> {
                 name.clone(),
             ]
         }
+        TmuxCommand::SetWindowGlobalOption { name, value } => {
+            vec![
+                "set-option".to_string(),
+                "-wg".to_string(),
+                name.clone(),
+                value.clone(),
+            ]
+        }
+        TmuxCommand::ShowWindowGlobalOption { name } => {
+            vec![
+                "show-options".to_string(),
+                "-wg".to_string(),
+                "-v".to_string(),
+                name.clone(),
+            ]
+        }
     }
 }
 
-/// Build the `set-option -g` command sequence that applies the scrollback +
-/// mouse-scroll ergonomics to the tmux server (#2398).
+/// Build the `set-option` command sequence that applies the scrollback +
+/// mouse-scroll + alternate-screen ergonomics to the tmux server (#2398,
+/// extended by #5151).
 ///
 /// Why: a pure, unit-testable builder for the exact commands a consumer
 /// must issue (and their order) — the resolved values come from each
 /// consumer's own config (e.g. trusty-mpm's `core::trusty_tools_config`),
 /// not from here, so this function stays free of any config/file-system
 /// dependency and is testable with plain arguments.
-/// What: two [`TmuxCommand::SetGlobalOption`] entries, `history-limit` then
-/// `mouse` (rendered `"on"`/`"off"`), in the order the caller must run
-/// them — both must land before the caller's subsequent `new-session`.
+///
+/// **What `alternate_screen: false` costs.** tmux's alternate screen is what
+/// gives a full-screen program its own buffer: the pane's prior contents
+/// reappear untouched when the program exits, and nothing the program drew is
+/// added to the pane's scrollback. Turning it off is why a TUI's output
+/// becomes scrollable — and the price is paid by EVERY pane on the shared
+/// tmux server, not just the one running an agent TUI. `vim`, `less`, `htop`
+/// and `man` all leave their final frame behind, smeared into the scrollback
+/// on exit, sometimes with redraw garbage. It is also not retroactive: history
+/// already lost to the alt screen stays lost.
+///
+/// What: three entries in the order the caller must run them, all of which
+/// must land before the caller's subsequent `new-session` —
+/// [`TmuxCommand::SetGlobalOption`] for `history-limit`, then the same for
+/// `mouse`, then [`TmuxCommand::SetWindowGlobalOption`] for
+/// `alternate-screen` (rendered `"on"`/`"off"`). The third uses the WINDOW
+/// scope deliberately; see [`TmuxCommand::SetWindowGlobalOption`] for the
+/// measured reason the server/pane scopes silently do nothing here.
 /// Test: `scrollback_option_commands_uses_configured_values`,
-/// `scrollback_option_commands_mouse_off`.
-pub fn scrollback_option_commands(history_limit: u32, mouse: bool) -> Vec<TmuxCommand> {
+/// `scrollback_option_commands_mouse_off`,
+/// `scrollback_option_commands_alternate_screen_defaults_on`,
+/// `scrollback_option_commands_alternate_screen_off_uses_window_scope`.
+pub fn scrollback_option_commands(
+    history_limit: u32,
+    mouse: bool,
+    alternate_screen: bool,
+) -> Vec<TmuxCommand> {
     vec![
         TmuxCommand::SetGlobalOption {
             name: HISTORY_LIMIT_OPTION.to_string(),
@@ -442,12 +543,17 @@ pub fn scrollback_option_commands(history_limit: u32, mouse: bool) -> Vec<TmuxCo
             name: MOUSE_OPTION.to_string(),
             value: if mouse { "on" } else { "off" }.to_string(),
         },
+        // #5151: window scope, not `-g`/`-s`/`-pg` — see SetWindowGlobalOption.
+        TmuxCommand::SetWindowGlobalOption {
+            name: ALTERNATE_SCREEN_OPTION.to_string(),
+            value: if alternate_screen { "on" } else { "off" }.to_string(),
+        },
     ]
 }
 
 /// Build the full ordered command sequence for creating a tmux session with
-/// generous scrollback ergonomics applied FIRST (issue #3004): the two
-/// [`scrollback_option_commands`] entries followed by `new-session`.
+/// generous scrollback ergonomics applied FIRST (issue #3004): every
+/// [`scrollback_option_commands`] entry followed by `new-session`.
 ///
 /// Why: `history-limit` is captured into a pane's ring buffer AT CREATION
 /// TIME — every session-creating call site, in every crate, must apply the
@@ -457,9 +563,10 @@ pub fn scrollback_option_commands(history_limit: u32, mouse: bool) -> Vec<TmuxCo
 /// #2398/#2399 fix — it never shared this ordering guarantee). This is the
 /// single, unit-tested source of that ordering: a consumer that calls this
 /// function structurally cannot get the order wrong.
-/// What: returns exactly 3 [`TmuxCommand`]s in caller-execution order —
+/// What: returns exactly 4 [`TmuxCommand`]s in caller-execution order —
 /// `SetGlobalOption(history-limit)`, `SetGlobalOption(mouse)`,
-/// `NewSession`. `idempotent` and `command` are threaded straight into the
+/// `SetWindowGlobalOption(alternate-screen)` (#5151), `NewSession`.
+/// `idempotent` and `command` are threaded straight into the
 /// `NewSession` entry (see its field docs) so callers with differing
 /// creation semantics (trusty-mpm's idempotent `-A` reuse vs.
 /// trusty-agents' fail-if-exists) can still share this one recipe.
@@ -471,10 +578,11 @@ pub fn managed_session_commands(
     workdir: Option<&str>,
     history_limit: u32,
     mouse: bool,
+    alternate_screen: bool,
     idempotent: bool,
     command: Option<&str>,
 ) -> Vec<TmuxCommand> {
-    let mut commands = scrollback_option_commands(history_limit, mouse);
+    let mut commands = scrollback_option_commands(history_limit, mouse, alternate_screen);
     commands.push(TmuxCommand::NewSession {
         name: name.to_string(),
         workdir: workdir.map(str::to_string),
@@ -485,267 +593,5 @@ pub fn managed_session_commands(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn target_renders_session_and_bare_pane() {
-        assert_eq!(TmuxTarget::session("s").as_target(), "s");
-        assert_eq!(TmuxTarget::pane("s", "%2").as_target(), "%2");
-    }
-
-    #[test]
-    fn new_session_argv_idempotent_with_workdir() {
-        let argv = tmux_argv(&TmuxCommand::NewSession {
-            name: "trusty-mpm-1".into(),
-            workdir: Some("/tmp/proj".into()),
-            idempotent: true,
-            command: None,
-        });
-        assert_eq!(
-            argv,
-            [
-                "new-session",
-                "-A",
-                "-d",
-                "-s",
-                "trusty-mpm-1",
-                "-c",
-                "/tmp/proj"
-            ]
-        );
-    }
-
-    #[test]
-    fn new_session_argv_without_workdir_or_idempotent() {
-        let argv = tmux_argv(&TmuxCommand::NewSession {
-            name: "s".into(),
-            workdir: None,
-            idempotent: false,
-            command: None,
-        });
-        assert_eq!(argv, ["new-session", "-d", "-s", "s"]);
-    }
-
-    #[test]
-    fn new_session_argv_with_initial_command_is_trailing_positional() {
-        // trusty-agents' debugger REPL launcher shape: an initial command
-        // must render as the LAST argument regardless of other flags.
-        let argv = tmux_argv(&TmuxCommand::NewSession {
-            name: "debug-repl".into(),
-            workdir: Some("/tmp/proj".into()),
-            idempotent: false,
-            command: Some("bash -lc 'run-repl'".into()),
-        });
-        assert_eq!(
-            argv,
-            [
-                "new-session",
-                "-d",
-                "-s",
-                "debug-repl",
-                "-c",
-                "/tmp/proj",
-                "bash -lc 'run-repl'"
-            ]
-        );
-    }
-
-    #[test]
-    fn send_keys_literal_argv() {
-        let argv = tmux_argv(&TmuxCommand::SendKeys {
-            target: TmuxTarget::session("s"),
-            keys: "claude --help".into(),
-            literal: true,
-        });
-        assert_eq!(argv, ["send-keys", "-t", "s", "-l", "claude --help"]);
-    }
-
-    #[test]
-    fn rename_session_argv() {
-        let argv = tmux_argv(&TmuxCommand::RenameSession {
-            old: "tm-old-01".into(),
-            new: "tm-new-01".into(),
-        });
-        assert_eq!(argv, ["rename-session", "-t", "tm-old-01", "tm-new-01"]);
-    }
-
-    #[test]
-    fn send_keys_keyname_argv() {
-        let argv = tmux_argv(&TmuxCommand::SendKeys {
-            target: TmuxTarget::pane("s", "%1"),
-            keys: "Enter".into(),
-            literal: false,
-        });
-        assert_eq!(argv, ["send-keys", "-t", "%1", "Enter"]);
-    }
-
-    #[test]
-    fn send_keys_pane_target_is_bare_id() {
-        let argv = tmux_argv(&TmuxCommand::SendKeys {
-            target: TmuxTarget::pane("trusty-mpm-xyz", "%6015"),
-            keys: "claude --resume".into(),
-            literal: true,
-        });
-        let target_arg = &argv[argv.iter().position(|a| a == "-t").unwrap() + 1];
-        assert_eq!(target_arg, "%6015", "pane target must be the bare pane id");
-        assert!(
-            !target_arg.contains(':'),
-            "pane target must not be session-qualified: {target_arg}"
-        );
-    }
-
-    #[test]
-    fn capture_argv() {
-        let argv = tmux_argv(&TmuxCommand::CapturePane {
-            target: TmuxTarget::session("s"),
-            lines: Some(50),
-        });
-        assert_eq!(argv, ["capture-pane", "-t", "s", "-p", "-S", "-50"]);
-
-        let argv = tmux_argv(&TmuxCommand::CapturePane {
-            target: TmuxTarget::session("s"),
-            lines: None,
-        });
-        assert_eq!(argv, ["capture-pane", "-t", "s", "-p"]);
-    }
-
-    #[test]
-    fn list_sessions_uses_canonical_format() {
-        let argv = tmux_argv(&TmuxCommand::ListSessions);
-        assert_eq!(argv, ["list-sessions", "-F", SESSION_LIST_FORMAT]);
-    }
-
-    #[test]
-    fn list_windows_argv() {
-        let argv = tmux_argv(&TmuxCommand::ListWindows {
-            name: "work".into(),
-        });
-        assert_eq!(
-            argv,
-            ["list-windows", "-t", "work", "-F", WINDOW_LIST_FORMAT]
-        );
-    }
-
-    #[test]
-    fn list_panes_argv() {
-        let argv = tmux_argv(&TmuxCommand::ListPanes {
-            name: "work".into(),
-        });
-        assert_eq!(
-            argv,
-            ["list-panes", "-s", "-t", "work", "-F", PANE_LIST_FORMAT]
-        );
-    }
-
-    #[test]
-    fn set_environment_argv() {
-        let argv = tmux_argv(&TmuxCommand::SetEnvironment {
-            session: "tmpm-brave-otter".into(),
-            key: "TM_MANAGED_SESSION_ID".into(),
-            value: "11111111-2222-3333-4444-555555555555".into(),
-        });
-        assert_eq!(
-            argv,
-            [
-                "set-environment",
-                "-t",
-                "tmpm-brave-otter",
-                "TM_MANAGED_SESSION_ID",
-                "11111111-2222-3333-4444-555555555555"
-            ]
-        );
-    }
-
-    #[test]
-    fn set_global_option_argv() {
-        let argv = tmux_argv(&TmuxCommand::SetGlobalOption {
-            name: "history-limit".into(),
-            value: "100000".into(),
-        });
-        assert_eq!(argv, ["set-option", "-g", "history-limit", "100000"]);
-    }
-
-    #[test]
-    fn start_server_argv() {
-        // #3386: no session/target arguments — this only ensures the server
-        // process itself exists.
-        assert_eq!(tmux_argv(&TmuxCommand::StartServer), ["start-server"]);
-    }
-
-    #[test]
-    fn show_global_option_argv() {
-        // #3386: `-v` so the reply is the bare value, directly parseable.
-        let argv = tmux_argv(&TmuxCommand::ShowGlobalOption {
-            name: "history-limit".into(),
-        });
-        assert_eq!(argv, ["show-options", "-g", "-v", "history-limit"]);
-    }
-
-    #[test]
-    fn scrollback_option_commands_uses_configured_values() {
-        // Order matters: history-limit must precede mouse (both must land
-        // before the caller's subsequent new-session, but the internal
-        // order between the two is asserted here so it stays stable).
-        let cmds = scrollback_option_commands(50_000, true);
-        assert_eq!(cmds.len(), 2);
-        assert_eq!(
-            tmux_argv(&cmds[0]),
-            ["set-option", "-g", "history-limit", "50000"]
-        );
-        assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "on"]);
-    }
-
-    #[test]
-    fn scrollback_option_commands_mouse_off() {
-        let cmds = scrollback_option_commands(100_000, false);
-        assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "off"]);
-    }
-
-    // ── #3004: the shared ordering-guarantee recipe ─────────────────────
-
-    #[test]
-    fn managed_session_commands_orders_options_before_new_session() {
-        let cmds = managed_session_commands("sess", Some("/tmp"), 100_000, true, true, None);
-        assert_eq!(cmds.len(), 3);
-        assert_eq!(
-            tmux_argv(&cmds[0]),
-            ["set-option", "-g", "history-limit", "100000"]
-        );
-        assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "on"]);
-        assert_eq!(
-            tmux_argv(&cmds[2]),
-            ["new-session", "-A", "-d", "-s", "sess", "-c", "/tmp"]
-        );
-    }
-
-    #[test]
-    fn managed_session_commands_idempotent_flag() {
-        let non_idempotent = managed_session_commands("sess", None, 100_000, true, false, None);
-        assert_eq!(
-            tmux_argv(&non_idempotent[2]),
-            ["new-session", "-d", "-s", "sess"]
-        );
-
-        let idempotent = managed_session_commands("sess", None, 100_000, true, true, None);
-        assert_eq!(
-            tmux_argv(&idempotent[2]),
-            ["new-session", "-A", "-d", "-s", "sess"]
-        );
-    }
-
-    #[test]
-    fn managed_session_commands_with_initial_command() {
-        let cmds =
-            managed_session_commands("debug-repl", None, 100_000, true, false, Some("run-repl"));
-        assert_eq!(
-            tmux_argv(&cmds[2]),
-            ["new-session", "-d", "-s", "debug-repl", "run-repl"]
-        );
-    }
-
-    #[test]
-    fn default_history_limit_is_100_000() {
-        assert_eq!(DEFAULT_TMUX_HISTORY_LIMIT, 100_000);
-    }
-}
+#[path = "tmux_tests.rs"]
+mod tmux_tests;
