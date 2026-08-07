@@ -20,12 +20,24 @@
 //! connection. Shutdown SIGTERMs every owned child, waits on each, and
 //! best-effort cleans up its socket file.
 //!
-//! Test: unit tests in this module cover the external-mode opt-out, the
-//! "already running" probe, and the `shutdown` reaping path with no
-//! daemon ever spawned. An `#[ignore]`-tagged integration test in
-//! `tests/bm25_supervisor_e2e.rs` drives a real `trusty-bm25-daemon` child
-//! end-to-end (index + search + shutdown) when the binary is on PATH or
-//! `TRUSTY_BM25_DAEMON_BIN` is set.
+//! The daemon population is BOUNDED (#2845 / #2846). Until this module grew a
+//! cap, the only thing that ever removed an entry from the map was `shutdown`,
+//! so one cross-palace `memory_recall_all` over ~99 palaces would leave 99
+//! child processes resident for the trusty-memory daemon's whole life — and
+//! each one's memory scales with its palace's drawer text, because
+//! `PalaceBm25Index` retains every document's full text in a `BTreeMap`. Two
+//! limits now apply on every `ensure_running`: a cap on concurrently-live
+//! daemons with least-recently-used reaping, and a per-daemon RSS ceiling that
+//! is compared against a real measurement rather than merely declared. Spawns
+//! are serialised so a burst fan-out cannot satisfy the cap per-caller and
+//! violate it in aggregate.
+//!
+//! Test: unit tests in `bm25_supervisor_tests.rs` cover the external-mode
+//! opt-out, the "already running" probe, the `shutdown` reaping path with no
+//! daemon ever spawned, and the two limits. An `#[ignore]`-tagged integration
+//! test in `tests/bm25_supervisor_e2e.rs` drives real `trusty-bm25-daemon`
+//! children end-to-end (index + search + cap eviction + shutdown) when the
+//! binary is on PATH or `TRUSTY_BM25_DAEMON_BIN` is set.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -51,6 +63,55 @@ use trusty_common::bm25_client::{locate_bm25_daemon_binary, socket_path_for_pala
 /// is treated as unset.
 /// Test: `external_mode_skips_spawn` exercises the opt-out branch.
 pub const ENV_EXTERNAL_BM25: &str = "TRUSTY_BM25_EXTERNAL";
+
+/// Environment variable that overrides the cap on concurrently-live daemons.
+///
+/// Why (#2845): `ensure_running` is called once per palace, and one
+/// `memory_recall_all` touches every palace on disk — ~99 on this host. Without
+/// a cap the supervisor would hold 99 child processes for the rest of the
+/// trusty-memory daemon's life, because nothing but `shutdown` ever removed an
+/// entry from the map. Drawer distribution is heavily skewed (one palace holds
+/// 57% of the corpus, ~80 hold nothing), so the working set is a handful of
+/// palaces and a small cap costs almost nothing while bounding the worst case.
+/// What: env var name `TRUSTY_BM25_MAX_DAEMONS`. Parsed as `usize`; values
+/// below 1 and unparseable values fall back to [`DEFAULT_MAX_LIVE_DAEMONS`].
+/// Test: `max_live_daemons_honours_env_override`.
+pub const ENV_MAX_DAEMONS: &str = "TRUSTY_BM25_MAX_DAEMONS";
+
+/// Environment variable that overrides the per-daemon RSS ceiling, in MB.
+///
+/// Why (#2846): trusty-search declared an `rss_limit_mb` and never compared it
+/// against anything; the process grew to 2.2x that limit and was OOM-killed.
+/// A BM25 daemon's memory scales linearly with its palace's drawer text
+/// because `PalaceBm25Index` retains every document's full text in a
+/// `BTreeMap`, so an unbounded palace is an unbounded daemon. This limit is
+/// enforced on every `ensure_running`, not merely reported.
+/// What: env var name `TRUSTY_BM25_RSS_LIMIT_MB`. `0` disables enforcement;
+/// unparseable values fall back to [`DEFAULT_RSS_LIMIT_MB`].
+/// Test: `rss_limit_honours_env_override`, `over_rss_limit_children_are_reaped`.
+pub const ENV_RSS_LIMIT_MB: &str = "TRUSTY_BM25_RSS_LIMIT_MB";
+
+/// Default cap on concurrently-live BM25 daemons.
+///
+/// Why: three covers the realistic working set — the palace you are in, the
+/// one you just cross-referenced, and one in flight — while keeping the
+/// worst case at three subprocesses instead of ninety-nine. Raising it is a
+/// one-env-var decision for operators who genuinely fan out wider.
+/// What: `3`.
+/// Test: `default_cap_is_three`.
+pub const DEFAULT_MAX_LIVE_DAEMONS: usize = 3;
+
+/// Default per-daemon RSS ceiling in megabytes.
+///
+/// Why: the whole drawer corpus across ~99 palaces is single-digit MB of text,
+/// so a single daemon holding more than 512 MB is not holding drawers — it is
+/// leaking, and #2846 is the record of what happens when nobody notices.
+/// Generous enough never to reap a healthy daemon; tight enough that a runaway
+/// one is reaped in seconds rather than at OOM time.
+/// What: `512`.
+/// Test: `rss_limit_honours_env_override` pins the parse; the reap path is
+/// covered by `over_rss_limit_children_are_reaped`.
+pub const DEFAULT_RSS_LIMIT_MB: u64 = 512;
 
 /// Upper bound on how long `ensure_running` waits for the freshly-spawned
 /// daemon's UDS socket to appear and accept a connection.
@@ -89,6 +150,15 @@ const MAX_PROBE_INTERVAL: Duration = Duration::from_millis(250);
 struct ChildHandle {
     child: Child,
     socket_path: PathBuf,
+    /// Monotonic tick of the last `ensure_running` that resolved to this
+    /// child. The LRU victim is the entry with the smallest value.
+    ///
+    /// Why a counter and not an `Instant`: two `ensure_running` calls inside
+    /// the same clock tick would compare equal and make the victim choice
+    /// arbitrary, which is exactly the case a burst fan-out produces. A
+    /// strictly-increasing counter gives a total order regardless of clock
+    /// resolution.
+    last_used: u64,
 }
 
 /// Supervisor that owns BM25 daemon subprocesses, one per palace.
@@ -111,20 +181,98 @@ struct ChildHandle {
 /// `shutdown_with_no_children_is_noop`, and the integration test.
 pub struct Bm25Supervisor {
     children: Mutex<HashMap<String, ChildHandle>>,
+    /// Serialises the spawn sequence (re-check → enforce limits → spawn →
+    /// probe → insert).
+    ///
+    /// Why (#2845): the map mutex is released before spawning so slow startups
+    /// for one palace don't block lookups for another, but that left two gaps.
+    /// First, two concurrent calls for the SAME palace could both reach the
+    /// spawn step and the second insert would silently drop the first child.
+    /// Second, a cross-palace fan-out could have every palace in flight at
+    /// once, so a cap checked per-call would be satisfied by each caller
+    /// individually and violated in aggregate — the same shape as the
+    /// unbounded fan-out that 503-stormed trusty-search. Serialising spawns
+    /// closes both: the cap is evaluated against a map nobody else is
+    /// mutating, and a double spawn is impossible because the second caller
+    /// re-checks the map after acquiring.
+    /// The cost is that a cold N-palace fan-out spawns serially. That is the
+    /// intended trade — with a cap of three, a parallel fan-out would spend
+    /// its time evicting daemons it just spawned.
+    spawn_gate: Mutex<()>,
+    /// Cap on concurrently-live daemons. Resolved once at construction.
+    max_live: usize,
+    /// Per-daemon RSS ceiling in MB. `None` disables enforcement.
+    ///
+    /// Why `Option` and not a sentinel `0`: "no ceiling" and "a ceiling of
+    /// zero" are opposite instructions, and a single `u64` cannot say both.
+    /// Encoding disabled-ness in the type keeps the operator's `=0` opt-out
+    /// from colliding with the tightest possible limit, which is the value the
+    /// enforcement tests need in order to be deterministic.
+    rss_limit_mb: Option<u64>,
+    /// Monotonic tick source for `ChildHandle::last_used`.
+    clock: std::sync::atomic::AtomicU64,
+    /// Count of children reaped by the cap or the RSS limit (never by
+    /// `shutdown`). Observability + test assertion surface.
+    reaped: std::sync::atomic::AtomicU64,
 }
 
 impl Bm25Supervisor {
-    /// Construct an empty supervisor.
+    /// Construct an empty supervisor with limits read from the environment.
     ///
     /// Why: cheap, allocation-light constructor so the supervisor can be
     /// built unconditionally at startup and only allocate when a palace
-    /// first asks for a daemon.
-    /// What: returns a supervisor with an empty per-palace map.
-    /// Test: trivially exercised by every other test in this module.
+    /// first asks for a daemon. Resolving the limits here (rather than on
+    /// each `ensure_running`) means a mid-flight env mutation cannot make the
+    /// cap wobble between two concurrent calls.
+    /// What: returns a supervisor with an empty per-palace map and the
+    /// caps from [`ENV_MAX_DAEMONS`] / [`ENV_RSS_LIMIT_MB`], falling back to
+    /// [`DEFAULT_MAX_LIVE_DAEMONS`] / [`DEFAULT_RSS_LIMIT_MB`].
+    /// Test: `default_cap_is_three`, `max_live_daemons_honours_env_override`.
     pub fn new() -> Self {
+        Self::with_limits(max_live_from_env(), rss_limit_from_env())
+    }
+
+    /// Construct a supervisor with explicit limits, bypassing the environment.
+    ///
+    /// Why: the limit-enforcement tests must pin a cap of 1 or an RSS ceiling
+    /// of 1 MB without mutating process-global env vars that sibling tests
+    /// race against. Production code should use [`Self::new`].
+    /// What: `max_live` is clamped to at least 1 — a cap of zero would reap
+    /// every daemon the instant it spawned, which is a wedge, not a limit.
+    /// `rss_limit_mb: None` disables RSS enforcement; `Some(n)` reaps any child
+    /// measuring at or above `n` MB.
+    /// Test: `cap_of_one_keeps_a_single_daemon_live`.
+    pub fn with_limits(max_live: usize, rss_limit_mb: Option<u64>) -> Self {
         Self {
             children: Mutex::new(HashMap::new()),
+            spawn_gate: Mutex::new(()),
+            max_live: max_live.max(1),
+            rss_limit_mb,
+            clock: std::sync::atomic::AtomicU64::new(0),
+            reaped: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Cap on concurrently-live daemons this supervisor enforces.
+    pub fn max_live(&self) -> usize {
+        self.max_live
+    }
+
+    /// Per-daemon RSS ceiling in MB; `None` means enforcement is off.
+    pub fn rss_limit_mb(&self) -> Option<u64> {
+        self.rss_limit_mb
+    }
+
+    /// How many children have been reaped by the cap or the RSS limit.
+    ///
+    /// Why: "the cap is configured" and "the cap did something" are different
+    /// claims, and #2846 is the record of a limit that only ever made the
+    /// first one. This counter makes the second checkable — by a test, and by
+    /// an operator reading it out of the daemon.
+    /// What: monotonic count; `shutdown` does not increment it.
+    /// Test: `exceeding_the_cap_reaps_the_least_recently_used`.
+    pub fn reaped_count(&self) -> u64 {
+        self.reaped.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Ensure a `trusty-bm25-daemon` is running for `palace` and return the
@@ -164,44 +312,29 @@ impl Bm25Supervisor {
             return Ok(socket_path);
         }
 
-        // ── (2) Already-supervised path ────────────────────────────────────
-        // Take the lock briefly to inspect / evict the stored child. We
-        // drop the guard before spawning so concurrent calls for OTHER
-        // palaces don't queue behind a slow startup probe.
-        {
-            let mut guard = self.children.lock().await;
-            if let Some(entry) = guard.get_mut(palace) {
-                match entry.child.try_wait() {
-                    Ok(None) => {
-                        // Still alive — happy path.
-                        tracing::trace!(
-                            palace = %palace,
-                            socket = %entry.socket_path.display(),
-                            "bm25 supervisor: child already running"
-                        );
-                        return Ok(entry.socket_path.clone());
-                    }
-                    Ok(Some(status)) => {
-                        // Exited — log and evict so we can re-spawn below.
-                        tracing::warn!(
-                            palace = %palace,
-                            ?status,
-                            "bm25 daemon exited unexpectedly — attempting one restart"
-                        );
-                        guard.remove(palace);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            palace = %palace,
-                            "bm25 supervisor: try_wait failed: {e:#} — evicting and retrying"
-                        );
-                        guard.remove(palace);
-                    }
-                }
-            }
+        // ── (2) Already-supervised fast path ───────────────────────────────
+        // Take the lock briefly to inspect the stored child. We drop the
+        // guard before spawning so concurrent calls for OTHER palaces don't
+        // queue behind a slow startup probe.
+        if let Some(path) = self.lookup_live(palace).await {
+            return Ok(path);
         }
 
-        // ── (3) Socket-already-bound check ─────────────────────────────────
+        // ── (3) Spawn, serialised ──────────────────────────────────────────
+        // Everything from here down mutates the daemon population, so it runs
+        // under the spawn gate — see the field's doc comment for why the map
+        // mutex alone is not enough.
+        let _spawn = self.spawn_gate.lock().await;
+
+        // Re-check under the gate: a concurrent caller for this same palace
+        // may have spawned it while we waited. Without this, the cap could be
+        // exceeded by exactly the number of racing callers, and the loser's
+        // child would be silently dropped by the map insert.
+        if let Some(path) = self.lookup_live(palace).await {
+            return Ok(path);
+        }
+
+        // ── (3a) Socket-already-bound check ────────────────────────────────
         // If some other process (a previously-spawned daemon we lost the
         // handle to, or an operator-managed launchd job that forgot to set
         // TRUSTY_BM25_EXTERNAL) is already serving on this socket, adopt
@@ -214,6 +347,12 @@ impl Bm25Supervisor {
             );
             return Ok(socket_path);
         }
+
+        // ── (3b) Enforce the limits BEFORE adding to the population ────────
+        // Order matters: reaping after the spawn would let the population
+        // momentarily exceed the cap, and under a fan-out that moment is when
+        // every other caller is also spawning.
+        self.enforce_limits(1).await;
 
         // ── (4) Spawn ──────────────────────────────────────────────────────
         let binary =
@@ -254,9 +393,137 @@ impl Bm25Supervisor {
             ChildHandle {
                 child,
                 socket_path: socket_path.clone(),
+                last_used: self.tick(),
             },
         );
+        let live = guard.len();
+        drop(guard);
+        tracing::debug!(live, cap = self.max_live, "bm25 supervisor: daemon count");
         Ok(socket_path)
+    }
+
+    /// Next value of the monotonic LRU clock.
+    fn tick(&self) -> u64 {
+        self.clock
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1)
+    }
+
+    /// Resolve `palace` to a live child's socket, refreshing its LRU stamp.
+    ///
+    /// Why: `ensure_running` needs this answer twice — once on the fast path
+    /// and once under the spawn gate — and the two must agree exactly,
+    /// including the dead-child eviction. Two copies would be two chances to
+    /// drift.
+    /// What: returns `Some(socket_path)` when the stored child is still
+    /// running, and stamps it as most-recently-used so the LRU victim choice
+    /// reflects real traffic. A child that has exited (or whose status cannot
+    /// be read) is removed from the map and `None` is returned, so the caller
+    /// falls through to a fresh spawn. Removing a corpse does NOT count as a
+    /// reap — nothing was reclaimed.
+    /// Test: `dead_child_is_evicted_and_respawned` (e2e).
+    async fn lookup_live(&self, palace: &str) -> Option<PathBuf> {
+        let stamp = self.tick();
+        let mut guard = self.children.lock().await;
+        let entry = guard.get_mut(palace)?;
+        match entry.child.try_wait() {
+            Ok(None) => {
+                entry.last_used = stamp;
+                let path = entry.socket_path.clone();
+                tracing::trace!(
+                    palace = %palace,
+                    socket = %path.display(),
+                    "bm25 supervisor: child already running"
+                );
+                Some(path)
+            }
+            Ok(Some(status)) => {
+                tracing::warn!(
+                    palace = %palace,
+                    ?status,
+                    "bm25 daemon exited unexpectedly — attempting one restart"
+                );
+                guard.remove(palace);
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    palace = %palace,
+                    "bm25 supervisor: try_wait failed: {e:#} — evicting and retrying"
+                );
+                guard.remove(palace);
+                None
+            }
+        }
+    }
+
+    /// Bring the live-daemon population within both limits, leaving room for
+    /// `headroom` more.
+    ///
+    /// Why (#2845 + #2846): these are the two failures trusty-search shipped —
+    /// an unbounded fan-out and a memory limit that was declared but never
+    /// compared against anything. Enforcing both in one place, on the path
+    /// that grows the population, is what makes them limits rather than
+    /// documentation.
+    /// What: two passes. First, every child whose measured RSS exceeds
+    /// `rss_limit_mb` is selected regardless of recency — a leaking daemon is
+    /// the wrong thing to keep no matter how recently it was used. A child
+    /// whose RSS cannot be measured is left alone: `None` means "no reading",
+    /// and reaping on a failed measurement would kill healthy daemons on any
+    /// platform where the read is unavailable. Second, while the survivors
+    /// plus `headroom` would exceed `max_live`, the least-recently-used
+    /// survivor is selected. Victims are removed from the map under the lock,
+    /// then terminated with the lock released so a 2 s SIGTERM wait never
+    /// blocks another palace's lookup.
+    /// Test: `exceeding_the_cap_reaps_the_least_recently_used`,
+    /// `over_rss_limit_children_are_reaped`,
+    /// `unmeasurable_rss_does_not_reap`.
+    async fn enforce_limits(&self, headroom: usize) {
+        let mut victims: Vec<(String, ChildHandle, &'static str)> = Vec::new();
+        {
+            let mut guard = self.children.lock().await;
+
+            let over: Vec<String> = guard
+                .iter()
+                .filter(|(_, h)| over_rss_limit(h.child.id(), self.rss_limit_mb))
+                .map(|(p, _)| p.clone())
+                .collect();
+            for palace in over {
+                if let Some(h) = guard.remove(&palace) {
+                    victims.push((palace, h, "rss"));
+                }
+            }
+
+            while guard.len() + headroom > self.max_live {
+                let Some(lru) = guard
+                    .iter()
+                    .min_by_key(|(_, h)| h.last_used)
+                    .map(|(p, _)| p.clone())
+                else {
+                    break;
+                };
+                if let Some(h) = guard.remove(&lru) {
+                    victims.push((lru, h, "cap"));
+                }
+            }
+        }
+
+        for (palace, mut handle, reason) in victims {
+            tracing::info!(
+                palace = %palace,
+                reason,
+                cap = self.max_live,
+                rss_limit_mb = ?self.rss_limit_mb,
+                pid = ?handle.child.id(),
+                "bm25 supervisor: reaping daemon to stay within limits"
+            );
+            if let Err(e) = terminate_child(&mut handle.child).await {
+                tracing::warn!(palace = %palace, "bm25 daemon reap error: {e:#}");
+            }
+            remove_socket_file(&palace, &handle.socket_path).await;
+            self.reaped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Graceful shutdown: SIGTERM all owned daemons, reap them, and clean
@@ -294,19 +561,7 @@ impl Bm25Supervisor {
                     "bm25 daemon shutdown encountered an error: {e:#}"
                 );
             }
-            // Best-effort socket cleanup. The daemon's own SIGTERM handler
-            // unlinks the socket as part of clean exit, but if we had to
-            // SIGKILL it the file is still on disk and will EADDRINUSE
-            // the next spawn.
-            if let Err(e) = tokio::fs::remove_file(&entry.socket_path).await {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::debug!(
-                        palace = %palace,
-                        socket = %entry.socket_path.display(),
-                        "could not remove bm25 daemon socket (likely already cleaned up): {e}"
-                    );
-                }
-            }
+            remove_socket_file(&palace, &entry.socket_path).await;
         }
     }
 
@@ -350,6 +605,103 @@ impl std::fmt::Debug for Bm25Supervisor {
 /// branch.
 fn external_mode_enabled() -> bool {
     std::env::var(ENV_EXTERNAL_BM25).as_deref() == Ok("1")
+}
+
+/// Best-effort unlink of a daemon's socket file.
+///
+/// Why: the daemon's own SIGTERM handler unlinks the socket on a clean exit,
+/// but a SIGKILLed daemon leaves the file behind and the next spawn for that
+/// palace then fails to bind with EADDRINUSE. Both the shutdown path and the
+/// limit-enforcement reap path need this, and a reaped palace is exactly the
+/// one most likely to be spawned again shortly.
+/// What: `remove_file`; `NotFound` is the expected clean-exit case and is not
+/// logged. Any other error is logged at `debug!` and ignored — a stale socket
+/// costs one failed spawn, not correctness.
+/// Test: covered by `bm25_supervisor_e2e`'s shutdown assertion.
+async fn remove_socket_file(palace: &str, socket_path: &Path) {
+    if let Err(e) = tokio::fs::remove_file(socket_path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::debug!(
+                palace = %palace,
+                socket = %socket_path.display(),
+                "could not remove bm25 daemon socket (likely already cleaned up): {e}"
+            );
+        }
+    }
+}
+
+/// Decide whether a child has breached the RSS ceiling.
+///
+/// Why (#2846): the whole point of this limit is that it is compared against a
+/// real measurement, so the two ways a measurement can be missing need an
+/// explicit, tested answer rather than whatever `unwrap_or` happens to do. A
+/// child with no pid has already exited — there is nothing to reclaim. A pid
+/// whose RSS cannot be read yields `None`, which means "no reading", NOT
+/// "zero"; reaping on it would kill every healthy daemon on any platform where
+/// the read is unavailable, turning a memory guardrail into an outage.
+/// What: `false` when enforcement is off, when the pid is gone, or when the
+/// reading is unavailable. Otherwise `true` iff the measured MB is at or above
+/// the ceiling. Pure — takes the pid rather than the handle so it is testable
+/// without a live process.
+/// Test: `over_rss_limit_is_false_without_a_measurement`,
+/// `over_rss_limit_is_false_when_disabled`.
+fn over_rss_limit(pid: Option<u32>, limit_mb: Option<u64>) -> bool {
+    let Some(limit) = limit_mb else {
+        return false;
+    };
+    let Some(pid) = pid else {
+        return false;
+    };
+    trusty_common::sys_metrics::process_rss_mb(pid).is_some_and(|mb| mb >= limit)
+}
+
+/// Resolve the live-daemon cap from [`ENV_MAX_DAEMONS`].
+///
+/// Why: an operator who fans out wider than the default working set needs a
+/// knob, and a knob that silently ignores a typo is worse than no knob — hence
+/// the explicit warn on an unparseable value rather than a quiet default.
+/// What: parses the env var as `usize`; `0` and unparseable values fall back
+/// to [`DEFAULT_MAX_LIVE_DAEMONS`].
+/// Test: `max_live_daemons_honours_env_override`.
+fn max_live_from_env() -> usize {
+    match std::env::var(ENV_MAX_DAEMONS) {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(n) if n >= 1 => n,
+            _ => {
+                tracing::warn!(
+                    "{ENV_MAX_DAEMONS}={raw:?} is not a positive integer — \
+                     using default {DEFAULT_MAX_LIVE_DAEMONS}"
+                );
+                DEFAULT_MAX_LIVE_DAEMONS
+            }
+        },
+        Err(_) => DEFAULT_MAX_LIVE_DAEMONS,
+    }
+}
+
+/// Resolve the per-daemon RSS ceiling from [`ENV_RSS_LIMIT_MB`].
+///
+/// Why: same knob-with-a-typo argument as [`max_live_from_env`], plus one
+/// specific to this limit — `0` must be an explicit, documented way to turn
+/// enforcement off, not an accident of parsing.
+/// What: parses as `u64`; `0` maps to `None` (enforcement off); unparseable
+/// values fall back to [`DEFAULT_RSS_LIMIT_MB`].
+/// Test: `rss_limit_honours_env_override`.
+fn rss_limit_from_env() -> Option<u64> {
+    match std::env::var(ENV_RSS_LIMIT_MB) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(n) => Some(n),
+            Err(_) => {
+                tracing::warn!(
+                    "{ENV_RSS_LIMIT_MB}={raw:?} is not an integer — \
+                     using default {DEFAULT_RSS_LIMIT_MB}"
+                );
+                Some(DEFAULT_RSS_LIMIT_MB)
+            }
+        },
+        Err(_) => Some(DEFAULT_RSS_LIMIT_MB),
+    }
 }
 
 /// Quick non-blocking probe — opens a `UnixStream`, immediately closes it.
@@ -497,223 +849,5 @@ async fn terminate_child(child: &mut Child) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::sync::Mutex as TokioMutex;
-
-    /// Process-wide lock that serialises every test in this module which
-    /// touches the `TRUSTY_BM25_EXTERNAL` or `TRUSTY_BM25_DAEMON_BIN` env
-    /// vars.
-    ///
-    /// Why: cargo runs tests in parallel inside the same process, and any
-    /// two tests that mutate the same env var race each other. The lock
-    /// keeps the supervisor's env mutation isolated from sibling tests
-    /// without slowing the whole suite via `--test-threads=1`. We use
-    /// `tokio::sync::Mutex` here (not `std::sync::Mutex`) because the
-    /// guard is held across `.await` calls in `ensure_running`; holding a
-    /// std-sync guard across an await would block the runtime and is
-    /// flagged by `clippy::await_holding_lock`.
-    /// What: a static `OnceLock<Arc<TokioMutex<()>>>` initialised on first
-    /// access so we don't need a runtime to construct it. Each call
-    /// returns a clone of the `Arc` — cheap and lockable.
-    /// Test: used by every env-mutating test below.
-    fn env_lock() -> std::sync::Arc<TokioMutex<()>> {
-        static LOCK: std::sync::OnceLock<std::sync::Arc<TokioMutex<()>>> =
-            std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Arc::new(TokioMutex::new(())))
-            .clone()
-    }
-
-    /// Why: the supervisor must start with an empty map so the first
-    /// `ensure_running` call always takes the cold-path branch.
-    /// What: constructs a supervisor and asserts no children are tracked.
-    /// Test: this test itself.
-    #[tokio::test]
-    async fn supervisor_starts_empty() {
-        let sup = Bm25Supervisor::new();
-        assert_eq!(sup.supervised_count().await, 0);
-    }
-
-    /// Why: `Default::default()` must behave like `new()`. Catches a
-    /// regression where someone adds state to `new` and forgets to mirror
-    /// it on `Default`.
-    /// Test: this test itself.
-    #[tokio::test]
-    async fn supervisor_default_matches_new() {
-        let sup: Bm25Supervisor = Default::default();
-        assert_eq!(sup.supervised_count().await, 0);
-    }
-
-    /// Why: in external-management mode `ensure_running` must NOT spawn
-    /// anything; it must just hand back the socket path the caller would
-    /// have ended up at if it had spawned. Pinning this guards against a
-    /// future regression that accidentally fires off a child even with the
-    /// env var set.
-    /// What: set `TRUSTY_BM25_EXTERNAL=1`, call `ensure_running` against a
-    /// definitely-unused palace + a nonexistent data dir, assert no child
-    /// is tracked and the returned path matches the canonical resolver.
-    /// Test: this test itself. The env mutation is serialised by the
-    /// guard because Rust tests run in parallel inside the same process.
-    #[tokio::test]
-    async fn external_mode_skips_spawn() {
-        let lock = env_lock();
-        let _env = lock.lock().await;
-        let _guard = EnvGuard::set(ENV_EXTERNAL_BM25, "1");
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let sup = Bm25Supervisor::new();
-        // Short palace name so the resolved socket path stays well under
-        // the kernel's `sun_path` limit (~104 bytes on macOS).
-        let palace = "ext-skip";
-        let path = sup
-            .ensure_running(palace, tmp.path())
-            .await
-            .expect("external mode must return socket path without spawning");
-        assert_eq!(path, socket_path_for_palace(palace));
-        assert_eq!(
-            sup.supervised_count().await,
-            0,
-            "external mode must not register a child"
-        );
-    }
-
-    /// Why: if some other process is already serving on the canonical
-    /// socket path (think: stale daemon from a previous run, or an
-    /// operator-managed launchd job that forgot the `TRUSTY_BM25_EXTERNAL`
-    /// env var), spawning a second daemon would EADDRINUSE. The supervisor
-    /// must adopt the existing socket and return without spawning.
-    /// What: bind a dummy `UnixListener` at the canonical socket path for
-    /// a test palace, call `ensure_running`, assert no child is tracked
-    /// and the returned path matches.
-    /// Test: this test itself.
-    #[tokio::test]
-    async fn already_running_skips_spawn() {
-        let lock = env_lock();
-        let _env = lock.lock().await;
-        // Ensure we don't accidentally pick up an external-mode flag from
-        // a sibling test that ran first.
-        let _g = EnvGuard::remove(ENV_EXTERNAL_BM25);
-        // Use a very short palace name. The canonical socket path is
-        // `$TMPDIR/trusty-bm25-<palace>.sock`, and macOS' `$TMPDIR`
-        // (`/var/folders/.../T/`) is already long, so we keep the palace
-        // fragment to a handful of characters to avoid SUN_LEN errors.
-        // Use the low bits of process PID to disambiguate concurrent
-        // test runs.
-        let palace = format!("a{:x}", std::process::id() & 0xffff);
-        let socket = socket_path_for_palace(&palace);
-        // Clean up any leftover socket from a previous failed test.
-        let _ = std::fs::remove_file(&socket);
-        let listener =
-            tokio::net::UnixListener::bind(&socket).expect("bind dummy listener at canonical path");
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let sup = Bm25Supervisor::new();
-        let path = sup
-            .ensure_running(&palace, tmp.path())
-            .await
-            .expect("ensure_running must adopt existing socket");
-        assert_eq!(path, socket);
-        assert_eq!(
-            sup.supervised_count().await,
-            0,
-            "adoption path must not register a child"
-        );
-
-        drop(listener);
-        let _ = std::fs::remove_file(&socket);
-    }
-
-    /// Why: `shutdown` on a fresh supervisor must not panic, error, or
-    /// log anything alarming. Operators will inevitably call it at exit
-    /// even when no palace has touched BM25 yet.
-    /// Test: this test itself.
-    #[tokio::test]
-    async fn shutdown_with_no_children_is_noop() {
-        let sup = Bm25Supervisor::new();
-        sup.shutdown().await;
-        assert_eq!(sup.supervised_count().await, 0);
-    }
-
-    /// Why: `Bm25Supervisor` is shared via `Arc` and must be `Send + Sync`
-    /// so it can be cloned into background tasks and async handlers.
-    /// Compile-fail of this test means the type bounds regressed.
-    /// What: a static assertion via a const fn that requires `Send + Sync`.
-    /// Test: this test itself.
-    #[test]
-    fn supervisor_is_send_and_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<Bm25Supervisor>();
-    }
-
-    /// Why: the probe must report `false` for a path with nothing bound,
-    /// not panic or block forever.
-    /// Test: this test itself.
-    #[tokio::test]
-    async fn probe_returns_false_for_missing_socket() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let missing = tmp.path().join("nonexistent.sock");
-        assert!(!probe_socket(&missing).await);
-    }
-
-    /// Why: the probe must report `true` immediately when something is
-    /// already accepting connections at that path. Pins the happy path.
-    /// Test: this test itself.
-    #[tokio::test]
-    async fn probe_returns_true_for_bound_socket() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let sock = tmp.path().join("listen.sock");
-        let _listener =
-            tokio::net::UnixListener::bind(&sock).expect("bind listener for probe test");
-        assert!(probe_socket(&sock).await);
-    }
-
-    /// RAII guard for serialised env-var mutation in tests.
-    ///
-    /// Why: cargo test runs tests in the same process by default, so
-    /// `std::env::set_var` mutations leak between tests unless restored
-    /// on drop. This is the same pattern the supervisor unit tests in
-    /// `trusty-search/src/service/embedder_supervisor.rs` use.
-    /// What: captures the prior value on construction, restores or
-    /// removes on drop. SAFETY notes inlined at each unsafe block.
-    /// Test: used by every env-touching test in this module.
-    struct EnvGuard {
-        key: String,
-        prev: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            // SAFETY: test-only env mutation; serialised by the fact that
-            // each test takes the guard before mutating, and the Drop
-            // impl restores on scope exit.
-            unsafe { std::env::set_var(key, value) }
-            Self {
-                key: key.to_string(),
-                prev,
-            }
-        }
-
-        fn remove(key: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            // SAFETY: same invariant as `set`.
-            unsafe { std::env::remove_var(key) }
-            Self {
-                key: key.to_string(),
-                prev,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: test teardown; restoring the captured prior value
-            // is the inverse of the unsafe mutation done at construction.
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var(&self.key, v),
-                    None => std::env::remove_var(&self.key),
-                }
-            }
-        }
-    }
-}
+#[path = "bm25_supervisor_tests.rs"]
+mod tests;

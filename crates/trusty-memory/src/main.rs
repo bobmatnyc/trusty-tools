@@ -1025,6 +1025,13 @@ fn spawn_startup_tasks(state: &AppState) {
         );
         tracing::info!(loops = n, "dream_scheduler: {n} loop(s) running (#1529)");
 
+        // BM25 backfill sweep. Must run AFTER hydration — before it, the
+        // registry is empty and the sweep would find nothing to index. A no-op
+        // while the lexical lane is off, which is every deployment until the
+        // default is flipped: `spawn_startup_backfill` returns immediately when
+        // `bm25_client` is `None`.
+        trusty_memory::bm25_backfill::spawn_startup_backfill(&bg_state);
+
         // Issue #42: once palaces are live, kick off auto-discovery against
         // cwd targeting the default palace (if configured). Without a default
         // palace there's no obvious destination, so skip — explicit MCP

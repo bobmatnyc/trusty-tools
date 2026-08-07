@@ -206,6 +206,20 @@ impl PalaceBm25Index {
         self.inner.len()
     }
 
+    /// Corpus size in bytes of retained document text.
+    ///
+    /// Why (#2846): this struct keeps every document's full text in `docs` so
+    /// it can re-serialise the snapshot, which means per-daemon RSS grows
+    /// linearly with the corpus. A supervisor enforcing a memory cap should be
+    /// able to see that figure rather than infer it from doc count alone —
+    /// 1311 one-line drawers and 1311 page-long ones cost very different RAM.
+    /// What: sums `str::len()` over the retained text. O(n) over documents, not
+    /// bytes, and only called on the `stats` path — never in the hot loop.
+    /// Test: `palace_index_stats_track_docs_and_bytes`.
+    pub fn total_text_bytes(&self) -> u64 {
+        self.docs.values().map(|t| t.len() as u64).sum()
+    }
+
     /// Snapshot path the daemon writes to. Exposed for diagnostics / tests.
     #[allow(dead_code)] // public for diagnostics; consumed by tests
     pub fn snapshot_path(&self) -> &Path {
@@ -353,6 +367,33 @@ mod tests {
         let raw = std::fs::read_to_string(idx.snapshot_path()).unwrap();
         assert!(raw.contains("\"doc_id\":\"x\""));
         assert!(raw.contains("\"text\":\"one two three\""));
+    }
+
+    /// Why: `stats` is the operation callers use to tell "indexed, no hits"
+    /// from "not indexed", so both figures must track mutation exactly —
+    /// including the delete path, where a stale byte total would overstate the
+    /// corpus a supervisor is budgeting RAM for.
+    /// What: indexes two docs, checks both figures, deletes one, checks again.
+    /// Test: this test itself.
+    #[test]
+    fn palace_index_stats_track_docs_and_bytes() {
+        let dir = tempdir();
+        let mut idx = PalaceBm25Index::load_or_create(dir.path()).unwrap();
+        assert_eq!(idx.doc_count(), 0);
+        assert_eq!(idx.total_text_bytes(), 0);
+
+        idx.index_doc("a", "hello");
+        idx.index_doc("b", "world!");
+        assert_eq!(idx.doc_count(), 2);
+        assert_eq!(idx.total_text_bytes(), 11);
+
+        assert!(idx.delete_doc("a"));
+        assert_eq!(idx.doc_count(), 1);
+        assert_eq!(idx.total_text_bytes(), 6);
+
+        idx.rebuild();
+        assert_eq!(idx.doc_count(), 0);
+        assert_eq!(idx.total_text_bytes(), 0);
     }
 
     #[test]

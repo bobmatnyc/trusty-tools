@@ -75,6 +75,7 @@ impl DaemonReadiness {
 pub mod activity;
 pub mod attribution;
 pub mod authz;
+pub mod bm25_backfill;
 pub mod bm25_supervisor;
 pub mod bootstrap;
 /// Autonomous Dreamer scheduler — spawns per-palace dream loops on daemon startup.

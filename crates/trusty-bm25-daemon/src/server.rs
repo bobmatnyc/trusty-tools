@@ -24,7 +24,7 @@ use crate::batch_queue::BatchQueue;
 use crate::protocol::{
     DeleteParams, DeleteResult, IndexParams, IndexResult, RebuildResult, RpcRequest, RpcResponse,
     SearchParams, SearchResult, ERR_INTERNAL, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, ERR_PARSE,
-    JSONRPC_VERSION, METHOD_DELETE, METHOD_INDEX, METHOD_REBUILD, METHOD_SEARCH,
+    JSONRPC_VERSION, METHOD_DELETE, METHOD_INDEX, METHOD_REBUILD, METHOD_SEARCH, METHOD_STATS,
 };
 
 /// Bind the UDS listener at `path`.
@@ -145,6 +145,7 @@ pub async fn dispatch_request(frame: &str, queue: &BatchQueue) -> RpcResponse {
         METHOD_SEARCH => dispatch_search(id, req.params, queue).await,
         METHOD_DELETE => dispatch_delete(id, req.params, queue).await,
         METHOD_REBUILD => dispatch_rebuild(id, queue).await,
+        METHOD_STATS => dispatch_stats(id, queue).await,
         other => RpcResponse::err(id, ERR_METHOD_NOT_FOUND, format!("unknown method: {other}")),
     }
 }
@@ -235,6 +236,26 @@ async fn dispatch_delete(
             RpcResponse::ok(id, result_val)
         }
         Err(e) => RpcResponse::err(id, ERR_INTERNAL, format!("delete failed: {e:#}")),
+    }
+}
+
+/// Answer `stats` — the corpus-coverage query.
+///
+/// Why: unlike `delete`/`rebuild` this is NOT privileged. Any caller that can
+/// search must also be able to ask how much corpus backs that search,
+/// otherwise an empty hit list is ambiguous between "no match" and "nothing
+/// indexed" and the caller has to guess. Guessing is what fails open.
+/// What: takes no params (any supplied are ignored, so a future revision can
+/// add optional filters without breaking old clients) and returns
+/// [`crate::protocol::StatsResult`].
+/// Test: `dispatch_request_handles_stats`.
+async fn dispatch_stats(id: serde_json::Value, queue: &BatchQueue) -> RpcResponse {
+    match queue.stats().await {
+        Ok(stats) => match serde_json::to_value(stats) {
+            Ok(v) => RpcResponse::ok(id, v),
+            Err(e) => RpcResponse::err(id, ERR_INTERNAL, format!("serialise stats: {e}")),
+        },
+        Err(e) => RpcResponse::err(id, ERR_INTERNAL, format!("stats failed: {e:#}")),
     }
 }
 
@@ -341,6 +362,32 @@ mod tests {
         // delete returns `{"deleted": <bool>}`.
         let result = resp.result.unwrap();
         assert!(result.get("deleted").is_some());
+    }
+
+    /// Why: this is the wire-level guarantee the whole backfill design leans
+    /// on — a caller must be able to ask a live daemon how much corpus it
+    /// holds, over the same socket it searches on, without params.
+    /// What: stats on an empty index, index two docs, stats again.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn dispatch_request_handles_stats() {
+        let (q, _dir) = test_queue();
+        let frame = r#"{"jsonrpc":"2.0","method":"stats","id":9}"#;
+        let resp = dispatch_request(frame, &q).await;
+        assert!(resp.error.is_none(), "stats must succeed: {resp:?}");
+        assert_eq!(resp.result.unwrap()["doc_count"].as_u64().unwrap(), 0);
+
+        for (doc, text) in [("d1", "alpha beta"), ("d2", "gamma")] {
+            let f = format!(
+                r#"{{"jsonrpc":"2.0","method":"index","params":{{"doc_id":"{doc}","text":"{text}"}},"id":1}}"#
+            );
+            assert!(dispatch_request(&f, &q).await.error.is_none());
+        }
+
+        let resp = dispatch_request(frame, &q).await;
+        let result = resp.result.unwrap();
+        assert_eq!(result["doc_count"].as_u64().unwrap(), 2);
+        assert_eq!(result["total_text_bytes"].as_u64().unwrap(), 15);
     }
 
     #[tokio::test]

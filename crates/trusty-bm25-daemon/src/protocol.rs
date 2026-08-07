@@ -40,6 +40,18 @@ pub const METHOD_DELETE: &str = "delete";
 /// [`METHOD_DELETE`] — the hot path must never invoke this.
 pub const METHOD_REBUILD: &str = "rebuild";
 
+/// JSON-RPC method: report how much corpus this daemon is actually serving.
+///
+/// Why: without it the protocol can answer "here are your hits" but not "is
+/// there anything to hit". A palace indexed to 20% of its drawers and a palace
+/// indexed to 100% return the same empty hit list for a query that misses, so
+/// a caller cannot tell a genuine no-match from a corpus that was never
+/// backfilled — the fail-open shape where partial coverage reads as working
+/// coverage. `stats` is what makes those two states distinguishable.
+/// What: takes no params; returns [`StatsResult`].
+/// Test: `stats_result_round_trips`, `dispatch_request_handles_stats`.
+pub const METHOD_STATS: &str = "stats";
+
 /// JSON-RPC version string. The protocol mandates this exact value.
 pub const JSONRPC_VERSION: &str = "2.0";
 
@@ -147,6 +159,24 @@ pub struct DeleteResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebuildResult {
     pub doc_count: usize,
+}
+
+/// Successful result for the `stats` method.
+///
+/// Why: two numbers answer two different questions. `doc_count` answers "is
+/// this palace indexed, and to what extent" — a backfiller compares it against
+/// the palace's drawer count to decide between skip, repair, and full run.
+/// `total_text_bytes` answers "how much memory is this daemon's corpus worth"
+/// — [`crate::index::PalaceBm25Index`] holds every document's full text in a
+/// `BTreeMap`, so per-daemon RSS scales with this figure and a supervisor
+/// enforcing an RSS cap wants it visible rather than inferred.
+/// What: `doc_count` is the live document count (post-delete, post-rebuild);
+/// `total_text_bytes` is the summed byte length of the retained document text.
+/// Test: `stats_result_round_trips`, `dispatch_request_handles_stats`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsResult {
+    pub doc_count: usize,
+    pub total_text_bytes: u64,
 }
 
 /// One hit returned by the `search` method.
@@ -349,5 +379,26 @@ mod tests {
         let raw = r#"{"jsonrpc":"2.0","method":"rebuild","params":{},"id":4}"#;
         let parsed: RpcRequest = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.method, "rebuild");
+    }
+
+    #[test]
+    fn stats_result_round_trips() {
+        let r = StatsResult {
+            doc_count: 1311,
+            total_text_bytes: 4_194_304,
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"doc_count\":1311"));
+        let back: StatsResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.doc_count, 1311);
+        assert_eq!(back.total_text_bytes, 4_194_304);
+    }
+
+    #[test]
+    fn stats_request_round_trips_without_params() {
+        let raw = r#"{"jsonrpc":"2.0","method":"stats","id":5}"#;
+        let parsed: RpcRequest = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.method, METHOD_STATS);
+        assert!(parsed.params.is_none());
     }
 }

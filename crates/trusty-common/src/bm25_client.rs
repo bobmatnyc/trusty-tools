@@ -34,6 +34,7 @@ const JSONRPC_VERSION: &str = "2.0";
 const METHOD_INDEX: &str = "index";
 const METHOD_SEARCH: &str = "search";
 const METHOD_DELETE: &str = "delete";
+const METHOD_STATS: &str = "stats";
 
 /// Resolve the canonical socket path for a given palace.
 ///
@@ -65,6 +66,27 @@ pub fn socket_path_for_palace(palace: &str) -> PathBuf {
 pub struct BM25Hit {
     pub doc_id: String,
     pub score: f32,
+}
+
+/// Corpus-coverage figures reported by the daemon's `stats` method.
+///
+/// Why: an empty `search` result is ambiguous — it means either "the query
+/// matched nothing" or "this daemon holds nothing to match against". Callers
+/// that cannot tell those apart silently serve partial results as if they were
+/// complete. `doc_count` resolves the ambiguity; `total_text_bytes` is what a
+/// supervisor budgets RAM against, because the daemon retains every document's
+/// full text in memory.
+/// What: a plain pair of counters, deserialised from the daemon's
+/// `StatsResult` wire shape.
+/// Test: `stats_response_decodes`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Bm25Stats {
+    /// Live documents the daemon is serving.
+    #[serde(default)]
+    pub doc_count: usize,
+    /// Summed byte length of the retained document text.
+    #[serde(default)]
+    pub total_text_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +216,25 @@ impl Bm25Client {
         let params = SearchParams { query, top_k };
         let res: SearchResult = self.call(METHOD_SEARCH, &params).await?;
         Ok(res.hits)
+    }
+
+    /// Ask the daemon how much corpus it is actually serving.
+    ///
+    /// Why: this is the call that lets a caller distinguish "indexed, no
+    /// lexical hits" from "not indexed". A backfiller uses it to decide
+    /// whether to skip a palace and to confirm what landed afterwards; a
+    /// recall path can use it to decide whether an empty BM25 result deserves
+    /// to influence fusion at all.
+    /// What: sends `{"method":"stats"}` with an empty params object and
+    /// returns the decoded [`Bm25Stats`]. Propagates the connection error when
+    /// the daemon is absent — "cannot ask" is a different state from "asked,
+    /// answered zero", and collapsing the two is the fail-open shape this
+    /// method exists to prevent. Callers that want to degrade should match on
+    /// the `Err` explicitly.
+    /// Test: end-to-end coverage in `trusty-bm25-daemon/tests/bm25_daemon.rs`
+    /// and `trusty-memory/tests/bm25_backfill_e2e.rs`.
+    pub async fn stats(&self) -> Result<Bm25Stats> {
+        self.call(METHOD_STATS, &serde_json::json!({})).await
     }
 
     /// Delete a document. Intended for the dream subprocess only.
@@ -442,6 +483,24 @@ mod tests {
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains("\"method\":\"delete\""));
         assert!(s.contains("\"doc_id\":\"x\""));
+    }
+
+    /// Why: the client's `Bm25Stats` and the daemon's `StatsResult` are
+    /// separate types in separate crates (deliberately — the client must not
+    /// depend on the daemon binary). A field-name drift between them would
+    /// silently decode as `Default::default()`, i.e. "zero documents", which
+    /// reads exactly like an unindexed palace. Pinning the wire shape here is
+    /// what stops that drift from being invisible.
+    /// What: decodes the daemon's literal success envelope.
+    /// Test: this test itself.
+    #[test]
+    fn stats_response_decodes() {
+        let raw =
+            r#"{"jsonrpc":"2.0","result":{"doc_count":1311,"total_text_bytes":4194304},"id":1}"#;
+        let resp: RpcResponse<Bm25Stats> = serde_json::from_str(raw).unwrap();
+        let stats = resp.result.expect("result present");
+        assert_eq!(stats.doc_count, 1311);
+        assert_eq!(stats.total_text_bytes, 4_194_304);
     }
 
     #[test]
