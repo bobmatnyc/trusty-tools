@@ -72,7 +72,19 @@ pub const SOCKET_MODE: u32 = 0o600;
 /// trusted. Every variant is fatal to the operation — none is a "log and
 /// continue" condition, because continuing would use a socket wider than the
 /// ADRs promise.
+///
+/// `#[non_exhaustive]`: this enum gained two variants across two review rounds
+/// of #5099 alone, so it will keep growing as the checks tighten. The attribute
+/// costs nothing while `trusty-common` sits unpublished at 0.30.0 against a
+/// published 0.28.1, and stops being free the moment 0.30.0 ships — after which
+/// each new variant would be a breaking change. On an enum it constrains
+/// *matching* only (external crates need a wildcard arm); it does not bar
+/// constructing variants, which is the separate effect the attribute has on a
+/// struct. Matching this exhaustively from outside `trusty-common` was never
+/// possible anyway — every consumer converts it (`io::Error::other`, `?` into
+/// `anyhow`, or `Display` in a log) rather than inspecting variants.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum UdsSecurityError {
     /// The socket path is a bare filename with no directory component, so
     /// there is nothing to harden.

@@ -25,3 +25,11 @@ Added
 - **`uds::check_sun_path_budget`** turns the kernel's bare `invalid argument`
   into a diagnostic naming the platform's `sun_path` capacity (104 on macOS, 108
   on Linux), the actual byte length, and the offending path.
+- **`UdsSecurityError` is `#[non_exhaustive]`.** It gained two variants across
+  two review rounds of this PR alone and will keep growing as the checks
+  tighten. The attribute is free while this crate is unpublished at 0.30.0
+  against a published 0.28.1, and stops being free once 0.30.0 ships — after
+  which each variant would be a break. On an enum it constrains matching only
+  (external crates need a wildcard arm), not construction; every in-tree
+  consumer converts the error rather than matching it, so nothing changed.
+  Matches `DedupError` (#5112) and `IndexOptions` (#5065).
