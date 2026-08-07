@@ -211,6 +211,18 @@ waits, the `tga` tag aliases (#1128), and the connection-safe daemon restart.
 > **Full release workflow, `scripts/bump-version.sh`, and Developer-ID signing
 > setup:** see [docs/reference/release-workflow.md](docs/reference/release-workflow.md).
 
+🔴 **A breaking public-API change needs a matching version bump, and CI now
+enforces it (#5050).** `scripts/check_semver.sh` runs `cargo-semver-checks`
+against the crate's latest crates.io release for every crate whose `src/**` the
+PR changed. Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is
+the MINOR position. A workspace `cargo check` can never catch this class of
+break — the root `Cargo.toml` path override pairs local source with local
+dependency — which is how #4088 shipped `trusty-common` 0.22.5's required new
+public field on a patch bump and cost `trusty-analyze` 0.7.3 a yank. Prefer
+`#[non_exhaustive]` on public structs and enums so field and variant additions
+stay non-breaking by construction. See
+[docs/reference/semver-gate.md](docs/reference/semver-gate.md).
+
 🔴 **CRITICAL macOS note:** never use `cp` to install a release binary on
 macOS — always `cargo install`. A plain `cp` over an on-PATH binary leaves a
 stale kernel cdhash cache and the next exec is SIGKILL'd as an invalid
@@ -430,5 +442,6 @@ Full-length reference materials for less-frequent lookups:
 - **HTTP trust-boundary threat model:** [docs/reference/threat-model.md](docs/reference/threat-model.md) — per-daemon bind/guard/proxy compliance inventory for the loopback-only doctrine ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md)).
 - **Domain consolidation audit:** [docs/reference/domain-consolidation-audit.md](docs/reference/domain-consolidation-audit.md) — dated per-domain status behind the common-entry-point rule.
 - **Per-PR changelog fragments:** [docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md) — assembler and CI-gate mechanics.
+- **Public-API / SemVer gate:** [docs/reference/semver-gate.md](docs/reference/semver-gate.md) — what it checks, which crates it skips and why, and the feature-exclusion file.
 - **Rust test ladder gate commands:** [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md) — the exact command chain per rung, the baseline-failure protocol, and how much gate output a PR body owes.
 - **Rust issue search keys:** [docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md) — why test name / panic text / symbol / crate find the canonical issue.
