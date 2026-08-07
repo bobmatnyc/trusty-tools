@@ -44,8 +44,22 @@
 #     - lines consisting entirely of // line comments (including /// and //!)
 #     - lines consisting entirely of /* ... */ block comments (including /**/)
 #     - lines that are inside an open /* ... */ block comment
+#     - inline `#[cfg(test)] mod <name> { … }` unit-test modules (issue #5153)
 #   A line that has code followed by a trailing // comment COUNTS (it has code).
 #   A line inside a multi-line /* */ block does NOT count.
+#
+# #[cfg(test)] EXCLUSION (issue #5153): a 460-SLOC module that gained inline
+#   tests used to cross the 500 production cap and had to have its test module
+#   mechanically split into a sibling _tests.rs — an inflated diff for no
+#   change in production code, which is already what the cap is about. The
+#   matcher recognises ONLY `#[cfg(test)]` + `mod <name> {` at a shared indent,
+#   and excludes the body through the matching close. It is deliberately
+#   FAIL-CLOSED: `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]`
+#   on an fn/impl/use/static, any non-literal cfg predicate (`all(test, …)`,
+#   `any(test, …)`, `not(test)`), and any module whose brace balance is skewed
+#   by braces inside string literals are all COUNTED AS PRODUCTION. The exact
+#   matcher, its two independent agreement checks, and the full list of what it
+#   does NOT exclude are in scripts/lib/sloc_awk.sh.
 #
 # Lenient-heuristic note: the SLOC counter is a pragmatic awk heuristic.
 #   Edge cases where // or /* appear inside a string literal, char literal, or
@@ -284,6 +298,7 @@ if [ "$MODE" = "update" ]; then
     echo "#   or path contains /tests/ or /benches/ segment. All others = production."
     echo "# SLOC excludes blank lines, // line comments, /// doc comments, //! inner-doc comments,"
     echo "# and /* ... */ block comments (including multi-line spans). Trailing-comment lines count."
+    echo "# SLOC also excludes inline '#[cfg(test)] mod <name> { ... }' bodies (issue #5153)."
     echo "# Ratchet: budgets may only DECREASE; when a file drops <= its applicable cap, remove it."
     echo "# Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap)."
     sort "$NEWLIST.body"
