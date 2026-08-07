@@ -148,7 +148,13 @@ pub(super) async fn dispatch_index_tool(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(server.get(&format!("/indexes/{index_id}/status")).await)
+            // #4715: `index_status` on a never-indexed pin 404'd the same way
+            // `search` did; it gets the same honest not-ready answer.
+            Some(
+                server
+                    .get_scoped(&format!("/indexes/{index_id}/status"), Some(&index_id))
+                    .await,
+            )
         }
         "list_chunks" => {
             // Issue #54 — paginated enumeration of an index's corpus.

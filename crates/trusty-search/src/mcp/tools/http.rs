@@ -27,6 +27,27 @@ impl McpServer {
     /// `DispatchError::Transport` on network, status, or decode failure.
     /// Test: `search_health` and `index_status` arms exercise this.
     pub(super) async fn get(&self, path: &str) -> Result<Value, DispatchError> {
+        self.get_scoped(path, None).await
+    }
+
+    /// GET an index-scoped JSON endpoint, translating a 404 on the session's
+    /// advertised index into `INDEX_NOT_READY` (issue #4715).
+    ///
+    /// Why: `GET /indexes/:id/status` 404s on a worktree that was never
+    /// indexed, and that 404 used to reach the caller as a plain transport
+    /// error reading "unknown index" — permanent-sounding for a transient
+    /// state. Routing index-scoped reads through here is what lets
+    /// [`McpServer::classify_index_miss`] see the id involved.
+    /// What: identical to [`Self::get`] except that a `404` is first offered to
+    /// `classify_index_miss`; every other status, and every network or decode
+    /// failure, behaves exactly as before. The classification can only turn one
+    /// error into a more specific error — it never produces `Ok`.
+    /// Test: `index_status_on_unindexed_pin_returns_index_not_ready`.
+    pub(super) async fn get_scoped(
+        &self,
+        path: &str,
+        index_id: Option<&str>,
+    ) -> Result<Value, DispatchError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .http
@@ -40,6 +61,11 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("read {url}: {e}")))?;
         if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND {
+                if let Some(e) = self.classify_index_miss(index_id) {
+                    return Err(e);
+                }
+            }
             return Err(DispatchError::Transport(format!(
                 "GET {url} returned {status}: {text}"
             )));
@@ -135,6 +161,28 @@ impl McpServer {
     /// Test: most tool arms in `search.rs`, `index.rs`, and `misc.rs` exercise
     /// this path.
     pub(super) async fn post(&self, path: &str, body: &Value) -> Result<Value, DispatchError> {
+        self.post_scoped(path, body, None).await
+    }
+
+    /// POST to an index-scoped endpoint, translating a 404 on the session's
+    /// advertised index into `INDEX_NOT_READY` (issue #4715).
+    ///
+    /// Why: `POST /indexes/:id/search` is the call in the #4715 report — a bare
+    /// `search` against a never-indexed worktree. It must answer "too early",
+    /// not "no such thing", and it must never be mistaken for a search that
+    /// returned zero hits.
+    /// What: identical to [`Self::post`] except that a `404` is first offered
+    /// to [`McpServer::classify_index_miss`], BEFORE the response body is
+    /// decoded, so a non-JSON error body cannot mask the state. Every other
+    /// status and every failure path is unchanged, and the classification never
+    /// yields `Ok`.
+    /// Test: `tools_call_search_on_unindexed_pin_returns_structured_not_ready`.
+    pub(super) async fn post_scoped(
+        &self,
+        path: &str,
+        body: &Value,
+        index_id: Option<&str>,
+    ) -> Result<Value, DispatchError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .http
@@ -144,6 +192,11 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("POST {url}: {e}")))?;
         let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            if let Some(e) = self.classify_index_miss(index_id) {
+                return Err(e);
+            }
+        }
         let body: Value = resp
             .json()
             .await
