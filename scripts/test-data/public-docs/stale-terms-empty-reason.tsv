@@ -1,0 +1,5 @@
+# STALE fixture terms. Paired with the fakeroot/ pages, not the real docs/ tree.
+TERM	trusty-mpmd	there is no `trusty-mpmd` binary; use `tm daemon`.
+TERM	open[-_]mpm	renamed to `trusty-agents` (binary `tagent`).
+TERM	@FORMER_REPO_CLONE_URLS@	that repo was folded into `bobmatnyc/trusty-tools`.
+WAIVE	docs/pages/waived-corpus.md	open[-_]mpm	1	

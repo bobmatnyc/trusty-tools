@@ -1,35 +1,31 @@
 # Three-Harness Architecture — trusty-tools
 
 **Status:** Accepted
-**Version:** v1
+**Version:** v2
 **Subsystem:** HARNESSES
 **Owner:** Engineering / Architecture
-**Last-updated:** 2026-06-05
-**Related:** [ADR-0004](../adr/0004-three-harnesses-shared-event-driven-common.md),
-[trusty-code](../../crates/trusty-code/README.md),
-[trusty-mpm](../../crates/trusty-mpm/README.md),
-[open-mpm](../../crates/open-mpm/README.md)
+**Last-updated:** 2026-08-07
 
 ---
 
 ## Purpose & Scope
 
 The trusty-tools workspace organises its AI orchestration crates into **three
-distinct harnesses**, each serving a different principal and carrying different
-responsibilities. This document defines those boundaries, their shared
-foundation in `trusty-common`, the event-driven mandate that applies to all
-three, and the inter-harness delegation graph.
+harnesses**, each serving a different principal. This page defines what each
+one is, the two shared crates all three build on, how events flow, and how a
+harness hands work to another harness.
 
-**In scope:** harness identity, responsibilities, shared surface, event model,
-and delegation edges. **Out of scope:** internal implementation details of any
-single harness, tool lists, model routing specifics, and per-crate release
-procedures (those live in the crate-level README and `docs/<crate>/`).
+**In scope:** harness identity, responsibilities, shared surface, event
+streams, and the delegation edges that exist in source today.
 
-> **Conformance tracking:** For testable conformance verification of the primary
-> trusty-mpm harness behaviors enumerated herein, refer to
-> [DOC-29 — Primary trusty-mpm Harness Behaviors — Conformance Matrix](../specs/mpm-behavior-conformance.md).
-> DOC-29 is the canonical source for per-behavior test citations and current
-> implementation status.
+**Out of scope:** per-harness internals, tool inventories, model routing, and
+release procedures. Those live in each harness's own documentation
+([trusty-mpm](../trusty-mpm/README.md), [trusty-code](../trusty-code/README.md),
+[trusty-agents](../trusty-agents/README.md)).
+
+Every claim below is stated against the crate source in `crates/`. Where the
+source does not settle a question, the page says so rather than guessing —
+see [Known gaps](#known-gaps).
 
 ---
 
@@ -37,127 +33,163 @@ procedures (those live in the crate-level README and `docs/<crate>/`).
 
 | Section | Topic |
 |---------|-------|
-| [Harness Definitions](#harness-definitions) | The three harnesses: purpose, analogy, scope |
-| [Comparison Table](#comparison-table) | Side-by-side harness summary |
-| [Shared Foundation — trusty-common](#shared-foundation--trusty-common) | What belongs to all harnesses |
-| [Event-Driven Mandate](#event-driven-mandate) | Binding architectural principle + event model |
-| [Inter-Harness Delegation](#inter-harness-delegation) | Call graph, boundaries, transport |
-| [Accepted Decision — Boundary Between trusty-mpm and trusty-agents](#accepted-decision--boundary-between-trusty-mpm-and-trusty-agents) | Owner-accepted boundary split + Elastic-2.0 license |
-| [Current Status vs. Target State](#current-status-vs-target-state) | What exists today and what is planned |
+| [Harness Definitions](#harness-definitions) | The three harnesses: purpose, binary, scope |
+| [Comparison Table](#comparison-table) | Side-by-side summary |
+| [Shared Foundations](#shared-foundations) | The two crates all three build on |
+| [Event Streams](#event-streams) | The event-driven principle and where each harness stands |
+| [Inter-Harness Delegation](#inter-harness-delegation) | Which harness invokes which, and how |
+| [Known gaps](#known-gaps) | What this page does not establish |
 
 ---
 
 ## Harness Definitions
 
-### 1. trusty-code — the Coding Harness
+### 1. trusty-code — the coding harness
 
-**Crate:** `crates/trusty-code/` — package `-p trusty-code`, binary `tcode`
+**Crate:** `crates/trusty-code/` — package `trusty-code`, binary `tcode`
 **Analogy:** Claude Code — a per-project coding orchestration harness.
 
-**Purpose:** Provides the per-project Claude-Code-compatible MPM orchestration
-entry point. One `tcode serve` process runs per project root (identified by a
-`.claude/` directory). It runs the PM main loop, enforces the mandatory
-workflow (research → plan → implement → verify), and delegates authority to
-typed coding sub-agents (engineer, QA, ticketing, security) via MCP and/or
-subprocess IPC.
+A `tcode serve` process runs the PM main loop for one project, reading that
+project's `.claude/` configuration the way Claude Code does: agents, skills,
+MCP descriptors, `CLAUDE.md`, and permission grants. It is single-instance per
+project root — multiple CLI and TUI clients attach to the one daemon. Serving
+without a project is also a first-class state, used for chat and planning
+before a project is chosen.
+
+Clients speak JSON-RPC 2.0 to it, over either NDJSON on stdio (`serve --stdio`)
+or loopback HTTP (`serve --http`, `POST /rpc` plus `GET /health`). Exactly one
+transport is selected per process. The method surface covers session lifecycle
+(`session.create`, `session.status`, `session.send`, `session.cancel`,
+`session.get_transcript`), task execution (`task.run`), workstreams, and
+agent/skill/filesystem introspection. Session events reach an attached client
+as a `session.event` notification on the stdio transport, or as an SSE stream at
+`GET /sessions/{id}/events` — which replays a session's backlog before going
+live — on the HTTP transport.
 
 **What it owns:**
-- The `tcode` binary and its IPC socket / HTTP endpoint
-- Per-project agent configuration (`.claude/agents/<name>.toml`)
-- Per-project skill injection (`.claude/skills/`)
-- Per-project workflow definitions (`.claude/workflows/<name>.toml`)
-- The PM main-loop for code-generation, edit, run, test cycles
-- Integration with Claude Code hooks (pre-tool-use, post-tool-use, stop)
+
+- The `tcode` binary, its JSON-RPC surface, and the sessions it holds
+- Per-project agent configuration, read from `.claude/agents/<name>.md`
+  (markdown with YAML frontmatter — the older TOML loader was removed)
+- Per-project skill loading from `.claude/skills/`
+- Workstreams: durable named groupings of sessions bound to the daemon's project
+- Per-agent model routing across AWS Bedrock and OpenRouter
+- The PM main loop for code-generation, edit, run, and test cycles
 
 **What it does not own:**
-- Multi-project session management (that is trusty-mpm)
-- Non-coding assistant workflows (HR, CRM, scheduling — trusty-agents)
-- The daemon / TUI / Telegram transports (trusty-mpm)
-- Search, memory, or analysis infrastructure (trusty-search / trusty-memory / trusty-analyze / trusty-common)
 
-**Current state & Status (updated 2026-07-06):** trusty-code is **being RE-VISIONED** from a narrow benchmark harness into a production-grade, token-efficient coding orchestrator. The crate contains Phase 1–3 modules (events, IPC, tools, agents, LLM layer) extracted from open-mpm; the daemon (`serve`) entry point is stubbed but the `run-task` CLI works end-to-end. Full vision and Phase 1–4 roadmap live in [`docs/trusty-code/vision-and-architecture-spec.md`](../../trusty-code/vision-and-architecture-spec.md). Epic [#587](https://github.com/bobmatnyc/trusty-tools/issues/587) tracks the extraction phases.
+- Multi-project session management (trusty-mpm)
+- Non-coding assistant workflows (trusty-agents)
+- Claude Code hooks. `tcode` is API/CLI/TUI-driven and has no hooks support;
+  hooks are a Claude Code shell-level feature, and `tcode` operates above that
+  layer via its event bus.
+- Search, memory, or analysis infrastructure (trusty-search / trusty-memory /
+  trusty-analyze / trusty-common)
+
+`tcode run-workflow` is declared in the CLI but not implemented — it exits
+non-zero with an explanatory message. Treat declarative workflow execution as
+absent from this harness today.
 
 ---
 
-### 2. trusty-mpm — the Meta-Harness
+### 2. trusty-mpm — the meta-harness
 
-**Crate:** `crates/trusty-mpm/` — package `-p trusty-mpm`,
-binaries: `tm` / `trusty-mpm` (CLI), `trusty-mpmd` (daemon), `trusty-mpm-tui`,
-`trusty-mpm-telegram`
+**Crate:** `crates/trusty-mpm/` — package `trusty-mpm`, binaries `tm` and
+`trusty-mpm` (the same program under two names)
 **Analogy:** Claude MPM — a PM-style multi-agent orchestrator *over* coding work.
 
-**Purpose:** Manages multi-project, multi-session AI workflows. It is the
-"operator's control plane": it runs the background daemon, relays hooks, tracks
-circuit-breaker state, exposes an MCP server to Claude Code sessions, and
-provides the TUI dashboard and Telegram bot for human oversight. It delegates
-coding tasks downward to `tcode` (trusty-code) instances; it does not execute
-code itself.
+trusty-mpm is the operator's control plane for multi-project, multi-session
+work. The daemon, TUI, Telegram bot, Slack integration, and MCP bridge are all
+subcommands of the one `tm` binary, not separate executables:
+
+| Surface | Invocation |
+|---|---|
+| Background daemon (loopback HTTP API) | `tm daemon`, or `tm start` / `tm serve` |
+| MCP stdio bridge for Claude Code | `tm serve --stdio` |
+| Terminal dashboard | `tm tui` |
+| Telegram bot | `tm telegram` |
+| Slack integration | `tm slack` |
+| Unattended fleet supervisor | `tm supervisor` |
+
+`tm serve --stdio` is a thin proxy: it forwards JSON-RPC from an MCP client to
+the daemon's loopback `POST /rpc`, auto-starting the daemon if needed. This is
+the form wired into `.mcp.json`. The daemon is the durable process; the bridge
+is stateless.
 
 **What it owns:**
-- `trusty-mpmd`: the always-on background daemon (HTTP API, hook relay, session
-  registry, watcher — `crates/trusty-mpm/src/daemon/`)
-- `tm` / `trusty-mpm` CLI: session control, service discovery, agent deploy
-- TUI: `ratatui`-based coordinator dashboard
-- Telegram bot: async operator notifications
-- MCP server: nine orchestration tools exposed to Claude Code sessions
-  (`session_list`, `session_status`, `agent_delegate`, `memory_protect`,
-  `circuit_breaker_status`, `list_recent_errors`, `preview_bug_report`,
-  `report_bug`, `hook_event` — `crates/trusty-mpm/src/mcp/`)
-- Session overseer + circuit breaker logic (`crates/trusty-mpm/src/core/overseer.rs`,
-  `src/core/circuit.rs`)
-- Cross-project session registry (`crates/trusty-mpm/src/core/session_store.rs`)
-- The `OrchestratorBackend` trait that binds MCP ↔ daemon
-  (`crates/trusty-mpm/src/mcp/mod.rs`)
+
+- The always-on daemon: HTTP API, hook relay, session registry, watchers
+  (`crates/trusty-mpm/src/daemon/`)
+- Session control, service discovery, and agent/skill deployment via the `tm` CLI
+- Managed sessions: provisioned in isolated git worktrees, running a runtime
+  inside a tmux pane (`crates/trusty-mpm/src/session_manager/`)
+- The MCP tool catalog — 33 tools spanning orchestration, session lifecycle,
+  console metrics, the project registry, and session-manager proxying
+  (`crates/trusty-mpm/src/mcp/tools/`)
+- Session overseer and circuit breaker (`src/core/overseer.rs`, `src/core/circuit.rs`)
+- Cross-project session registry (`src/core/session_store.rs`)
+- The `OrchestratorBackend` trait binding the MCP layer to the daemon
+  (`src/mcp/mod.rs`)
 
 **What it does not own:**
-- Per-project coding execution (delegated to trusty-code)
+
+- Executing code itself. It provisions and oversees a *runtime* that does.
 - General knowledge-worker assistant workflows (trusty-agents)
-- Search / memory / analysis infrastructure
+- Search, memory, or analysis infrastructure
+
+The runtime a managed session spawns is selected by `RuntimeKind`
+(`crates/trusty-mpm/src/runtime/`): `claude-code` (the default — the Claude
+Code CLI over OAuth) or `tcode` (trusty-code over the direct Anthropic API).
+Both are launched into a tmux pane. So trusty-mpm delegates to trusty-code only
+when an operator selects that runtime; it is an alternative backend, not the
+sole path.
 
 ---
 
-### 3. trusty-agents — the Agentic Harness
+### 3. trusty-agents — the agentic harness
 
-**Crate:** `crates/open-mpm/` (current name; planned rename to `trusty-agents`)
-**Package:** `-p open-mpm`, binaries: `open-mpm` / `ompm` (REPL + API server)
-**Analogy:** OpenClaw / Hermes — a general agentic harness for knowledge-worker tasks.
+**Crate:** `crates/trusty-agents/` — package `trusty-agents`, binary `tagent`
 
-**Purpose:** Provides a general-purpose agentic harness for non-coding workflows:
-CRM interaction, HR queries, scheduling, knowledge retrieval, memory management,
-communications (Slack, Telegram), and any domain-specific assistant persona. It
-uses the same PM-orchestrator-plus-sub-agent subprocess pattern as trusty-code
-but is NOT a coding harness. It is the integration point for external MCP
-services (`mcp_service_tools.rs`) and exposes configurable personas (Izzie,
-custom) via TOML agent definitions.
+A general-purpose agentic harness for non-coding workflows: knowledge
+retrieval, memory management, scheduling, communications, and domain-specific
+assistant personas. It uses a PM-orchestrator-plus-sub-agent pattern, but it is
+not a coding harness.
+
+Sub-agents run one of two ways, chosen per agent: as a subprocess exchanging
+NDJSON over stdin/stdout, or as a tokio task in the PM process. The in-process
+path avoids a per-delegation startup cost and is used for read-heavy agents;
+agents that shell out or execute user code stay on the subprocess path, where
+process isolation is part of the contract.
 
 **What it owns:**
-- PM orchestrator main loop with in-process `delegate_to_agent` tool
-  (`crates/open-mpm/src/ctrl/`)
-- Intent classifier for fast-pathing (conversational / research / implementation)
-  (`crates/open-mpm/src/intent/`)
+
+- The PM orchestrator loop and the in-process `delegate_to_agent` tool
+  (`src/ctrl/`, `src/tools/delegate.rs`)
+- A heuristic intent classifier and the deterministic backend router
+  (`src/intent/`)
 - MCP service bridge: wraps any MCP server's tools as `ToolExecutor` instances
-  (`crates/open-mpm/src/tools/mcp_service_tools.rs`)
-- Tool registry + RBAC + identity primitives (`crates/open-mpm/src/tools/`,
-  `src/rbac/`, `src/identity/`)
-- Persona system (agent TOML + skill injection)
-- Transports: REPL (`src/repl/`), HTTP API (`src/api/`), Slack (`src/slack/`),
-  Telegram (`src/telegram/`)
-- Harness adapter detection (recognises Claude Code, open-mpm, claude-mpm, Codex,
-  Gemini panes — `src/adapters/`)
-- Process-global event bus + SSE relay (`crates/open-mpm/src/events.rs`,
-  `src/bus/`)
-- Workflow engine for complex declarative pipelines (`crates/open-mpm/src/workflow/`)
-- Agent plugin API (`crates/open-mpm-agent-api/`) for external agent injection
+  (`src/tools/mcp_service_tools.rs`)
+- Tool registry, RBAC tiers, and identity primitives (`src/tools/`, `src/rbac/`,
+  `src/identity/`)
+- Assistant personas defined as TOML agent configs, with markdown skill injection
+- Transports: interactive REPL and CTRL multi-project dispatcher (`src/repl/`,
+  `src/ctrl/`), HTTP API with an SSE event stream (`src/api/`), Slack
+  (`src/slack/`), Telegram (`src/telegram/`), and a stdio MCP server
+  (`tagent mcp-serve`)
+- A declarative workflow engine for phase-based pipelines (`src/workflow/`)
+- A tmux session manager of its own (`src/tm/`), distinct from trusty-mpm
 
 **What it does not own:**
-- Per-project coding workflow enforcement (trusty-code)
-- Multi-project session management / circuit breaker / hook relay (trusty-mpm)
-- Search infrastructure (trusty-search)
-- Memory storage engine (trusty-common `memory-core` feature + trusty-memory)
 
-**Planned rename:** `open-mpm` → `trusty-agents`. See
-[ADR-0004](../adr/0004-three-harnesses-shared-event-driven-common.md) §Decision
-for the rationale.
+- Per-project coding workflow enforcement (trusty-code)
+- Multi-project session management, circuit breaker, or hook relay (trusty-mpm)
+- Search infrastructure (trusty-search)
+- Memory storage engine (trusty-common's `memory-core` feature, plus trusty-memory)
+
+The harness-adapter framework — which recognises whether a Claude Code,
+claude-mpm, Codex, Gemini, or shell process occupies a given pane — and the
+JSON-backed session ledger both live in `trusty-agents-common` and are
+re-exported by this crate.
 
 ---
 
@@ -165,358 +197,212 @@ for the rationale.
 
 | Dimension | trusty-code | trusty-mpm | trusty-agents |
 |-----------|-------------|------------|---------------|
-| **Analogy** | Claude Code | Claude MPM | OpenClaw / Hermes |
+| **Analogy** | Claude Code | Claude MPM | A general agentic assistant |
 | **Primary user** | Developer / CI pipeline | Operator / PM role | Knowledge worker |
 | **Scope** | One project, coding tasks | Many projects, orchestration control | Any domain, non-coding workflows |
-| **Main binary** | `tcode` | `tm` / `trusty-mpmd` | `open-mpm` / `ompm` |
-| **Core loop** | PM main loop (per project) | Session daemon + hook relay | PM main loop (per persona) |
-| **Agent model** | Coding sub-agents (engineer, QA, ticketing) | Overseer / delegation authority | Domain personas + MCP bridge |
-| **Tool source** | Claude Code tools + project skill files | Orchestration tools (MCP) | Any MCP service + native tools |
-| **Transports** | IPC socket / HTTP | HTTP API / MCP / TUI / Telegram | REPL / HTTP API / Slack / Telegram |
-| **What it delegates** | Sub-agents within project | Coding work to trusty-code | Coding tasks to trusty-code; managed projects to trusty-mpm |
-| **What it does not do** | Multi-project management | Execute code directly | Manage multi-project sessions |
-| **Crate status** | Phase 0 scaffold | Production | Production |
-| **Current crate name** | `trusty-code` | `trusty-mpm` | `open-mpm` (rename planned) |
+| **Binary** | `tcode` | `tm` (alias `trusty-mpm`) | `tagent` |
+| **Core loop** | PM main loop per project | Daemon + session manager + hook relay | PM main loop per persona |
+| **Agent model** | Coding sub-agents from `.claude/agents/*.md` | Deploys agents; oversees the runtime that runs them | Domain personas plus an MCP tool bridge |
+| **Transports** | JSON-RPC over stdio **or** loopback HTTP; TUI client | Loopback HTTP daemon; MCP stdio bridge; TUI; Telegram; Slack | REPL/CTRL; HTTP API with SSE; Slack; Telegram; MCP stdio |
+| **Delegates to** | Its own sub-agents | A runtime per managed session (`claude-code` or `tcode`) | `tcode` or `tm`, via `dispatch_task` |
+| **License** | MIT | MIT | MIT |
+
+Every crate in the workspace inherits `license = "MIT"` from
+`[workspace.package]` in the root `Cargo.toml`.
 
 ---
 
-## Shared Foundation — trusty-common
+## Shared Foundations
 
-**Binding principle:** Shared commonality lives in `trusty-common`. All three
-harnesses build their specialisation on top of it.
+Two crates carry the commonality. No harness's behaviour is built on another
+harness's library surface: where one harness needs another, it invokes its
+binary, as described under
+[Inter-Harness Delegation](#inter-harness-delegation).
 
-`trusty-common` (`crates/trusty-common/`) is the cross-harness foundation. Its
-module surface is organised behind feature flags so each harness pulls in only
-what it needs. The following are relevant to all three harnesses:
+### trusty-common
 
-### Always-on (no feature flag required)
+`crates/trusty-common/` is the workspace-wide foundation, used well beyond the
+three harnesses. Its module surface sits behind feature flags so each consumer
+pulls in only what it needs.
+
+Always on, no feature flag:
 
 | Module | Role for harnesses |
 |--------|--------------------|
-| `chat` | OpenRouter / Anthropic chat-completions client — the LLM call abstraction all three harnesses use |
-| `claude_config` | Reads `.claude/` configuration (agents, CLAUDE.md, permissions) — shared between trusty-code and trusty-mpm |
+| `chat` | Chat-completions client — the LLM call abstraction all three use |
+| `claude_config` | Reads `.claude/` configuration (agents, `CLAUDE.md`, permissions) |
 | `project_discovery` | Locates project roots from a working directory |
-| `shutdown` | SIGTERM + SIGINT graceful-shutdown signal — every daemon in all three harnesses uses this |
-| `log_buffer` | Bounded in-memory log ring buffer for `/logs/tail` endpoints |
-| `sys_metrics` | RSS / CPU sampling for `/health` endpoints |
+| `shutdown` | SIGTERM + SIGINT graceful-shutdown signal for every daemon |
+| `log_buffer` | Bounded in-memory log ring buffer for log-tail endpoints |
+| `sys_metrics` | RSS / CPU sampling for health endpoints |
 
-### Feature-gated modules relevant to all three harnesses
+Feature-gated modules the harnesses draw on:
 
 | Feature | Module | Purpose |
 |---------|--------|---------|
-| `mcp` | `trusty_common::mcp` | JSON-RPC 2.0 / MCP primitives (envelope types, stdio dispatch loop, OpenRPC discovery). Every MCP server in the workspace imports from here. |
-| `rpc` | `trusty_common::rpc` | General-purpose JSON-RPC client + stdio/HTTP transports |
-| `memory-core` | `trusty_common::memory_core` | Memory palace storage engine (palace, note, retrieval) — trusty-memory's backend; also used by trusty-agents |
-| `tickets` | `trusty_common::tickets` | Issue-tracker integration primitives |
-| `symgraph` | `trusty_common::symgraph` | Knowledge-graph data types (EntityType, RawEntity, EdgeKind) — used by trusty-search |
-| `embedder` | `trusty_common::embedder` | Text-embedding abstraction (Embedder trait, FastEmbedder) — used by trusty-search and trusty-analyze |
-| `bm25` | `trusty_common::bm25` | BM25 lexical index — used by trusty-search |
-| `axum-server` | `trusty_common::server` | Shared axum middleware (CORS, trace, gzip) — every HTTP daemon uses this |
-| `migrations` | `trusty_common::migrations` | Schema migration kernel shared by data-layer crates |
+| `mcp` | `trusty_common::mcp` | JSON-RPC 2.0 / MCP primitives — envelope types, the stdio dispatch loop, OpenRPC discovery. Every MCP server in the workspace imports from here. |
+| `rpc` | `trusty_common::rpc` | General-purpose JSON-RPC client plus stdio and HTTP transports |
+| `stdio-mcp-client` | `trusty_common::stdio_mcp_client` | Client that spawns and talks to a stdio MCP server |
+| `memory-core` | `trusty_common::memory_core` | Memory palace storage engine — trusty-memory's backend, also used by trusty-agents |
+| `session-naming` | `trusty_common::session_naming` | The one canonical tmux session-naming rule, shared so trusty-mpm's and trusty-agents' session managers never orphan each other's sessions |
+| `search-index` | `trusty_common::search_index` | Best-effort "ensure this project is indexed" entry point, used by trusty-mpm at session launch and trusty-code at task start |
+| `axum-server` | `trusty_common::server` | Shared axum middleware and the same-origin write guard used by every HTTP daemon |
+| `inference-client` | `trusty_common::inference` | Shared OpenAI-compatible adapter layer and provider key configuration |
+| `catchup` | `trusty_common::catchup` | Incremental catch-up context generation across git, memory, and session sources |
 
-### What SHOULD migrate to trusty-common (target state)
+### trusty-agents-common
 
-The following currently live in `open-mpm` but belong in `trusty-common` as
-shared infrastructure so all three harnesses can use them without taking a
-dependency on a peer harness crate:
+`crates/trusty-agents-common/` is the harness-layer shared crate. All three
+harness crates depend on it. It holds what the harnesses share with each other
+but not with the rest of the workspace:
 
-1. **Tool registry and RBAC primitives** (`open-mpm/src/tools/traits.rs`,
-   `src/rbac/`, `src/identity/`) — the `ToolExecutor` trait, `ServiceTier` RBAC
-   enum, and `UserIdentity` are already partially extracted into
-   `open-mpm-agent-api` to break the cargo cycle. The next step is migrating
-   them into `trusty-common` behind a `tool-registry` feature flag so
-   trusty-code can use them without depending on `open-mpm`.
-2. **Shared event types** — see the [Event-Driven Mandate](#event-driven-mandate)
-   section below.
-3. **Intent classifier** (`open-mpm/src/intent/`) — the heuristic
-   `IntentClass` (Conversational / Research / Implementation) is a
-   cross-harness primitive.
+- `ToolExecutor`, `ToolResult`, `ToolExecutionTier`, `ServiceTier` (RBAC tiers),
+  and `AgentPlugin` — the plugin surface an external agent crate implements
+- `adapters` — the harness-adapter framework and its registry
+- `session_registry` — the JSON-backed session ledger
+- `runner` — the `AgentRunner` dependency-injection seam and its value types
+- `events` — the unified `HarnessEvent` envelope and process-global bus (see below)
+- `harness_doc` — the shared harness-understanding instructions consumed by both
+  trusty-mpm's session-manager prompt and trusty-code
+- `compress` — portable tool-output compression
+- `perf` — portable token/cost value types
 
 ---
 
-## Event-Driven Mandate
+## Event Streams
 
-**Binding architectural principle: all three harnesses are event-driven.**
+**Architectural principle: the harnesses are event-driven.** A harness that
+blocks synchronously at each step cannot fan out to sub-agents, stream progress
+to a UI, or relay across a process boundary. Each harness therefore publishes to
+a broadcast channel that subscribers fan out from, rather than operating in pure
+request-response mode.
 
-An agent harness that blocks synchronously at each step is fragile: it cannot
-fan out to multiple sub-agents, cannot stream progress to a UI, and cannot relay
-events across process boundaries. The trusty-tools architecture requires that
-every harness publishes and subscribes to a well-defined event stream rather than
-operating in pure request-response mode.
+That principle holds in all three. The *unification* does not yet.
 
-### Shared Event Model
+### Where each harness stands
 
-The shared event model lives (or will live) in `trusty-common` behind an `events`
-feature flag. It consists of:
+| Harness | Bus | Payload type | External stream |
+|---|---|---|---|
+| **trusty-agents** | Process-global `tokio::sync::broadcast` (`src/events.rs`) | Its own `Event` enum | SSE over the HTTP API; UDS NDJSON `MessageBus` between projects (`src/bus/`) |
+| **trusty-code** | Process-global `tokio::sync::broadcast` (`src/events.rs`) | `SessionEventEnvelope` wrapping a tagged `Event`, with a per-session monotonic sequence number | `session.event` JSON-RPC notifications on stdio; SSE at `/sessions/{id}/events` on HTTP |
+| **trusty-mpm** | Daemon-held `tokio::sync::broadcast` (`src/daemon/state/`) | Untyped `serde_json::Value` | SSE at `/events` and `/sessions/{id}/events`; a poll endpoint at `/events/poll` |
 
-**Event envelope (wire format):**
-```rust
-// Target: trusty_common::events::HarnessEvent (to be extracted from open-mpm)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum HarnessEvent {
-    // Session lifecycle
-    SessionStarted   { session_id: String, project: String, harness: HarnessKind },
-    SessionFinished  { session_id: String, exit_code: i32 },
-    SessionError     { session_id: String, message: String },
+trusty-agents and trusty-code each also relay events from a child process to
+their parent by prefixing NDJSON lines on stderr. Both use the same prefix,
+`__OMPM_EVENT__ `, each from its own crate-local constant rather than a shared
+one.
 
-    // Agent lifecycle  
-    AgentStarted     { session_id: String, agent: String },
-    AgentFinished    { session_id: String, agent: String, elapsed_ms: u64 },
-    AgentMessage     { session_id: String, agent: String, content: String },
+### The unified envelope, and why it is not yet the wire format
 
-    // Tool execution
-    ToolCall         { session_id: String, tool: String, args: serde_json::Value },
-    ToolResult       { session_id: String, tool: String, success: bool },
+`trusty_agents_common::events` defines `HarnessEvent` — one envelope carrying a
+`HarnessSource`, a tagged `HarnessPayload`, and a lag-aware subscription API —
+together with the process-global bus and a subscription `Filter`. It was landed
+as a foundation with no emit sites migrated onto it.
 
-    // PM / workflow
-    WorkflowPhase    { session_id: String, phase: String },
-    DelegationStarted{ session_id: String, target_harness: HarnessKind, task: String },
-    DelegationResult { session_id: String, target_harness: HarnessKind, success: bool },
-
-    // Infrastructure
-    Ping             { session_id: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HarnessKind { TrustyCode, TrustyMpm, TrustyAgents }
-```
-
-**Transport mechanisms (per harness boundary):**
-
-| Boundary | Transport | Implementation |
-|----------|-----------|----------------|
-| Within a harness process | `tokio::sync::broadcast` | `open-mpm/src/events.rs` (EVENT_BUS OnceLock); to be replicated in trusty-mpm daemon |
-| Harness → UI (browser/TUI) | Server-Sent Events (SSE) over HTTP | open-mpm API `/events` endpoint; trusty-mpmd SSE stream |
-| trusty-mpm → trusty-code | HTTP POST to `tcode serve` endpoint | Planned in trusty-code Phase 1 (#587) |
-| Subprocess → parent | Stderr relay (`__OMPM_EVENT__ <json>`) | `open-mpm/src/events.rs` EVENT_LINE_PREFIX |
-| Cross-project (open-mpm) | Unix Domain Socket NDJSON bus | `open-mpm/src/bus/mod.rs` MessageBus |
-
-### Current Event-Driven Status
-
-| Harness | Event bus today | Gap |
-|---------|-----------------|-----|
-| **trusty-agents (open-mpm)** | Full: `EVENT_BUS` broadcast channel + SSE relay + UDS MessageBus; `Event` enum covers full PM lifecycle (`src/events.rs`, `src/bus/mod.rs`) | Events not yet typed in shared `trusty-common`; bus types are crate-private |
-| **trusty-mpm** | Partial: hook relay and daemon state changes fire events; no process-global broadcast bus exposed to MCP layer | Missing: typed event bus in daemon; MCP notifications not streamed |
-| **trusty-code** | None: Phase 0 stub | Requires full implementation in Phase 1+ (#587) |
-
-**Required work to close the gap:**
-1. Extract `open-mpm`'s `Event` enum (with `HarnessKind` tag) into `trusty-common::events`.
-2. Add a `broadcast::Sender<HarnessEvent>` to `trusty-mpmd`'s daemon state.
-3. Implement event emission in trusty-code Phase 1.
+That is still the state. No harness crate imports
+`trusty_agents_common::events`: the three buses above each carry their own
+payload type, and the envelope's own relay prefix, `__HARNESS_EVENT__ `, is not
+the one either subprocess relay actually emits. Consuming the unified envelope
+is the outstanding work, and until it lands, an event crossing a harness
+boundary is re-encoded rather than forwarded.
 
 ---
 
 ## Inter-Harness Delegation
 
-### Delegation Graph
+### Delegation graph
+
+All three are independently operator-facing — each has its own human entry
+points, and none is a front door to the others. Two delegation edges leave
+trusty-agents, both through the same tool; one leaves trusty-mpm.
 
 ```
-                              ┌────────────────────┐
-                              │   Human / Operator │
-                              └─────────┬──────────┘
-                                        │ (chat, Telegram, TUI, Slack)
-                                        ▼
-                   ┌────────────────────────────────────────┐
-                   │        trusty-agents (open-mpm)        │
-                   │  General agentic harness               │
-                   │  - Intent classifier                   │
-                   │  - MCP service bridge                  │
-                   │  - Domain personas (Izzie, custom)     │
-                   └──────────────┬─────────────────────────┘
-                                  │ (1) coding task
-                                  │ (2) managed multi-agent project
-                          ┌───────┴────────────┐
-                          │                    │
-                          ▼                    ▼
-        ┌─────────────────────────┐   ┌──────────────────────────────┐
-        │  trusty-code (tcode)    │   │  trusty-mpm (tm / mpmd)      │
-        │  Coding harness         │   │  Meta-harness (PM control)   │
-        │  - PM main loop         │◄──│  - Multi-project sessions    │
-        │  - coding sub-agents    │   │  - Circuit breaker / overseer│
-        │  - per-project config   │   │  - Hook relay                │
-        │  - workflows            │   │  - MCP server to Claude Code │
-        └─────────────────────────┘   └──────────────────────────────┘
-                   ▲
-                   │ (3) session delegation
-                   │
-        ┌──────────┴───────────────────────────────────────────────┐
-        │                    trusty-mpm                            │
-        │  delegates coding work to tcode; monitors its sessions   │
-        └──────────────────────────────────────────────────────────┘
+     operator             operator              operator
+  REPL / Slack /       tm CLI / TUI /         tcode CLI /
+  Telegram / HTTP        Telegram                 TUI
+         │                    │                    │
+         ▼                    ▼                    ▼
+ ┌───────────────┐   ┌───────────────┐   ┌───────────────┐
+ │ trusty-agents │   │  trusty-mpm   │   │  trusty-code  │
+ │    agentic    │   │     meta      │   │    coding     │
+ └───────┬───────┘   └───────┬───────┘   └───────▲───────┘
+         │                   │                   │
+         │  (2) dispatch_task, route = Tm        │
+         ├──────────────────►│                   │
+         │                                       │
+         │  (1) dispatch_task, route = Tcode     │
+         └──────────────────────────────────────►│
+                             │                   │
+                             │  (3) --runtime tcode
+                             └──────────────────►│
 ```
 
-### Delegation Edges (Defined)
+### Delegation edges
 
-| From | To | Trigger | Transport | What is passed | What is returned |
-|------|----|---------|-----------|----------------|-----------------|
-| **trusty-agents** | **trusty-code** | Intent classified as `Implementation` — a coding task | HTTP POST to `tcode serve` IPC endpoint (Phase 1) OR CLI subprocess `tcode run-task <agent> <task>` | Task description, agent name, optional context | Result text, exit code |
-| **trusty-agents** | **trusty-mpm** | Multi-agent project requiring session management, QA enforcement, or hook relay | HTTP POST to `trusty-mpmd` API OR MCP tool `agent_delegate` | Task description, workflow name, session constraints | Session ID, delegation ID, result |
-| **trusty-mpm** | **trusty-code** | New coding session created or existing session overseen | Session launch via `session_launch::SessionLaunchConfig` (`crates/trusty-mpm/src/core/session_launch.rs`) → spawns `tcode serve` subprocess | Project path, agent config, model tier, overseer policy | Session ID; events relayed via hook relay |
+| # | From | To | Trigger | Transport | Returned |
+|---|------|----|---------|-----------|----------|
+| 1 | trusty-agents | trusty-code | `dispatch_task` with `route_task` returning `Tcode` — a repo-file token or a coding verb in the task text | One-shot subprocess `tcode run-task pm <task> --project <dir> --json`, which blocks until the daemon-owned session reaches a terminal state | The full transcript, with backend identity scrubbed |
+| 2 | trusty-agents | trusty-mpm | `dispatch_task` with `route_task` returning `Tm` — orchestration, project, session, issue, or multi-agent vocabulary, and the default when no signal is present | Spawns `tm serve --stdio` as an MCP client, calls `session_new`, polls `session_activity`, then `session_decommission` | Observed pane transcript, identity scrubbed |
+| 3 | trusty-mpm | trusty-code | A managed session created with `--runtime tcode` instead of the default `claude-code` | `TcodeAdapter` verifies `tcode` is on PATH and sends `tcode run-task <agent> <task> --project <cwd>` into the session's tmux pane | Session events via the hook relay and pane capture |
 
-### Delegation Contracts
+Two properties of edge 2 are worth stating plainly. trusty-mpm has no
+synchronous run-this-and-block RPC, so the bridge polls with a bounded attempt
+count and returns whatever transcript it has observed when the budget runs out.
+And the bridge scrubs backend identity from both success and error paths, so a
+persona calling `dispatch_task` never learns that `tm` or `tcode` exists.
 
-**trusty-agents → trusty-code (coding delegation):**
-- Inputs: `{ agent: String, task: String, project_path: PathBuf, context: Option<String> }`
-- Outputs: `{ result: String, exit_code: i32, session_id: String }`
-- Precondition: `tcode serve` must be running for `project_path`; or trusty-agents
-  spawns a transient `tcode` instance
-- Error: timeout, agent not found, or compilation failure — returned as
-  `DelegationResult { success: false }`
+Which backend a task routes to is decided by `intent::route::route_task`, a
+pure function with no I/O: a repo-file token or a hard coding verb wins
+outright, then any orchestration vocabulary, then a generic code verb, and
+`Tm` otherwise.
 
-**trusty-agents → trusty-mpm (managed project delegation):**
-- Inputs: MCP tool call `agent_delegate(session_id, agent, task, tier?)`
-- Outputs: `{ delegation_id: String }` (async — caller subscribes to events
-  for completion)
-- Precondition: `trusty-mpmd` running; session established
-- Error: circuit-breaker open, session not found — MCP error response
+### What is not cross-harness delegation
 
-**trusty-mpm → trusty-code (session management):**
-- Inputs: `SessionLaunchConfig { project_path, agent_names, overseer_policy, model_tier }`
-- Outputs: `SessionId` registered in session store; events relayed via hook relay
-- Precondition: `tcode` binary on PATH; project has `.claude/` config
-- Error: binary not found, project not initialised — `SessionStatus::Error`
-
-### What is NOT a cross-harness delegation
-
-- trusty-search, trusty-memory, trusty-analyze are **tool-layer services**, not
-  harnesses. All three harnesses call them over HTTP/MCP as tools; this is not
-  delegation in the harness sense.
-- trusty-code calling its own sub-agents (engineer, QA, ticketing) is
-  **intra-harness** delegation, not cross-harness.
+- trusty-search, trusty-memory, and trusty-analyze are **tool-layer services**,
+  not harnesses. All three harnesses call them over HTTP or MCP as tools.
+- A harness invoking its own sub-agents is intra-harness delegation.
+- trusty-mpm spawning the Claude Code CLI — its default runtime — is not a
+  trusty-tools harness boundary at all.
 
 ---
 
-## Accepted Decision — Boundary Between trusty-mpm and trusty-agents
+## Known gaps
 
-**Status: ACCEPTED — boundary and license recorded; implementation proceeds
-under epic #587 and the P0 rename.**
+Stated explicitly so nothing here reads as more settled than it is.
 
-### The Problem
-
-Both `open-mpm` (trusty-agents) and `trusty-mpm` carry orchestration/PM-style
-machinery that overlaps:
-
-| Capability | open-mpm location | trusty-mpm location |
-|------------|-------------------|---------------------|
-| PM main loop | `src/ctrl/` (agent orchestrator REPL) | Not present (delegates to tcode) |
-| Workflow engine | `src/workflow/` (phase-based pipelines) | Not present |
-| Multi-agent session management | `src/session*.rs`, `src/session/` | `src/core/session_store.rs`, `src/daemon/` |
-| Intent classification | `src/intent/` (heuristic classifier) | Not present |
-| Tool registry + RBAC | `src/tools/`, `src/rbac/` | Not present (uses Claude Code's tool layer) |
-| Harness adapter detection | `src/adapters/` | Implicit (via hook relay) |
-| MCP service bridge | `src/tools/mcp_service_tools.rs` | Implicit (Claude Code sessions invoke MCP servers directly) |
-| Event bus | `src/events.rs`, `src/bus/` | Partial (hook relay only) |
-
-### The Accepted Line
-
-**PM / workflow / multi-agent orchestration belongs to trusty-mpm (the meta-harness).
-General non-coding assistants belong to trusty-agents.**
-
-More precisely (all items below are accepted; Cargo.toml updates happen during
-the P0 rename, not in this PR):
-
-1. **`open-mpm/src/workflow/`** — the `WorkflowEngine` and declarative phase
-   pipelines (`WorkflowDef`, `PhaseDef`, parallel phases, worktree management,
-   autopush) are **generic orchestration logic**.
-   **Decision: migrate to trusty-mpm.**
-
-2. **`open-mpm/src/ctrl/`** (the PM orchestrator loop) — the subset that drives
-   coding agents belongs in `trusty-code` (epic #587); the subset that drives
-   knowledge-worker personas stays in trusty-agents. The split follows intent:
-   coding agent → trusty-code; domain persona (Izzie, CRM assistant) → trusty-agents.
-   **Decision: split by agent type as part of #587 extraction.**
-
-3. **`open-mpm/src/session_registry.rs`** (cross-project session registry) —
-   session management at the multi-project level belongs to `trusty-mpm`.
-   Per-conversation session state intrinsic to a single knowledge-worker
-   conversation stays in trusty-agents.
-   **Decision: trusty-mpm owns cross-project sessions; trusty-agents owns
-   per-conversation session state for its own loops.**
-
-4. **`open-mpm/src/tools/`, `src/rbac/`, `src/identity/`** — the
-   `ToolExecutor` trait + `ServiceTier` RBAC + `UserIdentity` are shared primitives.
-   **Decision: migrate to `trusty-common` behind a `tool-registry` feature flag.**
-
-5. **`open-mpm/src/events.rs`, `src/bus/`** — the event bus belongs to
-   `trusty-common` so all harnesses can share it.
-   **Decision: migrate to `trusty-common::events`.**
-
-6. **`open-mpm/src/intent/`** — the intent classifier is a shared primitive.
-   **Decision: migrate to `trusty-common::intent`.**
-
-7. **`open-mpm/src/adapters/`** (harness adapter detection) — trusty-mpm-level
-   functionality (recognising which harness is in a tmux pane).
-   **Decision: migrate to trusty-mpm.**
-
-### What Stays Exclusively in trusty-agents After the Split
-
-- MCP service bridge (`mcp_service_tools.rs`) — wrapping external MCP servers as
-  tool executors for knowledge-worker personas
-- Domain persona definitions (Izzie and custom TOML personas)
-- Knowledge-worker tool set: `granola_*`, `gmail_*`, calendar, web search, memory
-  read/write, ticketing
-- REPL, HTTP API, Slack, Telegram transports for knowledge-worker interaction
-- Per-conversation session state and interaction log
-- Intent classifier (until extracted to trusty-common)
-
-### License Decision — ACCEPTED
-
-**trusty-agents (crates/open-mpm/, planned rename) and its companion crates
-(`trusty-agents-api`, `trusty-agents-local`) are licensed under Elastic
-License 2.0, matching trusty-search. This is NOT MIT.**
-
-This decision is recorded in
-[ADR-0004](../adr/0004-three-harnesses-shared-event-driven-common.md) under
-"Accepted Decisions". The `license` field in the three Cargo.toml files will be
-set to `"Elastic-2.0"` during the P0 rename PR — it is not changed in this
-documentation-only PR.
-
-### Remaining Open Questions
-
-The boundary and license decisions are now settled. The following questions
-remain open and will be addressed in subsequent PRs or the #587 implementation:
-
-1. **Model strategy:** default model routing policy for trusty-agents personas.
-2. **Relationship to duetto-intelligence gateway:** tool vs. embedded integration.
-3. **open-mpm-agent-api retirement timing:** shim or immediate deprecation once
-   `trusty-common::tool-registry` is ready.
-4. **v1 assistant scope:** minimal useful v1 trusty-agents without tcode extracted.
-5. **Rename timing vs. #587:** dedicated rename PR before vs. within #587 Phase 1.
-
-See [ADR-0004](../adr/0004-three-harnesses-shared-event-driven-common.md) for
-the full decision record.
-
----
-
-## Current Status vs. Target State
-
-| Harness | Today | Target |
-|---------|-------|--------|
-| **trusty-code** | Phase 0: CLI stub only | Full coding PM loop, extracted from open-mpm (#587) |
-| **trusty-mpm** | Production: daemon, MCP, TUI, Telegram | + Typed event bus; + session delegation to tcode; + workflow engine (migrated from open-mpm) |
-| **trusty-agents (open-mpm)** | Production: PM loop, intent router, MCP bridge, personas | Renamed `trusty-agents`; coding-specific ctrl extracted to tcode; shared primitives migrated to trusty-common |
-| **trusty-common** | Foundation: chat, mcp, rpc, memory-core, embedder, symgraph, bm25 | + `events` feature (shared event types); + `tool-registry` feature (ToolExecutor, RBAC); + `intent` module |
+- **The boundary between trusty-mpm and trusty-agents is not fully resolved in
+  source.** Both carry a session manager, both carry tmux integration, and
+  trusty-agents carries a workflow engine that trusty-code does not. The shared
+  tmux session-naming rule in `trusty_common::session_naming` exists precisely
+  so the two managers do not orphan each other's sessions, which is a mitigation
+  of the overlap rather than a resolution of it. This page describes what each
+  crate contains; it does not assert where the line should finally fall.
+- **Event unification has a landed foundation and no consumers.** The section
+  above states which bus each harness actually runs. Anything beyond that —
+  a migration order, a target date — is not established by source.
+- **trusty-mpm's hook relay carries Claude Code hook events**, which is why
+  edge 3 (`--runtime tcode`) has a different observability shape from the
+  default runtime: trusty-code emits no hooks. How completely the pane-capture
+  path substitutes for that is not something this page establishes.
 
 ---
 
 ## References
 
-- [Workspace Port Assignments](port-assignments.md) — the cross-cutting
-  inventory of every daemon's default loopback port; consult before adding a
-  new one (#3364)
-- [ADR-0004](../adr/0004-three-harnesses-shared-event-driven-common.md) — records
-  the three-harness + event-driven + shared-trusty-common decisions
-- `crates/trusty-code/src/main.rs` — Phase 0 CLI surface (lines 1-107)
-- `crates/trusty-code/src/lib.rs` — Phase 0 library skeleton (lines 1-62)
-- `crates/open-mpm/src/events.rs` — current event bus + Event enum
-- `crates/open-mpm/src/bus/mod.rs` — UDS inter-project message bus
-- `crates/open-mpm/src/intent/mod.rs` — intent classifier
-- `crates/open-mpm/src/tools/mcp_service_tools.rs` — MCP service bridge
-- `crates/open-mpm/src/workflow/mod.rs` — workflow engine
-- `crates/trusty-mpm/src/mcp/mod.rs` — OrchestratorBackend trait + MCP tools
-- `crates/trusty-mpm/src/core/overseer.rs` — OverseerDecision + Overseer trait
-- `crates/trusty-mpm/src/core/session_store.rs` — cross-project session registry
-- `crates/trusty-common/src/lib.rs` — feature-gated shared modules
-- Epic #587 — trusty-code extraction phases
+- [trusty-mpm](../trusty-mpm/README.md), [trusty-code](../trusty-code/README.md),
+  [trusty-agents](../trusty-agents/README.md) — per-harness documentation
+- [trusty-common](../trusty-common/README.md) — the workspace-wide shared crate
+
+Source of truth for everything above, in the repository:
+
+- `crates/trusty-code/src/lib.rs`, `src/main.rs`, `src/serve/` — the coding harness
+- `crates/trusty-mpm/src/bin/tm/cli/mod.rs` — the `tm` subcommand surface
+- `crates/trusty-mpm/src/mcp/tools/mod.rs` — the MCP tool catalog
+- `crates/trusty-mpm/src/runtime/` — `RuntimeKind` and the two runtime adapters
+- `crates/trusty-agents/src/tools/pm_bridge.rs`, `src/tools/pm_bridge_backend.rs`,
+  `src/intent/route.rs` — the `dispatch_task` bridge and its router
+- `crates/trusty-agents-common/src/lib.rs` — the harness-layer shared surface
+- `crates/trusty-common/Cargo.toml` — the feature list behind the table above
+- `docs/adr/0004-three-harnesses-shared-event-driven-common.md` and
+  `docs/adr/0019-unified-ipc-messaging-on-event-bus.md` — the decision records
+  behind the three-harness split and the event bus

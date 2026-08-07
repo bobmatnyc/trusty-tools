@@ -137,7 +137,7 @@ async fn agents_check_probes_the_managed_config_tier_not_the_workspace() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_twenty_nine_checks() {
+async fn run_doctor_produces_thirty_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -155,7 +155,8 @@ async fn run_doctor_produces_twenty_nine_checks() {
     // twenty-five); issue #2919 adds `worktree_disk` (twenty-five →
     // twenty-six); issue #4605 adds `skill_unmanaged` (twenty-six →
     // twenty-seven); issue #4033 adds `binary_provenance` (twenty-seven →
-    // twenty-eight).
+    // twenty-eight); issue #5045 adds `search_index_pin` (twenty-nine →
+    // thirty).
     // #1905's stale-skill cleanup is deliberately NOT a `run_doctor` probe
     // — see the `run_doctor` doc.
     let report = run_doctor(None, None, &[]).await;
@@ -180,6 +181,7 @@ async fn run_doctor_produces_twenty_nine_checks() {
         "agent_skills_prose_hints",
         "memory",
         "search",
+        "search_index_pin",
         "worktrees",
         "worktree_disk",
         "gh_account",

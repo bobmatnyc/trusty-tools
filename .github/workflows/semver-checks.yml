@@ -1,0 +1,88 @@
+# Public-API / SemVer gate for the trusty-tools workspace (issue #5050).
+#
+# The workspace publishes 20+ crates to crates.io and had no check that a
+# breaking public-API change carried a matching version bump. #4088 is what that
+# costs: `trusty-common` 0.22.5 added a required public field on a patch bump,
+# every dependent on a `^0.22` floor stopped compiling on a lockfile-free
+# `cargo install`, and `trusty-analyze` 0.7.3 was yanked. A workspace
+# `cargo check` cannot see that class of break — the root Cargo.toml's path
+# override always pairs local source with local dependency — so this job
+# compares against the REGISTRY instead.
+#
+# Cost control: the gate is diff-scoped, the same way check_changelog_fragment.sh
+# is. It builds rustdoc for a crate only when that crate's `src/**` changed AND
+# it is published AND its declared version does not already carry a breaking
+# bump. On a docs-only, CI-only, or unpublished-crate PR the job is a few
+# seconds of git and metadata; the two rustdoc builds are paid only by the PRs
+# that can actually cause the defect.
+#
+# Deliberately NO `paths:` filter (issue #4468): a required check skipped by a
+# path filter never reports on the PRs it skips and leaves them pending forever.
+# This job always runs and reports SUCCESS on an exempt PR — the exemption lives
+# in the script, not the trigger.
+#
+# `pull_request` only: crate selection is a diff against the base branch, which
+# is empty (and would trip the gate's own scan floor) on a push to main.
+name: SemVer checks
+
+on:
+  pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # and is the event a base-branch RETARGET fires, so without it a stacked PR
+    # retargeted onto main never re-triggers. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+
+concurrency:
+  group: semver-checks-${{ github.ref }}
+  cancel-in-progress: ${{ github.event.action != 'edited' }}
+
+jobs:
+  semver-checks:
+    name: Public API / SemVer
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      # fetch-depth: 0 — the gate needs `git merge-base` against the base
+      # branch, which a shallow checkout cannot resolve.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # A prebuilt binary, PINNED. `cargo install cargo-semver-checks` compiles
+      # ~2 minutes of tool before a single crate is checked, which is exactly the
+      # kind of overhead that gets a gate disabled. install-action downloads a
+      # release artifact instead, and pinning the version keeps a tool release
+      # from silently changing the lint set under a PR. It also never touches
+      # this workspace's Cargo.lock — refreshing that turns the MSRV 1.94 job
+      # red (see CLAUDE.md, "Version bumps must not refresh Cargo.lock").
+      - name: Install cargo-semver-checks (pinned prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks@0.50.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: semver-checks
+          # cargo-semver-checks builds into target/semver-checks/, which
+          # rust-cache prunes as "unrecognised" by default. Keeping it is the
+          # difference between a warm 1-minute check and a cold 5-minute one.
+          cache-directories: target/semver-checks
+
+      # Runs BEFORE the real gate, matching line-cap.yml's selftest-then-gate
+      # ordering: a gate that cannot fail makes the real run's green meaningless.
+      # These four cases are the gate's fail-open surface — an unscanned diff and
+      # an unreachable crates.io — plus the 404 case that proves the other three
+      # fail for the right reason.
+      - name: SemVer gate selftest (must refuse a blind run)
+        run: bash scripts/check_semver_selftest.sh
+
+      - name: Enforce public-API SemVer against crates.io
+        env:
+          SEMVER_GATE_BASE: ${{ github.event.pull_request.base.sha }}
+          SKIP_UI_BUILD: '1'
+        run: bash scripts/check_semver.sh
