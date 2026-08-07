@@ -15,7 +15,7 @@ This document defines the canonical installation convention that every distribut
 - `trusty-git-analytics` (tga) — developer productivity analytics
 - `trusty-code` — per-project Claude-Code orchestration harness
 
-**Out of scope**: library-only crates, internal binaries, and publish=false crates (trusty-mpm-gui, trusty-agents, etc.).
+**Out of scope**: library-only crates, internal binaries, `publish = false` crates (e.g. `trusty-mpm-gui`), and crates that have simply never been published (e.g. `trusty-agents` — no `publish` field, no `trusty-agents-v*` release tag, zero crates.io or GitHub releases; install it with `cargo install --path crates/trusty-agents --locked` from a source checkout instead).
 
 ## Installation Channels
 
@@ -277,11 +277,18 @@ Install with `cargo install --git https://github.com/bobmatnyc/trusty-tools trus
 
 #### Configuration
 
-The daemon reads from `~/.config/trusty-mpm/config.yaml` by default. See the `trusty-mpm` crate README for configuration examples and the full option reference.
+The daemon reads from `$XDG_CONFIG_HOME/trusty-mpm/config.toml`, falling back to `~/.config/trusty-mpm/config.toml`, by default. See the `trusty-mpm` crate README for configuration examples and the full option reference.
+
+There is no separate `trusty-mpmd` binary — the crate ships one binary
+(installed as both `tm` and `trusty-mpm`), and the daemon is its `daemon`
+subcommand:
 
 ```bash
-trusty-mpmd --config /path/to/config.yaml
+tm daemon
 ```
+
+The `daemon` subcommand has no `--config` flag; to use a config file at a
+non-default location, set `XDG_CONFIG_HOME` before running it.
 
 The CLI (`tm` / `trusty-mpm`) discovers the running daemon automatically via the standard socket or HTTP port and requires no configuration beyond a running daemon.
 ```
