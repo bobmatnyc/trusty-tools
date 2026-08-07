@@ -1,0 +1,3 @@
+SECTION	pages	Pages
+PAGE	pages	docs/pages/current.md	/current	Current
+PAGE	pages	docs/pages/retired-binary.md	/retired	Retired binary

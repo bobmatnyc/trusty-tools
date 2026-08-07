@@ -11,6 +11,13 @@
 #       a dressed-up existence check.
 #     - missing-source.tsv points at a docs/ path that does not exist, which is
 #       what a rename or deletion in docs/ looks like to the manifest.
+#   The STALE cases (issue #5125) carry the whole weight of that check, because
+#   it is opt-in and wired to nothing: no hook and no CI job runs
+#   `--stale` today, so these fixtures are the ONLY place its logic is
+#   ever observed working. They run against scripts/test-data/public-docs/fakeroot/
+#   via --root, so they assert on pages this file controls rather than on
+#   whatever the real docs/ tree says this week.
+#
 #   forbidden-internal-suffix.tsv covers the third case, which has no tree rule
 #   behind it: docs/reference/ is mixed-audience, so the internal half of a split
 #   (docs/reference/config-convention-internal.md, PR #5107) sits one row away
@@ -87,6 +94,80 @@ while IFS="$TAB" read -r fixture expected_exit expected_code; do
   rm -f "$err"
 done <<EOF
 $CASES
+EOF
+
+# --- STALE pass (issue #5125) ------------------------------------------------
+#
+# manifest<TAB>terms<TAB>expected_exit<TAB>expected_substrings (comma-separated,
+# ALL required; "-" when exit 0). Requiring several substrings is what makes
+# case 1 prove BOTH that a retired literal fires AND that the derived
+# @FORMER_REPO_CLONE_URLS@ term fires — a single "STALE" assertion would pass on
+# either alone, and the derivation is the half that can silently match nothing.
+FAKEROOT="$FIXTURE_DIR/fakeroot"
+STALE_CASES="stale-hit.tsv${TAB}stale-terms.tsv${TAB}1${TAB}FAIL STALE,trusty-mpmd,@FORMER_REPO_CLONE_URLS@
+stale-waived.tsv${TAB}stale-terms-waived.tsv${TAB}0${TAB}-
+stale-waived.tsv${TAB}stale-terms-empty-reason.tsv${TAB}1${TAB}BAD-WAIVER
+stale-unpublished.tsv${TAB}stale-terms.tsv${TAB}0${TAB}-"
+
+while IFS="$TAB" read -r fixture terms expected_exit expected_subs; do
+  [ -n "$fixture" ] || continue
+  label="$fixture + $terms"
+  mpath="$FIXTURE_DIR/$fixture"
+  tpath="$FIXTURE_DIR/$terms"
+  if [ ! -f "$mpath" ] || [ ! -f "$tpath" ]; then
+    echo "FAIL: stale fixture missing: $mpath / $tpath" >&2
+    fail=1
+    continue
+  fi
+
+  err="$(mktemp "${TMPDIR:-/tmp}/public-docs-selftest.XXXXXX")"
+  rc=0
+  bash "$GATE" --manifest "$mpath" --root "$FAKEROOT" \
+    --stale-terms "$tpath" >/dev/null 2>"$err" || rc=$?
+
+  if [ "$rc" -ne "$expected_exit" ]; then
+    echo "FAIL: $label -> exit $rc (expected $expected_exit)" >&2
+    sed 's/^/       /' "$err" >&2
+    fail=1
+    rm -f "$err"
+    continue
+  fi
+
+  missing=""
+  if [ "$expected_subs" != "-" ]; then
+    # Comma-split without arrays, so this stays bash 3.2 clean.
+    rest="$expected_subs"
+    while [ -n "$rest" ]; do
+      case "$rest" in
+        *,*)
+          sub="${rest%%,*}"
+          rest="${rest#*,}"
+          ;;
+        *)
+          sub="$rest"
+          rest=""
+          ;;
+      esac
+      grep -qF -- "$sub" "$err" || missing="${missing}'${sub}' "
+    done
+  fi
+
+  if [ -n "$missing" ]; then
+    echo "FAIL: $label -> exit $rc but stderr never mentions ${missing}" >&2
+    sed 's/^/       /' "$err" >&2
+    fail=1
+    rm -f "$err"
+    continue
+  fi
+
+  if [ "$expected_subs" = "-" ]; then
+    echo "PASS: $label -> exit $rc (clean)"
+  else
+    echo "PASS: $label -> exit $rc, reported ${expected_subs}"
+  fi
+  rm -f "$err"
+done <<EOF
+$STALE_CASES
 EOF
 
 # The committed manifest itself must pass. A green fixture suite over a red
