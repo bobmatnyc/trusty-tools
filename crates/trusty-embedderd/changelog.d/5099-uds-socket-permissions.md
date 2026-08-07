@@ -9,3 +9,6 @@ Fixed
   `trusty_common::uds::bind_hardened` (`0700` directory, `0600` socket before
   the first accept), and `run_uds_accept_loop` drops any connection whose peer
   uid is not this process's own.
+- Version bumped to 0.3.11: 0.3.10 is already published on crates.io and this
+  PR changes `src/**`, so leaving it would turn main's version-parity workflow
+  red (#4421, #3366).

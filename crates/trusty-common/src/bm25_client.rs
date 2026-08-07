@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 /// JSON-RPC protocol version string. Must match the daemon's expectation.
 const JSONRPC_VERSION: &str = "2.0";
