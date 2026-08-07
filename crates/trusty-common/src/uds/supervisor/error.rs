@@ -92,9 +92,28 @@ pub enum SupervisorError {
         key: String,
         /// The socket that was refused.
         socket: PathBuf,
-        /// Which property failed.
+        /// Which property failed. Boxed: `UdsSecurityError` is the largest
+        /// payload in this enum, and unboxed it pushes `SupervisorError` past
+        /// clippy's `result_large_err` threshold for every fallible non-async
+        /// caller.
         #[source]
-        source: crate::uds::UdsSecurityError,
+        source: Box<crate::uds::UdsSecurityError>,
+    },
+
+    /// A runtime-derived [`crate::uds::ServiceTimeouts`] pair fails the one
+    /// relation the type enforces. Only [`crate::uds::ServiceTimeouts::try_new`]
+    /// produces this — the `const fn` constructor turns the same condition into
+    /// a build error.
+    #[error(
+        "SIGTERM patience {sigterm_patience:?} must strictly exceed the supervised \
+         child's shutdown-flush budget {shutdown_flush:?}, or the SIGKILL lands \
+         mid-flush and discards acked writes"
+    )]
+    InvalidTimeouts {
+        /// The patience that was too short.
+        sigterm_patience: Duration,
+        /// The child's declared flush budget.
+        shutdown_flush: Duration,
     },
 
     /// The socket path does not fit the kernel's address buffer, so no child
@@ -105,8 +124,9 @@ pub enum SupervisorError {
         service: String,
         /// Instance key.
         key: String,
-        /// The underlying budget failure.
+        /// The underlying budget failure. Boxed for the same reason as
+        /// [`SupervisorError::UntrustedSocket`]'s.
         #[source]
-        source: crate::uds::UdsSecurityError,
+        source: Box<crate::uds::UdsSecurityError>,
     },
 }

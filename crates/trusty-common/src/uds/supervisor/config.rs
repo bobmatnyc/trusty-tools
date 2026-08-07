@@ -27,6 +27,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::SupervisorError;
+
 /// Initial socket-probe interval, doubled on each miss.
 ///
 /// 20 ms gives sub-50 ms detection on a fast bind without busy-waiting.
@@ -64,14 +66,30 @@ const fn duration_gt(a: Duration, b: Duration) -> bool {
 /// `shutdown_flush` — the child still needs signal delivery, the flush itself,
 /// socket cleanup and exit inside that window.
 ///
+/// 🔴 **Sourcing rule for `shutdown_flush`, and what the assert cannot check.**
+/// `shutdown_flush` MUST be the supervised binary's own flush constant,
+/// imported — `trusty_bm25_daemon::SHUTDOWN_FLUSH_TIMEOUT`, not a literal `2 s`
+/// that happens to match it today. [`ServiceTimeouts::new`] enforces the
+/// RELATION (`sigterm_patience > shutdown_flush`) and nothing else: it has no
+/// way to know what your child's real budget is, so a literal that understates
+/// it compiles, passes the assert, and SIGKILLs mid-flush — the exact failure
+/// this type exists to prevent. A hardcoded copy also stays equal to itself
+/// while the daemon's real value drifts, so it can never detect the drift.
+/// Import the constant, or add a test pinning your value against it the way
+/// `sigterm_patience_exceeds_the_daemon_flush_budget` does. If your service's
+/// flush budget is not a constant you can name, that is the thing to fix first.
+///
 /// `#[non_exhaustive]`: free while `trusty-common` sits unpublished at 0.30.0
 /// against a published 0.28.1, and never free again. On a STRUCT the attribute
 /// bars construction from outside the crate, including functional-update syntax
-/// (E0639) — which is the intent: [`ServiceTimeouts::new`] is the only way in,
-/// and it is where the guard lives.
+/// (E0639) — which is the intent: the constructors are the only way in, and
+/// they are where the guard lives. Use [`ServiceTimeouts::new`] for a `const`
+/// declaration (compile-time check) and [`ServiceTimeouts::try_new`] when the
+/// values are computed at runtime.
 ///
 /// Test: `service_timeouts_reject_patience_equal_to_the_flush`,
-/// `service_timeouts_carry_probe_defaults_and_honour_overrides`.
+/// `service_timeouts_carry_probe_defaults_and_honour_overrides`,
+/// `try_new_rejects_an_inverted_pair_without_panicking`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ServiceTimeouts {
@@ -138,6 +156,34 @@ impl ServiceTimeouts {
             max_probe_interval: DEFAULT_MAX_PROBE_INTERVAL,
             connect_probe: DEFAULT_CONNECT_PROBE_TIMEOUT,
         }
+    }
+
+    /// [`Self::new`] for values that are not known at compile time.
+    ///
+    /// Why: `new` is a `const fn`, which is what makes the guard a build error
+    /// at a `const` call site — but it also means the only thing it can do about
+    /// a bad pair at runtime is panic. A service deriving its timeouts from
+    /// config or an environment variable needs to report that as an error, not
+    /// take the process down. `#[non_exhaustive]` leaves no other way to build
+    /// the value, so without this the runtime case is unserviceable.
+    /// What: identical to [`Self::new`] except the relation failure is returned
+    /// as [`SupervisorError::InvalidTimeouts`]. The sourcing rule on the type
+    /// still applies — this checks the relation, never whether `shutdown_flush`
+    /// is your child's real budget.
+    /// Test: `try_new_rejects_an_inverted_pair_without_panicking`,
+    /// `try_new_matches_new_for_a_valid_pair`.
+    pub fn try_new(
+        spawn_probe: Duration,
+        shutdown_flush: Duration,
+        sigterm_patience: Duration,
+    ) -> Result<Self, SupervisorError> {
+        if !duration_gt(sigterm_patience, shutdown_flush) {
+            return Err(SupervisorError::InvalidTimeouts {
+                sigterm_patience,
+                shutdown_flush,
+            });
+        }
+        Ok(Self::new(spawn_probe, shutdown_flush, sigterm_patience))
     }
 
     /// Override the exponential-backoff probe intervals.

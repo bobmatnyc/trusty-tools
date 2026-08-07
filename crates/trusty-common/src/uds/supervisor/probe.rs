@@ -106,7 +106,9 @@ pub async fn probe_socket_verdict(path: &Path, timeout: Duration) -> SocketVerdi
 /// "may I skip the spawn?" — for which anything short of a completed connect
 /// must read as no.
 /// What: true iff [`probe_socket_verdict`] returns [`SocketVerdict::Serving`].
-/// Test: `probe_reports_false_for_a_missing_socket`.
+/// Test: `probe_verdict_reports_not_serving_for_a_missing_socket`,
+/// `probe_verdict_reports_serving_for_a_bound_socket` — both assert this
+/// function alongside the verdict it wraps.
 pub async fn socket_is_serving(path: &Path, timeout: Duration) -> bool {
     probe_socket_verdict(path, timeout).await == SocketVerdict::Serving
 }

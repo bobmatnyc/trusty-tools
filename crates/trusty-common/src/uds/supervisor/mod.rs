@@ -185,9 +185,11 @@ impl UdsServiceSupervisor {
     /// [`SupervisorError::UntrustedSocket`] rather than a spawn that dies on
     /// EADDRINUSE.
     ///
-    /// Test: `external_mode_skips_spawn`, `adoption_requires_a_hardened_socket`,
-    /// `a_serving_child_is_reused`, plus `trusty-memory`'s concurrency suite for
-    /// the racing cases.
+    /// Test: `external_mode_skips_spawn`,
+    /// `adoption_refuses_a_world_writable_socket`,
+    /// `adoption_accepts_a_hardened_socket_without_spawning`,
+    /// `a_serving_child_is_reused_without_a_spawn`, plus `trusty-memory`'s
+    /// concurrency suite for the racing cases.
     pub async fn ensure_running<F>(
         &self,
         key: &str,
@@ -235,7 +237,7 @@ impl UdsServiceSupervisor {
                     service: service.to_string(),
                     key: key.to_string(),
                     socket: socket_path.to_path_buf(),
-                    source,
+                    source: Box::new(source),
                 }
             })?;
             tracing::info!(
@@ -256,7 +258,7 @@ impl UdsServiceSupervisor {
             SupervisorError::SocketPath {
                 service: service.to_string(),
                 key: key.to_string(),
-                source,
+                source: Box::new(source),
             }
         })?;
 
@@ -333,7 +335,8 @@ impl UdsServiceSupervisor {
     /// another instance's lookup. Eviction then re-acquires and fires only if the
     /// map still holds the same child, so a replacement spawned concurrently is
     /// never evicted by this call's stale verdict.
-    /// Test: `a_dead_child_is_evicted`, `an_unserved_child_is_queued_as_doomed`.
+    /// Test: `a_dead_child_is_evicted_without_counting_as_a_reap`,
+    /// `an_unserved_live_child_is_queued_for_graceful_termination`.
     async fn lookup_live(&self, key: &str) -> Option<PathBuf> {
         let (pid, path) = {
             let stamp = self.tick();

@@ -14,13 +14,20 @@
 //! Measured on this file: `probe_verdict_reports_not_serving_for_a_stale_socket_file`
 //! passed 3/3 alone and 3/3 alongside the other probe tests, but failed 4 of 5
 //! runs of the whole module and 2 of 3 runs of the wider `uds::` filter —
-//! reading `Serving` for a listener this test had already dropped. The
-//! interference tracks the fork-heavy tests, not the probe ones. The mechanism
-//! is not characterised here and this file does not guess at one; what is
-//! measured is that a socket-liveness assertion and a concurrent `Command::spawn`
-//! in the same process do not coexist. `trusty-memory`'s
-//! `bm25_supervisor_concurrency.rs` reached the same conclusion for the same
-//! assertion and took the same remedy. Serialising removes no coverage.
+//! reading `Serving` for a listener this test had already dropped.
+//!
+//! The mechanism is **fd inheritance across a concurrent fork**. macOS has no
+//! atomic `SOCK_CLOEXEC`, so `UnixListener::bind` creates the socket and then
+//! sets `FD_CLOEXEC` in a second syscall. A `Command::spawn` on another test
+//! thread that forks inside that window hands the listening fd to the child —
+//! here a `sleep 60` stub — and the child holds it open. The parent's
+//! `drop(listener)` then closes only its own descriptor, the socket stays bound,
+//! and the connect this test expects to be refused completes instead. It is a
+//! property of the test harness, not of the supervisor: a supervised service
+//! binds its own socket in its own process, and this supervisor never holds one
+//! to leak. Serialising the fork-heavy tests against the liveness assertions
+//! closes the window. `trusty-memory`'s `bm25_supervisor_concurrency.rs` reached
+//! the same remedy for the same assertion. It removes no coverage.
 //! Test: this *is* the test file.
 
 use std::path::PathBuf;
@@ -162,6 +169,41 @@ fn service_timeouts_accept_a_subsecond_margin() {
         Duration::from_millis(600),
     );
     assert_eq!(t.sigterm_patience, Duration::from_millis(600));
+}
+
+/// Why: `new` is a `const fn`, so the only thing it can do about a bad pair at
+/// runtime is panic — and `#[non_exhaustive]` leaves no other way to build the
+/// value. A service deriving its timeouts from config needs to report that as an
+/// error rather than take the process down.
+/// Test: this test itself.
+#[serial_test::serial]
+#[test]
+fn try_new_rejects_an_inverted_pair_without_panicking() {
+    let err = ServiceTimeouts::try_new(
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    )
+    .expect_err("an equal pair must be rejected");
+    assert!(
+        matches!(err, SupervisorError::InvalidTimeouts { .. }),
+        "expected InvalidTimeouts, got {err:?}"
+    );
+}
+
+/// Why: the fallible constructor must be the same check, not a second one that
+/// could drift from the `const fn`'s.
+/// Test: this test itself.
+#[serial_test::serial]
+#[test]
+fn try_new_matches_new_for_a_valid_pair() {
+    let built = ServiceTimeouts::try_new(
+        Duration::from_millis(400),
+        Duration::from_millis(50),
+        Duration::from_secs(5),
+    )
+    .expect("a valid pair must be accepted");
+    assert_eq!(built, TEST_TIMEOUTS);
 }
 
 /// Why: the probe cadence is supervision's own concern, not the service's, so

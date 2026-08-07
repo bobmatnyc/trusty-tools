@@ -34,3 +34,10 @@ Added
   #5089)
 - Every new public enum and struct is `#[non_exhaustive]` while the crate is
   unpublished at 0.30.0 against a released 0.28.1 (#5089)
+- `ServiceTimeouts::try_new` is the fallible sibling of the `const fn`
+  constructor, for a service deriving its timeouts from config rather than
+  declaring them as a `const`. `#[non_exhaustive]` left no other way to build
+  the value, so without it the runtime case could only panic. The type also now
+  documents the sourcing rule the assert cannot check: `shutdown_flush` must be
+  the supervised binary's own flush constant, imported, not a literal that
+  happens to match it today (#5089)
