@@ -8,10 +8,13 @@
 //! channel messages); creating, editing, and inspecting them programmatically
 //! lets an agent produce runbooks, meeting notes, or specs the team can keep
 //! iterating on in Slack itself.
-//! What: [`create_canvas`]/[`canvas_create`] post via `canvases.create`
-//! (`canvas_create` is `slack_canvas_create`'s `canvases:write`-namespaced
-//! sibling: it requires `markdown` up front rather than allowing an empty
-//! canvas, matching issue #3744 slice 1's spec); [`update_canvas`] posts via
+//! What: [`create_canvas`]/[`canvas_create`] post via
+//! `conversations.canvases.create` when the caller names a `channel_id` and
+//! via `canvases.create` when they do not — see [`post_create_canvas`] for why
+//! (issue #5155). (`canvas_create` is `slack_canvas_create`'s
+//! `canvases:write`-namespaced sibling: it requires `markdown` up front rather
+//! than allowing an empty canvas, matching issue #3744 slice 1's spec);
+//! [`update_canvas`] posts via
 //! `canvases.edit` with a single whole-document `replace` operation
 //! (mirroring the reference Python implementation's `edit_canvas` — Slack's
 //! `changes` array supports much richer section-targeted operations, but a
@@ -68,8 +71,12 @@
 //! `::canvas_push_table_over_cap_is_invalid_args`.
 //! Test: `tests/tools_http.rs::create_canvas_returns_id`,
 //! `::create_canvas_with_channel_and_markdown`,
+//! `::create_canvas_without_channel_uses_standalone_endpoint`,
 //! `::canvas_create_requires_markdown`,
 //! `::canvas_create_posts_document_content_and_channel`,
+//! `::canvas_create_without_channel_uses_standalone_endpoint`,
+//! `::both_create_paths_return_the_same_structure`,
+//! `::canvas_create_channel_endpoint_error_names_the_endpoint`,
 //! `::update_canvas_replaces_content`,
 //! `::read_canvas_downloads_and_escapes_content`,
 //! `::read_canvas_without_download_url_returns_empty_content`,
@@ -83,7 +90,10 @@ use serde_json::{json, Value};
 
 use super::args::{opt_str, opt_str_array, require_str};
 use super::clean::field_str;
-use super::{CANVASES_CREATE, CANVASES_EDIT, CANVASES_SECTIONS_LOOKUP, FILES_INFO};
+use super::{
+    CANVASES_CREATE, CANVASES_EDIT, CANVASES_SECTIONS_LOOKUP, CONVERSATIONS_CANVASES_CREATE,
+    FILES_INFO,
+};
 use crate::slack::api::client::BaseClient;
 use crate::slack::api::error::SlackError;
 use crate::slack::canvas_markdown::to_canvas_markdown;
@@ -95,30 +105,87 @@ fn document_content(markdown: &str) -> Value {
     json!({ "type": "markdown", "markdown": markdown })
 }
 
-/// POST a `canvases.create` request body and shape the response.
+/// Name the Slack method a canvas-create failure came from.
+///
+/// Why: #5155 — the two create endpoints fail for different reasons
+/// (`free_teams_cannot_create_non_tabbed_canvases` is a `canvases.create`
+/// symptom; `channel_canvas_already_exists` and
+/// `team_tier_cannot_create_channel_canvases` only ever come from
+/// `conversations.canvases.create`). A bare slug forces the next person
+/// diagnosing this to read the source to work out which call ran.
+/// What: appends `(from <method>)` to a `SlackError::Api` slug, leaving the
+/// slug itself as the leading token and every other variant untouched.
+/// Test: `tests/tools_http.rs::canvas_create_surfaces_slack_api_error`,
+/// `::canvas_create_channel_endpoint_error_names_the_endpoint`.
+fn with_endpoint(method: &str, err: SlackError) -> ToolCallError {
+    match err {
+        SlackError::Api(slug) => {
+            ToolCallError::from(SlackError::Api(format!("{slug} (from {method})")))
+        }
+        other => ToolCallError::from(other),
+    }
+}
+
+/// POST a canvas-creation request and shape the response, choosing the
+/// endpoint by whether a channel was named.
 ///
 /// Why: shared by [`create_canvas`] and [`canvas_create`], which differ only
-/// in whether `markdown` is optional or required and how the request body
-/// gets assembled — the network call and response shaping (surface
-/// `canvas_creation_failed` / `canvas_disabled_user_team` / `missing_scope` /
-/// `free_teams_cannot_create_non_tabbed_canvases` through the existing
-/// `SlackError::Api` path via `?`) must not drift between the two.
-/// What: POSTs `body` to `canvases.create`; returns `{ok, canvas_id}`.
-async fn post_create_canvas(client: &BaseClient, body: Value) -> Result<Value, ToolCallError> {
-    let resp = client.call_method(CANVASES_CREATE, &body).await?;
+/// in whether `markdown` is optional or required — the endpoint choice,
+/// network call, and response shaping must not drift between the two. Issue
+/// #5155: `canvases.create` makes a **standalone** canvas owned by the acting
+/// identity, so a canvas the bot creates lands view-only for the human who
+/// asked for it, who then has to duplicate it to edit. Its `channel_id`
+/// argument only tabs the canvas into the channel cosmetically and confers no
+/// edit rights, which is why passing it looked like it should already work.
+/// `conversations.canvases.create` makes a **channel** canvas instead, whose
+/// access follows channel membership with no separate share step. Both take a
+/// bot token and the same `canvases:write` scope, so this is an endpoint
+/// change only — no new OAuth grant.
+/// What: when `channel_id` is present, sets it on `body` and POSTs to
+/// `conversations.canvases.create`; when absent, POSTs to `canvases.create`
+/// unchanged. Both endpoints return the created id under the same top-level
+/// `canvas_id` key, and this is the single place that reads it, so callers get
+/// an identical `{ok, canvas_id}` either way and never learn which ran.
+/// Failures surface through [`SlackError::Api`] as before, with the attempted
+/// method named by [`with_endpoint`].
+/// Test: `tests/tools_http.rs::create_canvas_with_channel_and_markdown`,
+/// `::create_canvas_without_channel_uses_standalone_endpoint`,
+/// `::canvas_create_posts_document_content_and_channel`,
+/// `::canvas_create_without_channel_uses_standalone_endpoint`,
+/// `::both_create_paths_return_the_same_structure`.
+async fn post_create_canvas(
+    client: &BaseClient,
+    mut body: Value,
+    channel_id: Option<String>,
+) -> Result<Value, ToolCallError> {
+    let method = match channel_id {
+        Some(channel_id) => {
+            body["channel_id"] = json!(channel_id);
+            CONVERSATIONS_CANVASES_CREATE
+        }
+        None => CANVASES_CREATE,
+    };
+    let resp = client
+        .call_method(method, &body)
+        .await
+        .map_err(|e| with_endpoint(method, e))?;
     Ok(json!({ "ok": true, "canvas_id": field_str(&resp, "canvas_id") }))
 }
 
-/// Create a canvas via `canvases.create` (requires `canvases:write`).
+/// Create a canvas (requires `canvases:write`).
 ///
-/// Why: the primary document-creation tool; Slack lets a canvas be created
-/// standalone or tabbed directly into a channel in the same call.
+/// Why: the primary document-creation tool. Slack lets a canvas be created
+/// standalone or bound to a channel, and which of those the caller wants is
+/// decided by whether they name a channel — see [`post_create_canvas`] for why
+/// that picks a different endpoint (issue #5155).
 /// What: all arguments are optional (Slack itself allows creating an empty,
-/// untitled canvas): `title`, `markdown` (initial content), and `channel_id`
-/// (tabs the canvas into that channel on creation). Returns
-/// `{ok, canvas_id}`.
+/// untitled canvas): `title`, `markdown` (initial content), and `channel_id`.
+/// With `channel_id` the canvas is created as that channel's canvas, editable
+/// by its members; without it the canvas is standalone and owned by the bot.
+/// Returns `{ok, canvas_id}` in both cases.
 /// Test: `tests/tools_http.rs::create_canvas_returns_id`,
-/// `::create_canvas_with_channel_and_markdown`.
+/// `::create_canvas_with_channel_and_markdown`,
+/// `::create_canvas_without_channel_uses_standalone_endpoint`.
 pub(super) async fn create_canvas(
     client: &BaseClient,
     args: Value,
@@ -130,29 +197,30 @@ pub(super) async fn create_canvas(
     if let Some(markdown) = opt_str(&args, "markdown") {
         body["document_content"] = document_content(&markdown);
     }
-    if let Some(channel_id) = opt_str(&args, "channel_id") {
-        body["channel_id"] = json!(channel_id);
-    }
-    post_create_canvas(client, body).await
+    post_create_canvas(client, body, opt_str(&args, "channel_id")).await
 }
 
 /// `slack_canvas_create` (issue #3744 slice 1): create a canvas from required
-/// markdown via `canvases.create` (requires `canvases:write`).
+/// markdown (requires `canvases:write`).
 ///
 /// Why: the `slack_canvas_*`-namespaced counterpart to [`create_canvas`] for
 /// epic #3744's canvas-tool surface. Unlike `slack_create_canvas`, this tool's
 /// spec requires `markdown` up front rather than allowing an empty canvas —
 /// the intended call shape is "create this document", not "reserve an empty
 /// canvas".
-/// What: requires `markdown`; `title` and `channel_id` are optional. Slack
-/// requires `channel_id` on free-tier (non-Business+) teams to create a
-/// non-tabbed canvas — see this tool's `tools/list` description. Returns
-/// `{ok, canvas_id}`; Slack errors (`canvas_creation_failed`,
-/// `canvas_disabled_user_team`, `missing_scope`,
-/// `free_teams_cannot_create_non_tabbed_canvases`, …) surface unchanged
-/// through [`SlackError::Api`] via `?`.
+/// What: requires `markdown`; `title` and `channel_id` are optional. Endpoint
+/// selection is shared with [`create_canvas`] through [`post_create_canvas`]
+/// (issue #5155): `channel_id` present creates a member-editable channel
+/// canvas, absent creates a standalone bot-owned one. Free-tier
+/// (non-Business+) teams reject a standalone canvas outright with
+/// `free_teams_cannot_create_non_tabbed_canvases` — see this tool's
+/// `tools/list` description. Returns `{ok, canvas_id}`; Slack errors
+/// (`canvas_creation_failed`, `canvas_disabled_user_team`, `missing_scope`,
+/// `channel_canvas_already_exists`, …) surface through [`SlackError::Api`]
+/// with the attempted method named by [`with_endpoint`].
 /// Test: `tests/tools_http.rs::canvas_create_requires_markdown`,
-/// `::canvas_create_posts_document_content_and_channel`.
+/// `::canvas_create_posts_document_content_and_channel`,
+/// `::canvas_create_without_channel_uses_standalone_endpoint`.
 pub(super) async fn canvas_create(
     client: &BaseClient,
     args: Value,
@@ -162,10 +230,7 @@ pub(super) async fn canvas_create(
     if let Some(title) = opt_str(&args, "title") {
         body["title"] = json!(title);
     }
-    if let Some(channel_id) = opt_str(&args, "channel_id") {
-        body["channel_id"] = json!(channel_id);
-    }
-    post_create_canvas(client, body).await
+    post_create_canvas(client, body, opt_str(&args, "channel_id")).await
 }
 
 /// Replace a canvas's entire document content via `canvases.edit` (requires
