@@ -13,7 +13,8 @@
     "test": "playwright test",
     "test:ui": "playwright test --ui",
     "test:unit": "vitest run",
-    "check:tokens": "node ../../../scripts/check_token_drift.mjs"
+    "tokens:generate": "node ../../../scripts/generate_foundry_tokens.mjs",
+    "check:tokens": "node ../../../scripts/generate_foundry_tokens.mjs --check && node ../../../scripts/check_token_drift.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",

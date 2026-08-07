@@ -19,6 +19,28 @@ Drop-in for the existing Svelte UIs — variable names are unchanged:
 
    https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap
 
+## Consuming the tokens from a Tailwind app
+
+`tokens.css` is the canonical source and holds hex values. Tailwind needs each
+colour as a space-separated RGB triple so `rgb(var(--color-x) / <alpha-value>)`
+can generate opacity-modified utilities (`bg-foundry-primary/10`); a bare
+`var(--color-x)` silently generates no rule for those. Do not hand-convert —
+generate (#5095):
+
+1. Add an entry to `CONSUMERS` in `scripts/lib/foundry-tokens.mjs`: the output
+   path, the app's own light/dark selectors, and which `--color-*` name maps to
+   which `--trusty-*` token.
+2. Run `node scripts/generate_foundry_tokens.mjs`.
+3. Import the generated file from the app's stylesheet and commit it.
+
+The output is checked in, so a token change lands as a reviewable colour diff.
+CI's `token-drift` job re-renders every consumer and fails if the checked-in
+file is not byte-identical, so a hand-edit cannot survive.
+
+`crates/trusty-agents/ui` is the worked example. Plain-CSS (non-Tailwind) apps
+skip all of this: they copy the `--trusty-*` names and hex values verbatim, and
+`scripts/check_token_drift.mjs` compares them directly.
+
 ## Design philosophy
 
 Foundry is a workshop, not a showroom.

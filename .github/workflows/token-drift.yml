@@ -13,6 +13,13 @@
 # All 7 UI crates are enforced (epic #3486); the allowlist is empty. Both
 # comparison modes ("rgb-triple" and "hex") live in scripts/check_token_drift.mjs.
 #
+# Since #5095, trusty-agents no longer hand-transcribes: its RGB-triple block
+# is GENERATED into crates/trusty-agents/ui/src/lib/styles/foundry-tokens.generated.css
+# by scripts/generate_foundry_tokens.mjs, and this job additionally re-renders
+# it and fails if the checked-in file is not byte-identical. New consumers
+# (e.g. website/, #5092) join the CONSUMERS table in
+# scripts/lib/foundry-tokens.mjs and are covered by that same step.
+#
 # Pure Node script, zero dependencies — no pnpm install / lockfile needed, so
 # this runs as its own lightweight job (matches line-cap.yml / test-pointers.yml's
 # checkout style).
@@ -55,8 +62,15 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Run check_token_drift.mjs regression tests
-        run: node --test scripts/check_token_drift.test.mjs
+      - name: Run generator + checker regression tests
+        run: node --test scripts/generate_foundry_tokens.test.mjs scripts/check_token_drift.test.mjs
+
+      # Generated consumers (#5095): the checked-in CSS must be byte-identical
+      # to what the generator produces from the canonical source right now.
+      # Runs before the per-token check so a stale artifact is reported as
+      # "regenerate", not as ambiguous drift.
+      - name: Check generated token files are current
+        run: node scripts/generate_foundry_tokens.mjs --check
 
       - name: Check adopted-UI tokens against canonical Foundry source
         run: node scripts/check_token_drift.mjs
