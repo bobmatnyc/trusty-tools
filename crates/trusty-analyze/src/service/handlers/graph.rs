@@ -6,8 +6,8 @@
 //! distinct from the simpler complexity/quality handlers.
 //!
 //! What: Six public handlers (`graph_for_index`, `entities_for_index`,
-//! `clusters_for_index`, `ner_for_index`, `ingest_scip`) plus their supporting
-//! types and helpers.
+//! `clusters_for_index`, `ner_for_index`, `ingest_scip`,
+//! `scip_overlay_status`) plus their supporting types and helpers.
 //!
 //! Test: All handler tests are in `service/tests.rs`.
 
@@ -16,6 +16,7 @@ use std::sync::Arc;
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
+    http::{HeaderName, HeaderValue},
     response::Json,
 };
 use serde::{Deserialize, Serialize};
@@ -34,17 +35,30 @@ pub struct GraphQueryParams {
     pub language: Option<String>,
 }
 
+/// Response header naming whether a SCIP overlay contributed to this graph.
+///
+/// Why (#5049): an empty or thin `/graph` body cannot say whether the index
+/// has no SCIP data at all or has an ingested SCIP index that carried no
+/// symbols. Answering in a header keeps the JSON body a bare `KgGraph`, so
+/// every existing consumer is unaffected.
+/// What: `present` when an overlay row exists for this index (even a
+/// zero-node one), `absent` when none has ever been ingested.
+/// Test: `graph_marks_scip_overlay_present_after_ingest`,
+/// `graph_marks_scip_overlay_absent_without_ingest`.
+pub const SCIP_OVERLAY_HEADER: &str = "x-scip-overlay";
+
 /// Why: Phase 2 surfaces the language-neutral knowledge graph to consumers
 /// (Claude Code, web UIs, etc.) so they can navigate symbols across files.
-/// What: Fetch chunks for `index`, run the language registry, optionally
-/// filter to `?language=`, and return the merged `KgGraph` as JSON.
-/// Test: with a mock index containing a Rust chunk, GET returns at least
-/// one Function node tagged `language=rust`.
+/// What: Fetch chunks for `index`, run the language registry, merge any stored
+/// SCIP overlay, optionally filter to `?language=`, and return the merged
+/// `KgGraph` as JSON plus an `x-scip-overlay: present|absent` header.
+/// Test: `graph_marks_scip_overlay_present_after_ingest` and
+/// `graph_marks_scip_overlay_absent_without_ingest` in `service/tests.rs`.
 pub async fn graph_for_index(
     State(state): State<Arc<AnalyzerAppState>>,
     Path(id): Path<String>,
     Query(params): Query<GraphQueryParams>,
-) -> Result<Json<KgGraph>, ApiError> {
+) -> Result<([(HeaderName, HeaderValue); 1], Json<KgGraph>), ApiError> {
     let chunks = fetch_chunks(&state, &id).await?;
     let res = state.registry.analyze(&chunks);
     let mut graph = res.graph;
@@ -52,8 +66,21 @@ pub async fn graph_for_index(
     // index. SCIP supplies fully-resolved cross-file symbols which the
     // tree-sitter adapters cannot derive on their own, so the union is
     // strictly more useful than either alone.
-    if let Some(overlay) = state.scip_overlays.read().await.get(&id).cloned() {
-        graph.merge(overlay);
+    //
+    // #5049: a read failure is surfaced as 500 rather than treated as
+    // "no overlay" — silently degrading to the tree-sitter-only graph is the
+    // exact indistinguishable-emptiness this endpoint is being fixed for.
+    let overlay = state.scip_overlays.get(&id).map_err(|e| {
+        tracing::error!("read SCIP overlay for {id} failed: {e:#}");
+        ApiError::internal(format!("read SCIP overlay for {id}: {e:#}"))
+    })?;
+    let overlay_header = HeaderValue::from_static(if overlay.is_some() {
+        "present"
+    } else {
+        "absent"
+    });
+    if let Some(record) = overlay {
+        graph.merge(record.graph);
         graph = crate::core::link(graph);
     }
     if let Some(lang) = params.language.as_deref() {
@@ -68,7 +95,10 @@ pub async fn graph_for_index(
             .edges
             .retain(|e| keep_nodes.contains(&e.from) && keep_nodes.contains(&e.to));
     }
-    Ok(Json(graph))
+    Ok((
+        [(HeaderName::from_static(SCIP_OVERLAY_HEADER), overlay_header)],
+        Json(graph),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -307,10 +337,13 @@ pub struct ScipIngestResponse {
 /// across files, generics). Ingesting them is how the analyzer goes from
 /// "approximate" to "precise" for languages with a real SCIP indexer.
 /// What: accepts a SCIP `Index` protobuf as raw bytes, converts it to a
-/// `KgGraph`, stores it as a per-index overlay, and returns ingest stats.
-/// The overlay is merged into `/indexes/{id}/graph` responses.
-/// Test: `scip_ingest_round_trip` POSTs a hand-built SCIP index and verifies
-/// the resulting graph appears in the `/graph` response.
+/// `KgGraph`, writes it to the durable per-index overlay store, and returns
+/// ingest stats. The overlay is merged into `/indexes/{id}/graph` responses.
+/// A store write failure is a 500 — #5049: this endpoint must not answer 200
+/// for an ingest that was not durably recorded.
+/// Test: `scip_ingest_accepts_valid_index_and_stores_overlay` POSTs a
+/// hand-built SCIP index; `scip_overlay_survives_state_rebuild` proves the
+/// write outlives the process state that accepted it.
 pub async fn ingest_scip(
     State(state): State<Arc<AnalyzerAppState>>,
     Path(id): Path<String>,
@@ -321,7 +354,10 @@ pub async fn ingest_scip(
         ApiError::bad_request(format!("invalid SCIP protobuf: {e:#}"))
     })?;
     let symbols_ingested = summary.kg_nodes;
-    state.scip_overlays.write().await.insert(id.clone(), graph);
+    state.scip_overlays.put(&id, graph).map_err(|e| {
+        tracing::error!("persist SCIP overlay for {id} failed: {e:#}");
+        ApiError::internal(format!("persist SCIP overlay for {id}: {e:#}"))
+    })?;
     state.emit(AnalyzerEvent::ScipIngested {
         index_id: id.clone(),
         symbols_ingested,
@@ -329,5 +365,44 @@ pub async fn ingest_scip(
     Ok(Json(ScipIngestResponse {
         index_id: id,
         summary,
+    }))
+}
+
+/// Overlay presence report for one index.
+#[derive(Serialize)]
+pub struct ScipOverlayStatus {
+    pub index_id: String,
+    pub nodes: usize,
+    pub edges: usize,
+    /// Unix seconds at which the overlay was ingested.
+    pub ingested_at: u64,
+}
+
+/// Why (#5049): the defect this endpoint closes is that an empty `/graph`
+/// response cannot say whether the index has no SCIP data at all or has an
+/// ingested SCIP index that carried no symbols. A 404 means nobody ingested;
+/// a 200 with `nodes: 0` means somebody ingested an empty index. Persisting
+/// the overlay stops the data loss, but only this distinction stops the
+/// silence.
+/// What: reads the durable overlay store for `id` and returns its node/edge
+/// counts and ingest timestamp, or 404 when no overlay row exists.
+/// Test: `scip_overlay_status_404_when_never_ingested` and
+/// `scip_overlay_survives_state_rebuild` in `service/tests.rs`.
+pub async fn scip_overlay_status(
+    State(state): State<Arc<AnalyzerAppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ScipOverlayStatus>, ApiError> {
+    let record = state.scip_overlays.get(&id).map_err(|e| {
+        tracing::error!("read SCIP overlay for {id} failed: {e:#}");
+        ApiError::internal(format!("read SCIP overlay for {id}: {e:#}"))
+    })?;
+    let record = record.ok_or_else(|| {
+        ApiError::not_found(format!("no SCIP overlay has been ingested for index {id}"))
+    })?;
+    Ok(Json(ScipOverlayStatus {
+        index_id: record.index_id,
+        nodes: record.graph.node_count(),
+        edges: record.graph.edge_count(),
+        ingested_at: record.ingested_at,
     }))
 }

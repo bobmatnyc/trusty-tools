@@ -102,7 +102,13 @@ pub fn build_router_with_self_origins(
             get(handlers::graph::clusters_for_index),
         )
         .route("/indexes/{id}/ner", get(handlers::graph::ner_for_index))
-        .route("/indexes/{id}/scip", post(handlers::graph::ingest_scip))
+        // #5049: GET reports whether an overlay was ever ingested (404) versus
+        // ingested-and-empty (200, `nodes: 0`) — the distinction an empty
+        // `/graph` body cannot make on its own.
+        .route(
+            "/indexes/{id}/scip",
+            post(handlers::graph::ingest_scip).get(handlers::graph::scip_overlay_status),
+        )
         .route("/review", post(handlers::review::review_diff_handler))
         .route(
             "/review/github-pr",

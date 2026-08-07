@@ -12,17 +12,16 @@
 //! Test: `sse_subscriber_receives_emitted_event` and
 //! `sse_route_returns_event_stream_content_type` in `service/tests.rs`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::core::{AnalyzerRegistry, FactStore, TrustySearchClient};
+use crate::core::{AnalyzerRegistry, FactStore, ScipOverlayStore, TrustySearchClient};
 use crate::embedder::{BowEmbedder, Embedder};
-use crate::types::{KgGraph, SmellThresholds};
+use crate::types::SmellThresholds;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 
 /// Live event broadcast over `/sse` for any dashboard subscribers.
 ///
@@ -76,7 +75,18 @@ pub struct AnalyzerAppState {
     /// `POST /indexes/{id}/scip`. Merged into the response of
     /// `GET /indexes/{id}/graph` so consumers see the union of tree-sitter
     /// extraction and any precise SCIP indexes the user has uploaded.
-    pub scip_overlays: Arc<RwLock<HashMap<String, KgGraph>>>,
+    ///
+    /// Why: this was an `Arc<RwLock<HashMap<String, KgGraph>>>` until #5049 —
+    /// pure process memory, so a restart discarded an ingest that had already
+    /// returned HTTP 200 and `/graph` then served a tree-sitter-only graph
+    /// with no way to tell it apart. A SCIP index is uploaded by the operator
+    /// and is not re-derivable from the corpus, so it must be on disk.
+    /// What: redb-backed store keyed by index id. `get` returns `Option`,
+    /// which is how `GET /indexes/{id}/scip` distinguishes "nobody ingested"
+    /// (404) from "ingested, zero symbols" (200 with `nodes: 0`).
+    /// Test: `scip_overlay_survives_state_rebuild`,
+    /// `scip_overlay_status_404_when_never_ingested`.
+    pub scip_overlays: ScipOverlayStore,
     /// Broadcast sender for live `AnalyzerEvent` pushes to `/sse` subscribers.
     ///
     /// Why: mirrors trusty-memory's `events` channel so dashboards can react
@@ -134,14 +144,25 @@ pub struct AnalyzerAppState {
 impl AnalyzerAppState {
     /// Construct with the default registry and a BOW embedder. Use this when
     /// neural embeddings aren't required (tests, BOW-only deployments).
-    pub fn new(search: TrustySearchClient, facts: FactStore) -> Self {
+    ///
+    /// Why (#5049): `scip_overlays` is a required constructor argument rather
+    /// than a `with_*` override precisely so no caller can end up with a
+    /// non-durable overlay store by omission — that omission was the bug.
+    /// What: builds state around the supplied search client, fact store, and
+    /// overlay store.
+    /// Test: covered by every `service::tests` case via `make_state`.
+    pub fn new(
+        search: TrustySearchClient,
+        facts: FactStore,
+        scip_overlays: ScipOverlayStore,
+    ) -> Self {
         let (events_tx, _) = broadcast::channel(128);
         Self {
             search,
             facts,
             registry: Arc::new(AnalyzerRegistry::default_registry()),
             embedder: Arc::new(BowEmbedder::default()),
-            scip_overlays: Arc::new(RwLock::new(HashMap::new())),
+            scip_overlays,
             events: events_tx,
             smell_thresholds: SmellThresholds::default(),
             webhook_secret: None,
@@ -157,6 +178,7 @@ impl AnalyzerAppState {
         search: TrustySearchClient,
         facts: FactStore,
         registry: Arc<AnalyzerRegistry>,
+        scip_overlays: ScipOverlayStore,
     ) -> Self {
         let (events_tx, _) = broadcast::channel(128);
         Self {
@@ -164,7 +186,7 @@ impl AnalyzerAppState {
             facts,
             registry,
             embedder: Arc::new(BowEmbedder::default()),
-            scip_overlays: Arc::new(RwLock::new(HashMap::new())),
+            scip_overlays,
             events: events_tx,
             smell_thresholds: SmellThresholds::default(),
             webhook_secret: None,
@@ -266,7 +288,7 @@ impl ApiError {
             message: msg.into(),
         }
     }
-    #[allow(dead_code)]
+    /// 404 — used by `GET /indexes/{id}/scip` for "no overlay ingested" (#5049).
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
