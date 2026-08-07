@@ -25,44 +25,35 @@ A branch that has drawn 3+ review rounds is evidence to close and fold, not to
 attempt round 4. Branch = workstream, and it is durable; worktree = writer, and
 it is ephemeral.
 
-## 5-Phase Sequence
+## Risk — the second input to every skip condition
 
 The CORE section's phase table is canonical for WHETHER a phase runs and carries
-each skip condition; this section describes HOW each phase is executed. Where a
-phase runs, its gate is blocking — "conditional" governs entry, never rigour
-(issue #4594).
+each skip condition; where a phase runs, its gate is blocking — "conditional"
+governs entry, never rigour (issue #4594).
 
-**Risk is the second input to every skip condition.** Label the change **Low**
-(docs, comments, mechanical metadata), **Normal** (a localized behaviour change
-inside one package), or **High** (security, destructive or irreversible paths,
-persisted state, release/SemVer, or a contract another package depends on).
-Where a skip condition is a size or simplicity heuristic, High risk means it does
-not hold: a 30-line change to a credential path is small and still earns its
-review.
+Label the change **Low** (docs, comments, mechanical metadata), **Normal** (a
+localized behaviour change inside one package), or **High** (security,
+destructive or irreversible paths, persisted state, release/SemVer, or a
+contract another package depends on). Where a skip condition is a size or
+simplicity heuristic, High risk means it does not hold: a 30-line change to a
+credential path is small and still earns its review.
 
 The labels say nothing about how much testing a change needs. The project's test
 ladder in its `CLAUDE.md` answers that, and is authoritative where the project
 defines one.
 
-| Phase | Agent | Executed as |
-|---|---|---|
-| 1. Research | `research` | Returns requirements, constraints, measurable success criteria, risks |
-| 2. Code Analysis | `code-analyzer` — a separate agent from `code-critic` | Returns APPROVED (→ implement) / NEEDS_IMPROVEMENT (→ back to Research) / BLOCKED (→ escalate to user) |
-| 3. Implementation | the language-specific engineer where one exists | Complete code, error handling, test proof, and a changelog entry for the changed package |
-| 4. QA | `api-qa` (APIs), `web-qa` (UI), `qa` (otherwise) | Real-world testing with evidence; the gate is the CORE section's QA Verification Gate |
-| 5. Documentation | `documentation` | Updated docs, API specs, README |
-
-Dispatch-brief templates for each phase are in `Skill(skill="tm-workflow")`.
+Each phase's executing agent is the one named in the CORE phase table, and
+`code-analyzer` is a separate agent from `code-critic`. Per-phase dispatch-brief
+templates: `Skill(skill="tm-workflow")`.
 
 ### Fail-Open Check (BLOCKING wherever a failure branch exists)
 
 Where a change adds or touches a failure branch — an operation that can fail,
 whose failure is downgraded to a warning, a default, or a `false`, while state
-advances anyway — that branch is not reviewed until it has been checked against
-that shape and an error-arm regression test exists that FAILS against the
-pre-fix commit. **Name the Fail-Open Check in the dispatch brief** for
-`code-analyzer` or `code-critic`; the five checks that find it are in the
-`code-review-standards` skill both agents already load.
+advances anyway — that branch is not reviewed until an error-arm regression test
+exists that FAILS against the pre-fix commit. **Name the Fail-Open Check in the
+dispatch brief** for `code-analyzer` or `code-critic`; the five checks that find
+it are in the `code-review-standards` skill both agents already load.
 
 ## Source Citations
 
@@ -73,6 +64,6 @@ and the line number is verified before linking.
 ## Before Push
 
 A credential scan by `security` over `git diff origin/main HEAD` is mandatory
-before any `git push`, and blocks the push on a hit. That step, the branch
-protection it sits inside, and the review and changelog gates are in
+before any `git push`, and blocks the push on a hit. The branch protection it
+sits inside, and the review and changelog gates:
 `Skill(skill="tm-pr-workflow")`.
