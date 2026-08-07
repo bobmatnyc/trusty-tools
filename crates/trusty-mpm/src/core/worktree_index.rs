@@ -203,8 +203,10 @@ pub fn index_new_worktree(worktree_path: &Path) -> WorktreeIndexOutcome {
 /// `path/.git` distinguishes the two with one stat and no subprocess. A
 /// submodule also uses a `.git` file; that is an accepted (and harmless)
 /// overlap, since nothing in trusty-mpm hands a submodule root to this module.
-/// Test: `is_git_worktree_true_for_worktree`, `is_git_worktree_false_for_clone`,
-/// `is_git_worktree_false_for_plain_dir`.
+/// Test: `is_git_worktree_matches_git_on_disk_shapes` (worktree `.git` file =>
+/// true, clone `.git` directory => false), `skips_path_that_is_not_a_worktree`
+/// and `skips_plain_directory` cover the two refusal paths as reached through
+/// `index_new_worktree`.
 pub fn is_git_worktree(path: &Path) -> bool {
     path.join(".git").is_file()
 }
