@@ -211,16 +211,24 @@ waits, the `tga` tag aliases (#1128), and the connection-safe daemon restart.
 > **Full release workflow, `scripts/bump-version.sh`, and Developer-ID signing
 > setup:** see [docs/reference/release-workflow.md](docs/reference/release-workflow.md).
 
-🔴 **A breaking public-API change needs a matching version bump, and CI now
-enforces it (#5050).** `scripts/check_semver.sh` runs `cargo-semver-checks`
-against the crate's latest crates.io release for every crate whose `src/**` the
-PR changed. Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is
-the MINOR position. A workspace `cargo check` can never catch this class of
-break — the root `Cargo.toml` path override pairs local source with local
-dependency — which is how #4088 shipped `trusty-common` 0.22.5's required new
-public field on a patch bump and cost `trusty-analyze` 0.7.3 a yank. Prefer
+🔴 **A breaking public-API change needs a matching version bump, and the release
+path enforces it (#5050, moved to release-time by #5149).**
+`scripts/preflight-publish.sh` CHECK 5 runs `cargo-semver-checks` against the
+crate's latest crates.io release immediately before `cargo publish`, and its
+nonzero exit is the absolute stop — that is what blocks a bad upload, since
+`cargo publish` runs locally and no CI job can stop it. The tag-push workflow
+`.github/workflows/semver-checks.yml` reports the same check independently.
+Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is the MINOR
+position. A workspace `cargo check` can never catch this class of break — the
+root `Cargo.toml` path override pairs local source with local dependency — which
+is how #4088 shipped `trusty-common` 0.22.5's required new public field on a
+patch bump and cost `trusty-analyze` 0.7.3 a yank.
+
+🟡 **It does not run on PRs**, so between releases a breaking change can merge
+unnoticed and will surface at the release that ships it. Prefer
 `#[non_exhaustive]` on public structs and enums so field and variant additions
-stay non-breaking by construction. See
+stay non-breaking by construction, and check a risky change yourself with
+`bash scripts/check_semver.sh --crate <crate>`. See
 [docs/reference/semver-gate.md](docs/reference/semver-gate.md).
 
 🔴 **CRITICAL macOS note:** never use `cp` to install a release binary on
@@ -442,7 +450,7 @@ Full-length reference materials for less-frequent lookups:
 - **HTTP trust-boundary threat model:** [docs/reference/threat-model.md](docs/reference/threat-model.md) — per-daemon bind/guard/proxy compliance inventory for the loopback-only doctrine ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md)).
 - **Domain consolidation audit:** [docs/reference/domain-consolidation-audit.md](docs/reference/domain-consolidation-audit.md) — dated per-domain status behind the common-entry-point rule.
 - **Per-PR changelog fragments:** [docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md) — assembler and CI-gate mechanics.
-- **Public-API / SemVer gate:** [docs/reference/semver-gate.md](docs/reference/semver-gate.md) — what it checks, which crates it skips and why, and the feature-exclusion file.
+- **Public-API / SemVer gate:** [docs/reference/semver-gate.md](docs/reference/semver-gate.md) — where it runs (release-time, not per-PR), what it checks, which crates it skips and why, and the feature-exclusion file.
 - **Rust test ladder gate commands:** [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md) — the exact command chain per rung, the baseline-failure protocol, and how much gate output a PR body owes.
 - **Rust issue search keys:** [docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md) — why test name / panic text / symbol / crate find the canonical issue.
 - **Public documentation allowlist:** [docs/public-manifest.tsv](docs/public-manifest.tsv) — the curated list of `docs/` pages the public website may publish; format documented in the file header. It is an ALLOWLIST, so a page absent from it is never public. Enforced by `scripts/check_public_docs.sh` (self-test `scripts/check_public_docs_selftest.sh`). The internal mdBook (`docs/book.toml` + `docs/SUMMARY.md`) is unaffected and remains the complete offline book.
