@@ -442,7 +442,15 @@ pub fn tool_descriptors_pinned(pinned: Option<&str>) -> Value {
     let Some(id) = pinned else {
         return defs;
     };
-    let note = format!("Defaults to this session's pinned project index ('{id}') when omitted.");
+    // #4715: the pin can name an index that has not been built yet. Say so in
+    // the schema so the model knows the retryable error exists before it hits
+    // one, and knows the answer is "use grep/find now", not "give up".
+    let note = format!(
+        "Defaults to this session's pinned project index ('{id}') when omitted. \
+         If that index has not been built yet the call fails with INDEX_NOT_READY \
+         (retryable) rather than an unknown-index error — fall back to grep/find \
+         and retry later."
+    );
     if let Some(tools) = defs.as_array_mut() {
         for tool in tools.iter_mut() {
             let Some(schema) = tool.get_mut("inputSchema").and_then(Value::as_object_mut) else {

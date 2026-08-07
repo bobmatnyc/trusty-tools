@@ -148,8 +148,14 @@ pub(super) async fn dispatch_search_tool(
                     )))
                 }
             };
+            // Issue #4715: scoped POST so a 404 on the session's advertised
+            // index surfaces as INDEX_NOT_READY, not "unknown index".
             let resp = match server
-                .post(&format!("/indexes/{index_id}/search"), &body)
+                .post_scoped(
+                    &format!("/indexes/{index_id}/search"),
+                    &body,
+                    Some(&index_id),
+                )
                 .await
             {
                 Ok(v) => v,
@@ -246,7 +252,11 @@ impl McpServer {
         // The lexical and `search_all` tools always work — they degrade
         // gracefully through the daemon's adaptive routing.
         if let Some(required) = lane.required_capability() {
-            let status = self.get(&format!("/indexes/{index_id}/status")).await?;
+            // #4715: index-scoped, so a never-indexed pin answers "too early"
+            // rather than leaking the daemon's "unknown index" 404.
+            let status = self
+                .get_scoped(&format!("/indexes/{index_id}/status"), Some(&index_id))
+                .await?;
             let caps: Vec<String> = status
                 .get("search_capabilities")
                 .and_then(Value::as_array)
@@ -336,7 +346,11 @@ impl McpServer {
         }
 
         let resp = self
-            .post(&format!("/indexes/{index_id}/search"), &body)
+            .post_scoped(
+                &format!("/indexes/{index_id}/search"),
+                &body,
+                Some(&index_id),
+            )
             .await?;
         // Mirror the daemon's per-query INFO log.
         let log_intent = resp
