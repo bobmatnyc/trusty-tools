@@ -155,3 +155,52 @@ async fn cold_parked_index_grep_is_503_not_404() {
     .expect_err("genuinely unknown");
     assert_eq!(code, StatusCode::NOT_FOUND);
 }
+
+/// A permanently-failed restore never clears on its own, so grep's body must
+/// name the operator action (`search_handler`'s wording) rather than telling
+/// the caller to wait.
+///
+/// The state built here is the OVERLAP — in both `entries` and
+/// `failed_entries` — which is what makes the arm order load-bearing: a
+/// `contains`-first match would answer "retry after it restores" for an index
+/// that never will. `mark_failed` alone does not produce it (it removes the
+/// entry, `store.rs:541`); a later `register_cold_entries` does, because
+/// `register_with_reason` never consults the failed set and nothing ever
+/// clears it.
+#[tokio::test]
+async fn restore_failed_index_grep_says_restart_not_retry() {
+    let state = state_with_cold_index("failed-c");
+    let id = IndexId::new("failed-c".to_string());
+    state.cold_store.mark_failed(&id);
+    assert!(
+        !state.cold_store.contains(&id),
+        "mark_failed drops the entry"
+    );
+    state
+        .cold_store
+        .register_cold_entries(vec![cold_entry("failed-c")]);
+    assert!(
+        state.cold_store.contains(&id),
+        "re-registered as a cold entry"
+    );
+    assert!(state.cold_store.is_failed(&id), "and still a failed one");
+
+    let (code, axum::Json(body)) = super::files::grep_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("failed-c".to_string()),
+        axum::Json(grep_request()),
+    )
+    .await
+    .expect_err("a failed index cannot be grepped");
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "index_restore_failed");
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("restart the daemon or re-register"),
+        "must name the operator action, got: {message}"
+    );
+    assert!(
+        !message.contains("retry after it restores"),
+        "must not tell a permanently-failed index to wait, got: {message}"
+    );
+}

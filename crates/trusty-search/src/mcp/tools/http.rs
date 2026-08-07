@@ -85,7 +85,6 @@ impl McpServer {
     /// What: GETs `{base_url}{path}` with `query` appended as a properly-encoded
     /// query string, then mirrors [`Self::get`]'s status-then-decode handling.
     /// Test: `list_chunks` cursor arm exercises this via the dispatch tests.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) async fn get_query(
         &self,
         path: &str,

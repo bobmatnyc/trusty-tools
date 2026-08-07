@@ -281,7 +281,26 @@ pub(super) async fn grep_handler(
     // #4715: same rule as `index_status_handler` — a cold-parked index exists.
     let handle = match state.registry.get(&index_id) {
         Some(h) => h,
-        None if state.cold_store.contains(&index_id) || state.cold_store.is_failed(&index_id) => {
+        // A permanently-failed restore never clears on its own, so the remedy
+        // is not "wait" — it is the operator action `search_handler` names.
+        // Keep this arm ahead of the cold-parked one, matching that handler's
+        // precedence: an id can sit in BOTH sets (nothing clears
+        // `failed_entries`, and re-registering re-adds to `entries`), and
+        // "retry later" would be a lie for it.
+        None if state.cold_store.is_failed(&index_id) => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "index_restore_failed",
+                    "message": format!(
+                        "index '{}' previously failed to restore (blocked volume or \
+                         missing root_path) — restart the daemon or re-register to retry",
+                        index_id.0
+                    ),
+                })),
+            ))
+        }
+        None if state.cold_store.contains(&index_id) => {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({
