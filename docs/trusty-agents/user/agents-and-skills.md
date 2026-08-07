@@ -2,7 +2,7 @@
 
 ## Bundled agents
 
-open-mpm ships with these agents in `.open-mpm/agents/`:
+trusty-agents ships with these agents in `.trusty-agents/agents/`:
 
 | Agent | Role | Purpose |
 |---|---|---|
@@ -22,11 +22,11 @@ open-mpm ships with these agents in `.open-mpm/agents/`:
 | `local-ops-agent` | ops | Allowlisted shell access for local operations |
 | `postmortem-agent` | analyst | Analyzes session errors and suggests improvements (#186) |
 
-Run `open-mpm agents list` for the live list.
+Run `tagent agents list` for the live list.
 
 ## Writing a custom agent
 
-1. Drop a TOML file into `.open-mpm/agents/<your-name>.toml`:
+1. Drop a TOML file into `.trusty-agents/agents/<your-name>.toml`:
 
 ```toml
 [agent]
@@ -51,38 +51,39 @@ You are a senior Rust engineer specializing in async Tokio applications…
 """
 ```
 
-2. (Optional) Use a starter from `.open-mpm/agent-templates/`:
+2. (Optional) Use a starter from `.trusty-agents/agent-templates/`:
 
 ```bash
-cp .open-mpm/agent-templates/engineer.toml .open-mpm/agents/rust-engineer.toml
-$EDITOR .open-mpm/agents/rust-engineer.toml
+cp .trusty-agents/agent-templates/engineer.toml .trusty-agents/agents/rust-engineer.toml
+$EDITOR .trusty-agents/agents/rust-engineer.toml
 ```
 
 3. Verify it loads:
 
 ```bash
-open-mpm agents list | grep rust-engineer
+tagent agents list | grep rust-engineer
 ```
 
 4. Invoke it:
 
 ```bash
-open-mpm --direct rust-engineer --task "Write a tokio TCP echo server"
+tagent --direct rust-engineer --task "Write a tokio TCP echo server"
 ```
 
 ## Bundled skills
 
-Skills are Markdown files with optional YAML frontmatter. Discovery scans
-(in priority order):
+Skills are Markdown files with optional YAML frontmatter. By default,
+discovery scans two local sources (in priority order):
 
-1. `<project>/.claude/skills/`
-2. `~/.claude/skills/`
-3. `~/.open-mpm/skills/files/`
-4. `<project>/.open-mpm/skills/`
+1. `<project>/.trusty-agents/skills/`
+2. `~/.trusty-agents/skills/`
+
+Add more sources — extra local directories or remote git repositories — via
+`.trusty-agents/skill-sources.toml`; see [configuration.md](./configuration.md#discovery-order-highest-priority-first).
 
 ```bash
-open-mpm skills list
-open-mpm skills sources    # which directories were scanned
+tagent skills list
+tagent skills sources    # which directories were scanned
 ```
 
 ## Writing a custom skill
@@ -153,9 +154,9 @@ The default tool registry exposes these to most engineering agents (see the
 ## Discovering everything from the CLI
 
 ```bash
-open-mpm agents list
-open-mpm skills list
-open-mpm skills sources
+tagent agents list
+tagent skills list
+tagent skills sources
 ```
 
 Or, from inside CTRL, just ask:
