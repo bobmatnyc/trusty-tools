@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 
 use super::runner_coverage::load_coverage_contrib;
 use super::runner_helpers::{
-    abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
+    DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
     fetch_github_pr_meta, finalize_run, resolve_diff_token,
 };
 use crate::{
@@ -239,7 +239,8 @@ pub async fn run_review(
     // ── Step 2b: dedup claim (Phase 1, #582) ──────────────────────────────
     // Claim the (owner,repo,pr,head_sha) slot before doing expensive work.  A
     // completed claim for the same head SHA short-circuits the whole pipeline.
-    // Store errors are fail-safe: we log and proceed (never block a review).
+    // #5064: a store error means the gate did not engage, so the review
+    // aborts without posting rather than proceeding unguarded.
     if !is_local
         && !head_sha.is_empty()
         && let Some(store) = deps.dedup.as_ref()
@@ -275,7 +276,9 @@ pub async fn run_review(
                     "dedup claim failed — aborting without posting: {reason}"
                 );
                 result.error = Some(format!("dedup claim unavailable: {reason}"));
-                return abort_dry(result, config, &input, &deps).await;
+                // #5064: NotHeld — this review never acquired the claim, so it
+                // must not delete whatever record is on disk.
+                return abort_dry(result, config, &input, &deps, DedupClaim::NotHeld).await;
             }
         }
     }
@@ -290,7 +293,7 @@ pub async fn run_review(
         Err(e) => {
             warn!("failed to resolve GitHub token for diff fetch: {e}");
             result.error = Some(format!("GitHub token resolution failed: {e}"));
-            return abort_dry(result, config, &input, &deps).await;
+            return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
         }
     };
 
@@ -301,7 +304,7 @@ pub async fn run_review(
         Err(e) => {
             warn!("failed to load diff: {e}");
             result.error = Some(format!("diff load failed: {e}"));
-            return abort_dry(result, config, &input, &deps).await;
+            return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
         }
     };
     let filtered = DiffAnalyzer::default().analyze(&raw_diff).await;
@@ -362,7 +365,7 @@ pub async fn run_review(
              may be invisible; could not review",
             orig = raw_diff.len(),
         ));
-        return abort_dry(result, config, &input, &deps).await;
+        return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
     }
 
     // ── Step 4: extract identifiers for context retrieval ─────────────────
@@ -392,7 +395,7 @@ pub async fn run_review(
                 result.dry_run = true;
                 // Return WITHOUT finalize_review so a skipped review is never posted.
                 // Release any dedup claim so a retry (once the dep recovers) can re-run.
-                return abort_dry(result, config, &input, &deps).await;
+                return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
             }
             GateOutcome::Degraded(reason) => {
                 warn!("required-context gate: proceeding DEGRADED (non-authoritative) — {reason}");
@@ -491,7 +494,7 @@ pub async fn run_review(
             warn!("LLM call failed: {e} — applying fail-safe UNKNOWN (fail-closed, #1241)");
             result.verdict = Verdict::Unknown;
             result.error = Some(format!("LLM error: {e}"));
-            return abort_dry(result, config, &input, &deps).await;
+            return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
         }
     };
 
@@ -537,7 +540,7 @@ pub async fn run_review(
             "review output truncated at token ceiling ({}/{} tokens) — could not review",
             llm_resp.output_tokens, requested_max_tokens
         ));
-        return abort_dry(result, config, &input, &deps).await;
+        return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
     }
 
     // ── Step 7: parse verdict + findings ──────────────────────────────────
@@ -830,10 +833,12 @@ pub(super) enum ClaimGate {
 /// Why: #5064 — every `DedupError` means the same thing operationally. The
 /// caller does not know whether this head SHA was already reviewed, and could
 /// not record that it is reviewing it now. Proceeding posts an unguarded
-/// comment; aborting drops a review that GitHub will redeliver. A dropped
-/// review is recoverable, a duplicate comment is not, so every error aborts —
-/// `Contended` included, which is the variant a stuck sibling process produces
-/// during a rolling upgrade.
+/// comment; aborting drops the review. The webhook handler has already returned
+/// 202 by this point (`service::webhook`), so GitHub will NOT redeliver — the
+/// review is lost until a human re-requests it. That is still the better half
+/// of the trade: a dropped review is visible and re-requestable, a duplicate
+/// comment cannot be retracted. Every error aborts, `Contended` included, which
+/// is the variant a stuck sibling process produces during a rolling upgrade.
 /// What: maps `Ok(Claimed)` → `Proceed`, `Ok(Skipped)` → `DuplicateSkip`, and
 /// every `Err` → `Abort` carrying the error's `Display`.
 /// Test: `classify_claim_contended_aborts`, `classify_claim_open_error_aborts`,

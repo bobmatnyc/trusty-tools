@@ -12,7 +12,11 @@ Fixed
   behind a lock so two processes cannot rename away each other's database. Every
   `AppState` builder now declares `DedupNeed`: modes that never post do not touch
   the file, and modes that can post fail to start without the claim gate. A
-  claim that cannot be established aborts the review instead of proceeding —
-  a dropped review is redelivered by GitHub, a duplicate comment is not.
+  claim that cannot be established aborts the review instead of proceeding. The
+  review is then lost until a human re-requests it — the webhook acks with 202
+  before the review runs, so GitHub does not redeliver — which is still better
+  than a duplicate comment nobody can retract. An abort releases only a claim
+  the aborting review actually acquired, so a failed claim never deletes
+  another process's record.
   Store operations run on a blocking thread so the lock wait cannot stall a
   tokio worker (#5064).

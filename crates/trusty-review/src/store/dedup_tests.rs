@@ -471,10 +471,11 @@ fn concurrent_recovery_waits_and_adopts_the_winners_database() {
 /// Why: `claim_blocking` sleeps for up to two seconds on the file lock, and the
 /// webhook review runs inside a `tokio::spawn`ed task. Blocking a runtime
 /// worker that long stalls every other task on it.
-/// What: on a single-worker runtime, holds the lock from a plain thread and
-/// runs the async `claim` concurrently with a short `tokio::time::sleep`. The
-/// timer must fire while the claim is still waiting — proof the wait is not
-/// occupying the only worker.
+/// What: on a single-worker runtime, holds the lock from a plain thread —
+/// synchronising on a channel so the hold is established before the claim
+/// starts — and runs the async `claim` concurrently with a short
+/// `tokio::time::sleep`. The timer must fire while the claim is still waiting,
+/// which it can only do if the wait is not occupying the only worker.
 /// Test: this test. Fails if `claim` runs its blocking body on the worker: the
 /// timer cannot be polled until the claim returns.
 #[tokio::test(flavor = "current_thread")]
@@ -486,13 +487,22 @@ async fn async_claim_runs_off_the_runtime_worker() {
     let store = Arc::new(DedupStore::open(&path).expect("open"));
 
     let hold_path = path.clone();
+    let (holding_tx, holding_rx) = std::sync::mpsc::channel();
     let (released_tx, released_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
         let db = Database::create(&hold_path).expect("holder takes the lock");
+        holding_tx.send(()).expect("signal");
         std::thread::sleep(Duration::from_millis(300));
         drop(db);
         let _ = released_tx.send(());
     });
+
+    // Do not start the timer or the claim until the holder actually owns the
+    // lock — otherwise `claim` can win the race and return before the timer is
+    // due, failing on correct code.
+    holding_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("holder took the lock");
 
     let timer_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = std::sync::Arc::clone(&timer_fired);

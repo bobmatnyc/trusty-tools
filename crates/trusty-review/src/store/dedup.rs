@@ -23,8 +23,11 @@
 //! Error contract (#5064): a failed operation means the claim gate did NOT
 //! engage — the caller does not know whether this head SHA was already
 //! reviewed, and cannot record that it is reviewing it now. Callers must
-//! therefore **abort without posting**, never log-and-proceed. A dropped
-//! review is recoverable (GitHub redelivers); a duplicate comment is not.
+//! therefore **abort without posting**, never log-and-proceed. The dropped
+//! review is genuinely lost: the webhook handler acks with 202 before the
+//! review runs, so GitHub does not redeliver and a human must re-request it.
+//! That is still the better half of the trade — a dropped review can be
+//! re-requested, a duplicate comment cannot be retracted.
 //! `pipeline::runner::classify_claim` is the single place that decision is
 //! made.
 //!
@@ -181,6 +184,13 @@ pub struct DedupStore {
 
 impl DedupStore {
     /// Open (or create) the dedup store at `path`.
+    ///
+    /// **Blocking** — probes the file, so it can wait out a concurrent holder
+    /// for up to the lock-wait budget. Today the only `Required` caller is the
+    /// HTTP daemon's synchronous startup, before it accepts traffic; the stdio
+    /// path declares `DedupNeed::NotNeeded` and never reaches here. A future
+    /// caller on a hot async path must wrap this the way the claim/complete/
+    /// release wrappers do (#5064).
     ///
     /// Why: the store lives under the review log dir so it persists across
     /// daemon restarts (spec: `{LOG_DIR}/dedup.redb`). Issue #702: redb 4.x
