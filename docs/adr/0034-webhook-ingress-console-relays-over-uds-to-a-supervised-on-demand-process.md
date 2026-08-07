@@ -66,6 +66,30 @@ settled by precedent — newline-framed JSON-RPC 2.0 — but ADR-0032's
 does **not** exist. Two of the three clients above are near-duplicates of
 each other, which is the shape the common-entry-point rule exists to stop.
 
+> 🔴 **Correction (#5089 step 1a, 2026-08-07): the inventory above is
+> incomplete on both halves.** It omits `trusty-agents/src/bus/mod.rs`
+> (`MessageBus`) entirely — an NDJSON transport at
+> `~/.trusty-agents/sockets/<project>.sock` that is *both* a dialer
+> (`send_to`, which writes a payload, and `list_running`, which probes) and a
+> listener (`MessageBus::start`). The correct counts are **four** UDS clients,
+> not three, and **four** bind sites, not the two named in the sentence above:
+> `trusty-embedderd/src/uds_server.rs`, `trusty-bm25-daemon/src/socket.rs`,
+> `trusty-agents`' bus, and `trusty-agents`' `CtrlSocket::bind`. Note also that
+> the ctrl row above lists `<project>.sock`; the ctrl socket is actually
+> `<project>.ctrl.sock`, deliberately distinct from the bus's `<project>.sock`
+> in the same directory.
+>
+> The omission had consequences rather than being a bookkeeping slip: the bind
+> half of the bus was found and hardened only during implementation of
+> [#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099)
+> ([PR #5124](https://github.com/bobmatnyc/trusty-tools/pull/5124)), which is
+> where the "four bind sites" count comes from, and its three dial sites
+> survived that PR because this table never listed them. They are routed
+> through `trusty_common::uds::connect_hardened` in
+> [#5089](https://github.com/bobmatnyc/trusty-tools/issues/5089) step 1a. The
+> Context text above is left unedited per DOC-46 §4; this note records that its
+> site inventory was wrong, not that the decision changed.
+
 **🔴 Socket permissions are not what the prior ADRs claim.** ADR-0031 rests
 its case on "a loopback port is reachable by any local process, a 0600 socket
 is not," and ADR-0032 repeats it: "a `0600`-permissioned socket in a
@@ -227,6 +251,13 @@ clients. What is new is a single shared listener/dial module in
 `trusty-common` that every consumer routes through — the one ADR-0032 assumed
 and the workspace does not have. The three current implementations are
 migrated onto it rather than a fourth being added.
+
+> 🔴 **Correction (#5089 step 1a, 2026-08-07).** "Three current
+> implementations" inherits the incomplete inventory corrected in Context
+> above: there are **four**, the fourth being `trusty-agents`' `MessageBus`.
+> The Decision's substance is unaffected — every implementation migrates onto
+> the shared module — but the migration is one crate wider than this sentence
+> states. Decision text left unedited per DOC-46 §4.
 
 ## Consequences
 
