@@ -27,6 +27,10 @@
 #
 #   Inert (docs-only) paths:
 #     docs/**                      project documentation tree
+#     website/**                   SvelteKit marketing/docs site (#5094) — its
+#                                   own build/lint runs in its own workflow,
+#                                   never Cargo's, so it cannot affect a Rust
+#                                   result any more than docs/** can.
 #     <root>/*.md                  README/CHANGELOG/CONTRIBUTING/SECURITY/CLAUDE
 #     LICENSE, LICENSE-*
 #     .github/*.md                 e.g. PULL_REQUEST_TEMPLATE.md
@@ -72,6 +76,12 @@ is_inert_path() {
 
   # docs/** — the project documentation tree, at any depth.
   if [ "$n" -ge 2 ] && [ "${seg[0]}" = "docs" ]; then
+    return 0
+  fi
+
+  # website/** — the SvelteKit marketing/docs site, at any depth (#5094). It
+  # builds and lints under its own workflow, never Cargo's.
+  if [ "$n" -ge 2 ] && [ "${seg[0]}" = "website" ]; then
     return 0
   fi
 
