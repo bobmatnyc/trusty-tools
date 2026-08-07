@@ -11,6 +11,7 @@
 //! - [`concept_cluster`]: k-means clustering helpers (label-only; no embedder
 //!   dependency in this crate — callers supply embeddings)
 //! - [`facts`]: redb-backed canonical fact store, owned by the analyzer
+//! - [`scip_overlay`]: redb-backed per-index SCIP graph overlay store (#5049)
 //! - [`client`]: HTTP client for fetching chunks/index summaries from
 //!   trusty-search
 
@@ -26,10 +27,12 @@ pub mod github;
 pub mod linker;
 pub mod ner;
 pub mod quality;
+pub mod redb_open;
 pub mod refactor;
 pub mod registry;
 pub mod review;
 pub mod scip;
+pub mod scip_overlay;
 pub mod tool_impls;
 pub mod tool_registry;
 pub mod tools;
@@ -55,6 +58,7 @@ pub use review::{
     ReviewError, ReviewReport,
 };
 pub use scip::{extract_kg_from_scip, index_to_graph as scip_index_to_graph, ScipIngestSummary};
+pub use scip_overlay::{overlay_path_beside_facts, ScipOverlayRecord, ScipOverlayStore};
 pub use tool_registry::{global_registry, ToolRegistry};
 pub use tools::{DiagnosticsReport, Severity as DiagnosticSeverity, StaticTool, ToolDiagnostic};
 

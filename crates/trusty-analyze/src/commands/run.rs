@@ -17,6 +17,7 @@ use clap::ValueEnum;
 
 use trusty_analyze::core::FactStore;
 use trusty_analyze::core::TrustySearchClient;
+use trusty_analyze::core::{overlay_path_beside_facts, ScipOverlayStore};
 #[cfg(any(feature = "bundled-ort", feature = "load-dynamic", feature = "cuda"))]
 use trusty_analyze::embedder::NeuralEmbedder;
 use trusty_analyze::embedder::{BowEmbedder, Embedder};
@@ -68,6 +69,12 @@ pub async fn run_serve(
     let facts = FactStore::open(&facts_path)
         .with_context(|| format!("open facts store at {}", facts_path.display()))?;
 
+    // #5049: SCIP overlays live in their own redb file beside the facts store,
+    // so one `--facts-path` still governs the whole data directory.
+    let overlay_path = overlay_path_beside_facts(&facts_path);
+    let scip_overlays = ScipOverlayStore::open(&overlay_path)
+        .with_context(|| format!("open SCIP overlay store at {}", overlay_path.display()))?;
+
     // Try to load the neural embedder. Failure is non-fatal: we fall
     // back to BOW so the daemon still serves clustering requests.
     // Why: keeping the daemon resilient when the ONNX model is
@@ -107,7 +114,7 @@ pub async fn run_serve(
         );
         Arc::new(BowEmbedder::default())
     };
-    let state = AnalyzerAppState::new(search, facts).with_embedder(embedder);
+    let state = AnalyzerAppState::new(search, facts, scip_overlays).with_embedder(embedder);
 
     // Warn at startup when OPENROUTER_API_KEY is absent so operators
     // notice the gap before any deep-analysis call returns a 400.
