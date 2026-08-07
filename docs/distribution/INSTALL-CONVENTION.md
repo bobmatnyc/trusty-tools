@@ -30,14 +30,14 @@ The workspace supports three installation channels per crate. Every distributabl
 **Tier 1 (required for every release)**:
 - **macOS arm64 (Apple Silicon)** (`aarch64-apple-darwin`) — built on GitHub Actions (apple-latest runner)
 - **Linux x86_64** (`x86_64-unknown-linux-gnu`) — built on GitHub Actions (ubuntu-latest runner) via `cargo zigbuild` pinned to a glibc 2.17 baseline (the manylinux2014 floor — issue #2037), so releases run on RHEL 8/9, Debian 11/12, Ubuntu 20.04+, Amazon Linux 2/2023, etc., not just the runner's own (newer) glibc.
-  - **Exception**: ONNX-runtime crates (`trusty-search`, `trusty-analyze`) keep the ORIGINAL native (non-zigbuild) x86_64 build for this leg — unchanged glibc floor, not a regression. Their default `bundled-ort` feature links a prebuilt ONNX Runtime archive compiled with the real GNU libstdc++ ABI, which zig's cross-linker (LLVM libc++, a different ABI) cannot link against; this was confirmed via a real CI dry-run while implementing #2037. Their portable-Linux option is the Tier 2 AL2023/load-dynamic asset below, which sidesteps the problem by not linking ONNX Runtime at build time at all.
+  - **Exception**: The ONNX-runtime crate (`trusty-search`) keeps the ORIGINAL native (non-zigbuild) x86_64 build for this leg — unchanged glibc floor, not a regression. Its default `bundled-ort` feature links a prebuilt ONNX Runtime archive compiled with the real GNU libstdc++ ABI, which zig's cross-linker (LLVM libc++, a different ABI) cannot link against; this was confirmed via a real CI dry-run while implementing #2037. Its portable-Linux option is the Tier 2 AL2023/load-dynamic asset below, which sidesteps the problem by not linking ONNX Runtime at build time at all. (`trusty-analyze` was in this set until #5067 removed its unused neural embedder; it now takes the ordinary zigbuild leg.)
 
 **Tier 1 (continued) — Linux arm64 (issue #2037, made blocking by PR #4822)**:
-- **Linux arm64** (`aarch64-unknown-linux-gnu`) — built NATIVELY on the `ubuntu-24.04-arm` runner (no longer cross-compiled from x86_64), and **required**, not `continue-on-error`: a missing arm64 asset now turns the release run red. Most crates keep the `cargo zigbuild` glibc 2.17 baseline, now applied natively. ONNX-runtime crates (`trusty-search`, `trusty-analyze`) build this leg with the load-dynamic feature set (see Tier 2) rather than default `bundled-ort`, since the bundled path has no aarch64 build-time binary to download.
+- **Linux arm64** (`aarch64-unknown-linux-gnu`) — built NATIVELY on the `ubuntu-24.04-arm` runner (no longer cross-compiled from x86_64), and **required**, not `continue-on-error`: a missing arm64 asset now turns the release run red. Most crates keep the `cargo zigbuild` glibc 2.17 baseline, now applied natively. The ONNX-runtime crate (`trusty-search`) builds this leg with the load-dynamic feature set (see Tier 2) rather than default `bundled-ort`, since the bundled path has no aarch64 build-time binary to download.
   - **Caveat, measured not assumed**: for those two crates this leg uses the runner's GCC rather than zig (zig's clang miscompiles `numkong`'s AArch64 SIMD probes), so the asset carries the runner's **glibc 2.39** floor and needs OpenSSL 3 at runtime — the same floor its x86_64 sibling has always had. PR #4822 verified by execution that it runs on Ubuntu 24.04 arm64 and **fails to load on Amazon Linux 2023 arm64**. The portable arm64 answer is the Tier 2 `aarch64-linux-al2023` asset below.
 
 **Tier 2 (optional per crate)**:
-- **Amazon Linux 2023 / glibc < 2.38** — variant for ONNX-runtime crates only (`trusty-analyze`, `trusty-search`). Built with `--no-default-features --features load-dynamic` (`trusty-analyze` additionally needs `http-server`) and requires runtime `ORT_DYLIB_PATH` configuration. Ships for **both architectures**: `x86_64-linux-al2023` and, since the #2533 follow-up to PR #4822, `aarch64-linux-al2023` (Graviton on AL2023). Both are built inside the `amazonlinux:2023` container on a runner of their own architecture, so they carry that distro's glibc 2.34 floor rather than the CI runner's. Both legs are non-blocking (`best_effort`), but a dropped leg is reported by the `release-completeness-audit` job rather than passing silently.
+- **Amazon Linux 2023 / glibc < 2.38** — variant for the ONNX-runtime crate only (`trusty-search`; `trusty-analyze` was dropped from this set by #5067). Built with `--no-default-features --features load-dynamic` and requires runtime `ORT_DYLIB_PATH` configuration. Ships for **both architectures**: `x86_64-linux-al2023` and, since the #2533 follow-up to PR #4822, `aarch64-linux-al2023` (Graviton on AL2023). Both are built inside the `amazonlinux:2023` container on a runner of their own architecture, so they carry that distro's glibc 2.34 floor rather than the CI runner's. Both legs are non-blocking (`best_effort`), but a dropped leg is reported by the `release-completeness-audit` job rather than passing silently.
 - **Apple Silicon GPU acceleration** — CoreML auto-detected at runtime for `trusty-search` and `trusty-analyze`; no build variant needed.
 - **NVIDIA GPU (CUDA)** — optional feature flag; build documented separately if supported.
 
@@ -220,18 +220,12 @@ trusty-analyze start
 
 Basic analysis (complexity, smells) runs without an LLM; the deep pass is optional.
 
-#### Optional: NVIDIA GPU (CUDA)
+#### No GPU or glibc variants
 
-Install with `cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze --features cuda --locked`. Requires CUDA toolkit. On Amazon Linux 2023 and other glibc < 2.38 hosts, use the load-dynamic build:
-
-```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze \
-  --no-default-features --features http-server,load-dynamic --locked
-
-# Point to system ONNX Runtime
-export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
-trusty-analyze start
-```
+Since #5067 this crate links no ONNX Runtime — the neural clustering embedder
+that needed it was removed. There is no CUDA variant, no Amazon Linux 2023
+variant, and no `ORT_DYLIB_PATH` to set. The standard install above works on
+every supported host.
 
 #### Note: Embedded Svelte UI
 
@@ -319,12 +313,15 @@ Configuration and usage details are documented in the `trusty-code` crate README
 
 ## Special Case: ONNX Runtime on Amazon Linux 2023 / glibc < 2.38
 
-For `trusty-analyze` (and `trusty-search` with CUDA) on Amazon Linux 2023 or any host with glibc < 2.38:
+For `trusty-search` on Amazon Linux 2023 or any host with glibc < 2.38.
+(`trusty-analyze` no longer appears here — #5067 removed ONNX Runtime from it
+along with its unused neural embedder, so it installs the standard way
+everywhere.)
 
 1. Install from source with load-dynamic linking:
    ```bash
-   cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze \
-     --no-default-features --features http-server,load-dynamic --locked
+   cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-search \
+     --no-default-features --features load-dynamic --locked
    ```
 
 2. Install a compatible ONNX Runtime (e.g., glibc 2.31):
@@ -336,7 +333,7 @@ For `trusty-analyze` (and `trusty-search` with CUDA) on Amazon Linux 2023 or any
 3. Point the daemon to the installed library:
    ```bash
    export ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so
-   trusty-analyze start
+   trusty-search start
    ```
 
 This allows the daemon to run on newer systems where the bundled ORT library (glibc ≥ 2.38) is not available.

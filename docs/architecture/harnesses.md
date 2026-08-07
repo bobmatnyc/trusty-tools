@@ -209,7 +209,7 @@ what it needs. The following are relevant to all three harnesses:
 | `memory-core` | `trusty_common::memory_core` | Memory palace storage engine (palace, note, retrieval) — trusty-memory's backend; also used by trusty-agents |
 | `tickets` | `trusty_common::tickets` | Issue-tracker integration primitives |
 | `symgraph` | `trusty_common::symgraph` | Knowledge-graph data types (EntityType, RawEntity, EdgeKind) — used by trusty-search |
-| `embedder` | `trusty_common::embedder` | Text-embedding abstraction (Embedder trait, FastEmbedder) — used by trusty-search and trusty-analyze |
+| `embedder` | `trusty_common::embedder` | Text-embedding abstraction (Embedder trait, FastEmbedder) — used by trusty-search |
 | `bm25` | `trusty_common::bm25` | BM25 lexical index — used by trusty-search |
 | `axum-server` | `trusty_common::server` | Shared axum middleware (CORS, trace, gzip) — every HTTP daemon uses this |
 | `migrations` | `trusty_common::migrations` | Schema migration kernel shared by data-layer crates |

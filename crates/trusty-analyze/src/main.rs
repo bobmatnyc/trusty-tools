@@ -16,6 +16,10 @@ use trusty_analyze::mcp::AnalyzerMcpServer;
 use trusty_analyze::service::DEFAULT_PORT;
 
 mod commands;
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod main_tests;
 use commands::daemon as daemon_cmds;
 use commands::daemon_guard::ensure_daemon_running;
 use commands::port::{handle_port, PortFormat};
