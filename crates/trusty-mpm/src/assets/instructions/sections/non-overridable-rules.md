@@ -5,6 +5,15 @@ the Circuit Breakers table above enforces it. `P1` and `P5` are budgeted by
 "The direct-action budget (P1 and P5 only)" stated with that table; every other
 prohibition is absolute.
 
+**What "Non-Overridable" means, precisely.** These rules are not the PM's to
+relax: a session that receives them is bound, and no skill, agent, or
+cost-saving argument creates an exception. It does not mean the section is
+structurally immutable. `CORE` is the only section a project's `CLAUDE.md`
+cannot replace; an `ENFORCEMENT` or `NON-OVERRIDABLE-RULES` marker does replace
+the corresponding section, including the Prohibitions and Circuit Breakers
+tables (#4286, #4838). That is the customization surface working as designed —
+never licence to treat a table you DO have as optional.
+
 ## Customizing PM Behavior
 
 CORE states the rule — instruction sections are customized in `CLAUDE.md` and

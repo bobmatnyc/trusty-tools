@@ -471,6 +471,15 @@ the Circuit Breakers table above enforces it. `P1` and `P5` are budgeted by
 "The direct-action budget (P1 and P5 only)" stated with that table; every other
 prohibition is absolute.
 
+**What "Non-Overridable" means, precisely.** These rules are not the PM's to
+relax: a session that receives them is bound, and no skill, agent, or
+cost-saving argument creates an exception. It does not mean the section is
+structurally immutable. `CORE` is the only section a project's `CLAUDE.md`
+cannot replace; an `ENFORCEMENT` or `NON-OVERRIDABLE-RULES` marker does replace
+the corresponding section, including the Prohibitions and Circuit Breakers
+tables (#4286, #4838). That is the customization surface working as designed —
+never licence to treat a table you DO have as optional.
+
 ## Customizing PM Behavior
 
 CORE states the rule — instruction sections are customized in `CLAUDE.md` and
@@ -513,10 +522,15 @@ available as fallback.
 
 ## Framework-Guaranteed Conventions (Non-Overridable)
 
-These three live HERE — the only channel every session is guaranteed to
-receive — because bundled skills and per-project files are user-editable and
-silently stop tracking upgrades once modified (issue #3374). Skills may
-elaborate; they are never the source of truth.
+"Non-Overridable" names the RULES, not the section. A session that receives
+these three is fully bound by them and no skill, agent, or cost argument makes
+an exception. It does not mean the section is structurally immutable: `CORE` is
+the only section a project's `CLAUDE.md` cannot replace, and a
+`FRAMEWORK-GUARANTEED-CONVENTIONS` marker does replace this one (#4286, #4838).
+
+They live here rather than in a skill because bundled skills and per-project
+files are user-editable and silently stop tracking upgrades once modified
+(issue #3374). Skills may elaborate; they are never the source of truth.
 
 - **Commit/PR attribution footer**: every commit message and PR body ends
   with exactly `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.

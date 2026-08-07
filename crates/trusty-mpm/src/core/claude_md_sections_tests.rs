@@ -850,7 +850,8 @@ fn assert_authority_intact(prompt: &str, configuration: &str) {
             prompt.contains(marker),
             "{configuration}: the delivered prompt lost the authority row {marker:?} — \
              the Prohibitions and Circuit Breakers tables are the PM's entire \
-             delegation-enforcement model and no customization may remove them (#4573)"
+             delegation-enforcement model. Only an ENFORCEMENT marker may remove \
+             them (#4838); every other override path must leave them intact (#4573)"
         );
     }
 }
@@ -896,7 +897,7 @@ fn a_hostile_core_override_cannot_delete_the_authority_tables() {
 }
 
 #[test]
-fn the_authority_tables_survive_every_override_configuration() {
+fn the_authority_tables_survive_every_override_except_an_enforcement_block() {
     // SCOPE CHANGE (#4286). This no longer claims the tables survive EVERY
     // configuration, because they do not: `enforcement` is now an ordinary
     // overridable section, so a project that writes an ENFORCEMENT block does
@@ -1207,7 +1208,8 @@ fn the_pm_allowlist_does_not_contradict_the_action_budget() {
 fn the_budget_survives_every_override_configuration() {
     // SCOPE CHANGE (#4838, the deduplication PR). This no longer claims the
     // budget survives EVERY configuration, for the same reason
-    // `the_authority_tables_survive_every_override_configuration` stopped
+    // `the_authority_tables_survive_every_override_except_an_enforcement_block`
+    // stopped
     // claiming that of the tables at #4286: `enforcement` is an ordinary
     // overridable section. #4838 also made `enforcement.md` the single
     // canonical home of the budget rule (it used to be restated in
@@ -1249,7 +1251,7 @@ fn the_budget_survives_every_override_configuration() {
 
     // #4838: an ENFORCEMENT override now DOES delete the budget rule, because
     // deduplication left `enforcement.md` as the rule's only copy. Mirrors
-    // `the_authority_tables_survive_every_override_configuration`'s
+    // `the_authority_tables_survive_every_override_except_an_enforcement_block`'s
     // `hostile_floor` arm, which records the same fact for the Prohibitions
     // and Circuit Breakers tables.
     let hostile_enforcement = TempDir::new().unwrap();
