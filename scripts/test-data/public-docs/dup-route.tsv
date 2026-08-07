@@ -1,0 +1,3 @@
+SECTION	docs	Docs
+PAGE	docs	docs/intro.md	/dup	One
+PAGE	docs	docs/reference/ide-setup.md	/dup	Two
