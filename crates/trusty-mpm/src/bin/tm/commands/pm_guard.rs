@@ -589,18 +589,19 @@ fn edit_tool_target_path(tool_input: Option<&serde_json::Value>) -> Option<&str>
 /// home, and `TASK.md`-style session files. A session-pause writing
 /// `.trusty-mpm/sessions/session-*.md` must always pass, independent of the
 /// source-code rule.
-/// What: `true` when the basename is `TASK.md` or `MEMORY.md`, or when any path
-/// *component* is exactly `.trusty-mpm` or `.trusty-tools`. Component matching
-/// (not substring) is deliberate so the crate source dir `crates/trusty-mpm/`
-/// — note no leading dot — is NOT matched.
+/// What: `true` when the basename is `TASK.md`, or when any path *component* is
+/// exactly `.trusty-mpm` or `.trusty-tools`. Component matching (not substring)
+/// is deliberate so the crate source dir `crates/trusty-mpm/` — note no leading
+/// dot — is NOT matched. A `MEMORY.md` under either component still matches, so
+/// the palace index and the retired `.trusty-mpm/MEMORY.md` override stay
+/// allowed.
 /// Test: `is_pm_orchestration_path_matches_owned_state`.
 fn is_pm_orchestration_path(path: &str) -> bool {
     use std::path::{Component, Path};
     let p = Path::new(path);
-    if matches!(
-        p.file_name().and_then(|s| s.to_str()),
-        Some("TASK.md" | "MEMORY.md")
-    ) {
+    // #5086: `MEMORY.md` dropped from the basename match — core.md (#5079)
+    // forbids the PM writing it, so a bare one must not be always-allowed.
+    if matches!(p.file_name().and_then(|s| s.to_str()), Some("TASK.md")) {
         return true;
     }
     p.components().any(|c| {
@@ -881,7 +882,16 @@ mod tests {
             assert!(is_pm_orchestration_path(p), "{p} should be PM-owned");
         }
         // The crate source dir `trusty-mpm` (no leading dot) must NOT match.
-        for p in ["crates/trusty-mpm/src/lib.rs", "src/main.rs", "notes.md"] {
+        // #5086: a bare `MEMORY.md` outside a PM-owned directory must NOT match
+        // either — the prompt forbids writing it (core.md, #5079).
+        for p in [
+            "crates/trusty-mpm/src/lib.rs",
+            "src/main.rs",
+            "notes.md",
+            "MEMORY.md",
+            "/Users/x/some/project/MEMORY.md",
+            "docs/MEMORY.md",
+        ] {
             assert!(!is_pm_orchestration_path(p), "{p} should NOT be PM-owned");
         }
     }
