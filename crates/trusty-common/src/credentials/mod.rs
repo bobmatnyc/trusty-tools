@@ -20,8 +20,11 @@
 //! [`registry`] is the provider→environment-variable table.
 //! [`resolver::resolve_key`] applies the 3-tier precedence (process env var via
 //! [`registry::env_var_for`] > `.env.local` via [`dotenv`] >
-//! [`resolver::default_store`]). [`redact::redact_secret`] is the one
-//! credential-masking implementation, also reused by `memory_core::filter`.
+//! [`resolver::default_store`]). [`redact`] holds the credential-masking
+//! implementations: [`redact::redact_secret`] (mask a value you are naming;
+//! also reused by `memory_core::filter`) and [`redact::scrub_secrets`] (remove
+//! values you hold from text you don't control), with
+//! [`redact::resolved_secret_values`] supplying the latter's needle set.
 //!
 //! **Reference and use-time resolution** (#4565). [`CredentialRef`] is the
 //! opaque, non-secret handle a config row holds *instead of* a credential;
@@ -67,7 +70,7 @@ pub use handle::{CredentialRef, CredentialRefError};
 pub use keyring_store::KeyringStore;
 pub use memory_store::MemoryKeyStore;
 pub use principal::{Access, Principal, Scope, ServiceId};
-pub use redact::redact_secret;
+pub use redact::{redact_secret, resolved_secret_values, scrub_secrets};
 pub use registry::{REGISTRY, env_var_for, registered_providers};
 pub use resolver::{default_store, resolve_key, resolve_key_with};
 pub use secret::Secret;
