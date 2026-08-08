@@ -133,4 +133,99 @@ mod tests {
             "an unopenable repo reports failed, not completed"
         );
     }
+
+    /// Build `n` empty git repositories under a fresh temp directory.
+    ///
+    /// An initialised repo with no commits OPENS fine — so it gets past
+    /// `GitCollector::new` — but its revwalk has no ref to seed from, so every
+    /// `collect_window` call fails. That is the shape of the real failure the
+    /// #5197 review found: a per-week error inside the walk, not a repo that
+    /// could never be opened.
+    fn empty_repos(tag: &str, n: usize) -> (std::path::PathBuf, Vec<RepositoryConfig>) {
+        let root = std::env::temp_dir().join(format!("tga-5197-{tag}-{}", std::process::id()));
+        let mut repos = Vec::new();
+        for i in 0..n {
+            let path = root.join(format!("repo{i}"));
+            std::fs::create_dir_all(&path).expect("mkdir");
+            git2::Repository::init(&path).expect("git init");
+            repos.push(RepositoryConfig {
+                path,
+                name: Some(format!("repo{i}")),
+                // A closed one-week window keeps the walk deterministic: one
+                // week, one failure, regardless of today's date.
+                since_date: Some("2026-01-05".into()),
+                until_date: Some("2026-01-11".into()),
+                ..Default::default()
+            });
+        }
+        (root, repos)
+    }
+
+    fn run_pipeline(repos: Vec<RepositoryConfig>, bus: &crate::core::progress::ProgressBus) {
+        let cfg = Config {
+            repositories: repos,
+            ..Default::default()
+        };
+        let pipeline = CollectionPipeline::new(cfg).with_progress(bus.clone());
+        let mut db = crate::core::db::Database::open_in_memory().expect("open");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(pipeline.run(&mut db)).expect("run");
+    }
+
+    /// #5197 finding 1: a repo whose weeks failed used to report
+    /// `Outcome::Completed` — the walk's errors reached `stats.errors` and the
+    /// next line emitted success unconditionally.
+    #[test]
+    fn run_reports_failed_when_a_week_fails() {
+        let bus = crate::core::progress::ProgressBus::bounded(64);
+        let (root, repos) = empty_repos("week-fail", 1);
+        run_pipeline(repos, &bus);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let events = bus.drain();
+        let terminal: Vec<_> = events
+            .iter()
+            .filter(|e| e.target == "repo0" && e.is_terminal())
+            .collect();
+        assert_eq!(terminal.len(), 1, "exactly one terminal event: {events:?}");
+        match &terminal[0].outcome {
+            Some(crate::core::progress::Outcome::Failed { reason }) => {
+                assert!(
+                    reason.contains("error(s)"),
+                    "reason names the count: {reason}"
+                );
+            }
+            other => panic!("a repo whose walk failed must report Failed, got {other:?}"),
+        }
+    }
+
+    /// #5197 finding 4: the pre-walk emit tagged position-among-repositories
+    /// onto the repo's own row, so the second of two repos rendered "1/2" —
+    /// 50% through itself — before its walk had done anything. Nothing emits
+    /// intra-repo progress, so no non-terminal event may claim a fraction.
+    #[test]
+    fn no_repo_row_claims_a_fraction_it_cannot_substantiate() {
+        let bus = crate::core::progress::ProgressBus::bounded(64);
+        let (root, repos) = empty_repos("fraction", 2);
+        run_pipeline(repos, &bus);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let events = bus.drain();
+        let repo_rows: Vec<_> = events
+            .iter()
+            .filter(|e| e.target.starts_with("repo") && !e.is_terminal())
+            .collect();
+        assert_eq!(
+            repo_rows.len(),
+            2,
+            "one in-flight event per repo: {events:?}"
+        );
+        for e in repo_rows {
+            assert_eq!(e.total, None, "no total is known mid-walk: {e:?}");
+            assert_eq!(e.done, 0, "no intra-repo progress is ever emitted: {e:?}");
+        }
+    }
 }

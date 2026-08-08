@@ -78,6 +78,12 @@ impl WorkerHandle {
     /// What: clones the narrowed config and the bus, spawns [`run_work`], and
     /// stores the receiver. A run already in flight is refused by the caller
     /// (see `event_loop::start`), not here.
+    ///
+    /// The thread is detached and never joined, so process exit cuts an
+    /// in-flight fetch or per-week write off mid-flight. `event_loop::apply`
+    /// therefore makes quitting during a run take a confirming second press
+    /// rather than joining here (#5197) — see the `Action::Quit` arm for why
+    /// joining was rejected.
     /// Test: exercised by running `tga tui`.
     pub fn start(&mut self, state: &TuiState, mode: WorkMode) {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -168,7 +174,10 @@ impl WorkerHandle {
 /// Propagates a database-open failure, a runtime-build failure, a collection
 /// failure, or a correlation failure to the caller, which turns it into a
 /// status-bar line.
-fn run_work(
+///
+/// `pub(super)` so `super::tests` can assert on the summary; nothing outside
+/// this module calls it.
+pub(super) fn run_work(
     config: Config,
     db_path: PathBuf,
     mode: WorkMode,
@@ -186,7 +195,11 @@ fn run_work(
                 .run(&mut db),
         )?;
         runtime.shutdown_timeout(Duration::from_secs(0));
-        Some(stats.commits_collected)
+        // #5197: the error count travels with the commit count. A pipeline
+        // whose per-repo failures only reached `stats.errors` used to reach
+        // the TUI as a bare "collected N commit(s)", so `tga tui` had no
+        // surface at all for a failure `tga collect` prints.
+        Some((stats.commits_collected, stats.errors.len()))
     } else {
         None
     };
@@ -194,7 +207,10 @@ fn run_work(
     let outcome = correlate_commits(db.connection_mut(), bus)?;
 
     Ok(match collected {
-        Some(n) => format!("collected {n} commit(s); {}", outcome.summary()),
+        Some((n, errors)) => format!(
+            "collected {n} commit(s), {errors} error(s); {}",
+            outcome.summary()
+        ),
         None => format!("correlate only — {}", outcome.summary()),
     })
 }

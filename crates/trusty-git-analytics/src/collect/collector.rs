@@ -318,17 +318,22 @@ impl CollectionPipeline {
         let resolver = IdentityResolver::from_config(&self.config);
 
         // #5197: one progress row per configured repository, in walk order.
-        let repo_total = self.config.repositories.len() as u64;
-        for (repo_index, repo_cfg) in self.config.repositories.iter().enumerate() {
+        for repo_cfg in self.config.repositories.iter() {
             let repo_label = repo_cfg
                 .name
                 .clone()
                 .unwrap_or_else(|| repo_cfg.path.display().to_string());
-            self.progress.emit(ProgressEvent::advanced(
+            // #5197: `started` with no total, not `advanced(repo_index,
+            // repo_total)` — position among repositories shares this repo's
+            // target, so the aggregate folded it into this row and a mid-walk
+            // repo displayed "4/5" as if it were 80% through ITSELF. Nothing
+            // emits intra-repo progress, so the honest statement is "in
+            // flight, size unknown"; the how-many-repos roll-up is the stage
+            // header, which counts done / failed / skipped / running rows.
+            self.progress.emit(ProgressEvent::started(
                 Stage::Collect,
                 repo_label.clone(),
-                repo_index as u64,
-                Some(repo_total),
+                None,
             ));
             // Per-repo head_only is OR-ed with the global pipeline flag: if
             // either is true, that repo walks HEAD only.  This lets operators
@@ -384,12 +389,21 @@ impl CollectionPipeline {
                 }
             };
             let before = stats.commits_collected as u64;
-            self.collect_repo_by_week(db, &collector, &mut stats);
-            self.progress.emit(ProgressEvent::completed(
-                Stage::Collect,
-                repo_label,
-                stats.commits_collected as u64 - before,
-            ));
+            let errors_before = stats.errors.len();
+            let failures = self.collect_repo_by_week(db, &collector, &mut stats);
+            let collected = stats.commits_collected as u64 - before;
+            // #5197: a repo whose weeks failed reported `Completed` — "ok, 1
+            // commit" — because the walk's errors only reached stats.errors.
+            self.progress.emit(if failures == 0 {
+                ProgressEvent::completed(Stage::Collect, repo_label, collected)
+            } else {
+                let first = stats.errors.get(errors_before).map_or("", String::as_str);
+                ProgressEvent::failed(
+                    Stage::Collect,
+                    repo_label,
+                    format!("{failures} error(s), {collected} commit(s) collected; {first}"),
+                )
+            });
         }
 
         // Tag and release-branch reachability scan (issue #279).
@@ -739,12 +753,19 @@ impl CollectionPipeline {
     /// pairs that already have a row in `collection_runs` unless `force` is
     /// set. All non-fatal errors are pushed into `stats.errors` so that one
     /// bad week (or bad repo) does not abort the entire run.
+    ///
+    /// Returns how many errors this call appended to `stats.errors` — a
+    /// non-zero count is what makes the caller emit
+    /// [`ProgressEvent::failed`] instead of a success this repo did not earn
+    /// (#5197).
+    /// Test: `crate::collect::tests::run_reports_failed_when_a_week_fails`.
     fn collect_repo_by_week(
         &self,
         db: &mut Database,
         collector: &GitCollector,
         stats: &mut CollectionStats,
-    ) {
+    ) -> usize {
+        let errors_before = stats.errors.len();
         let repo_name = collector.name().to_string();
 
         // Derive the [from, to] NaiveDate window from the collector's
@@ -787,7 +808,7 @@ impl CollectionPipeline {
                         stats.errors.push(msg);
                     }
                 }
-                return;
+                return stats.errors.len() - errors_before;
             }
             (None, None) => {
                 // Fully unbounded — full history traversal with no week
@@ -812,7 +833,7 @@ impl CollectionPipeline {
                         stats.errors.push(msg);
                     }
                 }
-                return;
+                return stats.errors.len() - errors_before;
             }
         };
 
@@ -878,6 +899,7 @@ impl CollectionPipeline {
                 }
             }
         }
+        stats.errors.len() - errors_before
     }
 
     /// Read distinct `(author_name, author_email)` pairs from `commits`

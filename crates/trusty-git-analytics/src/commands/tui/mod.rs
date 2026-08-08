@@ -123,6 +123,16 @@ fn run_blocking(config: Config, db_path: PathBuf, args: TuiArgs) -> anyhow::Resu
     worker.reload_results(&mut state);
 
     let mut terminal = enter_tui()?;
+    // #5197: clear before the first draw. `Database::open` runs migrations and
+    // logs one line each to stderr; on a first run against an unmigrated
+    // database that is ~22 lines, and ratatui's diff renderer starts from an
+    // assumed-blank buffer, so any cell it believes unchanged keeps whatever
+    // the terminal already had there. Wherever the alternate screen does not
+    // clear on entry — tmux with `alternate-screen off`, terminals that
+    // implement it as a plain buffer switch — that log text stayed visible
+    // inside and around the drawn boxes across every redraw. `clear()` issues
+    // Clear(All) AND marks the next draw as full, which fixes both halves.
+    terminal.clear()?;
     let result = event_loop::run_loop(&mut terminal, &mut state, &mut worker);
     // Restore on BOTH paths, and prefer the loop's error over a teardown one.
     let teardown = leave_tui(&mut terminal);

@@ -188,6 +188,9 @@ pub struct TuiState {
     pub message: Option<String>,
     /// Set when the operator asks to quit.
     pub quit: bool,
+    /// Set when a quit was refused because a run is in flight; the next quit
+    /// keypress is taken as the confirmation (#5197).
+    pub quit_armed: bool,
     /// `--correlate-only`: refuse the pull action entirely, so the session
     /// provably touches no network. The correlation pass and every view stay
     /// fully available (#5197 zero-inference default).
@@ -222,6 +225,7 @@ impl TuiState {
             show_help: false,
             message: None,
             quit: false,
+            quit_armed: false,
             offline: false,
         }
     }

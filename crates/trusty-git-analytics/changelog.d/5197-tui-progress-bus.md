@@ -30,6 +30,31 @@ Added
   collect loop. Every configured repository reaches a terminal event, including
   one that cannot be opened.
 
+Fixed
+
+- A repository whose weekly walks failed reported `Completed` — "ok, 1 commit" —
+  to the progress bus. Per-week failures (a `collect_window` error, a
+  `collection_runs` lookup or record failure) reached `stats.errors` and the
+  terminal event was emitted unconditionally, so `Outcome::Failed` was
+  unreachable from that path. It now reports `Failed` with the error count and
+  the first message, still exactly one terminal event per repository.
+- `tga tui` had no surface at all for a collection error: the run summary read
+  only `commits_collected`. It now reads `collected N commit(s), M error(s); …`,
+  which is what the `Finished` status line shows.
+- Quitting `tga tui` mid-run abandoned the worker silently — it is a detached
+  thread nothing joins, so `q` / `Esc` / `Ctrl-C` cut an in-flight fetch or
+  per-week write off at process exit with status 0. A quit during a run now
+  takes a confirming second press, and says so.
+- The pre-walk progress event tagged position-among-repositories onto the
+  repository's own row, so a large repo mid-walk displayed "4/5" as if it were
+  80% through itself. Nothing emits intra-repo progress, so the row is now
+  "in flight, size unknown" until its terminal event; the how-many-repos
+  roll-up stays in the stage header.
+- The first `tga tui` frame against an unmigrated database rendered corrupted:
+  the migration log lines printed before the alternate screen showed through
+  ratatui's diff-rendered output and persisted across redraws. The TUI now
+  clears the screen before its first draw.
+
 Changed
 
 - `indicatif` now resolves through `[workspace.dependencies]` instead of a

@@ -13,7 +13,7 @@ use tga::core::progress::{ProgressEvent, Stage};
 use super::event_loop::{apply, key_to_action, Action, Effect};
 use super::render;
 use super::state::{RepoSource, TuiState, View, WorkStatus};
-use super::work::WorkMode;
+use super::work::{run_work, WorkMode};
 
 fn repo(name: &str, path: &str) -> RepositoryConfig {
     RepositoryConfig {
@@ -248,6 +248,55 @@ fn run_is_refused_while_running() {
     assert!(s.message.unwrap_or_default().contains("already in flight"));
 }
 
+/// #5197 finding 3: `q` / `Esc` / `Ctrl-C` used to set `quit` unconditionally,
+/// and the worker is a detached thread nobody joins — so quitting mid-run cut
+/// an in-flight fetch or per-week write off at process exit with no warning.
+#[test]
+fn quit_during_a_run_takes_a_confirming_second_press() {
+    let mut s = state();
+    apply(&mut s, Action::RunFull);
+    assert_eq!(s.status, WorkStatus::Running);
+
+    assert_eq!(apply(&mut s, Action::Quit), Effect::Nothing);
+    assert!(!s.quit, "the first press does not abandon a run in flight");
+    let msg = s.message.clone().unwrap_or_default();
+    assert!(msg.contains("in flight"), "the refusal says why: {msg}");
+
+    apply(&mut s, Action::Quit);
+    assert!(s.quit, "the confirming press abandons it");
+}
+
+/// The confirmation is armed for the next keypress only — an intervening key
+/// must not leave a loaded quit behind.
+#[test]
+fn any_other_key_disarms_the_quit_confirmation() {
+    let mut s = state();
+    apply(&mut s, Action::RunFull);
+    apply(&mut s, Action::Quit);
+    assert!(s.quit_armed);
+
+    apply(&mut s, Action::NextView);
+    assert!(!s.quit_armed);
+    apply(&mut s, Action::Quit);
+    assert!(!s.quit, "the confirmation had to be re-armed");
+}
+
+/// The guard is scoped to a run in flight: idle and help-overlay behaviour are
+/// unchanged, and help still closes before anything else.
+#[test]
+fn quit_is_immediate_when_no_run_is_in_flight() {
+    let mut s = state();
+    apply(&mut s, Action::Quit);
+    assert!(s.quit, "an idle TUI exits on the first press");
+
+    let mut s = state();
+    s.show_help = true;
+    apply(&mut s, Action::RunFull);
+    apply(&mut s, Action::Quit);
+    assert!(!s.show_help, "help closes first, even mid-run");
+    assert!(!s.quit);
+}
+
 #[test]
 fn pull_is_refused_with_no_repositories_selected() {
     let mut s = state();
@@ -348,6 +397,51 @@ fn pump_records_the_bus_drop_count() {
     s.pump_progress();
     assert_eq!(s.progress.dropped(), 3);
     assert!(render::status_line(&s).contains("dropped 3"));
+}
+
+// ----------------------------------------------------------------- work
+
+/// #5197 finding 2: `run_work` read only `stats.commits_collected`, so a
+/// collection failure had NO surface in the TUI — the Progress pane said the
+/// repo completed, and the `Finished(summary)` status line said "collected 0
+/// commit(s)" with no hint anything went wrong. `tga collect` prints it.
+#[test]
+fn the_run_summary_carries_the_collection_error_count() {
+    // An initialised repo with no commits opens fine and then fails its walk —
+    // the same shape as a permissions failure on a real repo, without needing
+    // one.
+    let root = std::env::temp_dir().join(format!("tga-5197-summary-{}", std::process::id()));
+    let repo_path = root.join("broken");
+    std::fs::create_dir_all(&repo_path).expect("mkdir");
+    git2::Repository::init(&repo_path).expect("git init");
+
+    let cfg = Config {
+        repositories: vec![RepositoryConfig {
+            path: repo_path,
+            name: Some("broken".into()),
+            since_date: Some("2026-01-05".into()),
+            until_date: Some("2026-01-11".into()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let summary = run_work(
+        cfg,
+        root.join("tga.db"),
+        WorkMode::PullAndCorrelate,
+        &tga::core::progress::ProgressBus::disabled(),
+    )
+    .expect("run_work");
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert!(
+        summary.contains("collected 0 commit(s)"),
+        "the commit count is still reported: {summary}"
+    );
+    assert!(
+        summary.contains("error(s)") && !summary.contains("0 error(s)"),
+        "the summary states how many errors the run recorded: {summary}"
+    );
 }
 
 // ---------------------------------------------------------------- render

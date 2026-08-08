@@ -121,11 +121,27 @@ pub fn apply(state: &mut TuiState, action: Action) -> Effect {
     if action != Action::None {
         state.message = None;
     }
+    // #5197: the confirmation is armed for the very next keypress only.
+    if action != Action::Quit {
+        state.quit_armed = false;
+    }
     match action {
         Action::None => Effect::Nothing,
         Action::Quit => {
             if state.show_help {
                 state.show_help = false;
+            } else if state.status.is_running() && !state.quit_armed {
+                // #5197: the worker is a detached thread (`work::start`) that
+                // nothing joins, so quitting mid-run cut an in-flight fetch or
+                // per-week write off at process exit, silently, with exit code
+                // 0. Confirming beats joining here: a join would park the draw
+                // loop behind a hung network call in raw mode, leaving the
+                // operator no key that works — the confirmation keeps the
+                // abandon deliberate and the UI responsive.
+                state.quit_armed = true;
+                state.set_message(
+                    "a run is in flight — press [q]/[Esc] again to abandon it mid-write",
+                );
             } else {
                 state.quit = true;
             }
