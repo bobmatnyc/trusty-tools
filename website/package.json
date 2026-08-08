@@ -49,5 +49,8 @@
 		"unist-util-visit": "^5.1.0",
 		"vite": "^6.4.3",
 		"vitest": "^4.1.10"
+	},
+	"dependencies": {
+		"@vercel/analytics": "^2.0.1"
 	}
 }

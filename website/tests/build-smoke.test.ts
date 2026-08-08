@@ -58,11 +58,34 @@ function docPages(): Set<string> {
 	return found;
 }
 
+/** Every built client-side JS chunk, concatenated. */
+function clientBundle(): string {
+	const chunks: string[] = [];
+	const walk = (dir: string) => {
+		if (!existsSync(dir)) return;
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) walk(full);
+			else if (entry.name.endsWith('.js')) chunks.push(readFileSync(full, 'utf8'));
+		}
+	};
+	walk(path.join(STATIC, '_app'));
+	return chunks.join('\n');
+}
+
 beforeAll(() => {
 	rmSync(OUTPUT, { recursive: true, force: true });
 	execFileSync('node', [path.join(WEBSITE_ROOT, 'node_modules/vite/bin/vite.js'), 'build'], {
 		cwd: WEBSITE_ROOT,
-		stdio: 'inherit'
+		stdio: 'inherit',
+		// Vitest exports NODE_ENV=test, which this subprocess inherits, and Vite
+		// derives `isProduction` from `process.env.NODE_ENV || mode`. Left alone,
+		// `import.meta.env.DEV` — and therefore SvelteKit's `dev` — comes out TRUE
+		// in a `vite build`, so this suite validated an artifact Vercel never
+		// produces. Harmless until something branched on `dev`; the analytics
+		// wiring in `+layout.svelte` does, and picks the third-party debug script
+		// when it reads true. Pinned so the build under test is the deployed one.
+		env: { ...process.env, NODE_ENV: 'production' }
 	});
 	landingPage = readFileSync(path.join(STATIC, 'index.html'), 'utf8');
 });
@@ -106,9 +129,17 @@ describe('production build', () => {
 		}
 	});
 
-	// The published site must be fully self-contained: everything is baked at
-	// build time and the page opens no connection to any service. Anchor hrefs
+	// The published site loads everything it renders from its own origin:
+	// content, CSS, fonts and scripts are all baked at build time. Anchor hrefs
 	// are destinations a reader clicks, not requests — only subresources count.
+	//
+	// Vercel Web Analytics (#5097) is the one service the page now talks to, and
+	// it does not appear here: `injectAnalytics` no-ops unless `browser`, so
+	// prerendering emits no tag, and in `production` mode the beacon it appends
+	// at hydration is the FIRST-PARTY `/_vercel/insights/script.js`. That is why
+	// this list is still empty rather than carrying an exception — the assertion
+	// below is deliberately unchanged. The runtime half is pinned by
+	// 'wires analytics to a first-party path…' underneath.
 	it('loads no subresource from a third-party origin', () => {
 		for (const name of ['index.html', 'docs.html', ...docPages()]) {
 			const html = readFileSync(path.join(STATIC, name), 'utf8');
@@ -120,6 +151,19 @@ describe('production build', () => {
 			expect(offSite, `${name} loads ${offSite.join(', ')}`).toEqual([]);
 			expect(html).not.toContain('@import url(http');
 		}
+	});
+
+	// The HTML walk above cannot see this: the analytics beacon is appended by
+	// client JS after hydration, so the only evidence is the bundle. `mode`
+	// decides the origin — `production` selects Vercel's first-party proxy path,
+	// `development` selects va.vercel-scripts.com. Dropping the `mode` argument,
+	// or a build where SvelteKit's `dev` reads true, silently ships the
+	// third-party one, and nothing else in this file would notice.
+	it('wires analytics to a first-party path, never the third-party debug script', () => {
+		const bundle = clientBundle();
+		expect(bundle).toContain('/_vercel/insights/script.js');
+		expect(bundle).toMatch(/\{\s*mode:\s*["']production["']\s*\}/);
+		expect(bundle).not.toMatch(/\{\s*mode:\s*["']development["']\s*\}/);
 	});
 
 	it('renders real documentation, with rewritten links and no blob/main', () => {

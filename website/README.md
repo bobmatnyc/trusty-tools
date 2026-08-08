@@ -82,6 +82,35 @@ page changed: the permalinks move to the commit that was actually released.
 The framework preset is SvelteKit; build command, output directory, and install
 command are all detected — leave them on their defaults.
 
+## Analytics
+
+Vercel Web Analytics, wired in `src/routes/+layout.svelte`:
+
+```ts
+injectAnalytics({ mode: dev ? 'development' : 'production' });
+```
+
+Enable **Web Analytics** on the Vercel project or the beacon 404s — the script
+is served by the platform, not built into the bundle.
+
+Two properties are worth knowing, because both look surprising:
+
+- **Nothing is added to the prerendered HTML.** `injectAnalytics` returns early
+  unless `$app/environment`'s `browser` is true, so the beacon is a `<script>`
+  appended to `document.head` at hydration. The build smoke test's HTML walk
+  cannot see it; a separate assertion reads the JS bundle instead.
+- **The beacon stays first-party.** In `production` mode the script is
+  `/_vercel/insights/script.js`, which Vercel proxies from the site's own
+  origin, so the site still loads no third-party subresource. Only
+  `development` mode reaches off-site, for the debug script on
+  `va.vercel-scripts.com` — that is what `mode` exists to prevent shipping, and
+  what `tests/build-smoke.test.ts` pins.
+
+The `mode` argument is not decoration. Left at its default `auto`, the package
+infers the environment from `process.env.NODE_ENV` inside the browser bundle;
+passing SvelteKit's own `dev` flag keeps the decision at build time where it is
+inspectable.
+
 ## Theme
 
 `docs/design/UI/design-system/tokens.css` is the canonical Foundry v2 source.
@@ -137,10 +166,10 @@ is the whole boundary: the site enumerates it and never walks `docs/`, so an
 unlisted file has no prerendered output and no URL.
 
 Everything is built in Node at build time and prerendered to static HTML —
-there is no runtime filesystem route, and a published page opens no connection
-to any service. Relative links are rewritten to site routes when the target is
-published and to commit-pinned GitHub permalinks when it is not; a link that
-resolves to nothing fails the build.
+there is no runtime filesystem route, and the only connection a published page
+opens is the analytics beacon below. Relative links are rewritten to site routes
+when the target is published and to commit-pinned GitHub permalinks when it is
+not; a link that resolves to nothing fails the build.
 
 `src/lib/docs/README.md` carries the link rule, the failure-code table, and the
 rendering pipeline.
