@@ -170,10 +170,6 @@ pub(super) async fn auth_middleware(
     //   - GET /api/health  (health probes; the sidecar polls it pre-credential)
     //   - GET /api/config  (UI bootstrap: tells client whether auth is needed)
     //   - any non-/api path (UI static assets at "/" and "/*path")
-    // #5052: `/api/events` was a third exemption and is not one any more — it
-    // streams conversation content and is now gated by a ticket that a browser
-    // EventSource CAN carry (see `super::event_tickets`). Both remaining
-    // exemptions are justified in this function's doc comment.
     // #5052 (critic HIGH): `/api/events` is exempt HERE and gated in the handler
     // instead. This middleware is layered OUTSIDE the routes, so a request
     // carrying only a ticket never reached `EventStreamAuth` — the server minted

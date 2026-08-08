@@ -61,10 +61,13 @@ pub fn start_event_bridge(app: AppHandle, port: u16) {
         // #5052 (critic MEDIUM-2): the sidecar inherits this process's
         // environment, so when the operator configured a token it reads the
         // same var we do — that is the credential this bridge must present.
+        // No `.filter(|t| !t.is_empty())`: the server's own resolution
+        // (`runtime::mode_dispatch`) does not drop an empty value either, so
+        // filtering here would make an empty `TAGENT_API_TOKEN` configure a
+        // token server-side that this bridge then never presents.
         let token = std::env::var("TAGENT_API_TOKEN")
             .or_else(|_| std::env::var("OPEN_MPM_API_TOKEN"))
-            .ok()
-            .filter(|t| !t.is_empty());
+            .ok();
         loop {
             if let Err(e) = pump_stream(&app, &base, token.as_deref()).await {
                 // #5052 (critic MEDIUM-2): `debug!` hid a PERMANENT failure —
@@ -96,16 +99,33 @@ async fn mint_ticket(
         with_bearer(client.post(format!("{base}/api/events/ticket")), token)
             .send()
             .await
-            .map_err(|e| format!("mint: {e}"))?
+            .map_err(|e| redacted("mint", e))?
             .error_for_status()
-            .map_err(|e| format!("mint status: {e}"))?
+            .map_err(|e| redacted("mint status", e))?
             .json()
             .await
-            .map_err(|e| format!("mint body: {e}"))?;
+            .map_err(|e| redacted("mint body", e))?;
     body.get("ticket")
         .and_then(|t| t.as_str())
         .map(str::to_string)
         .ok_or_else(|| "mint response had no ticket".to_string())
+}
+
+/// Render a `reqwest::Error` for logging WITHOUT the request URL. (#5052)
+///
+/// Why: SECURITY. The stream URL carries `?ticket=<live credential>`, and
+/// `reqwest::Error`'s `Display` appends the full URL including its query string
+/// (reqwest documents this on the type). Every error here reaches
+/// `tracing::warn!` in `start_event_bridge`, so formatting one verbatim would
+/// write a still-valid ticket into the default log on every routine stream drop
+/// — exactly the leak channel the ticket design exists to avoid, which is why
+/// #5052 rejected a `?token=<bearer>` scheme in the first place.
+/// What: prefixes the caller's label and formats `e.without_url()`, which
+/// returns the same error with its URL stripped. The failure CAUSE is
+/// unchanged, so the log keeps all of its diagnostic value.
+/// Test: `redacted_error_does_not_leak_the_ticket`.
+fn redacted(context: &str, e: reqwest::Error) -> String {
+    format!("{context}: {}", e.without_url())
 }
 
 /// Attach `Authorization: Bearer <token>` when the operator configured one.
@@ -131,12 +151,12 @@ async fn pump_stream(app: &AppHandle, base: &str, token: Option<&str>) -> Result
     let mut resp = with_bearer(client.get(&url), token)
         .send()
         .await
-        .map_err(|e| format!("connect: {e}"))?
+        .map_err(|e| redacted("connect", e))?
         .error_for_status()
-        .map_err(|e| format!("status: {e}"))?;
+        .map_err(|e| redacted("status", e))?;
 
     let mut parser = SseParser::default();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read: {e}"))? {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| redacted("read", e))? {
         for data in parser.push(&chunk) {
             dispatch_frame(app, &data);
         }
@@ -256,6 +276,37 @@ fn field_str(value: &serde_json::Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why: SECURITY (#5052) — `reqwest::Error`'s Display appends the request
+    /// URL, and this bridge's stream URL carries a LIVE ticket in its query
+    /// string. Since these errors are logged at `warn!` on every routine stream
+    /// drop, a verbatim format would publish a working credential to the
+    /// default log. The raw assertion below is deliberate: it proves reqwest
+    /// really does embed the URL, so this test would catch a regression rather
+    /// than passing vacuously.
+    /// Test: this test.
+    #[tokio::test]
+    async fn redacted_error_does_not_leak_the_ticket() {
+        const TICKET: &str = "s3cret-ticket-value";
+        // Port 1 is privileged and unbound, so this fails to connect
+        // immediately — no server, no network, no timing dependence.
+        let err = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:1/api/events?ticket={TICKET}"))
+            .send()
+            .await
+            .expect_err("connecting to a closed port must fail");
+
+        assert!(
+            format!("{err}").contains(TICKET),
+            "precondition: reqwest embeds the URL, so redaction is load-bearing"
+        );
+        let logged = redacted("connect", err);
+        assert!(
+            !logged.contains(TICKET),
+            "a live ticket must never reach the log: {logged}"
+        );
+        assert!(logged.starts_with("connect: "), "context is kept: {logged}");
+    }
 
     #[test]
     fn parse_dispatches_agent_message_delta() {
