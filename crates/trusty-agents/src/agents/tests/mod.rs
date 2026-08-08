@@ -1323,3 +1323,120 @@ fn agent_config_anthropic_pin_forces_the_direct_path() {
     assert_eq!(cfg.agent.model, "anthropic/claude-sonnet-4-6");
     assert!(cfg.llm.use_anthropic_direct);
 }
+
+// ── Pin bypass via post-load model override (#3765) ──────────────────────────
+//
+// Four call sites replaced `cfg.agent.model` after load and rebuilt the adapter
+// from the raw string, discarding the pin: `in_process_runner::run_inner`
+// (`RunContext.model` — a workflow phase's model, or retry escalation) and the
+// three ctrl dispatch paths' `/model` session override, reachable from an HTTP
+// body via `TaskRequest.model_id`. All four now go through
+// `AgentConfig::override_model`. These tests exercise that function directly,
+// which is the single point every one of them funnels through.
+
+/// Why: the bypass regression. Pre-fix, assigning a model directly left a
+/// pinned agent routed at whatever the override's slug implied — here Bedrock
+/// would have won over an `atlascloud` pin. Bedrock is used as the OVERRIDE
+/// (not the pin) precisely because its slug prefix beats every heuristic, so a
+/// pin that survives it is a pin that survives anything.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn override_model_repins_a_pinned_agent() {
+    let _env = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::test_env::force_env_local_loaded();
+    let prev = std::env::var_os("ATLASCLOUD_API_KEY");
+    // SAFETY: ENV_LOCK held for the entire test body.
+    unsafe { std::env::set_var("ATLASCLOUD_API_KEY", "ac-FAKE-override-test") };
+
+    let result = (|| -> anyhow::Result<AgentConfig> {
+        let mut cfg = load_pinned("openai/gpt-5.6-sol", Some("atlascloud"))?;
+        cfg.override_model("bedrock/anthropic.claude-3-5-haiku-20241022-v1:0")?;
+        Ok(cfg)
+    })();
+
+    // SAFETY: ENV_LOCK still held.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("ATLASCLOUD_API_KEY", v),
+            None => std::env::remove_var("ATLASCLOUD_API_KEY"),
+        }
+    }
+
+    let cfg = result.expect("override applies");
+    assert_eq!(
+        cfg.agent.model, "atlascloud/anthropic.claude-3-5-haiku-20241022-v1:0",
+        "the override's bedrock/ marker must be replaced by the pin's"
+    );
+    assert_eq!(
+        cfg.adapter.provider(),
+        crate::llm::adapter::Provider::AtlasCloud,
+        "and the rebuilt adapter must follow the pin, not the override's slug"
+    );
+}
+
+/// Why: the other half of the contract — an UNPINNED agent's override must
+/// behave exactly as it did before #3765 (assign, rebuild adapter, no
+/// validation), or this fix regresses every agent that never opted in.
+/// Test: itself.
+#[test]
+fn override_model_leaves_an_unpinned_agent_alone() {
+    let mut cfg = load_pinned("anthropic/claude-sonnet-4-6", None).expect("loads");
+    cfg.override_model("bedrock/anthropic.claude-3-5-haiku-20241022-v1:0")
+        .expect("override applies");
+    assert_eq!(
+        cfg.agent.model, "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
+        "an unpinned override is taken verbatim"
+    );
+    assert_eq!(
+        cfg.adapter.provider(),
+        crate::llm::adapter::Provider::Bedrock
+    );
+}
+
+/// Why: a model override on a pinned agent whose credential has since gone
+/// away must fail closed at DISPATCH too, not just at load — `override_model`
+/// re-runs the same validation rather than trusting the config it was handed.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn override_model_fails_closed_when_the_pinned_credential_vanishes() {
+    let _env = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::test_env::force_env_local_loaded();
+    crate::test_env::clear_all_credential_env_vars();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: HOME_LOCK held for the entire test body.
+    unsafe { std::env::set_var("HOME", tmp.path()) };
+
+    // Load with the credential present, then take it away before the override.
+    // SAFETY: ENV_LOCK held.
+    unsafe { std::env::set_var("ATLASCLOUD_API_KEY", "ac-FAKE-then-removed") };
+    let loaded = load_pinned("openai/gpt-5.6-sol", Some("atlascloud"));
+    // SAFETY: ENV_LOCK held.
+    unsafe { std::env::remove_var("ATLASCLOUD_API_KEY") };
+    let err = loaded
+        .expect("loads while the key is present")
+        .override_model("some-other-model")
+        .expect_err("must fail closed once the key is gone");
+    let msg = format!("{err:#}");
+
+    // SAFETY: HOME_LOCK still held.
+    unsafe {
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+    assert!(
+        msg.contains("atlascloud") && msg.contains("ATLASCLOUD_API_KEY"),
+        "{msg}"
+    );
+}

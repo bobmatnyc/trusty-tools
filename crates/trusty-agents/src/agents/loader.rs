@@ -350,6 +350,40 @@ impl AgentConfig {
         Ok(())
     }
 
+    /// Replace this config's model AFTER load, re-applying the provider pin.
+    ///
+    /// Why (#3765): four call sites replaced `cfg.agent.model` post-load and
+    /// rebuilt the adapter from the raw string — the in-process runner's
+    /// `RunContext.model` (workflow phase model / retry escalation) and the
+    /// three ctrl dispatch paths' `/model` session override, which is
+    /// reachable from an HTTP request body via `TaskRequest.model_id`. Each
+    /// one silently discarded the pin: a pinned agent handed
+    /// `claude-sonnet-4-6` would route to Anthropic no matter what its
+    /// `provider_id` said. A fail-closed guarantee with four bypasses is not a
+    /// guarantee, so every post-load model change now goes through this one
+    /// function instead of assigning the field directly.
+    ///
+    /// A model override is RE-PINNED rather than refused, because the two
+    /// statements are compatible and specific: the operator pinned a PROVIDER,
+    /// the caller chose a MODEL on it. Refusing would break the workflow
+    /// engine's retry escalation for every pinned agent while adding no
+    /// safety — a re-pinned override still cannot reach an unpinned provider,
+    /// which is the property that matters. A PROVIDER override is the opposite
+    /// case and IS refused; see `ctrl::config::resolve_overridden_credentials`.
+    /// What: assigns `model`, re-runs [`Self::apply_provider_pin`] (which also
+    /// re-validates the pinned provider's credential, so the fail-closed check
+    /// applies at dispatch and not only at load), then rebuilds `adapter` from
+    /// the resulting slug. For an UNPINNED agent this is exactly the old
+    /// behaviour: assign, rebuild, no validation.
+    /// Test: `override_model_repins_a_pinned_agent`,
+    /// `override_model_leaves_an_unpinned_agent_alone`.
+    pub(crate) fn override_model(&mut self, model: &str) -> Result<()> {
+        self.agent.model = model.to_string();
+        self.apply_provider_pin()?;
+        self.adapter = Arc::from(adapter_for_model(&self.agent.model));
+        Ok(())
+    }
+
     /// Built-in default `ctrl` agent config used when no `ctrl.toml` /
     /// `pm.toml` is found on disk (#240, standalone mode).
     ///

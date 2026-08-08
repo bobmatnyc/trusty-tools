@@ -54,7 +54,8 @@ fn resolve_ctrl_turn_credentials(
 ) -> Result<(llm::credentials::LlmCredentials, bool)> {
     if let Some(ref m) = overrides.model {
         tracing::debug!(model = %m, "ctrl_chat_turn: applying /model session override");
-        cfg.agent.model = m.clone();
+        // #3765: re-pins the override when the agent declares a provider.
+        cfg.override_model(m)?;
     }
     let creds = resolve_overridden_credentials(cfg, overrides.provider.as_deref())?;
     let claude_cli_short_circuit = apply_credential_routing(cfg, &creds);
