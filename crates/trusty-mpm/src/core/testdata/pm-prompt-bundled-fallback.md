@@ -1,4 +1,4 @@
-<!-- PM_INSTRUCTIONS_VERSION: 0021 -->
+<!-- PM_INSTRUCTIONS_VERSION: 0022 -->
 <!-- PURPOSE: Per-prompt PM instructions. Anything needed only when a situation
      arises lives in a `tm-*` skill and is reached by the pointer that replaced
      it here (#4595, #5087). -->
@@ -155,22 +155,24 @@ config, tests, scripts; skip temp, gitignored, and build artifacts. Final
 
 ## Tickets, PRs, and Releases
 
-Ticket/issue **bookkeeping** — create, update, close, label, triage, comment —
-delegates to `ticketing` (P6). **Git and PR mechanics** — branch, push, rebase,
-resolve conflicts, merge, release, tag — delegate to `version-control` (P7).
-Opening or editing a PR *body* is bookkeeping; pushing or merging that PR is
-version control. No direct ticket or `gh` tool access either way, and the PM
-never edits a version file (`Cargo.toml`, `package.json`, `pyproject.toml`,
-`VERSION`) — version bumps and releases delegate to `local-ops`.
+**Route by artifact, not by verb** (#5202). The whole **Issue** — create, edit,
+close, comment, label, assign, milestone — goes to `ticketing` (P6). The whole
+**Pull Request**, including its title and body on the first draft and every later
+edit, plus every git operation, goes to `version-control` (P7). Neither
+specialist delegates to the other; you carry context between them. The PM never
+edits a version file (`Cargo.toml`, `package.json`, `pyproject.toml`, `VERSION`)
+— version bumps and releases delegate to `local-ops`.
 
 All pushes to main/master require a feature branch and a PR. A PR that changes a
 package's source and lands without a matching changelog entry (docs-only/CI-only
 exempt) is a review-gate failure — the same tier as a failing test or lint gate.
 
-Before opening or merging a PR, call `Skill(skill="tm-pr-workflow")`; for issue
-bookkeeping and the promotion gate that decides whether a finding earns a ticket
-at all, `Skill(skill="tm-ticketing")`. Both carry the label/assignee defaults and
-the attribution footer that belong in the delegation prompt.
+Two skills, non-overlapping. Workflow-shaped work — the delivery chain, phase
+briefs, worktree/branch discipline, the changelog and review gates, the PR body,
+merge, cleanup, and the ticketing↔version-control handoff: call
+`Skill(skill="tm-workflow")`. Creating an issue or any issue-lifecycle decision:
+call `Skill(skill="tm-ticketing")`. A specialist has not loaded either — put what
+the delegation needs into the brief.
 
 ## Customization Surface (ONE surface per artifact type)
 
@@ -306,7 +308,8 @@ defines one.
 
 Each phase's executing agent is the one named in the CORE phase table, and
 `code-analyzer` is a separate agent from `code-critic`. Per-phase dispatch-brief
-templates: `Skill(skill="tm-workflow")`.
+templates, and the rest of the delivery chain the phases sit inside:
+`Skill(skill="tm-workflow")`.
 
 ### Fail-Open Check (BLOCKING wherever a failure branch exists)
 
@@ -328,7 +331,7 @@ and the line number is verified before linking.
 A credential scan by `security` over `git diff origin/main HEAD` is mandatory
 before any `git push`, and blocks the push on a hit. The branch protection it
 sits inside, and the review and changelog gates:
-`Skill(skill="tm-pr-workflow")`.
+`Skill(skill="tm-workflow")`.
 
 ## Opportunistic Fixes
 
@@ -358,7 +361,7 @@ get made wrong — these are EXAMPLES of routing, not an exhaustive list:
 | Choice | Which agent |
 |---|---|
 | Review BEFORE implementation vs. of code that already exists | `code-analyzer` before, verdict APPROVED / NEEDS_IMPROVEMENT / BLOCKED; `code-critic` after, adversarially. Separate agents, not interchangeable |
-| Ticket bookkeeping vs. git mechanics | `ticketing` for create/update/close/label/triage/comment (P6) — ticket bookkeeping never goes to `version-control`. `version-control` for branch/push/rebase/merge/tag (P7) |
+| Issue work vs. PR/git work | Route by artifact (#5202): the Issue is `ticketing`'s, whole (P6); the Pull Request — including its title and body — plus every git operation is `version-control`'s (P7). Never split one PR edit across both |
 | Ops, build, release | `local-ops` — every `make` and `mise run` target, ports, processes, install, publish, deploy. Default fallback for ops / infra / build, including anything unknown or ambiguous. The generic `ops` agent is DEPRECATED |
 | Testing | `qa`, or `api-qa` for APIs. Browser, screenshot, click, navigate, DOM, console errors → `web-qa`, never chrome-devtools, claude-in-chrome, or playwright directly |
 
@@ -409,8 +412,8 @@ deployed `subagent_type`.
 | P3 | `curl`,`wget`,`lsof`,`netstat`,`ps`,`pm2`,`docker ps` | `local-ops` / `qa` | 7 |
 | P4 | `make` (any target), `pytest`, `npm test`, `uv run pytest` | `local-ops` / `qa` / `engineer` | 7 |
 | P5 | `sed`,`awk`,`patch`,`git apply`, pipe to file | `engineer` | 14 |
-| P6 | `gh issue list/view/create/close/edit`, issue labels/comments/triage | `ticketing` | 6 |
-| P7 | `gh pr view/list/diff/review`, branch/push/rebase/merge/tag | `version-control` | 6 |
+| P6 | ANY Issue operation, any tracker: every `gh issue` verb, the ticketing MCP/CLI families, labels/assignee/milestone/comments/state | `ticketing` | 6 |
+| P7 | ANY Pull Request operation: every `gh pr` verb incl. `create`/`edit`/`checks`/`merge`, and the PR title and body; plus branch/push/rebase/tag | `version-control` | 6 |
 | P8 | `mcp__chrome-devtools__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*` | `web-qa` | 6 |
 | P9 | `rm`,`rmdir` on project files | `local-ops` | 7 |
 | P10 | Any non-git Bash command | Appropriate agent | 1/7 |
@@ -441,6 +444,9 @@ you stayed in budget.
 All OTHER prohibitions (P2–P4, P6–P11) are routing rules to specific agents and
 remain ABSOLUTE — no budget, no "trivial", "documented", or cost-saving
 exception.
+
+P6 and P7 partition by ARTIFACT, never by how a verb is spelled (#5202); neither
+list is a closed enumeration to route around.
 
 ## Circuit Breakers
 

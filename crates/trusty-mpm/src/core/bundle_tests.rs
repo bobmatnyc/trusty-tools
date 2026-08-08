@@ -75,7 +75,6 @@ fn constants_are_non_empty() {
     assert!(!TM_BUG_REPORTING.trim().is_empty());
     assert!(!TM_TEACHING_TEMPLATES.trim().is_empty());
     assert!(!TM_TICKETING.trim().is_empty());
-    assert!(!TM_PR_WORKFLOW.trim().is_empty());
     assert!(!TM_DELEGATION_PATTERNS.trim().is_empty());
     assert!(!TM_SESSION_MANAGEMENT.trim().is_empty());
     assert!(!TM_SESSION_PAUSE.trim().is_empty());
@@ -120,7 +119,6 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-bug-reporting.md",
         "skills/tm-teaching-templates.md",
         "skills/tm-ticketing.md",
-        "skills/tm-pr-workflow.md",
         "skills/tm-delegation-patterns.md",
         "skills/tm-session-management.md",
         "skills/tm-session-pause.md",
@@ -136,6 +134,29 @@ fn tm_skills_are_in_bundle() {
             "missing bundled /tm- skill: {expected}"
         );
     }
+}
+
+/// #5202: `tm-pr-workflow` is RETIRED, not aliased.
+///
+/// Why: the consolidation only holds if there is exactly ONE workflow skill. A
+/// re-registered alias, or a re-added asset file, restores the second editable
+/// source the issue removed — and it would do so silently, because every other
+/// test here only asserts what IS present.
+/// What: asserts the retired stem appears in no bundled artifact path, and that
+/// the skill it was consolidated into is present.
+/// Test: this IS the test.
+#[test]
+fn retired_pr_workflow_skill_is_not_bundled() {
+    let paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
+    assert!(
+        !paths.iter().any(|p| p.contains("tm-pr-workflow")),
+        "tm-pr-workflow was retired into tm-workflow (#5202); re-registering it \
+         restores the split this consolidation removed"
+    );
+    assert!(
+        paths.contains(&"skills/tm-workflow.md"),
+        "tm-workflow must remain bundled — it now carries the whole delivery chain"
+    );
 }
 
 #[test]
@@ -197,7 +218,6 @@ fn tm_skills_have_frontmatter() {
         ("tm-bug-reporting", TM_BUG_REPORTING),
         ("tm-teaching-templates", TM_TEACHING_TEMPLATES),
         ("tm-ticketing", TM_TICKETING),
-        ("tm-pr-workflow", TM_PR_WORKFLOW),
         ("tm-delegation-patterns", TM_DELEGATION_PATTERNS),
         ("tm-session-management", TM_SESSION_MANAGEMENT),
         ("tm-session-pause", TM_SESSION_PAUSE),
@@ -366,7 +386,7 @@ fn bundle_table_is_complete() {
     //   tm-circuit-breaker, tm-verification-protocols, tm-tool-usage-guide,
     //   tm-git-file-tracking, tm-adr, tm-workflow, tm-agent-architecture,
     //   tm-postmortem, tm-bug-reporting, tm-teaching-templates, tm-ticketing,
-    //   tm-pr-workflow, tm-delegation-patterns, tm-session-management,
+    //   tm-delegation-patterns, tm-session-management,
     //   tm-session-pause, tm-session-resume, tm-init, tm (overview),
     //   tm-issues-prune (#2185: gh issue backlog prune/prioritize),
     //   tm-cli-operations (#2321: tm CLI operation incl. MCP setup/management)
@@ -418,11 +438,14 @@ fn bundle_table_is_complete() {
     //   `references/framework.md` — the harness's own install layout and tier
     //   precedence, rendered from the path constants and tier resolvers the
     //   runtime uses. 178 + 1 = 179.
-    assert_eq!(ALL.len(), 179);
+    // Issue #5202 (-1): `skills/tm-pr-workflow.md` is RETIRED — its live policy
+    //   was consolidated into `tm-workflow`, leaving one workflow skill rather
+    //   than an alias or a second editable source. 179 - 1 = 178.
+    assert_eq!(ALL.len(), 178);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 179, "artifact paths must be unique");
+    assert_eq!(paths.len(), 178, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

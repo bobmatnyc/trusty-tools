@@ -78,22 +78,15 @@ visibility.
 
 **SM's role:**
 1. Detect tracking artifact references in the task description during decompose
-2. Inject the in-flight-commentary convention into the session prompt (point to
-   `tm-ticketing.md` under "Ticket-Driven Development Protocol")
+2. Point the session prompt at the canonical authority rather than restating it:
+   issue comment cadence and attribution are `tm-ticketing`'s ("Lifecycle"), and
+   the PR body and its freshness are `tm-workflow`'s (#5202)
 3. Optionally remind via `sessions.send()` if monitoring a task — e.g., "This
    issue is public; post a progress comment on the diagnosis when confirmed"
 
-**Session PM's responsibility (delegated, not SM's direct action):**
-- Post progress comments at work start (root cause/scope), meaningful state
-  transitions (diagnosis, fix pushed, review feedback, blocked), and completion
-  (version/SHA, evidence)
-- Use attribution footer: `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`
-- Keep PR bodies truthful (update if scope changes mid-flight)
-
-This standard practice applies when tracking artifacts exist; projects without
-formal tracking workflows are exempt. When present, visibility into in-progress
-state is the session PM's responsibility, exercised via the same issue/PR tools
-the session would use for any other workflow operation.
+The session PM owns the actual commentary and routes it to its own `ticketing`
+and `version-control` agents. This applies when tracking artifacts exist;
+projects without formal tracking workflows are exempt.
 
 ## Triage & summarization
 

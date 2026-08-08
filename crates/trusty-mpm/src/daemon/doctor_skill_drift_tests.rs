@@ -73,15 +73,17 @@ fn staleness_catches_drift_the_stale_cache_hid() {
     let tmp = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
     // Deployed 07-29; manifest agrees with the file, as it did in the incident.
+    // #5202: this case needs an ORDINARY skill — `tm-workflow` became
+    // conventions-bearing when it absorbed `tm-pr-workflow`, and would now Fail.
     let _src = deploy_real(
         &paths.claude_skills_dir(),
-        "tm-workflow",
+        "tm-delegation-patterns",
         "v1 mentions PM_INSTRUCTIONS.md",
         None,
     );
 
     let check = report(
-        &reference_of(&[("tm-workflow", "v2 describes the JSON manifest")]),
+        &reference_of(&[("tm-delegation-patterns", "v2 describes the JSON manifest")]),
         &paths,
         None,
     );
@@ -91,7 +93,11 @@ fn staleness_catches_drift_the_stale_cache_hid() {
         "message: {}",
         check.message
     );
-    assert!(check.message.contains("tm-workflow"), "{}", check.message);
+    assert!(
+        check.message.contains("tm-delegation-patterns"),
+        "{}",
+        check.message
+    );
     assert!(check.message.contains("REPAIRABLE"), "{}", check.message);
 }
 
@@ -99,20 +105,16 @@ fn staleness_catches_drift_the_stale_cache_hid() {
 fn staleness_escalates_when_conventions_skill_drifts() {
     let tmp = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
-    let _src = deploy_real(&paths.claude_skills_dir(), "tm-pr-workflow", "v1", None);
+    let _src = deploy_real(&paths.claude_skills_dir(), "tm-workflow", "v1", None);
 
-    let check = report(&reference_of(&[("tm-pr-workflow", "v2")]), &paths, None);
+    let check = report(&reference_of(&[("tm-workflow", "v2")]), &paths, None);
     assert_eq!(
         check.status,
         CheckStatus::Fail,
         "message: {}",
         check.message
     );
-    assert!(
-        check.message.contains("tm-pr-workflow"),
-        "{}",
-        check.message
-    );
+    assert!(check.message.contains("tm-workflow"), "{}", check.message);
     assert!(
         check.message.to_lowercase().contains("convention"),
         "{}",
@@ -128,10 +130,10 @@ fn staleness_warns_when_ordinary_skill_drifts() {
     let paths = paths_under(&tmp);
     let dest = paths.claude_skills_dir();
     let _a = deploy_real(&dest, "tm-doctor", "v1", None);
-    let _b = deploy_real(&dest, "tm-pr-workflow", "v2", None);
+    let _b = deploy_real(&dest, "tm-workflow", "v2", None);
 
     let check = report(
-        &reference_of(&[("tm-doctor", "v2"), ("tm-pr-workflow", "v2")]),
+        &reference_of(&[("tm-doctor", "v2"), ("tm-workflow", "v2")]),
         &paths,
         None,
     );
@@ -234,9 +236,15 @@ fn staleness_covers_the_managed_config_tier() {
     let tmp = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
     let managed = paths.agent_deploy_dir().parent().unwrap().join("skills");
-    let _src = deploy_real(&managed, "tm-workflow", "v1", None);
+    // #5202: an ORDINARY skill — `tm-workflow` is conventions-bearing now, and
+    // would raise this to Fail for a reason unrelated to what the test measures.
+    let _src = deploy_real(&managed, "tm-delegation-patterns", "v1", None);
 
-    let check = report(&reference_of(&[("tm-workflow", "v2")]), &paths, None);
+    let check = report(
+        &reference_of(&[("tm-delegation-patterns", "v2")]),
+        &paths,
+        None,
+    );
     assert_eq!(
         check.status,
         CheckStatus::Warn,
@@ -244,7 +252,9 @@ fn staleness_covers_the_managed_config_tier() {
         check.message
     );
     assert!(
-        check.message.contains("managed config/tm-workflow"),
+        check
+            .message
+            .contains("managed config/tm-delegation-patterns"),
         "the managed-config tier must be named: {}",
         check.message
     );

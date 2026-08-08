@@ -121,7 +121,7 @@ mod tests {
         // A leftover `~/.claude/skills/tm-*` copy must be flagged.
         let tmp = tempfile::tempdir().unwrap();
         let skills = tmp.path().join(".claude").join("skills");
-        let skill_dir = skills.join("tm-pr-workflow");
+        let skill_dir = skills.join("tm-workflow");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "old attribution").unwrap();
         // A non-tm user skill must NOT trip the probe.

@@ -2,7 +2,7 @@
 
 > **The requirement ("every PR touching a crate's `src/**` adds a fragment") is
 > in [`CLAUDE.md`](../../CLAUDE.md)**, and the fragment file format is in the
-> `tm-pr-workflow` skill — call `Skill(skill="tm-pr-workflow")` for it. This
+> `tm-workflow` skill — call `Skill(skill="tm-workflow")` for it. This
 > page is the trusty-tools-specific assembler and CI-gate detail: consult it
 > when writing a fragment or debugging a rejected one.
 

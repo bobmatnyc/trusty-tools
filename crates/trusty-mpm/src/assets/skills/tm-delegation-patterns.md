@@ -86,8 +86,8 @@ Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
 | `local-ops` | localhost, PM2, npm, docker / docker-compose, ports, processes; every `make` and `mise run` target; build, dist, clean, install, setup; version, bump, release, publish, deploy (`pyproject.toml`, `package.json`) | sonnet | Default fallback for ops / infra / build, including anything unknown or ambiguous. The generic `ops` agent is DEPRECATED |
 | `qa`, `web-qa`, `api-qa` | test, verify, check, regression, deployment verification; `make`/`mise run` `test`, `lint`, `check` (or `engineer`); browser, screenshot, click, navigate, DOM, console errors → `web-qa`; APIs → `api-qa` | sonnet | For browser work use `web-qa` — never chrome-devtools, claude-in-chrome, or playwright directly |
 | `documentation` | docs, README, API docs, guides | haiku | Style consistency, organization standards |
-| `ticketing` | issue/ticket bookkeeping — create, update, close, label, triage, comment (P6) | haiku | Required by P6 — ticket bookkeeping never goes to `version-control` |
-| `version-control` | PRs, branches, push/rebase/merge/tag, complex git, stacked PRs (P7) | haiku | Check git user for main-branch access |
+| `ticketing` | every Issue operation — create, update, close, label, assign, milestone, comment, dedupe (P6) | sonnet | Route by artifact: the Issue is always ticketing's, and no PR mutation ever is. See `tm-ticketing` |
+| `version-control` | the whole PR lifecycle incl. its title and body, plus branches, push/rebase/merge/tag, complex git, stacked PRs (P7) | haiku | Check git user for main-branch access. Policy comes from `tm-workflow` via the PM |
 | `security` | pre-push credential scan, vulnerability assessment | sonnet | Secret scanning, attack-vector detection |
 | `mpm-skills-manager` | creating/improving skills, recommending skills, stack detection | sonnet | Triggers: "skill", "stack", "framework" |
 
@@ -104,7 +104,7 @@ When the user says "just do it" or "handle it", delegate the full pipeline:
 | browser, screenshot, click, navigate, DOM, console errors | `web-qa` |
 | API, endpoint, HTTP, curl-shaped verification | `api-qa` |
 | ticket, issue, PROJ-123, #123 | `ticketing` (see `tm-ticketing`) |
-| PR, branch, merge, stacked | `version-control` (see `tm-pr-workflow`) |
+| PR, branch, merge, stacked | `version-control` (see `tm-workflow`) |
 | skill authoring, skill catalog | `mpm-skills-manager` |
 | agent authoring, agent catalog | `mpm-agent-manager` |
 | code review, adversarial verdict | `code-critic` |

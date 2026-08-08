@@ -496,7 +496,7 @@ pub(crate) fn has_file_write_redirection(command: &str) -> bool {
 pub(crate) const WORKTREE_TMP_REASON: &str = "`git worktree add` must not target /tmp, \
      /private/tmp, /var/folders, $TMPDIR, or the harness scratchpad — worktrees provisioned \
      there silently fail unrelated tests and can be reaped mid-task (issue #3955). Use \
-     `<repo-root>/.claude/worktrees/<name>` (the tm-pr-workflow convention) instead.";
+     `<repo-root>/.claude/worktrees/<name>` (the tm-workflow convention) instead.";
 
 /// Filesystem roots `git worktree add` must never target (issue #3977).
 ///
