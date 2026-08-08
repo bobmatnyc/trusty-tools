@@ -637,25 +637,26 @@ async fn load_persisted_tasks() -> Option<TaskStore> {
 
 /// Persist the given task map to disk atomically.
 ///
-/// Why: A naive `write` to the live file risks readers (or a crash) seeing
-/// a half-written file. Writing to a sibling temp path and renaming is
-/// atomic on the same filesystem on POSIX, so observers either see the old
-/// snapshot or the new one — never a corrupt one.
-/// What: Ensures the parent directory exists, writes JSON to
-/// `tasks.json.tmp`, then `rename`s onto `tasks.json`. Logs (but does not
-/// fail) on I/O errors — losing a snapshot is preferable to crashing the
-/// running server.
-/// Test: Call with a sample map, assert the target file parses back to the
-/// same map; force the parent dir to be missing and assert no panic.
+/// Why: A naive `write` to the live file risks readers (or a crash) seeing a
+/// half-written file. This used to open-code its own tmp+rename, which was a
+/// second implementation of what `state_writer` — the crate's entry point for
+/// exactly this — already owned, and it is how this file ended up as the one
+/// state file written without the owner-only mode `state_writer` now applies:
+/// `tasks.json` holds task narratives, including credential-scrubbed but not
+/// provably secret-free child-process stderr (#5230). Routing through the
+/// shared writer also buys the cross-process advisory lock the GUI, the
+/// `--api` sidecar, and a `cargo run` build need when they share
+/// `.trusty-agents/`.
+/// What: Serializes the map, then hands the write to
+/// `state_writer::atomic_write` (parent-dir creation, lock, `0600` tmp,
+/// fsync, rename) on a blocking worker — `fs4`'s lock syscalls block, the same
+/// reason `interaction_log` and `session_record` bridge through
+/// `spawn_blocking`. Logs (but does not fail) on I/O errors: losing a snapshot
+/// is preferable to crashing the running server.
+/// Test: `atomic_write_creates_an_owner_only_file`,
+/// `atomic_write_tightens_an_existing_world_readable_file`.
 async fn persist_tasks(responses: &HashMap<String, PmResponse>) {
     let path = tasks_persistence_path();
-    let tmp = path.with_extension("json.tmp");
-    if let Some(parent) = path.parent()
-        && let Err(e) = tokio::fs::create_dir_all(parent).await
-    {
-        tracing::warn!(?e, "failed to create state dir for tasks.json");
-        return;
-    }
     let json = match serde_json::to_vec(responses) {
         Ok(j) => j,
         Err(e) => {
@@ -663,11 +664,10 @@ async fn persist_tasks(responses: &HashMap<String, PmResponse>) {
             return;
         }
     };
-    if let Err(e) = tokio::fs::write(&tmp, &json).await {
-        tracing::warn!(?e, "failed to write tasks.json.tmp");
-        return;
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, &path).await {
-        tracing::warn!(?e, "failed to rename tasks.json.tmp -> tasks.json");
+    match tokio::task::spawn_blocking(move || crate::state_writer::atomic_write(&path, &json)).await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(?e, "failed to persist tasks.json"),
+        Err(e) => tracing::warn!(?e, "tasks.json persist worker failed to join"),
     }
 }
