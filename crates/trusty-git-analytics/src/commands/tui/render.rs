@@ -79,7 +79,10 @@ pub fn status_line(state: &TuiState) -> String {
     };
     let dropped = state.progress.dropped();
     let gap = if dropped > 0 {
-        format!("  (progress bus dropped {dropped} event(s))")
+        // #5197: the counter now covers both feeds the pane renders — the
+        // progress bus and the diverted tracing log — so it no longer names
+        // just one of them.
+        format!("  (dropped {dropped} line(s) under load)")
     } else {
         String::new()
     };

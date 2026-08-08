@@ -12,6 +12,8 @@ use tga::core::config::Config;
 use tga::core::db::correlation::{CorrelationCounts, CorrelationFilter, CorrelationRow};
 use tga::core::progress::{ProgressAggregate, ProgressBus};
 
+use super::capture::LogCapture;
+
 /// How many correlation rows the results view loads at a time.
 ///
 /// Why: a corpus can hold hundreds of thousands of commits; the view is a
@@ -172,6 +174,9 @@ pub struct TuiState {
     pub progress: ProgressAggregate,
     /// The bus the pipelines publish to. Cloned into each worker.
     pub bus: ProgressBus,
+    /// #5197: the process's diverted `tracing` output. Disarmed until the
+    /// alternate screen is up, so nothing is captured outside the TUI's life.
+    pub logs: LogCapture,
     /// Worker state.
     pub status: WorkStatus,
     /// Correlation roll-up as of the last reload.
@@ -217,6 +222,7 @@ impl TuiState {
             view: View::default(),
             progress: ProgressAggregate::new(),
             bus: ProgressBus::new(),
+            logs: LogCapture::new(),
             status: WorkStatus::default(),
             counts: CorrelationCounts::default(),
             rows: Vec::new(),
@@ -243,18 +249,40 @@ impl TuiState {
         self
     }
 
-    /// Drain the bus into the aggregate.
+    /// Adopt the capture that `main.rs` installed as the tracing writer.
+    ///
+    /// Why: the writer has to exist before `tracing_subscriber::…::init()`,
+    /// which happens long before the TUI is built — so the handle is created
+    /// there and handed down rather than made here (#5197).
+    /// What: builder setter for [`TuiState::logs`]. The capture is still
+    /// disarmed; `super::run_blocking` arms it once the alternate screen is up.
+    /// Test: `super::tests::pump_progress_surfaces_captured_log_lines`.
+    #[must_use]
+    pub fn with_logs(mut self, logs: LogCapture) -> Self {
+        self.logs = logs;
+        self
+    }
+
+    /// Drain the bus and the diverted log into the aggregate.
     ///
     /// Why: this is the once-per-tick call that makes the progress view live,
     /// and the only place the two halves of the bus meet.
     /// What: folds every queued event, then records the bus's drop count so
-    /// the pane can label a gap rather than silently show one.
-    /// Test: `super::tests::pump_folds_bus_events`.
+    /// the pane can label a gap rather than silently show one. #5197 adds the
+    /// second source: every `tracing` line the capture diverted since the last
+    /// tick becomes an ACTIVITY line, which is where it would have been
+    /// readable anyway had stderr not been the same device as the screen.
+    /// Test: `super::tests::pump_folds_bus_events`,
+    /// `super::tests::pump_progress_surfaces_captured_log_lines`.
     pub fn pump_progress(&mut self) {
         for event in self.bus.drain() {
             self.progress.apply(event);
         }
-        self.progress.set_dropped(self.bus.dropped());
+        for line in self.logs.drain() {
+            self.progress.push_activity(line);
+        }
+        self.progress
+            .set_dropped(self.bus.dropped() + self.logs.dropped());
     }
 
     /// Move the active view's cursor by `delta`, clamped to its list.

@@ -13,6 +13,7 @@ use crate::collect::git::GitCollector;
 use crate::collect::github::GitHubClient;
 use crate::collect::identity::IdentityResolver;
 use crate::collect::linear_pipeline;
+use crate::collect::notify;
 use crate::collect::pr_provider::PrProvider;
 use crate::collect::weeks::{clamp_week_to_range, weeks_in_range};
 use crate::core::config::Config;
@@ -373,7 +374,10 @@ impl CollectionPipeline {
                 Ok(c) => c
                     .no_fetch(true)
                     .with_head_only(effective_head_only)
-                    .with_explicit_branches(self.branches.clone()),
+                    .with_explicit_branches(self.branches.clone())
+                    // #5197: an attached bus means a TUI owns the terminal, so
+                    // the walk's indicatif spinner must not draw over it.
+                    .with_progress(self.progress.clone()),
                 Err(e) => {
                     let msg = format!("failed to open repo {}: {e}", repo_cfg.path.display());
                     warn!("{msg}");
@@ -429,7 +433,7 @@ impl CollectionPipeline {
                      `developer_aliases` in the config to map missing identities."
                 );
                 warn!("{msg}");
-                eprintln!("{msg}");
+                notify::warning(&self.progress, "collect", &msg);
             }
         }
 
@@ -586,7 +590,7 @@ impl CollectionPipeline {
                                rate-limits to 60 requests/hour and most PRs will be \
                                missed.";
                     warn!("{msg}");
-                    eprintln!("warning: {msg}");
+                    notify::warning(&self.progress, "collect", &format!("warning: {msg}"));
                     info!(
                         repo_count = repos.len(),
                         "GitHub PR fetcher will scan {} repo(s) anonymously",
@@ -793,9 +797,13 @@ impl CollectionPipeline {
                     "until_date set without since_date — collecting full git history. \
                      Use --weeks N or set analysis.since_date in config to limit scope."
                 );
-                eprintln!(
+                notify::warning(
+                    &self.progress,
+                    &repo_name,
+                    &format!(
                     "warning: [{repo_name}] no since_date / --weeks — collecting FULL git history. \
                      Set analysis.since_date or pass --weeks N to limit scope."
+                ),
                 );
                 match collector.collect_window(db, None, Some(u)) {
                     Ok(n) => {
@@ -818,9 +826,13 @@ impl CollectionPipeline {
                     "no since_date or --weeks flag set — collecting full git history. \
                      Use --weeks N or set analysis.since_date in config to limit scope."
                 );
-                eprintln!(
+                notify::warning(
+                    &self.progress,
+                    &repo_name,
+                    &format!(
                     "warning: [{repo_name}] no since_date / --weeks — collecting FULL git history. \
                      Set analysis.since_date or pass --weeks N to limit scope."
+                ),
                 );
                 match collector.collect(db) {
                     Ok(n) => {
@@ -844,9 +856,13 @@ impl CollectionPipeline {
                 match db::is_week_collected(db, &repo_name, year, week_no) {
                     Ok(true) => {
                         info!("Skipping {repo_name} W{week_no} {year} — already collected");
-                        println!(
-                            "Skipped   W{week_no:02} {year}: already collected \
+                        notify::progress(
+                            &self.progress,
+                            &repo_name,
+                            &format!(
+                                "Skipped   W{week_no:02} {year}: already collected \
                              (use --force to re-collect) [{repo_name}]"
+                            ),
                         );
                         stats.weeks_skipped += 1;
                         continue;
@@ -878,7 +894,8 @@ impl CollectionPipeline {
                         commits = n,
                         "extracted week"
                     );
-                    println!("Collected W{week_no:02} {year}: {n} commits [{repo_name}]");
+                    let line = format!("Collected W{week_no:02} {year}: {n} commits [{repo_name}]");
+                    notify::progress(&self.progress, &repo_name, &line);
                     stats.commits_collected += n;
                     stats.weeks_collected += 1;
                     let repo_count = self.config.repositories.len();

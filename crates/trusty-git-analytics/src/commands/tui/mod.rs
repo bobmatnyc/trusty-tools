@@ -22,13 +22,21 @@
 //! already is — the classify cascade's opt-in tier 4 — and switching it off
 //! changes nothing here.
 //!
-//! Terminal hygiene is a correctness requirement: raw mode and the alternate
-//! screen are restored on normal exit, on error, and on panic. See
-//! [`install_panic_hook`].
+//! Terminal hygiene is a correctness requirement, in two directions. Raw mode
+//! and the alternate screen are restored on normal exit, on error, and on
+//! panic (see [`install_panic_hook`]) — and while the screen IS ours, nothing
+//! in the process may write to it behind ratatui's back. Three things used to:
+//! the revwalk's `indicatif` spinner (now suppressed whenever a progress bus is
+//! attached), the collect pipeline's `println!` / `eprintln!` lines (now routed
+//! to the bus by `tga::collect`'s `notify`), and the `tracing` subscriber
+//! itself (now diverted into [`capture`] and rendered in the ACTIVITY pane).
+//! A stray write is not cosmetic: ratatui's diff renderer never repaints a cell
+//! it believes unchanged, so it survives every later redraw (#5197).
 //!
 //! Test: `tests` in this module covers the picker, the key map, the state
 //! transitions, and the zero-credential path.
 
+mod capture;
 mod event_loop;
 mod render;
 mod state;
@@ -46,6 +54,8 @@ use trusty_common::monitor::tui_common::{enter_tui, leave_tui};
 use crate::commands::args::TuiArgs;
 use state::TuiState;
 use work::WorkerHandle;
+
+pub use capture::LogCapture;
 
 /// Restore the terminal from raw mode and the alternate screen.
 ///
@@ -77,13 +87,16 @@ fn restore_terminal() {
 /// Why: a panic inside the draw loop unwinds past every `leave_tui` call, and
 /// an operator left in raw mode on the alternate screen has a shell that does
 /// not echo and does not scroll. That is a defect, not a rough edge.
-/// What: installs a hook that restores the terminal first, then delegates to
-/// whatever hook was installed before (so the backtrace still prints).
+/// What: installs a hook that restores the terminal and stops diverting
+/// `tracing` (#5197 — a swallowed log line after a panic is a lost diagnosis),
+/// then delegates to whatever hook was installed before so the backtrace still
+/// prints.
 /// Test: side-effect-only; verified by panicking inside the loop by hand.
-fn install_panic_hook() {
+fn install_panic_hook(logs: LogCapture) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
+        logs.disarm();
         previous(info);
     }));
 }
@@ -101,9 +114,17 @@ fn install_panic_hook() {
 /// Returns an error when the database cannot be opened, when terminal setup
 /// fails, or when the loop itself fails. The terminal is restored first in
 /// every one of those cases.
-pub async fn run(config: Config, db_path: &Path, args: TuiArgs) -> anyhow::Result<()> {
+///
+/// `logs` is the [`LogCapture`] `main.rs` installed as the tracing writer; the
+/// TUI arms it for exactly as long as it owns the screen (#5197).
+pub async fn run(
+    config: Config,
+    db_path: &Path,
+    args: TuiArgs,
+    logs: LogCapture,
+) -> anyhow::Result<()> {
     let db_path: PathBuf = db_path.to_path_buf();
-    tokio::task::spawn_blocking(move || run_blocking(config, db_path, args)).await?
+    tokio::task::spawn_blocking(move || run_blocking(config, db_path, args, logs)).await?
 }
 
 /// The blocking half of [`run`]: terminal setup, loop, teardown.
@@ -114,15 +135,28 @@ pub async fn run(config: Config, db_path: &Path, args: TuiArgs) -> anyhow::Resul
 /// screen, runs the loop, and restores the terminal before returning either
 /// result.
 /// Test: side-effect-only glue.
-fn run_blocking(config: Config, db_path: PathBuf, args: TuiArgs) -> anyhow::Result<()> {
-    install_panic_hook();
+fn run_blocking(
+    config: Config,
+    db_path: PathBuf,
+    args: TuiArgs,
+    logs: LogCapture,
+) -> anyhow::Result<()> {
+    install_panic_hook(logs.clone());
 
     let db = Database::open(&db_path)?;
-    let mut state = TuiState::new(config).offline(args.correlate_only);
+    let mut state = TuiState::new(config)
+        .offline(args.correlate_only)
+        .with_logs(logs);
     let mut worker = WorkerHandle::new(db, db_path);
     worker.reload_results(&mut state);
 
     let mut terminal = enter_tui()?;
+    // #5197: from here until the terminal is restored, this process must not
+    // write a byte to stdout or stderr outside ratatui's own draws. Arming the
+    // capture diverts every `tracing` line into the ACTIVITY pane instead;
+    // arming it AFTER `enter_tui` keeps a terminal-setup failure on stderr,
+    // where the operator can still read it.
+    state.logs.arm();
     // #5197: clear before the first draw. `Database::open` runs migrations and
     // logs one line each to stderr; on a first run against an unmigrated
     // database that is ~22 lines, and ratatui's diff renderer starts from an
@@ -137,5 +171,8 @@ fn run_blocking(config: Config, db_path: PathBuf, args: TuiArgs) -> anyhow::Resu
     // Restore on BOTH paths, and prefer the loop's error over a teardown one.
     let teardown = leave_tui(&mut terminal);
     restore_terminal();
+    // The screen is ours again, so tracing goes back to stderr for whatever
+    // the process still has to say — including the error this may return.
+    state.logs.disarm();
     result.and(teardown)
 }

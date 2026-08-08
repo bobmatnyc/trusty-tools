@@ -15,6 +15,8 @@
 //! - [`pr_provider`] — provider-agnostic PR fetch trait
 //! - [`ticket`] — ticket-reference detection on commit messages
 //! - [`collector`] — end-to-end pipeline orchestrator
+//! - `notify` — routes the pipeline's operator-facing lines to stdout/stderr,
+//!   or to the progress bus when a consumer owns the terminal (#5197)
 //! - [`errors`] — module-level error type ([`CollectError`])
 
 pub mod ai_attribution;
@@ -31,6 +33,7 @@ pub mod identity;
 pub mod jira;
 pub mod linear;
 mod linear_pipeline;
+mod notify;
 pub mod pm_adapter;
 pub mod pr_provider;
 pub mod ticket;
@@ -200,6 +203,42 @@ mod tests {
             }
             other => panic!("a repo whose walk failed must report Failed, got {other:?}"),
         }
+    }
+
+    /// #5197: the pipeline's operator-facing lines must not reach the terminal
+    /// while a consumer owns it.
+    ///
+    /// The unbounded-window branch is the cheapest one to reach that prints:
+    /// with no `since_date` it warns about a full-history walk. With a bus
+    /// attached that text has to arrive as a `Collect` detail event — if it
+    /// still went to `eprintln!` it would land inside the TUI's drawn frame,
+    /// where ratatui never repaints it.
+    #[test]
+    fn operator_lines_reach_the_bus_instead_of_the_terminal() {
+        let bus = crate::core::progress::ProgressBus::bounded(64);
+        let root = std::env::temp_dir().join(format!("tga-5197-notify-{}", std::process::id()));
+        let path = root.join("repo0");
+        std::fs::create_dir_all(&path).expect("mkdir");
+        git2::Repository::init(&path).expect("git init");
+        // No since_date / until_date: takes the full-history branch, which warns.
+        run_pipeline(
+            vec![RepositoryConfig {
+                path,
+                name: Some("repo0".into()),
+                ..Default::default()
+            }],
+            &bus,
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        let events = bus.drain();
+        assert!(
+            events.iter().any(|e| e
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("collecting FULL git history"))),
+            "the full-history warning must arrive on the bus, not on stderr: {events:?}"
+        );
     }
 
     /// #5197 finding 4: the pre-walk emit tagged position-among-repositories

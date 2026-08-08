@@ -266,7 +266,25 @@ async fn run() -> anyhow::Result<()> {
     };
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level.to_string()));
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    // #5197: `tga tui` owns the alternate screen, and stderr is the same
+    // device — a `warn!` from the collect pipeline lands inside the drawn frame
+    // and ratatui never repaints those cells, so it is permanent for the
+    // session. For that one subcommand the writer becomes a `LogCapture` the
+    // TUI arms and drains into its ACTIVITY pane, and ANSI is off because those
+    // lines are re-rendered as ratatui text rather than written to a terminal.
+    // Every other subcommand takes the byte-identical stderr path it always
+    // had; nothing here changes `trusty_common::init_tracing` for any other
+    // binary, whose stderr default keeps stdout clean for MCP framing.
+    let log_capture = commands::tui::LogCapture::new();
+    if matches!(cli.command, Commands::Tui(_)) {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(log_capture.clone())
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    }
 
     // Update check: tga has no MCP stdio transport — all other subcommands are
     // human-facing interactive CLI commands where a release notice is
@@ -343,7 +361,7 @@ async fn run() -> anyhow::Result<()> {
     // each background run opens its own writer — so it is dispatched before the
     // shared open below rather than sharing a `&mut Database` across threads.
     if let Commands::Tui(args) = cli.command {
-        return commands::tui::run(config, &db_path, args).await;
+        return commands::tui::run(config, &db_path, args, log_capture).await;
     }
 
     // Open SQLite database (runs migrations on open).

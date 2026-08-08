@@ -280,6 +280,22 @@ fn aggregate_log_is_bounded() {
     assert!(last.contains(&format!("r{}", LOG_CAPACITY + 49)));
 }
 
+/// #5197: the TUI pushes its diverted `tracing` lines onto the same log, and
+/// they obey the same bound as the event-derived ones.
+#[test]
+fn aggregate_accepts_external_activity_lines() {
+    let mut agg = ProgressAggregate::new();
+    agg.push_activity("2026-08-08T16:53:27Z  WARN fetch failed".to_string());
+    assert_eq!(
+        agg.log().next_back().map(String::as_str),
+        Some("2026-08-08T16:53:27Z  WARN fetch failed")
+    );
+    for i in 0..LOG_CAPACITY {
+        agg.push_activity(format!("line {i}"));
+    }
+    assert_eq!(agg.log().count(), LOG_CAPACITY);
+}
+
 #[test]
 fn activity_line_only_for_notable_events() {
     let mut agg = ProgressAggregate::new();

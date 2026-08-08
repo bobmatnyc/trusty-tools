@@ -385,6 +385,48 @@ fn pump_folds_bus_events() {
     assert_eq!(s.progress.rows(Stage::Collect).len(), 1);
 }
 
+/// #5197: a `tracing` line written while the TUI owns the screen must reach the
+/// ACTIVITY pane instead of the terminal.
+///
+/// This asserts the whole path a real log line takes — `MakeWriter` → capture
+/// buffer → `pump_progress` → the aggregate the ACTIVITY pane renders — using
+/// the same `io::Write` call `tracing_subscriber`'s fmt layer makes. What it
+/// does NOT assert is that the subscriber is wired to this capture in `main.rs`
+/// (that wiring is a `matches!` on the subcommand) or that the resulting screen
+/// is free of escape sequences; both need the visual pass.
+#[test]
+fn pump_progress_surfaces_captured_log_lines() {
+    use std::io::Write;
+    use tracing_subscriber::fmt::MakeWriter;
+    let mut s = state();
+    s.logs.arm();
+    s.logs
+        .make_writer()
+        .write_all(b"2026-08-08T16:53:27Z  WARN fetch failed for branch main\n")
+        .expect("write");
+    s.pump_progress();
+    assert!(
+        s.progress
+            .log()
+            .any(|l| l == "2026-08-08T16:53:27Z  WARN fetch failed for branch main"),
+        "a diverted log line must render in the ACTIVITY pane; got {:?}",
+        s.progress.log().collect::<Vec<_>>()
+    );
+}
+
+/// #5197: with the capture disarmed — every state outside the alternate
+/// screen, and every non-`tui` subcommand — writes go to the real stderr.
+#[test]
+fn a_disarmed_capture_leaves_tracing_on_stderr() {
+    use tracing_subscriber::fmt::MakeWriter;
+    let s = state();
+    assert!(!s.logs.is_armed());
+    assert!(
+        !s.logs.make_writer().is_buffered(),
+        "nothing may be diverted before the TUI owns the terminal"
+    );
+}
+
 #[test]
 fn pump_records_the_bus_drop_count() {
     let mut s = state();

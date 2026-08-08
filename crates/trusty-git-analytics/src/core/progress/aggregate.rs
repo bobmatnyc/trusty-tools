@@ -187,6 +187,19 @@ impl ProgressAggregate {
         self.dropped
     }
 
+    /// Append a line to the activity log that did not come from an event.
+    ///
+    /// Why: #5197 diverts the process's `tracing` output into the TUI while it
+    /// owns the terminal — writing it to stderr would print inside the drawn
+    /// frame. Those lines have no `ProgressEvent` behind them, but they belong
+    /// in the same pane and under the same bound as the ones that do.
+    /// What: pushes onto the bounded log, evicting the oldest past
+    /// [`LOG_CAPACITY`].
+    /// Test: `super::tests::aggregate_accepts_external_activity_lines`.
+    pub fn push_activity(&mut self, line: String) {
+        self.push_log(line);
+    }
+
     /// Rows for one stage, in first-seen order.
     ///
     /// Why: the pane lists repos in the order the pipeline reached them, which
