@@ -421,6 +421,42 @@ engineer = "haiku"
 // and the `config_write` MCP tool and read by nothing. These pin the chain that
 // now consumes it, and the project layer that outranks it.
 
+/// `load_effective` reads the project file from disk and applies its layer.
+///
+/// Why: `project_default_model_tops_the_chain` asserts the layering on an
+/// in-memory struct, which stays green even if the loader stops reading the
+/// project file at all. This pins the whole path — real `config.toml`, real
+/// `.trusty-mpm.toml` — so the refactor that moved the root resolution into
+/// `load_effective_default` (#5207) cannot silently drop the project layer.
+/// Asserting the PROJECT value keeps it independent of whatever host YAML the
+/// developer's home directory happens to hold: the project layer outranks it.
+/// Test: itself.
+#[test]
+fn load_effective_applies_the_project_layer() {
+    let root = tempfile::TempDir::new().unwrap();
+    let project = tempfile::TempDir::new().unwrap();
+    std::fs::write(
+        root.path().join("config.toml"),
+        "[models]\ndefault = \"haiku\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project
+            .path()
+            .join(crate::core::project_config::PROJECT_CONFIG_FILE),
+        "default_model = \"opus\"\n",
+    )
+    .unwrap();
+
+    let cfg = MpmConfig::load_effective(root.path(), Some(project.path()));
+
+    assert_eq!(
+        resolve_agent_model(&cfg, "nobody", None, None),
+        "claude-opus-4-5",
+        "the project file's default_model must beat the root config.toml's"
+    );
+}
+
 /// The project's committed `.trusty-mpm.toml` tops the default-model chain.
 /// Test: itself.
 #[test]

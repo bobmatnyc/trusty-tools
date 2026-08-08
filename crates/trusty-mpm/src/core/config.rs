@@ -505,17 +505,49 @@ impl MpmConfig {
     /// explicit `--model`, a per-agent override, agent frontmatter — still win
     /// over any of these, since they are all defaults.
     /// `project_dir` is `None` for a launch with no resolved project.
-    /// Test: `project_default_model_tops_the_chain`,
+    /// Test: `load_effective_applies_the_project_layer`,
+    /// `project_default_model_tops_the_chain`,
     /// `yaml_default_model_beats_toml_default`,
     /// `default_model_layers_are_a_no_op_when_unset`.
     pub fn load_effective(root: &Path, project_dir: Option<&Path>) -> Self {
+        Self::load(root).with_outer_default_model_layers(project_dir)
+    }
+
+    /// [`load_effective`](Self::load_effective) against the canonical
+    /// `~/.trusty-mpm/` root.
+    ///
+    /// Why: `launch()` needs the effective config but must not name
+    /// `FrameworkPaths::default()` itself — the #4203 source-text guard
+    /// (`launch_paths_prepare_through_the_isolated_seam`) forbids that symbol in
+    /// the CLI launch paths, because a self-resolved framework root there is how
+    /// the deploy-tier bug got reintroduced twice. Resolving the root inside the
+    /// config module keeps the guard meaningful instead of merely satisfied.
+    /// What: delegates to [`load_default`](Self::load_default) — same
+    /// home-directory handling, including the stripped-CI fallback — then folds
+    /// on the project and host layers.
+    /// Test: `load_effective_applies_the_project_layer` covers the layering;
+    /// the root resolution is [`load_default`]'s.
+    pub fn load_effective_default(project_dir: Option<&Path>) -> Self {
+        Self::load_default().with_outer_default_model_layers(project_dir)
+    }
+
+    /// Fold the project and host `default_model` layers onto an already-loaded
+    /// config.
+    ///
+    /// Why: shared by [`load_effective`](Self::load_effective) and
+    /// [`load_effective_default`](Self::load_effective_default) so the two entry
+    /// points cannot drift in precedence — only in how they find the root.
+    /// What: reads the project's `.trusty-mpm.toml` and the host YAML, then
+    /// applies [`with_default_model_layers`](Self::with_default_model_layers).
+    /// Test: `load_effective_applies_the_project_layer`.
+    #[must_use]
+    fn with_outer_default_model_layers(self, project_dir: Option<&Path>) -> Self {
         let project_default = project_dir
             .and_then(crate::core::project_config::load_or_report)
             .and_then(|c| c.default_model);
         let host_default =
             crate::core::trusty_tools_config::TrustyToolsConfig::load().default_model;
-        Self::load(root)
-            .with_default_model_layers(project_default.as_deref(), host_default.as_deref())
+        self.with_default_model_layers(project_default.as_deref(), host_default.as_deref())
     }
 
     /// Overlay the project and host default-model layers onto `[models] default`.
