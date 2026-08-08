@@ -1,0 +1,3 @@
+Fixed
+
+- A failed workflow subprocess now reports what the child actually said. `run_task` kept a non-zero exit's only explanation — the child's stderr — in the parent's own stderr, which is invisible when the parent is the GUI-launched API sidecar, so the user saw nothing but `subprocess exited with status Some(1)`. The last 20 non-protocol stderr lines are now captured and appended to the response narrative; the legacy `subprocess exited with status {code:?}` text stays leading so both GUI delivery paths keep matching on it (refs [#4321](https://github.com/bobmatnyc/trusty-tools/issues/4321))
