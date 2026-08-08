@@ -10,8 +10,9 @@
 //! sidecar's `/api/events`, parses frames, and re-emits each streaming delta
 //! as a Tauri `task-delta` event — exactly the payload the browser bridge
 //! emits, so `ChatView` handles both transports with identical code.
-//! What: [`start_event_bridge`] spawns a supervised background task that
-//! (re)connects to `{api_base}/api/events`, incrementally parses the SSE
+//! What: [`start_event_bridge`] spawns a supervised background task that mints
+//! a stream ticket (#5052 — `/api/events` is no longer unauthenticated) and
+//! (re)connects to `{api_base}/api/events?ticket=…`, incrementally parses the SSE
 //! `event:`/`data:` framing off `Response::chunk()` (no extra deps — reqwest's
 //! chunk reader is available without the `stream` feature), and for every
 //! `agent_message_delta` frame emits `app.emit("task-delta", DeltaPayload)`.
@@ -56,9 +57,9 @@ struct DeltaPayload {
 /// `RECONNECT_BACKOFF`, repeat. Errors are logged, never fatal.
 pub fn start_event_bridge(app: AppHandle, port: u16) {
     tauri::async_runtime::spawn(async move {
-        let url = format!("{}/api/events", api_base(port));
+        let base = api_base(port);
         loop {
-            if let Err(e) = pump_stream(&app, &url).await {
+            if let Err(e) = pump_stream(&app, &base).await {
                 tracing::debug!(?e, "event bridge stream ended; will reconnect");
             }
             tokio::time::sleep(RECONNECT_BACKOFF).await;
@@ -66,11 +67,41 @@ pub fn start_event_bridge(app: AppHandle, port: u16) {
     });
 }
 
-/// Connect to `url` and pump SSE frames until the stream ends.
-async fn pump_stream(app: &AppHandle, url: &str) -> Result<(), String> {
+/// Mint a stream ticket from the sidecar. (#5052)
+///
+/// Why: `GET /api/events` is no longer unauthenticated — it streams conversation
+/// content, and any page in the user's browser could previously read it from
+/// `127.0.0.1`. This bridge is a same-machine, server-side client, so it sends
+/// no `Origin` and the mint endpoint's same-origin write guard admits it.
+/// What: `POST /api/events/ticket` → the `ticket` field of the JSON body.
+/// Test: covered end-to-end by launching the desktop shell against a live
+/// sidecar; the server side is `trusty-agents`' `api::server::tests::event_tickets`.
+async fn mint_ticket(client: &reqwest::Client, base: &str) -> Result<String, String> {
+    let body: serde_json::Value = client
+        .post(format!("{base}/api/events/ticket"))
+        .send()
+        .await
+        .map_err(|e| format!("mint: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("mint status: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("mint body: {e}"))?;
+    body.get("ticket")
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "mint response had no ticket".to_string())
+}
+
+/// Connect to the sidecar's event stream and pump SSE frames until it ends.
+async fn pump_stream(app: &AppHandle, base: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
+    // #5052: a fresh ticket per connection attempt — cheaper and more robust
+    // than caching one across the reconnect backoff and discovering it expired.
+    let ticket = mint_ticket(&client, base).await?;
+    let url = format!("{base}/api/events?ticket={ticket}");
     let mut resp = client
-        .get(url)
+        .get(&url)
         .send()
         .await
         .map_err(|e| format!("connect: {e}"))?

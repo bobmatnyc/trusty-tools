@@ -10,6 +10,10 @@
 //!   - [`with_guarded_middleware`] additionally applies the router-wide
 //!     same-origin write guard ([`origin_guard`], #3304) so destructive daemon
 //!     write routes are not exposed to cross-origin CSRF.
+//!   - [`with_guarded_middleware_same_origin_cors`] is the same stack with the
+//!     permissive CORS policy swapped for [`same_origin_cors`], so a browser
+//!     page on an untrusted origin cannot READ the daemon's responses either
+//!     (#5052).
 //!   - [`daemon_http_client`] builds a reqwest client with short timeouts so
 //!     CLI commands never hang on a missing daemon.
 //!
@@ -26,13 +30,16 @@ use tower_http::{
         CompressionLayer,
         predicate::{DefaultPredicate, NotForContentType, Predicate},
     },
-    cors::{Any, CorsLayer},
+    cors::{AllowOrigin, Any, CorsLayer},
     trace::TraceLayer,
 };
 
 pub mod origin_guard;
 
-pub use origin_guard::{SelfOrigins, guard_write_origin};
+pub use origin_guard::{
+    SelfOrigins, guard_write_origin, origin_is_local_webview, origin_is_loopback,
+    origin_matches_self,
+};
 
 /// Apply the standard trusty-* middleware stack to an axum router.
 ///
@@ -62,12 +69,81 @@ where
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
+    with_middleware_stack(router, cors)
+}
+
+/// The trace + gzip half of the standard stack, plus a caller-chosen CORS policy.
+///
+/// Why: `with_standard_middleware` and
+/// [`with_guarded_middleware_same_origin_cors`] differ in exactly one layer —
+/// the CORS policy. Keeping the layer ORDER (and the SSE compression carve-out
+/// documented on `with_standard_middleware`) in one function means a future fix
+/// to that order lands once rather than twice.
+/// What: layers compression (innermost), trace, then `cors` (outermost).
+/// Test: `with_standard_middleware_composes`,
+/// `with_guarded_middleware_same_origin_cors_composes`.
+fn with_middleware_stack<S>(router: Router<S>, cors: CorsLayer) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     let compress =
         CompressionLayer::new().compress_when(DefaultPredicate::new().and(NotForContentType::SSE));
     router
         .layer(compress)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+}
+
+/// A CORS policy that reflects ONLY same-machine origins. (#5052)
+///
+/// Why: `allow_origin(Any)` lets any page the operator happens to have open
+/// READ a loopback daemon's responses. A loopback bind does not contain that —
+/// the attacker's JavaScript runs inside the operator's own browser, which can
+/// reach `127.0.0.1` — so for a daemon whose GET surface carries conversation
+/// content (`trusty-agents`' `/api/events`, `/api/tasks`, `/api/sessions/*`),
+/// permissive CORS is the difference between "unreachable off-host" and
+/// "readable by any web page". Reflecting only same-machine origins keeps every
+/// legitimate consumer working: the daemon's own SPA (same-origin), a `pnpm dev`
+/// Vite server on `http://localhost:5173`, a Tauri webview, and the daemon's own
+/// resolved non-loopback bind (#3269). Server-side callers (the console reverse
+/// proxy, `curl`, MCP stdio bridges) send no `Origin` at all and are unaffected
+/// — CORS is a browser-enforced policy, never a server-side access control,
+/// which is why this is defence in depth BEHIND per-route auth, not a
+/// replacement for it.
+/// What: builds a [`CorsLayer`] whose allowed origin is a predicate —
+/// [`origin_is_loopback`] OR [`origin_is_local_webview`] OR
+/// [`origin_matches_self`] against `self_origins`. Methods and headers stay
+/// `Any`; credentials are NOT allowed, so no ambient cookie/auth is ever
+/// attached cross-origin.
+/// Test: `same_origin_cors_predicate_*` below;
+/// `cross_origin_event_stream_is_not_cors_readable` in trusty-agents'
+/// `api::server::tests::guard`.
+pub fn same_origin_cors(self_origins: SelfOrigins) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _parts| {
+            origin
+                .to_str()
+                .map(|value| same_origin_cors_allows(value, &self_origins))
+                .unwrap_or(false)
+        }))
+        .allow_methods(Any)
+        .allow_headers(Any)
+}
+
+/// Whether [`same_origin_cors`] reflects `origin`.
+///
+/// Why: the predicate closure handed to `AllowOrigin::predicate` is not
+/// reachable from a unit test; naming the decision separately makes the policy
+/// directly testable, including the DNS-rebinding lookalikes
+/// (`127.0.0.1.evil.com`) that [`origin_is_loopback`] already rejects.
+/// What: `true` for a loopback host, a local webview origin, or one of the
+/// daemon's own resolved non-loopback bind addresses.
+/// Test: `same_origin_cors_predicate_allows_local`,
+/// `same_origin_cors_predicate_rejects_remote`.
+pub fn same_origin_cors_allows(origin: &str, self_origins: &SelfOrigins) -> bool {
+    origin_is_loopback(origin)
+        || origin_is_local_webview(origin)
+        || origin_matches_self(origin, self_origins)
 }
 
 /// Apply the standard middleware stack PLUS the router-wide same-origin write
@@ -107,6 +183,36 @@ where
         guard_write_origin,
     ));
     with_standard_middleware(guarded)
+}
+
+/// [`with_guarded_middleware`], but with [`same_origin_cors`] in place of the
+/// permissive CORS policy. (#5052)
+///
+/// Why: the write guard stops a cross-origin page from DRIVING a daemon; it does
+/// nothing about a cross-origin page READING one, because reads are `GET` and
+/// the guard is method-gated. For a daemon whose GET surface is telemetry that
+/// is fine. For one whose GET surface is conversation content it is not — see
+/// [`same_origin_cors`]. This entry point exists so such a daemon opts into the
+/// tighter policy with a one-line change instead of assembling the stack itself
+/// (and drifting from the layer order in [`with_middleware_stack`]).
+/// What: layers [`guard_write_origin`] innermost, then compression/trace, then
+/// the same-origin CORS policy built from the SAME `self_origins` allowlist the
+/// guard uses.
+/// Test: `with_guarded_middleware_same_origin_cors_composes` below; the
+/// end-to-end behaviour is covered by trusty-agents'
+/// `api::server::tests::guard`.
+pub fn with_guarded_middleware_same_origin_cors<S>(
+    router: Router<S>,
+    self_origins: SelfOrigins,
+) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let guarded = router.layer(axum::middleware::from_fn_with_state(
+        self_origins.clone(),
+        guard_write_origin,
+    ));
+    with_middleware_stack(guarded, same_origin_cors(self_origins))
 }
 
 /// Build a `reqwest::Client` configured for daemon-to-daemon calls.
@@ -172,6 +278,60 @@ mod tests {
         // stateless router with a default (loopback-only) allowlist.
         let router: Router = Router::new().route("/ping", get(|| async { "pong" }));
         let _wrapped = with_guarded_middleware(router, SelfOrigins::default());
+    }
+
+    #[test]
+    fn with_guarded_middleware_same_origin_cors_composes() {
+        // #5052 smoke test: the tightened stack layers and finalizes.
+        let router: Router = Router::new().route("/ping", get(|| async { "pong" }));
+        let _wrapped = with_guarded_middleware_same_origin_cors(router, SelfOrigins::default());
+    }
+
+    /// Why: #5052 — every legitimate same-machine consumer must keep working
+    /// after the policy stops being `Any`: the daemon's own SPA, a Vite dev
+    /// server, the Tauri shell, and the daemon's own non-loopback bind (#3269).
+    /// Test: this test.
+    #[test]
+    fn same_origin_cors_predicate_allows_local() {
+        let self_origins =
+            SelfOrigins::from_bind_addrs(&[std::net::SocketAddr::from(([100, 64, 1, 2], 7654))]);
+        for origin in [
+            "http://127.0.0.1:7654",
+            "http://localhost:5173",
+            "http://[::1]:7654",
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "http://100.64.1.2:7654",
+        ] {
+            assert!(
+                same_origin_cors_allows(origin, &self_origins),
+                "{origin} must be reflected"
+            );
+        }
+    }
+
+    /// Why: SECURITY (#5052) — the whole point of the policy is that a page on
+    /// a remote origin cannot read the daemon's responses, including the
+    /// DNS-rebinding lookalikes that a naive prefix match would accept.
+    /// Test: this test.
+    #[test]
+    fn same_origin_cors_predicate_rejects_remote() {
+        let self_origins =
+            SelfOrigins::from_bind_addrs(&[std::net::SocketAddr::from(([100, 64, 1, 2], 7654))]);
+        for origin in [
+            "https://evil.example",
+            "http://127.0.0.1.evil.com",
+            "http://localhost.evil.com",
+            "https://tauri.localhost.evil.com",
+            "http://100.64.9.9:7654",
+            "http://10.0.0.5:7654",
+            "",
+        ] {
+            assert!(
+                !same_origin_cors_allows(origin, &self_origins),
+                "{origin} must NOT be reflected"
+            );
+        }
     }
 
     #[tokio::test]

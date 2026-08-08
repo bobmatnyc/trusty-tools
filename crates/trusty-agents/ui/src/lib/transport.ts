@@ -341,18 +341,8 @@ export async function listenEvent<T>(
 
 /**
  * Why: #192 Phase B replaces 2-second polling of `/api/tasks` with a
- * persistent Server-Sent Events stream from the Rust API server. Browsers
- * reconnect dropped EventSources automatically, so we get free resilience —
- * we just need a small wrapper to route incoming `event:` payloads to a
- * typed callback and surface errors to the caller for UI status feedback.
- * What: Opens an `EventSource` against `/api/events` (optionally filtered by
- * `session_id`), parses every `event:`-named SSE message as JSON `AppEvent`,
- * and invokes `onEvent`. `onError` fires on transport errors; the browser
- * keeps trying to reconnect in the background. Returns the raw EventSource
- * so callers can `close()` on unmount.
- * Test: Run `cargo run -- --api --port 7654` then open the browser; observe
- * that submitted tasks emit `session_started`, `pm_thinking`, etc. without
- * any polling network activity.
+ * persistent Server-Sent Events stream from the Rust API server.
+ * What: Shape of one decoded server event.
  */
 export interface AppEvent {
   type: string;
@@ -373,42 +363,152 @@ export interface AppEvent {
   [key: string]: unknown;
 }
 
-export function connectEventSource(
+/**
+ * Why (#5052): `GET /api/events` used to be exempt from auth entirely, because
+ * `EventSource` cannot set an `Authorization` header — which meant any page in
+ * the user's browser could open the stream against `127.0.0.1` and read live
+ * conversation content. The stream is authenticated now, and this is how the
+ * browser obtains a credential it CAN put in the URL: `POST
+ * /api/events/ticket`, which is same-origin-guarded server-side (and
+ * token-gated when a token is configured), returns a short-lived opaque ticket.
+ * What: mints one ticket and returns it, or `null` when the endpoint is
+ * unreachable/unauthorized. Never throws — the caller connects anyway and lets
+ * the resulting 401 drive the normal retry path, so a stubbed or older server
+ * degrades to the pre-existing failure mode instead of a hard crash.
+ * Test: `transport.test.ts` — `mintEventTicket` returns the ticket, and `null`
+ * on a 401 / malformed body.
+ */
+export async function mintEventTicket(): Promise<string | null> {
+  try {
+    const r = await fetch(`${apiBase()}/api/events/ticket`, {
+      method: 'POST',
+      headers: authHeaders(),
+    });
+    if (!r.ok) return null;
+    const body = (await r.json()) as { ticket?: unknown };
+    return typeof body.ticket === 'string' && body.ticket ? body.ticket : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Reconnect backoff bounds for the authenticated event stream (#5052). */
+export const SSE_RECONNECT_MIN_MS = 1_000;
+export const SSE_RECONNECT_MAX_MS = 15_000;
+
+/**
+ * Why (#5052): a ticket expires, so a stream that has been down longer than its
+ * TTL must come back with a NEW one. The browser's built-in `EventSource`
+ * reconnect re-uses the original URL and would therefore 401 forever. Naming
+ * the backoff schedule separately keeps that contract unit-testable.
+ * What: doubles from `SSE_RECONNECT_MIN_MS`, capped at `SSE_RECONNECT_MAX_MS`.
+ * Test: `transport.test.ts` — `sseReconnectDelayMs` table incl. the cap.
+ */
+export function sseReconnectDelayMs(attempt: number): number {
+  const delay = SSE_RECONNECT_MIN_MS * 2 ** Math.max(0, attempt);
+  return Math.min(delay, SSE_RECONNECT_MAX_MS);
+}
+
+/**
+ * Handle returned by `connectEventSource` — the caller's only lever is
+ * `close()`, which also cancels any pending reconnect.
+ */
+export interface EventStreamHandle {
+  close(): void;
+}
+
+/**
+ * Why: #192 Phase B replaces 2-second polling of `/api/tasks` with a persistent
+ * Server-Sent Events stream. #5052 added a credential to that stream, so this
+ * wrapper now owns the reconnect loop as well: it mints a ticket, opens the
+ * `EventSource`, and on transport failure closes it and re-mints rather than
+ * letting the browser retry the same (possibly expired) ticket forever.
+ * What: opens `/api/events?ticket=<t>` (optionally `&session_id=`), parses every
+ * `event:`-named SSE message as JSON `AppEvent`, and invokes `onEvent`.
+ * `onError` still fires on every transport error for UI status feedback.
+ * Resolves once the first connection attempt has been made; returns a handle
+ * whose `close()` tears down the stream and stops reconnecting.
+ * Test: Run `cargo run -- --api --port 7654` then open the browser; observe
+ * that submitted tasks emit `session_started`, `pm_thinking`, etc. without any
+ * polling network activity. Unit: `transport.test.ts`.
+ */
+export async function connectEventSource(
   sessionId?: string,
   onEvent?: (event: AppEvent) => void,
   onError?: (e: Event) => void,
-): EventSource {
-  const base = apiBase();
-  const url = sessionId
-    ? `${base}/api/events?session_id=${encodeURIComponent(sessionId)}`
-    : `${base}/api/events`;
-  const es = new EventSource(url);
-  es.addEventListener('event', (e: MessageEvent) => {
-    if (!onEvent) return;
-    try {
-      const parsed = JSON.parse(e.data) as AppEvent;
-      onEvent(parsed);
-    } catch {
-      // Malformed payload — ignore. The server normally emits valid JSON;
-      // a bad line is most likely a transient proxy mangling that fixes
-      // itself on the next event.
-    }
-  });
-  // The server also sends `event: ping` keepalives and `event: lag` notices;
-  // both are diagnostic-only so we wire them through `onEvent` with their
-  // raw type tag for callers that want to react.
-  es.addEventListener('ping', () => {
-    onEvent?.({ type: 'ping' });
-  });
-  es.addEventListener('lag', (e: MessageEvent) => {
-    if (!onEvent) return;
-    try {
-      const parsed = JSON.parse(e.data) as { skipped?: number };
-      onEvent({ type: 'lag', skipped: parsed.skipped });
-    } catch {
-      // ignore
-    }
-  });
-  if (onError) es.onerror = onError;
-  return es;
+): Promise<EventStreamHandle> {
+  let current: EventSource | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let attempt = 0;
+  let closed = false;
+
+  const open = async (): Promise<void> => {
+    if (closed) return;
+    const ticket = await mintEventTicket();
+    if (closed) return;
+
+    const params = new URLSearchParams();
+    if (sessionId) params.set('session_id', sessionId);
+    if (ticket) params.set('ticket', ticket);
+    const query = params.toString();
+    const es = new EventSource(`${apiBase()}/api/events${query ? `?${query}` : ''}`);
+    current = es;
+
+    es.addEventListener('open', () => {
+      attempt = 0;
+    });
+    es.addEventListener('event', (e: MessageEvent) => {
+      if (!onEvent) return;
+      try {
+        onEvent(JSON.parse(e.data) as AppEvent);
+      } catch {
+        // Malformed payload — ignore. The server normally emits valid JSON;
+        // a bad line is most likely a transient proxy mangling that fixes
+        // itself on the next event.
+      }
+    });
+    // The server also sends `event: ping` keepalives and `event: lag` notices;
+    // both are diagnostic-only so we wire them through `onEvent` with their
+    // raw type tag for callers that want to react.
+    es.addEventListener('ping', () => {
+      onEvent?.({ type: 'ping' });
+    });
+    es.addEventListener('lag', (e: MessageEvent) => {
+      if (!onEvent) return;
+      try {
+        const parsed = JSON.parse(e.data) as { skipped?: number };
+        onEvent({ type: 'lag', skipped: parsed.skipped });
+      } catch {
+        // ignore
+      }
+    });
+    es.onerror = (e: Event) => {
+      onError?.(e);
+      if (closed) return;
+      // #5052: take the reconnect over from the browser — its retry re-uses
+      // this URL, and once the ticket has expired that can only ever 401.
+      es.close();
+      if (current === es) current = null;
+      const delay = sseReconnectDelayMs(attempt);
+      attempt += 1;
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        void open();
+      }, delay);
+    };
+  };
+
+  await open();
+
+  return {
+    close() {
+      closed = true;
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      current?.close();
+      current = null;
+    },
+  };
 }

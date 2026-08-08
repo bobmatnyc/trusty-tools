@@ -15,12 +15,18 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::{
+    Extension, Json,
     extract::Query,
-    response::sse::{Event as SseEvent, KeepAlive, Sse},
+    http::{HeaderMap, StatusCode},
+    response::{
+        IntoResponse, Response,
+        sse::{Event as SseEvent, KeepAlive, Sse},
+    },
 };
 use serde::Deserialize;
 use tokio_stream::Stream;
 
+use super::event_tickets::EventStreamAuth;
 use crate::events::{self, Event};
 
 /// Query string for `GET /api/events`. (#192 Phase B, #3760)
@@ -50,6 +56,11 @@ pub(super) struct EventsQuery {
     session_id: Option<String>,
     /// #3760: Slack channel id to scope the Slack conversation mirror to.
     channel: Option<String>,
+    /// #5052: the stream credential a browser `EventSource` can carry, since it
+    /// cannot set an `Authorization` header. Minted at `POST
+    /// /api/events/ticket`. Programmatic clients send a bearer header instead
+    /// and leave this absent.
+    ticket: Option<String>,
 }
 
 /// #3760: Whether one bus event should be delivered to a subscriber holding
@@ -106,13 +117,57 @@ pub(super) fn event_passes(
 /// reverse proxies and mobile networks don't reap idle connections. On
 /// `RecvError::Lagged(n)` (slow subscriber), yields one `event: lag\ndata:
 /// {"skipped":<n>}` notice and resumes — never silently drops the stream.
-/// Test: After `cargo run -- --api --port 7654 &`, run
-/// `curl -N http://localhost:7654/api/events` and watch events stream as
-/// tasks execute. The connection is exempt from Bearer auth (see
-/// `auth_middleware`).
+/// #5052: the connection is NO LONGER exempt from auth. A caller must present
+/// either a matching `Authorization: Bearer <token>` (programmatic clients) or a
+/// live `?ticket=` minted at `POST /api/events/ticket` (browsers, whose
+/// `EventSource` cannot set headers); anything else gets 401. This holds even
+/// when no bearer token is configured, because the shipped default — the Tauri
+/// sidecar on `127.0.0.1:7654` with no token — is precisely the configuration
+/// the cross-origin `EventSource` disclosure targeted.
+/// Test: `cargo run -- --api --port 7654 &`, then
+/// `T=$(curl -sX POST localhost:7654/api/events/ticket | jq -r .ticket)` and
+/// `curl -N "http://localhost:7654/api/events?ticket=$T"`; the same `curl -N`
+/// without a ticket returns 401. Unit coverage:
+/// `super::tests::event_tickets`.
 pub(super) async fn events_handler(
+    Extension(auth): Extension<EventStreamAuth>,
+    headers: HeaderMap,
     Query(params): Query<EventsQuery>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+) -> Response {
+    // #5052: authenticate before subscribing to the bus, so an unauthorized
+    // caller never holds a receiver on a channel carrying conversation content.
+    if !auth.authorize(&headers, params.ticket.as_deref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    event_stream(params).into_response()
+}
+
+/// `POST /api/events/ticket` — issue a short-lived credential for the SSE
+/// stream. (#5052)
+///
+/// Why: the browser needs a credential it can put in an `EventSource` URL, and
+/// this is the authenticated endpoint that hands one out. It is a POST, and
+/// therefore already behind the router-wide same-origin write guard
+/// (`trusty_common::server::guard_write_origin`) — that is what closes the
+/// default, token-less configuration: a page on `https://evil.example` gets a
+/// 403 here and so can never obtain a ticket, whatever it does with
+/// `EventSource` afterwards. When a bearer token IS configured, `auth_middleware`
+/// gates this route on top, since `/api/events/ticket` is not an exempt path.
+/// What: mints a ticket and returns `{"ticket": "<opaque>", "expires_in_secs":
+/// 300}`.
+/// Test: `event_tickets::mint_route_requires_bearer_token_when_configured`,
+/// `event_tickets::mint_route_rejects_cross_origin_caller`.
+pub(super) async fn mint_event_ticket(Extension(auth): Extension<EventStreamAuth>) -> Response {
+    Json(auth.mint()).into_response()
+}
+
+/// The SSE body itself, split out so [`events_handler`] can return either it or
+/// a 401 from one function without the stream type leaking into that signature.
+fn event_stream(params: EventsQuery) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let mut rx = events::subscribe();
     let session_filter = params.session_id;
     // #3760: optional Slack-channel scope for the conversation mirror.
