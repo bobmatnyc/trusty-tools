@@ -135,6 +135,7 @@ pub mod skill_drift;
 pub mod skill_manifest;
 pub mod skill_reconcile;
 pub mod skill_repair;
+pub mod skill_retire;
 pub mod skill_source;
 pub mod skill_staleness;
 pub mod skill_tiers;
