@@ -25,7 +25,11 @@ Added
 - retries are claimed and backed off. A `ClaimSet` gives one relay per entry at
   a time, so a sweep tick landing inside the request path's own relay window
   cannot send the same delivery twice; `BackoffPolicy` spaces attempts
-  exponentially (30 s doubling to a 1 h ceiling) and stops at 24 failures
+  exponentially (30 s doubling to a 1 h ceiling) and stops at 24 failures. The
+  claim is taken on the entry's path *before* the durable write, not after —
+  claiming afterwards left the entry on disk and unclaimed for the width of one
+  scheduler poll, and a sweep landing there relayed a delivery the request path
+  was about to relay itself
 - an entry past that limit is moved to `webhook-spool/exhausted/` rather than
   deleted or left in place. It is still an unacknowledged webhook, so it is
   kept and it keeps the health signal red — but it stops being read and

@@ -354,6 +354,30 @@ impl WebhookIngress {
             last_attempt_at_unix_ms: None,
         };
 
+        // 🔴 Claim BEFORE the write, not after it. `entry_path` is a pure
+        // function of the receipt time and delivery id, both already fixed, so
+        // the path is known before the entry exists. Claiming afterwards left a
+        // window in which the entry was on disk and unclaimed — and the write
+        // now runs on the blocking pool, which widens that window to however
+        // long a worker thread takes to be scheduled. A sweep landing there
+        // relayed a delivery this request was about to relay itself. Measured,
+        // not theorised: with the claim taken after the write, a sweep 20 ms
+        // into `ingest` reports `acked: 1` for an entry the request path then
+        // relays again.
+        //
+        // Backoff's first-attempt grace also covers this window in production,
+        // but two guards that each fully close it is the point — a deployment
+        // that tunes the grace to zero must not reopen a double-relay.
+        //
+        // 🔴 No regression test pins this ordering. The window is one scheduler
+        // poll wide, and every deterministic probe tried against it — a
+        // rendezvous, a select! loop, a parallel hammer on a 4-worker runtime —
+        // passed against a claim-after-write build as readily as against this
+        // one. A test that cannot tell the two apart is worse than none, so
+        // none was kept. Do not reorder these two statements on the strength of
+        // a green suite.
+        let claim = self.claims.claim(&self.spool.entry_path(&entry));
+
         // Step 3 — durable BEFORE the ack. A failure here is a 5xx, never a
         // logged-and-accepted delivery. `persist_new` refuses to overwrite: the
         // entry already at that path may be one console has acknowledged, and
@@ -379,11 +403,10 @@ impl WebhookIngress {
             }
         };
 
-        // Step 4 — relay, and record what happened durably either way. The
-        // claim is what stops a sweep tick landing inside the relay window from
-        // sending the same delivery a second time; it is released on drop, so a
+        // Step 4 — relay, and record what happened durably either way, holding
+        // the claim taken before the write. It is released on drop, so a
         // panicking relay cannot wedge the entry.
-        let outcome = match self.claims.claim(&path) {
+        let outcome = match claim {
             Some(_claim) => {
                 let outcome = relay.deliver(&entry).await;
                 let bookkeeping_error = self.settle(&path, &mut entry, &outcome).await;

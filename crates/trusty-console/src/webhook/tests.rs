@@ -90,6 +90,67 @@ fn spawn_target(dir: &StdPath, behaviour: StubTarget, count: usize) -> (PathBuf,
     (socket, captured)
 }
 
+/// A stub that announces when it has received a frame, then waits for the test
+/// to release it before answering.
+///
+/// Why: the previous version of the sweep-race test slept 150 ms and hoped
+/// `ingest` had reached its claim by then. That asserts on a window the test
+/// does not control — and it does not control it: under CI scheduling the
+/// spawned task had not even persisted the entry yet, so the sweep listed an
+/// empty spool and the assertion failed for a reason unrelated to claims.
+/// A rendezvous removes the wall clock entirely: the target has the frame, so
+/// the relay is provably in flight, so the claim is provably held.
+/// What: returns the socket, the captured frames, a receiver that fires once
+/// the first frame has been read, and a sender that lets the stub answer. Any
+/// connection after the first is answered immediately, so a second relay — the
+/// defect — is observable rather than hanging.
+/// Test: `sweep_does_not_relay_an_entry_the_request_path_is_still_relaying`.
+fn spawn_gated_target(
+    dir: &StdPath,
+) -> (
+    PathBuf,
+    Captured,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let socket = dir.join("sockets").join("gated.sock");
+    let listener: UnixListener = bind_hardened(&socket).expect("bind gated stub");
+    let captured: Captured = Default::default();
+    let sink = captured.clone();
+    let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        async fn absorb(conn: &mut tokio::net::UnixStream, sink: &Captured) {
+            let mut raw = Vec::new();
+            let _ = conn.read_to_end(&mut raw).await;
+            if let Ok(frame) = serde_json::from_slice::<serde_json::Value>(&raw) {
+                sink.lock().await.push(frame);
+            }
+        }
+        async fn ack(conn: &mut tokio::net::UnixStream) {
+            let _ = conn.write_all(br#"{"result":{"ack":true}}"#).await;
+            let _ = conn.write_all(b"\n").await;
+            let _ = conn.flush().await;
+        }
+
+        let Ok((mut first, _)) = listener.accept().await else {
+            return;
+        };
+        absorb(&mut first, &sink).await;
+        let _ = received_tx.send(());
+        let _ = release_rx.await;
+        ack(&mut first).await;
+
+        while let Ok((mut extra, _)) = listener.accept().await {
+            absorb(&mut extra, &sink).await;
+            ack(&mut extra).await;
+        }
+    });
+
+    (socket, captured, received_rx, release_tx)
+}
+
 /// A schedule that admits every pending entry immediately.
 ///
 /// Most cases here are asserting on relay and spool behaviour, not on timing;
@@ -1217,19 +1278,19 @@ async fn integration_from_env_fails_closed_when_the_secret_is_unset() {
 
 #[tokio::test]
 async fn sweep_does_not_relay_an_entry_the_request_path_is_still_relaying() {
-    // 🔴 Fails against the pre-fix head: the sweep listed every `.json` with no
-    // claim and no age filter, so a tick landing inside the relay window
-    // re-sent a delivery `ingest` was still sending. One delivery, two relays —
-    // and with at-least-once semantics the target sees a genuine duplicate.
+    // 🔴 Two defects met here. The claim used to be taken AFTER the durable
+    // write, leaving a window in which the entry was on disk and unclaimed —
+    // and a sweep landing in it relayed a delivery `ingest` was about to relay
+    // itself. Measured at the pre-fix head: a sweep 20 ms into `ingest`
+    // reported `acked: 1`, two relays for one delivery.
+    //
+    // The test itself was also racy: it slept 150 ms and assumed `ingest` had
+    // reached its claim. Under CI scheduling it had not even persisted yet, so
+    // the sweep listed an empty spool. The rendezvous below removes the wall
+    // clock — the target holding the frame is proof the relay is in flight.
     let tmp = tempfile::tempdir().expect("tempdir");
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
-    // Serves up to 4 connections, so a second relay WOULD be answered if one
-    // were made. The count is the assertion, not the stub's capacity.
-    let (socket, captured) = spawn_target(
-        tmp.path(),
-        StubTarget::AckAfter(Duration::from_millis(600)),
-        4,
-    );
+    let (socket, captured, received, release) = spawn_gated_target(tmp.path());
     let ingress = ingress_for(spool, socket);
 
     let requester = {
@@ -1241,18 +1302,22 @@ async fn sweep_does_not_relay_an_entry_the_request_path_is_still_relaying() {
         })
     };
 
-    // Land the sweep squarely inside the in-flight relay.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // The target has the frame, so the relay is in flight and the claim is
+    // held. No sleep, no guess.
+    received
+        .await
+        .expect("the target received the relayed frame");
+
     let sweep = ingress.retry_pending_once().await;
     assert_eq!(
         sweep.in_flight, 1,
-        "the sweep must see the entry as claimed, not free to relay"
+        "the sweep must see the entry as claimed, not free to relay: {sweep:?}"
     );
-    assert_eq!(sweep.acked, 0);
-    assert_eq!(sweep.still_pending, 0);
+    assert_eq!(sweep.acked, 0, "and must not relay it: {sweep:?}");
+    assert_eq!(sweep.still_pending, 0, "{sweep:?}");
 
-    let outcome = requester.await.expect("ingest task");
-    match outcome {
+    release.send(()).expect("release the target");
+    match requester.await.expect("ingest task") {
         IngestOutcome::Accepted { relay, .. } => assert!(relay.is_acked()),
         other => panic!("expected Accepted, got {other:?}"),
     }
@@ -1264,9 +1329,7 @@ async fn sweep_does_not_relay_an_entry_the_request_path_is_still_relaying() {
     );
     assert!(listing_of(ingress.spool()).pending.is_empty());
 
-    // The claim must be released once the relay settles, not leaked — a leaked
-    // claim would make the entry permanently unrelayable if it were still
-    // pending. A follow-up sweep reporting nothing in flight is that proof.
+    // The claim must be released once the relay settles, not leaked.
     let after = ingress.retry_pending_once().await;
     assert_eq!(after.in_flight, 0, "the claim must not outlive the relay");
 }
