@@ -97,7 +97,7 @@ Homebrew provides:
 
 ```bash
 # trusty-search must be running first (hard runtime dependency)
-trusty-search daemon
+trusty-search start
 
 # Run the analyzer sidecar
 trusty-analyze serve --search-url http://127.0.0.1:7878
@@ -176,8 +176,13 @@ unreachable.
 
 ## MCP Tools
 
-The MCP server registers **17 tools** (authoritative source: `src/mcp/mod.rs`
-`tool_definitions`):
+The MCP server assembles its tool list from three sources (authoritative
+source: `src/mcp/mod.rs` `tool_descriptors`): 18 base descriptors always
+present (`src/mcp/descriptors.rs` `base_tool_descriptors`), plus
+`console_metrics` (always appended), plus three `tr_review_*` tools appended
+only when built with the `review` Cargo feature. The exact count therefore
+depends on how the binary was built — read `tool_descriptors()` rather than
+relying on a fixed number here.
 
 | Tool | HTTP equivalent |
 |------|-----------------|
@@ -194,10 +199,16 @@ The MCP server registers **17 tools** (authoritative source: `src/mcp/mod.rs`
 | `extract_graph` | knowledge-graph extraction |
 | `extract_ner` | named-entity extraction (optional ONNX) |
 | `list_entities` | enumerate extracted entities |
+| `list_analyze_indexes` | `GET /indexes` (used by the trusty-console dashboard) |
 | `suggest_refactors` | refactor suggestions |
 | `review_diff` | review a unified diff |
 | `review_github_pr` | review a GitHub pull request |
 | `deep_analysis` | combined deep-analysis pass |
+| `console_metrics` | daemon health + index stats for the trusty-console dashboard |
+
+Built with `--features review`, three more tools are registered:
+`tr_review_pr`, `tr_review_diff`, `tr_review_health` — see
+`src/mcp/review.rs`.
 
 ## HTTP API
 

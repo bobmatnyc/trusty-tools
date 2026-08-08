@@ -269,7 +269,7 @@ Once connected, Claude Code can call `search`, `index_file`, `list_indexes`, and
   LRU embedding cache (256+ entries) skips re-embedding on repeat queries
 - **Native multi-request** — `Arc<SearchAppState>`, reader-priority `RwLock`,
   axum HTTP/2 — many concurrent searches against the same index never block
-- **MCP server** — stdio + HTTP/SSE transports, 18 tools (per `src/mcp/tools.rs`), drop-in for Claude Code
+- **MCP server** — stdio + HTTP/SSE transports, 21 tools (per `src/mcp/tools/descriptors.rs`), drop-in for Claude Code
 - **Embedded Svelte 5 admin UI** — Collections, Search, Chat, Admin panels
   compiled into the binary via `include_dir!`; open with `trusty-search ui`
 - **Migration path** — `trusty-search convert` reads `mcp-vector-search`
@@ -423,13 +423,13 @@ be registered (via `POST /indexes`, `trusty-search index`, or any MCP tool), it
 must appear in the allowlist file at:
 
 ```
-~/.config/trusty-search/indexes.toml   # macOS / Linux (XDG config dir)
+~/.config/trusty-search/allowlist.toml   # macOS / Linux (XDG config dir)
 ```
 
 ### Format
 
 ```toml
-# ~/.config/trusty-search/indexes.toml
+# ~/.config/trusty-search/allowlist.toml
 
 [[index]]
 path = "/Users/me/Projects/myproj"
@@ -504,7 +504,7 @@ trusty-search service install --no-auto-discover     # macOS: bake the above int
                                                      # `--auto-discover` turns the scan back on
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]   # register + index (primary command)
-                                                     # also writes ~/.config/trusty-search/indexes.toml
+                                                     # also writes ~/.config/trusty-search/allowlist.toml
                                                      # auto-detects ./trusty-search.yaml
 trusty-search index add <path> [--name <id>]         # add path to allowlist + index
 trusty-search index list [--json]                    # list all allowlisted roots
@@ -526,8 +526,8 @@ trusty-search reindex [path]                         # alias for index --force
 
 ## MCP tools
 
-The MCP server registers **18 tools** (authoritative source: `src/mcp/tools.rs`
-`tool_definitions`):
+The MCP server registers **21 tools** (authoritative source:
+`src/mcp/tools/descriptors.rs` `tool_definitions`):
 
 | Tool            | Description                                          |
 |-----------------|------------------------------------------------------|
@@ -549,6 +549,9 @@ The MCP server registers **18 tools** (authoritative source: `src/mcp/tools.rs`
 | `grep`          | Literal/regex grep fallback over the corpus          |
 | `search_health` | Daemon liveness probe                                |
 | `chat`          | OpenRouter Q&A with auto-injected search context     |
+| `upgrade`       | Check for or install a new trusty-search version     |
+| `console_metrics` | Daemon health + index aggregate stats for the trusty-console dashboard |
+| `typeahead`     | Per-keystroke autocomplete suggestions for an index  |
 
 ### `search_kg` — `refine_query` parameter (issue #147)
 

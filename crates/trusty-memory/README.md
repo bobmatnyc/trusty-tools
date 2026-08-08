@@ -236,7 +236,7 @@ running (started either by `trusty-memory setup`'s LaunchAgent or by
 
 ## Available MCP Tools
 
-The MCP server registers **25 tools** (authoritative source:
+The MCP server registers **45 tools** (authoritative source:
 `src/tools/definitions.rs` `tool_definitions`, asserted by the
 `tool_definitions_lists_all_tools` test). All are exposed via both the MCP
 protocol (over the `serve --stdio` path) and the HTTP API (`/api/v1/`). The
@@ -581,12 +581,12 @@ Each palace directory contains:
 ```
 trusty-memory (this crate)          trusty-common `memory-core` feature
   axum HTTP/SSE server     ──────►  PalaceRegistry
-  Unix domain socket       ──────►  usearch vector index (index.usearch)
+  serve --stdio (JSON-RPC) ──────►  usearch vector index (index.usearch)
   embedded Svelte UI               redb metadata + KG (kg.redb)
-  30 MCP tools                     fastembed (AllMiniLML6V2Q)
+  45 MCP tools                     fastembed (AllMiniLML6V2Q)
 
-trusty-memory-mcp-bridge (separate binary, PR #149)
-  Claude Code stdio  ◄──pipe──►  trusty-memory UDS
+Claude Code stdio ◄──JSON-RPC──► `trusty-memory serve --stdio`
+                                  ──POST /rpc (HTTP)──► trusty-memory daemon
 ```
 
 The `memory-core` feature of `trusty-common` owns the storage engine: `usearch` for approximate
