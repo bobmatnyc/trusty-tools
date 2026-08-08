@@ -5,10 +5,16 @@
   (2026-08-07 owner ruling "Console relays over UDS." closes the Open
   Question below: console terminates the webhook's HTTP request, verifies
   HMAC once, spools the payload durably before acknowledging, and relays
-  over UDS to a console-supervised on-demand process). This ADR's Decision
+  over UDS to a console-supervised on-demand process) **and by
+  [0035](0035-console-health-probe-aggregates-over-uds.md)** (2026-08-08
+  owner ruling "Console should have a health probe that probes all the UDS
+  services." replaces the per-CLI UDS-dial mechanism named below in
+  Consequences with a console-side aggregator: console fans out over UDS to
+  every trusty-\* service, and CLIs consume console's aggregated health
+  instead of dialing each daemon directly). This ADR's Decision
   remains in force in full; its Context/Decision/Consequences are left as
   originally accepted per the ADR immutability rule (DOC-46 §4), and
-  ADR-0034 is the record of the amendment.
+  ADR-0034 and ADR-0035 are the record of the amendments.
   Its `0600` access-control premise is separately corrected by
   [#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099) — see the
   correction note in Consequences.
@@ -166,6 +172,16 @@ Concretely:
 - **CLI status/health commands** (`trusty-search status`, `tm status`, etc.)
   that currently do a quick loopback HTTP `GET` must move to a UDS dial —
   mechanical, but touches every CLI entry point across six crates.
+
+  > 🔴 **Amended by [0035](0035-console-health-probe-aggregates-over-uds.md),
+  > 2026-08-08.** Owner ruling: "Console should have a health probe that
+  > probes all the UDS services." This replaces the per-CLI UDS-dial
+  > mechanism above with a console-side aggregator — console fans out over
+  > UDS to every trusty-\* service, and CLIs consume console's aggregated
+  > health rather than dialing each daemon themselves. The bullet above is
+  > left as originally accepted per DOC-46 §4; see ADR-0035 for the full
+  > mechanism, rationale, and its two open questions (how a CLI reaches
+  > console, and what happens when console itself is down).
 - **`docs/reference/threat-model.md`'s per-daemon inventory goes stale.**
   Its bind/guard/console-proxy-allowlist table is built entirely on ADR-0018
   premises (which daemons may bind loopback HTTP and how they're guarded).
