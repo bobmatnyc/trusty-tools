@@ -33,6 +33,12 @@ use serde::{Deserialize, Serialize};
 pub mod inbox;
 pub mod serve;
 
+/// The receive half's tests (#5182), kept out of this file so the wire contract
+/// stays readable and the 500-SLOC production cap is not spent on fixtures.
+#[cfg(test)]
+#[path = "tests.rs"]
+mod receive_tests;
+
 pub use inbox::{Inbox, InboxError, Ownership};
 pub use serve::{
     DeliverySink, LISTENER_SHUTDOWN_FLUSH, ServeOptions, SinkRejection, dispatch_frame, serve_until,
