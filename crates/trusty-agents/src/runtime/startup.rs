@@ -172,6 +172,17 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
         .inspect_err(|e| tracing::warn!(error = %e, "failed to deploy bundled agents to $HOME"))
         .unwrap_or_default();
 
+    // #5227: same treatment for the bundled WORKFLOW definitions. Agents were
+    // the only config kind that ever reached the `$HOME` tier, so
+    // `--workflow prescriptive` launched from a directory with no
+    // `.trusty-agents/` (the GUI sidecar runs with `cwd = /`) had no
+    // definition to read anywhere on its search hierarchy. Same best-effort
+    // posture as the roster deploy above: a read-only `$HOME` degrades to the
+    // pre-fix "workflow not found", it does not crash the harness.
+    let _bundled_workflows_report = agents::bundled::ensure_bundled_workflows_deployed()
+        .inspect_err(|e| tracing::warn!(error = %e, "failed to deploy bundled workflows to $HOME"))
+        .unwrap_or_default();
+
     // #4325: create each Assistant INSTANCE's home directory
     // (`~/trusty-agents/<instance>/`) so the layout exists before anything
     // reaches for it. Placed here, immediately after the bundled roster is on

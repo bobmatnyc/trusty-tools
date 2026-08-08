@@ -440,22 +440,58 @@ fn resolve_extends_in_map(
     errors
 }
 
+/// Compute the search paths for one `.trusty-agents/<leaf>` config kind, in
+/// priority order (highest first).
+///
+/// Why: The project → user → bundled tier order is one discovery policy, not
+/// one per config kind. `agent_search_paths` was the only expression of it,
+/// so anything else that needed the same hierarchy (the workflow-mode
+/// pre-flight, workflow-definition lookup) either re-walked the tiers itself
+/// or — as in #5227 — consulted the process CWD alone and disagreed with the
+/// registry about whether a config existed.
+/// What: Returns, in order: `.trusty-agents/<leaf>`, `.claude/<leaf>`,
+/// `~/.trusty-agents/<leaf>`, `~/.claude/<leaf>`, `<config_dir>/<leaf>`.
+/// Paths are returned whether or not they exist; callers filter.
+/// Test: `agent_search_paths_order`, `workflow_search_paths_uses_the_workflows_leaf`
+/// — one per leaf, asserting the same five tiers in the same order.
+pub fn config_search_paths(config_dir: &Path, leaf: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    paths.push(PathBuf::from(".trusty-agents").join(leaf));
+    paths.push(PathBuf::from(".claude").join(leaf));
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(
+            PathBuf::from(home.clone())
+                .join(".trusty-agents")
+                .join(leaf),
+        );
+        paths.push(PathBuf::from(home).join(".claude").join(leaf));
+    }
+    paths.push(config_dir.join(leaf));
+    paths
+}
+
 /// Compute the agent search paths in priority order (highest first).
 ///
 /// Why: Centralizes the discovery policy — project-level overrides beat
 /// user-level overrides beat bundled defaults — so every call site
 /// (`main.rs`, `tagent agents list`, tests) sees the same order.
-/// What: Returns, in order: `.trusty-agents/agents`, `.claude/agents`,
-/// `~/.trusty-agents/agents`, `~/.claude/agents`, `<config_dir>/agents`.
+/// What: [`config_search_paths`] with the `agents` leaf — in order:
+/// `.trusty-agents/agents`, `.claude/agents`, `~/.trusty-agents/agents`,
+/// `~/.claude/agents`, `<config_dir>/agents`.
 /// Test: `agent_search_paths_order`.
 pub fn agent_search_paths(config_dir: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    paths.push(PathBuf::from(".trusty-agents/agents"));
-    paths.push(PathBuf::from(".claude/agents"));
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(PathBuf::from(home.clone()).join(".trusty-agents/agents"));
-        paths.push(PathBuf::from(home).join(".claude/agents"));
-    }
-    paths.push(config_dir.join("agents"));
-    paths
+    config_search_paths(config_dir, "agents")
+}
+
+/// Compute the workflow-definition search paths in priority order.
+///
+/// Why (#5227): `--workflow <name>` resolved `<name>.json` under a single
+/// CWD-relative `.trusty-agents/workflows`, while agents resolved
+/// hierarchically. A process whose CWD has no `.trusty-agents/` — the macOS
+/// `.app` sidecar runs with `cwd = /` — could therefore load 28 agents and
+/// still fail to find any workflow.
+/// What: [`config_search_paths`] with the `workflows` leaf.
+/// Test: `workflow_search_paths_uses_the_workflows_leaf`.
+pub fn workflow_search_paths(config_dir: &Path) -> Vec<PathBuf> {
+    config_search_paths(config_dir, "workflows")
 }

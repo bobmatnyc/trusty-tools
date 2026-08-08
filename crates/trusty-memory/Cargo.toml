@@ -178,7 +178,9 @@ serial_test = { workspace = true }
 # which is gated behind `embedder-test-support`. Re-declaring trusty-common here
 # with the feature activates it for all integration tests without enabling it in
 # the production library (mirrors the trusty-mpm and trusty-search pattern).
-trusty-common = { path = "../trusty-common", version = "0.30", default-features = false, features = ["memory-core", "embedder-test-support"] }
+# `docgen` (#5205 follow-up): `tests/generated_docs.rs` renders the MCP tool
+# section of README.md from `tool_definitions()`.
+trusty-common = { path = "../trusty-common", version = "0.30", default-features = false, features = ["memory-core", "embedder-test-support", "docgen"] }
 chrono = { workspace = true }
 
 [features]

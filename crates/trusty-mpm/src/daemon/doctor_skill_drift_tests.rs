@@ -391,3 +391,47 @@ fn staleness_is_unknown_when_a_tier_has_no_ledger() {
         check.message
     );
 }
+
+/// #5224, the concrete PR #5221 case: retiring a bundled skill leaves an
+/// orphaned deployed copy whose ledger key has no reference asset, and that ONE
+/// orphan folds the whole check to Unknown — a check that has stopped
+/// protecting anything. The retirement sweep must restore it to Ok.
+#[test]
+fn a_retired_skill_no_longer_pins_staleness_to_unknown() {
+    let tmp = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let dest = paths.claude_skills_dir();
+    let _current = deploy_real(&dest, "tm-workflow", "v2", None);
+    // The skill PR #5221 deletes from the bundle, still deployed here.
+    let _retired = deploy_real(&dest, "tm-pr-workflow", "the retired workflow skill", None);
+
+    // The new binary's reference no longer carries `tm-pr-workflow`.
+    let reference = reference_of(&[("tm-workflow", "v2")]);
+
+    let before = report(&reference, &paths, None);
+    assert_eq!(
+        before.status,
+        CheckStatus::Unknown,
+        "expected the #5224 defect, got: {}",
+        before.message
+    );
+    assert!(
+        before.message.contains("tm-pr-workflow"),
+        "{}",
+        before.message
+    );
+
+    let live: std::collections::BTreeSet<String> = ["tm-workflow".to_string()].into();
+    let retired =
+        crate::core::skill_retire::retire_orphans_in("operator home", &dest, &live).unwrap();
+    assert_eq!(retired.len(), 1, "{retired:?}");
+    assert!(retired[0].removed, "{retired:?}");
+
+    let after = report(&reference, &paths, None);
+    assert_eq!(
+        after.status,
+        CheckStatus::Ok,
+        "the check is still degraded after the orphan was retired: {}",
+        after.message
+    );
+}

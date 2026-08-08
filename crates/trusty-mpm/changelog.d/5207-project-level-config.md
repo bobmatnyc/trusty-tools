@@ -1,0 +1,8 @@
+Added
+
+- trusty-mpm now reads a committed, project-level config file (closes [#5207](https://github.com/bobmatnyc/trusty-tools/issues/5207))
+  - `<project>/.trusty-mpm.toml` is tracked in git, so a project's conventions travel with the clone, show up in PR diffs, and stop being something every operator has to re-declare on every machine. It is a ROOT-LEVEL dotfile rather than a member of `<project>/.trusty-mpm/`, because that directory holds machine-local session state and projects gitignore it wholesale — this repository's own `.trusty-mpm/*` rule already makes the #4832 `framework/manifest.toml` layer untrackable, and trusty-mpm cannot carve a re-include out of a consumer's `.gitignore`
+  - `worktree` is the first setting to use it. Precedence, highest first: the project's `.trusty-mpm.toml`, then the machine-global `projects.json` registry, then the built-in `true`. The project layer wins in both directions — a repo can force isolation back ON over a local opt-out, not only off
+  - the clone-based spawn branch, which asks the question before any project directory exists, is unchanged and still resolves from the registry alone
+  - a key the schema does not define is REJECTED (`serde(deny_unknown_fields)`), so `worktre = false` is an error instead of silently reading as "worktrees stay on". At spawn time a rejected file contributes nothing and is logged at `error` level, and resolution falls through to the registry — a committed file is shared, so one bad push must not brick every operator's launches
+  - `default_model` is the second setting: it tops the same chain `resolve_agent_model` already ends in. Explicit `--model`, per-agent overrides, and agent frontmatter are more specific than a default and still win over it

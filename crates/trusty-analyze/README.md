@@ -176,13 +176,43 @@ unreachable.
 
 ## MCP Tools
 
-The MCP server assembles its tool list from three sources (authoritative
-source: `src/mcp/mod.rs` `tool_descriptors`): 18 base descriptors always
-present (`src/mcp/descriptors.rs` `base_tool_descriptors`), plus
-`console_metrics` (always appended), plus three `tr_review_*` tools appended
-only when built with the `review` Cargo feature. The exact count therefore
-depends on how the binary was built — read `tool_descriptors()` rather than
-relying on a fixed number here.
+<!-- BEGIN GENERATED: mcp-tools -->
+The MCP server registers **19 tools** with default features, **22 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
+this table is generated from it, not maintained by hand.
+
+| Tool | Available | Arguments | Summary |
+|---|---|---|---|
+| `analyze_quality` | always | `index?`, `index_id?` | Aggregate quality stats: avg cyclomatic, %A, smell count |
+| `analyzer_health` | always | — | Probe analyzer daemon liveness and version |
+| `cluster_concepts` | always | `index?`, `index_id?`, `k?`, `method?` | Group chunks into concept clusters using k-means over hashed bag-of-words embeddings |
+| `complexity_hotspots` | always | `index?`, `index_id?`, `top_n?` | Top-N chunks ranked by cyclomatic complexity |
+| `console_metrics` | always | — | Return health and operational metrics for trusty-console polling. |
+| `deep_analysis` | always | `index_id`, `model?` | Run an LLM-augmented deep analysis pass over an index: synthesises a deterministic review report from the indexed corpus, looks up detected… |
+| `delete_fact` | always | `id` | Delete a fact by its u64 id |
+| `extract_graph` | always | `index?`, `index_id?`, `language?` | Build the multi-language knowledge graph (nodes + edges) for an index |
+| `extract_ner` | always | `index?`, `index_id?`, `top_k?` | Extract named entities from doc comments for a code index using NER |
+| `find_smells` | always | `index?`, `index_id?`, `limit?`, `offset?`, `omit_content?` | Chunks with at least one detected code smell. |
+| `ingest_scip` | always | `scip_base64`, `index?`, `index_id?` | Ingest a SCIP (Scalable and Precise Index for Code) protobuf index for a given index_id, enriching the knowledge graph with fully-resolved… |
+| `list_analyze_indexes` | always | — | List all indexes known to the trusty-analyze daemon. |
+| `list_entities` | always | `index?`, `index_id?`, `kind?`, `language?` | List symbol-level entities (functions, classes, ...) for an index |
+| `list_facts` | always | `object?`, `predicate?`, `subject?` | List canonical facts, optionally filtered by subject/predicate/object |
+| `review_diff` | always | `diff`, `index_id` | Review a unified git diff and return a structured quality report (per-file complexity, code smells, grade A-F, recommendations). |
+| `review_github_pr` | always | `owner`, `repo`, `pr`, `index_id`, `post_comment?` | Fetch a GitHub pull request's unified diff and run a structured quality review against a trusty-search index. |
+| `run_diagnostics` | always | `index?`, `index_id?`, `language?`, `limit?`, `offset?`, `tools?` | Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy,… |
+| `suggest_refactors` | always | `file?`, `index?`, `index_id?`, `min_severity?`, `top_k?` | Suggest concrete refactoring actions (extract method, reduce nesting, ...) ranked by severity, derived from complexity metrics and code… |
+| `tr_review_diff` | `--features review` | `diff`, `context?`, `reviewer_model?` | LLM-backed review of a raw unified diff string via the embedded trusty-review pipeline. |
+| `tr_review_health` | `--features review` | — | Probe the embedded trusty-review pipeline's liveness and configuration (dry_run mode, reviewer model, dependency URLs). |
+| `tr_review_pr` | `--features review` | `owner`, `repo`, `pr`, `reviewer_model?` | LLM-backed review of a GitHub pull request via the embedded trusty-review pipeline. |
+| `upsert_fact` | always | `subject`, `predicate`, `object`, `index_id`, `confidence?`, `provenance?` | Insert or update a canonical fact triple |
+<!-- END GENERATED: mcp-tools -->
+
+### HTTP equivalents
+
+Parity rule: every HTTP endpoint has an MCP tool. This mapping is hand-written
+— the route a tool forwards to lives in the dispatcher's match arms, not in the
+descriptors, so the generator above cannot derive it. The tool names here are
+cross-checked against the descriptors by `http_equivalents_name_only_real_tools`
+in `tests/generated_docs.rs`, so the list cannot name a tool that does not exist.
 
 | Tool | HTTP equivalent |
 |------|-----------------|
@@ -205,10 +235,6 @@ relying on a fixed number here.
 | `review_github_pr` | review a GitHub pull request |
 | `deep_analysis` | combined deep-analysis pass |
 | `console_metrics` | daemon health + index stats for the trusty-console dashboard |
-
-Built with `--features review`, three more tools are registered:
-`tr_review_pr`, `tr_review_diff`, `tr_review_health` — see
-`src/mcp/review.rs`.
 
 ## HTTP API
 

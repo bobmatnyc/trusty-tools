@@ -134,7 +134,7 @@ fn stale_stamp_triggers_refresh() {
     let new_stamp = stamp::read(tmp.path());
     assert_eq!(
         new_stamp.as_deref(),
-        Some(current_bundle_stamp().unwrap().as_str()),
+        Some(current_bundle_stamp::<BundledAgents>().unwrap().as_str()),
         "stamp must be updated to the current bundle content hash"
     );
 }
@@ -368,7 +368,7 @@ fn concurrent_ensure_calls_over_stale_target_converge_to_one_consistent_refresh(
     );
     assert_eq!(
         stamp::read(tmp.path()).as_deref(),
-        Some(current_bundle_stamp().unwrap().as_str()),
+        Some(current_bundle_stamp::<BundledAgents>().unwrap().as_str()),
         "final stamp must match the current bundle content hash"
     );
 }
@@ -528,4 +528,40 @@ fn bundled_personas_grant_vector_search() {
             "{file} binds an OKG store but does not grant vector_search"
         );
     }
+}
+
+/// Why (#5227): making the workflow-mode pre-flight hierarchical only helps if
+/// a workflow definition actually reaches a tier on that hierarchy. The
+/// bundled `prescriptive.json` used to exist only inside a checkout of this
+/// repo, so a `cargo install`ed binary (or the GUI sidecar, `cwd = /`) had
+/// none anywhere. Pin that the workflows tree deploys through the same
+/// stamp-aware path the agent roster uses, and that `prescriptive.json` is in
+/// it — that file name is what `--workflow` defaults to.
+/// Test: itself.
+#[test]
+fn bundled_workflows_deploy_to_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let report = ensure_embedded_deployed_in::<BundledWorkflows>(tmp.path()).unwrap();
+
+    assert!(report.written > 0, "no bundled workflow files written");
+    assert!(
+        tmp.path().join("prescriptive.json").is_file(),
+        "prescriptive.json missing from the deployed workflows tree"
+    );
+
+    // Stamp-aware: a second pass over an unchanged bundle writes nothing.
+    let again = ensure_embedded_deployed_in::<BundledWorkflows>(tmp.path()).unwrap();
+    assert_eq!(again.total_touched(), 0, "re-deploy was not a no-op");
+}
+
+/// Why (#5227): agents and workflows share the deploy machinery but must never
+/// share a stamp — a workflows-tree deploy that wrote the agents stamp would
+/// make the next agent refresh believe it was up to date.
+/// Test: itself.
+#[test]
+fn agent_and_workflow_bundles_hash_differently() {
+    assert_ne!(
+        current_bundle_stamp::<BundledAgents>().unwrap(),
+        current_bundle_stamp::<BundledWorkflows>().unwrap()
+    );
 }

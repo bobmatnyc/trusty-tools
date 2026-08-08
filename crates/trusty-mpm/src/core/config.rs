@@ -441,6 +441,17 @@ impl MpmConfig {
             Ok(raw) => match toml::from_str::<Self>(&raw) {
                 Ok(cfg) => {
                     tracing::debug!("loaded config from {}", path.display());
+                    // #5207: this parse is deliberately LENIENT (see
+                    // `core::config_keys` for why `deny_unknown_fields` here
+                    // would be a regression), so a typo'd key is dropped. Report
+                    // it instead of dropping it in silence.
+                    if let Some(doc) = crate::core::config_keys::toml_document(&raw) {
+                        crate::core::config_keys::report_unknown_keys(
+                            &path.display().to_string(),
+                            &doc,
+                            &cfg,
+                        );
+                    }
                     cfg
                 }
                 Err(err) => {
@@ -471,6 +482,89 @@ impl MpmConfig {
                 Self::default()
             }
         }
+    }
+
+    /// Load the config and fold in every OTHER default-model layer (#5207).
+    ///
+    /// Why: `TrustyToolsConfig::default_model` was orphaned — the trusty-console
+    /// Config tab and the `config_write` MCP tool both wrote it, under a field
+    /// whose own placeholder reads "(unset — uses ~/.trusty-mpm/config.toml)",
+    /// and nothing ever read it back. Setting it did nothing. Rather than delete
+    /// an operator-facing field three surfaces already expose, this folds it into
+    /// the ONE model chain [`resolve_agent_model`] already terminates in, which
+    /// is what the owner ruling means by unitary: if it is configurable, every
+    /// system uses it. Folding at LOAD time rather than adding a parameter to
+    /// [`resolve_agent_model`] is what makes it reach every launch path — the PM
+    /// launch, agent delegation, and the daemon — without touching their
+    /// signatures.
+    /// What: precedence for the effective `models.default`, highest first — the
+    /// project's committed `.trusty-mpm.toml`, then
+    /// `~/.trusty-tools/trusty-mpm/config.yaml`'s `default_model`, then this
+    /// file's own `[models] default`. The YAML sits ABOVE the TOML because that
+    /// is the contract its editor already advertises. More SPECIFIC settings — an
+    /// explicit `--model`, a per-agent override, agent frontmatter — still win
+    /// over any of these, since they are all defaults.
+    /// `project_dir` is `None` for a launch with no resolved project.
+    /// Test: `load_effective_applies_the_project_layer`,
+    /// `project_default_model_tops_the_chain`,
+    /// `yaml_default_model_beats_toml_default`,
+    /// `default_model_layers_are_a_no_op_when_unset`.
+    pub fn load_effective(root: &Path, project_dir: Option<&Path>) -> Self {
+        Self::load(root).with_outer_default_model_layers(project_dir)
+    }
+
+    /// [`load_effective`](Self::load_effective) against the canonical
+    /// `~/.trusty-mpm/` root.
+    ///
+    /// Why: `launch()` needs the effective config but must not name
+    /// `FrameworkPaths::default()` itself — the #4203 source-text guard
+    /// (`launch_paths_prepare_through_the_isolated_seam`) forbids that symbol in
+    /// the CLI launch paths, because a self-resolved framework root there is how
+    /// the deploy-tier bug got reintroduced twice. Resolving the root inside the
+    /// config module keeps the guard meaningful instead of merely satisfied.
+    /// What: delegates to [`load_default`](Self::load_default) — same
+    /// home-directory handling, including the stripped-CI fallback — then folds
+    /// on the project and host layers.
+    /// Test: `load_effective_applies_the_project_layer` covers the layering;
+    /// the root resolution is [`load_default`]'s.
+    pub fn load_effective_default(project_dir: Option<&Path>) -> Self {
+        Self::load_default().with_outer_default_model_layers(project_dir)
+    }
+
+    /// Fold the project and host `default_model` layers onto an already-loaded
+    /// config.
+    ///
+    /// Why: shared by [`load_effective`](Self::load_effective) and
+    /// [`load_effective_default`](Self::load_effective_default) so the two entry
+    /// points cannot drift in precedence — only in how they find the root.
+    /// What: reads the project's `.trusty-mpm.toml` and the host YAML, then
+    /// applies [`with_default_model_layers`](Self::with_default_model_layers).
+    /// Test: `load_effective_applies_the_project_layer`.
+    #[must_use]
+    fn with_outer_default_model_layers(self, project_dir: Option<&Path>) -> Self {
+        let project_default = project_dir
+            .and_then(crate::core::project_config::load_or_report)
+            .and_then(|c| c.default_model);
+        let host_default =
+            crate::core::trusty_tools_config::TrustyToolsConfig::load().default_model;
+        self.with_default_model_layers(project_default.as_deref(), host_default.as_deref())
+    }
+
+    /// Overlay the project and host default-model layers onto `[models] default`.
+    ///
+    /// Why: split from [`load_effective`] so the precedence is assertable without
+    /// a home directory or a real config file.
+    /// What: `project` wins over `host`, which wins over whatever `[models]
+    /// default` already held. Both absent → unchanged.
+    /// Test: `project_default_model_tops_the_chain`,
+    /// `yaml_default_model_beats_toml_default`,
+    /// `default_model_layers_are_a_no_op_when_unset`.
+    #[must_use]
+    pub fn with_default_model_layers(mut self, project: Option<&str>, host: Option<&str>) -> Self {
+        if let Some(m) = project.or(host) {
+            self.models.default = Some(m.to_string());
+        }
+        self
     }
 
     /// Expand a tier alias or pass through a full model id.

@@ -34,6 +34,31 @@ use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
 use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
+/// Does this project's next managed session get its own git worktree? (#5207)
+///
+/// Why: the decision needs a live [`ProjectRegistry`] from [`DaemonState`], and
+/// [`crate::project::worktree_policy`] must not depend on `daemon::` to get one
+/// — that coupling is exactly what #4300 unpicked. This is the daemon-side
+/// adapter: it supplies the registry, the shared policy decides. Keeping it
+/// here rather than inline in `lifecycle::spawn_managed_routed` also honours
+/// this module's reason for existing (see the module doc — `lifecycle.rs` is
+/// frozen at its allowlisted SLOC budget).
+/// What: delegates to [`crate::project::worktree_enabled_for_project`], which
+/// resolves the project's committed `.trusty-mpm.toml` ABOVE the machine-global
+/// registry, and the built-in `true` below both. Only the in-project spawn
+/// branch can call this — the clone-based branch has no project directory yet
+/// and uses [`crate::project::worktree_enabled_for_origin`] instead.
+/// Test: `worktree_project_config_overrides_registry` and the rest of the
+/// project-layer cases in `project::worktree_policy_tests`.
+pub(super) async fn worktree_isolated(
+    state: &Arc<DaemonState>,
+    local_path: &std::path::Path,
+    origin_url: &str,
+) -> bool {
+    let registry = state.project_registry().await;
+    crate::project::worktree_enabled_for_project(local_path, &registry, origin_url).await
+}
+
 /// Return the FIRST already-`Active` session whose cwd is EXACTLY
 /// `local_path`, if any (#3455 collision detector).
 ///

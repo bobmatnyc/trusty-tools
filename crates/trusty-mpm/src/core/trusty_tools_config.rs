@@ -576,7 +576,17 @@ impl TrustyToolsConfig {
     /// [`CRATE_NAME`].
     /// Test: `config_template_used_when_no_env` (round-trips via `crate_config`).
     pub fn load() -> Self {
-        trusty_common::crate_config::load_or_default::<Self>(CRATE_NAME)
+        let cfg = trusty_common::crate_config::load_or_default::<Self>(CRATE_NAME);
+        // #5207: the parse above is LENIENT and stays that way — see
+        // `core::config_keys` for why `deny_unknown_fields` on this struct would
+        // turn one typo into a whole-file discard. Report what it dropped.
+        if let Some(path) = trusty_common::crate_config::crate_config_path(CRATE_NAME)
+            && let Ok(raw) = std::fs::read_to_string(&path)
+            && let Some(doc) = crate::core::config_keys::yaml_document(&raw)
+        {
+            crate::core::config_keys::report_unknown_keys(&path.display().to_string(), &doc, &cfg);
+        }
+        cfg
     }
 }
 

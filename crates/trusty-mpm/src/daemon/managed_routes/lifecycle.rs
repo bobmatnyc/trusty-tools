@@ -375,8 +375,11 @@ async fn spawn_managed_routed(
         if let Some(origin_url) = super::inproject::get_origin_url(local_path)
             && let Some(gh) = trusty_common::github_path::parse_github_path(&origin_url)
         {
-            let registry = state.project_registry().await;
-            if !crate::project::worktree_enabled_for_origin(&registry, &origin_url).await {
+            // #5207: the project dir is already resolved here, so this branch
+            // consults the project's own committed `.trusty-mpm.toml` ABOVE the
+            // machine-global registry. The clone-based branch below has no
+            // project dir yet and keeps using the registry-only entry point.
+            if !super::launch_on_main::worktree_isolated(state, local_path, &origin_url).await {
                 info!(
                     id = %session_id,
                     path = %local_path.display(),
