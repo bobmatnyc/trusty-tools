@@ -17,6 +17,8 @@ mod attendance;
 mod cancel;
 mod costs;
 mod ctrl_sessions;
+// #5052: `/api/events` stream authentication (ticket mint + redeem + CORS).
+mod event_tickets;
 mod events_sse;
 mod guard;
 mod listener_events;
