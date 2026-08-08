@@ -424,7 +424,7 @@ fn spawn_listener(
     let listener = crate::uds::bind_hardened(&sock).expect("bind listener");
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        serve_until(listener, sink, ServeOptions::default(), async {
+        serve_until(&listener, sink, ServeOptions::default(), async {
             let _ = stop_rx.await;
         })
         .await;
@@ -740,7 +740,7 @@ async fn serve_rejects_an_oversized_frame() {
         ..ServeOptions::default()
     };
     tokio::spawn(async move {
-        serve_until(listener, sink, options, std::future::pending::<()>()).await;
+        serve_until(&listener, sink, options, std::future::pending::<()>()).await;
     });
 
     let flood = vec![b'x'; 4096];

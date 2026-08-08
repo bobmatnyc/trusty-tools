@@ -170,8 +170,9 @@ impl Default for ServeOptions {
 /// the strength of it.
 ///
 /// What, in order: parse; reject a non-`2.0` envelope; reject any method other
-/// than [`RELAY_METHOD`]; reject a frame whose provenance says the sender did
-/// not verify it (the sender refuses an unverified delivery before it reaches
+/// than [`RELAY_METHOD`]; reject a frame whose id disagrees with its
+/// `delivery_id`; reject a frame whose provenance says the sender did not
+/// verify it (the sender refuses an unverified delivery before it reaches
 /// its spool, so such a frame is a contract violation and never something to
 /// take responsibility for); then, and only then, take ownership and ack.
 ///
@@ -179,7 +180,8 @@ impl Default for ServeOptions {
 /// `dispatch_refuses_when_the_sink_cannot_take_ownership`,
 /// `dispatch_rejects_a_method_that_is_not_webhook_deliver`,
 /// `dispatch_rejects_an_unparseable_frame`,
-/// `dispatch_rejects_an_unverified_provenance`.
+/// `dispatch_rejects_an_unverified_provenance`,
+/// `dispatch_rejects_a_frame_whose_id_disagrees_with_its_delivery_id`.
 pub fn dispatch_frame(frame: &[u8], sink: &dyn DeliverySink) -> RelayResponse {
     let request: RelayRequest = match serde_json::from_slice(frame) {
         Ok(r) => r,
@@ -210,6 +212,19 @@ pub fn dispatch_frame(frame: &[u8], sink: &dyn DeliverySink) -> RelayResponse {
             format!(
                 "unknown method {:?}; this listener serves only {RELAY_METHOD}",
                 request.method
+            ),
+        );
+    }
+
+    // #5182 review: the response carries no id, so a frame whose JSON-RPC id
+    // disagrees with its delivery id would be stored under one and logged under
+    // the other — a correlation that silently points at the wrong delivery.
+    if request.id != request.params.delivery_id {
+        return RelayResponse::refuse(
+            CODE_INVALID_PARAMS,
+            format!(
+                "request id {:?} does not match params.delivery_id {:?}",
+                request.id, request.params.delivery_id
             ),
         );
     }
@@ -246,12 +261,13 @@ pub fn dispatch_frame(frame: &[u8], sink: &dyn DeliverySink) -> RelayResponse {
 /// `Unreachable` — a durable pending state, never an ack.
 ///
 /// Test: `serve_round_trips_a_delivery_over_a_real_socket`,
-/// `serve_rejects_an_oversized_frame`.
+/// `serve_rejects_an_oversized_frame`,
+/// `handle_connection_reports_a_liveness_probe_rather_than_a_failure`.
 pub async fn handle_connection(
     mut stream: UnixStream,
     sink: Arc<dyn DeliverySink>,
     options: ServeOptions,
-) -> std::io::Result<()> {
+) -> std::io::Result<Served> {
     ensure_peer_is_self(&stream).map_err(std::io::Error::other)?;
 
     let mut frame: Vec<u8> = Vec::new();
@@ -259,10 +275,11 @@ pub async fn handle_connection(
         let mut reader = BufReader::new((&mut stream).take(options.max_frame_bytes));
         let read = reader.read_until(b'\n', &mut frame).await?;
         if read == 0 && frame.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "peer closed without sending a frame",
-            ));
+            // #5182 review: NOT a failed delivery. `UdsServiceSupervisor`'s
+            // liveness probe connects and closes immediately on every
+            // `ensure_running`, so treating this as a dropped delivery makes the
+            // one WARN an operator greps for fire on every successful relay.
+            return Ok(Served::LivenessProbe);
         }
         if !frame.ends_with(b"\n") && frame.len() as u64 >= options.max_frame_bytes {
             return Err(std::io::Error::new(
@@ -279,11 +296,30 @@ pub async fn handle_connection(
         .await
         .map_err(|join| std::io::Error::other(format!("dispatch task did not complete: {join}")))?;
 
+    let acked = response.is_ack();
     let mut bytes = serde_json::to_vec(&response).map_err(std::io::Error::other)?;
     bytes.push(b'\n');
     stream.write_all(&bytes).await?;
     stream.flush().await?;
-    Ok(())
+    Ok(Served::Answered { acked })
+}
+
+/// What one accepted connection turned out to be.
+///
+/// Why: "the peer connected and closed without sending anything" is the
+/// supervisor's liveness probe, not a dropped delivery. Collapsing the two into
+/// one `Ok(())`/`Err` pair made a WARN about lost work fire on every successful
+/// relay, which is worse than not logging at all.
+/// Test: `handle_connection_reports_a_liveness_probe_rather_than_a_failure`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Served {
+    /// A frame arrived and a response was written.
+    Answered {
+        /// Whether that response was an acknowledgement.
+        acked: bool,
+    },
+    /// The peer connected and closed without sending a byte — a liveness probe.
+    LivenessProbe,
 }
 
 /// Accept and serve connections until `shutdown` resolves.
@@ -291,17 +327,28 @@ pub async fn handle_connection(
 /// Why: the socket must exist without the service running resident, so this is
 /// the whole body of a short-lived, console-supervised child — bind, serve,
 /// exit on SIGTERM.
-/// What: each connection is handled inline rather than spawned. Webhook volume
-/// is measured at zero deliveries in 14 days (#5028) and the handler is bounded
-/// by [`ServeOptions::read_timeout`], so serialising costs nothing and removes
-/// any question of how many tasks a shutdown has to wait for. A connection that
-/// errors is logged and dropped without answering; the sender records
-/// `Unreachable` and keeps its copy.
+///
+/// What: each connection is handed to `tokio::spawn` rather than served inline.
+/// That is a REQUIREMENT of `UdsServiceSupervisor`, not a throughput choice:
+/// `supervisor::probe.rs`'s `SocketVerdict` docs record that on macOS a bound
+/// listener with a saturated accept queue answers ECONNREFUSED, which the
+/// supervisor classifies as `NotServing` and evicts. A listener that accepted
+/// inline would be killed under exactly the load it was handling. Shutdown drops
+/// the loop; an in-flight handler is bounded by
+/// [`ServeOptions::read_timeout`], which is under [`LISTENER_SHUTDOWN_FLUSH`],
+/// so console's SIGTERM patience still covers it.
+///
+/// The listener is borrowed, not consumed, so a caller can unlink the socket
+/// while it is still bound — see [`super::WebhookListener::run`].
+///
+/// A connection that errors is logged and dropped without answering; the sender
+/// records `Unreachable` and keeps its copy.
 ///
 /// Test: `serve_round_trips_a_delivery_over_a_real_socket`,
-/// `serve_stops_on_shutdown`.
+/// `serve_stops_on_shutdown`,
+/// `serve_handles_concurrent_connections_without_serialising`.
 pub async fn serve_until(
-    listener: UnixListener,
+    listener: &UnixListener,
     sink: Arc<dyn DeliverySink>,
     options: ServeOptions,
     shutdown: impl std::future::Future<Output = ()> + Send,
@@ -321,22 +368,30 @@ pub async fn serve_until(
             }
         };
         let sink = Arc::clone(&sink);
-        match tokio::time::timeout(
-            options.read_timeout,
-            handle_connection(stream, sink, options),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "webhook delivery connection failed; not acknowledged");
+        tokio::spawn(async move {
+            match tokio::time::timeout(
+                options.read_timeout,
+                handle_connection(stream, sink, options),
+            )
+            .await
+            {
+                Ok(Ok(Served::Answered { .. })) => {}
+                Ok(Ok(Served::LivenessProbe)) => {
+                    tracing::debug!("liveness probe connected and closed without a frame");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        error = %e,
+                        "webhook delivery connection failed; not acknowledged"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        timeout = ?options.read_timeout,
+                        "webhook delivery connection timed out; not acknowledged"
+                    );
+                }
             }
-            Err(_) => {
-                tracing::warn!(
-                    timeout = ?options.read_timeout,
-                    "webhook delivery connection timed out; not acknowledged"
-                );
-            }
-        }
+        });
     }
 }

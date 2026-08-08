@@ -40,10 +40,11 @@ pub mod serve;
 #[path = "tests.rs"]
 mod receive_tests;
 
-pub use inbox::{Inbox, InboxError, Ownership};
+pub use inbox::{Inbox, InboxError, Ownership, held_count};
 pub use listener::{ListenerError, WebhookListener, run_until_signal};
 pub use serve::{
-    DeliverySink, LISTENER_SHUTDOWN_FLUSH, ServeOptions, SinkRejection, dispatch_frame, serve_until,
+    DeliverySink, LISTENER_SHUTDOWN_FLUSH, ServeOptions, Served, SinkRejection, dispatch_frame,
+    serve_until,
 };
 
 /// JSON-RPC method a target implements to accept a relayed delivery.
@@ -81,6 +82,40 @@ pub fn review_socket_path() -> std::path::PathBuf {
 #[cfg(feature = "uds")]
 pub fn analyze_socket_path() -> std::path::PathBuf {
     crate::uds::scratch_socket_dir().join(ANALYZE_SOCKET_FILE)
+}
+
+/// Directory name each receiver's inbox occupies under its data directory.
+pub const INBOX_DIR_NAME: &str = "webhook-inbox";
+
+/// Crate whose data directory holds a `{source}`'s inbox.
+///
+/// Test: `inbox_roots_are_per_service_and_under_the_data_dir`.
+pub fn inbox_app_name(source: &str) -> Option<&'static str> {
+    match source {
+        REVIEW_SOURCE => Some("trusty-review"),
+        ANALYZE_SOURCE => Some("trusty-analyze"),
+        _ => None,
+    }
+}
+
+/// Where a `{source}`'s receiver holds deliveries it has acknowledged.
+///
+/// Why: the receiver writes here and `trusty-console` reads the depth here, so
+/// the path has to be one function. A delivery sitting in this directory is work
+/// that arrived and is not finished; console meters it so an undrained backlog
+/// does not read as healthy (#5192). A second spelling of the path would make
+/// console meter a directory nobody writes to and report `Ok` forever.
+/// What: `<data dir for the owning crate>/webhook-inbox`. Honours
+/// `TRUSTY_DATA_DIR_OVERRIDE`, which is what keeps tests off the real one.
+///
+/// # Errors
+///
+/// When the platform data directory cannot be resolved or created.
+///
+/// Test: `inbox_roots_are_per_service_and_under_the_data_dir`.
+pub fn inbox_root_for(source: &str) -> Option<anyhow::Result<std::path::PathBuf>> {
+    let app = inbox_app_name(source)?;
+    Some(crate::resolve_data_dir(app).map(|dir| dir.join(INBOX_DIR_NAME)))
 }
 
 /// The socket for a `{source}` route segment, or `None` when it names no

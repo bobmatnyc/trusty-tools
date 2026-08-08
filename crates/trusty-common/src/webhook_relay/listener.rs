@@ -124,14 +124,23 @@ impl WebhookListener {
         );
 
         let sink: Arc<dyn DeliverySink> = Arc::new(self.inbox.clone());
-        serve_until(listener, sink, self.options, shutdown).await;
+        serve_until(&listener, sink, self.options, shutdown).await;
 
-        // Leaving the file behind would make the next supervised spawn take
-        // over a corpse instead of binding cleanly. A failure here is not worth
-        // an exit code — the singleton bind handles the leftover.
+        // 🔴 #5182 review: unlink BEFORE the listener is dropped, which is why
+        // `serve_until` borrows it. With the order reversed there is a window in
+        // which nothing answers the path but the file is still there — a
+        // successor probes, reads "corpse", unlinks and rebinds, and then this
+        // process's `remove_file` deletes the successor's fresh socket, leaving
+        // it alive and permanently unreachable. That is #5085's shape, and
+        // inside the supervisor only #5085's own reap ordering closes it; an
+        // operator's Ctrl-C'd listener has no such protection.
+        //
+        // A failure here is not worth an exit code — `bind_singleton_hardened`
+        // handles a leftover file.
         if let Err(e) = std::fs::remove_file(&self.socket) {
             tracing::debug!(socket = %self.socket.display(), error = %e, "socket already gone");
         }
+        drop(listener);
         Ok(())
     }
 }

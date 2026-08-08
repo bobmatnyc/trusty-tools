@@ -48,6 +48,7 @@ mod tests;
 
 pub mod dir;
 mod peer;
+pub mod probe;
 pub mod rpc;
 pub mod singleton;
 
@@ -69,12 +70,12 @@ pub mod supervisor;
 
 pub use dir::prepare_socket_dir;
 pub use peer::{ensure_peer_is_self, peer_uid, self_uid};
+pub use probe::{SocketVerdict, probe_socket_verdict, socket_is_serving};
 pub use rpc::{MAX_FRAME_BYTES, UdsRpcError, send_framed_request};
 pub use singleton::bind_singleton_hardened;
 #[cfg(feature = "uds-supervisor")]
 pub use supervisor::{
-    ServiceTimeouts, SocketVerdict, SpawnSpec, SupervisorConfig, SupervisorError,
-    UdsServiceSupervisor,
+    ServiceTimeouts, SpawnSpec, SupervisorConfig, SupervisorError, UdsServiceSupervisor,
 };
 
 use std::fs::Permissions;

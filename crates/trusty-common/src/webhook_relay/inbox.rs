@@ -30,6 +30,11 @@ use std::path::{Path, PathBuf};
 
 use super::RelayDelivery;
 
+/// Distinguishes two temp files written in the same nanosecond by this process.
+///
+/// See [`Inbox::write_temp`] for why a collision here refuses a valid delivery.
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Mode the inbox directory is held at: owner-only, like every other socket and
 /// spool directory on this path.
 pub const INBOX_DIR_MODE: u32 = 0o700;
@@ -106,6 +111,21 @@ pub enum InboxError {
         source: std::io::Error,
     },
 
+    /// A different delivery already occupies this delivery's path.
+    ///
+    /// Acking here would discard the incoming delivery and license the sender to
+    /// delete its only copy of it, on nothing more than a filename match.
+    /// Refusing keeps the sender's copy and surfaces the collision.
+    #[error("delivery {delivery_id} collides with the entry already at {path}: {detail}")]
+    KeyCollision {
+        /// Path that is already occupied.
+        path: PathBuf,
+        /// The delivery that could not be stored.
+        delivery_id: String,
+        /// What the held copy turned out to be.
+        detail: String,
+    },
+
     /// The inbox could not be read back.
     #[error("read webhook inbox {path}: {source}")]
     Read {
@@ -149,6 +169,12 @@ pub struct Inbox {
 impl Inbox {
     /// Open (creating) an inbox at `root`, held at [`INBOX_DIR_MODE`].
     ///
+    /// Deliberately narrower than [`crate::uds::prepare_socket_dir`]: it chmods
+    /// an existing directory without checking ownership or refusing a symlink.
+    /// The inbox lives under the user's own data directory, so reaching it
+    /// already requires having compromised that directory. Point this somewhere
+    /// less private and those checks become load-bearing.
+    ///
     /// # Errors
     ///
     /// [`InboxError::PrepareDir`] when the directory cannot be created or
@@ -183,18 +209,25 @@ impl Inbox {
     /// already held instead of writing a second one. A receipt timestamp in the
     /// name — which the sender's spool does use, for age-sorting — would defeat
     /// deduplication entirely.
-    /// What: `<sanitised id>-<fnv1a of the raw id>.json`. The id arrives from an
-    /// attacker-influenced header (the HMAC covers the body, not the headers),
-    /// so it is reduced to `[A-Za-z0-9_-]` and truncated before it reaches
-    /// `Path::join`; the hash of the RAW id restores the uniqueness that
-    /// sanitising throws away, so two hostile ids cannot alias onto one file.
+    /// What: `<sanitised id>-<sha256 of the raw id, first 16 hex>.json`. The id
+    /// arrives from an attacker-influenced header (the HMAC covers the body, not
+    /// the headers), so it is reduced to `[A-Za-z0-9_-]` and truncated before it
+    /// reaches `Path::join`; the digest of the RAW id restores the uniqueness
+    /// sanitising throws away.
+    ///
+    /// The digest narrows collisions, it does not eliminate them, and the ack
+    /// does not rest on it: [`Inbox::take_ownership`] reads the held copy back
+    /// and refuses when it is a different delivery. A truncated SHA-256 rather
+    /// than a non-cryptographic hash because a signature-capable sender could
+    /// otherwise choose two ids that land on one path (`sha2` is already a
+    /// dependency — `webhook-relay` implies `webhook-hmac`).
     /// Test: `inbox_entry_path_sanitises_a_hostile_delivery_id`,
     /// `inbox_entry_path_separates_ids_that_sanitise_alike`.
     pub fn entry_path(&self, delivery_id: &str) -> PathBuf {
         self.root.join(format!(
-            "{}-{:016x}.json",
+            "{}-{}.json",
             sanitise_delivery_id(delivery_id),
-            fnv1a64(delivery_id.as_bytes())
+            id_digest(delivery_id)
         ))
     }
 
@@ -206,8 +239,12 @@ impl Inbox {
     ///
     /// What: encode → write a temp file with `create_new` → `sync_all` it →
     /// `hard_link` it into place → unlink the temp → `sync_all` the directory.
-    /// An `EEXIST` on the link is not a failure: the delivery is already held,
-    /// which is [`Ownership::already_owned`] and still an ack.
+    ///
+    /// An `EEXIST` on the link means something is already at this path. That is
+    /// an ack ONLY once the held copy has been read back and confirmed to be the
+    /// same delivery — see [`InboxError::KeyCollision`]. Acking on the bare
+    /// `EEXIST` would discard the incoming delivery and license the sender to
+    /// delete its only copy of it, on nothing more than a filename match.
     ///
     /// # Errors
     ///
@@ -215,6 +252,7 @@ impl Inbox {
     ///
     /// Test: `inbox_persist_is_durable_before_it_returns`,
     /// `inbox_redelivery_of_a_held_id_is_already_owned`,
+    /// `inbox_refuses_a_different_delivery_on_the_same_path`,
     /// `inbox_persist_fails_when_the_root_is_not_a_directory`.
     pub fn take_ownership(&self, delivery: &RelayDelivery) -> Result<Ownership, InboxError> {
         let final_path = self.entry_path(&delivery.delivery_id);
@@ -222,7 +260,17 @@ impl Inbox {
 
         let already_owned = match std::fs::hard_link(&tmp_path, &final_path) {
             Ok(()) => false,
-            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => true,
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                // #5182 review: a filename match is not a delivery match. Two
+                // distinct ids can land here — console's own fallback id
+                // `no-delivery-header-<ms>` is not unique within a millisecond,
+                // and a digest is not a proof of injectivity.
+                if let Err(e) = self.confirm_same_delivery(&final_path, delivery) {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(e);
+                }
+                true
+            }
             Err(source) => {
                 let _ = std::fs::remove_file(&tmp_path);
                 return Err(InboxError::Commit {
@@ -277,11 +325,58 @@ impl Inbox {
         Ok(held)
     }
 
+    /// Confirm the copy already at `path` is the same delivery as `incoming`.
+    ///
+    /// Why: [`Inbox::take_ownership`] treats `EEXIST` as "already held", and
+    /// that answer licenses the sender to delete its only copy. If the held file
+    /// is a DIFFERENT delivery that merely shares a path, acking discards the
+    /// incoming one permanently. Refusing instead leaves the sender's copy alive
+    /// and turns a silent loss into a visible, retried failure.
+    /// What: reads the held entry and compares the delivery id and the body. A
+    /// file that cannot be read or decoded is treated as a mismatch — an
+    /// unreadable held copy is not evidence that the work is owned.
+    /// Test: `inbox_refuses_a_different_delivery_on_the_same_path`,
+    /// `inbox_refuses_when_the_held_copy_is_unreadable`.
+    fn confirm_same_delivery(
+        &self,
+        path: &Path,
+        incoming: &RelayDelivery,
+    ) -> Result<(), InboxError> {
+        let collision = |detail: &str| InboxError::KeyCollision {
+            path: path.to_path_buf(),
+            delivery_id: incoming.delivery_id.clone(),
+            detail: detail.to_string(),
+        };
+        let bytes =
+            std::fs::read(path).map_err(|e| collision(&format!("held copy unreadable: {e}")))?;
+        let held: RelayDelivery = serde_json::from_slice(&bytes)
+            .map_err(|e| collision(&format!("held copy undecodable: {e}")))?;
+        if held.delivery_id != incoming.delivery_id {
+            return Err(collision(&format!(
+                "path is held by delivery {:?}",
+                held.delivery_id
+            )));
+        }
+        if held.body_b64 != incoming.body_b64 {
+            return Err(collision(
+                "same delivery id, different body — the sender re-used an id",
+            ));
+        }
+        Ok(())
+    }
+
     /// Encode `delivery` into a fresh, fsync'd temp file beside `final_path`.
     ///
-    /// The temp name carries the process id and a nanosecond stamp so two
-    /// concurrent writers for the same delivery cannot share one, and uses
-    /// `create_new` so a leftover from a crashed run is never appended to.
+    /// The temp name carries the process id, a nanosecond stamp and a
+    /// process-wide counter so two concurrent writers for the same delivery
+    /// cannot share one, and uses `create_new` so a leftover from a crashed run
+    /// is never appended to.
+    ///
+    /// 🔴 The counter is not belt-and-braces. Two deliveries handled in the same
+    /// nanosecond collide on the pid+stamp name alone, `create_new` fails with
+    /// `EEXIST`, and the second one is REFUSED — a correct delivery reported as
+    /// undurable purely because a sibling was concurrent. That went unseen while
+    /// connections were served inline and appeared the moment they were spawned.
     fn write_temp(
         &self,
         delivery: &RelayDelivery,
@@ -296,8 +391,9 @@ impl Inbox {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
+        let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp_path =
-            final_path.with_extension(format!("json.{}.{stamp}.tmp", std::process::id()));
+            final_path.with_extension(format!("json.{}.{stamp}.{seq}.tmp", std::process::id()));
 
         let write = || -> std::io::Result<()> {
             let mut file = std::fs::OpenOptions::new()
@@ -314,6 +410,34 @@ impl Inbox {
         })?;
         Ok(tmp_path)
     }
+}
+
+/// How many deliveries sit at `root`, without opening (or creating) an inbox.
+///
+/// Why: `trusty-console` has to meter a directory that belongs to another
+/// service, and it must not create or chmod it as a side effect of asking. A
+/// held delivery is work that arrived and is not finished, so this count is what
+/// stands between an operator and an undrained backlog reported as healthy —
+/// see [`crate::webhook_relay::inbox_root_for`] and #5192.
+/// What: counts `*.json` entries. An absent directory is `0`, not an error:
+/// nothing has ever been delivered to that service.
+/// Test: `held_count_reports_zero_for_an_absent_inbox`,
+/// `held_count_counts_stored_deliveries`.
+pub fn held_count(root: &Path) -> Result<usize, InboxError> {
+    let dir = match std::fs::read_dir(root) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => {
+            return Err(InboxError::Read {
+                path: root.to_path_buf(),
+                source,
+            });
+        }
+    };
+    Ok(dir
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .count())
 }
 
 /// fsync a directory so a name created inside it survives a crash.
@@ -349,19 +473,18 @@ fn sanitise_delivery_id(raw: &str) -> String {
     }
 }
 
-/// FNV-1a 64, spelled out rather than pulled from a dependency.
+/// First 8 bytes of SHA-256 over the raw delivery id, as hex.
 ///
-/// Why: [`Inbox::entry_path`] needs a hash that is identical across processes
-/// and releases, because the path IS the deduplication key — `DefaultHasher` is
+/// Why: [`Inbox::entry_path`] needs a digest that is identical across processes
+/// and releases, because the path is the deduplication key — `DefaultHasher` is
 /// explicitly not stable across releases and would silently start writing a
-/// second copy of a delivery already held. This is not a security hash and is
-/// not used as one; the sanitised prefix plus the raw-id hash only have to make
-/// two distinct ids land on two distinct files.
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
+/// second copy of a delivery already held. SHA-256 rather than a
+/// non-cryptographic hash so a signature-capable sender cannot choose two ids
+/// that land on one path; truncation keeps the filename short, and the
+/// read-back in [`Inbox::confirm_same_delivery`] is what actually decides
+/// whether a shared path is the same delivery.
+fn id_digest(delivery_id: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(delivery_id.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
