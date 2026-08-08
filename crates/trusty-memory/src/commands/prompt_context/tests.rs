@@ -1439,3 +1439,104 @@ async fn prompt_context_injection_has_no_provenance_tags() {
 
     addr_handle.shutdown().await;
 }
+
+/// Why (issue #4972, end to end): the unit tests in `query` pin the shaping in
+/// isolation. This one proves the metric survives the whole hook — an
+/// over-window `<task-notification>` prompt must reach `/recall` reshaped and
+/// leave a record of it on the enriched-prompt log line, which is the same
+/// corpus the 52%-over-window rate was measured from. Before this change the
+/// embedder cut the query at token 512 and nothing anywhere recorded it.
+/// What: fires the hook with a 22 KB envelope-wrapped prompt, then parses the
+/// JSONL log and asserts `recall_query` reports an over-budget original, a
+/// within-budget send, a stripped envelope, and a non-zero dropped-unit count.
+/// Test: itself.
+/// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+#[cfg(feature = "axum-server")]
+#[tokio::test]
+async fn prompt_context_logs_recall_query_shape() {
+    let _guard = crate::commands::env_test_lock().lock().await;
+    unsafe {
+        std::env::remove_var(ENV_MIN_SCORE);
+        std::env::remove_var(super::query::ENV_QUERY_TOKEN_BUDGET);
+    }
+    let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+        spin_up_test_daemon_with_palace("prompt-ctx-query-shape").await;
+    let _ = crate::tools::dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": slug,
+            "text": "Rust integration uses tokio for async tasks and serde for JSON encoding",
+            "room": "General",
+            "tags": [json!("rust")],
+        }),
+    )
+    .await
+    .expect("memory_remember");
+
+    // The exact shape 65.3% of logged hook prompts arrive in: a machine
+    // envelope whose head is task ids and absolute paths, wrapping a long
+    // agent report.
+    let long_result = "The retrieval relevance floor interacts with the top_k cap.\n".repeat(400);
+    let prompt = format!(
+        "<task-notification>\n\
+         <task-id>a23c46a0439fa7881</task-id>\n\
+         <tool-use-id>toolu_01PvoC76SpHX65DVbJi7sPes</tool-use-id>\n\
+         <output-file>/private/tmp/claude-502/-Users-masa-projects/tasks/a23.output</output-file>\n\
+         <status>completed</status>\n\
+         <summary>Agent \"rust integration\" finished</summary>\n\
+         <result>{long_result}</result>\n\
+         </task-notification>"
+    );
+    assert!(prompt.len() > 20_000, "fixture must be far past the window");
+
+    let payload = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": project_dir.to_string_lossy(),
+        "prompt": prompt,
+    })
+    .to_string();
+    let _ = build_injection_body(&payload).await;
+
+    let logs_dir = trusty_common::resolve_data_dir("trusty-memory")
+        .expect("resolve data dir")
+        .join("logs");
+    let log_file = std::fs::read_dir(&logs_dir)
+        .expect("logs dir")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("enriched-prompts."))
+        })
+        .expect("an enriched-prompts log file");
+    let content = std::fs::read_to_string(&log_file).expect("read log");
+    let entry: crate::prompt_log::PromptLogEntry = content
+        .lines()
+        .filter_map(|l| serde_json::from_str::<crate::prompt_log::PromptLogEntry>(l).ok())
+        .next_back()
+        .expect("at least one parseable log line");
+
+    let shape = entry
+        .recall_query
+        .expect("an over-window query must leave a shape record, not truncate silently");
+    assert!(
+        shape.original_tokens > shape.budget_tokens,
+        "fixture must exceed the budget; got {shape:?}"
+    );
+    assert!(
+        shape.sent_tokens <= shape.budget_tokens,
+        "the query sent to the embedder must fit its window; got {shape:?}"
+    );
+    assert!(
+        shape.envelope_stripped,
+        "the task-notification envelope must be stripped; got {shape:?}"
+    );
+    assert!(
+        shape.units_dropped > 0 && shape.reshaped(),
+        "the reduction must be recorded, not silent; got {shape:?}"
+    );
+
+    addr_handle.shutdown().await;
+}
