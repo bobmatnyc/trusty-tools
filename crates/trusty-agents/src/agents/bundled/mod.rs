@@ -61,7 +61,7 @@
 //! subsequent `stamp::write` — is one critical section under a SINGLE
 //! pass-level advisory lock ([`lock`]), acquired ONCE by the caller
 //! ([`ensure_bundled_agents_deployed_in`], [`force_reprovision_bundled_agents`])
-//! and threaded down into [`reprovision_bundled_agents_locked`] (the MEDIUM
+//! and threaded down into [`reprovision_embedded_locked`] (the MEDIUM
 //! follow-up: an earlier version acquired the lock only INSIDE the refresh
 //! loop, leaving the stamp read/decide/write outside it — two concurrent
 //! passes could both observe the same stale stamp, both refresh, then race
@@ -88,6 +88,21 @@ mod stamp;
 #[derive(rust_embed::RustEmbed)]
 #[folder = ".trusty-agents/agents/"]
 struct BundledAgents;
+
+/// Embeds this crate's own `.trusty-agents/workflows/` tree — the prescriptive
+/// pipeline definitions `--workflow <name>` loads — into the compiled binary
+/// at build time (#5227).
+///
+/// Why: agents were the only config kind ever deployed to the `$HOME` tier, so
+/// `tagent --workflow prescriptive` launched from a directory with no
+/// `.trusty-agents/` (the macOS `.app` sidecar runs with `cwd = /`) resolved
+/// every agent hierarchically and then had no workflow definition to read.
+/// What: same `rust-embed` mechanism as [`BundledAgents`], deployed by
+/// [`ensure_bundled_workflows_deployed`] through the SAME stamp/lock/refresh
+/// path — see [`reprovision_embedded_locked`].
+#[derive(rust_embed::RustEmbed)]
+#[folder = ".trusty-agents/workflows/"]
+struct BundledWorkflows;
 
 /// Outcome of one (re)provision pass over the bundled agent set (#3556).
 ///
@@ -151,15 +166,15 @@ pub fn deploy_bundled_agents(target_dir: &Path) -> Result<usize> {
 /// Callers that DO have a stamp step to keep in the same critical section
 /// (`ensure_bundled_agents_deployed_in`, `force_reprovision_bundled_agents`)
 /// acquire the lock themselves and call
-/// [`reprovision_bundled_agents_locked`] directly instead of this wrapper —
+/// [`reprovision_embedded_locked`] directly instead of this wrapper —
 /// see that function's docs for why (#3556 code-critic follow-up, MEDIUM).
 /// What: acquires the pass-level lock, then delegates to
-/// [`reprovision_bundled_agents_locked`].
+/// [`reprovision_embedded_locked`].
 /// Test: `deploy_writes_missing_files_only`, `deploy_never_overwrites_existing_file`,
 /// `deploy_is_idempotent_on_rerun`, `deploy_writes_directory_package_agents` (tests.rs).
 fn reprovision_bundled_agents(target_dir: &Path, refresh_stale: bool) -> Result<ReprovisionReport> {
     let guard = lock::acquire(target_dir)?;
-    reprovision_bundled_agents_locked(&guard, target_dir, refresh_stale)
+    reprovision_embedded_locked::<BundledAgents>(&guard, target_dir, refresh_stale)
 }
 
 /// The actual write-side loop over `BundledAgents::iter()`, REQUIRING an
@@ -197,16 +212,16 @@ fn reprovision_bundled_agents(target_dir: &Path, refresh_stale: bool) -> Result<
 /// `existing_stale_backup_is_never_clobbered` (tests.rs);
 /// `pass_lock_serializes_concurrent_reprovision_calls` (`lock`'s own tests)
 /// pins the underlying mutual-exclusion primitive.
-fn reprovision_bundled_agents_locked(
+fn reprovision_embedded_locked<E: rust_embed::RustEmbed>(
     _guard: &lock::ProvisionLock,
     target_dir: &Path,
     refresh_stale: bool,
 ) -> Result<ReprovisionReport> {
     let mut report = ReprovisionReport::default();
-    for rel in BundledAgents::iter() {
+    for rel in E::iter() {
         let dest = target_dir.join(rel.as_ref());
-        let file = BundledAgents::get(&rel)
-            .with_context(|| format!("embedded bundled-agent asset vanished: {rel}"))?;
+        let file =
+            E::get(&rel).with_context(|| format!("embedded bundled asset vanished: {rel}"))?;
 
         if dest.exists() {
             if !refresh_stale {
@@ -267,11 +282,11 @@ fn stale_backup_path(dest: &Path) -> PathBuf {
 /// [`stamp::compute`] for the order-independent hash.
 /// Test: `stamp_changes_when_content_changes`,
 /// `stamp_stable_regardless_of_input_order` (`stamp`'s own tests).
-fn current_bundle_stamp() -> Result<String> {
+fn current_bundle_stamp<E: rust_embed::RustEmbed>() -> Result<String> {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
-    for rel in BundledAgents::iter() {
-        let file = BundledAgents::get(&rel)
-            .with_context(|| format!("embedded bundled-agent asset vanished: {rel}"))?;
+    for rel in E::iter() {
+        let file =
+            E::get(&rel).with_context(|| format!("embedded bundled asset vanished: {rel}"))?;
         entries.push((rel.to_string(), file.data.into_owned()));
     }
     Ok(stamp::compute(entries))
@@ -287,12 +302,12 @@ fn current_bundle_stamp() -> Result<String> {
 /// (#3556 code-critic follow-up, MEDIUM), and holds it across the ENTIRE
 /// read-decide-refresh-write sequence so two concurrent callers over the
 /// same `target_dir` can never both observe the same stale stamp and race
-/// writing it back — see [`reprovision_bundled_agents_locked`]'s docs for
+/// writing it back — see [`reprovision_embedded_locked`]'s docs for
 /// the full rationale.
 /// What: computes the current binary's bundle stamp, compares it to the
 /// stamp on disk (`target_dir/.bundled-stamp`, via [`stamp::read`]) — a
 /// missing or differing stamp means "stale", triggering
-/// `reprovision_bundled_agents_locked(&guard, target_dir, true)` (refresh
+/// `reprovision_embedded_locked(&guard, target_dir, true)` (refresh
 /// path) followed by writing the new stamp; a matching stamp takes the fast
 /// never-overwrite path (`refresh_stale = false`) and leaves the stamp file
 /// untouched. A lock-acquire failure propagates as `Err` (unchanged
@@ -304,17 +319,58 @@ fn current_bundle_stamp() -> Result<String> {
 /// `concurrent_ensure_calls_over_stale_target_converge_to_one_consistent_refresh`,
 /// `ensure_deployed_blocks_on_externally_held_pass_lock` (tests.rs).
 pub fn ensure_bundled_agents_deployed_in(target_dir: &Path) -> Result<ReprovisionReport> {
+    ensure_embedded_deployed_in::<BundledAgents>(target_dir)
+}
+
+/// Stamp-aware deploy/refresh of one embedded config tree into `target_dir`
+/// (#5227 generalisation of `ensure_bundled_agents_deployed_in`).
+///
+/// Why: agents and workflows need byte-identical deploy semantics — the
+/// pass-level lock, the content-hash staleness check, the `.stale.bak` archive
+/// of a differing on-disk copy. Duplicating that for a second config kind
+/// would guarantee the two drift; parameterising over the embed keeps one
+/// implementation. `stamp` and `lock` are already per-`target_dir`, so the two
+/// trees never share a stamp file.
+/// What: identical to what `ensure_bundled_agents_deployed_in` did before,
+/// with `BundledAgents` lifted to a type parameter.
+/// Test: the whole existing bundled-agent suite exercises this through
+/// `ensure_bundled_agents_deployed_in`; `bundled_workflows_deploy_to_target`
+/// pins the workflows instantiation.
+fn ensure_embedded_deployed_in<E: rust_embed::RustEmbed>(
+    target_dir: &Path,
+) -> Result<ReprovisionReport> {
     let guard = lock::acquire(target_dir)?;
 
-    let current_stamp = current_bundle_stamp()?;
+    let current_stamp = current_bundle_stamp::<E>()?;
     let on_disk_stamp = stamp::read(target_dir);
     let is_stale = on_disk_stamp.as_deref() != Some(current_stamp.as_str());
 
-    let report = reprovision_bundled_agents_locked(&guard, target_dir, is_stale)?;
+    let report = reprovision_embedded_locked::<E>(&guard, target_dir, is_stale)?;
     if is_stale {
         stamp::write(target_dir, &current_stamp)?;
     }
     Ok(report)
+}
+
+/// Production entry point: deploy/refresh the bundled workflow definitions at
+/// `$HOME/.trusty-agents/workflows/` (#5227).
+///
+/// Why: `--workflow prescriptive` reads `<workflows-dir>/prescriptive.json`,
+/// and until this the only copy on any machine lived inside a checkout of this
+/// repo. A `cargo install`ed `tagent` — or the GUI's `.app` sidecar, whose CWD
+/// is `/` — had no workflow definition anywhere on its search hierarchy, so
+/// making the pre-flight hierarchical alone would only have moved the failure
+/// from the pre-flight to `WorkflowNotFound`.
+/// What: mirrors [`ensure_bundled_agents_deployed`] exactly — no-op when
+/// `$HOME` is unresolvable, otherwise stamp-aware deploy into
+/// `$HOME/.trusty-agents/workflows`. Best-effort at the call site.
+/// Test: `bundled_workflows_deploy_to_target` covers the hermetic core.
+pub fn ensure_bundled_workflows_deployed() -> Result<ReprovisionReport> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(ReprovisionReport::default());
+    };
+    let target = home.join(".trusty-agents").join("workflows");
+    ensure_embedded_deployed_in::<BundledWorkflows>(&target)
 }
 
 /// Production entry point: deploy/refresh the bundled agent set at
@@ -360,7 +416,7 @@ pub fn ensure_bundled_agents_deployed() -> Result<ReprovisionReport> {
 /// concurrent `ensure_*`/`repair` pair over the same `target_dir` can never
 /// interleave.
 /// What: unconditionally runs the refresh path
-/// (`reprovision_bundled_agents_locked(&guard, target_dir, true)`), then
+/// (`reprovision_embedded_locked(&guard, target_dir, true)`), then
 /// writes the current bundle stamp so a subsequent automatic startup check
 /// treats the roster as up to date. Errors (including a lock-acquire
 /// failure) propagate loudly to the caller — this function has no fail-soft
@@ -370,8 +426,8 @@ pub fn ensure_bundled_agents_deployed() -> Result<ReprovisionReport> {
 /// `existing_stale_backup_is_never_clobbered` (tests.rs).
 pub fn force_reprovision_bundled_agents(target_dir: &Path) -> Result<ReprovisionReport> {
     let guard = lock::acquire(target_dir)?;
-    let report = reprovision_bundled_agents_locked(&guard, target_dir, true)?;
-    let current_stamp = current_bundle_stamp()?;
+    let report = reprovision_embedded_locked::<BundledAgents>(&guard, target_dir, true)?;
+    let current_stamp = current_bundle_stamp::<BundledAgents>()?;
     stamp::write(target_dir, &current_stamp)?;
     Ok(report)
 }
