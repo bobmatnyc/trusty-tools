@@ -129,6 +129,16 @@ fn tool_definitions_drops_palace_required_when_default_set() {
     }
 }
 
+/// Why: this roster is the required-tool contract — every name here must be
+/// served, and nothing may be served that is not here. It used to also carry a
+/// bare `assert_eq!(tools.len(), 45)`; #5205 removed that number because the
+/// README's count is now generated from this same function, and a hand-typed
+/// 45 alongside a derived count is two sources for one fact again. The roster
+/// stays hardcoded on purpose — it is the human-authored contract, not a
+/// restatement of what the code happens to return.
+/// What: asserts the roster and the served set are exactly equal, in both
+/// directions, so an addition or removal still fails here.
+/// Test: this test.
 #[test]
 fn tool_definitions_lists_all_tools() {
     let defs = tool_definitions();
@@ -136,17 +146,16 @@ fn tool_definitions_lists_all_tools() {
         .get("tools")
         .and_then(|t| t.as_array())
         .expect("tools array");
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+        .collect();
     // 34 original + 3 task tools (task_add, task_list, task_complete, issue
     // #1722) + 3 room tools (room_list, room_create, room_rename, ADR-0027 T6)
     // + 3 wing tools (wing_list, wing_create, wing_rename, ADR-0027 T9 / #4809)
     // + 1 repair tool (palace_reembed, #4906)
     // + 1 alias-repair tool (palace_unalias, #5005)
-    assert_eq!(tools.len(), 45);
-    let names: Vec<&str> = tools
-        .iter()
-        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
-        .collect();
-    for expected in [
+    let roster = [
         "memory_remember",
         "memory_note",
         "memory_recall",
@@ -195,9 +204,23 @@ fn tool_definitions_lists_all_tools() {
         "wing_list",
         "wing_create",
         "wing_rename",
-    ] {
+    ];
+    for expected in roster {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
+    // The other direction: a new tool must be added to the roster above, which
+    // is what keeps this an exact contract rather than a lower bound.
+    for served in &names {
+        assert!(
+            roster.contains(served),
+            "tool not in the roster above: {served}"
+        );
+    }
+    assert_eq!(
+        names.len(),
+        roster.len(),
+        "duplicate tool name in tool_definitions"
+    );
 }
 
 /// Why: Confirm `palace_create` actually persists a palace under the

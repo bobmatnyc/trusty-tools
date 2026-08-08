@@ -58,3 +58,10 @@ jobs:
 
       - name: Enforce SLOC file cap (500 prod / 3000 test, ratcheted allowlist)
         run: bash scripts/check_line_cap.sh
+
+      # #5205: a generated doc region is only checked if the owning crate has a
+      # `tests/generated_docs.rs`. Markers pasted anywhere else would look
+      # generated while being hand-maintained, so reject an unowned region here
+      # rather than discovering it via another stale README. Cheap, no toolchain.
+      - name: Every generated doc region has an owning test
+        run: bash scripts/check_generated_regions.sh

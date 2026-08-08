@@ -236,64 +236,72 @@ running (started either by `trusty-memory setup`'s LaunchAgent or by
 
 ## Available MCP Tools
 
-The MCP server registers **45 tools** (authoritative source:
-`src/tools/definitions.rs` `tool_definitions`, asserted by the
-`tool_definitions_lists_all_tools` test). All are exposed via both the MCP
-protocol (over the `serve --stdio` path) and the HTTP API (`/api/v1/`). The
-`palace` argument is required unless the server was started with `--palace
-<name>`. The tables below cover the primary surface, not all 45 — for the
-complete, current list of tool names read `tool_definitions()` in
-`src/tools/definitions.rs`, or the exhaustive name list asserted by
-`tool_definitions_lists_all_tools` in `src/tools/tests.rs`.
+All tools are exposed via both the MCP protocol (over the `serve --stdio`
+path) and the HTTP API (`/api/v1/`). The `palace` argument is required unless
+the server was started with `--palace <name>`, which makes it optional
+everywhere.
 
-### Memory tools
+Chat-session tools (`chat_session_*`, `chat_turn_append`) back a redb-backed,
+per-palace conversation store: turns are stored verbatim and bypass the
+`memory_remember` signal/noise and dedup gates.
 
-| Tool | Arguments | Description |
+<!-- BEGIN GENERATED: mcp-tools -->
+The MCP server registers **45 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
+this table is generated from it, not maintained by hand.
+
+| Tool | Arguments | Summary |
 |---|---|---|
-| `memory_remember` | `palace, text, room?, tags?` | Store a memory. Returns the `drawer_id`. |
-| `memory_recall` | `palace, query, top_k?` | Hybrid BM25+vector recall (L0/L1/L2 layers). |
-| `memory_recall_deep` | `palace, query, top_k?` | Deep recall (L3 — slower, higher recall). |
-| `memory_list` | `palace, room?, tag?, limit?` | List stored memories, optionally filtered. |
-| `memory_forget` | `palace, drawer_id` | Delete a specific memory by ID. |
-
-### Palace management tools
-
-| Tool | Arguments | Description |
-|---|---|---|
-| `palace_create` | `name, description?, force?` | Create a new palace namespace. See [Palace as Project](#palace-as-project) for naming rules. Pass `force=true` to bypass project-slug validation and create a palace under an arbitrary app/tenant slug (chat-session-manager use case). |
-| `palace_list` | — | List all palaces and their IDs. |
-| `palace_info` | `palace` | Palace metadata and statistics. |
-
-### Chat session tools
-
-A redb-backed, per-palace chat store for applications using trusty-memory as a
-conversation session manager. Turns are stored verbatim and bypass the
-`memory_remember` signal/noise + dedup gates.
-
-| Tool | Arguments | Description |
-|---|---|---|
-| `chat_session_create` | `palace, session_id?, title?` | Create (or reference) a session. Returns `{ session_id, created_at, message_count }`. |
-| `chat_session_add_turn` | `palace, session_id, role, content` | Append a `user`/`assistant`/`system` turn (creates the session if missing). Returns `{ message_count, updated_at }`. |
-| `chat_session_get` | `palace, session_id` | Full session with all turns in order. |
-| `chat_session_list` | `palace, limit?=50, offset?=0` | Paginated session metadata. Returns `{ sessions, total_count }`. |
-
-### Knowledge graph tools
-
-| Tool | Arguments | Description |
-|---|---|---|
-| `kg_assert` | `palace, subject, predicate, object, confidence?, provenance?` | Assert a knowledge triple. |
-| `kg_query` | `palace, subject` | Query triples by subject. |
-
-### Dream and status tools
-
-| Tool | Arguments | Description |
-|---|---|---|
-| `dream_consolidate_room` | `palace, room?, max_age_days?=7` | On-demand, synchronous LLM consolidation scoped to one room (omit `room` for all rooms). Summarises facts older than `max_age_days` into canonical drawers, then evicts the superseded originals. `Task` drawers are always skipped. No-op when no inference backend is configured. Returns `{ summary_facts_created, facts_evicted }`. |
-| `palace_dream` | `palace, room?, max_age_days?=7` | Alias for `dream_consolidate_room`, exposed under the `palace_*` naming convention. Same behaviour and return shape. |
+| `add_alias` | `palace`, `short`, `full`, `extra?` | Add a short→full alias (e.g. tga → trusty-git-analytics) to the prompt-facts surface. |
+| `chat_session_add_turn` | `palace`, `session_id`, `role`, `content` | Append a message (prompt or response) to a chat session's history. |
+| `chat_session_create` | `palace`, `session_id?`, `title?` | Create a new chat session in a palace (spec-001 chat-session manager). |
+| `chat_session_delete` | `palace`, `session_id` | Delete a chat session (and its full history) from a palace. |
+| `chat_session_get` | `palace`, `session_id` | Retrieve a full chat session: metadata plus every turn in chronological order. |
+| `chat_session_list` | `palace`, `limit?`, `offset?` | List chat sessions in a palace as paginated metadata (id, title, timestamps, message_count) ordered most-recently-updated first. |
+| `chat_session_recall` | `palace`, `session_id` | Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). |
+| `chat_turn_append` | `palace`, `session_id`, `prompt`, `response` | Append a prompt/response PAIR to a chat session as two consecutive messages (user role then assistant role). |
+| `console_metrics` | — | Return a ConsoleMetricsReport with palace aggregate statistics (palace_count, cached_palace_count, total_drawers, total_vectors,… |
+| `discover_aliases` | `palace`, `project_root?` | Auto-discover project aliases by scanning Cargo workspace members, binary names, first-letter abbreviations, and the git remote. |
+| `dream_consolidate_room` | `palace`, `max_age_days?`, `room?` | Trigger LLM-driven semantic consolidation for one room (or all rooms) of a palace, on demand and synchronously (spec-001). |
+| `get_prompt_context` | `query?` | Fetch the current project context (aliases, conventions, facts, shorthands) from the memory palace as a Markdown block ready to drop into… |
+| `kg_assert` | `palace`, `subject`, `predicate`, `object`, `confidence?`, `provenance?` | Assert a fact in the temporal knowledge graph. |
+| `kg_bootstrap` | `palace?`, `project_path?` | Seed the knowledge graph from well-known project files (Cargo.toml, package.json, pyproject.toml, go.mod, CLAUDE.md, .git/config). |
+| `kg_gaps` | `palace?` | List knowledge gaps detected in the memory palace graph. |
+| `kg_query` | `palace`, `subject` | Query active knowledge-graph triples for a subject. |
+| `list_prompt_facts` | — | List every active prompt-fact triple (aliases, conventions, facts, shorthands) across all palaces. |
+| `memory_forget` | `palace`, `drawer_id` | Delete a drawer from a palace by its UUID. |
+| `memory_list` | `palace`, `limit?`, `room?`, `tag?`, `wing?` | List drawers in a palace, optionally filtered by wing, room type, or tag. |
+| `memory_note` | `palace`, `content`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `room?`, `tags?`, `workstream?` | Curated shortcut for short, high-signal facts ("User prefers snake_case", "Deploy target is prod-east"). |
+| `memory_recall` | `palace`, `query`, `room?`, `top_k?`, `wing?` | Recall memories using L0+L1+L2 progressive retrieval. |
+| `memory_recall_all` | `q`, `deep?`, `top_k?` | Semantic search across ALL palaces simultaneously. |
+| `memory_recall_deep` | `palace`, `query`, `room?`, `top_k?` | Deep recall using L3 full HNSW search. |
+| `memory_remember` | `palace`, `text`, `allow_secret_like?`, `context?`, `cwd?`, `expires_at?`, `fact_key?`, `force?`, `room?`, `tags?`, `wing?`, `workstream?` | Store a memory (drawer) in a palace room. |
+| `memory_send_message` | `to_palace`, `purpose`, `content`, `cwd?`, `from_palace?`, `workstream?` | Send an inter-project message (issue #99). |
+| `palace_compact` | `palace` | Remove orphaned vector index entries (vectors with no matching drawer row). |
+| `palace_create` | `name`, `cwd?`, `description?`, `force?` | Create a new memory palace. |
+| `palace_delete` | `palace_id`, `force?` | Delete an entire memory palace, including its drawers, vectors, and knowledge graph. |
+| `palace_dream` | `palace`, `max_age_days?`, `room?` | On-demand LLM-driven consolidation for a palace (issue #1721). |
+| `palace_info` | `palace` | Get metadata and stats for a single palace. |
+| `palace_list` | — | List all palaces on this machine. |
+| `palace_reembed` | `palace`, `dry_run?`, `limit?` | #4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. |
+| `palace_unalias` | `palace`, `dry_run?` | #5005: free drawers whose vector was destroyed by an id collision (`palace_reembed` reports these as `aliased`), so a re-embed can repair… |
+| `palace_update` | `palace_id`, `name` | Update the display name of an existing palace. |
+| `remove_prompt_fact` | `subject`, `predicate` | Retract the active triple for a (subject, predicate) pair from the prompt-facts surface. |
+| `room_create` | `palace`, `label`, `description?`, `wing?` | Create a room in a palace, or return the existing one (ADR-0027). |
+| `room_list` | `palace`, `wing?` | List every room registered in a palace (ADR-0027). |
+| `room_rename` | `palace`, `room`, `new_label` | Rename a room (ADR-0027). |
+| `task_add` | `palace`, `content`, `room?`, `tags?` | Create a Task drawer in a palace (spec-001 issue #1722). |
+| `task_complete` | `palace`, `drawer_id` | Mark a Task drawer as completed by setting its completed_at timestamp (spec-001 issue #1722). |
+| `task_list` | `palace`, `include_completed?` | List Task drawers in a palace (spec-001 issue #1722). |
+| `upgrade` | `check?`, `confirm?` | Check for or install a new version of trusty-memory (issue #537). |
+| `wing_create` | `palace`, `label` | Create a wing (scope) in a palace, or return the existing one with that label (ADR-0027). |
+| `wing_list` | `palace` | List the wings of a palace (ADR-0027). |
+| `wing_rename` | `palace`, `wing`, `new_label` | Rename a wing (ADR-0027). |
+<!-- END GENERATED: mcp-tools -->
 
 Global daemon statistics (total drawers, vectors, KG triples) are available
 via `GET /api/v1/status` — an HTTP-only endpoint (`StatusPayload` in
-`src/service/types.rs`); there is no corresponding MCP tool.
+`src/service/types.rs`); there is no corresponding MCP tool, which is why the
+generated roster above does not list one.
 
 ### Task drawers (protected memory)
 
@@ -584,7 +592,7 @@ trusty-memory (this crate)          trusty-common `memory-core` feature
   axum HTTP/SSE server     ──────►  PalaceRegistry
   serve --stdio (JSON-RPC) ──────►  usearch vector index (index.usearch)
   embedded Svelte UI               redb metadata + KG (kg.redb)
-  45 MCP tools                     fastembed (AllMiniLML6V2Q)
+  MCP tool surface                 fastembed (AllMiniLML6V2Q)
 
 Claude Code stdio ◄──JSON-RPC──► `trusty-memory serve --stdio`
                                   ──POST /rpc (HTTP)──► trusty-memory daemon
