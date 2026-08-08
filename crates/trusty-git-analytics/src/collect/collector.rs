@@ -12,12 +12,13 @@ use crate::collect::errors::Result;
 use crate::collect::git::GitCollector;
 use crate::collect::github::GitHubClient;
 use crate::collect::identity::IdentityResolver;
-use crate::collect::linear::LinearClient;
+use crate::collect::linear_pipeline;
 use crate::collect::pr_provider::PrProvider;
 use crate::collect::weeks::{clamp_week_to_range, weeks_in_range};
 use crate::core::config::Config;
 use crate::core::db::{self, Database};
 use crate::core::models::PullRequest;
+use crate::core::progress::{ProgressBus, ProgressEvent, Stage};
 
 /// Outcome of a `git fetch origin` attempt for a single repository.
 ///
@@ -140,6 +141,10 @@ pub struct CollectionPipeline {
     /// When `true`, print a success line for every fetched repo in the summary
     /// (not just failures). Default `false` — only failures are printed.
     verbose_fetch: bool,
+    /// #5197: optional live-progress sink. Defaults to
+    /// [`ProgressBus::disabled`], on which every emit is a no-op — so the CLI
+    /// path, including its `indicatif` bars, behaves exactly as before.
+    progress: ProgressBus,
 }
 
 impl CollectionPipeline {
@@ -161,7 +166,24 @@ impl CollectionPipeline {
             branches: Vec::new(),
             strict_fetch: false,
             verbose_fetch: false,
+            progress: ProgressBus::disabled(),
         }
+    }
+
+    /// Attach a live-progress sink for the per-repository collect loop.
+    ///
+    /// Why: `tga tui` (#5197) needs to show which repository is being walked
+    /// and how each one ended, while the walk is still running. Nothing else
+    /// does, so the bus is opt-in and defaults to
+    /// [`ProgressBus::disabled`] — on which every emit returns immediately,
+    /// leaving the CLI path byte-identical to before this existed.
+    /// What: builder setter for the pipeline's progress bus.
+    /// Test: `tests::progress_is_disabled_by_default` and
+    /// `tests::run_emits_a_terminal_event_per_repo`.
+    #[must_use]
+    pub fn with_progress(mut self, progress: ProgressBus) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Enable forced re-collection: every `(repo, ISO-week)` pair is
@@ -295,7 +317,19 @@ impl CollectionPipeline {
 
         let resolver = IdentityResolver::from_config(&self.config);
 
-        for repo_cfg in &self.config.repositories {
+        // #5197: one progress row per configured repository, in walk order.
+        let repo_total = self.config.repositories.len() as u64;
+        for (repo_index, repo_cfg) in self.config.repositories.iter().enumerate() {
+            let repo_label = repo_cfg
+                .name
+                .clone()
+                .unwrap_or_else(|| repo_cfg.path.display().to_string());
+            self.progress.emit(ProgressEvent::advanced(
+                Stage::Collect,
+                repo_label.clone(),
+                repo_index as u64,
+                Some(repo_total),
+            ));
             // Per-repo head_only is OR-ed with the global pipeline flag: if
             // either is true, that repo walks HEAD only.  This lets operators
             // set `--head-only` globally (the CLI flag) or `head_only: true`
@@ -313,6 +347,13 @@ impl CollectionPipeline {
                 Err(e) => {
                     let msg = format!("failed to open repo {}: {e}", repo_cfg.path.display());
                     warn!("{msg}");
+                    // #5197: a repo that never opens must still reach a
+                    // terminal state, or its row spins forever in the TUI.
+                    self.progress.emit(ProgressEvent::failed(
+                        Stage::Collect,
+                        repo_label.clone(),
+                        msg.clone(),
+                    ));
                     stats.errors.push(msg);
                     continue;
                 }
@@ -331,11 +372,24 @@ impl CollectionPipeline {
                 Err(e) => {
                     let msg = format!("failed to open repo {}: {e}", repo_cfg.path.display());
                     warn!("{msg}");
+                    // #5197: a repo that never opens must still reach a
+                    // terminal state, or its row spins forever in the TUI.
+                    self.progress.emit(ProgressEvent::failed(
+                        Stage::Collect,
+                        repo_label.clone(),
+                        msg.clone(),
+                    ));
                     stats.errors.push(msg);
                     continue;
                 }
             };
+            let before = stats.commits_collected as u64;
             self.collect_repo_by_week(db, &collector, &mut stats);
+            self.progress.emit(ProgressEvent::completed(
+                Stage::Collect,
+                repo_label,
+                stats.commits_collected as u64 - before,
+            ));
         }
 
         // Tag and release-branch reachability scan (issue #279).
@@ -406,69 +460,7 @@ impl CollectionPipeline {
             }
         }
 
-        // Optional: Linear issue enrichment.
-        if let Some(linear_cfg) = &self.config.linear {
-            if linear_cfg.fetch_on_reference {
-                match LinearClient::new(linear_cfg) {
-                    Ok(client) => {
-                        // Collect commit messages from DB.
-                        let messages: Vec<String> = {
-                            let conn = db.connection();
-                            let mut stmt = match conn.prepare("SELECT message FROM commits") {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    stats
-                                        .errors
-                                        .push(format!("Linear: query commits failed: {e}"));
-                                    return Ok(stats);
-                                }
-                            };
-                            let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    stats
-                                        .errors
-                                        .push(format!("Linear: read commits failed: {e}"));
-                                    return Ok(stats);
-                                }
-                            };
-                            let mut out = Vec::new();
-                            for r in rows.flatten() {
-                                out.push(r);
-                            }
-                            out
-                        };
-
-                        let msg_refs: Vec<&str> = messages.iter().map(String::as_str).collect();
-                        let issues = client
-                            .fetch_referenced_issues(&msg_refs, &linear_cfg.team_keys)
-                            .await;
-                        for issue in &issues {
-                            info!(
-                                id = %issue.identifier,
-                                state = %issue.state,
-                                team = %issue.team,
-                                "Linear issue fetched"
-                            );
-                        }
-                        match client.store_issues(db, &issues) {
-                            Ok(n) => {
-                                info!(stored = n, "persisted linear_issues rows");
-                                stats.linear_issues_fetched += n;
-                            }
-                            Err(e) => {
-                                stats
-                                    .errors
-                                    .push(format!("Linear: store issues failed: {e}"));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        stats.errors.push(format!("Linear client init failed: {e}"));
-                    }
-                }
-            }
-        }
+        linear_pipeline::fetch_and_store_linear_issues(db, &self.config, &mut stats).await;
 
         Ok(stats)
     }

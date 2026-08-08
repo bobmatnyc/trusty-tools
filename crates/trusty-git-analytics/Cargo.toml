@@ -34,7 +34,12 @@ path = "src/main.rs"
 # are always on; `bedrock-client` (the shared Converse adapter, #2407) is added
 # only under tga's own `bedrock` feature below (#2411) so the AWS SDK stack
 # stays opt-in.
-trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli"] }
+# `monitor-tui` (#5197) is what gives the `tga tui` subcommand the shared
+# `enter_tui` / `leave_tui` terminal glue in `trusty_common::monitor::tui_common`,
+# so tga does not grow a second copy of the raw-mode dance. It turns on
+# ratatui + crossterm in trusty-common at the SAME workspace versions tga pins
+# below — one ratatui major in the build graph.
+trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli", "monitor-tui"] }
 # Async runtime
 tokio = { workspace = true }
 # IANA timezone database: JQL date literals are evaluated in the JIRA
@@ -90,8 +95,15 @@ strsim = { workspace = true }
 # Logging / tracing
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# Progress bars
-indicatif = "0.17"
+# Progress bars — workspace entry already declares 0.17 (#5197 drive-by:
+# the local pin duplicated the workspace table).
+indicatif = { workspace = true }
+# TUI (#5197): `tga tui`. Pinned to the workspace versions (ratatui 0.29 /
+# crossterm 0.28) that trusty-common's `monitor-tui` feature also uses —
+# NOT the 0.30/0.29 pair in `crates/trusty-tui`, which would put two ratatui
+# majors in one build graph.
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 # UUID
 uuid = { workspace = true }
 # Hashing (config hash)

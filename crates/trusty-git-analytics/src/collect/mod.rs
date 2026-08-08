@@ -21,6 +21,7 @@ pub mod ai_attribution;
 pub mod azdo;
 pub mod bitbucket;
 pub mod collector;
+pub mod correlate;
 pub mod env_expand;
 pub mod errors;
 pub mod git;
@@ -29,12 +30,14 @@ mod github_pipeline;
 pub mod identity;
 pub mod jira;
 pub mod linear;
+mod linear_pipeline;
 pub mod pm_adapter;
 pub mod pr_provider;
 pub mod ticket;
 pub mod weeks;
 
 pub use collector::{CollectionPipeline, CollectionStats};
+pub use correlate::{correlate_commits, CorrelationOutcome};
 pub use errors::{CollectError, Result};
 pub use pm_adapter::{
     build_adapters, AzureDevOpsAdapter, GitHubAdapter, JiraAdapter, LinearAdapter, PmAdapter,
@@ -75,5 +78,59 @@ mod tests {
     fn pipeline_constructs_with_default_config() {
         let cfg = Config::default();
         let _pipeline = CollectionPipeline::new(cfg);
+    }
+
+    /// #5197: the bus is opt-in, so an untouched pipeline publishes nothing.
+    #[test]
+    fn progress_is_disabled_by_default() {
+        let observer = crate::core::progress::ProgressBus::bounded(8);
+        let pipeline = CollectionPipeline::new(Config::default());
+        let mut db = crate::core::db::Database::open_in_memory().expect("open");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(pipeline.run(&mut db)).expect("run");
+        assert!(
+            observer.drain().is_empty(),
+            "a pipeline with no bus attached must publish nothing"
+        );
+    }
+
+    /// #5197: every configured repository reaches a terminal progress event,
+    /// even one that cannot be opened — otherwise its row spins forever.
+    #[test]
+    fn run_emits_a_terminal_event_per_repo() {
+        let bus = crate::core::progress::ProgressBus::bounded(64);
+        let cfg = Config {
+            repositories: vec![RepositoryConfig {
+                path: std::env::temp_dir().join("tga-5197-not-a-repo"),
+                name: Some("ghost".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let pipeline = CollectionPipeline::new(cfg).with_progress(bus.clone());
+        let mut db = crate::core::db::Database::open_in_memory().expect("open");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(pipeline.run(&mut db)).expect("run");
+
+        let events = bus.drain();
+        assert!(!events.is_empty());
+        let terminal: Vec<_> = events
+            .iter()
+            .filter(|e| e.target == "ghost" && e.is_terminal())
+            .collect();
+        assert_eq!(terminal.len(), 1, "exactly one terminal event: {events:?}");
+        assert!(
+            matches!(
+                terminal[0].outcome,
+                Some(crate::core::progress::Outcome::Failed { .. })
+            ),
+            "an unopenable repo reports failed, not completed"
+        );
     }
 }

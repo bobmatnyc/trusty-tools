@@ -19,6 +19,7 @@ use crate::commands::aliases::AliasesArgs;
 use crate::commands::args::{
     AnalyzeArgs, ClassifyArgs, CollectArgs, DeploymentsSubcommand, DeploymentsSubcommandArgs,
     IncidentsSubcommand, IncidentsSubcommandArgs, JiraSubcommand, JiraSubcommandArgs, ReportArgs,
+    TuiArgs,
 };
 use crate::commands::author::AuthorArgs;
 use crate::commands::backfill::BackfillArgs;
@@ -136,6 +137,8 @@ enum Commands {
     Dora(DoraArgs),
     /// JIRA status-transition and comment ingestion (issue #3966).
     Jira(JiraSubcommandArgs),
+    /// Interactive terminal UI: repo picker, live progress, correlation results (#5197).
+    Tui(TuiArgs),
 
     /// Manage inference provider configuration (API keys) — the universal
     /// `config keys set/list/test/unset` surface shared by every trusty-*
@@ -336,6 +339,13 @@ async fn run() -> anyhow::Result<()> {
         .or_else(|| config.resolved_database_path())
         .unwrap_or_else(|| database_path::default_path(config.config_dir()));
 
+    // `tga tui` owns its own connections — the UI holds a read connection and
+    // each background run opens its own writer — so it is dispatched before the
+    // shared open below rather than sharing a `&mut Database` across threads.
+    if let Commands::Tui(args) = cli.command {
+        return commands::tui::run(config, &db_path, args).await;
+    }
+
     // Open SQLite database (runs migrations on open).
     tracing::info!(path = %db_path.display(), "opening database");
     let mut db = Database::open(&db_path)?;
@@ -365,6 +375,7 @@ async fn run() -> anyhow::Result<()> {
             JiraSubcommand::Freshness(a) => commands::jira::run_freshness(&config, &db, a)?,
         },
         // Handled above — match is exhaustive.
+        Commands::Tui(_) => unreachable!("tui dispatched above"),
         Commands::Install(_) => unreachable!("install dispatched above"),
         Commands::Config(_) => unreachable!("config dispatched above"),
     }
