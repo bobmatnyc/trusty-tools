@@ -13,6 +13,8 @@ mod agent_permissions;
 mod agent_skills;
 mod agent_stores;
 mod agent_subagents;
+// #4355: per-assistant task-stream attribution, retention, and retrieval.
+mod assistant_streams;
 mod attendance;
 mod cancel;
 mod costs;
@@ -27,7 +29,7 @@ mod models;
 mod relay;
 
 use super::routes::{build_router, build_router_with_config};
-use super::state::{AppState, MAX_RETAINED};
+use super::state::{AppState, MAX_RETAINED_PER_AGENT};
 use crate::api::types::{PmResponse, PmStatus};
 use crate::registry::ProjectRegistry;
 use axum::Router;
@@ -178,22 +180,22 @@ async fn tm_tell_returns_503_without_manager() {
 #[tokio::test]
 async fn app_state_trims_to_max_retained() {
     let state = AppState::default();
-    // Push MAX_RETAINED + 5 terminal (non-Running) responses. #3063: FIFO
+    // Push MAX_RETAINED_PER_AGENT + 5 terminal (non-Running) responses. #3063: FIFO
     // trimming now exempts `Running` rows from eviction (see
     // `insert_and_trim`'s doc comment), so this fixture uses `Success` to
     // keep exercising the trim path rather than the "everything is running,
     // skip eviction" edge case covered by
     // `cancel::cancel_survives_fifo_eviction_pressure`.
-    for i in 0..(MAX_RETAINED + 5) {
+    for i in 0..(MAX_RETAINED_PER_AGENT + 5) {
         let id = format!("id-{i}");
         let mut r = PmResponse::running(&id);
         r.status = PmStatus::Success;
         state.upsert(id, r).await;
     }
     let list = state.list().await;
-    assert_eq!(list.len(), MAX_RETAINED);
+    assert_eq!(list.len(), MAX_RETAINED_PER_AGENT);
     // Newest should be at the front.
-    assert_eq!(list[0].id, format!("id-{}", MAX_RETAINED + 4));
+    assert_eq!(list[0].id, format!("id-{}", MAX_RETAINED_PER_AGENT + 4));
 }
 
 // -- #181: auth middleware --

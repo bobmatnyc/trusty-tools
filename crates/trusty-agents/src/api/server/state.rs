@@ -20,8 +20,36 @@ use crate::events::{self, Event};
 use crate::recap::{RecapConfig, RecapTracker};
 use crate::tm::TmManager;
 
-/// Maximum number of terminal responses retained in memory.
-pub(super) const MAX_RETAINED: usize = 20;
+/// Maximum number of responses retained in memory PER addressed assistant
+/// (#4355).
+///
+/// Why: this used to be a single server-wide cap of 20. Once tasks are split
+/// into per-assistant streams a server-wide cap divides across the roster —
+/// six assistants would get roughly three turns of history each, which makes
+/// "switch assistant, see its stream" useless the moment it works. The bound
+/// that matters to a user is "how far back does MY assistant's stream go", so
+/// that is the bound the server enforces. The number is unchanged from the old
+/// global one, so a single-assistant user sees exactly the depth they saw
+/// before.
+/// What: `insert_and_trim` evicts the oldest non-`Running` row of an
+/// assistant's own stream once that stream exceeds this.
+/// Test: `per_agent_retention_keeps_n_for_each_assistant`.
+pub(super) const MAX_RETAINED_PER_AGENT: usize = 20;
+
+/// Server-wide backstop across all assistants (#4355).
+///
+/// Why: per-assistant retention alone is unbounded in the number of DISTINCT
+/// assistant ids — `TaskRequest.agent` is a free-form string, so a buggy or
+/// hostile client can mint a new stream per request and grow the store
+/// forever. This caps total memory (and the size of `tasks.json`, rewritten in
+/// full on every upsert) at 10× the old global bound regardless of roster
+/// size. At a ~4 KB typical `PmResponse` that is ~800 KB; a pathological
+/// 64 KB-narrative store would be ~13 MB, which is the ceiling this constant
+/// buys and the reason it is not larger.
+/// What: after per-stream trimming, `insert_and_trim` evicts the oldest
+/// non-`Running` row overall while the store exceeds this.
+/// Test: `global_backstop_caps_total_across_many_assistants`.
+pub(super) const MAX_RETAINED_TOTAL: usize = 200;
 
 /// Filesystem location for runtime state (recaps, tasks.json, etc.).
 ///
@@ -236,16 +264,26 @@ impl AppState {
     pub(super) async fn try_cancel(&self, id: &str) -> CancelOutcome {
         let (outcome, handle) = {
             let mut store = self.inner.lock().await;
-            match store.responses.get(id) {
+            // Snapshot the two facts needed about the existing row so the read
+            // borrow ends before the write below.
+            let existing = store
+                .responses
+                .get(id)
+                .map(|r| (r.status.clone(), r.addressed_agent.clone()));
+            match existing {
                 None => (CancelOutcome::NotFound, None),
-                Some(r) if r.status != PmStatus::Running => {
-                    (CancelOutcome::AlreadyTerminal(r.status.clone()), None)
+                Some((status, _)) if status != PmStatus::Running => {
+                    (CancelOutcome::AlreadyTerminal(status), None)
                 }
-                Some(_) => {
+                Some((_, agent)) => {
+                    // #4355: `cancelled()` starts from the Concierge default,
+                    // so carry the original stream over — otherwise cancelling
+                    // a task silently moves it into another assistant's history.
                     let handle = store.handles.remove(id);
-                    store
-                        .responses
-                        .insert(id.to_string(), PmResponse::cancelled(id));
+                    store.responses.insert(
+                        id.to_string(),
+                        PmResponse::cancelled(id).addressed_to(agent),
+                    );
                     (CancelOutcome::Cancelled, handle)
                 }
             }
@@ -304,18 +342,42 @@ impl AppState {
 
     /// List all stored responses, newest first.
     ///
-    /// Why: `GET /api/tasks` and recap assembly both need a recency-ordered
-    /// snapshot.
-    /// What: Walks the insertion order in reverse, cloning each response.
+    /// Why: recap assembly needs a recency-ordered snapshot of everything,
+    /// unfiltered.
+    /// What: `list_stream(None, None)`.
     /// Test: `list_tasks_empty_store_returns_empty_array`.
     pub(super) async fn list(&self) -> Vec<PmResponse> {
+        self.list_stream(None, None).await
+    }
+
+    /// One assistant's task stream (or the whole store), newest first (#4355).
+    ///
+    /// Why: this is the server-side half of "switching assistants loads that
+    /// assistant's most recent task stream" — the owner's decision was that the
+    /// association lives on the server, not in a per-client filter, so that all
+    /// clients attached to one running agent see the same stream. Answering it
+    /// here rather than by shipping every task to the client also means a
+    /// client never has to receive another assistant's conversation to decide
+    /// it should not display it.
+    /// What: walks insertion order in reverse (newest first), keeping rows
+    /// whose `addressed_agent` matches `agent` when one is given, and stops
+    /// after `limit` rows when one is given. `agent = None` reproduces the
+    /// pre-#4355 full listing exactly.
+    /// Test: `tasks_filtered_by_agent_returns_only_that_stream_newest_first`.
+    pub(super) async fn list_stream(
+        &self,
+        agent: Option<&str>,
+        limit: Option<usize>,
+    ) -> Vec<PmResponse> {
         let store = self.inner.lock().await;
-        // Newest first.
         store
             .order
             .iter()
             .rev()
-            .filter_map(|id| store.responses.get(id).cloned())
+            .filter_map(|id| store.responses.get(id))
+            .filter(|r| agent.is_none_or(|a| r.addressed_agent == a))
+            .take(limit.unwrap_or(usize::MAX))
+            .cloned()
             .collect()
     }
 
@@ -449,61 +511,95 @@ pub(super) enum CancelOutcome {
     Cancelled,
 }
 
-/// Insert `resp` for `id`, tracking insertion order and trimming to
-/// `MAX_RETAINED`. Returns a clone of the resulting map for the caller to
-/// persist outside the lock.
+/// Insert `resp` for `id`, tracking insertion order and trimming the store
+/// to its per-assistant and server-wide bounds. Returns a clone of the
+/// resulting map for the caller to persist outside the lock.
 ///
 /// Why: Shared by `upsert` (always overwrites) and `finalize_task` (which
 /// adds a cancellation guard before calling this). Keeping the
 /// insert/track/trim logic in one place avoids the two call sites drifting.
 /// A naive index-0 FIFO eviction would silently orphan a genuinely
-/// `Running` task once `MAX_RETAINED` unrelated tasks churn through the
+/// `Running` task once the cap's worth of unrelated tasks churn through the
 /// store: its `responses`/`order` row disappears while its `AbortHandle`
 /// stays in `handles` forever, and `try_cancel` (which looks the id up in
 /// `responses` first) then 404s a task that is very much still alive
 /// (issue #3063 code review).
-/// What: Inserts, appends to `order` iff the key was previously absent,
-/// then evicts entries past `MAX_RETAINED` — walking forward from the
-/// oldest to find the first entry whose status isn't `Running` and
-/// evicting that one instead of blindly evicting index 0, removing its
-/// `handles` entry too so the maps stay in lockstep. If every retained row
-/// happens to be `Running`, eviction is skipped entirely for this call
-/// (never kill a live task to make room) — in practice this only lets the
-/// store grow transiently, since concurrently `Running` tasks are rare.
-/// Test: `app_state_trims_to_max_retained` (via `upsert`, all-terminal
-/// case); `cancel_survives_fifo_eviction_pressure` (a `Running` task
-/// planted before `MAX_RETAINED` terminal tasks must still be reachable).
+/// What: Inserts, appends to `order` iff the key was previously absent, then
+/// trims twice (#4355) — first the touched assistant's own stream down to
+/// `MAX_RETAINED_PER_AGENT`, then the whole store down to
+/// `MAX_RETAINED_TOTAL`. Trimming the touched stream FIRST is what keeps one
+/// busy assistant from evicting an idle assistant's history: the global pass
+/// only fires when the roster as a whole is oversized. Both passes go through
+/// `evict_oldest_terminal`, which never evicts a `Running` row; if nothing is
+/// evictable the pass stops (never kill a live task to make room), so the
+/// store may grow transiently — concurrently `Running` tasks are rare.
+/// Test: `app_state_trims_to_max_retained` (single-stream case, via `upsert`);
+/// `per_agent_retention_keeps_n_for_each_assistant`;
+/// `global_backstop_caps_total_across_many_assistants`;
+/// `cancel_survives_fifo_eviction_pressure` (a `Running` task planted before a
+/// cap's worth of terminal tasks must still be reachable).
 fn insert_and_trim(
     store: &mut TaskStore,
     id: String,
     resp: PmResponse,
 ) -> HashMap<String, PmResponse> {
+    let agent = resp.addressed_agent.clone();
     let was_absent = !store.responses.contains_key(&id);
     store.responses.insert(id.clone(), resp);
     if was_absent {
         store.order.push(id);
     }
-    while store.order.len() > MAX_RETAINED {
-        let mut evict_idx = None;
-        for (i, oid) in store.order.iter().enumerate() {
-            let is_running = matches!(
-                store.responses.get(oid),
-                Some(r) if r.status == PmStatus::Running
-            );
-            if !is_running {
-                evict_idx = Some(i);
-                break;
-            }
-        }
-        let Some(idx) = evict_idx else {
-            // Every retained row is Running — don't evict a live task.
-            break;
-        };
-        let old = store.order.remove(idx);
-        store.responses.remove(&old);
-        store.handles.remove(&old);
-    }
+    while stream_len(store, &agent) > MAX_RETAINED_PER_AGENT
+        && evict_oldest_terminal(store, Some(&agent))
+    {}
+    while store.order.len() > MAX_RETAINED_TOTAL && evict_oldest_terminal(store, None) {}
     store.responses.clone()
+}
+
+/// Number of retained rows addressed to `agent` (#4355).
+fn stream_len(store: &TaskStore, agent: &str) -> usize {
+    store
+        .order
+        .iter()
+        .filter(|id| {
+            store
+                .responses
+                .get(*id)
+                .is_some_and(|r| r.addressed_agent == agent)
+        })
+        .count()
+}
+
+/// Evict the oldest non-`Running` row, optionally restricted to one
+/// assistant's stream; `false` when there is nothing evictable (#4355).
+///
+/// Why: both trim passes in `insert_and_trim` need the same "oldest terminal
+/// row wins, never a live task" rule, differing only in whether they look at
+/// one stream or all of them. Splitting it out keeps that rule stated once —
+/// a second copy is exactly how the `handles` map drifts out of lockstep with
+/// `responses` and resurrects the #3063 orphaned-`AbortHandle` bug.
+/// What: scans `order` oldest-first for the first row whose status isn't
+/// `Running` (and, when `agent` is `Some`, whose `addressed_agent` matches),
+/// then removes it from `order`, `responses`, and `handles` together.
+/// Test: `per_agent_retention_keeps_n_for_each_assistant`,
+/// `cancel_survives_fifo_eviction_pressure`.
+fn evict_oldest_terminal(store: &mut TaskStore, agent: Option<&str>) -> bool {
+    let TaskStore {
+        responses,
+        order,
+        handles,
+    } = store;
+    let Some(idx) = order.iter().position(|oid| {
+        responses.get(oid).is_some_and(|r| {
+            r.status != PmStatus::Running && agent.is_none_or(|a| r.addressed_agent == a)
+        })
+    }) else {
+        return false;
+    };
+    let old = order.remove(idx);
+    responses.remove(&old);
+    handles.remove(&old);
+    true
 }
 
 /// Path where the task snapshot is persisted.
