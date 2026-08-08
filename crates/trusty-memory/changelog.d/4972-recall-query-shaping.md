@@ -12,7 +12,22 @@ Fixed
   to 55.3% — and, when the remainder is still over budget, keeps whole leading
   lines (falling back to whole words) rather than letting the cut land mid-word.
   Every reduction is recorded: a `recall_query` object on the enriched-prompt log
-  line (`original_tokens`, `sent_tokens`, `budget_tokens`, `envelope_stripped`,
-  `units_dropped`) plus a `tracing::warn!`. The budget is overridable with
-  `TRUSTY_MEMORY_PROMPT_QUERY_TOKENS`; setting it well above the real window
-  restores the previous behaviour.
+  line (`original_tokens`, `sent_tokens`, `sent_tokens_max`, `budget_tokens`,
+  `envelope_stripped`, `units_dropped`) plus a `tracing::warn!`. The budget is
+  overridable with `TRUSTY_MEMORY_PROMPT_QUERY_TOKENS`; setting it well above the
+  real window restores the previous behaviour.
+
+  The token estimate charges ASCII-letter runs 1 token per 2 characters rather
+  than per 3. The old divisor was calibrated on English and underestimated every
+  compound-word language measured against the model's own tokenizer — Hungarian
+  342 against a true 372, Finnish 362 against 392, Dutch 332 against 362 — which
+  let those prompts pass through as fitting and be cut inside the embedder while
+  the new metric reported no loss. The cost is paid by English: a prompt now
+  delivers ~189 true tokens of the 512-token window rather than ~291.
+
+  No divisor above 1 token per character can bound a run of ASCII letters, so
+  `recall_query` also carries `sent_tokens_max`, a true ceiling on what was sent.
+  `sent_tokens <= budget_tokens` is an estimate clearing a budget, not a proof;
+  `sent_tokens_max > budget_tokens` marks the sends whose fit could not be
+  proven, so the log stops reporting a clean pass on a query the embedder may
+  still have cut.
