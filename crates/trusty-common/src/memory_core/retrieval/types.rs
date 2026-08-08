@@ -39,6 +39,41 @@ pub struct RecallResult {
     pub layer: u8,
 }
 
+/// What a `PalaceHandle::forget` call actually did.
+///
+/// Why (#5231): `forget` used to return `Result<()>`, where `Ok` meant only
+/// "nothing panicked" — `drawers.retain` never reports whether it matched, so
+/// forgetting an id that was never stored looked identical to a real delete.
+/// Every caller that counts or reports deletions was therefore counting
+/// attempts. This makes the distinction part of the return type so a caller
+/// cannot ignore it by accident.
+/// What: `Deleted` when a drawer row was present and has been removed;
+/// `NotFound` when no drawer with that id existed in the palace.
+/// Test: `forget_reports_not_found_for_an_unknown_drawer` and
+/// `forget_reports_deleted_and_the_drawer_stays_gone_after_reopen`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgetOutcome {
+    /// A drawer with this id existed and was removed.
+    Deleted,
+    /// No drawer with this id existed; nothing was removed.
+    NotFound,
+}
+
+impl ForgetOutcome {
+    /// True only when a drawer was actually removed.
+    pub fn is_deleted(self) -> bool {
+        matches!(self, Self::Deleted)
+    }
+
+    /// Wire/CLI spelling: `"deleted"` or `"not_found"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deleted => "deleted",
+            Self::NotFound => "not_found",
+        }
+    }
+}
+
 /// Maximum number of drawers held in the L1 cache.
 pub(super) const L1_CAP: usize = 15;
 

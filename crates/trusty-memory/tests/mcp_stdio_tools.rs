@@ -424,13 +424,15 @@ async fn memory_forget_removes_drawer() {
         .iter()
         .any(|r| r["content"].as_str().unwrap_or("").contains("Capybaras")));
 
-    dispatch_tool(
+    let forget = dispatch_tool(
         fx.state(),
         "memory_forget",
         json!({"palace": "forgetful", "drawer_id": id}),
     )
     .await
     .expect("memory_forget");
+    // #5231: a real deletion is the only case that may report "deleted".
+    assert_eq!(forget["status"], "deleted", "got {forget}");
 
     let after = dispatch_tool(
         fx.state(),
@@ -508,6 +510,76 @@ async fn round_trip_remember_recall_forget_recall_empty() {
             .iter()
             .any(|r| r["content"].as_str().unwrap_or("").contains("octopus")),
         "forgotten drawer must not appear in L2 recall results; got {l2_hits:?}"
+    );
+}
+
+/// Regression test for issue #5231.
+///
+/// Why: `memory_forget` returned `{"status":"deleted"}` for a well-formed
+/// `drawer_id` that had never existed, so a cleanup loop could report N
+/// deletions having made zero. Parsing the UUID was the only validation.
+/// What: forgets a syntactically valid UUID that was never stored and asserts
+/// the reported status is `not_found`, and that the drawer that *does* exist is
+/// untouched.
+/// Test: this test.
+#[tokio::test]
+async fn memory_forget_reports_not_found_for_unknown_drawer_id() {
+    let fx = Fixture::new();
+    create_palace(fx.state(), "phantom").await;
+    let live_id = remember(
+        fx.state(),
+        "phantom",
+        "Wombats produce cube-shaped droppings because of their intestinal elasticity",
+        &[],
+    )
+    .await;
+
+    let res = dispatch_tool(
+        fx.state(),
+        "memory_forget",
+        json!({"palace": "phantom", "drawer_id": "deadbeef-0000-4000-8000-000000000000"}),
+    )
+    .await
+    .expect("memory_forget dispatch");
+    assert_eq!(res["status"], "not_found", "got {res}");
+
+    // The delete that never happened must not have disturbed the real drawer.
+    let list = dispatch_tool(fx.state(), "memory_list", json!({"palace": "phantom"}))
+        .await
+        .expect("memory_list");
+    assert!(
+        list["drawers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["drawer_id"] == live_id.as_str()),
+        "live drawer disappeared: {list}"
+    );
+}
+
+/// Issue #5231 companion: the parse-time rejection must survive the fix.
+///
+/// Why: the pre-fix behaviour got *malformed* ids right and only nonexistent
+/// ids wrong; adding the existence check must not turn a malformed id into a
+/// quiet `not_found`.
+/// What: dispatches `memory_forget` with a non-UUID string and asserts the call
+/// still returns `Err`.
+/// Test: this test.
+#[tokio::test]
+async fn memory_forget_still_rejects_a_malformed_drawer_id() {
+    let fx = Fixture::new();
+    create_palace(fx.state(), "malformed").await;
+
+    let err = dispatch_tool(
+        fx.state(),
+        "memory_forget",
+        json!({"palace": "malformed", "drawer_id": "not-a-uuid"}),
+    )
+    .await
+    .expect_err("malformed drawer_id must be an error");
+    assert!(
+        err.to_string().contains("invalid drawer_id UUID"),
+        "unexpected error: {err:#}"
     );
 }
 

@@ -245,8 +245,10 @@ pub(super) async fn create_drawer(
 /// `DELETE /api/v1/palaces/{id}/drawers/{drawer_id}` — delete a drawer.
 ///
 /// Why: Provides the HTTP counterpart to the MCP forget tool.
-/// What: Delegates to `MemoryService::delete_drawer`; returns `204 No Content`.
-/// Test: `delete_palace_force_removes_populated_palace` uses this indirectly.
+/// What: Delegates to `MemoryService::delete_drawer`; returns `204 No Content`
+/// on a real delete and `404` for a drawer id that does not exist (#5231).
+/// Test: `delete_palace_force_removes_populated_palace` uses this indirectly;
+/// `delete_drawer_404s_for_an_unknown_drawer_id` covers the miss.
 pub(super) async fn delete_drawer(
     State(state): State<AppState>,
     AxumPath((id, drawer_id)): AxumPath<(String, String)>,

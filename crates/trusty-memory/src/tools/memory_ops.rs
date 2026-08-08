@@ -560,17 +560,22 @@ pub(crate) async fn handle_memory_forget(state: &AppState, args: Value) -> Resul
     let drawer_id = Uuid::parse_str(drawer_id_str)
         .map_err(|e| anyhow!("memory_forget: invalid drawer_id UUID: {e}"))?;
     let handle = open_palace_handle(state, &palace)?;
-    handle.forget(drawer_id).await.context("forget")?;
-    // Issue #96: emit so MCP-driven deletes are visible in the feed.
-    let drawer_count = handle.drawers.read().len();
-    state.emit(DaemonEvent::DrawerDeleted {
-        palace_id: palace.clone(),
-        drawer_count,
-        source: ActivitySource::Mcp,
-    });
+    let outcome = handle.forget(drawer_id).await.context("forget")?;
+    // #5231: only a real deletion emits DrawerDeleted and reports "deleted".
+    // A no-op used to do both, so an audit loop saw N delete events for zero
+    // deletions.
+    if outcome.is_deleted() {
+        // Issue #96: emit so MCP-driven deletes are visible in the feed.
+        let drawer_count = handle.drawers.read().len();
+        state.emit(DaemonEvent::DrawerDeleted {
+            palace_id: palace.clone(),
+            drawer_count,
+            source: ActivitySource::Mcp,
+        });
+    }
     // Issue #228: skip the per-write `StatusChanged` emit — the ticker
     // handles aggregate roll-ups.
-    Ok(json!({ "status": "deleted", "drawer_id": drawer_id_str, "palace": palace }))
+    Ok(json!({ "status": outcome.as_str(), "drawer_id": drawer_id_str, "palace": palace }))
 }
 
 /// Cross-palace counterpart of `recall_without_embedder` (issue #1970).

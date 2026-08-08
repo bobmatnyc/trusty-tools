@@ -262,7 +262,10 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_forget",
-                "description": "Delete a drawer from a palace by its UUID.",
+                // #5231: the caller can only trust a delete if the tool says
+                // which of the two things happened, so the contract is in the
+                // description an LLM caller actually reads.
+                "description": "Delete a drawer from a palace by its UUID. Returns status='deleted' when a drawer was removed, or status='not_found' when no drawer with that id existed (nothing was deleted).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

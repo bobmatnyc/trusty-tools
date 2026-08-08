@@ -94,6 +94,59 @@ async fn delete_palace_returns_not_found_for_missing_id() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
+/// Regression test for issue #5231.
+///
+/// Why: `DELETE /palaces/{id}/drawers/{drawer_id}` answered `204 No Content`
+/// for a drawer id that was never stored — identical to a real delete — because
+/// `PalaceHandle::forget` returned `Ok(())` either way. `delete_palace` has
+/// answered 404 for a missing id since #180; the drawer route now matches.
+/// What: creates a palace, DELETEs a well-formed but unknown drawer UUID, and
+/// asserts 404. A malformed id stays a 400.
+/// Test: This test itself.
+#[tokio::test]
+async fn delete_drawer_404s_for_an_unknown_drawer_id() {
+    let state = test_state();
+    let app = router().with_state(state);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"name": "ghost-drawer"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/palaces/ghost-drawer/drawers/deadbeef-0000-4000-8000-000000000000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/palaces/ghost-drawer/drawers/not-a-uuid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 /// Why: Issue #180 follow-up — verify the happy path of `PATCH
 /// /api/v1/palaces/{id}`: create a palace, rename it, and confirm
 /// `GET /api/v1/palaces/{id}` returns the new display name. The id

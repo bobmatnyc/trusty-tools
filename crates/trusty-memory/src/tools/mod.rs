@@ -12,7 +12,7 @@
 //! - `memory_recall(palace, query, top_k?)`        -> Vec<Drawer> (L0+L1+L2)
 //! - `memory_recall_deep(palace, query, top_k?)`   -> Vec<Drawer> (L3 deep)
 //! - `memory_list(palace, room?, tag?, limit?)`    -> Vec<Drawer>
-//! - `memory_forget(palace, drawer_id)`            -> ()
+//! - `memory_forget(palace, drawer_id)`            -> status: deleted|not_found
 //! - `palace_create(name, description?)`           -> PalaceId
 //! - `palace_list()`                                -> Vec<PalaceId>
 //! - `palace_info(palace)`                          -> palace metadata + stats
