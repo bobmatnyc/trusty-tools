@@ -428,6 +428,93 @@ pub trait Embedder: Send + Sync {
     fn provider(&self) -> ExecutionProvider {
         ExecutionProvider::Cpu
     }
+
+    /// Stable identity of *what produced these vectors*, for keying a
+    /// content-addressed embedding cache (issue #5024).
+    ///
+    /// Why: a cross-index embedding cache keyed on content alone would serve a
+    /// vector produced by a different model — or by the same architecture at a
+    /// different weight quantization — with no error, silently degrading search
+    /// months later. Folding this string into the cache key turns that class of
+    /// bug into a cache miss. The default is `None`, which means **do not cache
+    /// this embedder's output at all**: an embedder that cannot honestly name
+    /// itself (`MockEmbedder`, any external or test implementation) must never
+    /// contribute to, or read from, a machine-wide cache.
+    /// What: `None` by default; implementors return `Some(id)` where `id`
+    /// changes whenever the produced vectors would change — model weights,
+    /// weight quantization, output dimension, or compute precision. See
+    /// [`predicted_cache_identity`] for the value the sidecar adapters use.
+    /// Test: `cache_identity_defaults_to_none` in `mod.rs`;
+    /// `key_changes_when_identity_changes` in `trusty-search`'s
+    /// `core::embed_cache::tests`.
+    fn cache_identity(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Compose the cache identity for a sidecar-backed embedder from build cfg +
+/// environment alone (issue #5024).
+///
+/// Why: the stdio/UDS/HTTP sidecar adapters never hold a `FastEmbedder`, so
+/// they cannot read a resolved `model_name()` back. Model selection is a pure
+/// function of `TRUSTY_EMBEDDER_MODEL` on both sides of the pipe, so the parent
+/// predicts the same answer the sidecar resolves — the identical convention
+/// [`resolve_expected_provider`] already uses for `/health`'s provider field.
+///
+/// What: `"<model>|<dim>|fp16"` or `"<model>|<dim>|fp32"`. The model name
+/// carries the ONNX **weight quantization** (`all-MiniLM-L6-v2` vs
+/// `all-MiniLM-L6-v2-int8`) and the trailing tag carries the **compute
+/// precision** (`TRUSTY_PY_EMBED_FP16`) — the two settings that change the
+/// numbers coming out of the embedder. Returns `None` when the resolved model
+/// is unrecognised, so an unknown model fails closed to "do not cache".
+///
+/// Deliberately excluded: the execution provider. ort and torch/MPS run the
+/// same weights and agree to >=0.999 cosine (epic #3524's spike), and the
+/// daemon already hot-swaps between them mid-index, so keying on the provider
+/// would discard the whole cache on every swap to prevent a difference the
+/// system already accepts. `TRUSTY_VECTOR_QUANT` is also excluded: it sets the
+/// HNSW *storage* scalar kind, applied downstream of this vector, and does not
+/// change the f32 values a cache entry holds.
+///
+/// Test: `predicted_cache_identity_tracks_model_and_precision` in
+/// `provider_tests.rs`.
+pub fn predicted_cache_identity() -> Option<String> {
+    let resolved = super::fast_embedder::resolve_default_embedding_model();
+    compose_cache_identity(
+        super::fast_embedder::embedding_model_name(&resolved),
+        EMBED_DIM,
+    )
+}
+
+/// Build a cache-identity string, rejecting a model name that could not be
+/// resolved (issue #5024).
+///
+/// Why: `embedding_model_name` answers `"unknown"` for any variant outside the
+/// two this crate selects. Caching under `"unknown"` would let two genuinely
+/// different models share one key — the exact failure the identity exists to
+/// prevent — so an unresolved name fails closed to `None`.
+/// What: returns `Some("<model>|<dim>|<precision>")`, or `None` when `model`
+/// is `"unknown"` or empty.
+/// Test: `compose_cache_identity_rejects_unknown_model` in `provider_tests.rs`.
+pub(crate) fn compose_cache_identity(model: &str, dim: usize) -> Option<String> {
+    if model.is_empty() || model == "unknown" {
+        return None;
+    }
+    let precision = if embed_fp16_enabled() { "fp16" } else { "fp32" };
+    Some(format!("{model}|{dim}|{precision}"))
+}
+
+/// Is the sidecar configured to compute in fp16 rather than fp32?
+///
+/// Why: `TRUSTY_PY_EMBED_FP16` changes the arithmetic the Python/MPS sidecar
+/// performs, so vectors produced under it are not interchangeable with fp32
+/// ones for cache purposes.
+/// What: truthy check over the same value set the rest of the daemon accepts.
+/// Test: `compose_cache_identity_tracks_fp16` in `provider_tests.rs`.
+fn embed_fp16_enabled() -> bool {
+    std::env::var("TRUSTY_PY_EMBED_FP16")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 /// Convenience helper: embed a single text via `embed_batch` and return the

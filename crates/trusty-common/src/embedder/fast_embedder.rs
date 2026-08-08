@@ -811,4 +811,20 @@ impl super::types::Embedder for FastEmbedder {
     fn provider(&self) -> ExecutionProvider {
         self.provider
     }
+
+    /// Identify this embedder by the model that ACTUALLY loaded (issue #5024).
+    ///
+    /// Why: `FastEmbedder` runs a primary→CPU-retry→fallback-model chain, so
+    /// the loaded model can differ from the one `TRUSTY_EMBEDDER_MODEL`
+    /// requested. Keying the cache on `self.model_name` rather than on the
+    /// prediction means a fallback writes its entries under its own identity
+    /// instead of impersonating the model it failed to load.
+    /// What: delegates to `compose_cache_identity`, which returns `None` when
+    /// the resolved name is `"unknown"` — an unrecognised model then fails
+    /// closed and is never cached.
+    /// Test: `fast_embedder_cache_identity_is_none_for_unknown_model` in
+    /// `provider_tests.rs`.
+    fn cache_identity(&self) -> Option<String> {
+        super::types::compose_cache_identity(self.model_name, self.dim)
+    }
 }

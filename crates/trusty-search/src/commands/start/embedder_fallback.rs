@@ -235,6 +235,14 @@ impl Embedder for FallbackEmbedderAdapter {
             .unwrap_or_else(|| Arc::clone(&self.primary))
             .resolved_provider_label()
     }
+
+    // #5024: the identity must name whichever backend is serving right now,
+    // so a latched fallback caches under its own model, not the primary's.
+    fn cache_identity(&self) -> Option<String> {
+        self.active_fallback()
+            .unwrap_or_else(|| Arc::clone(&self.primary))
+            .cache_identity()
+    }
 }
 
 #[cfg(test)]

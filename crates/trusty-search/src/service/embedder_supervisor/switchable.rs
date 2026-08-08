@@ -291,6 +291,12 @@ impl Embedder for SwitchableEmbedder {
     fn resolved_provider_label(&self) -> Option<String> {
         self.current().resolved_provider_label()
     }
+
+    // #5024: forward to the installed backend so a hot-swap cannot leave the
+    // cache keyed on a backend that is no longer producing the vectors.
+    fn cache_identity(&self) -> Option<String> {
+        self.current().cache_identity()
+    }
 }
 
 #[cfg(test)]

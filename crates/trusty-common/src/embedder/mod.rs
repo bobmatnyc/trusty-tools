@@ -63,8 +63,9 @@ pub use fast_embedder::FastEmbedder;
 pub use types::{
     CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
     DEFAULT_ORT_INTER_THREADS, EMBED_DIM, Embedder, ExecutionProvider, OrtThreadingOptions,
-    default_ort_intra_threads, embed_one, resolve_cuda_options, resolve_expected_provider,
-    resolve_expected_python_provider, resolve_fastembed_cache_dir, resolve_ort_threading_options,
+    default_ort_intra_threads, embed_one, predicted_cache_identity, resolve_cuda_options,
+    resolve_expected_provider, resolve_expected_python_provider, resolve_fastembed_cache_dir,
+    resolve_ort_threading_options,
 };
 
 #[cfg(any(test, feature = "embedder-test-support"))]

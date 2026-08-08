@@ -762,6 +762,19 @@ impl crate::core::Embedder for RemoteEmbedderAdapter {
     fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
         trusty_common::embedder::resolve_expected_provider()
     }
+
+    /// Identify the sidecar's model for the embed cache (issue #5024).
+    ///
+    /// Why: the sidecar resolves its model from the same `TRUSTY_EMBEDDER_MODEL`
+    /// value this process sees, so the parent can name it without a wire
+    /// round-trip — the convention `provider()` above already follows.
+    /// What: delegates to `trusty_common::embedder::predicted_cache_identity`,
+    /// which fails closed to `None` on an unrecognised model.
+    /// Test: `predicted_cache_identity_tracks_model_and_precision` in
+    /// trusty-common's `provider_tests.rs`.
+    fn cache_identity(&self) -> Option<String> {
+        trusty_common::embedder::predicted_cache_identity()
+    }
 }
 
 /// Adapter that implements trusty-search's `Embedder` trait by delegating to
@@ -814,6 +827,19 @@ impl crate::core::Embedder for UdsEmbedderAdapter {
     /// Test: covered by trusty-common's `resolve_expected_provider_*` tests.
     fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
         trusty_common::embedder::resolve_expected_provider()
+    }
+
+    /// Identify the sidecar's model for the embed cache (issue #5024).
+    ///
+    /// Why: the sidecar resolves its model from the same `TRUSTY_EMBEDDER_MODEL`
+    /// value this process sees, so the parent can name it without a wire
+    /// round-trip — the convention `provider()` above already follows.
+    /// What: delegates to `trusty_common::embedder::predicted_cache_identity`,
+    /// which fails closed to `None` on an unrecognised model.
+    /// Test: `predicted_cache_identity_tracks_model_and_precision` in
+    /// trusty-common's `provider_tests.rs`.
+    fn cache_identity(&self) -> Option<String> {
+        trusty_common::embedder::predicted_cache_identity()
     }
 }
 
@@ -937,6 +963,22 @@ impl crate::core::Embedder for LazySlotEmbedderAdapter {
     /// in `start/tests.rs`.
     fn supervisor_gave_up(&self) -> bool {
         self.handle.supervisor_gave_up()
+    }
+
+    /// Identify the sidecar's model for the embed cache (issue #5024).
+    ///
+    /// Why: both arms this adapter serves — the Rust ort sidecar and the
+    /// Python/MPS one — load the model named by `TRUSTY_EMBEDDER_MODEL`, so
+    /// one prediction covers both and the identity survives the ort→python
+    /// hot-swap. The provider is deliberately absent from the identity (see
+    /// `predicted_cache_identity`): the two backends agree to >=0.999 cosine
+    /// on the same weights, and keying on the provider would throw away the
+    /// entire cache the moment the swap lands.
+    /// What: delegates to `trusty_common::embedder::predicted_cache_identity`.
+    /// Test: `predicted_cache_identity_tracks_model_and_precision` in
+    /// trusty-common's `provider_tests.rs`.
+    fn cache_identity(&self) -> Option<String> {
+        trusty_common::embedder::predicted_cache_identity()
     }
 }
 

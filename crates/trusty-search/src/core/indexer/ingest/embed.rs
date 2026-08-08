@@ -114,6 +114,39 @@ impl CodeIndexer {
         let (Some(embedder), Some(_store)) = (&self.embedder, &self.store) else {
             return Ok(embeddings);
         };
+
+        // #5024: serve content the machine has already embedded, so a fresh
+        // worktree does not re-pay for its base clone's vectors. `pending`
+        // indexes into `chunks` and holds only what the cache could not
+        // answer; every path below operates on it rather than on `chunks`.
+        let cache_ctx = self.embed_cache_context(embedder.as_ref(), chunks).await;
+        let mut pending: Vec<usize> = (0..chunks.len()).collect();
+        if let Some(ctx) = &cache_ctx {
+            for (i, hit) in ctx.lookup.hits.iter().enumerate() {
+                if let Some(v) = hit {
+                    embeddings[i] = Some(v.clone());
+                }
+            }
+            pending.retain(|i| embeddings[*i].is_none());
+            tracing::debug!(
+                total = chunks.len(),
+                hits = ctx.lookup.hit_count(),
+                misses = pending.len(),
+                "embed_chunks_in_batches: embed cache consulted"
+            );
+        }
+
+        if pending.is_empty() {
+            // Nothing left to embed, but the hits still owe an LRU refresh so
+            // the entries a live index depends on are not the first evicted.
+            if let Some(ctx) = cache_ctx {
+                ctx.cache.store_batch(Vec::new(), ctx.lookup.touches).await;
+            }
+            return Ok(embeddings);
+        }
+
+        let pending_chunks: Vec<&RawChunk> = pending.iter().map(|i| &chunks[*i]).collect();
+        let chunks: &[&RawChunk] = &pending_chunks;
         let chunk_total = chunks.len();
         // CoreML pre-allocates ANE buffers; oversized batches stack until jetsam
         // kills the daemon.
@@ -202,7 +235,10 @@ impl CodeIndexer {
                     );
                 }
                 for (offset, vec) in batch_vecs.into_iter().enumerate() {
-                    embeddings[start_pos + offset] = Some(vec);
+                    // `start_pos + offset` indexes `pending`, which indexes
+                    // `chunks` — a cache hit earlier in the batch shifts these
+                    // apart, so the remap is load-bearing (#5024).
+                    embeddings[pending[start_pos + offset]] = Some(vec);
                 }
             }
 
@@ -241,8 +277,58 @@ impl CodeIndexer {
 
             batch_start = wave_pos;
         }
+
+        // #5024: publish the newly computed vectors and refresh the hits. This
+        // runs after every embedding the caller needs is already in
+        // `embeddings`, so a write failure costs a future re-embed and nothing
+        // more — it can neither corrupt this batch nor block its commit.
+        if let Some(ctx) = cache_ctx {
+            let inserts: Vec<(crate::core::embed_cache::CacheKey, Vec<f32>)> = pending
+                .iter()
+                .filter_map(|i| embeddings[*i].as_ref().map(|v| (ctx.lookup.keys[*i], v.clone())))
+                .collect();
+            ctx.cache.store_batch(inserts, ctx.lookup.touches).await;
+        }
+
         Ok(embeddings)
     }
+
+    /// Resolve the embed cache and pre-load this batch's hits, or `None` when
+    /// caching does not apply (#5024).
+    ///
+    /// Why: two independent conditions gate the cache, and both must fail
+    /// closed. The embedder may decline to identify itself — `MockEmbedder` and
+    /// every test double do — in which case its vectors must never enter a
+    /// machine-wide store keyed as if they came from the real model. And the
+    /// cache itself may be switched off or unopenable. Either way the caller
+    /// takes the unchanged pre-#5024 path.
+    /// What: `None` unless both an identity and a global cache resolve;
+    /// otherwise the cache handle plus the batch's [`Lookup`].
+    /// Test: `embed_cache_context_is_none_without_identity` in
+    /// `core::embed_cache::tests`.
+    ///
+    /// [`Lookup`]: crate::core::embed_cache::Lookup
+    async fn embed_cache_context(
+        &self,
+        embedder: &dyn crate::core::Embedder,
+        chunks: &[RawChunk],
+    ) -> Option<EmbedCacheContext> {
+        let identity = embedder.cache_identity()?;
+        let cache = crate::core::embed_cache::EmbedCache::global()?;
+        let dim = embedder.dimension();
+        let contents: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
+        Some(EmbedCacheContext {
+            lookup: cache.lookup(&identity, &contents, dim).await,
+            cache,
+        })
+    }
+}
+
+/// The cache handle plus this batch's lookup result, carried together so the
+/// embed loop reads both from one place.
+struct EmbedCacheContext {
+    cache: std::sync::Arc<crate::core::embed_cache::EmbedCache>,
+    lookup: crate::core::embed_cache::Lookup,
 }
 
 #[cfg(test)]

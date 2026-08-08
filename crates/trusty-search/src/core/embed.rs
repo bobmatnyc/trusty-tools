@@ -99,6 +99,23 @@ pub trait Embedder: Send + Sync {
     fn supervisor_gave_up(&self) -> bool {
         false
     }
+
+    /// Stable identity of *what produced these vectors*, for keying the
+    /// machine-wide content-addressed embedding cache (issue #5024).
+    ///
+    /// Why: the cache in `core::embed_cache` is shared across every index on
+    /// the host, so a key made of content alone would let a vector from one
+    /// model satisfy a lookup made under another — a silent, unerroring search
+    /// regression. This method is the embedder's own declaration of the model,
+    /// weight quantization, dimension, and compute precision behind its
+    /// output; the cache folds it into every key.
+    /// What: `None` by default, and `None` means **never cache this
+    /// embedder** — test doubles and any implementation that cannot name
+    /// itself are excluded rather than guessed at.
+    /// Test: `cache_identity_defaults_to_none_and_is_overridable` below.
+    fn cache_identity(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Adapter: every shared `trusty_common::embedder::Embedder` automatically implements
@@ -123,6 +140,12 @@ where
 
     fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
         <E as trusty_common::embedder::Embedder>::provider(self)
+    }
+
+    // #5024: forward the shared trait's identity so `FastEmbedder`'s
+    // resolved-model answer survives the facade instead of decaying to `None`.
+    fn cache_identity(&self) -> Option<String> {
+        <E as trusty_common::embedder::Embedder>::cache_identity(self)
     }
 }
 

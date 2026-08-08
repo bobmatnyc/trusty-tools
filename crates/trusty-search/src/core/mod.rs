@@ -6,6 +6,9 @@ pub mod concept_cluster;
 pub mod corpus;
 pub mod corpus_recovery;
 pub mod embed;
+// #5024: machine-wide content-addressed embedding cache. Crate-internal — the
+// only caller is the ingest pipeline's embed step.
+pub(crate) mod embed_cache;
 pub mod entity;
 pub mod extract;
 pub mod git;
