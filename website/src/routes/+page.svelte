@@ -53,27 +53,38 @@
 	<div class="mt-6 grid gap-6 md:grid-cols-2">
 		<p class="text-foundry-secondary">
 			A single Cargo workspace holding the whole trusty-* family — shared libraries, daemons and MCP
-			servers, a multi-agent platform, and an orchestrator. It replaces seven formerly separate
-			repositories, so cross-crate changes are one atomic commit instead of a chain of version bumps
-			and patch tables.
+			servers, a multi-agent platform, and an orchestrator. Everything is co-located under
+			<code class="text-sm">crates/</code>, so a change spanning several of them is one commit
+			against one lockfile.
 		</p>
 		<p class="text-foundry-secondary">
-			Each crate versions, tags, and publishes independently, and everything is MIT licensed. The
-			three flagship services below each speak the Model Context Protocol, so they plug into Claude
-			Code and any other MCP client without a bespoke integration.
+			Each crate versions, tags, and publishes independently, and everything is MIT licensed. Five
+			of the six flagship tools below speak the Model Context Protocol, so they plug into Claude
+			Code and any other MCP client without a bespoke integration; the sixth is a command-line
+			analytics tool.
 		</p>
 	</div>
 </section>
 
-<!-- FLAGSHIP SERVICES -->
+<!-- FLAGSHIP TOOLS -->
 <section class="mx-auto max-w-content px-4 pb-16 sm:px-6">
-	<h2 class="font-display text-2xl font-bold sm:text-3xl">Three flagship MCP servers</h2>
-	<div class="mt-8 grid gap-6 lg:grid-cols-3">
+	<h2 id="flagships" class="scroll-mt-24 font-display text-2xl font-bold sm:text-3xl">
+		Six flagship tools
+	</h2>
+	<p class="mt-3 max-w-2xl text-foundry-secondary">
+		Each one has its own page — what it does, how it works, and how to install it.
+	</p>
+	<div class="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
 		{#each FLAGSHIPS as flagship (flagship.name)}
 			<article class="card flex flex-col">
 				<p class="eyebrow">{flagship.unit}</p>
-				<h3 class="mt-2 break-words font-display text-xl font-semibold text-foundry-primary">
-					{flagship.name}
+				<h3 class="mt-2 break-words font-display text-xl font-semibold">
+					<a
+						href="/tools/{flagship.slug}"
+						class="text-foundry-primary underline decoration-1 underline-offset-4 hover:decoration-2"
+					>
+						{flagship.name}
+					</a>
 				</h3>
 				<p class="mt-1 text-sm font-semibold text-foundry-text">{flagship.tagline}</p>
 				<ul class="mt-4 space-y-2 text-sm text-foundry-secondary">
@@ -85,6 +96,14 @@
 						</li>
 					{/each}
 				</ul>
+				<p class="mt-6 pt-2">
+					<a
+						href="/tools/{flagship.slug}"
+						class="font-mono text-xs uppercase tracking-wider text-foundry-primary"
+					>
+						{flagship.name} →
+					</a>
+				</p>
 			</article>
 		{/each}
 	</div>
@@ -93,12 +112,14 @@
 <!-- CRATE LINEUP -->
 <section class="border-y border-foundry-border bg-foundry-raised">
 	<div class="mx-auto max-w-content px-4 py-16 sm:px-6">
-		<h2 class="font-display text-2xl font-bold sm:text-3xl">The crate lineup</h2>
+		<h2 class="font-display text-2xl font-bold sm:text-3xl">The rest of the lineup</h2>
 		<p class="mt-3 max-w-2xl text-foundry-secondary">
-			A selection of what lives under <code class="text-sm">crates/</code>. The workspace glob in
-			the root <code class="text-sm">Cargo.toml</code> is the authoritative list.
+			What else you can install today, and what is still being built. Shared libraries and internal
+			tooling are left out — the workspace glob in the root
+			<code class="text-sm">Cargo.toml</code> is the authoritative list of everything under
+			<code class="text-sm">crates/</code>.
 		</p>
-		<div class="mt-8 grid gap-8 sm:grid-cols-2 lg:grid-cols-4">
+		<div class="mt-8 grid gap-8 sm:grid-cols-2">
 			{#each CRATE_GROUPS as group (group.group)}
 				<div>
 					<h3 class="eyebrow">{group.group}</h3>

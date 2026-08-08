@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { TOOLS } from '../src/lib/tools';
 
 /**
  * Why: every other test here reads source files. None of them prove the site
@@ -40,6 +41,17 @@ function routeToArtifact(route: string): string {
 /** The Build Output API v3 config the adapter emitted. */
 function vercelConfig(): { overrides: Record<string, { path: string }>; routes: unknown[] } {
 	return JSON.parse(readFileSync(path.join(OUTPUT, 'config.json'), 'utf8'));
+}
+
+/**
+ * The hand-authored `/tools/<slug>` pages, as emitted static files.
+ *
+ * `docPages()` below is manifest-driven, so it cannot see these — they are
+ * routes, not documentation. Without this the self-containment assertion
+ * would silently skip every flagship page.
+ */
+function toolPages(): string[] {
+	return TOOLS.map((tool) => `tools/${tool.slug}.html`);
 }
 
 /** Prerendered doc artifacts on disk, as paths relative to the static root. */
@@ -140,8 +152,14 @@ describe('production build', () => {
 	// this list is still empty rather than carrying an exception — the assertion
 	// below is deliberately unchanged. The runtime half is pinned by
 	// 'wires analytics to a first-party path…' underneath.
+	it('prerenders every flagship tool page to static HTML', () => {
+		for (const name of toolPages()) {
+			expect(existsSync(path.join(STATIC, name)), name).toBe(true);
+		}
+	});
+
 	it('loads no subresource from a third-party origin', () => {
-		for (const name of ['index.html', 'docs.html', ...docPages()]) {
+		for (const name of ['index.html', 'docs.html', ...docPages(), ...toolPages()]) {
 			const html = readFileSync(path.join(STATIC, name), 'utf8');
 			const subresources = [
 				...html.matchAll(/<(?:script|img|source|iframe)\b[^>]*\bsrc="([^"]+)"/g),
@@ -192,8 +210,11 @@ describe('production build', () => {
 
 	it('renders real landing-page content, not a shell', () => {
 		expect(landingPage).toContain('trusty-search');
-		expect(landingPage).toContain('Three flagship MCP servers');
+		expect(landingPage).toContain('Six flagship tools');
 		expect(landingPage).toContain('brew tap bobmatnyc/trusty');
+		for (const tool of TOOLS) {
+			expect(landingPage, tool.slug).toContain(`/tools/${tool.slug}`);
+		}
 	});
 
 	it('sets the theme class before first paint', () => {
