@@ -761,3 +761,216 @@ async fn serve_rejects_an_oversized_frame() {
         "an over-long frame must leave nothing durably owned"
     );
 }
+
+// ─── Review-round coverage (#5182) ───────────────────────────────────────────
+
+#[test]
+fn dispatch_rejects_a_frame_whose_id_disagrees_with_its_delivery_id() {
+    // The response carries no id, so a frame stored under one identifier and
+    // logged under another silently misdirects every later correlation.
+    let sink = StubSink::accepting();
+    let mut frame: serde_json::Value =
+        serde_json::from_slice(&frame_bytes(&delivery("id-b"))).expect("parse");
+    frame["id"] = serde_json::Value::String("id-a".to_string());
+
+    let response = dispatch_frame(
+        &serde_json::to_vec(&frame).expect("re-encode"),
+        sink.as_ref(),
+    );
+
+    assert!(!response.is_ack());
+    assert_eq!(response.error.expect("error").code, CODE_INVALID_PARAMS);
+    assert_eq!(
+        sink.calls(),
+        0,
+        "a mismatched frame must not reach the sink"
+    );
+}
+
+#[test]
+fn inbox_refuses_a_different_delivery_on_the_same_path() {
+    // 🔴 A filename match is not a delivery match. Acking on the bare `EEXIST`
+    // would discard the incoming delivery and license the sender to delete its
+    // only copy of it. Planting a foreign entry at the incoming delivery's path
+    // reproduces exactly what a digest collision — or console's non-unique
+    // `no-delivery-header-<ms>` fallback id — puts on disk.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox = Inbox::open(tmp.path().join("inbox")).expect("open inbox");
+    let incoming = delivery("the-new-one");
+    let squatter = delivery("someone-else");
+    std::fs::write(
+        inbox.entry_path(&incoming.delivery_id),
+        serde_json::to_vec(&squatter).expect("encode"),
+    )
+    .expect("plant the colliding entry");
+
+    let err = inbox
+        .take_ownership(&incoming)
+        .expect_err("a different delivery on this path must be refused, not acked");
+    assert!(
+        format!("{err}").contains("someone-else"),
+        "the refusal must name what is actually held, got {err}"
+    );
+
+    // The planted copy is untouched — refusing never destroys either delivery.
+    let stored = inbox.list().expect("list");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].1.delivery_id, "someone-else");
+}
+
+#[test]
+fn inbox_refuses_a_reused_id_carrying_a_different_body() {
+    // Same id, different payload: one of the two is about to be lost, and the
+    // sender must keep its copy rather than be told the work is held.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox = Inbox::open(tmp.path().join("inbox")).expect("open inbox");
+    let first = delivery("reused-id");
+    inbox.take_ownership(&first).expect("first");
+
+    let mut second = first.clone();
+    second.body_b64 = "ZGlmZmVyZW50IGJvZHk=".to_string();
+    let err = inbox
+        .take_ownership(&second)
+        .expect_err("a reused id with a different body must be refused");
+    assert!(
+        format!("{err}").contains("different body"),
+        "expected a body mismatch, got {err}"
+    );
+}
+
+#[test]
+fn inbox_refuses_when_the_held_copy_is_unreadable() {
+    // An undecodable held copy is not evidence that the work is owned.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox = Inbox::open(tmp.path().join("inbox")).expect("open inbox");
+    let d = delivery("unreadable-1");
+    let path = inbox.entry_path(&d.delivery_id);
+    std::fs::write(&path, b"not json at all").expect("plant a corrupt entry");
+
+    let err = inbox
+        .take_ownership(&d)
+        .expect_err("an unreadable held copy must not read as ownership");
+    assert!(
+        format!("{err}").contains("undecodable"),
+        "expected an undecodable-copy collision, got {err}"
+    );
+}
+
+#[test]
+fn inbox_app_names_map_each_source_to_its_owning_crate() {
+    use super::{inbox_app_name, inbox_root_for};
+    assert_eq!(inbox_app_name("review"), Some("trusty-review"));
+    assert_eq!(inbox_app_name("analyze"), Some("trusty-analyze"));
+    assert_eq!(inbox_app_name("mpm"), None);
+    assert!(inbox_root_for("mpm").is_none());
+}
+
+#[test]
+fn held_count_reports_zero_for_an_absent_inbox() {
+    // A service that has never been delivered to holds nothing. Reporting that
+    // as an error would turn console's signal red for a healthy install.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert_eq!(
+        super::held_count(&tmp.path().join("never-created")).expect("count"),
+        0
+    );
+}
+
+#[test]
+fn held_count_counts_stored_deliveries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox = Inbox::open(tmp.path().join("inbox")).expect("open inbox");
+    inbox.take_ownership(&delivery("count-1")).expect("one");
+    inbox.take_ownership(&delivery("count-2")).expect("two");
+    assert_eq!(super::held_count(inbox.root()).expect("count"), 2);
+}
+
+#[test]
+fn held_count_reports_an_error_rather_than_zero_for_an_uncountable_path() {
+    // "I could not count" and "there is nothing" must never share an answer.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let file = tmp.path().join("not-a-directory");
+    std::fs::write(&file, b"x").expect("write");
+    assert!(super::held_count(&file).is_err());
+}
+
+#[tokio::test]
+async fn handle_connection_reports_a_liveness_probe_rather_than_a_failure() {
+    // 🔴 `UdsServiceSupervisor` probes by connecting and closing on EVERY
+    // `ensure_running`. Reading that as a dropped delivery made the one WARN an
+    // operator greps for fire on every successful relay.
+    use super::serve::{Served, handle_connection};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("probe.sock");
+    let listener = crate::uds::bind_hardened(&sock).expect("bind");
+    let inbox = Inbox::open(tmp.path().join("inbox")).expect("open inbox");
+
+    let probe = tokio::spawn(async move {
+        let stream = tokio::net::UnixStream::connect(&sock)
+            .await
+            .expect("connect");
+        drop(stream);
+    });
+    let (accepted, _) = listener.accept().await.expect("accept");
+    let served = handle_connection(
+        accepted,
+        Arc::new(inbox.clone()) as Arc<dyn DeliverySink>,
+        ServeOptions::default(),
+    )
+    .await
+    .expect("a liveness probe is not an error");
+
+    assert_eq!(served, Served::LivenessProbe);
+    assert!(inbox.list().expect("list").is_empty());
+    probe.await.expect("join");
+}
+
+#[tokio::test]
+async fn serve_handles_concurrent_connections_without_serialising() {
+    // `UdsServiceSupervisor` REQUIRES its children to accept promptly and off
+    // the request path (`uds::probe::SocketVerdict`): on macOS a saturated
+    // accept queue answers ECONNREFUSED, which the supervisor reads as
+    // NotServing and evicts. A sink that blocks until every peer has arrived
+    // can only complete if the handlers actually run concurrently.
+    let peers = 4usize;
+    let barrier = Arc::new(std::sync::Barrier::new(peers));
+    struct BlockingSink(Arc<std::sync::Barrier>);
+    impl DeliverySink for BlockingSink {
+        fn take_ownership(&self, _d: &RelayDelivery) -> Result<(), SinkRejection> {
+            self.0.wait();
+            Ok(())
+        }
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (sock, _stop) = spawn_listener(tmp.path(), Arc::new(BlockingSink(barrier)));
+
+    let mut sends = Vec::new();
+    for n in 0..peers {
+        let sock = sock.clone();
+        sends.push(tokio::spawn(async move {
+            let d = delivery(&format!("parallel-{n}"));
+            let frame = RelayFrame::new(
+                &d.delivery_id,
+                &d.source,
+                &d.event,
+                &d.headers,
+                &d.body_b64,
+                &d.provenance,
+                d.received_at_unix_ms,
+                d.attempts,
+            );
+            let resp: RelayResponse =
+                crate::uds::send_framed_request(&sock, &frame, Duration::from_secs(10))
+                    .await
+                    .expect("round trip");
+            resp.is_ack()
+        }));
+    }
+    for send in sends {
+        assert!(
+            send.await.expect("join"),
+            "a serialised listener deadlocks here instead of acking"
+        );
+    }
+}

@@ -89,7 +89,7 @@ pub const INBOX_DIR_NAME: &str = "webhook-inbox";
 
 /// Crate whose data directory holds a `{source}`'s inbox.
 ///
-/// Test: `inbox_roots_are_per_service_and_under_the_data_dir`.
+/// Test: `inbox_app_names_map_each_source_to_its_owning_crate`.
 pub fn inbox_app_name(source: &str) -> Option<&'static str> {
     match source {
         REVIEW_SOURCE => Some("trusty-review"),
@@ -112,7 +112,8 @@ pub fn inbox_app_name(source: &str) -> Option<&'static str> {
 ///
 /// When the platform data directory cannot be resolved or created.
 ///
-/// Test: `inbox_roots_are_per_service_and_under_the_data_dir`.
+/// Test: `inbox_app_names_map_each_source_to_its_owning_crate` covers the
+/// mapping; the data-dir resolution itself is `resolve_data_dir`'s own.
 pub fn inbox_root_for(source: &str) -> Option<anyhow::Result<std::path::PathBuf>> {
     let app = inbox_app_name(source)?;
     Some(crate::resolve_data_dir(app).map(|dir| dir.join(INBOX_DIR_NAME)))
