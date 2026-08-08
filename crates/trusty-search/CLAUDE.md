@@ -534,7 +534,7 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 ### MCP Tools
 
 The MCP server registers **21 tools** (authoritative source:
-`src/mcp/tools/descriptors.rs` `tool_definitions`):
+`src/mcp/tools/descriptors.rs` `tool_descriptors`):
 
 - `search` — hybrid search (BM25 + vector + KG, RRF-fused)
 - `search_lexical` — BM25-only lexical search

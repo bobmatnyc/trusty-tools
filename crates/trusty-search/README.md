@@ -527,7 +527,7 @@ trusty-search reindex [path]                         # alias for index --force
 ## MCP tools
 
 The MCP server registers **21 tools** (authoritative source:
-`src/mcp/tools/descriptors.rs` `tool_definitions`):
+`src/mcp/tools/descriptors.rs` `tool_descriptors`):
 
 | Tool            | Description                                          |
 |-----------------|------------------------------------------------------|
