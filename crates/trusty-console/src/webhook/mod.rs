@@ -26,16 +26,18 @@
 //! `tracing::warn!` as the sole record of a failed relay, and any `202` issued
 //! before the spool write returns.
 //!
-//! Spawn-on-demand — console starting a target that is not resident — is
-//! #5089 step 4. Until then no target binds a listener and every relay lands in
-//! [`relay::RelayOutcome::Unreachable`], which is a durable pending state, not
-//! a dropped delivery.
+//! Spawn-on-demand — console starting a target that is not resident — landed in
+//! #5182 alongside the targets' listeners: [`spawn::TargetSupervisor`] runs
+//! `ensure_running` before each relay. A target that will not start is still
+//! [`relay::RelayOutcome::Unreachable`], which is a durable pending state, not a
+//! dropped delivery.
 //!
 //! Test: `tests.rs`.
 
 pub mod health;
 pub mod relay;
 pub mod schedule;
+pub mod spawn;
 pub mod spool;
 
 #[cfg(test)]
@@ -227,17 +229,21 @@ impl WebhookIngress {
     pub fn from_env() -> anyhow::Result<Self> {
         let spool = Spool::open(Spool::default_root()?)?;
         let secret = std::env::var(SECRET_ENV).unwrap_or_default();
-        let sockets = trusty_common::uds::scratch_socket_dir();
-        let targets = vec![
-            Target {
-                source: "review".to_string(),
-                relay: UdsRelay::new(sockets.join("trusty-review-webhook.sock")),
-            },
-            Target {
-                source: "analyze".to_string(),
-                relay: UdsRelay::new(sockets.join("trusty-analyze-webhook.sock")),
-            },
-        ];
+        // #5182: the paths come from the shared contract rather than a literal
+        // here, so the sender and the two receivers cannot disagree about them.
+        let supervisor: spawn::SharedSupervisor = Arc::new(spawn::TargetSupervisor::new());
+        let mut targets = Vec::new();
+        for source in [
+            trusty_common::webhook_relay::REVIEW_SOURCE,
+            trusty_common::webhook_relay::ANALYZE_SOURCE,
+        ] {
+            let socket = trusty_common::webhook_relay::socket_path_for(source)
+                .ok_or_else(|| anyhow::anyhow!("no socket is defined for source {source}"))?;
+            targets.push(Target {
+                source: source.to_string(),
+                relay: UdsRelay::new(socket).with_supervisor(source, Arc::clone(&supervisor)),
+            });
+        }
         Ok(Self::new(spool, secret, SECRET_ENV.to_string(), targets))
     }
 

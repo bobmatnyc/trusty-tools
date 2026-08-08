@@ -724,3 +724,40 @@ async fn listener_refuses_to_take_over_a_live_socket() {
         "expected an already-serving refusal, got {err}"
     );
 }
+
+#[tokio::test]
+async fn serve_rejects_an_oversized_frame() {
+    // A peer that never sends a newline would otherwise grow the read buffer
+    // until the process dies. The connection is dropped without an answer, which
+    // the sender classifies as `Unreachable` — pending and durable, never acked.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("flood.sock");
+    let listener = crate::uds::bind_hardened(&sock).expect("bind");
+    let inbox = Inbox::open(tmp.path().join("inbox")).expect("open inbox");
+    let sink: Arc<dyn DeliverySink> = Arc::new(inbox.clone());
+    let options = ServeOptions {
+        max_frame_bytes: 64,
+        ..ServeOptions::default()
+    };
+    tokio::spawn(async move {
+        serve_until(listener, sink, options, std::future::pending::<()>()).await;
+    });
+
+    let flood = vec![b'x'; 4096];
+    let err = crate::uds::send_framed_request::<_, RelayResponse>(
+        &sock,
+        &String::from_utf8(flood).expect("ascii"),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect_err("an over-long frame must not be answered");
+
+    assert!(
+        matches!(err, crate::uds::UdsRpcError::NoResponse { .. }),
+        "expected NoResponse, got {err:?}"
+    );
+    assert!(
+        inbox.list().expect("list").is_empty(),
+        "an over-long frame must leave nothing durably owned"
+    );
+}

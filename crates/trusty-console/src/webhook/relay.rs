@@ -14,19 +14,24 @@
 //! step 4's receivers are `trusty-review` and `trusty-analyze`, which cannot
 //! depend on the console.
 //!
-//! Until step 4 binds the targets' listeners, the expected outcome is
-//! [`RelayOutcome::Unreachable`]. That is a first-class durable state — the
-//! entry stays pending and its attempt count grows — not an error to swallow.
+//! #5182 bound those listeners and added the spawn that precedes the dial: a
+//! relay first asks [`super::spawn::TargetSupervisor`] to make sure something is
+//! serving the socket, because ADR-0034 §1 requires the target to exist without
+//! running resident. A supervisor failure is still [`RelayOutcome::Unreachable`]
+//! — a first-class durable state, the entry stays pending and its attempt count
+//! grows, not an error to swallow.
 //!
 //! Test: `webhook/tests.rs` — `relay_*` cases run against a test-double
 //! `UnixListener` bound through `bind_hardened`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use trusty_common::uds::{UdsRpcError, send_framed_request};
 use trusty_common::webhook_relay::{RelayFrame, RelayResponse};
 
+use super::spawn::SharedSupervisor;
 use super::spool::SpoolEntry;
 
 /// Default budget for one relay round trip.
@@ -84,25 +89,46 @@ impl RelayOutcome {
 
 /// Console's UDS client for one target.
 ///
-/// Why: spawn-on-demand is #5089 step 4's job, so this dials an existing socket
-/// and reports [`RelayOutcome::Unreachable`] when nothing is listening — the
-/// state every delivery is in until that step lands.
-/// What: a socket path plus a timeout. Cheap to clone; opens a fresh connection
-/// per delivery, matching every other UDS client in this workspace.
+/// Why: the dial half of ADR-0034's relay. Since #5182 it can also START the
+/// target: with a supervisor attached it calls `ensure_running` before writing
+/// the frame, which is what lets the target stay non-resident. Without one it
+/// dials whatever is already at the path, which is what the tests and any
+/// externally-managed deployment want.
+/// What: a socket path, a timeout, and an optional supervisor. Cheap to clone;
+/// opens a fresh connection per delivery, matching every other UDS client in
+/// this workspace.
 /// Test: `relay_*` cases in `webhook/tests.rs`.
 #[derive(Debug, Clone)]
 pub struct UdsRelay {
     socket: PathBuf,
     timeout: Duration,
+    source: String,
+    supervisor: Option<SharedSupervisor>,
 }
 
 impl UdsRelay {
-    /// Target `socket` with [`DEFAULT_RELAY_TIMEOUT`].
+    /// Target `socket` with [`DEFAULT_RELAY_TIMEOUT`] and no supervision.
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
             timeout: DEFAULT_RELAY_TIMEOUT,
+            source: String::new(),
+            supervisor: None,
         }
+    }
+
+    /// Start the target on demand, under `supervisor`, keyed by `source`.
+    ///
+    /// Test: `relay_with_a_supervisor_still_acks_against_a_live_target`,
+    /// `spawn_adopts_a_socket_that_is_already_served`.
+    pub fn with_supervisor(
+        mut self,
+        source: impl Into<String>,
+        supervisor: SharedSupervisor,
+    ) -> Self {
+        self.source = source.into();
+        self.supervisor = Some(supervisor);
+        self
     }
 
     /// Override the round-trip budget.
@@ -155,6 +181,17 @@ impl UdsRelay {
             entry.received_at_unix_ms,
             entry.attempts,
         );
+        // #5182: make sure something is serving the socket before writing to
+        // it. A supervisor failure is a transport failure — never an ack — so
+        // the entry stays pending and the sweep retries.
+        if let Some(supervisor) = &self.supervisor
+            && let Err(e) = supervisor.ensure_running(&self.source, &self.socket).await
+        {
+            return RelayOutcome::Unreachable {
+                reason: format!("could not start the {} target: {e}", self.source),
+            };
+        }
+
         let response: Result<RelayResponse, UdsRpcError> =
             send_framed_request(&self.socket, &frame, self.timeout).await;
 

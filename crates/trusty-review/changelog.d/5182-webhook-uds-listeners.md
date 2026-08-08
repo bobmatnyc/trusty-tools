@@ -1,0 +1,2 @@
+Added
+- `trusty-review webhook-listen` binds `trusty-review-webhook.sock`, the socket `trusty-console` has been relaying verified GitHub deliveries to since #5089 step 3 with nothing on the other end. Each delivery is fsync'd to a durable inbox under the crate's data directory before the acknowledgement is written; an acknowledgement is what lets console delete its own copy, so nothing is acked that is not already held. The listener exits on SIGTERM, so the socket exists without the service running resident. The legacy `POST /pr/github/webhook` route is unchanged.
