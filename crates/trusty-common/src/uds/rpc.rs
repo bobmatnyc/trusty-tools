@@ -1,43 +1,60 @@
-//! One request, one response, newline-framed JSON over a hardened Unix socket.
+//! Newline-framed JSON over a hardened Unix socket — the workspace's one
+//! framing entry point.
 //!
-//! Why: three call sites already speak this exact protocol by hand
-//! (`embedder_client/uds.rs`, `bm25_client.rs`, `trusty-agents`' `ctrl/socket.rs`)
-//! and #5089 step 3 adds a fourth — console relaying a verified webhook to
-//! `trusty-review` / `trusty-analyze`. Writing a fourth bespoke copy is what the
-//! common-entry-point rule exists to stop, and ADR-0034 §4 names the shared
-//! module explicitly. The three existing clients are migrated in a follow-up;
-//! this lands the entry point they migrate onto.
+//! Why: four call sites spoke this protocol by hand
+//! (`embedder_client/uds.rs`, `bm25_client.rs`, `trusty-agents`' `MessageBus`
+//! and its ctrl socket) and #5089 step 3 added a fifth — console relaying a
+//! verified webhook to `trusty-review` / `trusty-analyze`. A fifth bespoke copy
+//! is what the common-entry-point rule exists to stop, and ADR-0034 §4 names
+//! the shared module explicitly. #5089 step 3 landed the entry point; #5180
+//! migrated the legacy clients onto it.
 //!
-//! What: [`send_framed_request`] dials through [`super::connect_hardened`] (so
-//! the socket's `0700` directory and `0600` mode are verified before a single
-//! byte of the request is written), writes one newline-terminated JSON frame,
-//! half-closes the write side, and reads one newline-terminated JSON frame back.
-//! The whole exchange is bounded by a caller-supplied timeout and the response
-//! by [`MAX_FRAME_BYTES`].
+//! What: three shapes, one framing contract.
+//! - [`send_framed_request`] — one request, one response. Dials through
+//!   [`super::connect_hardened`] (so the socket's `0700` directory and `0600`
+//!   mode are verified before a single byte is written), writes one
+//!   newline-terminated JSON frame, half-closes the write side, and reads one
+//!   newline-terminated JSON frame back. Bounded by a caller-supplied timeout
+//!   and by [`MAX_FRAME_BYTES`]; [`send_framed_request_capped`] takes the
+//!   budget explicitly for bulk-data callers.
+//! - [`send_framed_notification`] — one frame out, no reply expected. The
+//!   `MessageBus` peer never writes back, so a request helper would block on a
+//!   response that does not exist.
+//! - [`write_frame`] / [`encode_frame`] — the write half alone, for streaming
+//!   NDJSON sites that send many frames over one already-open stream.
 //!
 //! Deliberately not JSON-RPC-aware: `Req` and `Resp` are whatever the caller
 //! names. The framing is the shared part; the envelope is not.
 //!
-//! Test: `tests.rs` — `send_framed_request_*` against a real listener bound
-//! through `bind_hardened`, covering the round trip, a server that closes
-//! without answering, an over-long frame, a malformed frame, an absent socket,
-//! and the timeout.
+//! Test: `send_framed_request_round_trips_a_typed_value`,
+//! `send_framed_request_reports_no_response_when_peer_hangs_up`,
+//! `send_framed_request_rejects_an_over_long_frame`,
+//! `send_framed_request_capped_honours_a_caller_supplied_budget`,
+//! `send_framed_notification_delivers_exactly_one_frame`,
+//! `write_frame_terminates_each_value_with_one_newline` — all against a real
+//! listener bound through `bind_hardened`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 
 use super::{UdsSecurityError, connect_hardened};
 
-/// Largest response frame [`send_framed_request`] will buffer, in bytes.
+/// Default largest response frame [`send_framed_request`] will buffer, in bytes.
 ///
 /// A peer that never sends a newline would otherwise grow the read buffer
-/// until the process dies. 8 MiB is far above any frame this workspace
-/// exchanges (the largest is an embedding batch) and far below a memory
-/// problem.
+/// until the process dies. 8 MiB is far above any control-plane frame this
+/// workspace exchanges and far below a memory problem.
+///
+/// #5180: bulk-data callers pass their own budget to
+/// [`send_framed_request_capped`] instead — an embed reply carries one
+/// JSON-encoded `f32` array per input text and outgrows this figure on a large
+/// batch, which is a different problem from a peer that never terminates a
+/// frame.
 pub const MAX_FRAME_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Everything that can go wrong on one framed exchange.
@@ -167,7 +184,42 @@ where
     Req: Serialize + ?Sized,
     Resp: DeserializeOwned,
 {
-    match tokio::time::timeout(timeout, exchange::<Req, Resp>(path, request)).await {
+    send_framed_request_capped(path, request, timeout, MAX_FRAME_BYTES).await
+}
+
+/// [`send_framed_request`] with an explicit response-frame budget.
+///
+/// Why: #5180 — [`MAX_FRAME_BYTES`] is sized for control-plane frames, and the
+/// embedder client's reply is bulk data (one JSON-encoded `f32` array per input
+/// text). Forcing it through the shared default would have converted a working
+/// large batch into a hard failure, so the budget becomes the caller's to state
+/// rather than a reason not to share the framing.
+/// What: identical to [`send_framed_request`] except that `max_frame_bytes`
+/// replaces [`MAX_FRAME_BYTES`] as the point at which an unterminated response
+/// is refused.
+///
+/// # Errors
+///
+/// The same [`UdsRpcError`] set as [`send_framed_request`];
+/// [`UdsRpcError::FrameTooLarge`] reports `max_frame_bytes` as its `limit`.
+///
+/// Test: `send_framed_request_capped_honours_a_caller_supplied_budget`.
+pub async fn send_framed_request_capped<Req, Resp>(
+    path: &Path,
+    request: &Req,
+    timeout: Duration,
+    max_frame_bytes: u64,
+) -> Result<Resp, UdsRpcError>
+where
+    Req: Serialize + ?Sized,
+    Resp: DeserializeOwned,
+{
+    match tokio::time::timeout(
+        timeout,
+        exchange::<Req, Resp>(path, request, max_frame_bytes),
+    )
+    .await
+    {
         Ok(result) => result,
         Err(_) => Err(UdsRpcError::Timeout {
             path: path.to_path_buf(),
@@ -176,18 +228,109 @@ where
     }
 }
 
-/// The un-timed body of [`send_framed_request`], split out so the timeout wraps
-/// exactly one future and the error mapping stays readable.
-async fn exchange<Req, Resp>(path: &Path, request: &Req) -> Result<Resp, UdsRpcError>
+/// Send one JSON frame to `path` and return without waiting for a reply.
+///
+/// Why: #5180 — `trusty-agents`' `MessageBus::send_to` is fire-and-forget. The
+/// receiving bus reads NDJSON lines and re-broadcasts them to in-process
+/// subscribers; it never writes anything back. Routing it through
+/// [`send_framed_request`] would block until the caller's timeout expired and
+/// then report a failure for a delivery that succeeded, so the shared module
+/// owes the one-way half of the contract rather than a request the peer cannot
+/// answer.
+///
+/// What: dials via [`super::connect_hardened`], writes one newline-terminated
+/// JSON frame, flushes, and half-closes the write side so the peer sees EOF.
+/// The whole sequence is bounded by `timeout`.
+///
+/// # Errors
+///
+/// [`UdsRpcError::Dial`], [`UdsRpcError::Encode`], [`UdsRpcError::Write`], or
+/// [`UdsRpcError::Timeout`]. `Ok(())` means the bytes reached the kernel, not
+/// that the peer acted on them — that is what one-way means, and a caller that
+/// needs an acknowledgement wants [`send_framed_request`] instead.
+///
+/// Test: `send_framed_notification_delivers_exactly_one_frame`,
+/// `send_framed_notification_reports_dial_failure_for_a_missing_socket`.
+pub async fn send_framed_notification<Req>(
+    path: &Path,
+    request: &Req,
+    timeout: Duration,
+) -> Result<(), UdsRpcError>
 where
     Req: Serialize + ?Sized,
-    Resp: DeserializeOwned,
 {
-    let mut frame = serde_json::to_vec(request).map_err(|source| UdsRpcError::Encode {
+    match tokio::time::timeout(timeout, dial_and_send(path, request)).await {
+        Ok(result) => result.map(|_stream| ()),
+        Err(_) => Err(UdsRpcError::Timeout {
+            path: path.to_path_buf(),
+            timeout,
+        }),
+    }
+}
+
+/// Serialise `value` as one newline-terminated JSON frame.
+///
+/// Why: #5180 — every UDS client in this workspace open-coded the same two
+/// steps (`serde_json::to_vec`, push `b'\n'`), so "what a frame is" was
+/// asserted in five places instead of stated in one.
+/// What: `serde_json::to_vec(value)` with a trailing `\n`. A serialised JSON
+/// value never contains a bare newline outside a string literal, and inside one
+/// it is escaped, so the terminator is unambiguous for any `value`.
+///
+/// # Errors
+///
+/// Whatever `serde_json::to_vec` returns for a value that cannot be serialised.
+///
+/// Test: `encode_frame_appends_exactly_one_newline`.
+pub fn encode_frame<T>(value: &T) -> serde_json::Result<Vec<u8>>
+where
+    T: Serialize + ?Sized,
+{
+    let mut frame = serde_json::to_vec(value)?;
+    frame.push(b'\n');
+    Ok(frame)
+}
+
+/// Write one newline-terminated JSON frame to `writer` and flush it.
+///
+/// Why: #5180 — the streaming NDJSON sites (`trusty-agents`' ctrl socket) push
+/// many frames down one already-connected stream, so they cannot use
+/// [`send_framed_request`], which owns the dial and reads exactly one reply.
+/// Exposing the write half on its own lets them share the framing anyway
+/// instead of keeping a private copy.
+/// What: [`encode_frame`], then `write_all` + `flush`.
+///
+/// # Errors
+///
+/// A serialisation failure surfaces as `io::ErrorKind::InvalidData`, matching
+/// what the call sites this replaced already did; everything else is the
+/// underlying write error.
+///
+/// Test: `write_frame_terminates_each_value_with_one_newline`.
+pub async fn write_frame<W, T>(writer: &mut W, value: &T) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize + ?Sized,
+{
+    let frame =
+        encode_frame(value).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    writer.write_all(&frame).await?;
+    writer.flush().await
+}
+
+/// Dial `path`, write one frame, and half-close the write side.
+///
+/// Split out so [`send_framed_request_capped`] and [`send_framed_notification`]
+/// share one copy of the dial-and-write sequence; the returned stream is the
+/// still-open read half for callers that expect a reply.
+async fn dial_and_send<Req>(path: &Path, request: &Req) -> Result<UnixStream, UdsRpcError>
+where
+    Req: Serialize + ?Sized,
+{
+    let frame = encode_frame(request).map_err(|source| UdsRpcError::Encode {
         path: path.to_path_buf(),
         source,
     })?;
-    frame.push(b'\n');
 
     let mut stream = connect_hardened(path)
         .await
@@ -208,7 +351,35 @@ where
         source,
     })?;
 
-    let mut reader = BufReader::new(stream.take(MAX_FRAME_BYTES));
+    Ok(stream)
+}
+
+/// The un-timed body of [`send_framed_request_capped`], split out so the
+/// timeout wraps exactly one future and the error mapping stays readable.
+async fn exchange<Req, Resp>(
+    path: &Path,
+    request: &Req,
+    max_frame_bytes: u64,
+) -> Result<Resp, UdsRpcError>
+where
+    Req: Serialize + ?Sized,
+    Resp: DeserializeOwned,
+{
+    let stream = dial_and_send(path, request).await?;
+    read_one_frame(stream, path, max_frame_bytes).await
+}
+
+/// Read bytes up to and including the next `\n` and decode them as `Resp`.
+async fn read_one_frame<R, Resp>(
+    source: R,
+    path: &Path,
+    max_frame_bytes: u64,
+) -> Result<Resp, UdsRpcError>
+where
+    R: AsyncRead + Unpin,
+    Resp: DeserializeOwned,
+{
+    let mut reader = BufReader::new(source.take(max_frame_bytes));
     let mut line: Vec<u8> = Vec::new();
     let read = reader
         .read_until(b'\n', &mut line)
@@ -223,10 +394,10 @@ where
             path: path.to_path_buf(),
         });
     }
-    if !line.ends_with(b"\n") && line.len() as u64 >= MAX_FRAME_BYTES {
+    if !line.ends_with(b"\n") && line.len() as u64 >= max_frame_bytes {
         return Err(UdsRpcError::FrameTooLarge {
             path: path.to_path_buf(),
-            limit: MAX_FRAME_BYTES,
+            limit: max_frame_bytes,
         });
     }
 
@@ -435,6 +606,137 @@ mod tests {
         assert!(
             matches!(err, UdsRpcError::Dial { .. }),
             "expected Dial, got {err:?}"
+        );
+    }
+
+    /// Why (#5180): the embedder client raises the budget rather than being
+    /// left out of the shared framing, so the budget must actually be the
+    /// caller's — a `capped` call that silently used [`MAX_FRAME_BYTES`] would
+    /// look identical on the happy path and fail only on a big batch in
+    /// production.
+    /// What: feeds an unterminated 4 KiB flood under a 1 KiB budget and asserts
+    /// the reported limit is the caller's figure, not the module default.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn send_framed_request_capped_honours_a_caller_supplied_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let flood = vec![b'x'; 4096];
+        let sock = spawn_stub(tmp.path(), vec![StubReply::Bytes(flood)]);
+
+        let err = send_framed_request_capped::<_, Pong>(
+            &sock,
+            &Ping {
+                method: "ping",
+                n: 1,
+            },
+            Duration::from_secs(5),
+            1024,
+        )
+        .await
+        .expect_err("an unterminated flood past the caller's budget must be refused");
+
+        assert!(
+            matches!(err, UdsRpcError::FrameTooLarge { limit, .. } if limit == 1024),
+            "expected FrameTooLarge at the caller's 1024-byte budget, got {err:?}"
+        );
+    }
+
+    /// Why (#5180): `MessageBus`'s peer never replies. This is the test that
+    /// fails if `send_to` is ever re-pointed at a request helper — the stub
+    /// here writes nothing back, exactly like a real bus.
+    /// What: sends a notification to a stub that only reads, and asserts both
+    /// that the call succeeds and that the bytes on the wire are one
+    /// newline-terminated JSON frame with no second newline.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn send_framed_notification_delivers_exactly_one_frame() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("notify.sock");
+        let listener: UnixListener = bind_hardened(&sock).expect("bind");
+
+        let served = tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.expect("accept");
+            let mut got = Vec::new();
+            conn.read_to_end(&mut got).await.expect("drain");
+            got
+        });
+
+        send_framed_notification(
+            &sock,
+            &Ping {
+                method: "ping",
+                n: 9,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("a peer that never replies is still a successful delivery");
+
+        let bytes = served.await.expect("join");
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert_eq!(
+            text, "{\"method\":\"ping\",\"n\":9}\n",
+            "one frame, one trailing newline, nothing else"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_framed_notification_reports_dial_failure_for_a_missing_socket() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("absent.sock");
+
+        let err = send_framed_notification(
+            &sock,
+            &Ping {
+                method: "ping",
+                n: 1,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("no listener means no delivery");
+
+        assert!(
+            matches!(err, UdsRpcError::Dial { .. }),
+            "expected Dial, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn encode_frame_appends_exactly_one_newline() {
+        let frame = encode_frame(&Ping {
+            method: "ping",
+            n: 3,
+        })
+        .expect("encode");
+        assert_eq!(frame, b"{\"method\":\"ping\",\"n\":3}\n");
+        assert_eq!(
+            frame.iter().filter(|b| **b == b'\n').count(),
+            1,
+            "a frame carries exactly one newline, and it is the terminator"
+        );
+    }
+
+    /// Why (#5180): this is the primitive the streaming ctrl socket writes
+    /// through, where N frames share one stream. A missing or doubled
+    /// terminator there desynchronises the reader for the rest of the
+    /// connection, not just one message.
+    /// What: writes two values into one buffer and asserts the result is two
+    /// NDJSON lines.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn write_frame_terminates_each_value_with_one_newline() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_frame(&mut buf, &Ping { method: "a", n: 1 })
+            .await
+            .expect("first frame");
+        write_frame(&mut buf, &Ping { method: "b", n: 2 })
+            .await
+            .expect("second frame");
+
+        assert_eq!(
+            String::from_utf8(buf).expect("utf8"),
+            "{\"method\":\"a\",\"n\":1}\n{\"method\":\"b\",\"n\":2}\n"
         );
     }
 

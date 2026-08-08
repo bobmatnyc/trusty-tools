@@ -68,7 +68,10 @@ pub mod supervisor;
 
 pub use dir::prepare_socket_dir;
 pub use peer::{ensure_peer_is_self, peer_uid, self_uid};
-pub use rpc::{MAX_FRAME_BYTES, UdsRpcError, send_framed_request};
+pub use rpc::{
+    MAX_FRAME_BYTES, UdsRpcError, encode_frame, send_framed_notification, send_framed_request,
+    send_framed_request_capped, write_frame,
+};
 #[cfg(feature = "uds-supervisor")]
 pub use supervisor::{
     ServiceTimeouts, SocketVerdict, SpawnSpec, SupervisorConfig, SupervisorError,

@@ -12,6 +12,9 @@
 //!     latency is microseconds),
 //!   - sends one newline-terminated JSON-RPC request,
 //!   - reads one newline-terminated response and returns the result.
+//! #5180: the transport itself is [`crate::uds::rpc::send_framed_request`] —
+//! this module owns the JSON-RPC envelope and the error contract, not the
+//! framing.
 //! Supported methods: `index`, `search`, `delete`. `rebuild` is intentionally
 //! not exposed here; the dream subprocess will call it directly over UDS.
 //!
@@ -20,13 +23,26 @@
 //! `crates/trusty-bm25-daemon/tests/`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// JSON-RPC protocol version string. Must match the daemon's expectation.
 const JSONRPC_VERSION: &str = "2.0";
+
+/// Wall-clock ceiling for one exchange with the BM25 daemon.
+///
+/// Why (#5180): the hand-rolled framing this client used before had no bound at
+/// all, so a daemon that accepted the connection and then wedged held the
+/// caller open forever — and because `memory_remember` calls `index` while
+/// holding the per-palace write mutex, one wedged daemon stalled every
+/// concurrent writer on that palace too. Every method here is a tokenise-and-
+/// look-up round trip that finishes in milliseconds, so 60 s is three orders of
+/// magnitude of headroom and still finite. This is the one deliberate
+/// behaviour change in the migration: an unbounded wait became a bounded one.
+/// Test: `rpc_timeout_is_generous_but_finite`.
+const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Method names — duplicated here verbatim from the daemon's `protocol.rs`
 /// so the two layers can't drift without a compile error in tests.
@@ -347,59 +363,40 @@ impl Bm25Client {
         Ok(())
     }
 
-    /// Shared RPC helper — open stream, send one frame, read one frame, decode.
+    /// Shared RPC helper — send one frame, read one frame, decode.
+    ///
+    /// Why: #5180 — this used to hand-roll `write_all` + `BufReader::read_line`
+    /// + `serde_json::from_str`, a fourth private copy of a framing contract
+    /// ADR-0034 §4 says lives in exactly one place. It now routes through
+    /// [`crate::uds::rpc::send_framed_request`], which owns the dial (with the
+    /// #5099 permission check), the newline framing, the response size cap, and
+    /// the timeout.
+    /// What: builds the JSON-RPC envelope, hands it to the shared entry point,
+    /// then applies this client's own error contract — a `-32601` still
+    /// surfaces as a downcastable [`Bm25RpcError`] so [`is_method_not_found`]
+    /// keeps working.
+    /// Test: `search_sends_one_newline_framed_jsonrpc_frame`,
+    /// `call_surfaces_a_daemon_rpc_error_with_its_code`.
     async fn call<P: Serialize, R: serde::de::DeserializeOwned>(
         &self,
         method: &'static str,
         params: &P,
     ) -> Result<R> {
-        // #5099: verify the directory and socket before trusting them. A daemon
-        // predating the hardening still answers at this path, and the
-        // supervisor adopts an existing socket rather than spawning, so the
-        // daemon's own checks may never run.
-        let stream = crate::uds::connect_hardened(&self.socket_path)
-            .await
-            .with_context(|| {
-                format!(
-                    "connect to bm25 daemon at {} (method={method})",
-                    self.socket_path.display()
-                )
-            })?;
-        let (read_half, mut write_half) = stream.into_split();
-
         let req = RpcRequest {
             jsonrpc: JSONRPC_VERSION,
             method,
             params,
             id: 1,
         };
-        let mut payload = serde_json::to_vec(&req).context("serialise bm25 JSON-RPC request")?;
-        payload.push(b'\n');
-        write_half
-            .write_all(&payload)
-            .await
-            .context("write bm25 JSON-RPC request to daemon")?;
-        write_half
-            .shutdown()
-            .await
-            .context("half-close write side of bm25 daemon socket")?;
-
-        let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        let n = reader
-            .read_line(&mut line)
-            .await
-            .context("read bm25 JSON-RPC response from daemon")?;
-        if n == 0 {
-            anyhow::bail!("bm25 daemon closed connection before responding (method={method})");
-        }
-
-        let resp: RpcResponse<R> = serde_json::from_str(line.trim()).with_context(|| {
-            format!(
-                "decode bm25 JSON-RPC response (method={method}, raw={})",
-                line.trim()
-            )
-        })?;
+        let resp: RpcResponse<R> =
+            crate::uds::rpc::send_framed_request(&self.socket_path, &req, RPC_TIMEOUT)
+                .await
+                .with_context(|| {
+                    format!(
+                        "bm25 daemon RPC at {} (method={method})",
+                        self.socket_path.display()
+                    )
+                })?;
         if let Some(err) = resp.error {
             // Typed rather than a bare `bail!` so a caller can tell a daemon
             // that does not implement the method from one that is not there.
@@ -508,6 +505,105 @@ fn which_bm25_daemon() -> anyhow::Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    /// Bind a hardened socket under `dir`, answer one connection with `reply`,
+    /// and hand back whatever the client wrote.
+    fn spawn_stub(dir: &Path, reply: &'static [u8]) -> (PathBuf, tokio::task::JoinHandle<Vec<u8>>) {
+        let sock = dir.join("sockets").join("bm25-stub.sock");
+        let listener = crate::uds::bind_hardened(&sock).expect("bind stub socket");
+        let handle = tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.expect("accept");
+            // The client half-closes after its request frame, so this returns
+            // exactly the request bytes.
+            let mut raw = Vec::new();
+            conn.read_to_end(&mut raw).await.expect("drain request");
+            conn.write_all(reply).await.expect("write reply");
+            conn.flush().await.expect("flush reply");
+            raw
+        });
+        (sock, handle)
+    }
+
+    /// Why (#5180): this client's framing moved into `uds::rpc`, and the daemon
+    /// on the other end is a separate crate that was NOT changed. A drift in
+    /// the request bytes — a missing terminator, a second one, a length prefix,
+    /// a renamed envelope field — is invisible to every other test here, which
+    /// only serialise structs in isolation. This one asserts what actually goes
+    /// down the socket, and fails if the framing changes.
+    /// What: runs a real `search` against a stub listener and asserts the wire
+    /// bytes are exactly one newline-terminated JSON-RPC 2.0 frame.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn search_sends_one_newline_framed_jsonrpc_frame() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (sock, served) = spawn_stub(
+            tmp.path(),
+            b"{\"jsonrpc\":\"2.0\",\"result\":{\"hits\":[{\"doc_id\":\"d1\",\"score\":1.5}]},\"id\":1}\n",
+        );
+
+        let hits = Bm25Client::new(sock)
+            .search("cargo test", 5)
+            .await
+            .expect("search round trip");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc_id, "d1");
+
+        let raw = String::from_utf8(served.await.expect("join")).expect("utf8");
+        assert!(
+            raw.ends_with('\n'),
+            "the request frame must be newline-terminated: {raw:?}"
+        );
+        assert_eq!(
+            raw.matches('\n').count(),
+            1,
+            "exactly one frame, one terminator: {raw:?}"
+        );
+        let sent: serde_json::Value =
+            serde_json::from_str(raw.trim_end_matches('\n')).expect("the frame is one JSON value");
+        assert_eq!(sent["jsonrpc"], "2.0");
+        assert_eq!(sent["method"], "search");
+        assert_eq!(sent["params"]["query"], "cargo test");
+        assert_eq!(sent["params"]["top_k"], 5);
+        assert_eq!(sent["id"], 1);
+    }
+
+    /// Why (#5180): [`is_method_not_found`] is what lets a backfiller tell an
+    /// outdated-but-healthy daemon from an absent one, and it depends on the
+    /// error envelope surviving the transport as a downcastable
+    /// [`Bm25RpcError`]. The migration replaced the decode path, so this pins
+    /// the contract end to end rather than on a synthetic error.
+    /// What: stubs a `-32601` reply to a real `missing_docs` call.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn call_surfaces_a_daemon_rpc_error_with_its_code() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (sock, served) = spawn_stub(
+            tmp.path(),
+            b"{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"unknown method\"},\"id\":1}\n",
+        );
+
+        let err = Bm25Client::new(sock)
+            .missing_docs(&["a".to_string()])
+            .await
+            .expect_err("an error envelope is not a result");
+        assert!(
+            is_method_not_found(&err),
+            "the daemon's -32601 must survive the transport: {err:#}"
+        );
+        let _ = served.await;
+    }
+
+    /// Why (#5180): the migration introduced a bound where there was none. A
+    /// value that drifts down to seconds would start failing legitimate calls
+    /// under load; removing it would restore the indefinite hang.
+    /// What: pins the ceiling's order of magnitude.
+    /// Test: this test itself.
+    #[test]
+    fn rpc_timeout_is_generous_but_finite() {
+        assert!(RPC_TIMEOUT >= Duration::from_secs(30));
+        assert!(RPC_TIMEOUT <= Duration::from_secs(300));
+    }
 
     #[test]
     fn socket_path_uses_tmpdir_and_palace_name() {

@@ -6,12 +6,30 @@
 //! their request through this socket and exit.
 //! What: `spawn_socket_listener`, `handle_socket_connection`, the small
 //! `write_socket_line` helper, and the client-side `forward_to_controller`.
-//! Test: Manual — `trusty-agents` in one terminal, `trusty-agents "task"` in another.
+//! Test: `write_socket_line_emits_one_ndjson_frame_per_value`; end-to-end is
+//! manual — `trusty-agents` in one terminal, `trusty-agents "task"` in another.
+//!
+//! #5180 — framing decision, recorded here because leaving it unstated is what
+//! produced that issue. The WRITE half of this file's NDJSON goes through
+//! `trusty_common::uds::write_frame`, the shared entry point, so "what a frame
+//! is" is stated once for the whole workspace. The READ halves deliberately do
+//! NOT migrate, and this socket does not use `send_framed_request`:
+//!
+//! - It is multi-message. One `task` command goes in; N `output` envelopes and
+//!   a terminal `done`/`error` come back on the same connection. A one-shot
+//!   request/response helper cannot express that, and neither can the one-way
+//!   `send_framed_notification`.
+//! - Its reader is deliberately lenient. `forward_to_controller` logs a line
+//!   that fails to parse and keeps streaming; `send_framed_request` treats a
+//!   malformed frame as terminal, which is right for an RPC and wrong for a
+//!   progress stream.
+//! - Adding a streaming variant to `uds::rpc` to serve this one call site would
+//!   put a second protocol in the shared module with no second consumer.
+//!   Revisit if another multi-message UDS client appears.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use tokio::io::AsyncWriteExt;
 
 use crate::events::{self, Event};
 
@@ -255,16 +273,74 @@ async fn handle_socket_connection(stream: tokio::net::UnixStream) {
 }
 
 /// Write one JSON value as an NDJSON line to a shared writer.
+///
+/// #5180: the framing is `trusty_common::uds::write_frame` now — same bytes,
+/// same `InvalidData` mapping for a serialisation failure, one fewer private
+/// copy of the terminator rule. The mutex stays here because it guards this
+/// connection's writer, not the framing.
+/// Test: `write_socket_line_emits_one_ndjson_frame_per_value`.
 async fn write_socket_line(
     writer: &std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
     value: &serde_json::Value,
 ) -> std::io::Result<()> {
-    let mut line = serde_json::to_string(value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    line.push('\n');
     let mut g = writer.lock().await;
-    g.write_all(line.as_bytes()).await?;
-    g.flush().await
+    trusty_common::uds::write_frame(&mut *g, value).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt as _;
+
+    /// Why (#5180): this connection is multi-message, so a send that emitted
+    /// zero or two terminators would desynchronise the client's `read_line`
+    /// loop for every remaining envelope, not just one. The migration onto the
+    /// shared `write_frame` must not have changed those bytes.
+    /// What: writes two envelopes through `write_socket_line` over a real
+    /// socket pair and asserts the peer sees exactly two NDJSON lines.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn write_socket_line_emits_one_ndjson_frame_per_value() {
+        let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (_read_half, write_half) = server.into_split();
+        let writer = std::sync::Arc::new(tokio::sync::Mutex::new(write_half));
+
+        write_socket_line(&writer, &serde_json::json!({"type": "output", "text": "a"}))
+            .await
+            .expect("first frame");
+        write_socket_line(&writer, &serde_json::json!({"type": "done"}))
+            .await
+            .expect("second frame");
+        drop(writer);
+
+        let (mut client_read, _client_write) = client.into_split();
+        let mut raw = String::new();
+        client_read
+            .read_to_string(&mut raw)
+            .await
+            .expect("read to eof");
+
+        assert!(
+            raw.ends_with('\n'),
+            "every frame is newline-terminated: {raw:?}"
+        );
+        assert_eq!(
+            raw.matches('\n').count(),
+            2,
+            "exactly one terminator per value: {raw:?}"
+        );
+        let frames: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("each line is a complete JSON value"))
+            .collect();
+        assert_eq!(
+            frames,
+            vec![
+                serde_json::json!({"type": "output", "text": "a"}),
+                serde_json::json!({"type": "done"}),
+            ]
+        );
+    }
 }
 
 /// CLI-side: forward this invocation to a running controller and stream
@@ -312,10 +388,8 @@ pub async fn forward_to_controller(
         "cwd": cwd,
         "history": history_json,
     });
-    let mut line = serde_json::to_string(&cmd)?;
-    line.push('\n');
-    write_half.write_all(line.as_bytes()).await?;
-    write_half.flush().await?;
+    // #5180: same shared framing as the server side above.
+    trusty_common::uds::write_frame(&mut write_half, &cmd).await?;
 
     let mut reader = tokio::io::BufReader::new(read_half);
     let mut buf = String::new();
