@@ -39,7 +39,7 @@ See [crates/trusty-search/README.md](crates/trusty-search/README.md) for full do
 Long-term memory storage with semantic search, persistent embedding index, and embedded Svelte UI. Store development context, notes, snippets, and retrieve them via natural language.
 
 **What you get:**
-- HNSW vector index (usearch) + SQLite persistent storage + fastembed embeddings
+- Pure-Rust HNSW vector index (`hnsw_rs`) persisted in `redb` + fastembed embeddings
 - Semantic search over all stored memories
 - Collection organization (notes, snippets, code patterns, decisions)
 - Svelte UI for browsing and editing
