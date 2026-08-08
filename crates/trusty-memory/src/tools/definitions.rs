@@ -295,6 +295,31 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                 }
             },
             {
+                "name": "palace_reembed",
+                "description": "#4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. Defaults to a dry run. #5005: `missing: 0` does NOT mean every drawer is findable — a drawer lost to an id collision has a vector row and is still unreachable. Before treating this report as a complete account of what is retrievable — and ALWAYS before deleting a drawer on the strength of it — read `alias_audit`: act only on `is_clean: true`, and run `palace_unalias` first when it is false. Read `alias_audit.key_rows` vs `distinct_vector_ids` directly if you need the raw counts; they cannot be masked.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":  {"type": "string"},
+                        "dry_run": {"type": "boolean", "description": "Report only; do not embed. Default true."},
+                        "limit":   {"type": "integer", "description": "Cap repairs per run."}
+                    },
+                    "required": palace_compact_required,
+                }
+            },
+            {
+                "name": "palace_unalias",
+                "description": "#5005: free drawers whose vector was destroyed by an id collision (`palace_reembed` reports these as `aliased`), so a re-embed can repair them. Defaults to a dry run. Branch on `outcome` (clean/planned/repaired/partial/unavailable), never on the id counts — `partial` and `unavailable` are not successes. Run `palace_reembed` afterwards to make the freed drawers findable again.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":  {"type": "string"},
+                        "dry_run": {"type": "boolean", "description": "Name the drawer ids that would be freed; delete nothing. Default true."}
+                    },
+                    "required": palace_compact_required,
+                }
+            },
+            {
                 "name": "add_alias",
                 "description": "Add a short→full alias (e.g. tga → trusty-git-analytics) to the prompt-facts surface. Asserts the alias as a hot KG triple and refreshes the session-init prompt cache.",
                 "inputSchema": {

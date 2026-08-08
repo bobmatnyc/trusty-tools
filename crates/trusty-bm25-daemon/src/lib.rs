@@ -136,6 +136,23 @@ pub struct DaemonConfig {
     pub max_batch_size: usize,
 }
 
+/// Upper bound on the shutdown snapshot flush.
+///
+/// Why: the flush is the difference between a reaped daemon keeping its corpus
+/// and losing the last write window, so it is worth waiting for — but not
+/// worth hanging on. Two seconds is far beyond a JSON write of a few MB and
+/// still well inside the supervisor's own SIGTERM-then-SIGKILL budget, so a
+/// wedged worker costs a bounded delay rather than an unkillable process.
+/// What: 2 seconds. Public so a supervisor that must outwait this daemon can
+/// compare against the real value instead of restating it — a restated copy
+/// cannot detect the drift it exists to name.
+/// Test: exercised by every shutdown path; the durability guarantee it
+/// protects is asserted by
+/// `tests/shutdown_flush.rs::shutdown_flushes_the_open_write_window`;
+/// `trusty-memory`'s `sigterm_patience_exceeds_the_daemon_flush_budget` pins
+/// the supervisor's margin over it.
+pub const SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Run the BM25 daemon to completion.
 ///
 /// Why: the library entry point lets the bundled shim in trusty-memory and
@@ -152,6 +169,38 @@ pub struct DaemonConfig {
 /// Test: end-to-end coverage in `tests/bm25_daemon.rs` (spawns the binary
 /// and drives it over the UDS protocol).
 pub async fn run(config: DaemonConfig) -> Result<()> {
+    // Install the signal handlers BEFORE any of the startup work in
+    // `run_until`, so a SIGTERM arriving during snapshot load or socket bind
+    // reaches our shutdown path rather than the kernel's default disposition.
+    let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+    let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
+    run_until(config, async move {
+        tokio::select! {
+            _ = sigterm.recv() => tracing::info!("received SIGTERM — shutting down"),
+            _ = sigint.recv() => tracing::info!("received SIGINT — shutting down"),
+        }
+    })
+    .await
+}
+
+/// Run the daemon until `shutdown` resolves, then flush and clean up.
+///
+/// Why: the durability guarantee this function carries — that a shutdown
+/// flushes the write window still open in the batch worker — was only
+/// reachable through a real SIGTERM, which makes its regression test both
+/// `#[ignore]`-able and timing-dependent. Taking the shutdown trigger as a
+/// parameter lets a test fire it at an exact moment with no signals involved,
+/// so reverting the flush below fails the test deterministically instead of
+/// probabilistically. [`run`] supplies the real SIGTERM/SIGINT trigger and is
+/// otherwise identical.
+/// What: loads the snapshot, starts the batch worker, binds the socket, and
+/// races the accept loop against `shutdown`. Whichever wins, the snapshot is
+/// flushed (bounded by [`SHUTDOWN_FLUSH_TIMEOUT`]) and the socket file removed.
+/// Test: `tests/shutdown_flush.rs::shutdown_flushes_the_open_write_window`.
+pub async fn run_until<S>(config: DaemonConfig, shutdown: S) -> Result<()>
+where
+    S: std::future::Future<Output = ()>,
+{
     let DaemonConfig {
         palace,
         data_dir,
@@ -203,25 +252,41 @@ pub async fn run(config: DaemonConfig) -> Result<()> {
     );
 
     // Step 5: run the accept loop alongside a signal-driven shutdown.
+    // Keep a handle for the shutdown flush below — the accept loop owns its
+    // own clone and never returns, so the channel never closes on its own and
+    // the worker's close-triggered final flush can never fire.
+    let shutdown_queue = Arc::clone(&queue);
     let accept = tokio::spawn(server::run_accept_loop(listener, queue));
 
-    let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
-    let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
-
     tokio::select! {
-        _ = sigterm.recv() => {
-            tracing::info!("received SIGTERM — shutting down");
-        }
-        _ = sigint.recv() => {
-            tracing::info!("received SIGINT — shutting down");
-        }
+        _ = shutdown => {}
         _ = accept => {
             // The accept loop never returns in normal operation.
             tracing::warn!("accept loop exited unexpectedly");
         }
     }
 
-    // Step 6: remove the socket file on clean exit so the next run does not
+    // Step 6: flush the snapshot BEFORE exiting.
+    //
+    // Without this the process returned from `run` with the batch worker still
+    // holding up to one write window's worth of applied-but-unwritten
+    // documents, and those were simply lost — the worker's own final flush is
+    // gated on the op channel closing, which cannot happen while the accept
+    // loop holds a sender. Harmless-looking while SIGTERM only arrived at
+    // daemon shutdown; not harmless now that the trusty-memory supervisor
+    // reaps daemons routinely to stay within its process cap, which turns a
+    // shutdown-only edge case into an ordinary one. Bounded so a wedged worker
+    // cannot stop the daemon from exiting.
+    match tokio::time::timeout(SHUTDOWN_FLUSH_TIMEOUT, shutdown_queue.flush_now()).await {
+        Ok(Ok(doc_count)) => tracing::info!(doc_count, "flushed BM25 snapshot before exit"),
+        Ok(Err(e)) => tracing::error!("shutdown BM25 snapshot flush failed: {e:#}"),
+        Err(_) => tracing::error!(
+            "shutdown BM25 snapshot flush timed out after {SHUTDOWN_FLUSH_TIMEOUT:?} — \
+             writes since the last batch flush are lost"
+        ),
+    }
+
+    // Step 7: remove the socket file on clean exit so the next run does not
     // see EADDRINUSE.
     socket::cleanup_stale_socket(&socket_path);
     Ok(())

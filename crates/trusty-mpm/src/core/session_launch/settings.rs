@@ -278,13 +278,28 @@ pub(super) fn write_output_style(
 /// the result back pretty-printed via
 /// [`trusty_common::claude_config::write_json_atomic`]. Creates the file and
 /// `.claude/` directory when absent.
+///
+/// `inject_prompt_context` carries the `[hooks] prompt_context` config key
+/// (#5034). It gates ONE entry — `UserPromptSubmit` → `trusty-memory
+/// prompt-context`. The strip is deliberately NOT narrowed with it (see
+/// [`super::project_hooks::project_managed_hook_events`]), so turning the key
+/// off also removes the entry a prior launch wrote. Note the write is
+/// framework-owned either way: a hand-deleted entry is re-added on the next
+/// launch when the key is `true`. The config key, not a manual edit, is the
+/// supported off switch.
 /// Test: `write_project_hooks_writes_all_event_types`,
 /// `write_project_hooks_registers_pm_guard`,
 /// `write_project_hooks_replaces_existing`,
 /// `project_hooks_tests::write_project_hooks_writes_lifecycle_triad`,
 /// `project_hooks_tests::write_project_hooks_preserves_foreign_hooks`,
-/// `project_hooks_tests::write_project_hooks_writes_via_atomic_path`.
-pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
+/// `project_hooks_tests::write_project_hooks_writes_via_atomic_path`,
+/// `project_hooks_tests::write_project_hooks_omits_prompt_context_when_disabled`,
+/// `project_hooks_tests::write_project_hooks_strips_stale_prompt_context_when_disabled`,
+/// `project_hooks_tests::write_project_hooks_enabled_output_is_unchanged_by_the_toggle`.
+pub(super) fn write_project_hooks(
+    project_dir: &Path,
+    inject_prompt_context: bool,
+) -> Result<(), PrepError> {
     let claude_dir = project_dir.join(".claude");
     std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
         path: claude_dir.clone(),
@@ -302,21 +317,23 @@ pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
         Err(_) => serde_json::Value::Object(serde_json::Map::new()),
     };
 
-    let additions = super::project_hooks::project_managed_hook_additions();
+    let additions = super::project_hooks::project_managed_hook_additions(inject_prompt_context);
 
     // Replace-by-identity at entry granularity: strip any existing entry we
-    // own (trusty-memory / PM-guard / lifecycle-triad) for the events we are
-    // about to (re)add, so re-running this on every launch never duplicates
-    // our own groups while a foreign entry sharing one of our matcher groups
-    // survives untouched.
-    if let Some(events) = additions.get("hooks").and_then(|h| h.as_object()) {
-        let event_keys: Vec<String> = events.keys().cloned().collect();
-        crate::core::standalone::hooks::strip_hook_entries_matching_for_events(
-            &mut settings,
-            Some(&event_keys),
-            super::project_hooks::is_project_managed_hook_command,
-        );
-    }
+    // own (trusty-memory / PM-guard / lifecycle-triad), so re-running this on
+    // every launch never duplicates our own groups while a foreign entry
+    // sharing one of our matcher groups survives untouched.
+    //
+    // #5034: the strip covers every event we OWN, not just the ones this call
+    // writes. Scoping it to the additions instead would leave a
+    // previously-written `UserPromptSubmit` entry in place once the operator
+    // sets `[hooks] prompt_context = false`, and the opt-out would do nothing.
+    let event_keys = super::project_hooks::project_managed_hook_events();
+    crate::core::standalone::hooks::strip_hook_entries_matching_for_events(
+        &mut settings,
+        Some(&event_keys),
+        super::project_hooks::is_project_managed_hook_command,
+    );
 
     let merged = trusty_common::claude_config::merge_hook_entries(&settings, &additions);
 
@@ -379,7 +396,7 @@ pub(super) fn inject_mcp_server(
     name: &str,
     server: serde_json::Value,
 ) -> Result<(), PrepError> {
-    let mcp_path = project_path.join(".mcp.json");
+    let mcp_path = project_path.join(crate::core::mcp_config::MCP_JSON);
 
     // Load existing config to preserve unrelated servers; tolerate a missing or
     // malformed file by starting from an empty object.
@@ -410,8 +427,16 @@ pub(super) fn inject_mcp_server(
     }
     servers.insert(name.to_string(), server);
 
-    let serialized =
-        serde_json::to_string_pretty(&config).map_err(|err| PrepError::Deploy(err.to_string()))?;
+    // #4181: trailing newline. Without it every rewrite of a git-tracked
+    // `.mcp.json` reports "\ No newline at end of file" on top of whatever
+    // actually changed, and a POSIX-text-expecting tool sees a malformed last
+    // line. One byte, and the diff shows only the entry that moved.
+    let serialized = serde_json::to_string_pretty(&config)
+        .map(|mut s| {
+            s.push('\n');
+            s
+        })
+        .map_err(|err| PrepError::Deploy(err.to_string()))?;
     std::fs::write(&mcp_path, serialized).map_err(|source| PrepError::Io {
         path: mcp_path.clone(),
         source,

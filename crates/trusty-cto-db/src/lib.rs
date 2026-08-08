@@ -1,13 +1,13 @@
 //! `trusty-cto-db` — read-only query tools over the CTO ops SQLite database.
 //!
-//! Why: The CTO assistant in `open-mpm` needs structured access to the
+//! Why: The CTO assistant in `trusty-agents` needs structured access to the
 //! headcount / budget / work-classification data that the original Python
 //! CTO bot loaded out of `~/Duetto/cto/data/cto.db`. Exposing raw SQL to
 //! the LLM is unsafe (injection, schema drift, expensive queries), so this
 //! crate wraps a small set of curated, read-only queries behind a JSON
 //! tool surface. The dispatcher (`handle_tool_call`) returns plain
 //! `serde_json::Value` so the same code path drives both an MCP server
-//! and direct in-process calls from open-mpm's tool registry.
+//! and direct in-process calls from trusty-agents's tool registry.
 //! What: Opens `cto.db` in read-only mode (`SQLITE_OPEN_READ_ONLY`),
 //! exposes four tools — `query_headcount`, `query_budget`, `query_risks`,
 //! `query_work_classification` — each of which builds a parameterised
@@ -347,12 +347,12 @@ pub fn query_work_classification(conn: &Connection, pod: Option<&str>) -> Result
 }
 
 // =====================================================================
-// Tool dispatch (matches the OMPM-RPC/1 contract used by open-mpm)
+// Tool dispatch (matches the OMPM-RPC/1 contract used by trusty-agents)
 // =====================================================================
 
 /// Static JSON-Schema for every tool this crate exposes.
 ///
-/// Why: open-mpm's tool registry consumes a list of `{name, description,
+/// Why: trusty-agents's tool registry consumes a list of `{name, description,
 /// inputSchema}` objects identical to the MCP `tools/list` contract.
 /// What: Returns one entry per query function with documented optional
 /// parameters.
@@ -421,7 +421,7 @@ pub fn tool_list_response() -> Value {
 /// Single entry point that routes a `{name, args}` call to the right
 /// query function.
 ///
-/// Why: open-mpm's tool dispatcher calls one Rust function per tool;
+/// Why: trusty-agents's tool dispatcher calls one Rust function per tool;
 /// centralising the match here keeps the surface auditable.
 /// What: Opens (and re-uses, per call) a read-only connection, dispatches
 /// by tool name, and returns the JSON the tool produced.

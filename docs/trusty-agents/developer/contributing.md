@@ -11,8 +11,8 @@
 ### First-time setup
 
 ```bash
-git clone https://github.com/bobmatnyc/open-mpm
-cd open-mpm
+git clone https://github.com/bobmatnyc/trusty-tools
+cd trusty-tools
 cat > .env.local <<'EOF'
 OPENROUTER_API_KEY=sk-or-v1-...
 # ANTHROPIC_API_KEY=sk-ant-api03-...
@@ -29,13 +29,11 @@ API key are gated on the env var being set.
 ## Project layout
 
 ```
-open-mpm/
+crates/trusty-agents/
 ├── Cargo.toml             Rust package manifest
 ├── build.rs               Captures GIT_COMMIT_HASH at compile time
-├── CLAUDE.md              Architectural reference for AI-assisted development
-├── Makefile               Convenience wrappers around cargo commands
 ├── .env.local             API keys (not committed)
-├── .open-mpm/             Bundled config + runtime state (state/ is gitignored)
+├── .trusty-agents/        Bundled config + runtime state (state/ is gitignored)
 ├── docs/
 │   ├── user/              User-facing docs (quickstart, CLI, configuration)
 │   ├── developer/         Developer docs (architecture, contributing, building, testing)
@@ -115,7 +113,7 @@ cargo test --bins
 
 File issues on GitHub. Include:
 
-- Version: `open-mpm --version`
+- Version: `tagent --version`
 - OS/arch: macOS-arm64, Linux-x64, etc.
 - Reproduction: minimal `cargo run --` invocation
 - Logs: re-run with `RUST_LOG=debug`

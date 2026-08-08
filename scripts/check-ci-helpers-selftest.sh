@@ -100,6 +100,10 @@ assert_eq "PR template"           "true"  "$(docs_only_of '.github/PULL_REQUEST_
 assert_eq "docs-only multi-file"  "true"  "$(docs_only_of 'docs/a.md
 README.md
 crates/trusty-mpm/changelog.d/1-x.md')"
+assert_eq "website/ tree"         "true"  "$(docs_only_of 'website/src/routes/+page.svelte')"
+assert_eq "website/ nested asset" "true"  "$(docs_only_of 'website/static/img/logo.svg')"
+assert_eq "website-only multi-file" "true" "$(docs_only_of 'website/package.json
+docs/a.md')"
 
 assert_eq "rust source"           "false" "$(docs_only_of 'crates/trusty-mpm/src/lib.rs')"
 assert_eq "Cargo.toml"            "false" "$(docs_only_of 'Cargo.toml')"
@@ -112,6 +116,8 @@ assert_eq "UI source"             "false" "$(docs_only_of 'crates/trusty-agents/
 assert_eq "embedded .md asset"    "false" "$(docs_only_of 'crates/trusty-code/src/assets/agents/ops.md')"
 assert_eq "nested fragment"       "false" "$(docs_only_of 'crates/x/changelog.d/sub/1.md')"
 assert_eq "mixed docs + code"     "false" "$(docs_only_of 'docs/a.md
+crates/trusty-mpm/src/lib.rs')"
+assert_eq "mixed website + code"  "false" "$(docs_only_of 'website/src/routes/+page.svelte
 crates/trusty-mpm/src/lib.rs')"
 assert_eq "empty (fail closed)"   "false" "$(docs_only_of '')"
 
@@ -265,6 +271,39 @@ assert_eq "workflow no longer passes the frozen base.sha" "0" \
     "${version_parity_wf}" || true)"
 assert_eq "main-side parity also runs on a schedule (#4688)" "1" \
   "$(grep -c '^  schedule:' "${version_parity_wf}" || true)"
+
+# Same #4688 staleness class, found live on PR #4960: ci.yml's own `changes`
+# job (the docs-only classifier every gated job in ci.yml consumes) fed
+# detect-docs-only.sh a frozen `github.event.pull_request.base.sha`. On a
+# repo merging this often, the gap between "when the PR event fired" and
+# "when this job runs" routinely spans several unrelated main merges, so
+# `git merge-base <stale-sha> HEAD` resolved to the stale snapshot itself and
+# swept every file touched by those merges into the diff — PR #4960 (4 files,
+# all docs/) was classified as 23 changed paths and ran full Clippy/Test/MSRV/
+# search-daemon-smoke. Same wiring guard as version-parity.yml above: assert
+# the fix is actually wired, not just that detect-docs-only.sh is correct in
+# isolation.
+ci_wf=".github/workflows/ci.yml"
+assert_eq "ci.yml passes a base BRANCH, not base.sha" "1" \
+  "$(grep -c 'DOCS_ONLY_BASE: origin/\${{ github.event.pull_request.base.ref }}' \
+    "${ci_wf}" || true)"
+assert_eq "ci.yml no longer passes the frozen base.sha" "0" \
+  "$(grep -c 'DOCS_ONLY_BASE: \${{ github.event.pull_request.base.sha }}' \
+    "${ci_wf}" || true)"
+
+# capabilities-drift.yml grew its own `changes` job (reusing detect-docs-only.sh,
+# not a second predicate) so the tm-capabilities cargo build stops running
+# unconditionally on every PR. Same wiring guard, same reason: the script being
+# correct proves nothing if the workflow never passes it a live base.
+capabilities_wf=".github/workflows/capabilities-drift.yml"
+# 3 = every cargo-touching step in the job (toolchain install, cache, the
+# actual `check_capabilities.sh` run) — update this count if a step is added
+# or removed, the same way the count itself would need a human to notice.
+assert_eq "capabilities-drift.yml gates its cargo run on docs_only" "3" \
+  "$(grep -c "if: needs.changes.outputs.docs_only != 'true'" "${capabilities_wf}" || true)"
+assert_eq "capabilities-drift.yml passes a base BRANCH, not base.sha" "1" \
+  "$(grep -c 'DOCS_ONLY_BASE: origin/\${{ github.event.pull_request.base.ref }}' \
+    "${capabilities_wf}" || true)"
 
 echo
 if [ "${FAILURES}" -gt 0 ]; then

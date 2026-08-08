@@ -2,14 +2,15 @@
 //!
 //! Why: Extracted from retrieval/mod.rs to keep each file under the 500-SLOC
 //! cap (#607). All pure query functions live here; mutation lives in handle.rs.
-//! What: `retrieve_l0_l1`, `rescore_l1_by_similarity`, `retrieve_l2`,
-//! `retrieve_l3`, `expand_query`, `recall`, `recall_deep`,
+//! What: `retrieve_l0_l1`, `rescore_l1_by_similarity`, `rank_score`,
+//! `retrieve_l2`, `retrieve_l3`, `expand_query`, `recall`, `recall_deep`,
 //! `recall_with_default_embedder`, `recall_deep_with_default_embedder`,
 //! `recall_across_palaces`, `recall_across_palaces_with_default_embedder`,
 //! `uuid_prefix_eq`, `dedup_extend`.
 //! Test: `recall_ranks_by_similarity_over_importance`, `l0_l1_always_present`,
 //! `l2_returns_relevant_drawer`, `l2_room_filter_excludes_other_rooms`,
-//! `recall_across_palaces_merges_results`.
+//! `recall_across_palaces_merges_results`,
+//! `l2_ranks_similar_low_importance_above_less_similar_high_importance`.
 //!
 //! # Read-time expiry (#4885, ADR-0028 D4)
 //!
@@ -62,10 +63,64 @@ use uuid::Uuid;
 /// reduces their effective score below typical in-topic L2 hits, turning
 /// importance into a mild tiebreaker rather than the primary ranking signal.
 /// What: `0.15` — chosen so a maximum-importance L1 drawer without a
-/// similarity score (0.15) is outranked by a mediocre-similarity L2 hit
-/// (e.g. importance=0.5 * similarity=0.4 = 0.20).
+/// similarity score (0.15) is outranked by a mediocre-similarity L2 hit. #4904
+/// widened that margin rather than narrowing it: an L2 hit now scores close to
+/// its raw similarity (see [`rank_score`]) instead of similarity times a
+/// ~0.46-median `eff_importance`, so the same 0.15 ceiling sits further below a
+/// real hit than it did.
 /// Test: `recall_ranks_by_similarity_over_importance` in the tests below.
 pub(super) const L1_NO_SIMILARITY_PENALTY: f32 = 0.15;
+
+/// Share of an L2/L3 candidate's score that effective importance may move.
+///
+/// Why (#4904): L2 and L3 used to score a candidate `eff_importance *
+/// similarity`. Measured over the trusty-tools palace (1,272 drawers) and 200
+/// real hook queries, the two factors are not comparable in scale: inside one
+/// query's 15-candidate pool, similarity spans 0.067 on average while
+/// `eff_importance` spans 0.436 — 6.5× more. Multiplying by it therefore does
+/// not weight the ranking, it *replaces* it: the final top-5 matched the
+/// similarity top-5 in 1 of those 200 queries. On a 400-drawer self-retrieval
+/// probe (each drawer queried with its own leading text, so the right answer is
+/// known) the product scored recall@1 of 102/400 where similarity alone scored
+/// 291/400 — the multiplier was discarding two thirds of the correct top hits.
+/// What: `0.05` — a candidate's score is similarity scaled by
+/// `0.95 + 0.05 * eff_importance`, so importance can move a score by at most 5%
+/// and acts as the tiebreaker its own docs always described, not the primary
+/// signal. The same sweep read 350/400 recall@5 at this weight, matching
+/// similarity-only (350/400) while keeping importance live; the shipped
+/// multiplier scored 295/400.
+/// Test: `rank_score_keeps_importance_a_tiebreaker`,
+/// `l2_ranks_similar_low_importance_above_less_similar_high_importance`.
+pub(super) const IMPORTANCE_TILT: f32 = 0.05;
+
+/// Combine the three L2/L3 ranking inputs into one comparable score.
+///
+/// Why: L2 and L3 scored candidates with the same three-term expression written
+/// out twice, so a change to one silently left the other on the old formula —
+/// exactly the drift that made `retrieve_l3` the odd one out for room filtering
+/// in #3274. One function is also the only place a reader has to look to see
+/// what "score" means.
+/// What: tilts `similarity` by at most [`IMPORTANCE_TILT`] according to
+/// `eff_importance`, adds the closet `tag_boost`, and clamps to `1.0`.
+/// Test: `rank_score_keeps_importance_a_tiebreaker`.
+pub(super) fn rank_score(similarity: f32, eff_importance: f32, tag_boost: f32) -> f32 {
+    let tilted = similarity * ((1.0 - IMPORTANCE_TILT) + IMPORTANCE_TILT * eff_importance);
+    (tilted + tag_boost).min(1.0)
+}
+
+/// Tracing target for per-candidate L2 ranking traces (#4904).
+///
+/// Why: a missed fact looks identical whether it never entered the candidate
+/// set, entered but ranked below the cutoff, or was never queried for. Only the
+/// pre-truncation candidate list with its score components tells them apart, and
+/// nothing logged it. Its own target keeps `RUST_LOG=trusty_common=debug` from
+/// drowning in one line per candidate per recall while still letting an operator
+/// ask for exactly this with `RUST_LOG=memory_recall_rank=debug`.
+/// What: the `target:` string on the `tracing::debug!` inside
+/// [`retrieve_l2_scoped`], emitted once per surviving candidate before the
+/// `top_k` truncation.
+/// Test: `l2_rank_trace_emits_one_event_per_candidate`.
+pub const RANK_TRACE_TARGET: &str = "memory_recall_rank";
 
 /// Compare two UUIDs by their first 8 bytes.
 ///
@@ -178,6 +233,9 @@ pub fn rescore_l1_by_similarity(
                 Some(&sim) => sim,
                 // Drawer was not in the HNSW results — likely off-topic.
                 // Apply penalty so importance alone can't dominate ranking.
+                // #5037: demoted is not excluded — this branch still yields a
+                // score that competes for a `top_k` slot. See
+                // `super::relevance::DEFAULT_RELEVANCE_FLOOR`.
                 None => r.drawer.importance * L1_NO_SIMILARITY_PENALTY,
             };
         }
@@ -195,9 +253,8 @@ pub fn rescore_l1_by_similarity(
 /// match, applies the optional room filter by comparing `drawer.room_id`
 /// against the id the palace's `ROOMS` registry holds for that room
 /// (issue #3274 for the filter itself; ADR-0027 D1.3 for resolving the id
-/// through the table instead of re-hashing it), scores as
-/// `drawer.importance * hit.score`, and returns the top `top_k`
-/// drawers tagged with `layer: 2`.
+/// through the table instead of re-hashing it), scores each candidate with
+/// [`rank_score`], and returns the top `top_k` drawers tagged with `layer: 2`.
 /// Test: `l2_returns_relevant_drawer` upserts a Rust-themed drawer and
 /// asserts a Rust-themed query retrieves it at rank 0.
 /// `l2_room_filter_excludes_other_rooms` (issue #3274) asserts a drawer from
@@ -297,7 +354,6 @@ pub async fn retrieve_l2_scoped(
             handle
                 .decay_config
                 .effective_importance(drawer.importance, age_days, boost);
-        let effective_score = eff_importance * hit.score;
 
         // Closet tag boost: if any query token matches a closet keyword that
         // contains this drawer, add a 0.15 bump (capped at 1.0) so topical
@@ -307,7 +363,25 @@ pub async fn retrieve_l2_scoped(
             .iter()
             .any(|tok| closets.get(tok).is_some_and(|ids| ids.contains(&drawer_id)));
         let tag_boost = if in_closet { 0.15_f32 } else { 0.0 };
-        let final_score = (effective_score + tag_boost).min(1.0);
+        // #4904: importance tilts the similarity score, it no longer multiplies
+        // it — see `IMPORTANCE_TILT`.
+        let final_score = rank_score(hit.score, eff_importance, tag_boost);
+
+        // #4904: the three candidate explanations for a missed fact — absent
+        // from the candidate set, present but ranked below the cutoff, or never
+        // queried for — are indistinguishable from the outside, because the only
+        // observable is the truncated top-k. Emitting every candidate WITH its
+        // score components before `truncate` is what separates them.
+        tracing::debug!(
+            target: RANK_TRACE_TARGET,
+            drawer_id = %drawer.id,
+            similarity = hit.score,
+            importance = drawer.importance,
+            eff_importance,
+            tag_boost,
+            score = final_score,
+            "l2 candidate"
+        );
 
         results.push(RecallResult {
             drawer: drawer.clone(),
@@ -339,8 +413,9 @@ pub async fn retrieve_l2_scoped(
 /// What: Embeds the query, searches with `top_k` (over-fetched to `top_k * 3`
 /// when a room filter is active, since filtered-out hits would otherwise eat
 /// the budget), joins each hit to its drawer via UUID-prefix match, drops
-/// drawers outside the requested room, scores as `importance * hit.score`,
-/// sorts descending, and returns at most `top_k` `RecallResult`s.
+/// drawers outside the requested room, scores each candidate with
+/// [`rank_score`], sorts descending, and returns at most `top_k`
+/// `RecallResult`s.
 /// Test: Symmetric with `l2_returns_relevant_drawer`; same join logic.
 /// `l3_room_filter_excludes_other_rooms` covers the filter.
 pub async fn retrieve_l3(
@@ -419,14 +494,15 @@ pub async fn retrieve_l3_scoped(
             handle
                 .decay_config
                 .effective_importance(drawer.importance, age_days, boost);
-        let effective_score = eff_importance * hit.score;
 
         let drawer_id = drawer.id;
         let in_closet = query_tokens
             .iter()
             .any(|tok| closets.get(tok).is_some_and(|ids| ids.contains(&drawer_id)));
         let tag_boost = if in_closet { 0.15_f32 } else { 0.0 };
-        let final_score = (effective_score + tag_boost).min(1.0);
+        // #4904: shares the one `rank_score` L2 uses, so deep recall cannot be
+        // left ranking on the old importance-multiplier formula.
+        let final_score = rank_score(hit.score, eff_importance, tag_boost);
 
         results.push(RecallResult {
             drawer: drawer.clone(),
@@ -591,6 +667,10 @@ pub async fn recall_scoped(
     // L1_CAP+1 entries before any L2 hits are merged; without this truncation
     // the caller receives more than top_k results whenever the palace has a
     // non-empty identity string plus several high-importance drawers.
+    // #5037: this stays a length cap, not a quality gate — callers that must
+    // not show a weak match apply `super::relevance::apply_relevance_floor` to
+    // what comes back. Gating here would silently change every MCP and CLI
+    // recall caller's contract, which #5037's ruling does not ask for.
     combined.truncate(top_k);
 
     handle.log_recall(query, &combined);

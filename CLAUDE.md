@@ -11,139 +11,70 @@ This is a **Rust workspace** (Cargo workspace, resolver v2, glob members
 `[workspace.package]` shares `rust-version`, `edition`, `license`, `repository`,
 and `authors` but no longer carries a version field (see #343).
 
-**MSRV**: `1.94` — driven by `aws-config` >= 1.9.0 / `aws-sdk-bedrockruntime`
->= 1.136.0, which declare `rust-version = "1.94.1"`; the let-chain
-stabilisation floor (1.88) is lower. CI enforces this with
-`dtolnay/rust-toolchain@1.94`. See `docs/adr/0029-msrv-1-94-and-edition-policy.md`.
+**MSRV**: `1.94`, enforced in CI with `dtolnay/rust-toolchain@1.94`. The
+`aws-config` / `aws-sdk-bedrockruntime` floor that drives it, and the per-crate
+edition policy, are in
+[ADR-0029](docs/adr/0029-msrv-1-94-and-edition-policy.md).
 
 ## Role & Scope
 
 `trusty-tools` is the **single source of truth** for all trusty-* AI tooling.
-It replaces seven formerly separate repos and eliminates the `[patch.crates-io]`
-dance for cross-crate development. The authoritative crate list is the
-`[workspace.members]` glob in the root `Cargo.toml`; every subdirectory under
-`crates/` with a `Cargo.toml` is a member.
-
-Key consumers of the shared libraries:
-- **trusty-agents** — agent orchestration platform (lives in `crates/trusty-agents`)
-- **trusty-search** — hybrid code search daemon + MCP server
-- **trusty-memory** — MCP frontend over the memory palace (storage lives in
-  `trusty-common`'s `memory-core` feature)
-- **trusty-analyze** — code analysis daemon (complexity, smells, quality metrics)
-
-Work touching a shared crate (e.g. `trusty-common`, `trusty-embedderd`) may
-require bumping the dependent crate's version and verifying its tests. Always
-run `cargo check` and `cargo test -p <crate>` after modifying a library crate,
-then propagate changes to all crates that depend on it before committing.
+The authoritative crate list is the `[workspace.members]` glob in the root
+`Cargo.toml`; every subdirectory under `crates/` with a `Cargo.toml` is a
+member. Per-crate purposes are in
+[docs/reference/crate-map.md](docs/reference/crate-map.md); the seven repos this
+monorepo replaced are in
+[docs/reference/former-repos.md](docs/reference/former-repos.md).
 
 ## Build and Test Commands
 
-🔴 **Single-path workflows — use exactly these commands.**
-
-### Workspace-wide Commands
-
-```bash
-# Build all crates (development)
-cargo build
-
-# Build all crates (release/optimised)
-cargo build --release
-
-# Run all tests
-cargo test
-
-# Check (fast compile check, no codegen)
-cargo check
-
-# Lint (workspace-wide, all targets)
-cargo clippy --workspace --all-targets -- -D warnings
-
-# Format check
-cargo fmt --check
-
-# Format and fix
-cargo fmt
-
-# Run ONNX-backed integration tests (slow; skipped in CI)
-cargo test -- --include-ignored
-
-# Update dependencies (review Cargo.lock diff before committing)
-cargo update
-
-# Audit dependencies for known vulnerabilities
-cargo audit   # requires: cargo install cargo-audit
-```
-
-### Individual Crate Commands
+🔴 **Single-path workflows — use exactly these commands.** Scope to the crate
+you changed; a bare workspace run is a hardening gate, not an inner loop.
 
 ```bash
-# Build a single crate (dev)
-cargo build -p trusty-search
-
-# Build a single crate (release)
-cargo build --release -p trusty-search
-
-# Check a single crate (fastest — no codegen)
-cargo check -p trusty-search
-
-# Test a single crate
-cargo test -p trusty-search
-
-# Test a single crate with a specific feature
-cargo test -p trusty-common --features axum-server
-
-# Test a single test by name within a crate
-cargo test -p trusty-search -- my_test_name
-
-# Run a binary from a specific crate
-cargo run -p trusty-search -- start
-cargo run -p trusty-mpm -- --help
-
-# Build only the binary, not the whole workspace
-cargo build --release -p trusty-mpm
-
-# Lint a single crate
-cargo clippy -p trusty-search -- -D warnings
-
-# Test a single crate with ignored tests
-cargo test -p trusty-embedderd -- --include-ignored
-
-# Run trusty-search performance regression suite (requires daemon + indexed trusty-tools)
-cargo test -p trusty-search --test baseline_trusty_tools -- --include-ignored --nocapture
+cargo build                                            # build all crates (dev)
+cargo check -p <crate>                                 # fastest — no codegen
+cargo test -p <crate>                                  # test one crate
+cargo clippy -p <crate> --all-targets -- -D warnings   # lint one crate
+cargo fmt                                              # format (--check to verify only)
 ```
 
-### Important: Crate Names vs. Directory Names
+For any other invocation — release builds, feature-gated tests,
+`--include-ignored` / ONNX tests, a single test by name, the `trusty-search`
+performance regression suite, `cargo update` / `cargo audit`, or running a
+crate's binary — call `Skill(skill="cargo-commands")` rather than guessing.
 
-**Crate names** match the `name` field in each crate's `Cargo.toml`, not necessarily the directory name.
-Most match (e.g. `crates/trusty-search/` → `-p trusty-search`) but note these exceptions:
-
-- `crates/trusty-git-analytics/` → `-p tga` (short name)
-- `crates/trusty-agents/` → `-p trusty-agents`
-
-Always verify the `name` field in the crate's `Cargo.toml` if you get a "package not found" error.
+🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from the
+crate's `Cargo.toml`, not the directory. Most match; the exceptions are in the
+Abbreviations & Aliases table below (notably `crates/trusty-git-analytics/` →
+`-p tga`). On "package not found", read the crate's `Cargo.toml`.
 
 ## Rust Test Ladder — how much testing this change needs
 
 🔴 **This ladder is the authoritative answer to "how much testing does this
 change need" for this repo.** Run the smallest deterministic gate that covers the
-change's blast radius — no less, and no more. The framework's phase-entry table
-labels a change Low / Normal / High risk; those labels map onto the rungs below
-(rungs 1–2 = Low, 3–4 = Normal, 5–6 = High). The framework does not carry a
-competing Rust matrix: when the question is *which command to run*, this table
-decides.
+change's blast radius — no less, and no more. The framework's Low / Normal / High
+risk labels map onto the rungs below (1–2 = Low, 3–4 = Normal, 5–6 = High); when
+the question is *which command to run*, this table decides.
 
 Required tests stay in the implementation PR (`tm-pr-workflow`, "One Outcome,
 One PR"). Name the rung and paste its command in the PR body so a reviewer can
 see which rung was actually run.
 
-| # | Change class | Risk | Development proof | PR gate — the command to run | Hardening / release gate |
-|---|---|---|---|---|---|
-| 1 | Docs, comments, changelog fragments only | Low | Read the rendered file | `bash scripts/check_sld.sh` (plus `check_doc_numbers.sh` / `check_line_cap.sh` if those surfaces were touched). No Cargo test by default. | CI required checks only |
-| 2 | Test-only stabilization — flake fix, fixture, test harness | Low | Fail-before / pass-after, repeated: `cargo test -p <crate> <test> -- --exact --nocapture` run ~10× | `cargo fmt --check` && `cargo test -p <crate>`; add `-- --test-threads=1` when the flake is isolation-shaped | `cargo test --workspace` **only** when shared test infrastructure changed |
-| 3 | Localized behavior inside one crate | Normal | One targeted regression test that provably fails before the change | `cargo fmt --check` && `cargo check -p <crate>` && `cargo clippy -p <crate> -- -D warnings` && `cargo test -p <crate>` | Workspace gate only when release policy requires it |
-| 4 | **Cross-crate change** — public API or shared library (`trusty-common`, `trusty-embedderd`, …) | Normal → High | Targeted regression plus `cargo test -p <lib>` | rung 3 for the library, then `cargo check --workspace` && `cargo test -p <consumer>` for **each direct dependent** | `cargo test --workspace` && `cargo clippy --workspace --all-targets -- -D warnings` at HARDEN/release |
-| 5 | Cross-crate contract, persistence, security, process lifecycle, **release tooling** | High | Targeted plus failure-path and concurrency tests | rung 4, plus `cargo test -p <crate> -- --include-ignored` for gated integration coverage, plus an adversarial review round (`code-critic`) | full workspace, `cargo audit`, and for release tooling `scripts/check-publish-ready.sh <crate>` && `scripts/preflight-publish.sh <crate>` |
-| 6 | **UI / API surface** — Svelte UIs, MCP tool schemas, HTTP routes | High | Rust crate tests **plus** direct UI/API evidence (curl the route, call the MCP tool, load the page) | rung 3 or 4 for the Rust side, plus `pnpm -C crates/<crate>/ui test` (where the package defines one; otherwise `… build`) and one smoke run of the binary | full product/e2e gate plus `cargo test -- --include-ignored` when hardening |
+| # | Change class | Risk | PR gate, in short |
+|---|---|---|---|
+| 1 | Docs, comments, changelog fragments only | Low | Doc gates only (`check_sld.sh`, plus doc-numbers / line-cap if touched). No Cargo test by default. |
+| 2 | Test-only stabilization — flake fix, fixture, test harness | Low | `fmt --check` + `test -p <crate>`, with the flake re-run ~10× |
+| 3 | Localized behavior inside one crate | Normal | `fmt --check` + `check` + `clippy` + `test`, all `-p <crate>`, plus one regression test that provably failed before |
+| 4 | **Cross-crate change** — public API or shared library (`trusty-common`, `trusty-embedderd`, …) | Normal → High | Rung 3 on the library, then `check --workspace` + `test -p <consumer>` for **each direct dependent** |
+| 5 | Cross-crate contract, persistence, security, process lifecycle, **release tooling** | High | Rung 4, plus `--include-ignored` integration coverage, failure-path/concurrency tests, and a `code-critic` round |
+| 6 | **UI / API surface** — Svelte UIs, MCP tool schemas, HTTP routes | High | Rung 3 or 4 for the Rust side, plus the UI package's own test/build and one binary smoke run — with direct UI/API evidence, not just crate tests |
+
+The exact command chain for each rung, its development-proof step, and its
+hardening/release gate are in
+[docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
+Read that page's rung entry before running the gate, and paste the command you
+actually ran into the PR body.
 
 🔴 **`cargo test --workspace` is not the default inner-loop proof for a localized
 change.** It belongs at the hardening boundaries (rungs 4–6). Making every narrow
@@ -157,11 +88,10 @@ below). It is never licence to make a red gate green by deleting, `#[ignore]`-in
 hard line it has always been.
 
 **Evidence detail:** a PR body may summarise a **passing** gate as command +
-counts + scope — `cargo test -p trusty-mpm — 214 passed, 0 failed` — because the
-reviewer's question there is which rung ran, not what scrolled past. Raw output
-stays **mandatory** for failures, flakes, performance claims, and disputed
-results, and agent-to-PM reporting keeps raw output in all cases
-(`BASE-AGENT.md`: never summarise test results in your own words).
+counts + scope; raw output stays **mandatory** for failures, flakes, performance
+claims, and disputed results. Full rule in
+[docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md)
+("How Much Gate Output the PR Body Owes").
 
 ### Baseline failures — the Rust specifics
 
@@ -176,61 +106,32 @@ exact report-string format: see
 
 ## Key Conventions
 
-🔴 **Rust issue boundary — what to search by before filing.** Whether a finding
-earns an issue at all is decided by the **Ticket-Promotion Gate** in the
-framework skill `tm-ticketing` (search first, the five promotion criteria, the
-confidence label, outcome-sized granularity, the six-field schema). That gate is
-not restated here — read it there. What this repo adds is *what to search by*,
-because a Cargo workspace hands you four high-signal keys a generic search
-misses:
-
-| Search key | Example | Why it finds the canonical issue |
-|---|---|---|
-| **Test name** | `execute_doctor_against_test_daemon` | Rust test names are effectively unique and get quoted verbatim in every prior report and CI log |
-| **Panic / error text** | `called Option::unwrap() on a None value`, or a `thiserror` Display string | The literal message is what people paste into issue bodies |
-| **Affected symbol** | `WatcherManager::reconcile` | Survives the file moves and module splits that break any path-based search — and this repo splits modules constantly under the 500-SLOC cap |
-| **Crate** | `-p trusty-search`, `-p tga` | Scopes to the owning workstream; expand abbreviations first (see the table below — `tm` is trusty-memory, not the binary) |
-
-Search **open and recently closed** issues on all four. A repeat failure in the
-same crate is almost always another occurrence of an existing canonical issue:
-append the run URL, SHA, command, and failure signature to that issue rather than
-filing a second one.
+🔴 **Rust issue boundary — search before filing.** Whether a finding earns an
+issue at all is decided by the **Ticket-Promotion Gate** in the framework skill
+`tm-ticketing` — read it there. What this repo adds is *what to search by*: the
+**test name**, the **panic / error text**, the **affected symbol**, and the
+**crate**. Search open and recently closed issues on all four; append to the
+canonical issue rather than filing a second one. Rationale per key:
+[docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md).
 
 🔴 **Why/What/Test doc pattern with proportional depth** — public items carry
-documentation proportional to how surprising the code is. The full three-section
-pattern (Why/What/Test) is mandatory for API entry points, design-heavy code,
-error contracts, safety/TCC behavior, and cross-crate surfaces; a single-line doc
-or lightweight pattern suffices for trivial items (simple getters, obvious
-one-liners, thin re-exports).
-
-**Full pattern (mandatory for non-obvious code):**
+documentation proportional to how surprising the code is:
 
 ```rust
-/// Why: <motivation — the problem this solves, not the mechanics>
-/// What: <mechanical description of what the item does>
-/// Test: <where coverage lives, or why it is side-effect-only / untestable>
-pub fn my_function() { … }
+/// Why: <motivation>   /// What: <mechanics>   /// Test: <where coverage lives>
 ```
 
-**Lighter touch (permitted for self-evident code):**
+The full three-section pattern is mandatory for API entry points, design-heavy
+code, error contracts, safety/TCC behavior, and cross-crate surfaces. A
+single-line doc suffices for trivial items (simple getters, obvious one-liners,
+thin re-exports) — if a competent reader's first guess is right, one line is
+complete. Defensive-reasoning paragraphs and issue-history anecdotes belong in
+linked ADRs or issues, not inline comments; use `// See <issue-or-adr>`.
+Worked examples and the four-axis model: `Skill(skill="documentation-style")`.
 
-```rust
-/// Returns the user's name.
-pub fn name(&self) -> &str { … }
-```
-
-**Judgment rule:** If a competent reader's first guess is right, a one-line doc
-is complete. Defensive-reasoning paragraphs and issue-history anecdotes belong in
-linked ADRs or issues, not inline comments — use `// See <issue-or-adr>` instead.
-This keeps the entry point dense and lets detail stay one hop away.
-
-🟡 **Ticket-attributed inline comments** — when you modify a function, class,
-or module *because of* a ticket, add a concise inline pointer at the change
-site: `// #1234: <one-line reason>`, or `// See #1234` when the ticket title
-already says it all. This is the same pointer convention as the judgment rule
-above, applied to change attribution instead of design rationale: the ticket
-reference is the pointer, never a narrative — one line, not a changelog
-embedded in comments. The full reasoning stays in the ticket.
+🟡 **Ticket-attributed inline comments** — when a ticket drives a change, leave a
+pointer at the change site: `// #1234: <one-line reason>`, or `// See #1234`. One
+line, never a narrative; the reasoning stays in the ticket.
 
 🔴 **No `unwrap()` in library code** — use `?` with `anyhow::Result` for
 application/binary code and `thiserror` for library error types. Reserve
@@ -245,6 +146,12 @@ TEST_CAP raised #4074):**
 | Production source files | **500 SLOC** |
 | Test / benchmark files | **3000 SLOC** |
 
+Comments, doc comments (`//`, `///`, `//!`, `/* … */`), and blank lines do
+**not** count toward the cap — only non-comment code lines in tracked `.rs`
+files do (e.g. `crates/trusty-common/src/lib.rs` is 809 raw lines but 113
+SLOC). Exact counting definition:
+[docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
+
 A file is classified as a **test/benchmark file** when ANY of these match:
 - basename is exactly `tests.rs`
 - basename ends with `_test.rs` or `_tests.rs`
@@ -254,15 +161,20 @@ A file is classified as a **test/benchmark file** when ANY of these match:
 
 All other tracked `.rs` files are **production files**, capped at 500 SLOC.
 
-🔴 As of issue #610 this is mechanically enforced by `scripts/check_line_cap.sh`,
-wired into CI and the pre-commit hook — a new tracked file over its cap
-**cannot merge**. Never turn this gate green by deleting, `#[ignore]`-ing, or
-excluding a file from the count; split it instead (one public module per
-logical concept, a thin `mod.rs` re-export facade, sibling single-responsibility
-files). See [docs/reference/sloc-cap.md](docs/reference/sloc-cap.md) for the
-exact SLOC counting definition, the ratchet-allowlist mechanics
-(`.line-cap-allowlist.tsv`, `--update`/`--seed`/`--force-add`), and the
-resolved #170/#171/#172 refactor history.
+🟡 **Inline `#[cfg(test)] mod <name> { … }` bodies do not count (#5153).** Add
+tests to a 460-SLOC module without splitting it. Only that exact shape is
+excluded — `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an
+`fn`/`impl`/`use`, and predicates like `all(test, …)` or `any(test, …)` are all
+still counted, as is any test module whose brace balance is skewed by a brace
+inside a string literal. The matcher is line-based and fails closed: it can
+raise a false cap violation, never silently drop production code.
+
+🔴 Mechanically enforced by `scripts/check_line_cap.sh` in CI and the pre-commit
+hook (#610) — a new tracked file over its cap **cannot merge**. Never turn this
+gate green by deleting, `#[ignore]`-ing, or excluding a file from the count;
+split it instead. Counting definition, the split pattern, ratchet-allowlist
+mechanics, and refactor history:
+[docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
 (`trusty-common`, `trusty-embedderd`, `trusty-bm25-daemon`, etc.) define structured error enums with
@@ -284,197 +196,92 @@ bespoke read-this-config / find-this-daemon / scrub-this-string logic: search fo
 existing entry point first (`git grep`, then trusty-common source tree) and extend it
 rather than duplicating. A second independent implementation of a shared capability is
 a defect, not a convenience — behavior fixes, security patches, and safety guardrails
-must land once, not N times, and silent drift between copies is a hidden risk. See the
-domain consolidation audit table below for 2026-07-11 baseline status. First enforcement
-instances: inference-adapter epic #2400, tmux common entry point #2398/PR #2399.
+must land once, not N times, and silent drift between copies is a hidden risk. Per-domain
+consolidation status is in
+[docs/reference/domain-consolidation-audit.md](docs/reference/domain-consolidation-audit.md).
 Scope: this rule governs capabilities shared ACROSS crates. Duplication of a
 capability WITHIN a single crate is not covered by it — consolidate that on
 its own merits when the drift has caused (or clearly will cause) a real
 defect, not by citing this rule (#4058 binary-name-table consolidation).
 
-🟡 **Rust editions** — `edition = "2024"` for `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`, and `trusty-code`
-(they use let-chains); `edition = "2021"` for all other crates. Check the crate
-`Cargo.toml` before assuming an edition.
-
-🟡 **No global state** — all helpers are free functions or small structs. No
-`lazy_static!` or `once_cell::sync::Lazy` except the tracing subscriber (which
-uses `try_init` to be idempotent across test binaries).
-
-🟡 **Logs to stderr** — `init_tracing` always writes to stderr so stdout stays
-clean for MCP JSON-RPC framing. Never log to stdout in a daemon or MCP server.
-
-🟡 **Ignore-tagged integration tests** — ONNX-backed embedder tests are marked
-`#[ignore]` to keep CI fast. Run with `cargo test -- --include-ignored` when
-you need local validation against the model.
-
-🟢 **Workspace dependency sharing** — all shared external crates (`anyhow`,
-`serde`, `tokio`, `axum`, etc.) are declared once in `[workspace.dependencies]`
-in the root `Cargo.toml` and referenced as `dep = { workspace = true }` in
-crate manifests. Never pin a dependency locally if it is already in the
-workspace table.
-
-🟢 **Internal path deps** — reference sibling crates as:
-```toml
-trusty-common = { workspace = true }
-```
-The workspace manifest declares the path so every member resolves from the
-in-tree source automatically. The `[patch.crates-io]` block in the root
-`Cargo.toml` also redirects any crates that still reference the old published
-versions by version number.
+The remaining 🟡/🟢 conventions — editions, global state, stderr logging,
+dependency declaration, and ignore-tagged tests — are one-liners in the
+"Common Pitfalls — Quick Checklist" below, with the reasoning in
+[docs/reference/common-pitfalls.md](docs/reference/common-pitfalls.md).
 
 ## Git Tag / Release Convention
 
-> **Full release workflow and macOS critical notes:** see [docs/reference/release-workflow.md](docs/reference/release-workflow.md).
+🔴 **Version bumps, tagging, and publishing are delegated to `local-ops`. The PM
+never edits a version file, cuts a tag, or runs `cargo publish` directly.**
 
-### Quick Release Steps
+Every crate versions and tags independently: `<crate-name>-v<version>`.
 
-1. Bump the crate version in `crates/<name>/Cargo.toml`.
-   - Shortcut: `scripts/bump-version.sh <crate-dir> <major|minor|patch>` reads the
-     current version, computes the next semver, edits the package version in
-     place, syncs the root `Cargo.lock` (`cargo update -p <package-name>
-     --precise <next-version>`, resolving `<package-name>` from the crate's
-     `[package] name` field so it works even when that differs from the
-     crates/ directory name, e.g. `tga`) so the release PR is `--locked`-clean
-     on the first CI run (issue #3199), assembles the crate's
-     `changelog.d/` fragments into a `## [<version>]` `CHANGELOG.md` section
-     (via `scripts/assemble-changelog.sh`, issue #4476), and **prints** the exact
-     `git tag` / `git push` commands for you to run. It never tags or pushes —
-     the human stays in the loop per the manual-tag convention. It honours the
-     `trusty-git-analytics` tag-prefix gotcha automatically (tags are
-     `trusty-git-analytics-v*`, not `tga-v*`).
-2. Update any dependent crates that pin that version.
-3. Run `cargo test -p <name>` and `cargo clippy --workspace -- -D warnings`.
-4. Commit the version bump.
-5. Create the tag: `git tag <crate-name>-v<version>`.
-6. Push the tag: `git push origin <crate-name>-v<version>`.
-7. Run `scripts/check-publish-ready.sh <crate>` (or `make publish-check CRATE=<crate>`) —
-   must pass (publish only from merged main; never an unmerged branch). See
-   issue #2227; escape hatch `ALLOW_UNMERGED_PUBLISH=1` is for rare, deliberate
-   use only.
-7b. Run `scripts/preflight-publish.sh <crate>` — must pass immediately before
-    `cargo publish`. Rule: **publish only from merged main, as bobmatnyc.**
-    Checks HEAD == origin/main exactly, the active `gh auth status` account is
-    `bobmatnyc`, the tree is clean, and the target version isn't already live
-    on crates.io. This closes the gap behind the 2026-07-08 incident, where a
-    crate was published from an unmerged branch under the wrong gh account and
-    burned crates.io version 0.22.0 with fix-less content.
-8. Publish: `cargo publish -p <crate-name>` (or `SKIP_UI_BUILD=1 cargo publish` for UI-embedding crates).
-9. Build and install: `cargo install --path crates/<dir> --locked`.
+Before any bump, tag, or publish, call `Skill(skill="cargo-publish")`. It carries
+the full release sequence, the mandatory publish-only-from-merged-main and
+identity/clean-tree guards (`scripts/check-publish-ready.sh`,
+`scripts/preflight-publish.sh`), cross-crate publish ordering and propagation
+waits, the `tga` tag aliases (#1128), and the connection-safe daemon restart.
 
-### Per-PR Changelog Fragment (framework default — issue #4476, supersedes the shared-`[Unreleased]` convention)
+> **Full release workflow, `scripts/bump-version.sh`, and Developer-ID signing
+> setup:** see [docs/reference/release-workflow.md](docs/reference/release-workflow.md).
+
+🔴 **A breaking public-API change needs a matching version bump, and the release
+path enforces it (#5050, moved to release-time by #5149).**
+`scripts/preflight-publish.sh` CHECK 5 runs `cargo-semver-checks` against the
+crate's latest crates.io release immediately before `cargo publish`, and its
+nonzero exit is the absolute stop — that is what blocks a bad upload, since
+`cargo publish` runs locally and no CI job can stop it. The tag-push workflow
+`.github/workflows/semver-checks.yml` reports the same check independently.
+Cargo's 0.x rule applies: for a `0.y.z` crate the breaking bump is the MINOR
+position. A workspace `cargo check` can never catch this class of break — the
+root `Cargo.toml` path override pairs local source with local dependency — which
+is how #4088 shipped `trusty-common` 0.22.5's required new public field on a
+patch bump and cost `trusty-analyze` 0.7.3 a yank.
+
+🟡 **It does not run on PRs**, so between releases a breaking change can merge
+unnoticed and will surface at the release that ships it. Prefer
+`#[non_exhaustive]` on public structs and enums so field and variant additions
+stay non-breaking by construction, and check a risky change yourself with
+`bash scripts/check_semver.sh --crate <crate>`. See
+[docs/reference/semver-gate.md](docs/reference/semver-gate.md).
+
+🔴 **CRITICAL macOS note:** never use `cp` to install a release binary on
+macOS — always `cargo install`. A plain `cp` over an on-PATH binary leaves a
+stale kernel cdhash cache and the next exec is SIGKILL'd as an invalid
+signature, which looks exactly like an OOM kill.
+
+🟢 **macOS TCC scope split — read before re-granting anything:** `trusty-search`
+(and other external-volume daemons) needs **Full Disk Access**; `trusty-mpm` /
+`tm` needs the separate **App Data** category only, and must never be granted
+Full Disk Access. Certificate setup, signed-install scripts, the `launchctl
+bootout` restart playbook, and orphan-listener verification (#873, #2558, #534,
+#2486, #4230) are in the release-workflow reference above.
+
+### Per-PR Changelog Fragment (issue #4476)
 
 🔴 **Every PR that touches a crate's `src/**` adds a changelog FRAGMENT file to
-that crate, in the same PR. Never edit a crate's `CHANGELOG.md` by hand.**
+that crate, in the same PR. Never edit a crate's `CHANGELOG.md` by hand.** A PR
+that changes crate source and lands with no fragment is a **review-gate
+failure** — the same tier as a failing `cargo test` / `cargo clippy` gate — and
+also a CI failure (`scripts/check_changelog_fragment.sh`). No "trivial change"
+exception. Docs-only, CI-only, test-only and `testdata/` PRs may skip it.
 
 ```
 crates/<crate>/changelog.d/<issue-or-pr-number>-<short-slug>.md
 ```
 
-```
-Fixed
-
-- pm_guard no longer scans quoted content (closes [#2741](https://github.com/bobmatnyc/trusty-tools/issues/2741))
-  - indented sub-bullets are preserved verbatim
-```
-
-- **Line 1 is the category:** `Breaking` | `Added` | `Fixed` | `Performance` |
-  `Changed` | `Removed` | `Security` | `Documentation` (the same groups the
-  changelogs already use).
-- **Everything after it is the bullet text**, copied through verbatim. Match the
-  crate CHANGELOG's existing style.
-- **One fragment carries ONE category.** Stacking several into one file — a bare
-  `Changed` line below a `Removed` line 1 — is rejected by the assembler and the
-  CI gate, because "verbatim" means the second category would render as body
-  text under the first one's heading. That shipped once (the 1.3.3
-  `4286-retire-trusty-mpm-override-files.md` fragment put four categories under
-  `### Removed`). Split it: same number, different slug. The heading form
-  (`## Changed`) counts as a second category too; anything inside a code fence
-  does not, so a fragment may show example output freely.
-- **The file must sit directly in `changelog.d/`.** A nested one (`changelog.d/sub/…`)
-  is rejected at release time; `changelog.d/README.md` is the tracked directory
-  placeholder and is never treated as a fragment.
-- **Preview what the next release will say:**
-  `bash scripts/assemble-changelog.sh <crate-dir> --stdout`.
-- **The filename's leading number is what makes this collision-free.** Two
-  concurrent PRs add two differently-named files, so git never sees a conflict.
-  That is the entire point: on 2026-07-31 five concurrent trusty-mpm PRs
-  (#4463–#4475) each wrote a bullet into the shared `## [Unreleased]` section and
-  every merge forced the next PR to rebase and hand-resolve it (#4399 burned
-  three such rounds).
-- Docs-only, CI-only, test-only and `testdata/` PRs may skip this step. A PR that changes
-  crate source and lands with no fragment is a **review-gate failure**, the same
-  tier as a failing `cargo test`/`cargo clippy` gate — and it is now also a CI
-  failure (`.github/workflows/changelog-fragment.yml` →
-  `scripts/check_changelog_fragment.sh`). No "trivial change" exception.
-
-**Fragments are the source of truth for the unreleased set.** `CHANGELOG.md`
-carries released version sections only — no `## [Unreleased]` heading between
-releases. At release time `scripts/bump-version.sh` calls
-`scripts/assemble-changelog.sh <crate-dir> <version>`, which groups the crate's
-fragments by category, writes one `## [<version>] — <date>` section, and deletes
-the consumed fragments in the same operation. Preview the pending set any time
-with `scripts/assemble-changelog.sh <crate-dir> --stdout`.
-
-**git-cliff no longer touches `CHANGELOG.md`.** `scripts/generate-changelog.sh`
-is deleted; it ran `git cliff --unreleased --prepend`, which blindly stacked a
-fresh `## [Unreleased]` on top of the hand-written one — the defect #2793 tracks
-and the reason `bump-version.sh` used to carry a duplicate-heading stopgap. Both
-are gone: there is exactly ONE mechanism that writes a crate changelog, and it
-is the assembler. `cliff.toml` stays, scoped to rendering the **GitHub Release
-body** in `.github/workflows/release.yml` (`--latest --strip all`), which never
-writes `CHANGELOG.md`.
-
-Transitional note: PRs opened before #4476 landed wrote into the shared
-`## [Unreleased]` section and were not converted. The gate accepts a
-`CHANGELOG.md` edit as evidence so they stay green, and the assembler refuses to
-run while a leftover `## [Unreleased]` heading survives — fold those bullets into
-the section being cut at the next release of that crate.
-
-🟢 **`tga` tag aliases (issue #1128):** `trusty-git-analytics` publishes to
-crates.io under the short package name `tga`. The binary-release workflow
-(`.github/workflows/release.yml`) accepts **both** tag forms — `tga-v<version>`
-and `trusty-git-analytics-v<version>` — and they resolve to the **same** build
-config (CARGO_PKG=`tga`, binary `tga`) and the same Homebrew formula. The parse
-step canonicalizes the `tga` prefix to `trusty-git-analytics` for the config map,
-the homebrew-bump job, and changelog path scoping, while the changelog
-`--tag-pattern` keys off the literal pushed tag so release notes match either
-form. Use whichever you prefer; the documented `<crate-name>-v<version>`
-convention (i.e. `tga-v<version>`, matching the abbreviation table) works.
-
-🔴 **CRITICAL macOS note:** Never use `cp` to install release binaries on macOS — always use `cargo install`. See release workflow reference for the detailed explanation.
-
-### macOS TCC (Full Disk Access / App Data) and daemon restart (issues #873, #2558, #534)
-
-🟢 **Scope split — read before re-granting anything:** `trusty-search` (and
-other external-volume daemons) needs **Full Disk Access**; `trusty-mpm` / `tm`
-needs the separate **App Data** TCC category only — it never needs, and should
-never be granted, Full Disk Access. Every `cargo install` mints a new cdhash,
-invalidating the previous grant; `tctl install <crate>` re-signs with a stable
-Developer-ID identity so the grant persists across reinstalls.
-
-See [docs/reference/release-workflow.md](docs/reference/release-workflow.md)
-for certificate setup, signed-install scripts, the restart playbook
-(`launchctl bootout`, never `cp`, never trust a bare `GET /health`), and
-orphan-listener verification (issues #2486, #4230).
+Fragment format and category line: `Skill(skill="tm-pr-workflow")`. Assembler
+and CI-gate specifics:
+[docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md).
 
 ## Cross-Crate Development Workflow
 
-Because all crates are in the same workspace, the `[patch.crates-io]` dance
-that was required with separate repos is no longer necessary for active
-development. Cargo resolves internal crates via path automatically.
-
-When you modify a library crate:
-1. Edit the crate under `crates/<lib>/`.
-2. Run `cargo check` to catch compilation errors across the entire workspace.
-3. Run `cargo test -p <lib>` for the modified library.
-4. Run `cargo test -p <consumer>` for each crate that depends on the library.
-5. Commit all changes together — workspace builds are atomic.
-
-When publishing a crate to crates.io:
-- The path dep in `[workspace.dependencies]` coexists with the version field,
-  so `cargo publish` sees the version and uploads correctly.
-- The `[patch.crates-io]` block in the root `Cargo.toml` ensures the in-tree
-  crates are preferred during local builds even if a published version exists.
+Cargo resolves internal crates via path automatically, so no `[patch.crates-io]`
+dance is needed during development. Modifying a library crate is **rung 4** of
+the test ladder above: `cargo check --workspace`, then `cargo test -p <consumer>`
+for each direct dependent, all committed together — workspace builds are atomic.
+Publish-time `[patch.crates-io]` semantics are in
+`Skill(skill="cargo-publish")`.
 
 ## Parallel Worktree Discipline
 
@@ -605,14 +412,10 @@ These abbreviations apply everywhere: ticket descriptions, build commands, refer
 
 ### Environment Variables
 
-> **Full environment-variable reference:** see [docs/reference/environment-variables.md](docs/reference/environment-variables.md).
-
-Key variables:
-- `OPENROUTER_API_KEY` — LLM chat via OpenRouter
-- `TRUSTY_LLM_MODEL` — LLM model for deep-analysis pass (default: `openai/gpt-4o-mini`)
-- `RUST_LOG` — Tracing filter (e.g., `RUST_LOG=debug`)
-- `SKIP_UI_BUILD` — Set to `1` to skip Svelte UI build in `build.rs`
-- `TRUSTY_NO_KG` — Set to `1` to skip knowledge-graph construction by default
+`RUST_LOG` (tracing filter) and `SKIP_UI_BUILD=1` (skip the Svelte UI build in
+`build.rs`) are the two you reach for day to day. Every variable, including
+`OPENROUTER_API_KEY`, `TRUSTY_LLM_MODEL` and `TRUSTY_NO_KG`, is in
+[docs/reference/environment-variables.md](docs/reference/environment-variables.md).
 
 ### IDE Setup
 
@@ -626,19 +429,54 @@ Quick: VS Code needs `rust-analyzer` + `Even Better TOML` extensions; RustRover 
 
 Quick: `RUST_LOG=info cargo run -p trusty-search -- start` (daemon), `cargo run -p trusty-search -- serve` (MCP stdio mode).
 
+## Public Website (`website/`)
+
+SvelteKit + `adapter-vercel`, deployed to Vercel from `main`. Two page
+families with DIFFERENT update semantics:
+
+- **`/docs/**`** — generated at build time from files listed in
+  `docs/public-manifest.tsv`. Edit a listed `docs/` file, merge to main, and
+  the live site updates automatically. A `PAGE` row naming a missing file
+  FAILS the build; a `docs/` file absent from the manifest is simply never
+  public (an allowlist boundary, not a bug).
+- **`/tools/<crate>`** — six hand-authored flagship pages (search, memory,
+  mpm, analyze, review, tga). Their copy is static prose in
+  `website/src/lib/tools.ts` and `website/src/routes/tools/*/+page.svelte`,
+  verified against crate source when written. 🔴 **Editing a crate README does
+  NOT update its flagship page** — nothing in the build reads crate READMEs.
+  Update those files by hand.
+
+Vercel rebuilds only when a push touches `website/`, `docs/`, `Cargo.lock`, or
+`crates/*/Cargo.toml`. A `crates/*/README.md` or root `README.md` change
+triggers no rebuild — nor does a `CLAUDE.md` edit, which is expected.
+
+🔴 There is no `vercel.json`. Root Directory, "Include source files outside of
+the Root Directory", and the Ignored Build Step are configured in the Vercel
+dashboard only — dashboard drift leaves no trace in git. Setup and the full
+path table: [website/README.md](website/README.md).
+
+🔴 Website tests do not run in CI (#5200). Run them by hand: `pnpm test` from
+INSIDE `website/` — pnpm is pinned there (`packageManager` field); a shell at
+the repo root has no such pin and its resolved pnpm can require a Node version
+newer than what's installed.
+
 ## Common Pitfalls — Quick Checklist
 
 For extended explanations, see [docs/reference/common-pitfalls.md](docs/reference/common-pitfalls.md).
 
 - **Library error handling:** use `thiserror`, not `unwrap()` in libraries
-- **Daemon stdout:** never log to stdout in daemons or MCP servers
+- **Daemon stdout:** never log to stdout in daemons or MCP servers — `init_tracing` writes to stderr so stdout stays clean for MCP JSON-RPC framing
 - **Axum in libraries:** gate behind `axum-server` feature flag
 - **Shared crate changes:** always run `cargo check` + tests for all dependents
 - **SLOC cap:** respect 500/3000 SLOC limits (prod/test); use `bash scripts/check_line_cap.sh`
 - **UI build:** install pnpm or set `SKIP_UI_BUILD=1` before `cargo build`
 - **Patch tables:** put all `[patch.crates-io]` in root `Cargo.toml` only
+- **Workspace deps:** shared external crates are declared once in `[workspace.dependencies]` and referenced as `dep = { workspace = true }` — never pin locally if already in the workspace table
+- **Internal deps:** reference sibling crates as `trusty-common = { workspace = true }`; the workspace manifest owns the path, so every member resolves from in-tree source
+- **No global state:** helpers are free functions or small structs — no `lazy_static!` / `once_cell::sync::Lazy` except the tracing subscriber, which uses `try_init` to stay idempotent across test binaries
 - **MSRV drift:** prefer stable channel toolchains; don't break `rust-version = "1.94"`
-- **Edition mismatch:** 2024 crates (mpm, agents, mpm-gui, agents-common, agents-local) may use let-chains; 2021 crates cannot
+- **Edition mismatch:** the workspace *default* is edition 2024 (`edition.workspace = true`); 11 crates pin `edition = "2021"` explicitly. Let-chains (`if let … && let …`) only compile in 2024 — read the crate's `Cargo.toml` before copying one in
+- **Ignored tests:** ONNX-backed embedder tests are `#[ignore]`d so CI stays fast; they need `cargo test -- --include-ignored` to run at all
 
 ## Reference Documentation
 
@@ -655,22 +493,9 @@ Full-length reference materials for less-frequent lookups:
 - **Running MCP servers (examples & wiring):** [docs/reference/running-mcp-servers.md](docs/reference/running-mcp-servers.md)
 - **Spec-Linked Documentation (SLD) policy:** [DOC-38](docs/specs/spec-linked-documentation.md) — the standard for declaring source↔spec references; enforced by `scripts/check_sld.sh`.
 - **HTTP trust-boundary threat model:** [docs/reference/threat-model.md](docs/reference/threat-model.md) — per-daemon bind/guard/proxy compliance inventory for the loopback-only doctrine ([ADR-0018](docs/adr/0018-loopback-only-doctrine.md)).
-
-## Domain Consolidation Audit
-
-**Baseline audit 2026-07-11** (session d72fb4a3-f9ff-4394-b148-8200d17a2d5a). Update verdicts
-as consolidations land. Reference: common-entry-point principle above.
-
-| Domain | Verdict | Scale | Status |
-|--------|---------|-------|--------|
-| HTTP clients (reqwest) | FRAGMENTED | 150+ builder sites incl. 20+ inside trusty-common | backlog |
-| git invocations | FRAGMENTED | ~90 production spawn sites, 7 crates | backlog (after tmux pattern proves) |
-| Shared env-var access | FRAGMENTED | OPENROUTER_API_KEY ×22 files/8 crates; GITHUB_TOKEN ×13/6 | partially covered by epic #2400 (#2401) |
-| gh CLI | FRAGMENTED | 3 wrappers (trusty-agents ticketing/gh_cli most complete) | backlog |
-| Config-file loading | FRAGMENTED | 5 implementations (2 pairs within single crates) | backlog |
-| Secret redaction | FRAGMENTED (security) | 4 rule sets (3 inside trusty-mpm) | partially covered by #2401 redact_secret |
-| launchctl | SCATTERED | shared LaunchdConfig exists; 9 bypass sites/4 crates | backlog |
-| Daemon addr discovery | SCATTERED | common resolver exists; 3 daemons re-implement | backlog |
-| Daemon PID discovery | FRAGMENTED | 3 copy-pasted find_daemon_pids() | backlog |
-| tmux (trusty-mpm) | SCATTERED→fixing | 19 sites | in flight: #2398/PR #2399 |
-| LLM inference | FRAGMENTED→fixing | 6 bespoke clients | epic #2400 |
+- **Domain consolidation audit:** [docs/reference/domain-consolidation-audit.md](docs/reference/domain-consolidation-audit.md) — dated per-domain status behind the common-entry-point rule.
+- **Per-PR changelog fragments:** [docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md) — assembler and CI-gate mechanics.
+- **Public-API / SemVer gate:** [docs/reference/semver-gate.md](docs/reference/semver-gate.md) — where it runs (release-time, not per-PR), what it checks, which crates it skips and why, and the feature-exclusion file.
+- **Rust test ladder gate commands:** [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md) — the exact command chain per rung, the baseline-failure protocol, and how much gate output a PR body owes.
+- **Rust issue search keys:** [docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md) — why test name / panic text / symbol / crate find the canonical issue.
+- **Public documentation allowlist:** [docs/public-manifest.tsv](docs/public-manifest.tsv) — the curated list of `docs/` pages the public website may publish; format documented in the file header. It is an ALLOWLIST, so a page absent from it is never public. Enforced by `scripts/check_public_docs.sh` (self-test `scripts/check_public_docs_selftest.sh`). The internal mdBook (`docs/book.toml` + `docs/SUMMARY.md`) is unaffected and remains the complete offline book.

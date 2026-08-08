@@ -44,6 +44,11 @@ use trusty_mpm::client::ManagedSessionSummary;
 /// (stopped — gray/faint), `Red` (errored, dead, deleted), `Yellow`
 /// (provisioning), `Plain` (unrecognised/future state — never fails closed
 /// into a misleading color).
+///
+/// `Magenta` and `Cyan` are COLUMN hues rather than state hues — the `tm ls`
+/// table colors its `NUM` and `NAME` columns through the same [`colorize`]
+/// seam, so they share this enum instead of growing a second, parallel one
+/// with its own `NO_COLOR` handling. [`state_color`] never returns either.
 /// Test: `state_color_*` in `session_picker_tests.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StateColor {
@@ -52,10 +57,16 @@ pub(crate) enum StateColor {
     Dim,
     Red,
     Yellow,
+    Magenta,
+    Cyan,
     Plain,
 }
 
 /// Map a [`StateColor`] to its raw ANSI SGR parameter, or `None` for `Plain`.
+///
+/// The two column hues are deliberately the plain (non-bold, non-bright) 35/36
+/// pair: both render as mid-tone colors that stay legible against a white and a
+/// black background, unlike `33` (yellow), which most light themes wash out.
 fn ansi_param(color: StateColor) -> Option<&'static str> {
     match color {
         StateColor::Green => Some("32"),
@@ -63,6 +74,8 @@ fn ansi_param(color: StateColor) -> Option<&'static str> {
         StateColor::Dim => Some("2"),
         StateColor::Red => Some("31"),
         StateColor::Yellow => Some("33"),
+        StateColor::Magenta => Some("35"),
+        StateColor::Cyan => Some("36"),
         StateColor::Plain => None,
     }
 }
@@ -124,7 +137,32 @@ pub(crate) fn state_color(state: &str, attached: bool) -> StateColor {
 /// `picker_use_color_false_when_no_color_set_even_on_tty` in
 /// `session_picker_tests.rs`.
 pub(crate) fn picker_use_color(stderr_tty: bool) -> bool {
-    stderr_tty && std::env::var_os("NO_COLOR").is_none()
+    color_enabled(stderr_tty)
+}
+
+/// Decide whether the `tm ls` TABLE should emit color, resolved ONCE per
+/// invocation.
+///
+/// Why: separate from [`picker_use_color`] because it gates on a DIFFERENT
+/// stream. The picker writes its menu with `eprintln!`; the table writes with
+/// `println!`. Reusing the picker's stderr gate would leak ANSI escapes into
+/// `tm ls | grep` on any terminal where stderr is still a TTY while stdout is a
+/// pipe — which is the normal shape of a piped invocation.
+/// What: `stdout_tty && NO_COLOR is unset`, sharing [`color_enabled`]'s rule so
+/// the two gates can never disagree about `NO_COLOR`.
+/// Test: `table_use_color_requires_stdout_tty`,
+/// `table_use_color_false_when_no_color_set_even_on_tty` in
+/// `session_picker_tests.rs`.
+pub(crate) fn table_use_color(stdout_tty: bool) -> bool {
+    color_enabled(stdout_tty)
+}
+
+/// The shared TTY + `NO_COLOR` rule behind both gates.
+///
+/// Any set `NO_COLOR` value — including the empty string — disables color, per
+/// the spec (https://no-color.org).
+fn color_enabled(tty: bool) -> bool {
+    tty && std::env::var_os("NO_COLOR").is_none()
 }
 
 /// Format one verbless, color-coded picker menu row (issue #3723).

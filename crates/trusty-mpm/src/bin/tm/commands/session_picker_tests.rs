@@ -15,7 +15,7 @@ use trusty_mpm::client::ManagedSessionSummary;
 
 use super::{PickerDecision, next_launch_slot, parse_picker_choice};
 use crate::commands::session_picker_render::{
-    StateColor, colorize, format_session_row, picker_use_color, state_color,
+    StateColor, colorize, format_session_row, picker_use_color, state_color, table_use_color,
 };
 
 /// Minimal `ManagedSessionSummary` fixture with a given `slot`.
@@ -282,6 +282,44 @@ fn picker_use_color_false_when_no_color_set_even_on_tty() {
     assert!(
         !result,
         "NO_COLOR must disable color even when stderr is a TTY"
+    );
+}
+
+/// Why: the `tm ls` table writes to STDOUT via `println!`, so reusing the
+/// picker's stderr gate would leak ANSI escapes into `tm ls | grep` whenever
+/// stderr stayed a TTY. This pins that the table gate keys off its own stream.
+#[test]
+fn table_use_color_requires_stdout_tty() {
+    assert!(!table_use_color(false));
+    // With NO_COLOR unset (the default in this process) a TTY enables color.
+    if std::env::var_os("NO_COLOR").is_none() {
+        assert!(table_use_color(true));
+    }
+}
+
+/// Why: the table gate must honour `NO_COLOR` identically to the picker gate —
+/// any set value, including the empty string, disables color
+/// (https://no-color.org). Shares the `no_color_env` serial group and the
+/// save/restore convention with `picker_use_color_false_when_no_color_set_even_on_tty`.
+#[test]
+#[serial_test::serial(no_color_env)]
+fn table_use_color_false_when_no_color_set_even_on_tty() {
+    let prev = std::env::var_os("NO_COLOR");
+    // SAFETY: serialized via #[serial(no_color_env)] against every other test
+    // in this named group.
+    unsafe {
+        std::env::set_var("NO_COLOR", "");
+    }
+    let result = table_use_color(true);
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("NO_COLOR", v),
+            None => std::env::remove_var("NO_COLOR"),
+        }
+    }
+    assert!(
+        !result,
+        "an EMPTY NO_COLOR must still disable color on a stdout TTY"
     );
 }
 

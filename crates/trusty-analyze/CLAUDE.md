@@ -352,7 +352,7 @@ crates/trusty-analyze/
 │   │   └── adapters/                   tree-sitter adapters (15: rust, python, java,
 │   │                                   go, typescript, javascript, c, cpp, csharp,
 │   │                                   kotlin, php, ruby, scala, swift)
-│   ├── embedder/                       BoW + neural concept-clustering embedders
+│   ├── embedder/                       BoW concept-clustering embedder
 │   ├── service/                        axum HTTP API (port 7879) + embedded UI
 │   ├── mcp/                            MCP server: stdio + HTTP/SSE transports
 │   └── commands/                       per-subcommand handlers (daemon/service/setup)
@@ -397,7 +397,7 @@ POST /indexes/:id/scip
      body: SCIP protobuf (application/octet-stream)
      → { symbols_ingested: N }
 
-GET  /indexes/:id/clusters?k=N&method=bow|neural
+GET  /indexes/:id/clusters?k=N&method=bow
      → Vec<ConceptCluster> (label, chunk_ids, centroid_terms)
 ```
 
@@ -406,13 +406,19 @@ GET  /indexes/:id/clusters?k=N&method=bow|neural
 ## MCP Tools
 
 Parity rule: every HTTP endpoint has an MCP tool equivalent. The MCP server
-registers **17 tools** (authoritative source: `src/mcp/mod.rs`
-`tool_definitions`):
+assembles its tool list from three sources (authoritative source:
+`src/mcp/mod.rs` `tool_descriptors`): 18 base descriptors always present
+(`src/mcp/descriptors.rs` `base_tool_descriptors`), plus `console_metrics`
+(always appended), plus three `tr_review_*` tools appended only when built
+with the `review` Cargo feature. The exact count depends on the build — read
+`tool_descriptors()` rather than a fixed number.
 
 `complexity_hotspots`, `find_smells`, `analyze_quality`, `run_diagnostics`,
 `list_facts`, `upsert_fact`, `delete_fact`, `analyzer_health`, `extract_graph`,
 `cluster_concepts`, `ingest_scip`, `extract_ner`, `suggest_refactors`,
-`review_diff`, `deep_analysis`, `review_github_pr`, `list_entities`.
+`review_diff`, `deep_analysis`, `review_github_pr`, `list_entities`,
+`list_analyze_indexes`, `console_metrics`, and — with `--features review` —
+`tr_review_pr`, `tr_review_diff`, `tr_review_health`.
 
 ### Transports
 
@@ -463,7 +469,7 @@ Matches trusty-search conventions where applicable for consistency.
 | Persistence | redb 2.6 (FactStore) |
 | Concurrency | dashmap 5, tokio::sync::RwLock |
 | Concept clustering | linfa 0.7 + ndarray (k-means) |
-| Embeddings | fastembed 5.x (optional; uses cached model from trusty-search) |
+| Embeddings | hashed bag-of-words (`core::bow_embedding`); no model, no ONNX Runtime since #5067 |
 | Code parsing | tree-sitter 0.24 (multi-language AST parsing; baseline for all phases) |
 | Container runtime | Docker (sandboxed runtime execution; Phase 3+) |
 | Temporal decay | chrono 0.4 |
@@ -502,7 +508,7 @@ trusty-common must never depend on trusty-search or trusty-analyze.
 
 ```bash
 # Step 1 — start trusty-search first (REQUIRED; analyzer will not start without it)
-trusty-search daemon   # port 7878
+trusty-search start   # port 7878
 
 # Step 2 — build everything
 cargo build
@@ -565,7 +571,7 @@ pin tree-sitter or other shared crates locally if they already live there.
 ## Project Status
 
 **Phase**: Phase 1 + Phase 2 complete. Full static analysis pipeline, HTTP API,
-MCP server, SCIP ingest, neural/BoW concept clustering, and language-specific
+MCP server, SCIP ingest, BoW concept clustering, and language-specific
 tree-sitter adapters are all functional.
 
 **Working:**
@@ -575,15 +581,16 @@ tree-sitter adapters are all functional.
   `blame.rs`, `quality.rs`, `facts.rs`, `concept_cluster.rs`, `linker.rs`,
   `explain.rs`, `github.rs`
 - axum HTTP sidecar (`src/service/`) on port 7879
-- MCP stdio + HTTP/SSE server (`src/mcp/`) — 17 tools (authoritative source:
-  `src/mcp/mod.rs` `tool_definitions`)
+- MCP stdio + HTTP/SSE server (`src/mcp/`) — 18 base tools + `console_metrics`,
+  plus 3 more under `--features review` (authoritative source: `src/mcp/mod.rs`
+  `tool_descriptors`)
 - CLI subcommands: `serve`, `analyze`, `facts list/upsert`, `health`
 - Daemon PID lockfile (fs4), graceful shutdown, `--search-url` flag
 - `LanguageAnalyzer` trait + 15 tree-sitter adapters, all implemented:
   rust, python, java, go, typescript, javascript, c, cpp, csharp, kotlin,
   php, ruby, scala, swift (see `src/lang/adapters/`)
 - CALLS edges + cross-chunk entity linker (`#47` complete)
-- k-means concept clustering (BoW / neural) + `/indexes/:id/clusters` endpoint
+- k-means concept clustering (BoW) + `/indexes/:id/clusters` endpoint
 - SCIP protobuf ingest → knowledge graph (`#47` complete)
 - Integration self-analysis suite
 

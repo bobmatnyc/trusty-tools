@@ -4,7 +4,8 @@
    * about?" map; rendering each cluster as a card with its top centroid terms
    * is the most compact way to scan the conceptual landscape.
    * What: Card grid — one card per cluster — showing label, centroid term
-   * chips, and chunk count. Method (bow|neural) and k are user-controllable.
+   * chips, and chunk count. k is user-controllable; the embedding method is
+   * always `bow` since #5067 removed the neural backend.
    * Test: Select an index that has chunks; expect at least 1 card with terms.
    */
   import { onMount } from 'svelte';
@@ -17,7 +18,8 @@
   let selected = $derived(getSelectedIndex());
   let clusters = $derived(getClusters());
   let k = $state(8);
-  let method = $state('bow');
+  // #5067: the neural backend was removed; `bow` is the only method the API accepts.
+  const method = 'bow';
 
   $effect(() => {
     if (!selected) return;
@@ -38,13 +40,6 @@
     <label class="text-xs text-muted">
       k
       <input class="input" type="number" min="2" max="32" bind:value={k} style="margin-left: 8px; width: 90px" />
-    </label>
-    <label class="text-xs text-muted">
-      Method
-      <select class="select" bind:value={method} style="margin-left: 8px; width: 120px">
-        <option value="bow">bow</option>
-        <option value="neural">neural</option>
-      </select>
     </label>
   </div>
 

@@ -220,7 +220,7 @@ pub mod embedder_client;
 /// Why: trusty-memory, trusty-search, and the per-palace
 /// `trusty-bm25-daemon` subprocess all want one shared BM25 implementation
 /// so the tokenizer's camelCase / PascalCase / alpha↔digit splits stay
-/// consistent across the workspace. Originally ported from open-mpm; now
+/// consistent across the workspace. Originally ported from trusty-agents; now
 /// the single source of truth lives here.
 /// What: Gated behind the `bm25` feature. Adds no new dependencies — pure
 /// `std` + `tracing` (already required).
@@ -264,7 +264,7 @@ pub mod bm25_client;
 
 /// Symbol-graph engine (formerly the `trusty-symgraph` crate).
 ///
-/// Why: All trusty-* tools that touch source code (open-mpm, trusty-search,
+/// Why: All trusty-* tools that touch source code (trusty-agents, trusty-search,
 /// trusty-analyze) want the same `EntityType` / `RawEntity` / `EdgeKind`
 /// data shapes and (for orchestrators) the same tree-sitter pipeline. Living
 /// here lets the workspace ship one tree-sitter `links =` slot instead of
@@ -359,7 +359,7 @@ pub mod sld;
 /// unknown-subcommand error output independently, so the formats drifted
 /// apart over time. Centralising the help model into one YAML schema, one
 /// canonical renderer, and one Jaro-Winkler suggester keeps the six binaries
-/// (search, memory, analyze, mpm-cli, tga, open-mpm) speaking with a single
+/// (search, memory, analyze, mpm-cli, tga, trusty-agents) speaking with a single
 /// user-facing voice.
 /// What: gated behind the `cli-help` feature. Pulls in `serde_yaml`, `strsim`,
 /// and `indexmap`. Exposes `HelpConfig` / `CommandDef` / `FlagDef` / `Example`
@@ -726,6 +726,52 @@ pub mod daemon_addr;
 /// What: Exposes [`health_probe::probe_health`].
 /// Test: covered via daemon_addr integration tests.
 pub mod health_probe;
+
+/// Unix-domain-socket permission enforcement (issue #5099).
+///
+/// Why: ADR-0031 and ADR-0032 both argue for UDS over loopback TCP on the
+/// strength of a `0600` socket, and no production code created one — every
+/// `set_permissions` hit in the workspace was a test fixture. Four bind sites
+/// each called `UnixListener::bind` bare. This is the single entry point they
+/// now share, so the permission contract cannot drift between them.
+/// What: Exposes [`uds::bind_hardened`] (`0700` directory, `0600` socket),
+/// [`uds::prepare_socket_dir`], [`uds::scratch_socket_dir`] (the per-uid
+/// replacement for the `$TMPDIR`-with-`/tmp`-fallback convention), and
+/// [`uds::ensure_peer_is_self`] (`SO_PEERCRED` / `getpeereid`).
+/// Test: `cargo test -p trusty-common --features uds uds::` — the `--features`
+/// flag is load-bearing. `uds` is not a default feature, so the bare
+/// `-p trusty-common` form compiles the module out and reports 0 tests run
+/// while exiting 0. CI's `cargo test --workspace` enables it via feature
+/// unification from `trusty-embedderd` and `trusty-bm25-daemon`.
+#[cfg(all(unix, feature = "uds"))]
+pub mod uds;
+
+/// GitHub webhook HMAC-SHA256 verification (#5089 step 3, ADR-0034 §3).
+///
+/// Why: the check exists twice today and the two copies disagree on what an
+/// unset secret means — `trusty-review` rejects, `trusty-analyze` processes the
+/// payload anyway. ADR-0034 §3 collapses verification to one place (console)
+/// and unifies the policy to fail-closed; this module is that place.
+/// What: Exposes [`webhook_hmac::verify_github_signature`], its three-state
+/// [`webhook_hmac::SignatureVerdict`], and [`webhook_hmac::sign_github_body`]
+/// for test harnesses.
+/// Test: `cargo test -p trusty-common --features webhook-hmac webhook_hmac::`.
+#[cfg(feature = "webhook-hmac")]
+pub mod webhook_hmac;
+
+/// Console->target webhook relay wire contract (#5089 step 3, ADR-0034 §3).
+///
+/// Why: the sender (`trusty-console`) and the receivers (`trusty-review`,
+/// `trusty-analyze`) cannot depend on each other, so a method name or field
+/// list held by only one half is two copies waiting to drift.
+/// What: Exposes [`webhook_relay::RELAY_METHOD`], the borrowed
+/// [`webhook_relay::RelayFrame`] the sender writes, the owned
+/// [`webhook_relay::RelayRequest`] a receiver reads, and
+/// [`webhook_relay::RelayResponse`], whose `ack` is the only thing that
+/// licenses the sender to delete its spool entry.
+/// Test: `cargo test -p trusty-common --features webhook-relay webhook_relay::`.
+#[cfg(feature = "webhook-relay")]
+pub mod webhook_relay;
 
 /// Global tracing subscriber initialisation helpers.
 ///

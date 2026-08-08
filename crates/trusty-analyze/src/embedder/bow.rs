@@ -1,7 +1,8 @@
 //! Bag-of-words hashed embedder.
 //!
-//! Why: provides a deterministic, dependency-free fallback when the neural
-//! model isn't available (CI, restricted environments, model load failure).
+//! Why: clustering needs a vector per chunk with no model, no cache, and no
+//! network — the sole embedder since #5067 removed the fastembed backend.
+//! Embedding here is pure hashing, so it cannot fail and cannot block.
 //! What: thin adapter over `crate::core::bow_embedding`, producing
 //! L2-normalized hashed BOW vectors of configurable dimension (default 256).
 //! Test: `bow_embedder_produces_normalized_256d_vectors` in `lib.rs` tests.

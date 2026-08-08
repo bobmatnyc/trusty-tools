@@ -51,6 +51,11 @@ pub(super) struct RunTotals {
     /// whole reindex. Non-zero ⇒ the walk was truncated by the budget and the
     /// index is incomplete.
     pub chunks_dropped_by_cap: usize,
+    /// Issue #5024: coarse wall-clock cost of the stages outside the batch
+    /// loop's subsystem accumulators.
+    pub stages: super::stage_timings::StageTimings,
+    /// Issue #5024: wall-clock time attributed to no named stage.
+    pub other_ms: u64,
 }
 
 /// Rebuild the symbol graph once for the whole reindex.
@@ -145,6 +150,18 @@ pub(super) async fn emit_complete_event(
             "vector_count": totals.vector_count,
             "symbol_count": kg.symbol_count,
             "edge_count": kg.edge_count,
+            // Issue #5024: per-stage breakdown. `walk_ms` + these + `kg_ms` +
+            // `other_ms` partition `elapsed_ms`; `parse`/`embed`/`bm25`/
+            // `vector_upsert` above are subsystem costs WITHIN `pipeline_ms`,
+            // not additional stages — see `StageTimings::pipeline_ms`.
+            "hash_cache_ms": totals.stages.hash_cache_ms,
+            "carryover_ms": totals.stages.carryover_ms,
+            "pipeline_ms": totals.stages.pipeline_ms,
+            "prune_ms": totals.stages.prune_ms,
+            "corpus_commit_ms": totals.stages.corpus_commit_ms,
+            "hnsw_commit_ms": totals.stages.hnsw_commit_ms,
+            "poller_stop_ms": totals.stages.poller_stop_ms,
+            "other_ms": totals.other_ms,
         },
     });
     // Issue #282: include the sidecar peak RSS when available; omit the key

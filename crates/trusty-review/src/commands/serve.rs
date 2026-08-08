@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use trusty_review::{
     config::ReviewConfig,
@@ -27,6 +27,7 @@ use trusty_review::{
     mcp::DeferredStateValue,
     pipeline::enforce_verifier_liveness,
     service::{AppState, DEFAULT_PORT, serve as serve_http},
+    store::DedupNeed,
 };
 
 use crate::cli_verify;
@@ -96,16 +97,19 @@ pub async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
         let (state_tx, state_rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
         let config_for_bg = config.clone();
         tokio::spawn(async move {
-            let value: DeferredStateValue = match build_app_state(config_for_bg).await {
-                Ok(state) => {
-                    info!("trusty-review AppState ready — tool calls now accepted");
-                    Some(Ok(Arc::new(state)))
-                }
-                Err(e) => {
-                    error!("trusty-review AppState build failed: {e:#}");
-                    Some(Err(format!("{e:#}")))
-                }
-            };
+            // #5064: the MCP surface hardcodes `allow_posting: false`, so it
+            // never reaches the dedup write path and must not open the file.
+            let value: DeferredStateValue =
+                match build_app_state(config_for_bg, DedupNeed::NotNeeded).await {
+                    Ok(state) => {
+                        info!("trusty-review AppState ready — tool calls now accepted");
+                        Some(Ok(Arc::new(state)))
+                    }
+                    Err(e) => {
+                        error!("trusty-review AppState build failed: {e:#}");
+                        Some(Err(format!("{e:#}")))
+                    }
+                };
             // Ignore SendError: it means the stdio loop already exited (EOF).
             let _ = state_tx.send(value);
         });
@@ -113,7 +117,10 @@ pub async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
     }
 
     // ── HTTP mode: synchronous build (no strict startup deadline) ────────────
-    let state = build_app_state(config.clone()).await?;
+    // #5064: the webhook handler runs `allow_posting: true`, so this mode must
+    // not start without the dedup store — a missing claim gate means duplicate
+    // comments on a redelivered webhook.
+    let state = build_app_state(config.clone(), DedupNeed::Required).await?;
 
     use std::net::SocketAddr;
     let addr: SocketAddr = format!("{}:{}", args.bind, args.port)
@@ -142,11 +149,13 @@ pub async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
 /// auto-derive #661).
 /// What: builds the reviewer and verifier LLM providers, resolves the search
 /// index from the daemon, constructs HTTP search/analyze clients, opens the
-/// durable dedup store, and wraps everything in `AppState`.
-/// Test: covered transitively by handler unit tests that inject fakes;
-/// `resolve_index` wiring covered by `build_app_state_resolve_index_called`
-/// in `commands/serve_tests.rs`.
-async fn build_app_state(mut config: ReviewConfig) -> Result<AppState> {
+/// durable dedup store *if `dedup_need` says this mode can post* (#5064), and
+/// wraps everything in `AppState`. A `Required` store that cannot be opened is
+/// returned as `Err` — it is never downgraded to `dedup: None`.
+/// Test: `open_for_not_needed_touches_nothing`, `open_for_required_opens`
+/// (store side); handler behaviour covered transitively by unit tests that
+/// inject fakes.
+async fn build_app_state(mut config: ReviewConfig, dedup_need: DedupNeed) -> Result<AppState> {
     let reviewer_model = config.role_models.reviewer.model.clone();
     let default_provider = config.role_models.reviewer.provider.clone();
     let llm = build_provider(&reviewer_model, &default_provider, &config)
@@ -172,20 +181,8 @@ async fn build_app_state(mut config: ReviewConfig) -> Result<AppState> {
     let analyze = SubprocessAnalyzeClient::from_config(&config)
         .map_err(|e| anyhow::anyhow!("failed to build analyze HTTP client: {e}"))?;
 
-    let dedup_path = config.log_dir.join("dedup.redb");
-    let dedup = match trusty_review::store::DedupStore::open(&dedup_path) {
-        Ok(store) => {
-            info!(path = %dedup_path.display(), "dedup store opened");
-            Some(Arc::new(store))
-        }
-        Err(e) => {
-            warn!(
-                path = %dedup_path.display(),
-                "failed to open dedup store (continuing without it): {e}"
-            );
-            None
-        }
-    };
+    // #5064: one entry point decides open-vs-skip for every AppState builder.
+    let dedup = trusty_review::store::open_dedup_for(&config.log_dir, dedup_need)?;
 
     Ok(AppState::with_verifier_and_dedup(
         config,

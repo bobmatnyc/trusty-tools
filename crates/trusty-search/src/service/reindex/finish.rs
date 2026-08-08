@@ -34,6 +34,7 @@ use super::guard::ReindexTerminationGuard;
 use super::hnsw_swap::{abort_staged_hnsw_swap, commit_staged_hnsw_swap, HnswSwapPaths};
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
+use super::stage_timings::StageTimings;
 use super::stages::{
     mark_graph_ready, mark_lexical_ready_semantic_in_progress, mark_reindex_failed,
     mark_semantic_ready_graph_in_progress, now_rfc3339, refresh_context_embedding,
@@ -121,7 +122,15 @@ pub(super) struct FinishCtx {
 /// What: runs all work that follows the pipelined batch loop and emits the
 /// terminal SSE `complete` event. Returns after scheduling progress GC.
 /// Test: `reindex_walks_directory_and_emits_events` (primary integration test).
-pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
+///
+/// `stage_timings` arrives pre-populated by the runner (hash cache, carryover,
+/// pipeline) and is completed here with the prune and swap-commit costs before
+/// being logged and attached to the `complete` event — see #5024.
+pub(super) async fn finish_reindex(
+    ctx: FinishCtx,
+    totals: BatchTotals,
+    mut stage_timings: StageTimings,
+) {
     use std::sync::atomic::Ordering;
 
     let FinishCtx {
@@ -168,7 +177,9 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
     let memory_aborted = mem_limit_hit || mem_abort.load(AtomicOrdering::Acquire);
 
     // Issue #848 — prune pass: remove stale chunks from files deleted on disk.
+    // #5024: scales with the walked-file set, so it is measured separately.
     if corpus_swap_tmp.is_some() && !force && !memory_aborted {
+        let prune_started = Instant::now();
         super::prune::prune_deleted_files_from_staging(
             &handle,
             &walked_files,
@@ -177,6 +188,7 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
             &index_id,
         )
         .await;
+        stage_timings.prune_ms = prune_started.elapsed().as_millis() as u64;
     }
 
     let embedder_present = handle.indexer.read().await.has_embedder();
@@ -238,6 +250,9 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         let indexer = handle.indexer.read().await;
         indexer.force_incremental_persist();
     }
+    // #5024: the HNSW resolve subsumes an AWAITED full snapshot save, so it is
+    // real per-run cost, not just a rename.
+    let hnsw_commit_started = Instant::now();
     resolve_hnsw_swap(
         &handle,
         &index_id,
@@ -245,8 +260,10 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         &staging_resolution,
     )
     .await;
+    stage_timings.hnsw_commit_ms = hnsw_commit_started.elapsed().as_millis() as u64;
 
     // Issue #603: resolve the atomic corpus swap.
+    let corpus_commit_started = Instant::now();
     resolve_corpus_swap(
         &handle,
         &index_id,
@@ -257,6 +274,7 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         memory_aborted,
     )
     .await;
+    stage_timings.corpus_commit_ms = corpus_commit_started.elapsed().as_millis() as u64;
 
     // Issue #601: a zero-vector embed failure on a full-pipeline index is a HARD failure.
     if let Some(reason) = reindex_outcome.failure_reason() {
@@ -328,6 +346,9 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
     .await;
 
     // Stop the background pollers.
+    // #5024: the join waits out the remainder of the poller's current tick, so
+    // this is a size-independent tax — measured, not left in the residual.
+    let poller_stop_started = Instant::now();
     stop_pollers(
         poller_stop,
         poller_handle,
@@ -335,6 +356,7 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         embedderd_poller_handle,
     )
     .await;
+    stage_timings.poller_stop_ms = poller_stop_started.elapsed().as_millis() as u64;
 
     // Final synchronous sample for the sidecar.
     if let Some(pid_slot) = embedderd_pid_slot.as_ref() {
@@ -398,32 +420,39 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         peak_rss_mb,
         mem_limit_hit,
     );
-    // Issue #744: emit a concise per-phase timing summary.
-    let model_load_approx_ms = elapsed_ms
-        .saturating_sub(walk_ms)
-        .saturating_sub(total_parse_ms)
-        .saturating_sub(total_embed_ms)
-        .saturating_sub(total_bm25_ms)
-        .saturating_sub(total_vector_upsert_ms)
-        .saturating_sub(kg.kg_ms);
+    // #5024: the old `model_load_approx_ms` was `elapsed` minus the subsystem
+    // accumulators, which lumped the hash-cache load, the carryover copy, the
+    // prune pass, and both swap commits into one number an operator could not
+    // act on. Those five now carry their own clocks; `other_ms` is what is
+    // genuinely left over.
+    let other_ms = stage_timings.other_ms(elapsed_ms, walk_ms, kg.kg_ms);
     // Issue #1174: include `defer_embed` in the timing log so operators can
     // distinguish "vector_upsert=0ms because deferred" from "0ms because the
     // embedder failed silently". On the defer path, vector_upsert_ms is always
     // 0 for the C1 fast pass — the real upsert happens in the background C2
     // pass logged separately by `spawn_deferred_embed_pass`.
     tracing::info!(
-        "reindex phase timings: index={} walk={}ms parse={}ms \
-         model_load_approx={}ms embed={}ms bm25={}ms vector_upsert={}ms \
-         kg={}ms total={}ms defer_embed={}",
+        "reindex phase timings: index={} walk={}ms hash_cache={}ms \
+         carryover={}ms pipeline={}ms prune={}ms hnsw_commit={}ms \
+         corpus_commit={}ms kg={}ms poller_stop={}ms other={}ms total={}ms | \
+         within pipeline: parse={}ms embed={}ms bm25={}ms vector_upsert={}ms \
+         defer_embed={}",
         index_id.0,
         walk_ms,
+        stage_timings.hash_cache_ms,
+        stage_timings.carryover_ms,
+        stage_timings.pipeline_ms,
+        stage_timings.prune_ms,
+        stage_timings.hnsw_commit_ms,
+        stage_timings.corpus_commit_ms,
+        kg.kg_ms,
+        stage_timings.poller_stop_ms,
+        other_ms,
+        elapsed_ms,
         total_parse_ms,
-        model_load_approx_ms,
         total_embed_ms,
         total_bm25_ms,
         total_vector_upsert_ms,
-        kg.kg_ms,
-        elapsed_ms,
         defer_embed,
     );
 
@@ -436,6 +465,10 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         vector_count: total_vector_count,
         mem_limit_hit,
         chunks_dropped_by_cap: total_chunks_dropped_by_cap,
+        // #5024: same breakdown the log line above prints, so a client polling
+        // the SSE stream sees it without scraping stderr.
+        stages: stage_timings,
+        other_ms,
     };
     emit_complete_event(
         &progress,

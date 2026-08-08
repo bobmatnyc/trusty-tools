@@ -24,7 +24,7 @@ exclude = []
 # — a second Tauri desktop GUI needing the pnpm/Svelte UI toolchain).
 #
 # Why: CI already runs the workspace-wide gates with
-# `--workspace --exclude trusty-mpm-gui --exclude trusty-code-gui`
+# `--workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui`
 # (`.github/workflows/ci.yml`) because these GUIs need the pnpm/Svelte UI
 # toolchain — a bare `cargo build`/`test`/`check` had no equivalent exclusion,
 # so every agent worktree (which routinely runs the bare form per this
@@ -36,7 +36,13 @@ exclude = []
 # and keep working exactly as before (`cargo build --workspace`,
 # `cargo test -p trusty-mpm-gui`, `cargo check -p trusty-code-gui`, etc.), so
 # this only changes what the bare, no-flag form does — it does not remove
-# either GUI crate from the workspace.
+# either GUI crate from the workspace. `trusty-agents-ui` needs the same
+# `--exclude` on `--workspace` invocations for a different reason: its
+# `tauri::generate_context!()` reads the same `crates/trusty-agents/ui/dist/`
+# that `trusty-agents`' own build.rs populates, so a `--workspace` run that
+# happens to check/build `trusty-agents-ui` before that build script has run
+# panics on the missing path — a real cargo build-order race, not merely a
+# missing-toolchain skip (#3053).
 #
 # Maintenance note: Cargo has no "members minus one" glob for
 # `default-members`, so this list must be updated by hand when a new crate
@@ -102,14 +108,14 @@ trusty-code = { path = "crates/trusty-code" }
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.5.0" }
-trusty-common = { path = "crates/trusty-common", version = "0.29" }
+trusty-common = { path = "crates/trusty-common", version = "0.30" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.10" }
 # trusty-bm25-daemon: per-palace BM25 lexical-index daemon — referenced by
 # trusty-memory so `cargo install trusty-memory` produces both binaries from
 # one command (mirrors the trusty-embedderd / trusty-search pattern, PR #190).
-trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.1.3" }
+trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.2.0" }
 # tga: trusty-git-analytics — developer productivity analytics.
 # Referenced by trusty-review for contributor-profile data pipeline (#558).
 tga = { path = "crates/trusty-git-analytics", version = "2.10" }
@@ -120,7 +126,7 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose
 # the trusty-review pipeline as `tr_review_*` tools (#630).
-trusty-review = { path = "crates/trusty-review", version = "0.11" }
+trusty-review = { path = "crates/trusty-review", version = "0.12" }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a

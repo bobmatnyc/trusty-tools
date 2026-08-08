@@ -414,6 +414,25 @@ because (per the Rationale below) neither alone is reliable.
   (a) is the one that catches total omission, because it inspects the launch configuration from
   outside the model's own context — see §9.
 
+**(c) Style selection and the `keep-coding-instructions` floor:**
+
+A user selects a style with `/config` → **Output style**, or by setting the `outputStyle` key
+in a settings file. The standalone `/output-style` command was deprecated in Claude Code
+v2.1.73 and removed in v2.1.91; it is not a valid selection mechanism and must not be
+referenced. Style is read once at session start, so a change lands after `/clear` or on the
+next session.
+
+Every bundled style MUST set `keep-coding-instructions: true` in its frontmatter. Claude Code
+strips its built-in software-engineering instructions (scoping, comments, verification) from
+any custom style that omits the field — it defaults to `false`. Omitting it produces a
+degradation this section's mechanism (a) cannot see: the style id resolves, the file exists,
+`tm doctor` reports `Ok`, and the session is nonetheless missing the coding floor these
+PM-orchestration styles are meant to layer on top of.
+
+Bundled styles are refreshed from the compiled bundle on deploy, so they are not a user
+customization surface — a user wanting different behavior writes their own style file under
+`~/.claude/output-styles/` (or the project's `.claude/output-styles/`) and selects that.
+
 ### Rationale (WHY)
 
 The incident's actual failure (F4) was precisely the case mechanism (b) cannot see: `outputStyle`
@@ -441,6 +460,8 @@ a fast, no-tooling way to sanity-check a live session mid-conversation.
 - `BASE_SM.md` and all three output styles contain the literal marker line
   `<!-- trusty-mpm-instructions-loaded: v1 -->` as the first line of their respective floor
   sections.
+- Every entry in `bundle::OUTPUT_STYLES` carries `keep-coding-instructions: true` in its
+  frontmatter (`bundle_tests::output_styles_keep_claude_code_coding_instructions`).
 
 ### Implementing Modules
 

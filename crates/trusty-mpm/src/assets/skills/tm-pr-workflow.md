@@ -1,6 +1,6 @@
 ---
 name: tm-pr-workflow
-description: Branch protection, trusty-review gate, squash-merge, and worktree discipline for landing work on main
+description: Branch protection, per-PR changelog fragment requirement (changelog.d file format and category line), trusty-review merge gate, squash-merge, and worktree discipline for landing work on main
 user-invocable: false
 version: "1.0.0"
 category: pm-workflow
@@ -107,6 +107,16 @@ and must never leave it into the main checkout, `git reset --hard`, `git
 checkout .`, or `git stash` against main. Clean up after merge with `git
 worktree remove --force <path>` and `git branch -D <branch>` — this never
 touches the main checkout.
+
+## Git Security Review (Mandatory Before Push)
+
+Before any `git push`, delegate a credential scan to the `security` agent:
+
+1. `git diff origin/main HEAD` — the diff about to be pushed.
+2. `security` scans it for API keys, passwords, private keys, and tokens, and
+   returns either clean or the list of blocked items.
+3. **Block the push if secrets are detected.** A leaked credential in git
+   history survives the commit being reverted.
 
 ## Branch Protection
 

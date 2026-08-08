@@ -159,7 +159,14 @@ pub(super) async fn dispatch_misc_tool(
             // Only when neither is set do we fan out across every index via the
             // global `/grep` endpoint — a pinned session never sweeps all.
             match server.resolve_index_id(args) {
-                Some(id) => Some(server.post(&format!("/indexes/{id}/grep"), &body).await),
+                // #4715: the pinned `grep` path is index-backed too, so a
+                // never-indexed worktree must say so rather than 404 — the
+                // agent needs to know to reach for its own filesystem tools.
+                Some(id) => Some(
+                    server
+                        .post_scoped(&format!("/indexes/{id}/grep"), &body, Some(&id))
+                        .await,
+                ),
                 None => Some(server.post("/grep", &body).await),
             }
         }

@@ -12,8 +12,9 @@
 //! decision is the whole contract and it is directly observable here.
 //! Test: this module IS the test.
 
+use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Method, Request, StatusCode};
 use tower::ServiceExt;
 
 use crate::api::server::events_sse::event_passes;
@@ -115,15 +116,36 @@ fn event_passes_still_scopes_by_session() {
 
 // -- #3760: a mistyped filter must fail LOUD, never fail open ----------------
 
+/// Mint a live stream ticket through `POST /api/events/ticket` (#5052).
+async fn mint_ticket(app: &Router) -> String {
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/events/ticket")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    v["ticket"].as_str().unwrap().to_string()
+}
+
 /// Open `/api/events` with the given query string and return the status.
 ///
 /// The SSE handler streams forever once it is entered, so we only ever assert
 /// on the response STATUS here — reaching a 200 means the `Query<EventsQuery>`
 /// extractor accepted the parameters, which is the whole contract under test.
+///
+/// #5052: the stream is authenticated now, so every call carries a freshly
+/// minted ticket. Without one the route 401s, which `is_client_error()` would
+/// happily accept — the rejection cases below would then pass for the wrong
+/// reason. The auth gate itself is covered by `super::event_tickets`.
 async fn get_events(query: &str) -> StatusCode {
     let app = build_router(AppState::default());
+    let ticket = mint_ticket(&app).await;
+    let sep = if query.is_empty() { '?' } else { '&' };
     let req = Request::builder()
-        .uri(format!("/api/events{query}"))
+        .uri(format!("/api/events{query}{sep}ticket={ticket}"))
         .body(Body::empty())
         .unwrap();
     app.oneshot(req).await.unwrap().status()

@@ -47,6 +47,8 @@ pub(crate) mod launchd_probe;
 pub(crate) mod managed;
 // #2919: merged-PR reclaim-pass rendering, split out of `managed` for the cap.
 pub(crate) mod managed_merged_prs;
+/// The `tm ls` table renderer, split out of `managed` for the SLOC cap.
+pub(crate) mod managed_render;
 pub(crate) mod managed_root;
 pub(crate) mod managed_route;
 pub(crate) mod managed_workspace;
@@ -72,16 +74,21 @@ pub(crate) mod reconcile_worktrees;
 // #4912: `tm register` positional resolution — URL first, alias optional, with
 // the legacy alias-first order still accepted.
 pub(crate) mod register_args;
+pub(crate) mod reinstall;
 pub(crate) mod rename;
 pub(crate) mod repair;
+pub(crate) mod run_target;
 pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod sessctl;
 pub(crate) mod session;
 pub(crate) mod session_picker;
+pub(crate) mod session_picker_filter;
 pub(crate) mod session_picker_prune;
 pub(crate) mod session_picker_rename;
 pub(crate) mod session_picker_render;
+// The `tm shell-init` wrapper emitter — print-only; it never writes an rc file.
+pub(crate) mod shell_init;
 pub(crate) mod slack;
 pub(crate) mod sm_serve;
 pub(crate) mod spawn_disclaimed;

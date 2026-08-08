@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 /// JSON-RPC protocol version string. Must match the daemon's expectation.
 const JSONRPC_VERSION: &str = "2.0";
@@ -34,23 +33,78 @@ const JSONRPC_VERSION: &str = "2.0";
 const METHOD_INDEX: &str = "index";
 const METHOD_SEARCH: &str = "search";
 const METHOD_DELETE: &str = "delete";
+const METHOD_STATS: &str = "stats";
+const METHOD_MISSING_DOCS: &str = "missing_docs";
+
+/// JSON-RPC code the daemon returns for a method it does not implement.
+///
+/// Why: a client newer than the daemon it is talking to gets this back for
+/// `stats` / `missing_docs`, and that is a materially different situation from
+/// a socket that is not there. Treating the two alike makes a healthy but
+/// outdated daemon look unreachable, which sends an operator hunting the wrong
+/// problem. Mirrors `trusty-bm25-daemon`'s `protocol::ERR_METHOD_NOT_FOUND` —
+/// duplicated verbatim for the same reason the method names are: this crate
+/// must not depend on the daemon crate.
+/// What: `-32601`, the JSON-RPC standard code.
+/// Test: `method_not_found_is_distinguishable_from_a_transport_error`.
+pub const ERR_METHOD_NOT_FOUND: i32 = -32601;
+
+/// A JSON-RPC error the daemon returned, carrying its code.
+///
+/// Why: `anyhow` flattens every failure into one opaque chain, so a caller
+/// deciding how to degrade cannot tell "this daemon is too old to answer"
+/// from "this daemon is gone". Attaching the code as a downcastable error
+/// keeps every existing `anyhow::Result` signature intact while making that
+/// one distinction available to the callers that need it.
+/// What: the wire code and message. Reach it with
+/// [`is_method_not_found`] or `err.downcast_ref::<Bm25RpcError>()`.
+/// Test: `method_not_found_is_distinguishable_from_a_transport_error`.
+#[derive(Debug, Clone)]
+pub struct Bm25RpcError {
+    pub code: i32,
+    pub message: String,
+}
+
+impl std::fmt::Display for Bm25RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "bm25 daemon error {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for Bm25RpcError {}
+
+/// True when `err` is the daemon answering "I do not implement that method".
+///
+/// Why: the caller that needs this is a backfiller deciding whether an
+/// unanswerable coverage query means "degrade and shout about an old daemon"
+/// or "the daemon is unreachable". Both fail closed, but they need different
+/// log lines and different operator actions.
+/// What: walks the `anyhow` chain for a [`Bm25RpcError`] carrying
+/// [`ERR_METHOD_NOT_FOUND`].
+/// Test: `method_not_found_is_distinguishable_from_a_transport_error`.
+pub fn is_method_not_found(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|e| e.downcast_ref::<Bm25RpcError>())
+        .any(|e| e.code == ERR_METHOD_NOT_FOUND)
+}
 
 /// Resolve the canonical socket path for a given palace.
 ///
 /// Why: callers (the client, the daemon's startup, and operators reading
 /// `lsof`) must all agree on where the per-palace socket lives. Keying the
 /// filename by palace name keeps multiple palaces isolated from each other.
-/// What: `$TMPDIR/trusty-bm25-<palace>.sock`. Falls back to `/tmp` when
-/// `TMPDIR` is unset, empty, or whitespace. The palace name is taken
-/// verbatim — callers are expected to have sanitised it already (the palace
-/// id is already kebab-case / underscore-safe).
+/// What: `<$TMPDIR or /tmp>/trusty-<uid>/trusty-bm25-<palace>.sock`. The palace
+/// name is taken verbatim — callers are expected to have sanitised it already
+/// (the palace id is already kebab-case / underscore-safe).
+///
+/// #5099: the socket used to sit directly in `$TMPDIR`, falling back to `/tmp`.
+/// On a Linux host with `TMPDIR` unset that is a world-writable directory that
+/// cannot be narrowed, so the uid-keyed subdirectory from
+/// [`crate::uds::scratch_socket_dir`] is interposed and held at `0700`.
+///
 /// Test: `socket_path_uses_tmpdir_and_palace_name`.
 pub fn socket_path_for_palace(palace: &str) -> PathBuf {
-    let dir = match std::env::var("TMPDIR") {
-        Ok(p) if !p.trim().is_empty() => PathBuf::from(p),
-        _ => PathBuf::from("/tmp"),
-    };
-    dir.join(format!("trusty-bm25-{palace}.sock"))
+    crate::uds::scratch_socket_dir().join(format!("trusty-bm25-{palace}.sock"))
 }
 
 /// One BM25 search hit returned by the daemon.
@@ -65,6 +119,47 @@ pub fn socket_path_for_palace(palace: &str) -> PathBuf {
 pub struct BM25Hit {
     pub doc_id: String,
     pub score: f32,
+}
+
+/// Corpus-coverage figures reported by the daemon's `stats` method.
+///
+/// Why: an empty `search` result is ambiguous — it means either "the query
+/// matched nothing" or "this daemon holds nothing to match against". Callers
+/// that cannot tell those apart silently serve partial results as if they were
+/// complete. `doc_count` resolves the ambiguity; `total_text_bytes` is what a
+/// supervisor budgets RAM against, because the daemon retains every document's
+/// full text in memory.
+/// What: a plain pair of counters, deserialised from the daemon's
+/// `StatsResult` wire shape. Neither field carries `#[serde(default)]`: a
+/// daemon-side rename must fail the decode, because defaulting `doc_count` to
+/// zero is indistinguishable from an empty palace.
+/// Test: `stats_response_decodes`, `stats_response_rejects_a_renamed_field`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Bm25Stats {
+    /// Live documents the daemon is serving.
+    pub doc_count: usize,
+    /// Summed byte length of the retained document text.
+    pub total_text_bytes: u64,
+}
+
+/// Coverage answer from the daemon's `missing_docs` method.
+///
+/// Why: `Bm25Stats` answers "how many", which is not the question a caller
+/// establishing coverage is asking. `missing.is_empty()` is a statement about
+/// the SET of documents the daemon holds, and it stays correct no matter how
+/// many documents the daemon holds that the caller never asked about.
+/// What: `missing` names the requested ids the daemon does not hold; `checked`
+/// echoes how many were examined so a caller can tell a real empty answer from
+/// a request that never reached the index. No `#[serde(default)]`, for the
+/// same reason as [`Bm25Stats`] — an absent `missing` field would decode as
+/// "fully covered".
+/// Test: `missing_docs_response_decodes`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Bm25Coverage {
+    /// Requested doc ids the daemon does not hold.
+    pub missing: Vec<String>,
+    /// How many ids the daemon examined.
+    pub checked: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,6 +291,44 @@ impl Bm25Client {
         Ok(res.hits)
     }
 
+    /// Ask the daemon how much corpus it is actually serving.
+    ///
+    /// Why: this is the call that lets a caller distinguish "indexed, no
+    /// lexical hits" from "not indexed". A backfiller uses it to decide
+    /// whether to skip a palace and to confirm what landed afterwards; a
+    /// recall path can use it to decide whether an empty BM25 result deserves
+    /// to influence fusion at all.
+    /// What: sends `{"method":"stats"}` with an empty params object and
+    /// returns the decoded [`Bm25Stats`]. Propagates the connection error when
+    /// the daemon is absent — "cannot ask" is a different state from "asked,
+    /// answered zero", and collapsing the two is the fail-open shape this
+    /// method exists to prevent. Callers that want to degrade should match on
+    /// the `Err` explicitly.
+    /// Test: end-to-end coverage in `trusty-bm25-daemon/tests/bm25_daemon.rs`
+    /// and `trusty-memory/tests/bm25_backfill_e2e.rs`.
+    pub async fn stats(&self) -> Result<Bm25Stats> {
+        self.call(METHOD_STATS, &serde_json::json!({})).await
+    }
+
+    /// Ask the daemon which of `doc_ids` it does not hold.
+    ///
+    /// Why: this is the only call that establishes coverage. [`Self::stats`]
+    /// reports a count, and a count is satisfied by documents the caller never
+    /// asked about — one stale entry left behind by a delete that never
+    /// happened is enough for `doc_count >= my_drawers` to claim coverage over
+    /// drawers the daemon has never seen. An empty `missing` list cannot be
+    /// satisfied that way.
+    /// What: sends `{"method":"missing_docs","params":{"doc_ids":[..]}}`.
+    /// Propagates the error rather than degrading — a coverage question that
+    /// could not be asked must never read as a coverage answer. A daemon older
+    /// than 0.2.0 answers `-32601`; see [`is_method_not_found`].
+    /// Test: `missing_docs_response_decodes`; end-to-end in
+    /// `trusty-memory/tests/bm25_backfill_e2e.rs`.
+    pub async fn missing_docs(&self, doc_ids: &[String]) -> Result<Bm25Coverage> {
+        let params = serde_json::json!({ "doc_ids": doc_ids });
+        self.call(METHOD_MISSING_DOCS, &params).await
+    }
+
     /// Delete a document. Intended for the dream subprocess only.
     ///
     /// Why: append-only ingest is the rule for the request path; the dream
@@ -220,7 +353,11 @@ impl Bm25Client {
         method: &'static str,
         params: &P,
     ) -> Result<R> {
-        let stream = UnixStream::connect(&self.socket_path)
+        // #5099: verify the directory and socket before trusting them. A daemon
+        // predating the hardening still answers at this path, and the
+        // supervisor adopts an existing socket rather than spawning, so the
+        // daemon's own checks may never run.
+        let stream = crate::uds::connect_hardened(&self.socket_path)
             .await
             .with_context(|| {
                 format!(
@@ -264,7 +401,13 @@ impl Bm25Client {
             )
         })?;
         if let Some(err) = resp.error {
-            anyhow::bail!("bm25 daemon error {}: {}", err.code, err.message);
+            // Typed rather than a bare `bail!` so a caller can tell a daemon
+            // that does not implement the method from one that is not there.
+            return Err(anyhow::Error::new(Bm25RpcError {
+                code: err.code,
+                message: err.message,
+            })
+            .context(format!("bm25 daemon rejected method={method}")));
         }
         resp.result
             .ok_or_else(|| anyhow!("bm25 daemon response missing both result and error"))
@@ -382,7 +525,13 @@ mod tests {
             fname.ends_with(".sock"),
             "filename must end with .sock: {fname}"
         );
-        assert!(p.parent().is_some());
+        // #5099: the parent must be the uid-keyed directory the daemon holds
+        // at 0700, not a bare `$TMPDIR` (or worse, a world-writable `/tmp`).
+        assert_eq!(
+            p.parent(),
+            Some(crate::uds::scratch_socket_dir().as_path()),
+            "socket must live in the per-uid scratch socket directory"
+        );
     }
 
     #[test]
@@ -442,6 +591,87 @@ mod tests {
         let s = serde_json::to_string(&req).unwrap();
         assert!(s.contains("\"method\":\"delete\""));
         assert!(s.contains("\"doc_id\":\"x\""));
+    }
+
+    /// Why: the client's `Bm25Stats` and the daemon's `StatsResult` are
+    /// separate types in separate crates (deliberately — the client must not
+    /// depend on the daemon binary). A field-name drift between them would
+    /// silently decode as `Default::default()`, i.e. "zero documents", which
+    /// reads exactly like an unindexed palace. Pinning the wire shape here is
+    /// what stops that drift from being invisible.
+    /// What: decodes the daemon's literal success envelope.
+    /// Test: this test itself.
+    #[test]
+    fn stats_response_decodes() {
+        let raw =
+            r#"{"jsonrpc":"2.0","result":{"doc_count":1311,"total_text_bytes":4194304},"id":1}"#;
+        let resp: RpcResponse<Bm25Stats> = serde_json::from_str(raw).unwrap();
+        let stats = resp.result.expect("result present");
+        assert_eq!(stats.doc_count, 1311);
+        assert_eq!(stats.total_text_bytes, 4_194_304);
+    }
+
+    /// Why: with `#[serde(default)]` on the fields, a daemon-side rename
+    /// decoded as `doc_count: 0` — which reads exactly like an empty palace
+    /// and is the silent drift the type's own doc comment claims to prevent.
+    /// Dropping the attribute turns that drift into a decode error.
+    /// What: feeds a plausibly-renamed field and asserts the decode fails.
+    /// Test: this test itself.
+    #[test]
+    fn stats_response_rejects_a_renamed_field() {
+        let raw =
+            r#"{"jsonrpc":"2.0","result":{"documents":1311,"total_text_bytes":4194304},"id":1}"#;
+        let decoded: Result<RpcResponse<Bm25Stats>, _> = serde_json::from_str(raw);
+        assert!(
+            decoded.is_err(),
+            "a renamed field must fail the decode, not default to zero documents"
+        );
+    }
+
+    /// Why: `missing` is the field the coverage predicate reads. If it
+    /// defaulted, an envelope that lost the field would decode as "nothing
+    /// missing" — full coverage claimed off a response that never said so.
+    /// What: decodes a populated answer, then asserts a truncated one errors.
+    /// Test: this test itself.
+    #[test]
+    fn missing_docs_response_decodes() {
+        let raw = r#"{"jsonrpc":"2.0","result":{"missing":["b"],"checked":2},"id":1}"#;
+        let resp: RpcResponse<Bm25Coverage> = serde_json::from_str(raw).unwrap();
+        let cov = resp.result.expect("result present");
+        assert_eq!(cov.missing, vec!["b".to_string()]);
+        assert_eq!(cov.checked, 2);
+
+        let truncated = r#"{"jsonrpc":"2.0","result":{"checked":2},"id":1}"#;
+        let decoded: Result<RpcResponse<Bm25Coverage>, _> = serde_json::from_str(truncated);
+        assert!(
+            decoded.is_err(),
+            "an absent `missing` field must not decode as full coverage"
+        );
+    }
+
+    /// Why: a client newer than its daemon gets `-32601` for `stats` and
+    /// `missing_docs`. Classifying that as "daemon unreachable" sends an
+    /// operator looking for a dead socket that is in fact serving fine.
+    /// What: builds both error shapes and asserts the discriminator separates
+    /// them — including that a transport failure is NOT method-not-found.
+    /// Test: this test itself.
+    #[test]
+    fn method_not_found_is_distinguishable_from_a_transport_error() {
+        let not_found = anyhow::Error::new(Bm25RpcError {
+            code: ERR_METHOD_NOT_FOUND,
+            message: "unknown method: missing_docs".to_string(),
+        })
+        .context("bm25 daemon rejected method=missing_docs");
+        assert!(is_method_not_found(&not_found));
+
+        let internal = anyhow::Error::new(Bm25RpcError {
+            code: -32603,
+            message: "index poisoned".to_string(),
+        });
+        assert!(!is_method_not_found(&internal));
+
+        let transport = anyhow!("connect to bm25 daemon at /tmp/x.sock: No such file");
+        assert!(!is_method_not_found(&transport));
     }
 
     #[test]

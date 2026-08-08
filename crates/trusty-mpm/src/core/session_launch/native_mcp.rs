@@ -37,10 +37,10 @@
 //! Because `.gitignore`/`.git/info/exclude` do not retroactively protect an
 //! ALREADY-tracked file (`.mcp.json`'s problem), but `.env.local` is USUALLY a
 //! NEW, never-tracked file, excluding it via `.git/info/exclude`
-//! ([`ensure_env_local_git_excluded`]) closes that case — mirroring the proven
+//! ([`ensure_git_excluded`]) closes that case — mirroring the proven
 //! pattern in `daemon::managed_routes::inproject::untracked_sync::append_to_git_exclude`
 //! (that helper is daemon-private and unreachable from this `core`-layer
-//! module, so `ensure_env_local_git_excluded` re-implements the same
+//! module, so `ensure_git_excluded` re-implements the same
 //! `git rev-parse --git-path info/exclude` + idempotent-append technique rather
 //! than introducing a `core` → `daemon` dependency; flagged here as a future
 //! consolidation candidate). But `tm` ships into ARBITRARY target repos —
@@ -398,7 +398,7 @@ pub(super) fn split_public_and_secret_env(
 /// `session_launch::custom_mcp` calls this too for custom stdio servers' `env`
 /// blocks — the guarantee (never write a secret into git-tracked `.mcp.json`)
 /// applies identically regardless of whether the server is native or custom.
-/// [`ensure_env_local_git_excluded`] appending a line to `info/exclude` is
+/// [`ensure_git_excluded`] appending a line to `info/exclude` is
 /// necessary but NOT sufficient: a code-critic re-review (residual HIGH,
 /// #2739) reproduced a second leak of the SAME class — if the target repo
 /// already TRACKS a file literally named `.env.local` (empirically plausible;
@@ -411,7 +411,7 @@ pub(super) fn split_public_and_secret_env(
 /// the exclude append silently didn't take effect (e.g. a `.gitignore`
 /// negation pattern elsewhere overriding it).
 /// What: resolves + ensures the `.env.local` git-exclude entry via
-/// [`ensure_env_local_git_excluded`] FIRST; on failure (not a git repo, `git`
+/// [`ensure_git_excluded`] FIRST; on failure (not a git repo, `git`
 /// missing, a permissions error) logs a `warn!` and returns `Ok(())`. THEN —
 /// even after that succeeds — runs `git -C <project_path> check-ignore -q --
 /// .env.local` (git's own authority on whether a path would be staged) and
@@ -428,7 +428,7 @@ pub(super) fn route_mcp_secrets_to_env_local(
     project_path: &Path,
     secrets: &BTreeMap<String, String>,
 ) -> Result<(), PrepError> {
-    if let Err(err) = ensure_env_local_git_excluded(project_path) {
+    if let Err(err) = ensure_git_excluded(project_path, ENV_LOCAL_FILENAME) {
         tracing::warn!(
             "skipping native trusty MCP secret delivery: could not confirm `{}` is \
              git-excluded in {} ({err}) — those servers will launch without credentials \
@@ -466,7 +466,7 @@ pub(super) fn route_mcp_secrets_to_env_local(
 /// be staged by `git add -A`) in `project_path`.
 ///
 /// Why: the fail-closed gate that catches an already-TRACKED `.env.local` —
-/// the case [`ensure_env_local_git_excluded`] cannot detect on its own, since
+/// the case [`ensure_git_excluded`] cannot detect on its own, since
 /// appending a line to `info/exclude` succeeds unconditionally regardless of
 /// whether the path is already tracked. `git check-ignore` is git's OWN
 /// authority on whether a path would be excluded from `git add`, so this is
@@ -494,18 +494,114 @@ pub(super) fn route_mcp_secrets_to_env_local(
 /// `is_env_local_actually_ignored_true_when_excluded`,
 /// `is_env_local_actually_ignored_false_when_tracked`.
 pub(super) fn is_env_local_actually_ignored(project_path: &Path) -> bool {
+    is_actually_git_ignored(project_path, ENV_LOCAL_FILENAME)
+}
+
+/// Ask git whether `filename` would actually be excluded from `git add`.
+///
+/// Why: this is [`is_env_local_actually_ignored`]'s implementation, taking the
+/// filename as a parameter so `.mcp.json` can ask the identical question
+/// (#4181) without a second copy of the spawn. The two callers want the answer
+/// for opposite reasons — `.env.local` treats "not ignored" as fail-closed
+/// (skip secret delivery entirely), `.mcp.json` treats it as warn-and-continue
+/// — but the QUESTION is one question, and the `disclaimed_output` spawn
+/// contract behind it must not drift between them.
+/// What: runs `git -C <project_path> check-ignore -q -- <filename>` and
+/// returns whether it exited `0`. Every non-zero exit — "not ignored", not a
+/// repo, no `git` binary — is `false`. Never panics. See
+/// [`is_env_local_actually_ignored`]'s doc for why the spawn captures output
+/// and why it routes through [`disclaimed_output`].
+/// Test: `is_env_local_actually_ignored_true_when_excluded`,
+/// `is_env_local_actually_ignored_false_when_tracked`,
+/// `is_env_local_actually_ignored_false_when_not_excluded_at_all`,
+/// `exclude_mcp_json_warns_when_repo_tracks_it` (#4181).
+pub(super) fn is_actually_git_ignored(project_path: &Path, filename: &str) -> bool {
     let args = [
         "-C".to_string(),
         project_path.to_string_lossy().to_string(),
         "check-ignore".to_string(),
         "-q".to_string(),
         "--".to_string(),
-        ENV_LOCAL_FILENAME.to_string(),
+        filename.to_string(),
     ];
     disclaimed_output("git", &args).is_ok_and(|output| output.status.success())
 }
 
-/// Ensure `.env.local` is listed in the workspace's real `info/exclude` file.
+/// Keep `<project_path>/.mcp.json` out of git's index, best-effort (#4181).
+///
+/// Why: every entry the MCP injectors write into that file is machine- or
+/// session-specific — `trusty-search`'s `--index` pin names the ephemeral
+/// worktree, `trusty-memory` carries a derived palace slug, and this module's
+/// own `tm mcp add` bridge can carry an absolute `command` path valid on
+/// exactly one machine. While the file is tracked, every managed session
+/// starts with a dirty tracked file and a routine `git add -A` commits an
+/// operator-specific path into the repository. This is the same
+/// `info/exclude` technique [`route_mcp_secrets_to_env_local`] already
+/// applies to `.env.local`, for the same reason and through the same helper.
+///
+/// Deliberately NOT fail-closed like the `.env.local` gate: no secret is at
+/// stake, and refusing to inject would drop the force-overwrite that
+/// #3934/#3950 require before a builtin name may enter
+/// `enabledMcpjsonServers`. An `Err` (not a git repo, `git` missing, a
+/// permissions fault) leaves the workspace's tracking state as it was.
+///
+/// **`info/exclude` cannot untrack an ALREADY-tracked `.mcp.json`** — git
+/// applies ignore rules only to paths absent from the index. A repository
+/// that already committed one needs it removed from the index once; see
+/// #4181.
+/// What: calls [`ensure_git_excluded`] with `.mcp.json`, logging a `warn!` on
+/// failure. Returns nothing — the caller has no decision to make.
+///
+/// `pub(crate)`, not `pub(super)`, because `prepare_session_inner` is not the
+/// only place the injectors run: `runtime::claude_code::prepare_managed_config`
+/// re-runs the same four of them on every spawn/resume, and two of its three
+/// callers (`spawn_resume`, `build_inplace_resume_command`) reach it with NO
+/// `prepare_session*` anywhere in their chain. Both write sites must exclude,
+/// or the resume paths reintroduce exactly the dirty tracked file this
+/// function exists to prevent.
+/// Test: `ensure_git_excluded_adds_mcp_json`,
+/// `exclude_mcp_json_warns_when_repo_tracks_it`.
+pub(crate) fn exclude_mcp_json_from_git(project_path: &Path) {
+    if let Err(err) = ensure_git_excluded(project_path, mcp_config::MCP_JSON) {
+        tracing::warn!(
+            "could not git-exclude `{}` in {} ({err}) — MCP injection continues; this \
+             workspace may show a dirty `{}` after launch",
+            mcp_config::MCP_JSON,
+            project_path.display(),
+            mcp_config::MCP_JSON
+        );
+        return;
+    }
+    // #4181, code-critic follow-up: the append above SUCCEEDS on a repo that
+    // already tracks `.mcp.json`, because `info/exclude` never applies to a
+    // path in the index — so the `Err` arm alone leaves that operator with no
+    // signal at all while their tracked file gets dirtied on every launch. Ask
+    // git for the real answer and say so. Still non-fatal: nothing tm can do
+    // about a foreign repo's index, and refusing to inject would drop the
+    // #3934/#3950 force-overwrite.
+    if !is_actually_git_ignored(project_path, mcp_config::MCP_JSON) {
+        tracing::warn!(
+            "`{}` is still not ignored in {} after adding it to info/exclude — this \
+             repository most likely TRACKS it, and `info/exclude` cannot override the \
+             index. Managed sessions will keep dirtying it; run `git rm --cached {}` \
+             to fix (see #4181)",
+            mcp_config::MCP_JSON,
+            project_path.display(),
+            mcp_config::MCP_JSON
+        );
+    }
+}
+
+/// Ensure `filename` is listed in the workspace's real `info/exclude` file.
+///
+/// **Concurrency (#4181):** `info/exclude` lives in the SHARED common git dir,
+/// so every concurrent managed session in the same project writes this one
+/// file. Two properties make that safe without a lock: the check-then-append
+/// is read-only up to an `O_APPEND` open, which POSIX makes atomic for a
+/// write this small, so no interleaving can corrupt or truncate an existing
+/// line; and the worst outcome of two sessions losing the check-then-append
+/// race is a DUPLICATE line, which git treats identically to one. The file is
+/// never rewritten or truncated, only appended to.
 ///
 /// Why: `.gitignore`/a tracked ignore file cannot protect a NEW file any
 /// differently than `.git/info/exclude` can, but unlike a tracked `.gitignore`
@@ -530,11 +626,21 @@ pub(super) fn is_env_local_actually_ignored(project_path: &Path) -> bool {
 /// `Command::new("git")` — see [`is_env_local_actually_ignored`]'s doc for why
 /// this call site is TCC-sensitive in the same way; same captured-output,
 /// same-error-handling contract, no observable behavior change.
+///
+/// #4181: `filename` is a parameter rather than a hardcoded
+/// `.env.local` because `.mcp.json` needs the identical treatment for the
+/// identical reason — it is written into the workspace on every
+/// `prepare_session` run and carries machine-specific content (an absolute
+/// `command` path from the `tm mcp add` registry, `trusty-search`'s
+/// worktree-scoped `--index` pin). One helper, so the two exclusion rules
+/// cannot drift.
 /// Test: `inject_native_env_local_is_git_excluded_and_unstaged`,
 /// `inject_native_secrets_skipped_outside_git_repo`,
-/// `ensure_env_local_git_excluded_is_idempotent`,
-/// `ensure_env_local_git_excluded_fails_outside_git_repo`.
-pub(super) fn ensure_env_local_git_excluded(project_path: &Path) -> Result<(), String> {
+/// `ensure_git_excluded_is_idempotent`,
+/// `ensure_git_excluded_fails_outside_git_repo`,
+/// `ensure_git_excluded_adds_mcp_json` (#4181),
+/// `ensure_git_excluded_is_concurrency_safe` (#4181).
+pub(super) fn ensure_git_excluded(project_path: &Path, filename: &str) -> Result<(), String> {
     let args = [
         "-C".to_string(),
         project_path.to_string_lossy().to_string(),
@@ -571,17 +677,14 @@ pub(super) fn ensure_env_local_git_excluded(project_path: &Path) -> Result<(), S
     }
 
     let existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
-    if existing
-        .lines()
-        .any(|line| line.trim() == ENV_LOCAL_FILENAME)
-    {
+    if existing.lines().any(|line| line.trim() == filename) {
         return Ok(());
     }
 
     let entry = if existing.is_empty() || existing.ends_with('\n') {
-        format!("{ENV_LOCAL_FILENAME}\n")
+        format!("{filename}\n")
     } else {
-        format!("\n{ENV_LOCAL_FILENAME}\n")
+        format!("\n{filename}\n")
     };
 
     use std::io::Write as _;

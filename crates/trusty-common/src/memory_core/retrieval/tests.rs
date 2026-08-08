@@ -1877,3 +1877,304 @@ async fn wing_scoped_deep_recall_returns_only_that_wing() {
         "a pm-wing drawer leaked through an engineer-wing deep recall"
     );
 }
+
+// ── #4904: importance must tilt the ranking, not replace it ─────────────────
+
+/// Build a unit vector at a chosen cosine similarity to `reference`.
+///
+/// Why (#4904): the ranking defect only shows up when two candidates are close
+/// in similarity and far apart in importance — the shape the live palace
+/// measured (0.067 similarity spread against a 0.436 importance spread). A
+/// hash-based `MockEmbedder` cannot be steered to that shape, so the test
+/// synthesises the vectors and inserts them into the store directly.
+/// What: normalises `reference`, picks a direction orthogonal to it by
+/// Gram-Schmidt against a `seed`-selected sign pattern, and returns
+/// `cos * r̂ + sqrt(1 - cos²) * ô`. Varying `seed` spreads the fillers over
+/// distinct directions instead of stacking them on one plane.
+/// Test: used by `l2_ranks_similar_low_importance_above_less_similar_high_importance`.
+fn vec_at_cosine(reference: &[f32], cos: f32, seed: usize) -> Vec<f32> {
+    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let rn = norm(reference);
+    let r: Vec<f32> = reference.iter().map(|x| x / rn).collect();
+    // Sign pattern keyed on `seed` — guarantees a non-parallel starting vector
+    // for any non-degenerate reference, and a different one per seed.
+    let base: Vec<f32> = (0..r.len())
+        .map(|i| {
+            if (i / (seed + 1)).is_multiple_of(2) {
+                1.0
+            } else {
+                -1.0
+            }
+        })
+        .collect();
+    let dot: f32 = base.iter().zip(&r).map(|(s, x)| s * x).sum();
+    let mut o: Vec<f32> = base.iter().zip(&r).map(|(s, x)| s - dot * x).collect();
+    let on = norm(&o);
+    for x in o.iter_mut() {
+        *x /= on;
+    }
+    let sin = (1.0 - cos * cos).max(0.0).sqrt();
+    r.iter().zip(&o).map(|(a, b)| cos * a + sin * b).collect()
+}
+
+/// Fill a handle's vector index with off-topic drawers around `qv`.
+///
+/// Why (#4904): `hnsw_rs` recall on a two-point graph is not reliable — the
+/// pre-existing `dream_cycle_merges_duplicates` failure is the same shape, a
+/// top-3 search over two vectors that intermittently returns one. A ranking
+/// assertion must not inherit that, so the index is padded to a couple of dozen
+/// points before anything is asserted about ordering.
+///
+/// #5162 corrects what that padding buys. It does NOT make the search
+/// exhaustive, as this comment used to claim: measured over 20,000 builds of
+/// this fixture, the miss rate is 0.3–0.6% at every pool size from 6 to 42
+/// points, because the miss is a connectivity property of the layer-0 graph and
+/// not a density one. See [`ranking_fixture_with_both_candidates`] for the
+/// measurement and for what the ranking tests do about it.
+/// What: inserts `n` drawers at cosines stepping down from 0.60, each on its own
+/// orthogonal direction, with mid-range importance so they cannot dominate under
+/// either the old or the new formula.
+/// Test: used by the two #4904 ranking tests below.
+async fn pad_index(handle: &PalaceHandle, qv: &[f32], n: usize) {
+    let room_id = Uuid::new_v4();
+    for i in 0..n {
+        let mut d = Drawer::new(room_id, format!("unrelated filler drawer {i}"));
+        d.importance = 0.5;
+        handle
+            .vector_store
+            .upsert(d.id, vec_at_cosine(qv, 0.60 - 0.02 * i as f32, i + 2))
+            .await
+            .unwrap();
+        handle.add_drawer(d);
+    }
+}
+
+/// Why (#4904): `rank_score` is the one place the three ranking inputs meet, so
+/// the tiebreaker property is asserted on it directly rather than inferred from
+/// an end-to-end ordering.
+/// What: asserts a 0.05-wide similarity gap survives a full-width importance
+/// gap, that importance still orders equal-similarity candidates, and that the
+/// clamp holds.
+/// Test: this is the test.
+#[test]
+fn rank_score_keeps_importance_a_tiebreaker() {
+    use super::layers::rank_score;
+
+    // The measured production shape: similarity differs by 0.05, importance by
+    // the full range. Similarity must win.
+    let more_similar_less_important = rank_score(0.80, 0.05, 0.0);
+    let less_similar_most_important = rank_score(0.75, 1.00, 0.0);
+    assert!(
+        more_similar_less_important > less_similar_most_important,
+        "importance overrode a 0.05 similarity gap: {more_similar_less_important} vs \
+         {less_similar_most_important}"
+    );
+
+    // With similarity equal, importance still decides — it is a tiebreaker,
+    // not a no-op.
+    assert!(
+        rank_score(0.70, 1.00, 0.0) > rank_score(0.70, 0.05, 0.0),
+        "importance stopped breaking ties between equally-similar candidates"
+    );
+
+    // The closet boost and the 1.0 clamp are unchanged.
+    assert!(rank_score(0.70, 0.5, 0.15) > rank_score(0.70, 0.5, 0.0));
+    assert_eq!(rank_score(1.0, 1.0, 0.15), 1.0);
+}
+
+/// Why (#4904): the hook injected ~1,211 tokens per prompt while missing
+/// curated facts because L2 scored `eff_importance * similarity`. With
+/// `eff_importance` spanning 0.436 inside a candidate pool whose similarity
+/// spans 0.067, the product ranked by importance and ignored relevance — a
+/// 400-drawer self-retrieval probe on the live palace scored recall@1 102/400
+/// under that formula against 291/400 for similarity alone.
+/// What: two drawers with hand-built vectors 0.05 apart in cosine and at
+/// opposite ends of the importance range. Under the old formula the
+/// high-importance drawer wins (0.75 × 1.0 = 0.75 beats 0.80 × 0.05 = 0.04);
+/// under [`rank_score`] the more similar one does.
+/// Test: this is the test.
+#[tokio::test]
+async fn l2_ranks_similar_low_importance_above_less_similar_high_importance() {
+    init_embedder();
+    let embedder = shared_embedder().await.unwrap();
+
+    let query = "context budget startup memory migration duplicate deletion";
+    let qv = embedder
+        .embed_batch(&[query.to_string()])
+        .await
+        .unwrap()
+        .remove(0);
+
+    let (_dir, handle, on_topic_id, loud_id) = ranking_fixture_with_both_candidates(&qv).await;
+
+    let results = retrieve_l2(&handle, embedder.as_ref(), query, None, 5)
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 5, "top_k=5 over a padded index");
+    assert!(
+        uuid_prefix_eq(results[0].drawer.id, on_topic_id),
+        "the more similar drawer must rank first; importance won instead \
+         (top={:?} scores={:?})",
+        results[0].drawer.id,
+        results.iter().map(|r| r.score).collect::<Vec<_>>()
+    );
+    // #5162: this assertion used to carry no evidence, so the CI failure it
+    // produced said only "expected the high-importance drawer second" and the
+    // investigation had to reconstruct the scores from scratch. Dump the same
+    // components the first assertion does.
+    assert!(
+        uuid_prefix_eq(results[1].drawer.id, loud_id),
+        "expected the high-importance drawer second, got {:?} \
+         (order={:?} scores={:?})",
+        results[1].drawer.id,
+        results.iter().map(|r| r.drawer.id).collect::<Vec<_>>(),
+        results.iter().map(|r| r.score).collect::<Vec<_>>()
+    );
+}
+
+/// Build the #4904 ranking fixture on an index whose candidate pool provably
+/// contains both drawers.
+///
+/// Why (#5162): `hnsw_rs` seeds its level-assignment RNG from OS entropy inside
+/// `Hnsw::new`, so every index build is a different random graph, and layer-0
+/// neighbour lists are pruned by Navarro's heuristic. Some of those graphs leave
+/// the 0.75-cosine drawer unreachable from the descent pivot — `search` walks
+/// the pivot's connected component and returns 15–20 of the 26 points, never
+/// offering that drawer as a candidate at all. Measured over 20,000 builds of
+/// this exact fixture: 85 misses (0.42%), always the runner-up and never the
+/// winner, which is precisely the shape of the `main` failure — `results[0]`
+/// held, `results[1]` did not. It is not density: the rate is 0.3–0.6% at every
+/// pool size from 6 to 42 points, and neither `set_keeping_pruned` (58/20,000)
+/// nor `set_extend_candidates` (90/20,000) removes it.
+///
+/// Whether the approximate index surfaces a candidate is a property of the
+/// index, with its own tests. It is not the ranking rule this test is named for,
+/// and it must not decide whether that rule looks broken.
+/// What: rebuilds the fixture until `vector_store::search` returns a full
+/// candidate pool containing both drawers, then hands it back. The retry
+/// condition reads the CANDIDATE POOL only, never the ranked output, so it
+/// cannot mask a ranking regression: a broken `rank_score` still yields a pool
+/// with both drawers on the first attempt and still fails the assertions.
+/// Test: `l2_ranks_similar_low_importance_above_less_similar_high_importance`.
+async fn ranking_fixture_with_both_candidates(
+    qv: &[f32],
+) -> (tempfile::TempDir, PalaceHandle, Uuid, Uuid) {
+    // At a 0.42% per-build miss rate, 12 attempts leave a 4e-30 chance of
+    // exhausting them — the assertion below is a corruption check, not a
+    // flake budget.
+    const MAX_ATTEMPTS: usize = 12;
+    // The pool `retrieve_l2` will see: top_k=5 over-fetches 3x.
+    const POOL: usize = 15;
+
+    for _ in 0..MAX_ATTEMPTS {
+        let dir = tempdir().unwrap();
+        let handle = make_handle(dir.path());
+        let room_id = Uuid::new_v4();
+
+        let mut on_topic = Drawer::new(room_id, "the fact the user was actually asking for");
+        on_topic.importance = 0.05;
+        let on_topic_id = on_topic.id;
+
+        let mut loud = Drawer::new(room_id, "an unrelated but maximally important drawer");
+        loud.importance = 1.0;
+        let loud_id = loud.id;
+
+        handle
+            .vector_store
+            .upsert(on_topic_id, vec_at_cosine(qv, 0.80, 0))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(loud_id, vec_at_cosine(qv, 0.75, 1))
+            .await
+            .unwrap();
+        handle.add_drawer(on_topic);
+        handle.add_drawer(loud);
+        pad_index(&handle, qv, 24).await;
+
+        let pool = handle.vector_store.search(qv, POOL).await.unwrap();
+        let has_both = [on_topic_id, loud_id]
+            .iter()
+            .all(|id| pool.iter().any(|h| uuid_prefix_eq(h.drawer_id, *id)));
+        if has_both && pool.len() == POOL {
+            return (dir, handle, on_topic_id, loud_id);
+        }
+    }
+    panic!(
+        "{MAX_ATTEMPTS} index builds in a row failed to surface both ranking \
+         drawers in a {POOL}-candidate pool; at the measured 0.42% miss rate \
+         that is not chance — the vector store or the fixture is broken"
+    );
+}
+
+/// Why (#4904): the three explanations for a fact missing from an injection —
+/// absent from the candidate set, present but below the cutoff, never queried —
+/// are indistinguishable from the truncated top-k alone. The pre-truncation
+/// trace is what separates them, so it must survive refactors of the scoring
+/// loop.
+/// What: captures `tracing` events on [`RANK_TRACE_TARGET`] across a `top_k=1`
+/// L2 call and asserts every candidate the HNSW pool yielded was traced, not
+/// just the one that survived truncation.
+/// Test: this is the test.
+#[tokio::test]
+async fn l2_rank_trace_emits_one_event_per_candidate() {
+    use std::sync::Mutex;
+    use tracing::subscriber::with_default;
+
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+
+    let query = "trace every candidate before truncation";
+    let qv = embedder
+        .embed_batch(&[query.to_string()])
+        .await
+        .unwrap()
+        .remove(0);
+    pad_index(&handle, &qv, 24).await;
+
+    // The pool `retrieve_l2` will see: `top_k=1` over-fetches to 3.
+    let pool = handle.vector_store.search(&qv, 3).await.unwrap();
+    assert_eq!(
+        pool.len(),
+        3,
+        "expected a 3-wide over-fetched candidate pool"
+    );
+
+    #[derive(Clone, Default)]
+    struct Counter(Arc<Mutex<usize>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Counter {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() == super::layers::RANK_TRACE_TARGET {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+    }
+
+    let counter = Counter::default();
+    let seen = counter.0.clone();
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+            .with(counter);
+        // `retrieve_l2` is async; drive it to completion inside the dispatch
+        // scope so every event is attributed to this subscriber.
+        let fut = retrieve_l2(&handle, embedder.as_ref(), query, None, 1);
+        let results = with_default(subscriber, || futures::executor::block_on(fut)).unwrap();
+        assert_eq!(results.len(), 1, "top_k=1 must truncate to one result");
+    }
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        pool.len(),
+        "every candidate must be traced, including the ones truncation drops"
+    );
+}

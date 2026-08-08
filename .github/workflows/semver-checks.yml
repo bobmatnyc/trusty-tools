@@ -1,0 +1,122 @@
+# Public-API / SemVer gate for the trusty-tools workspace (issue #5050),
+# moved from per-PR to release-time by #5149.
+#
+# The workspace publishes 20+ crates to crates.io and had no check that a
+# breaking public-API change carried a matching version bump. #4088 is what that
+# costs: `trusty-common` 0.22.5 added a required public field on a patch bump,
+# every dependent on a `^0.22` floor stopped compiling on a lockfile-free
+# `cargo install`, and `trusty-analyze` 0.7.3 was yanked. A workspace
+# `cargo check` cannot see that class of break — the root Cargo.toml's path
+# override always pairs local source with local dependency — so this job
+# compares against the REGISTRY instead.
+#
+# WHY THIS IS NOT A PR GATE (#5149). It used to run on every `pull_request`.
+# Installing the pinned `cargo-semver-checks` and warming a cold
+# `target/semver-checks` cache costs 20+ minutes under a 40-minute timeout,
+# and it is paid before crate selection has even decided whether the PR is
+# exempt. A SemVer break only becomes a defect when something is published, so
+# the check belongs where a publish happens. Between releases the repo is
+# deliberately unprotected against this class of break: a breaking change can
+# merge to main, and the gate catches it at the release that would ship it.
+#
+# WHERE THE BLOCKING GATE LIVES — READ THIS BEFORE TREATING THIS JOB AS THE
+# GATE. It is not. `cargo publish` for this workspace is run LOCALLY by a human
+# (`local-ops`), not by any workflow here, so no CI job can stop an upload. The
+# barrier is `scripts/preflight-publish.sh` CHECK 5, which runs the same
+# `scripts/check_semver.sh` immediately before `cargo publish` and whose nonzero
+# exit is the documented absolute stop. This job is the SECOND, INDEPENDENT
+# report: it fires on the tag push, which in this project's sequence happens
+# BEFORE `cargo publish` (see .claude/skills/cargo-publish/SKILL.md steps 4-6),
+# so a red run here is visible while the publish can still be called off. Same
+# blocking-vs-independent split, and the same reasoning, as release.yml's
+# `publish-dry-run` job.
+#
+# ON-DEMAND: workflow_dispatch takes a crate name so a break can be checked
+# without cutting a release. `bash scripts/check_semver.sh --crate <crate>`
+# does the same thing locally.
+name: SemVer checks
+
+on:
+  push:
+    tags:
+      - "*-v*"
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: "Crate to check — package name (tga) or crates/ directory (trusty-git-analytics)"
+        required: true
+        type: string
+
+concurrency:
+  group: semver-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semver-checks:
+    name: Public API / SemVer
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      # The tag prefix is whichever accepted form the tagger used —
+      # `tga-v1.4.2` and `trusty-git-analytics-v1.4.2` are both valid tags for
+      # the same crate (#1128). check_semver.sh's `--crate` accepts either, so
+      # no alias table is duplicated here.
+      - name: Resolve crate to check
+        id: crate
+        env:
+          TAG: ${{ github.ref_name }}
+          INPUT_CRATE: ${{ inputs.crate }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            NAME="$INPUT_CRATE"
+          else
+            NAME="$(printf '%s' "$TAG" | sed -E 's/-v[0-9].*$//')"
+            # An unchanged string means the sed matched nothing, i.e. the ref is
+            # not <crate>-v<version>. Resolving it would hand check_semver.sh a
+            # crate name that does not exist and read as a tooling error.
+            if [[ "$NAME" == "$TAG" ]]; then
+              echo "::error::Ref '${TAG}' is not a <crate>-v<version> release tag."
+              exit 1
+            fi
+          fi
+          if [[ -z "$NAME" ]]; then
+            echo "::error::Empty crate name — nothing to check."
+            exit 1
+          fi
+          echo "crate=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "Checking crate: ${NAME}"
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # A prebuilt binary, PINNED. `cargo install cargo-semver-checks` compiles
+      # ~2 minutes of tool before a single crate is checked. install-action
+      # downloads a release artifact instead, and pinning the version keeps a
+      # tool release from silently changing the lint set under a release. It
+      # also never touches this workspace's Cargo.lock — refreshing that turns
+      # the MSRV 1.94 job red (see CLAUDE.md).
+      - name: Install cargo-semver-checks (pinned prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks@0.50.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: semver-checks
+          # cargo-semver-checks builds into target/semver-checks/, which
+          # rust-cache prunes as "unrecognised" by default.
+          cache-directories: target/semver-checks
+
+      # Runs BEFORE the real gate, matching line-cap.yml's selftest-then-gate
+      # ordering: a gate that cannot fail makes the real run's green meaningless.
+      - name: SemVer gate selftest (must refuse a blind run)
+        run: bash scripts/check_semver_selftest.sh
+
+      - name: Enforce public-API SemVer against crates.io
+        env:
+          SKIP_UI_BUILD: '1'
+        run: bash scripts/check_semver.sh --crate "${{ steps.crate.outputs.crate }}"

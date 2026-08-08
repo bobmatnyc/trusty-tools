@@ -82,7 +82,7 @@ pub struct AgentConfig {
 
     /// Optional `[rbac]` block (#445) — role-based access control.
     ///
-    /// Why: Open-mpm exposes the same agent across multiple transports
+    /// Why: trusty-agents exposes the same agent across multiple transports
     /// (CLI, Slack, Telegram, HTTP). Each transport identifies users
     /// differently; the `[rbac]` block lets operators declare an env-var
     /// allowlist plus default tiers for authenticated vs unauthenticated

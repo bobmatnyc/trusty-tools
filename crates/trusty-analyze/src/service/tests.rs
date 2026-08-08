@@ -19,16 +19,45 @@ use axum::http::{Method, Request};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use crate::core::{FactStore, TrustySearchClient};
+use crate::core::{FactStore, ScipOverlayStore, TrustySearchClient};
 use crate::service::events::{AnalyzerAppState, AnalyzerEvent};
 use crate::service::routes::build_router;
 use axum::Router;
 
 pub(crate) fn make_state() -> (AnalyzerAppState, TempDir) {
     let tmp = TempDir::new().unwrap();
-    let facts = FactStore::open(&tmp.path().join("facts.redb")).unwrap();
-    let search = TrustySearchClient::new("http://127.0.0.1:1");
-    (AnalyzerAppState::new(search, facts), tmp)
+    let state = state_in(tmp.path());
+    (state, tmp)
+}
+
+/// Build state whose redb stores live under `dir`.
+///
+/// Why (#5049): proving the SCIP overlay survives a restart needs two
+/// `AnalyzerAppState`s built over the *same* data directory — the in-process
+/// stand-in for stopping and restarting the daemon. `make_state` hides its
+/// `TempDir`, so it cannot express that.
+/// What: opens both redb stores under `dir` and returns state around a search
+/// client pointed at port 1 (nothing listening), matching `make_state`.
+/// Test: used by `scip_overlay_survives_state_rebuild`.
+pub(crate) fn state_in(dir: &std::path::Path) -> AnalyzerAppState {
+    state_in_with_search(dir, "http://127.0.0.1:1")
+}
+
+/// `state_in`, but pointed at an arbitrary trusty-search base URL.
+///
+/// Why (#5049): `/indexes/{id}/graph` fetches chunks before it ever reads the
+/// overlay, so with the unreachable default client every graph request 502s
+/// and the overlay-merge path is untestable. Tests that need `/graph` point
+/// this at a local stub instead.
+/// What: same two redb stores under `dir`, with `search_base` as the search
+/// client's base URL.
+/// Test: used by `graph_marks_scip_overlay_present_after_ingest` and
+/// `graph_marks_scip_overlay_absent_without_ingest`.
+pub(crate) fn state_in_with_search(dir: &std::path::Path, search_base: &str) -> AnalyzerAppState {
+    let facts = FactStore::open(&dir.join("facts.redb")).unwrap();
+    let overlays = ScipOverlayStore::open(&dir.join("scip_overlays.redb")).unwrap();
+    let search = TrustySearchClient::new(search_base);
+    AnalyzerAppState::new(search, facts, overlays)
 }
 
 pub(crate) async fn json_get(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -367,59 +396,246 @@ async fn upsert_then_list_facts_round_trip() {
     assert_eq!(listing["count"], 1);
 }
 
-#[tokio::test]
-async fn scip_ingest_accepts_valid_index_and_stores_overlay() {
+/// Encode a SCIP `Index` protobuf carrying `symbol_names.len()` function
+/// symbols in `src/lib.rs`. An empty slice yields a valid, symbol-free index.
+///
+/// Why (#5049): the empty-vs-absent distinction needs a SCIP payload that
+/// legitimately produces zero KG nodes, so the ingest path can be driven with
+/// both shapes from one helper.
+/// What: builds one `Document` with one `SymbolInformation`/`Occurrence` pair
+/// per name and returns the encoded bytes.
+/// Test: used by `scip_ingest_accepts_valid_index_and_stores_overlay`,
+/// `scip_overlay_survives_state_rebuild`,
+/// `empty_scip_ingest_is_distinguishable_from_no_ingest`.
+pub(crate) fn scip_index_bytes(symbol_names: &[&str]) -> Vec<u8> {
     use protobuf::{EnumOrUnknown, Message};
     use scip::types::{
         symbol_information::Kind as ScipKind, Document, Index, Occurrence, SymbolInformation,
     };
 
-    let (state, _tmp) = make_state();
-    let overlays = state.scip_overlays.clone();
-    let app = build_router(state);
-
-    // Build a one-symbol SCIP index.
-    let mut sym = SymbolInformation::new();
-    sym.symbol = "rust . . hello().".into();
-    sym.kind = EnumOrUnknown::new(ScipKind::Function);
-    sym.display_name = "hello".into();
-    let mut occ = Occurrence::new();
-    occ.symbol = sym.symbol.clone();
-    occ.symbol_roles = 0x1;
-    occ.range = vec![1, 0, 5];
     let mut doc = Document::new();
     doc.relative_path = "src/lib.rs".into();
     doc.language = "rust".into();
-    doc.symbols.push(sym);
-    doc.occurrences.push(occ);
+    for (i, name) in symbol_names.iter().enumerate() {
+        let mut sym = SymbolInformation::new();
+        sym.symbol = format!("rust . . {name}().");
+        sym.kind = EnumOrUnknown::new(ScipKind::Function);
+        sym.display_name = (*name).into();
+        let mut occ = Occurrence::new();
+        occ.symbol = sym.symbol.clone();
+        occ.symbol_roles = 0x1;
+        occ.range = vec![i as i32 + 1, 0, 5];
+        doc.symbols.push(sym);
+        doc.occurrences.push(occ);
+    }
     let mut index = Index::new();
     index.documents.push(doc);
-    let bytes = index.write_to_bytes().expect("encode scip index");
+    index.write_to_bytes().expect("encode scip index")
+}
 
+async fn post_scip(
+    app: &Router,
+    index_id: &str,
+    bytes: Vec<u8>,
+) -> (StatusCode, serde_json::Value) {
     let resp = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/indexes/myidx/scip")
+                .uri(format!("/indexes/{index_id}/scip"))
                 .header("content-type", "application/octet-stream")
                 .body(Body::from(bytes))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let parsed = if body.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
+    (status, parsed)
+}
+
+#[tokio::test]
+async fn scip_ingest_accepts_valid_index_and_stores_overlay() {
+    let (state, _tmp) = make_state();
+    let overlays = state.scip_overlays.clone();
+    let app = build_router(state);
+
+    let (status, parsed) = post_scip(&app, "myidx", scip_index_bytes(&["hello"])).await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(parsed["index_id"], "myidx");
     assert_eq!(parsed["documents"], 1);
     assert_eq!(parsed["kg_nodes"], 1);
 
-    // The overlay should be persisted in state.
-    let overlays = overlays.read().await;
-    let g = overlays.get("myidx").expect("overlay stored");
-    assert_eq!(g.node_count(), 1);
-    assert_eq!(g.nodes[0].name, "hello");
+    // The overlay should be persisted in the durable store.
+    let rec = overlays.get("myidx").unwrap().expect("overlay stored");
+    assert_eq!(rec.graph.node_count(), 1);
+    assert_eq!(rec.graph.nodes[0].name, "hello");
+}
+
+/// Why (#5049): the defect. `POST /indexes/{id}/scip` answered 200 while
+/// writing only to an in-process `HashMap`, so a daemon restart discarded the
+/// ingest and every later `/graph` silently served a tree-sitter-only graph.
+/// What: ingests a SCIP index through one router, drops that state entirely,
+/// rebuilds `AnalyzerAppState` over the SAME data directory (the in-process
+/// stand-in for a restart), and asserts the second daemon still reports the
+/// overlay. Fails against the pre-fix commit, where the rebuilt state starts
+/// with an empty map.
+/// Test: this test.
+#[tokio::test]
+async fn scip_overlay_survives_state_rebuild() {
+    let tmp = TempDir::new().unwrap();
+
+    {
+        let app = build_router(state_in(tmp.path()));
+        let (status, parsed) = post_scip(&app, "myidx", scip_index_bytes(&["hello"])).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(parsed["kg_nodes"], 1);
+    }
+
+    // Second "daemon boot" over the same data directory.
+    let app = build_router(state_in(tmp.path()));
+    let (status, body) = json_get(app, "/indexes/myidx/scip").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "SCIP overlay must survive a daemon restart; got {body}"
+    );
+    assert_eq!(body["index_id"], "myidx");
+    assert_eq!(body["nodes"], 1);
+}
+
+/// Why (#5049): persistence stops the loss but not the silence — a caller
+/// still has to tell "nobody ingested SCIP here" from "an ingested SCIP index
+/// had no symbols". Both contribute zero nodes to `/graph`.
+/// What: never-ingested index → 404; index ingested with a symbol-free SCIP
+/// payload → 200 with `nodes: 0`.
+/// Test: this test.
+#[tokio::test]
+async fn empty_scip_ingest_is_distinguishable_from_no_ingest() {
+    let (state, _tmp) = make_state();
+    let app = build_router(state);
+
+    let (status, _) = post_scip(&app, "empty-idx", scip_index_bytes(&[])).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = json_get(app.clone(), "/indexes/empty-idx/scip").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["nodes"], 0, "ingested-but-empty overlay is present");
+
+    let (status, body) = json_get(app, "/indexes/never-idx/scip").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        body["error"].as_str().unwrap().contains("never-idx"),
+        "404 body must name the index: {body}"
+    );
+}
+
+#[tokio::test]
+async fn scip_overlay_status_404_when_never_ingested() {
+    let (state, _tmp) = make_state();
+    let app = build_router(state);
+    let (status, _) = json_get(app, "/indexes/nothing-here/scip").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Stand-in trusty-search that answers every chunk page with an empty page.
+///
+/// Why: `/graph` calls `get_chunks` first, so overlay-merge coverage needs a
+/// reachable search daemon. An always-empty corpus keeps the tree-sitter half
+/// of the graph at zero nodes, which is precisely the "empty graph" a caller
+/// could not previously tell apart from "no SCIP data".
+/// What: binds an ephemeral loopback port serving
+/// `GET /indexes/{id}/chunks` → `{"chunks": []}` and returns its base URL.
+/// Test: used by `graph_marks_scip_overlay_present_after_ingest` and
+/// `graph_marks_scip_overlay_absent_without_ingest`.
+async fn spawn_empty_chunk_search() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stub = Router::new().route(
+        "/indexes/{id}/chunks",
+        axum::routing::get(|| async { axum::response::Json(serde_json::json!({ "chunks": [] })) }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, stub).await.ok();
+    });
+    format!("http://{addr}")
+}
+
+async fn graph_overlay_header(app: Router, index_id: &str) -> (StatusCode, String) {
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/indexes/{index_id}/graph"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let header = resp
+        .headers()
+        .get("x-scip-overlay")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    (status, header)
+}
+
+/// Why (#5049): the endpoint where the ambiguity was observed. A `/graph`
+/// response for an index nobody SCIP-ingested must say so in the response
+/// itself, not leave the caller to infer it from an empty body.
+/// What: with an empty chunk corpus and no ingest, `/graph` answers 200 with
+/// `x-scip-overlay: absent`.
+/// Test: this test.
+#[tokio::test]
+async fn graph_marks_scip_overlay_absent_without_ingest() {
+    let tmp = TempDir::new().unwrap();
+    let search_base = spawn_empty_chunk_search().await;
+    let app = build_router(state_in_with_search(tmp.path(), &search_base));
+
+    let (status, header) = graph_overlay_header(app, "myidx").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header, "absent");
+}
+
+/// Why (#5049): the same response must flip to `present` once an overlay
+/// exists — and must still say `present` after a restart, which is what
+/// proves the merged graph is being served from disk rather than from the
+/// process that accepted the ingest.
+/// What: ingests through one router, rebuilds state over the same data
+/// directory, then asserts `/graph` answers `x-scip-overlay: present` and the
+/// merged body carries the SCIP symbol even though the chunk corpus is empty.
+/// Test: this test.
+#[tokio::test]
+async fn graph_marks_scip_overlay_present_after_ingest() {
+    let tmp = TempDir::new().unwrap();
+    let search_base = spawn_empty_chunk_search().await;
+
+    {
+        let app = build_router(state_in_with_search(tmp.path(), &search_base));
+        let (status, _) = post_scip(&app, "myidx", scip_index_bytes(&["hello"])).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let app = build_router(state_in_with_search(tmp.path(), &search_base));
+    let (status, header) = graph_overlay_header(app.clone(), "myidx").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(header, "present");
+
+    let (status, body) = json_get(app, "/indexes/myidx/graph").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["nodes"].as_array().unwrap().len(),
+        1,
+        "the persisted overlay must be merged into /graph: {body}"
+    );
+    assert_eq!(body["nodes"][0]["name"], "hello");
 }
 
 #[tokio::test]
@@ -447,4 +663,114 @@ async fn list_indexes_proxies_failure_to_502() {
     let app = build_router(state);
     let (status, _) = json_get(app, "/indexes").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+// ── #5067: concept clustering after the neural embedder was removed ──────────
+
+/// Spawn a stub trusty-search that serves a small, real chunk corpus.
+///
+/// Why (#5067): `spawn_empty_chunk_search` short-circuits `/clusters` before it
+/// ever reaches the embedder, so it cannot show that the surviving BOW path
+/// still produces usable vectors. Clustering needs actual content.
+/// What: binds an ephemeral loopback port serving `GET /indexes/{id}/chunks`,
+/// returning six distinct chunks at `offset=0` and an empty page beyond it so
+/// the client's pager terminates.
+/// Test: used by `clusters_return_bow_vectors_for_a_live_corpus` and
+/// `clusters_reject_removed_neural_method`.
+async fn spawn_chunk_search_with_corpus() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stub = Router::new().route(
+        "/indexes/{id}/chunks",
+        axum::routing::get(
+            |q: axum::extract::Query<HashMap<String, String>>| async move {
+                let q = q.0;
+                if q.get("offset").map(String::as_str) != Some("0") {
+                    return axum::response::Json(serde_json::json!({ "chunks": [] }));
+                }
+                let bodies = [
+                    "fn authenticate(user: User) -> Result<Session> { verify_password(user) }",
+                    "fn authorize(session: Session) -> bool { session.scopes.contains(\"admin\") }",
+                    "fn parse_config(path: &Path) -> Config { toml::from_str(&read(path)) }",
+                    "fn merge_config(a: Config, b: Config) -> Config { a.overlay(b) }",
+                    "fn render_chart(series: &[Point]) -> Svg { svg::plot(series) }",
+                    "fn render_legend(labels: &[String]) -> Svg { svg::legend(labels) }",
+                ];
+                let chunks: Vec<serde_json::Value> = bodies
+                    .iter()
+                    .enumerate()
+                    .map(|(i, content)| {
+                        serde_json::json!({
+                            "id": format!("src/lib.rs:{i}:{}", i + 3),
+                            "file": "src/lib.rs",
+                            "start_line": i,
+                            "end_line": i + 3,
+                            "content": content,
+                        })
+                    })
+                    .collect();
+                axum::response::Json(serde_json::json!({ "chunks": chunks }))
+            },
+        ),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, stub).await.ok();
+    });
+    format!("http://{addr}")
+}
+
+/// Why (#5067): removing the neural embedder must not remove clustering. This
+/// is the "used path still works" half of the fix — the endpoint every real
+/// caller (`trusty-console`, the MCP `cluster_concepts` tool, the embedded UI)
+/// actually hits has to keep returning usable vectors, now sourced from the
+/// state's BOW embedder rather than a model loaded at boot.
+/// What: with a six-chunk corpus, `/clusters?k=3` answers 200 with
+/// `method: "bow"`, the BOW embedder's 256 dimensions, all six chunks
+/// accounted for, and non-empty clusters.
+/// Test: this test.
+#[tokio::test]
+async fn clusters_return_bow_vectors_for_a_live_corpus() {
+    let tmp = TempDir::new().unwrap();
+    let search_base = spawn_chunk_search_with_corpus().await;
+    let app = build_router(state_in_with_search(tmp.path(), &search_base));
+    let (status, body) = json_get(app, "/indexes/demo/clusters?k=3").await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert_eq!(body["method"], "bow");
+    assert_eq!(body["dim"], 256);
+    assert_eq!(body["chunk_count"], 6);
+    let clusters = body["clusters"].as_array().expect("clusters array");
+    assert!(!clusters.is_empty(), "no clusters produced: {body}");
+    let members: usize = clusters
+        .iter()
+        .map(|c| c["members"].as_array().map(Vec::len).unwrap_or(0))
+        .sum();
+    assert_eq!(members, 6, "every chunk must land in a cluster: {body}");
+}
+
+/// Why (#5067): the pre-fix daemon answered `method=neural` with BOW vectors
+/// whenever the model had failed to load — it logged a warning at startup and
+/// then said nothing to the caller. Deleting the backend while still accepting
+/// the parameter would make that substitution permanent and invisible. A caller
+/// asking for an embedder that no longer exists has to be told.
+/// What: `/clusters?method=neural` answers 400 with a JSON error naming the
+/// rejected value, instead of 200 and hashed vectors.
+/// Test: this test.
+#[tokio::test]
+async fn clusters_reject_removed_neural_method() {
+    let tmp = TempDir::new().unwrap();
+    let search_base = spawn_chunk_search_with_corpus().await;
+    let app = build_router(state_in_with_search(tmp.path(), &search_base));
+    let (status, body) = json_get(app, "/indexes/demo/clusters?k=3&method=neural").await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "`method=neural` must be rejected, not silently served by BOW; body: {body}"
+    );
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("neural") && msg.contains("bow"),
+        "the error must name the rejected value and the supported one: {body}"
+    );
 }

@@ -93,9 +93,13 @@ Never guess what the PM is actually running under. Two equivalent ways to
 check:
 
 ```bash
-tm session instructions        # prints the resolved prompt
+tm sessions instructions       # prints the resolved prompt on stdout
 cat .trusty-mpm/last-instructions.md   # the exact stash resolve_pm_prompt wrote
 ```
+
+`tm sessions instructions` reports every applied, declined, and shadowed marker
+on **stderr**, so `tm sessions instructions >/dev/null` alone answers "why
+didn't my override apply?".
 
 `last-instructions.md` is written by `prepare_session` every time a prompt is
 assembled, specifically so the inspectable copy can never diverge from what
@@ -105,13 +109,82 @@ checks for this file's presence as a proxy for "has the pipeline run".
 ## The Bundled 5-Phase Model
 
 The bundled workflow section (`assets/instructions/sections/workflow.md`,
-replaceable via the override above) documents: Research (conditional) →
-Code Analysis review (mandatory gate) → Implementation → QA (mandatory
-gate) → Documentation, with skip conditions. This is genuinely tm's bundled
-default, not a claude-mpm holdover — but a project is free to replace the
-whole section via a `WORKFLOW` named-section marker in `CLAUDE.md` if its
-delivery process differs (e.g. no Code Analysis gate, an extra Security
-phase, a different QA routing rule).
+replaceable via the override above) documents Research → Code Analysis review →
+Implementation → QA → Documentation. **Every phase is CONDITIONAL**: it runs
+unless its skip condition holds, and the instruction package's CORE phase table
+is canonical for that decision. Where a phase runs, its gate is blocking —
+"conditional" governs entry, never rigour (#4594). This is genuinely tm's
+bundled default, not a claude-mpm holdover — but a project is free to replace
+the whole section via a `WORKFLOW` named-section marker in `CLAUDE.md` if its
+delivery process differs (e.g. no Code Analysis gate, an extra Security phase, a
+different QA routing rule).
+
+### Dispatch Briefs Per Phase
+
+**Phase 1 — Research** (`research`). Required for ambiguous requirements,
+multiple possible approaches, or an unfamiliar codebase. Skipped when the user
+gave an explicit command or the task is simple operational work
+(start/stop/build/test).
+
+```
+Task: Analyze requirements for [feature]
+Return: Technical requirements, gaps, measurable criteria, approach
+```
+
+Output: requirements, constraints, success criteria, risks.
+
+**Phase 2 — Code Analysis** (`code-analyzer`, sonnet — NOT `code-critic`, which
+is a separate agent).
+
+```
+Task: Review proposed solution
+Use: think/deepthink for analysis
+Return: Approval status with specific recommendations
+```
+
+Decision: APPROVED → Implementation. NEEDS_IMPROVEMENT → back to Research.
+BLOCKED → escalate to the user.
+
+**Phase 3 — Implementation** (the language-specific engineer where one exists).
+Requirements: complete code, error handling, basic test proof, and a changelog
+entry for the changed package — a per-PR fragment file if the project uses one,
+otherwise its `CHANGELOG.md`. Skip only for docs-only/CI-only changes.
+
+**Phase 4 — QA.** Routing: `api-qa` for APIs, `web-qa` for UI, `qa` otherwise.
+Requirements: real-world testing with evidence. The gate itself is
+`tm-verification-protocols`.
+
+**Phase 5 — Documentation** (`documentation`). Output: updated docs, API specs,
+README. Skipped for an internal refactor with no public API change.
+
+## Sprint, then Harden — the Rest of the Doctrine
+
+The instruction package states the two phases, where to spend the verification
+budget, and the hard line (never turn red green by deleting coverage). Two
+derived rules live here because they only apply at a specific moment:
+
+- **A branch that has drawn 3+ review rounds is evidence to close and fold**,
+  not to attempt round 4. Worked example: #4202 → #4207.
+- **Branch = workstream, and it is durable. Worktree = writer, and it is
+  ephemeral.** Keep worktrees short-lived; keep branches workstream-scoped.
+
+The causal claim behind the doctrine: slow feature release *causes* too many
+things in flight — it is not a separate problem. Shortening time-to-land is the
+fix; managing WIP count directly (caps, purges) treats the symptom.
+
+## Override Commands
+
+The user can bypass a gate by saying so explicitly:
+
+| User says | Effect |
+|---|---|
+| "Skip workflow" | Bypass the phase sequence |
+| "Go directly to [phase]" | Jump to that phase |
+| "No QA needed" | Skip phase 4 (not recommended) |
+| "Emergency fix" | Bypass Research |
+
+Honour the override and name the bypassed gate in the completion report, so the
+missing evidence is visible rather than implied.
 
 ## Verification Gates
 

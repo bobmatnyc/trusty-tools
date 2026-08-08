@@ -118,10 +118,31 @@ pub fn unmanaged_bundled_skills(
     dest: &Path,
     bundled: &BTreeSet<String>,
 ) -> Vec<UnmanagedBundledSkill> {
+    let manifest = SkillManifest::load(dest);
+    bundled_skill_dirs(dest, bundled)
+        .into_iter()
+        .filter(|skill| !manifest.is_managed(&skill.stem))
+        .collect()
+}
+
+/// Every bundled-named skill directory at `dest`, managed or not.
+///
+/// Why: [`unmanaged_bundled_skills`] answers "which bundled skills has this
+/// target lost track of?", but `tm reinstall --force` asks the wider question —
+/// "which bundled skills is the deployer declining to refresh here, for ANY
+/// reason?" — which also covers a MANAGED file hand-edited away from its
+/// recorded checksum. Both questions walk the same directory shape, so the walk
+/// lives here once and each caller applies its own manifest predicate.
+/// What: READ-ONLY. Same scan [`unmanaged_bundled_skills`] documents, minus the
+/// ownership filter: directories directly under `dest` whose stem is in
+/// `bundled` and which contain a [`SKILL_ENTRY_POINT`], sorted by stem. A
+/// missing or unreadable `dest`, or an empty `bundled` set, yields an empty vec.
+/// Test: `bundled_skill_dirs_includes_a_managed_skill`,
+/// `unmanaged_ignores_a_managed_skill`.
+pub fn bundled_skill_dirs(dest: &Path, bundled: &BTreeSet<String>) -> Vec<UnmanagedBundledSkill> {
     let Ok(entries) = std::fs::read_dir(dest) else {
         return Vec::new();
     };
-    let manifest = SkillManifest::load(dest);
 
     let mut found: Vec<UnmanagedBundledSkill> = entries
         .flatten()
@@ -130,7 +151,7 @@ pub fn unmanaged_bundled_skills(
                 return None;
             }
             let stem = entry.file_name().to_str()?.to_owned();
-            if !bundled.contains(&stem) || manifest.is_managed(&stem) {
+            if !bundled.contains(&stem) {
                 return None;
             }
             let dir = entry.path();

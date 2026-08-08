@@ -1,9 +1,9 @@
 # CLI Reference
 
-`open-mpm` is a single binary that dispatches based on flags.
+`tagent` (trusty-agents) is a single binary that dispatches based on flags.
 
 ```
-open-mpm [FLAGS]
+tagent [FLAGS]
 ```
 
 ## Mode flags (mutually exclusive)
@@ -14,11 +14,11 @@ open-mpm [FLAGS]
 | `--pm` | Single-shot PM orchestrator; reads one line from stdin |
 | `--agent <name>` | Sub-agent runner; reads one NDJSON Task from stdin, emits one Result, exits |
 | `--direct <name>` | Bypass PM LLM, send task to sub-agent directly |
-| `--workflow <name>` | Run `.open-mpm/workflows/<name>.json` |
+| `--workflow <name>` | Run `.trusty-agents/workflows/<name>.json` |
 | `--api` (alias `--serve`) | Launch HTTP API server + embedded web UI |
 | `--reindex` | Full re-index of the working tree, then exit |
 | `--watch` | Live filesystem watcher; keeps the code index in sync, blocks until killed |
-| `--version` / `-V` | Print version + git hash, exit |
+| `--version` / `-V` | Print version + build number, exit |
 
 ## Task input flags
 
@@ -38,7 +38,7 @@ Used with `--api` / `--serve`.
 | Flag | Description |
 |---|---|
 | `--port <N>` | TCP port (default `8080`) |
-| `--api-token <TOK>` | Require this bearer token on every `/api/*` request (except `/api/health` and `/api/config`). Falls back to `OPEN_MPM_API_TOKEN` env var |
+| `--api-token <TOK>` | Require this bearer token on every `/api/*` request. Falls back to the `TAGENT_API_TOKEN` env var. `/api/health` and `/api/config` are exempt (liveness probe and pre-auth UI bootstrap). `/api/events` is NOT exempt — it accepts this bearer token **or** a short-lived ticket from `POST /api/events/ticket`, because a browser `EventSource` cannot send headers ([#5052](https://github.com/bobmatnyc/trusty-tools/issues/5052)). The stream requires one of the two whether or not a token is configured |
 
 ## Diagnostic / maintenance flags
 
@@ -51,16 +51,20 @@ Used with `--api` / `--serve`.
 ## Subcommands
 
 ```
-open-mpm code search "<query>"     # Search the local code index
-open-mpm memory search "<query>"   # Search the history/turn-log index
-open-mpm agents list               # List available agents
-open-mpm skills list               # List discoverable skills
-open-mpm skills sources            # Show skill discovery directories
-open-mpm postmortem [--last N | --session <id>]
-open-mpm postmortem --tag <tag>
+tagent code search "<query>"     # Search the local code index
+tagent memory search "<query>"   # Search the history/turn-log index
+tagent agents list               # List available agents
+tagent skills list               # List discoverable skills
+tagent skills sources            # Show skill discovery directories
+tagent postmortem [--last N | --session <id>]
+tagent postmortem --tag <tag>
 ```
 
 ## Environment variables
+
+Current names use the `TAGENT_*` prefix. Deprecated `OPEN_MPM_*` names from
+before the crate's rename are still read as a fallback (with a one-time
+deprecation warning) — set the `TAGENT_*` name in new environments.
 
 | Variable | Description |
 |---|---|
@@ -68,40 +72,40 @@ open-mpm postmortem --tag <tag>
 | `ANTHROPIC_API_KEY` | Direct Anthropic API key (for agents with `use_anthropic_direct = true`) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | OAuth token from `claude setup-token` (only for agents with `runner = "claude-code"`) |
 | `BRAVE_API_KEY` | Optional — enables `web_search` tool |
-| `OPEN_MPM_API_TOKEN` | Default bearer token for `--api` mode |
+| `TAGENT_API_TOKEN` | Default bearer token for `--api` mode |
 | `RUST_LOG` | `trace`, `debug`, `info`, `warn`, `error` (default: `info`) |
-| `OPEN_MPM_CONFIG_DIR` | Override for `.open-mpm/agents/` lookup path |
-| `OPEN_MPM_OUT_DIR` | Default output root when `--out-dir` is omitted |
-| `OPEN_MPM_RUN_ID` | Auto-set; inherited by sub-agents for run correlation |
-| `OPEN_MPM_MAX_TURNS` | Per-invocation max-turns override for sub-agents |
-| `OPEN_MPM_MODEL_<AGENT>` | Per-agent model override (e.g. `OPEN_MPM_MODEL_CODE_AGENT`) |
-| `OPEN_MPM_DEFAULT_MODEL` | Fallback model when an agent TOML has no model set |
-| `OPEN_MPM_SKILLS_PROJECT_LOCAL_ONLY` | When `1`, skill discovery only walks project-local sources |
+| `TAGENT_CONFIG_DIR` | Override for `.trusty-agents/agents/` lookup path |
+| `TAGENT_OUT_DIR` | Default output root when `--out-dir` is omitted |
+| `TAGENT_RUN_ID` | Auto-set; inherited by sub-agents for run correlation |
+| `TAGENT_MAX_TURNS` | Per-invocation max-turns override for sub-agents |
+| `TAGENT_MODEL_<AGENT>` | Per-agent model override (e.g. `TAGENT_MODEL_PYTHON_ENGINEER`) |
+| `TAGENT_DEFAULT_MODEL` | Fallback model when an agent TOML has no model set |
+| `TAGENT_SKILLS_PROJECT_LOCAL_ONLY` | When `1`, skill discovery only walks project-local sources |
 
 ## Examples
 
 ```bash
 # Default: CTRL REPL
-open-mpm
+tagent
 
 # Workflow with telemetry
-open-mpm --workflow prescriptive \
+tagent --workflow prescriptive \
   --task-file ./task.md \
   --out-dir ./out/run1 \
   --json > result.json
 
 # Direct mode against a single agent
-open-mpm --direct research-agent \
+tagent --direct research-agent \
   --task "Compare Rust async runtimes"
 
 # API server with auth
-OPEN_MPM_API_TOKEN=secret123 open-mpm --api --port 7654
+TAGENT_API_TOKEN=secret123 tagent --api --port 7654
 
 # Live indexer (run in background while editing)
-open-mpm --watch &
+tagent --watch &
 
 # Debug a single agent invocation
-RUST_LOG=debug open-mpm --direct python-engineer --task-file ./task.md
+RUST_LOG=debug tagent --direct python-engineer --task-file ./task.md
 ```
 
 See [configuration.md](./configuration.md) for the file/directory layout the

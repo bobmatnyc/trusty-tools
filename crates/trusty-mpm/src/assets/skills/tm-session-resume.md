@@ -106,6 +106,7 @@ current project's absolute path explicitly. The tool returns:
   "recent_commits": [{ "sha", "msg", "author", "ts" }],
   "recent_memory": [{ "title", "tags" }],
   "resolved_snapshot": "<path or null>",
+  "undatable_sessions_dropped": 0,
   "watermark_advanced": false
 }
 ```
@@ -115,6 +116,16 @@ work, next steps, git context — confirm which session to resume from if more
 than one is listed, restore the todo state from it, and confirm with the user
 before continuing work. Cross-check `recent_commits` against your own
 knowledge of the repo state if anything looks stale.
+
+> **`sessions` and `resolved_snapshot` answer different questions** and
+> legitimately disagree under a recent watermark: `sessions` is "what paused
+> since your last catch-up", `resolved_snapshot` is "what should I resume
+> from". Resume from `resolved_snapshot`; treat `sessions` as the digest.
+
+> **Empty is not always empty.** An empty `sessions` array means "nothing
+> paused since last catch-up" only when `undatable_sessions_dropped` is `0`.
+> Non-zero means that many paused sessions exist but carried no derivable pause
+> timestamp and were withheld — re-call with `full: true` to see them.
 
 > **Watermark note:** a manual `/tm-session-resume` is a *read*, not a state
 > transition — `watermark_advanced` in the tool's response is always `false`.

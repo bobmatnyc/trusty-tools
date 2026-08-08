@@ -81,6 +81,32 @@ and zero HIGH findings; the MEDIUM/LOW observations that remain default to
 `Fix here` or `Parent`. `Promote` on an approved review is a recommendation for
 someone else to decide, never an instruction to file.
 
+## Fail-Open Check
+
+Run this over every failure branch the diff adds or touches. Relocated here
+from the always-loaded PM prompt (#4574) — the PM dispatches the check; a
+reviewer runs it.
+
+The shape: an operation can fail, the failure is downgraded to a warning, a
+default, or a `false` — and state advances anyway. The loss is permanent, and
+every alarm that should have caught it reports healthy. A finding here is
+CRITICAL or HIGH by construction: silent data loss, or a broken contract.
+
+1. **Does anything advance past the failure?** A cursor, watermark, index,
+   "done" marker, or success return that moves forward when the operation
+   failed puts the lost item outside every future window. **Fail closed** —
+   hold the state, propagate the error.
+2. **Name the alarm, then break it.** Identify which check is supposed to catch
+   this loss, then ask whether it can report healthy while the loss occurs.
+   Aggregates, tallies and summaries hide single-item failures by construction.
+3. **Compare sibling branches.** Asymmetry between arms of one state machine is
+   the tell. The arm that fails open is usually the bug.
+4. **Demand an error-arm test.** These ship green because no test ever entered
+   the failure path. Green CI over an untested failure path is evidence of
+   nothing. Require a regression test that FAILS against the pre-fix commit.
+5. **Review the fix harder than the bug.** A fix for this shape is the highest
+   risk place for it to reappear. Never merge one on the author's own gate.
+
 ## Review Process
 
 1. Work the rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW.

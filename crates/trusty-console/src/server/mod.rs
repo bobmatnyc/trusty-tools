@@ -7,6 +7,11 @@
 //!   - `GET /health` — liveness probe.
 //!   - `GET /api/console/services` — return cached snapshot (background poll).
 //!   - `GET /api/console/metrics/{analyze,memory,search,review,mpm}` — MCP-polled metrics.
+//!   - `POST /api/webhooks/{source}` — GitHub webhook ingress: verify once,
+//!     spool durably, relay over UDS (#5089 step 3, ADR-0034). Mounted only by
+//!     [`build_router_with_webhooks`].
+//!   - `GET /api/console/metrics/webhooks` — oldest-pending spool age as a red
+//!     health state.
 //!   - `GET /api/console/metrics/analyze/indexes` — analyze index list via stdio MCP.
 //!   - `GET /api/console/metrics/analyze/visualize?index=<id>` — graph+entities+clusters.
 //!   - `…/api/console/sessions/*` — the single HTTP front door for the trusty-mpm
@@ -295,6 +300,27 @@ pub fn build_router(state: AppState) -> Router {
     build_router_with_self_origins(state, crate::routes::origin_guard::SelfOrigins::default())
 }
 
+/// Build the router with the webhook ingress mounted (#5089 step 3).
+///
+/// Why: the ingress owns a spool directory, so constructing it can fail — and
+/// it must fail loudly at startup rather than silently leaving
+/// `/api/webhooks/{source}` unrouted, which would turn every delivery into a
+/// `404` GitHub records as a failure nobody looks at. Keeping it a separate
+/// parameter lets `run_serve` do that fallible construction once while the
+/// existing infallible `build_router` call sites (and every test that does not
+/// exercise webhooks) stay unchanged.
+/// What: identical to [`build_router_with_self_origins`], plus
+/// `POST /api/webhooks/{source}` and `GET /api/console/metrics/webhooks`, both
+/// carrying `WebhookIngress` as their own state.
+/// Test: the `route_*` and `metrics_route_*` cases in `webhook/tests.rs`.
+pub fn build_router_with_webhooks(
+    state: AppState,
+    self_origins: crate::routes::origin_guard::SelfOrigins,
+    ingress: crate::webhook::WebhookIngress,
+) -> Router {
+    build_router_inner(state, self_origins, Some(ingress))
+}
+
 /// Build the axum `Router` with all routes wired, additionally trusting the
 /// given bind-derived, non-loopback self-origins for the write-origin guard.
 ///
@@ -314,7 +340,17 @@ pub fn build_router_with_self_origins(
     state: AppState,
     self_origins: crate::routes::origin_guard::SelfOrigins,
 ) -> Router {
-    Router::new()
+    build_router_inner(state, self_origins, None)
+}
+
+/// The one router definition both public builders delegate to, so the mounted
+/// route set cannot drift between them.
+fn build_router_inner(
+    state: AppState,
+    self_origins: crate::routes::origin_guard::SelfOrigins,
+    webhook: Option<crate::webhook::WebhookIngress>,
+) -> Router {
+    let core = Router::new()
         .route("/health", get(health_handler))
         .route("/api/console/services", get(services_handler))
         .route("/api/console/metrics/analyze", get(metrics_analyze_handler))
@@ -399,7 +435,42 @@ pub fn build_router_with_self_origins(
         .route("/ui", get(spa_index_handler))
         .route("/ui/", get(spa_index_handler))
         .route("/ui/{*path}", get(spa_asset_handler))
-        .with_state(state)
+        .with_state(state);
+
+    // Webhook ingress (#5089 step 3, ADR-0034). Merged as its own state-typed
+    // sub-router. `/api/webhooks/{source}` cannot be shadowed by the
+    // `/api/{service}/{*path}` proxy above: matchit 0.8 prefers a static
+    // segment over a `{param}` capture at the same position, so `webhooks`
+    // wins regardless of declaration order — the same precedence rule the
+    // `/api/console/*` routes already rely on.
+    let router = match webhook {
+        Some(ingress) => core.merge(
+            Router::new()
+                .route(
+                    "/api/webhooks/{source}",
+                    axum::routing::post(crate::webhook::webhook_handler),
+                )
+                .route(
+                    "/api/console/metrics/webhooks",
+                    get(crate::webhook::metrics_webhooks_handler),
+                )
+                .with_state(ingress)
+                // axum's DefaultBodyLimit is 2 MiB, which silently 413s a real
+                // delivery before the handler runs: no spool entry, no metric,
+                // no ack — the exact invisible drop this route exists to
+                // prevent. GitHub payloads are legal to 25 MB and `push` /
+                // `pull_request` bodies routinely pass 2 MiB. Scoped to this
+                // sub-router so the proxy and SPA routes keep the default.
+                // (`trusty-search` sets 64 MiB the same way, at
+                // `service/server/mod.rs:251`.)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::webhook::MAX_WEBHOOK_BODY_BYTES,
+                )),
+        ),
+        None => core,
+    };
+
+    router
         // Same-origin guard for ALL destructive write routes, applied
         // router-wide (#3268 fix). The console serves a permissive CORS
         // policy (open reads), so without this guard any web page the

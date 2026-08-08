@@ -9,10 +9,14 @@
 //! process; a deleted session's slot stays reserved and renders as a
 //! tombstone instead of being handed to the next session; numbering resets
 //! only when the daemon restarts.
-//! What: [`SlotRegistry`] assigns a monotonically increasing `u32` to each
-//! [`ManagedSessionId`] the first time it is observed via
-//! [`SlotRegistry::observe`], and never reassigns or reuses a number for the
-//! registry's lifetime. It is deliberately NOT persisted to disk — the
+//! What: [`SlotRegistry`] assigns a `u32` to each [`ManagedSessionId`] the
+//! first time it is observed via [`SlotRegistry::observe`] and never reassigns
+//! it while the session's record is around. A number becomes reusable only
+//! after [`SlotRegistry::release`], which the record-retention sweep
+//! ([`super::retention`]) calls once a terminal record has aged out of the
+//! store entirely — so the tombstone guarantee above still holds for the whole
+//! retention window, and beyond it there is no record left to point at. It is
+//! deliberately NOT persisted to disk — the
 //! registry lives only inside the in-memory [`super::manager::SessionManager`]
 //! that owns it, so a fresh daemon process starts with a fresh, empty
 //! registry. That alone satisfies "reset numbering on restart"; no explicit
@@ -44,17 +48,16 @@ struct SlotMeta {
 /// client-side per-fetch enumeration cannot give that guarantee. Owning the
 /// assignment here, in the one daemon-side registry every listing call reads
 /// and writes, is what makes the numbering authoritative.
-/// What: `next` is the next never-used slot number (starts at 1 — slot 0 is
-/// never assigned, so it doubles as an unambiguous "no slot" sentinel for
-/// callers that default-construct a summary); `id_to_slot` is the reverse
-/// index; `slots` retains metadata for every slot ever assigned, in slot
-/// order.
+/// What: `id_to_slot` is the reverse index; `slots` holds metadata for every
+/// CURRENTLY-HELD slot, in slot order. Slot 0 is never assigned, so it doubles
+/// as an unambiguous "no slot" sentinel for callers that default-construct a
+/// summary.
 /// Test: `slot_registry_assigns_stable_increasing_numbers`,
 /// `slot_registry_never_reuses_a_number`,
-/// `slot_registry_refreshes_source_id_while_live`.
+/// `slot_registry_refreshes_source_id_while_live`,
+/// `slot_registry_release_frees_the_slot_for_reuse`.
 #[derive(Debug)]
 pub struct SlotRegistry {
-    next: u32,
     id_to_slot: HashMap<ManagedSessionId, u32>,
     slots: BTreeMap<u32, SlotMeta>,
 }
@@ -63,22 +66,46 @@ impl SlotRegistry {
     /// Construct an empty registry — the daemon-restart reset point (#3034).
     pub fn new() -> Self {
         Self {
-            next: 1,
             id_to_slot: HashMap::new(),
             slots: BTreeMap::new(),
         }
     }
 
+    /// The lowest slot number no session currently holds.
+    ///
+    /// Why: before record retention existed, the held set was gap-free — the
+    /// registry only ever inserted — so "lowest free" and "one past the
+    /// highest" were the same number and this scan would have been a provable
+    /// no-op. [`Self::release`] is what creates gaps, and reusing them is what
+    /// keeps `NUM` from climbing forever in a long-lived daemon.
+    /// What: walks the slot-ordered keys, returning the first integer ≥ 1 that
+    /// is absent. O(held slots) per assignment, against a set bounded by the
+    /// live fleet (hundreds at most).
+    /// Test: `slot_registry_release_frees_the_slot_for_reuse`.
+    fn lowest_free(&self) -> u32 {
+        let mut candidate = 1;
+        for &slot in self.slots.keys() {
+            if slot > candidate {
+                break;
+            }
+            candidate = slot + 1;
+        }
+        candidate
+    }
+
     /// Assign (or return the existing) stable slot number for `id`.
     ///
-    /// Why: the single mutation point — every other method is a pure lookup.
-    /// Refreshing `source_id` on every observation (rather than only at first
-    /// assignment) keeps a legacy record's initially-`None` source_id current
-    /// once it is set, without ever changing the assigned slot number.
+    /// Why: the single assignment point. Refreshing `source_id` on every
+    /// observation (rather than only at first assignment) keeps a legacy
+    /// record's initially-`None` source_id current once it is set, without ever
+    /// changing the assigned slot number.
     /// What: returns the previously-assigned slot when `id` is already known;
-    /// otherwise assigns `next`, increments it, and records `id`/`source_id`.
+    /// otherwise takes [`Self::lowest_free`] and records `id`/`source_id`
+    /// there. The returned slot is never one another session already holds, so
+    /// no two live sessions can ever display the same `NUM`.
     /// Test: `slot_registry_assigns_stable_increasing_numbers`,
-    /// `slot_registry_refreshes_source_id_while_live`.
+    /// `slot_registry_refreshes_source_id_while_live`,
+    /// `slot_registry_release_frees_the_slot_for_reuse`.
     pub fn observe(&mut self, id: ManagedSessionId, source_id: Option<&str>) -> u32 {
         if let Some(&slot) = self.id_to_slot.get(&id) {
             if let Some(meta) = self.slots.get_mut(&slot) {
@@ -86,8 +113,7 @@ impl SlotRegistry {
             }
             return slot;
         }
-        let slot = self.next;
-        self.next += 1;
+        let slot = self.lowest_free();
         self.id_to_slot.insert(id, slot);
         self.slots.insert(
             slot,
@@ -99,9 +125,38 @@ impl SlotRegistry {
         slot
     }
 
-    /// The highest slot number ever assigned, or 0 when none has been.
+    /// Drop `id`'s slot, freeing the number for a later session.
+    ///
+    /// Why (retention): a slot is reserved so an operator who captured its
+    /// number sees a `-- deleted --` tombstone rather than a neighbour's
+    /// session (#3034). Once the record behind it has aged out of the store
+    /// entirely there is nothing left to point at, and holding the number
+    /// forever is what let `NUM` reach 107 in a 31-row listing. This is the
+    /// ONLY method that removes a slot; the retention sweep is its only caller,
+    /// so an ordinary deletion still tombstones exactly as before.
+    /// What: removes `id` from both indexes and returns the freed slot, or
+    /// `None` when `id` held none.
+    /// Test: `slot_registry_release_frees_the_slot_for_reuse`,
+    /// `slot_registry_release_of_unknown_id_is_a_noop`.
+    pub fn release(&mut self, id: &ManagedSessionId) -> Option<u32> {
+        let slot = self.id_to_slot.remove(id)?;
+        self.slots.remove(&slot);
+        Some(slot)
+    }
+
+    /// Every currently-held slot number, ascending.
+    ///
+    /// Why: released slots leave gaps, so a `1..=max` walk would emit rows for
+    /// numbers nobody holds. Callers iterate this instead.
+    /// What: the slot-ordered keys of the held set.
+    /// Test: `slot_registry_release_frees_the_slot_for_reuse`.
+    pub fn assigned_slots(&self) -> Vec<u32> {
+        self.slots.keys().copied().collect()
+    }
+
+    /// The highest slot number currently held, or 0 when none is.
     pub fn max_slot(&self) -> u32 {
-        self.next.saturating_sub(1)
+        self.slots.keys().next_back().copied().unwrap_or(0)
     }
 
     /// The session id last observed at `slot`, if any was ever assigned there.
@@ -189,6 +244,52 @@ mod tests {
         assert_eq!(reg.source_id_at(1), None);
         reg.observe(a, Some("owner/repo"));
         assert_eq!(reg.source_id_at(1), Some("owner/repo"));
+    }
+
+    /// Why: retention's whole effect on `NUM` depends on a released slot
+    /// becoming available again — without reuse, evicting slot 1 leaves a
+    /// permanent hole and new sessions keep climbing. This also pins the
+    /// no-duplicate invariant across the release/reallocate cycle.
+    /// What: releases the middle of three slots, asserts it disappears from the
+    /// held set, is handed to the NEXT session observed, and that no two live
+    /// ids ever map to the same number.
+    /// Test: this test.
+    #[test]
+    fn slot_registry_release_frees_the_slot_for_reuse() {
+        let mut reg = SlotRegistry::new();
+        let (a, b, c) = (id(), id(), id());
+        assert_eq!(reg.observe(a, None), 1);
+        assert_eq!(reg.observe(b, None), 2);
+        assert_eq!(reg.observe(c, None), 3);
+
+        assert_eq!(reg.release(&b), Some(2));
+        assert_eq!(reg.assigned_slots(), vec![1, 3]);
+        assert_eq!(reg.id_at(2), None, "released slot points at nothing");
+        assert_eq!(reg.max_slot(), 3);
+
+        // The freed number is handed to the next NEW session, not 4.
+        let d = id();
+        assert_eq!(reg.observe(d, None), 2);
+        // …and the sessions still holding slots kept theirs.
+        assert_eq!(reg.observe(a, None), 1);
+        assert_eq!(reg.observe(c, None), 3);
+        let mut held = vec![
+            reg.observe(a, None),
+            reg.observe(c, None),
+            reg.observe(d, None),
+        ];
+        held.sort_unstable();
+        held.dedup();
+        assert_eq!(held.len(), 3, "no two live sessions share a NUM");
+    }
+
+    #[test]
+    fn slot_registry_release_of_unknown_id_is_a_noop() {
+        let mut reg = SlotRegistry::new();
+        let a = id();
+        reg.observe(a, None);
+        assert_eq!(reg.release(&id()), None);
+        assert_eq!(reg.assigned_slots(), vec![1], "held set untouched");
     }
 
     #[test]

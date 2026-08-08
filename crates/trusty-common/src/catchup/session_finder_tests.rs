@@ -367,3 +367,201 @@ fn render_empty_returns_no_sessions_message() {
         "empty renders a notice"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #5072 — undated snapshots and the watermark filter
+// ---------------------------------------------------------------------------
+
+/// Set a file's mtime so ordering assertions don't depend on write order.
+fn set_mtime(path: &Path, ts: DateTime<Utc>) {
+    let f = fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::from(ts)).unwrap();
+}
+
+/// Why: issue #5072 — a hand-written snapshot such as
+/// `session-20260730-bounce.md` has a filename that `parse_filename_timestamp`
+/// cannot decode, and before the fix `paused_at` was left `None` forever. That
+/// made the record undatable, which in turn made the watermark filter admit it
+/// unconditionally (see `filter_sessions_since_drops_undatable_session`).
+/// What: writes an undated snapshot, stamps a known mtime, and asserts the
+/// parser recovers that instant.
+/// Test: itself.
+#[test]
+fn parse_falls_back_to_mtime_when_filename_lacks_timestamp() {
+    let tmp = TempDir::new().unwrap();
+    let p = write_file(tmp.path(), "session-20260730-bounce.md", "# Hand written\n");
+    let expected: DateTime<Utc> = "2026-07-30T14:55:00Z".parse().unwrap();
+    set_mtime(&p, expected);
+
+    match parse_trusty_mpm_session(&p).unwrap() {
+        PausedSession::TrustyMpm { paused_at, .. } => {
+            assert_eq!(
+                paused_at,
+                Some(expected),
+                "an undated filename must fall back to the file's mtime"
+            );
+        }
+        other => panic!("expected TrustyMpm, got {other:?}"),
+    }
+}
+
+/// Why: issue #5072 — with `paused_at` stuck at `None`, an undated snapshot
+/// sorted LAST regardless of how recent it actually was, so the newest-first
+/// digest misordered it.
+/// What: an undated snapshot with a NEWER mtime than a well-formed dated one
+/// must sort first.
+/// Test: itself.
+#[test]
+fn find_orders_undated_snapshot_by_mtime() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+    fs::create_dir_all(&sdir).unwrap();
+    write_file(&sdir, "session-20260101-000000.md", "## Summary\nold");
+    let undated = write_file(&sdir, "session-rescue.md", "# Hand written\n");
+    set_mtime(&undated, "2026-06-01T00:00:00Z".parse().unwrap());
+
+    let sessions = find_paused_sessions(tmp.path()).unwrap();
+    assert_eq!(sessions.len(), 2);
+    match &sessions[0] {
+        PausedSession::TrustyMpm { path, .. } => {
+            assert_eq!(
+                path.file_name().unwrap(),
+                "session-rescue.md",
+                "the undated-but-newer snapshot must sort first"
+            );
+        }
+        other => panic!("expected TrustyMpm, got {other:?}"),
+    }
+}
+
+/// A genuinely undatable session: no file behind it, so no mtime to fall back
+/// on, and an unparseable recorded timestamp. This is the ONLY shape that
+/// still yields `sort_key() == None` after #5072 — a session read from disk
+/// always has an mtime.
+fn undatable_session() -> PausedSession {
+    let s = PausedSession::ClaudeMpm {
+        session: ClaudeMpmSession {
+            paused_at: Some("not-a-timestamp".to_string()),
+            source_mtime: None,
+            ..Default::default()
+        },
+    };
+    assert!(
+        s.sort_key().is_none(),
+        "fixture must actually be undatable, or the tests below prove nothing"
+    );
+    s
+}
+
+fn dated_session(ts: &str) -> PausedSession {
+    PausedSession::ClaudeMpm {
+        session: ClaudeMpmSession {
+            paused_at: Some(ts.to_string()),
+            ..Default::default()
+        },
+    }
+}
+
+/// Why: issue #5072 — `filter(|s| s.sort_key().is_none_or(|ts| ts > wm))`
+/// admitted every session whose timestamp could not be derived, so the ONE
+/// record that survived a recent watermark was the undatable one while every
+/// genuinely recent snapshot was dropped.
+/// What: a session with no derivable timestamp is excluded from a
+/// watermark-filtered result, and a session newer than the watermark is kept.
+/// Test: itself.
+#[test]
+fn filter_sessions_since_drops_undatable_session() {
+    let wm: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().unwrap();
+    let out = filter_sessions_since(
+        vec![undatable_session(), dated_session("2026-08-06T21:13:05Z")],
+        Some(wm),
+    );
+    assert_eq!(
+        out.kept.len(),
+        1,
+        "only the datable, newer-than-watermark session survives"
+    );
+    assert_eq!(
+        out.kept[0].sort_key(),
+        Some("2026-08-06T21:13:05Z".parse::<DateTime<Utc>>().unwrap())
+    );
+}
+
+/// Why: the watermark advances past a withheld session and never returns for
+/// it, so the count is a receipt the caller must receive — a stderr warning is
+/// invisible to an MCP client reading a JSON body (#5072).
+/// What: two undatable sessions and one that merely predates the watermark;
+/// only the two undatable ones are counted, and one datable session is kept.
+/// Test: itself.
+#[test]
+fn filter_sessions_since_reports_dropped_count() {
+    let wm: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().unwrap();
+    let out = filter_sessions_since(
+        vec![
+            undatable_session(),
+            undatable_session(),
+            dated_session("2026-07-01T00:00:00Z"), // too old — not "undatable"
+            dated_session("2026-08-06T21:13:05Z"),
+        ],
+        Some(wm),
+    );
+    assert_eq!(out.kept.len(), 1);
+    assert_eq!(
+        out.dropped_undatable, 2,
+        "only undatable exclusions are counted, never merely-too-old ones"
+    );
+}
+
+/// Why: `full=true` (no watermark) must never drop anything — the fail-closed
+/// rule above applies only when there is a watermark to compare against.
+/// What: with `None` as the watermark, both sessions survive and nothing is
+/// reported as withheld.
+/// Test: itself.
+#[test]
+fn filter_sessions_since_keeps_everything_without_watermark() {
+    let out = filter_sessions_since(
+        vec![undatable_session(), dated_session("2026-08-06T21:13:05Z")],
+        None,
+    );
+    assert_eq!(out.kept.len(), 2);
+    assert_eq!(out.dropped_undatable, 0);
+}
+
+/// Why: fail-closed filtering applies to BOTH `PausedSession` variants, but the
+/// #5072 mtime rescue initially covered only `TrustyMpm`. A claude-mpm JSON
+/// carrying nothing but `session_id` deserialises with `paused_at: None`
+/// (`roundtrip_partial_json_uses_defaults` pins that), so it would have gone
+/// from "appears in every digest" straight to "silently withheld from all of
+/// them" — a regression on the arm the fix did not rescue.
+/// What: loads such a file through the real loader and asserts it survives a
+/// watermark it postdates, dated by its mtime.
+/// Test: itself.
+#[test]
+fn claude_mpm_session_with_no_paused_at_is_dated_by_mtime() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".claude-mpm").join("sessions");
+    fs::create_dir_all(&sdir).unwrap();
+    let p = write_file(
+        &sdir,
+        "session-legacy.json",
+        r#"{"session_id":"legacy-only-id"}"#,
+    );
+    set_mtime(&p, "2026-08-06T21:13:05Z".parse().unwrap());
+
+    let sessions = find_paused_sessions(tmp.path()).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].sort_key(),
+        Some("2026-08-06T21:13:05Z".parse::<DateTime<Utc>>().unwrap()),
+        "a claude-mpm session with no paused_at must be dated by its file mtime"
+    );
+
+    let wm: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().unwrap();
+    let out = filter_sessions_since(sessions, Some(wm));
+    assert_eq!(
+        out.kept.len(),
+        1,
+        "and must survive a watermark it postdates"
+    );
+    assert_eq!(out.dropped_undatable, 0);
+}

@@ -497,14 +497,17 @@ pub fn check_secret(content: &str) -> Result<(), FilterReject> {
 /// Known credential prefixes that should always be treated as secrets.
 ///
 /// Why (issue #1481): provider-issued keys (OpenAI `sk-`, GitHub `ghp_`/`gho_`,
-/// AWS `AKIA`/`ASIA`, Slack `xoxb-`) have distinctive prefixes that make them
-/// unambiguously secret regardless of their entropy profile. Matching the
-/// prefix is cheaper and more precise than entropy alone — and it is the ONLY
-/// thing that catches AWS access key IDs, which are all-uppercase base32 and so
-/// never satisfy the mixed-case-plus-digit fallback in [`looks_like_secret`]
-/// (FN-1, issue #1481).
+/// Slack `xoxb-`) have distinctive prefixes that make them unambiguously secret
+/// regardless of their entropy profile. Matching the prefix is cheaper and more
+/// precise than entropy alone.
+///
+/// Every entry here carries punctuation an English word never does, which is why
+/// [`SECRET_MIN_LEN`] is sufficient protection for this list. AWS `AKIA`/`ASIA`
+/// used to live here and is not (issue #4898) — it is four bare letters, so it
+/// needs a shape check; see [`AWS_KEY_ID_PREFIXES`].
 /// What: lowercased prefix list checked case-insensitively in
-/// [`looks_like_secret`] (which lowercases the token before comparing).
+/// [`looks_like_secret`] (which lowercases the token before comparing), after
+/// the [`SECRET_MIN_LEN`] floor.
 /// Test: `known_key_prefixes_are_blocked`, `aws_access_key_ids_are_blocked`.
 const SECRET_PREFIXES: &[&str] = &[
     "sk-",
@@ -514,12 +517,84 @@ const SECRET_PREFIXES: &[&str] = &[
     "github_pat_",
     "xoxb-",
     "xoxp-",
-    // AWS long-term access key IDs (`AKIA…`) and STS temporary credential IDs
-    // (`ASIA…`): 4-char prefix + 16 base32 chars `[A-Z2-7]`, ALL-UPPERCASE, so
-    // the mixed-case heuristic below can never flag them. Compared lowercased.
-    "akia",
-    "asia",
 ];
+
+/// AWS access key ID prefixes — long-term (`AKIA…`) and STS temporary
+/// credentials (`ASIA…`).
+///
+/// Why these are separated from [`SECRET_PREFIXES`] (issue #4898): every other
+/// entry there carries punctuation (`-`, `_`) that no English word contains, so
+/// a bare length floor is enough to keep prose out. `akia`/`asia` do not — they
+/// were compared case-insensitively against a lowercased token, so `Asia` (the
+/// continent, 4 characters) matched, and `Asia-Pacific` and
+/// `asia-pacific-rollout-notes` matched at any length. Matching the AWS *shape*
+/// instead of a lowercased prefix removes that whole class rather than pushing
+/// it past a length threshold.
+/// What: uppercase prefixes, compared against the token verbatim by
+/// [`is_aws_access_key_id`].
+/// Test: `aws_access_key_ids_are_blocked`,
+/// `three_4898_reproductions_are_not_flagged`.
+const AWS_KEY_ID_PREFIXES: &[&str] = &["AKIA", "ASIA"];
+
+/// True when `token` OPENS with an AWS access key ID: an
+/// [`AWS_KEY_ID_PREFIXES`] prefix followed by uppercase-alphanumeric characters
+/// for the full [`SECRET_MIN_LEN`] of a key id. Whatever follows those 20
+/// characters is not examined.
+///
+/// Why (issue #4898): AWS key IDs are all-uppercase base32 (`[A-Z2-7]`), exactly
+/// 20 characters for `AKIA…`, so the mixed-case heuristic can never flag them
+/// and this layer is their only detector (FN-1, issue #1481).
+///
+/// Why it is a PREFIX predicate and not a whole-token one (#4898 review round
+/// 1): the first cut of this function required the ENTIRE token to be
+/// uppercase-alphanumeric, which lost AWS detection completely for any key with
+/// an adjacent character. `AKIAIOSFODNN7EXAMPLE-old` fell through to
+/// [`is_structural_token`], whose segmented-identifier branch rescued it
+/// (`AKIAIOSFODNN7EXAMPLE` and `old` are both case-uniform words), and the
+/// mixed-case branch then could not fire because `has_lower` is false. Measured
+/// FLAG -> MISS, including on AWS's own canonical key-id/secret-key pair
+/// `AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`. The
+/// predicate this replaced (`lower.starts_with("akia")`) was a prefix test, and
+/// converting it to a whole-token shape test is what the structural bypass
+/// defeated. Looking at the first 20 bytes only restores prefix semantics while
+/// keeping the shape check that excludes `Asia`, `Asia-Pacific` and
+/// `ASIA-PACIFIC-ROLLOUT-NOTES` (whose fifth byte is `-`).
+/// What: length floor, case-sensitive prefix match, then a charset check over
+/// the first [`SECRET_MIN_LEN`] bytes only.
+/// Test: `aws_access_key_ids_are_blocked`,
+/// `aws_key_ids_with_adjacent_text_are_blocked`,
+/// `real_secrets_still_blocked_after_4898_narrowing`,
+/// `known_accepted_bounds_after_4898`.
+fn is_aws_access_key_id(token: &str) -> bool {
+    token.len() >= SECRET_MIN_LEN
+        && AWS_KEY_ID_PREFIXES.iter().any(|p| token.starts_with(p))
+        // #4898 review: `.take(SECRET_MIN_LEN)`, not `.all()` over the token —
+        // one neighbouring character must not disable AWS detection.
+        && token
+            .bytes()
+            .take(SECRET_MIN_LEN)
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Minimum token length before [`looks_like_secret`] will call anything a
+/// credential.
+///
+/// Why (issue #4898): this floor existed as a bare `20` literal placed AFTER the
+/// prefix test, so it governed the entropy branches only. A four-character token
+/// equal to a prefix entry was flagged regardless of length — four characters
+/// cannot be a credential. Naming the constant and moving the check above the
+/// prefix test makes the floor apply to every detection path.
+///
+/// Why 20 does not cost detection: no issuer behind a [`SECRET_PREFIXES`] entry
+/// mints a token under 20 characters — `ghp_` is 40, `github_pat_` 93, `xoxb-`
+/// 50+, `sk-` issuers 35+ — and AWS key ids are exactly 20. The one shape the
+/// floor does drop is a self-hosted proxy key that copies a provider prefix
+/// without its length, such as LiteLLM's documented `sk-1234` master key
+/// (verified in review round 1).
+/// What: inclusive minimum token length.
+/// Test: `three_4898_reproductions_are_not_flagged`,
+/// `real_secrets_still_blocked_after_4898_narrowing`.
+const SECRET_MIN_LEN: usize = 20;
 
 /// Characters that separate the words of a human-readable compound identifier.
 ///
@@ -532,9 +607,12 @@ const SECRET_PREFIXES: &[&str] = &[
 ///
 /// Why this does not widen the base64 branch: [`is_structural_token`] returns
 /// before reaching its segmented-identifier branch whenever the token contains
-/// `+`, `=`, or `/` — which is precisely the `has_b64_sym` set. The segmented
-/// branch is therefore reachable only for tokens the base64 branch can never
-/// fire on, so this delimiter set is confined to the mixed-case branch.
+/// `=` or `/`, and a `+`-bearing token is diverted to
+/// [`is_plus_joined_word_phrase`] — which applies this same delimiter set plus a
+/// word-length floor. The segmented branch proper is therefore reachable only
+/// for tokens the base64 branch can never fire on. (Before #4898 the `+` case
+/// was a flat rejection; the divert is what closed the `PM+instructions+
+/// subagents` false positive without loosening `=` or `/`.)
 /// What: the delimiter set `-`, `_`, `.` used by both `contains` and `split`.
 /// Test: `dotted_capitalised_filenames_are_not_flagged`.
 const IDENTIFIER_DELIMITERS: [char; 3] = ['-', '_', '.'];
@@ -557,9 +635,38 @@ const IDENTIFIER_DELIMITERS: [char; 3] = ['-', '_', '.'];
 /// The bound this predicate actually holds, stated exactly because a reader
 /// will rely on it and because #4723 shipped an absolute here that a
 /// measurement disproved: a segment that is not uniformly uppercase admits **at
-/// most one uppercase letter, and only as its first letter**. That is what
-/// keeps the run-of-two case alternation of an encoded blob (`AbCd`, `EfGh`)
-/// out — two uppercase letters in a non-uppercase segment is disqualifying.
+/// most one uppercase letter, in any position**. That is what keeps the
+/// run-of-two case alternation of an encoded blob (`AbCd`, `EfGh`) out — two
+/// uppercase letters in a non-uppercase segment is disqualifying.
+///
+/// Why the position constraint was dropped (issue #4898, the SIXTH recurrence):
+/// #4739 admitted a capital only in FIRST position, so the git branch name
+/// `fix-3696-slice1-gapA-emit` failed on the segment `gapA` — a lowercase word
+/// with one trailing capital, the ordinary way engineers label a variant
+/// (`gapA`, `partB`, `phase2B`). The count is what does the discriminating work,
+/// not the position: `AbCd` and `xYzAbc` carry two capitals either way and stay
+/// out.
+///
+/// KNOWN RESIDUAL MISS, measured, carried deliberately (#4898 review round 1):
+/// the earlier revision of this doc claimed the relaxation admits a shape "no
+/// encoded alphabet produces at segment scale". That is false for base64url,
+/// which encodes with `-` and `_` — so its tokens arrive already split into 4–8
+/// character segments, exactly the scale at which "at most one capital" is cheap
+/// to satisfy by chance. `9h6Nn6_ivJd6vmb-xEk4` is real
+/// `base64url(urandom(15))` output and flipped FLAG -> MISS on this change. Cost
+/// against `origin/main` over a fixed 300k-sample corpus: 453 additional misses
+/// at 15 input bytes, 210 at 16, 48 at 20, 6 at 24, 0 at 32 — it decays to
+/// nothing as tokens lengthen, because more segments means more chances for one
+/// to carry two capitals.
+///
+/// Why it is not closed here: the narrowing that would close it — refusing a
+/// non-first capital in any segment that also carries a digit — takes `phase2B`
+/// with it, and `slice1`/`gapA` sit either side of that line in the very branch
+/// name this issue is about. Closing it properly is the structural rewrite this
+/// PR defers (see the PR body); a carve-out would be the seventh round of the
+/// same mistake. Pinned as a ratchet in
+/// `generated_encoder_corpus_stays_flagged` so the number cannot drift
+/// unnoticed.
 ///
 /// The ACCEPTED side of that bound, stated because the rejected side alone
 /// would read as a stronger guarantee than this predicate gives: what
@@ -597,34 +704,35 @@ const IDENTIFIER_DELIMITERS: [char; 3] = ['-', '_', '.'];
 /// signature of `AbCdEfGhIjKlMnOpQrSt-1234` — a credential miss. Measured, not
 /// assumed; see the residue assertion in the test below.
 /// What: strips leading/trailing non-alnum chars (arrow punctuation like `>`,
-/// `<`), then accepts when the alphabetic characters are all-lowercase,
-/// all-uppercase, or a single leading uppercase followed by lowercase. Interior
-/// non-alphanumeric characters are ignored rather than rejected — this
-/// predicate constrains case, not charset.
+/// `<`), then accepts when the alphabetic characters are all-uppercase, or carry
+/// at most one uppercase letter anywhere. Interior non-alphanumeric characters
+/// are ignored rather than rejected — this predicate constrains case, not
+/// charset.
 /// Test: `structural_tokens_are_not_flagged`,
 /// `dotted_capitalised_filenames_are_not_flagged`,
 /// `real_secrets_still_blocked_after_4739_capitalised_segments`,
-/// `per_segment_case_uniformity_is_a_known_accepted_bound`.
+/// `per_segment_case_uniformity_is_a_known_accepted_bound`,
+/// `three_4898_reproductions_are_not_flagged`,
+/// `real_secrets_still_blocked_after_4898_narrowing`.
 fn is_human_word_segment(seg: &str) -> bool {
     let s = seg.trim_matches(|c: char| !c.is_ascii_alphanumeric());
     if s.is_empty() {
         return false;
     }
-    let alphas: Vec<char> = s.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    let uppers = s.chars().filter(|c| c.is_ascii_uppercase()).count();
+    let lowers = s.chars().filter(|c| c.is_ascii_lowercase()).count();
     // Digit-only segments are case-neutral (`20260729`, `000028`).
-    let Some((first, rest)) = alphas.split_first() else {
+    if uppers == 0 {
         return true;
-    };
-    let rest_all_lower = rest.iter().all(|c| c.is_ascii_lowercase());
-    let rest_all_upper = rest.iter().all(|c| c.is_ascii_uppercase());
-    // #4739: `lowercase` | `UPPERCASE` | `Capitalized`. A leading uppercase may
-    // be followed by either case run (Capitalized or ALL-UPPERCASE); a leading
-    // lowercase may only be followed by lowercase.
-    if first.is_ascii_uppercase() {
-        rest_all_lower || rest_all_upper
-    } else {
-        rest_all_lower
     }
+    // #4739: ALL-UPPERCASE (`REQUEST_CHANGES`) is a word.
+    if lowers == 0 {
+        return true;
+    }
+    // #4898: one capital anywhere — `Capitalized`, `gapA`, `phase2B`. Two or
+    // more in a mixed-case segment is run-of-two alternation (`AbCd`), the
+    // signature of an encoded blob.
+    uppers == 1
 }
 
 /// True when `token` looks like a compound identifier whose delimiter-separated
@@ -647,6 +755,91 @@ fn is_human_word_segment(seg: &str) -> bool {
 /// rejects the empty segment a trailing delimiter produces).
 /// Test: `structural_tokens_are_not_flagged`,
 /// `dotted_capitalised_filenames_are_not_flagged`.
+/// Minimum alphabetic length one segment of a `+`-joined token must reach
+/// before [`is_plus_joined_word_phrase`] will call the token prose.
+///
+/// Why (issue #4898): `+` is base64's own symbol, so per-segment case uniformity
+/// alone is too weak a signal there — `A+DIA+DIA+DIA+…` is case-uniform in every
+/// segment and is a base64 blob. Requiring one segment to reach word length is
+/// what separates it from `PM+instructions+subagents` (longest segment 12).
+/// Five is the shortest length at which an English word carries enough letters
+/// to be one; the repro's shortest content word (`agents`, `skills`) is six.
+/// What: inclusive minimum count of ASCII alphabetic characters in the longest
+/// segment.
+/// Test: `real_secrets_still_blocked_after_4898_narrowing` (the `base64 with +`
+/// entry is what this constant keeps flagged).
+const MIN_PHRASE_WORD_LEN: usize = 5;
+
+/// True when `token` is a `+`-joined phrase of human-readable words, e.g.
+/// `PM+instructions+subagents`.
+///
+/// Why (issue #4898): [`is_structural_token`] rejected every `+`-bearing token
+/// outright on the reasoning that "`+` is unambiguously base64". It is not — `+`
+/// is also how prose joins terms into a compound label, and the resulting token
+/// went straight to the base64 branch of [`looks_like_secret`], where the
+/// `has_upper || has_digit` entropy floor was satisfied by any capitalised word
+/// in the phrase. The doc on [`is_plausible_b64_charset`] already named this as
+/// an accepted residual gap; this predicate closes it.
+///
+/// Why every segment must be purely alphanumeric: [`is_human_word_segment`]
+/// constrains case, not charset — it trims the ends of a segment and ignores
+/// interior punctuation. Without a charset requirement here, `token=A+DIA+DIA+…`
+/// yields the segment `token=A` (one capital, six letters) and
+/// `mongodb+srv://svcuser:hunterhunter@cluster.mongodb.net` yields
+/// `srv://svcuser:hunterhunter@cluster` (all lowercase), so a `key=`-prefixed
+/// base64 blob and a mongo connection string both passed.
+///
+/// Why every segment must additionally be pure-alphabetic OR pure-digit (#4898
+/// review round 1): the first cut argued that base64's `+` density of ~1.6%
+/// makes its `+`-separated runs "average tens of characters and cannot be
+/// case-uniform". That reasoning fails at the 20-char floor, where a token is
+/// short enough for every run to be short. `base64::encode(urandom(15))` yields
+/// shapes like `j1u7nJd+tvZers+wdZyr` whose segments each carry exactly one
+/// capital, and `j1u7nJd` clears [`MIN_PHRASE_WORD_LEN`] on its own. Measured on
+/// a generated corpus, that cost 152 misses per 300k at 15 input bytes, 72 at
+/// 16, 11 at 20. Requiring each segment to be uniformly alphabetic or uniformly
+/// numeric takes it to 1–2 per 300k, because encoder output interleaves letters
+/// and digits inside a run while a `+`-joined phrase never does — `PM`,
+/// `instructions`, `milestone`, `1`, `3`, `5` are each uniform.
+///
+/// Known accepted bound: a `+`-joined token whose segments are case-uniform,
+/// character-class-uniform AND word-length is admitted without any dictionary
+/// check — `Abcdefgh+Ijklmnop+Qrstuvwx` passes. This is the same class of bound
+/// [`is_human_word_segment`] already documents.
+/// What: splits on [`IDENTIFIER_DELIMITERS`] plus `+`, requires at least two
+/// segments, every segment non-empty, ASCII-alphanumeric, uniformly alphabetic
+/// or uniformly numeric, and a [`is_human_word_segment`]; plus one segment
+/// holding at least [`MIN_PHRASE_WORD_LEN`] alphabetic characters.
+/// Test: `three_4898_reproductions_are_not_flagged`,
+/// `real_secrets_still_blocked_after_4898_narrowing`,
+/// `generated_encoder_corpus_stays_flagged`,
+/// `known_accepted_bounds_after_4898`.
+fn is_plus_joined_word_phrase(token: &str) -> bool {
+    let segments: Vec<&str> = token
+        .split(|c: char| c == '+' || IDENTIFIER_DELIMITERS.contains(&c))
+        .collect();
+    if segments.len() < 2 {
+        return false;
+    }
+    let segment_is_wordlike = |s: &&str| {
+        // #4898: charset first — a segment carrying `=`, `:`, `/` or `@` is not
+        // a word, and `is_human_word_segment` would not notice.
+        !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_alphanumeric())
+            // #4898 review: uniformly alphabetic or uniformly numeric. A run
+            // that interleaves letters and digits is encoder output, not a word.
+            && (s.chars().all(|c| c.is_ascii_alphabetic())
+                || s.chars().all(|c| c.is_ascii_digit()))
+            && is_human_word_segment(s)
+    };
+    if !segments.iter().all(segment_is_wordlike) {
+        return false;
+    }
+    segments
+        .iter()
+        .any(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).count() >= MIN_PHRASE_WORD_LEN)
+}
+
 fn is_segmented_identifier(token: &str) -> bool {
     if !token.contains(IDENTIFIER_DELIMITERS) {
         return false;
@@ -672,27 +865,35 @@ fn is_segmented_identifier(token: &str) -> bool {
 /// This function recognises those structural shapes and short-circuits the
 /// two dangerous branches in `looks_like_secret`.
 ///
-/// How the three branches divide the work (issue #4739): branches (a) and (b)
-/// fire only on tokens carrying `=` or `/`, and branch (a)'s `+` guard returns
-/// first — so (a) and (b) are the ones that can rescue a token from the base64
-/// branch. Branch (c) is reachable only after all of `+`, `=` and `/` are ruled
-/// out, i.e. only for tokens on which `has_b64_sym` is false, so it serves the
-/// mixed-case branch exclusively. That partition is why a fix to (c) cannot
+/// How the branches divide the work (issue #4739, amended #4898): the `+` guard
+/// returns first and decides `+`-bearing tokens on its own via
+/// [`is_plus_joined_word_phrase`]. Branches (a) and (b) then fire only on tokens
+/// carrying `=` or `/`, so they are the ones that can rescue a token from the
+/// base64 branch. Branch (c) is reachable only after all of `+`, `=` and `/` are
+/// ruled out, i.e. only for tokens on which `has_b64_sym` is false, so it serves
+/// the mixed-case branch exclusively. That partition is why a fix to (c) cannot
 /// loosen base64 detection.
-/// What: returns `true` for (a) `=`-containing tokens where the LHS is a
-/// word segment and the RHS is itself structural (a word segment OR a
-/// slash-path), checked before the slash-path branch so that tokens like
-/// `key=path/to/value` are decomposed at `=` first; (b) slash-path tokens
-/// where every `/`-segment is word-like; or (c) `-`/`_`/`.`-segmented compound
-/// identifiers where each segment is a single human-readable word. A token with
-/// `+` is never structural (`+` never appears in identifiers).
+/// What: returns `true` for `+`-bearing tokens that are `+`-joined word phrases
+/// (checked first, and the only way a `+` token can be structural); (a)
+/// `=`-containing tokens where the LHS is a word segment and the RHS is itself
+/// structural (a word segment OR a slash-path), checked before the slash-path
+/// branch so that tokens like `key=path/to/value` are decomposed at `=` first;
+/// (b) slash-path tokens where every `/`-segment is word-like; or (c)
+/// `-`/`_`/`.`-segmented compound identifiers where each segment is a single
+/// human-readable word.
 /// Test: `structural_tokens_are_not_flagged`, `base64_blob_is_blocked`,
 /// `key_equals_slashpath_not_flagged` (issue #1676 regression tests),
-/// `dotted_capitalised_filenames_are_not_flagged` (issue #4739).
+/// `dotted_capitalised_filenames_are_not_flagged` (issue #4739),
+/// `three_4898_reproductions_are_not_flagged` (issue #4898).
 fn is_structural_token(token: &str) -> bool {
-    // `+` is unambiguously base64 — no structural pattern uses it.
+    // #4898: a `+`-bearing token is decided here and nowhere else — it is
+    // structural only when it reads as a `+`-joined word phrase. Keeping the
+    // early return (rather than letting `+` tokens fall through to branches (a)
+    // and (b)) confines the change to this one shape: branch (a)'s `is_word_
+    // segment(lhs) || is_word_segment(rhs)` fallback would otherwise exempt
+    // `foo=<base64-with-plus>` on the strength of the `foo` alone.
     if token.contains('+') {
-        return false;
+        return is_plus_joined_word_phrase(token);
     }
     // A "word segment" for slash/equals splitting: non-empty, contains only
     // ASCII alphanumeric chars plus the minimal set of punctuation that
@@ -771,9 +972,10 @@ fn is_structural_token(token: &str) -> bool {
 /// Why (issue #1481): see [`find_secret_token`]. This is the core decision —
 /// it must say "no" to git SHAs and "yes" to credentials.
 /// What: returns `false` immediately for [`is_git_sha_like`] tokens (the
-/// allowlist), then returns `true` when the token (a) carries a known
-/// [`SECRET_PREFIXES`] credential prefix (e.g. `sk-`, `ghp_`, AWS `AKIA`/`ASIA`),
-/// or (b) is long (≥ 20 chars) AND is not a structural token (see
+/// allowlist) and for anything below [`SECRET_MIN_LEN`], then returns `true`
+/// when the token (a) carries a known [`SECRET_PREFIXES`] credential prefix
+/// (e.g. `sk-`, `ghp_`) or has the AWS key-id shape ([`is_aws_access_key_id`]),
+/// or (b) is not a structural token (see
 /// [`is_structural_token`]) AND mixes character classes in a way SHAs cannot
 /// — i.e. contains BOTH a lowercase and an uppercase letter plus a digit, or
 /// contains a base64-indicator symbol (`+`) or an `=`/`/` that is NOT part of
@@ -802,13 +1004,14 @@ fn looks_like_secret(token: &str) -> bool {
     if is_issue_number_list(token) {
         return false;
     }
-    let lower = token.to_ascii_lowercase();
-    if SECRET_PREFIXES.iter().any(|p| lower.starts_with(p)) {
-        return true;
-    }
-    // Below the length floor, entropy is too low to confidently flag.
-    if token.len() < 20 {
+    // #4898: the length floor now runs BEFORE the prefix test. It used to run
+    // after, so a 4-char token equal to a prefix (`Asia`) was flagged.
+    if token.len() < SECRET_MIN_LEN {
         return false;
+    }
+    let lower = token.to_ascii_lowercase();
+    if SECRET_PREFIXES.iter().any(|p| lower.starts_with(p)) || is_aws_access_key_id(token) {
+        return true;
     }
     // Issue #1667: structural tokens (paths, slugs, key=value pairs, and
     // hyphen-segmented compound identifiers) must not be flagged as secrets
@@ -840,8 +1043,8 @@ fn looks_like_secret(token: &str) -> bool {
     // so requiring BOTH cases plus a digit excludes them while catching the
     // typical `AbCd12…` / JWT-segment shapes. NOTE (FN-1, issue #1481): this
     // does NOT catch AWS access key IDs — `AKIAIOSFODNN7EXAMPLE` is // pragma: allowlist secret
-    // all-uppercase base32 (`has_lower == false`), so it relies entirely on the
-    // `akia`/`asia` entries in SECRET_PREFIXES above.
+    // all-uppercase base32 (`has_lower == false`), so it relies entirely on
+    // `is_aws_access_key_id` above (#4898 moved that out of SECRET_PREFIXES).
     //
     // Issue #2442: this fallback used to fire on ANY ≥20-char token that
     // mixed case + digit, regardless of what other punctuation it carried.
@@ -924,9 +1127,12 @@ fn is_issue_number_list(token: &str) -> bool {
 ///
 /// Known bound: a token built only from this charset still reaches the branch,
 /// so a hyphen/plus-joined English phrase such as `ticker+shutdown-channel`
-/// remains a false positive. The second gate is what resolves it — the
-/// `has_upper || has_digit` entropy floor in [`looks_like_secret`], with
-/// [`is_url_credential_shaped`] exempting connection strings from that floor.
+/// depends on a second gate. That gate is the `has_upper || has_digit` entropy
+/// floor in [`looks_like_secret`], with [`is_url_credential_shaped`] exempting
+/// connection strings from it. The floor covers the all-lowercase case only,
+/// which left `PM+instructions+subagents` flagged — issue #4898 closed that
+/// residue upstream instead, in [`is_plus_joined_word_phrase`], so a
+/// `+`-joined phrase is now rescued before it reaches this branch at all.
 /// What: returns `true` iff every char is ASCII alphanumeric or in
 /// `{'+', '/', '=', '-', '_', '.', ':', '@'}`.
 /// Test: `four_4312_acceptance_cases_are_not_flagged`,

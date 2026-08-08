@@ -485,6 +485,8 @@ impl GitBackend for RealGitBackend {
                 branch = %branch_name,
                 "per-session worktree created"
             );
+            // #5060: index at creation, fire-and-forget — `core::worktree_index`.
+            crate::core::worktree_index::index_new_worktree_in_background(worktree_path.into());
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&out.stderr);

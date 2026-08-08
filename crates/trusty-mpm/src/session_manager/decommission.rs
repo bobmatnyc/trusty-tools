@@ -14,6 +14,8 @@
 
 use std::path::Path;
 
+use chrono::Utc;
+
 use tracing::{info, warn};
 
 use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
@@ -531,7 +533,9 @@ impl SessionManager {
         // would sit in the human-confirmation queue forever.
         record.pending_decision = None;
         record.proposed_default = None;
-        record.state = ManagedSessionState::Decommissioned;
+        // Stamps `terminal_at` as well as `state` — the retention sweep's clock
+        // starts here, not at `created_at`.
+        record.set_lifecycle_state(ManagedSessionState::Decommissioned, Utc::now());
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session record tombstoned (record-only)");
         Ok((record, false))
@@ -816,7 +820,9 @@ impl SessionManager {
         // dirty-worktree-refused teardown — all reach this line).
         record.pending_decision = None;
         record.proposed_default = None;
-        record.state = ManagedSessionState::Decommissioned;
+        // Stamps `terminal_at` as well as `state` — the retention sweep's clock
+        // starts here, not at `created_at`.
+        record.set_lifecycle_state(ManagedSessionState::Decommissioned, Utc::now());
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
         Ok((record, workspace_removed))

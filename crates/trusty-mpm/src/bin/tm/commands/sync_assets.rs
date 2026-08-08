@@ -7,7 +7,7 @@
 //! deployment is one-shot at launch, so a long-lived session's deployed
 //! `.claude/{agents,skills}` never re-syncs when the bundled/catalog source
 //! changes underneath it — `tm sessions ls`'s `[stale-assets]` marker (see
-//! `commands::managed::format_state_column`) flags exactly this. These two
+//! `commands::managed_render::format_state_column`) flags exactly this. These two
 //! functions are the fix.
 //! What: [`session_sync_assets`] POSTs the per-session daemon route
 //! (resolving `id_or_name` to a managed id via

@@ -51,8 +51,10 @@ use crate::core::paths::FrameworkPaths;
 /// under the agent source directory (`<agents_dir>/.bundle-stamp`).
 ///
 /// Mirrors `skill_source::STAMP_FILE_NAME`; hidden (leading `.`) so the prune
-/// sweep never considers it a stale agent.
-const STAMP_FILE_NAME: &str = ".bundle-stamp";
+/// sweep never considers it a stale agent. `pub(crate)` so a test can pin a
+/// hand-seeded agent source as already-current and stop the self-heal
+/// materializing the real compiled-in bundle over it.
+pub(crate) const STAMP_FILE_NAME: &str = ".bundle-stamp";
 
 /// Outcome of one [`autodeploy_agents`] run.
 ///
@@ -291,7 +293,7 @@ fn deploy_into(source_dir: &Path, target_dir: &Path, out: &mut AgentAutodeploy) 
 /// What: a shallow read of `dir`, ignoring hidden entries. A read error (absent
 /// or unreadable) counts as empty. Test:
 /// `autodeploy_agents_for_falls_back_when_the_submodule_is_empty`.
-fn has_agent_markdown(dir: &Path) -> bool {
+pub(crate) fn has_agent_markdown(dir: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };

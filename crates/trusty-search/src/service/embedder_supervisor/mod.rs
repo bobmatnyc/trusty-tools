@@ -206,10 +206,12 @@ pub fn locate_embedderd_binary() -> anyhow::Result<PathBuf> {
 ///
 /// Why: if two daemons share a single socket path, the second spawn would
 /// fail with "address already in use". Using the parent PID disambiguates.
-/// What:
-///   - macOS/Linux: `$TMPDIR/trusty-embedderd-<PID>.sock`
-///   - Falls back to `/tmp/trusty-embedderd-<PID>.sock` when `TMPDIR` is
-///     empty (common on headless Linux).
+/// What: `<$TMPDIR or /tmp>/trusty-<uid>/trusty-embedderd-<PID>.sock`.
+///
+/// #5099: the socket used to sit directly in `$TMPDIR`, falling back to a
+/// world-writable `/tmp` on headless Linux. The uid-keyed subdirectory from
+/// [`trusty_common::uds::scratch_socket_dir`] is what the daemon holds at
+/// `0700`; the PID keeps concurrent daemons from colliding inside it.
 ///
 /// Note: this path is used for the UDS transport
 /// (`TRUSTY_EMBEDDER=unix:/path`). The default auto-spawn path uses the
@@ -217,15 +219,7 @@ pub fn locate_embedderd_binary() -> anyhow::Result<PathBuf> {
 /// Test: `default_socket_path_is_pid_specific`.
 pub fn default_socket_path() -> PathBuf {
     let pid = std::process::id();
-    let filename = format!("trusty-embedderd-{pid}.sock");
-
-    let dir = std::env::var("TMPDIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-
-    dir.join(filename)
+    trusty_common::uds::scratch_socket_dir().join(format!("trusty-embedderd-{pid}.sock"))
 }
 
 // ── Lazy spawn handle (issue #315) ───────────────────────────────────────────

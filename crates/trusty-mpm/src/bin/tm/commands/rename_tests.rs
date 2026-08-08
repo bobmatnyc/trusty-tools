@@ -233,3 +233,50 @@ async fn do_rename_request_reports_plain_success() {
         .expect("rename succeeds");
     assert_eq!(msg, "renamed sess-1 -> tm-new");
 }
+
+#[tokio::test]
+async fn do_rename_request_surfaces_daemon_500_body() {
+    // #5001, live repro: `sessions.json` was corrupt, so `SessionManager::rename`
+    // failed at `store.all()` and the route's unmapped-error arm returned 500
+    // with the reason IN THE BODY. The CLI called `error_for_status()`, which
+    // DISCARDS the body, so the operator saw only:
+    //   "HTTP status server error (500 Internal Server Error) for url (…)"
+    // The body text — the only actionable part — must reach the error message.
+    // This is the exact body the live daemon returned (verified by curl).
+    let body = "store error: session store serialization error: \
+                trailing characters at line 3755 column 2";
+    let url = spawn_mock_rename_daemon("500 Internal Server Error", body).await;
+    let client = reqwest::Client::new();
+    let err = do_rename_request(&client, &url, "sess-1", "sess-1", "tm-code".to_string())
+        .await
+        .expect_err("a 500 must fail");
+    let msg = err.to_string();
+    // The load-bearing assertion: the DAEMON'S OWN text, not just "500".
+    // `error_for_status()` can never satisfy this — it never reads the body.
+    assert!(
+        msg.contains("session store serialization error"),
+        "the daemon's reason must reach the operator: {msg}"
+    );
+    assert!(
+        msg.contains("line 3755 column 2"),
+        "the full body must survive, not a truncated prefix: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn do_rename_request_reports_bare_status_when_500_body_is_empty() {
+    // Guard the fallback: a daemon that 500s with NO body must still produce a
+    // message naming the status, never an empty/confusing error. This pins the
+    // `detail.is_empty()` branch so a later refactor cannot silently drop it.
+    let url = spawn_mock_rename_daemon("500 Internal Server Error", "").await;
+    let client = reqwest::Client::new();
+    let err = do_rename_request(&client, &url, "sess-1", "sess-1", "tm-code".to_string())
+        .await
+        .expect_err("a 500 must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("500"), "must name the status: {msg}");
+    assert!(
+        msg.contains("no detail"),
+        "must say the daemon sent nothing rather than print an empty reason: {msg}"
+    );
+}

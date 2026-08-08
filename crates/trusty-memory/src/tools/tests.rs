@@ -101,6 +101,8 @@ fn tool_definitions_drops_palace_required_when_default_set() {
         ("memory_forget", true),
         ("palace_info", true),
         ("palace_compact", true),
+        ("palace_reembed", true),
+        ("palace_unalias", true),
         ("kg_assert", true),
         ("kg_query", true),
         // Issue #664: add_alias and discover_aliases now include `palace`
@@ -137,7 +139,9 @@ fn tool_definitions_lists_all_tools() {
     // 34 original + 3 task tools (task_add, task_list, task_complete, issue
     // #1722) + 3 room tools (room_list, room_create, room_rename, ADR-0027 T6)
     // + 3 wing tools (wing_list, wing_create, wing_rename, ADR-0027 T9 / #4809)
-    assert_eq!(tools.len(), 43);
+    // + 1 repair tool (palace_reembed, #4906)
+    // + 1 alias-repair tool (palace_unalias, #5005)
+    assert_eq!(tools.len(), 45);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -155,6 +159,8 @@ fn tool_definitions_lists_all_tools() {
         "palace_list",
         "palace_info",
         "palace_compact",
+        "palace_reembed",
+        "palace_unalias",
         "kg_assert",
         "kg_query",
         "memory_recall_all",
@@ -209,6 +215,70 @@ async fn dispatch_palace_create_persists() {
         .expect("palace_list");
     let ids = listed["palaces"].as_array().expect("palaces array");
     assert!(ids.iter().any(|v| v.as_str() == Some("alpha")));
+}
+
+/// Why (#4906): the repair path has to be reachable from the daemon, because
+/// the daemon holds the palace's writer lock — a CLI would only ever get a
+/// read-only snapshot. This confirms the tool is wired end-to-end through
+/// `dispatch_tool` and that a dry run reports rather than mutates.
+/// What: creates a palace, calls `palace_reembed` with no arguments, and
+/// asserts the response carries the coverage counts and defaults to a dry run.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_palace_reembed_dry_run_reports_counts() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "reembed-test"}))
+        .await
+        .expect("palace_create");
+    let out = dispatch_tool(&state, "palace_reembed", json!({"palace": "reembed-test"}))
+        .await
+        .expect("palace_reembed");
+    assert_eq!(out["dry_run"], true, "must default to a dry run: {out}");
+    assert_eq!(out["missing"], 0);
+    assert_eq!(out["attempted"], 0);
+    assert_eq!(out["repaired"], 0);
+    assert!(out["drawer_count"].is_number());
+    assert!(out["vector_count"].is_number());
+}
+
+/// Why (#5005): `unalias` had zero call sites — the repair existed as code an
+/// operator could not run. The claim this makes is that it is now reachable
+/// through `dispatch_tool`, defaults to a dry run like `palace_reembed`, and
+/// reports an id SET rather than a count (the count-based all-clear is the
+/// defect the ticket is about). It also runs inside the daemon for the same
+/// reason `palace_reembed` does: the daemon holds the writer lock.
+/// What: creates a palace and calls `palace_unalias` with no arguments,
+/// asserting the default is a dry run, the outcome word is `clean` on a palace
+/// with nothing aliased, and the payload carries `freed_ids` as an array.
+/// Test: itself. Removing the `palace_unalias` dispatch arm makes this an
+/// unknown-tool error; defaulting `dry_run` to false fails the first assertion.
+#[tokio::test]
+async fn dispatch_palace_unalias_dry_run_names_ids_and_writes_nothing() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "unalias-test"}))
+        .await
+        .expect("palace_create");
+    let out = dispatch_tool(&state, "palace_unalias", json!({"palace": "unalias-test"}))
+        .await
+        .expect("palace_unalias must be dispatchable");
+    assert_eq!(out["dry_run"], true, "must default to a dry run: {out}");
+    assert_eq!(
+        out["outcome"], "clean",
+        "a palace with no collision is clean, not repaired: {out}"
+    );
+    assert_eq!(out["success"], true);
+    assert!(
+        out["freed_ids"]
+            .as_array()
+            .expect("freed_ids array")
+            .is_empty(),
+        "an id SET, empty here — never a bare count: {out}"
+    );
+    assert_eq!(
+        out["reembed_required"], false,
+        "nothing was freed, so nothing is owed"
+    );
+    assert!(out["error"].is_null(), "a clean run has no error: {out}");
 }
 
 /// Why (issue #1714): `force=true` bypasses slug validation with no
@@ -1751,6 +1821,15 @@ async fn bm25_index_queue_drops_when_full() {
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
         other => panic!("expected Full overflow, got {other:?}"),
     }
+
+    // #5048 review: dropping is only defensible if something repairs the drop.
+    // Removing the `mark_dirty` call from `bm25_index_enqueue`'s `Full` arm
+    // leaves this list empty and the coverage gap unrepaired until restart.
+    assert_eq!(
+        crate::bm25_repair::dirty_palaces(&state),
+        vec!["default".to_string()],
+        "a dropped index op must queue its palace for coverage repair"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -3277,4 +3356,255 @@ fn kuzu_migrate_refuses_hot_predicates_and_passes_cold_ones() {
             "{p} is an ordinary relation type and must still import",
         );
     }
+}
+
+/// Why (#5048 re-review): the enqueue drop was tested but the worker's own two
+/// loss paths were not, and they lose a write just as completely — a daemon
+/// that will not spawn and an index call that fails both leave the drawer out
+/// of the BM25 corpus with nothing queued to repair it.
+/// What: drives `spawn_bm25_index_worker` directly with a client pointed at a
+/// dead socket, so `client.index` fails, and asserts the palace is queued.
+/// Test: this test itself. Delete the `dirty.insert` from the index-failure arm
+/// and the queue stays empty.
+#[tokio::test]
+async fn a_failed_index_call_queues_the_palace_for_repair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dirty: crate::bm25_repair::DirtyPalaces = std::sync::Arc::new(dashmap::DashSet::new());
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+
+    // No listener at this path, so every `index` call fails at connect.
+    let client = std::sync::Arc::new(trusty_common::bm25_client::Bm25Client::new(
+        tmp.path().join("dead.sock"),
+    ));
+    // No supervisor: this isolates the index-failure arm from the spawn arm.
+    spawn_bm25_index_worker(rx, Some(client), None, std::sync::Arc::clone(&dirty));
+
+    tx.send(Bm25IndexRequest {
+        palace: "lossy".to_string(),
+        drawer_id: Uuid::new_v4().to_string(),
+        content: "content that will never reach the daemon".to_string(),
+        data_dir: tmp.path().join("bm25"),
+    })
+    .await
+    .expect("send to worker");
+
+    for _ in 0..200 {
+        if dirty.contains("lossy") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        dirty.contains("lossy"),
+        "an index call that failed lost the write and must queue the palace"
+    );
+}
+
+/// Why: the other worker loss path. A supervisor that cannot start a daemon
+/// makes the worker skip the request entirely, which is the same lost write.
+/// What: points the daemon locator at a path that does not exist so
+/// `ensure_running` fails, and asserts the palace is queued.
+/// Test: this test itself. Delete the `dirty.insert` from the spawn-failure arm
+/// and the queue stays empty.
+#[tokio::test]
+async fn a_daemon_that_will_not_spawn_queues_the_palace_for_repair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let prev = std::env::var("TRUSTY_BM25_DAEMON_BIN").ok();
+    let prev_ext = std::env::var("TRUSTY_BM25_EXTERNAL").ok();
+    // SAFETY: test-only env mutation, restored below.
+    unsafe {
+        std::env::set_var("TRUSTY_BM25_DAEMON_BIN", tmp.path().join("no-such-binary"));
+        std::env::remove_var("TRUSTY_BM25_EXTERNAL");
+    }
+
+    let dirty: crate::bm25_repair::DirtyPalaces = std::sync::Arc::new(dashmap::DashSet::new());
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+    let client = std::sync::Arc::new(trusty_common::bm25_client::Bm25Client::new(
+        tmp.path().join("unused.sock"),
+    ));
+    let supervisor = std::sync::Arc::new(crate::bm25_supervisor::Bm25Supervisor::new());
+    spawn_bm25_index_worker(
+        rx,
+        Some(client),
+        Some(supervisor),
+        std::sync::Arc::clone(&dirty),
+    );
+
+    // A palace name short enough that the socket path stays inside `sun_path`.
+    let palace = format!("nz{:x}", std::process::id() & 0xfff);
+    tx.send(Bm25IndexRequest {
+        palace: palace.clone(),
+        drawer_id: Uuid::new_v4().to_string(),
+        content: "content that will never reach a daemon".to_string(),
+        data_dir: tmp.path().join("bm25"),
+    })
+    .await
+    .expect("send to worker");
+
+    for _ in 0..400 {
+        if dirty.contains(&palace) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let queued = dirty.contains(&palace);
+
+    // SAFETY: restoring the captured prior values.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("TRUSTY_BM25_DAEMON_BIN", v),
+            None => std::env::remove_var("TRUSTY_BM25_DAEMON_BIN"),
+        }
+        if let Some(v) = prev_ext {
+            std::env::set_var("TRUSTY_BM25_EXTERNAL", v);
+        }
+    }
+
+    assert!(
+        queued,
+        "a daemon that will not spawn lost the write and must queue the palace"
+    );
+}
+
+/// Why (#5048 re-review): `Full` marked the palace dirty and `Closed`, three
+/// lines below it, logged at `debug!` and returned. Both lose the write
+/// identically — the drawer never reaches the index and nothing remembers that
+/// it did not. Fixing one arm and leaving its sibling is the shape #4683
+/// shipped with.
+/// What: drops the receiver so `try_send` returns `Closed`, then enqueues.
+/// Test: this test itself. Remove the `mark_dirty` from the `Closed` arm and
+/// the queue stays empty.
+#[tokio::test]
+async fn a_closed_index_queue_queues_the_palace_for_repair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut state = AppState::new(tmp.path().to_path_buf());
+
+    // Swap in a sender whose receiver is dropped. Waiting for the real worker
+    // to exit would race its spawn; this closes the channel deterministically.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+    drop(rx);
+    state.bm25_index_tx = tx;
+
+    assert!(
+        matches!(
+            state.bm25_index_tx.try_send(Bm25IndexRequest {
+                palace: "default".to_string(),
+                drawer_id: Uuid::new_v4().to_string(),
+                content: "probe".to_string(),
+                data_dir: state.data_root.join("default"),
+            }),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+        ),
+        "precondition: the queue must actually be closed, not merely full"
+    );
+
+    bm25_index_enqueue(&state, "default", Uuid::new_v4(), "content that is lost");
+
+    assert_eq!(
+        crate::bm25_repair::dirty_palaces(&state),
+        vec!["default".to_string()],
+        "a closed queue loses the write as completely as a full one and must queue repair"
+    );
+}
+
+/// Why (#5005 review): every `palace_unalias` test that reached `dispatch_tool`
+/// ran against an empty palace, so the only daemon-level outcome ever observed
+/// was `clean` — the branch that does nothing. The success path was proven at
+/// the store layer and assumed through the tool: nothing had shown that a real
+/// collision survives arg parsing, the `is_read_only()` routing a dry run skips,
+/// and JSON serialization to arrive as a non-empty `freed_ids`. An unobserved
+/// happy path is not a proven one, and this is the path #4834's deletion gate
+/// will call.
+/// What: seeds two drawer uuids onto one `vector_id` in the palace's own
+/// `index.usearch.redb`, then drives `palace_unalias` with `dry_run: false`
+/// through `dispatch_tool`, asserting `outcome: "repaired"`, both uuids named
+/// in `freed_ids`, and `reembed_required: true`. A second call must then report
+/// `clean` and free nothing — idempotence observed at the tool surface, not
+/// just at the store.
+/// Test: itself. Routing the write path through the read-only lock, or letting
+/// `freed_ids` serialize as a count, fails it.
+#[tokio::test]
+async fn dispatch_palace_unalias_frees_a_real_collision_and_is_idempotent() {
+    use redb::{Database, TableDefinition};
+    const VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("vectors");
+    const VECTOR_KEYS: TableDefinition<&str, u64> = TableDefinition::new("vector_keys");
+
+    let (state, tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "collide"}))
+        .await
+        .expect("palace_create");
+
+    // Two drawers, one shared vector id — the collision this PR repairs.
+    let a = uuid::Uuid::new_v4();
+    let b = uuid::Uuid::new_v4();
+    let shared_id: u64 = 7;
+    {
+        // Drop the cached handle so the palace releases its flock; the next
+        // dispatch reopens the file and sees the seeded collision.
+        state.registry.remove(&PalaceId::new("collide"));
+        let db = Database::create(tmp.path().join("collide/index.usearch.redb"))
+            .expect("open palace vector redb");
+        let wtx = db.begin_write().expect("begin");
+        {
+            let mut vectors = wtx.open_table(VECTORS).expect("vectors");
+            let mut keys = wtx.open_table(VECTOR_KEYS).expect("keys");
+            let encoded = postcard::to_allocvec(&vec![0.05_f32; 384]).expect("encode vector");
+            vectors.insert(shared_id, encoded.as_slice()).expect("vec");
+            keys.insert(a.to_string().as_str(), shared_id)
+                .expect("key a");
+            keys.insert(b.to_string().as_str(), shared_id)
+                .expect("key b");
+        }
+        wtx.commit().expect("commit");
+        drop(db); // release the flock before the palace reopens the file
+    }
+
+    let out = dispatch_tool(
+        &state,
+        "palace_unalias",
+        json!({"palace": "collide", "dry_run": false}),
+    )
+    .await
+    .expect("palace_unalias must dispatch on the write path");
+
+    assert_eq!(out["dry_run"], false, "explicit write run: {out}");
+    assert_eq!(
+        out["outcome"], "repaired",
+        "a real collision must repair, not report clean: {out}"
+    );
+    assert_eq!(out["success"], true, "{out}");
+    let freed: Vec<String> = out["freed_ids"]
+        .as_array()
+        .expect("freed_ids array")
+        .iter()
+        .map(|v| v.as_str().expect("uuid string").to_string())
+        .collect();
+    assert_eq!(freed.len(), 2, "both members of the group: {out}");
+    assert!(freed.contains(&a.to_string()), "{a} missing: {out}");
+    assert!(freed.contains(&b.to_string()), "{b} missing: {out}");
+    assert_eq!(
+        out["reembed_required"], true,
+        "freed drawers are owed a re-embed: {out}"
+    );
+    assert!(out["error"].is_null(), "{out}");
+
+    // Idempotence at the tool surface: the collision is gone, not just reported.
+    let again = dispatch_tool(
+        &state,
+        "palace_unalias",
+        json!({"palace": "collide", "dry_run": false}),
+    )
+    .await
+    .expect("second palace_unalias");
+    assert_eq!(
+        again["outcome"], "clean",
+        "the repair must be durable, not repeatable: {again}"
+    );
+    assert!(
+        again["freed_ids"]
+            .as_array()
+            .expect("freed_ids array")
+            .is_empty(),
+        "nothing left to free: {again}"
+    );
 }

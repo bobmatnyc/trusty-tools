@@ -69,6 +69,49 @@ pub fn physical_footprint_mb(pid: u32) -> Option<u64> {
     Some(info.ri_phys_footprint / (1024 * 1024))
 }
 
+/// Resident memory of an **arbitrary** process, in megabytes.
+///
+/// Why (#2846): a supervisor that owns child processes has to answer "is this
+/// child over its declared limit?" before the kernel answers it with an
+/// OOM-kill. trusty-search shipped an `rss_limit_mb` it never compared against
+/// anything and grew to 2.2x that limit before the OOM killer intervened; the
+/// missing piece was a way to read another process's RSS at all. This is that
+/// entry point, and it lives here — next to [`physical_footprint_mb`] and
+/// [`SysMetrics`] — so every trusty-* supervisor reads child memory the same
+/// way instead of each growing its own `/proc` parser.
+/// What: on macOS, delegates to [`physical_footprint_mb`], which counts pages
+/// the memory compressor holds (the figure the kernel's Jetsam logic uses). On
+/// Linux, reads `VmRSS` from `/proc/<pid>/status`. Everywhere else, returns
+/// `None`. `None` means "cannot measure", never "measured zero" — callers must
+/// treat it as "no opinion" and leave the process alone rather than reaping it.
+/// Test: `process_rss_mb_reports_own_process`,
+/// `process_rss_mb_is_none_for_absent_pid`.
+#[must_use]
+pub fn process_rss_mb(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        physical_footprint_mb(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        for line in status.lines() {
+            let Some(rest) = line.strip_prefix("VmRSS:") else {
+                continue;
+            };
+            // Format is `VmRSS:\t   12345 kB`.
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb / 1024);
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Per-process RSS + CPU sampler bound to the current process.
 ///
 /// Why: holding the `System` between calls is required for CPU measurement —
@@ -326,6 +369,42 @@ mod tests {
             rss < 1024 * 1024,
             "RSS implausibly large ({rss} MB) — unit must be MB"
         );
+    }
+
+    /// Why (#2846): the RSS guardrail is only as good as the measurement it
+    /// gates on. If `process_rss_mb` silently returned `None` for a live
+    /// process, a supervisor built on it would never reap anything and we
+    /// would have re-shipped the unenforced-limit bug.
+    /// What: measures this test process by its own pid and asserts a
+    /// plausible non-zero figure in MB.
+    /// Test: this test itself. Skipped (asserted only on the `Some` arm) on
+    /// platforms where the measurement is genuinely unavailable.
+    #[test]
+    fn process_rss_mb_reports_own_process() {
+        let me = std::process::id();
+        match process_rss_mb(me) {
+            Some(mb) => assert!(
+                mb < 1024 * 1024,
+                "own RSS implausibly large ({mb} MB) — unit must be MB"
+            ),
+            // Only acceptable off macOS/Linux; on those two the read must have
+            // worked for our own pid.
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            None => panic!("process_rss_mb must resolve the current process on this platform"),
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            None => {}
+        }
+    }
+
+    /// Why: `None` must mean "cannot measure", so a reaped/absent pid must
+    /// never read as `Some(0)` — a supervisor would treat that as "under the
+    /// limit" and keep a corpse in its map.
+    /// Test: this test itself.
+    #[test]
+    fn process_rss_mb_is_none_for_absent_pid() {
+        // pid 0 is the kernel scheduler on Linux and not addressable via
+        // proc_pid_rusage on macOS; either way it must not yield a figure.
+        assert_eq!(process_rss_mb(0), None);
     }
 
     #[test]

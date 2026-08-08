@@ -1025,6 +1025,17 @@ fn spawn_startup_tasks(state: &AppState) {
         );
         tracing::info!(loops = n, "dream_scheduler: {n} loop(s) running (#1529)");
 
+        // BM25 backfill sweep. A no-op while the lexical lane is off, which is
+        // every deployment until the default is flipped: `spawn_startup_backfill`
+        // returns immediately when `bm25_client` is `None`.
+        trusty_memory::bm25_backfill::spawn_startup_backfill(&bg_state);
+
+        // BM25 coverage repair sweep. The write path drops on a full queue,
+        // and before this the only thing that repaired a drop was the next
+        // daemon restart — so the "drops are recoverable" trade was not true
+        // of the running process. Also a no-op while the lane is off.
+        trusty_memory::bm25_repair::spawn_repair_sweep(&bg_state);
+
         // Issue #42: once palaces are live, kick off auto-discovery against
         // cwd targeting the default palace (if configured). Without a default
         // palace there's no obvious destination, so skip — explicit MCP

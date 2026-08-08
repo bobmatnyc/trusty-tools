@@ -109,7 +109,12 @@ impl SessionManager {
             ));
         }
 
-        record.state = ManagedSessionState::Active;
+        // Routed through `set_lifecycle_state` rather than assigning `state`
+        // directly: this is the one production `Decommissioned -> Active`
+        // transition, so it is also the one place a record can leave a terminal
+        // state still carrying the `terminal_at` stamp the retention sweep
+        // reads. The setter clears it.
+        record.set_lifecycle_state(ManagedSessionState::Active, Utc::now());
         record.last_activity_at = Some(Utc::now());
         // #4337: a reactivation always precedes the client `exec`-ing a fresh
         // `claude` back into this SAME pane, guaranteeing a genuinely NEW

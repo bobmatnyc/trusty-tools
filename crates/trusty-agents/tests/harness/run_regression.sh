@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Regression task runner for open-mpm.
+# Regression task runner for tagent.
 #
 # Why: Validates that the harness can execute each regression task end-to-end
 # (build → run → produce output files) without LLM regressions silently
 # breaking output generation. Each task is a concrete coding challenge; a
 # passing run means the prescribed workflow produced at least one output file.
-# What: For each task file in .open-mpm/tasks/regression/, runs
-# `open-mpm --workflow prescriptive --task-file <file> --out-dir <dir>`
+# What: For each task file in .trusty-agents/tasks/regression/, runs
+# `tagent --workflow prescriptive --task-file <file> --out-dir <dir>`
 # with a per-task timeout, then checks that the output dir is non-empty.
 # Prints PASS/FAIL per task with elapsed time, exits non-zero on any failure.
 # Test: `./tests/harness/run_regression.sh --dry-run` (no LLM calls, lists tasks)
@@ -54,9 +54,9 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-TASK_DIR="$PROJECT_ROOT/.open-mpm/tasks/regression"
+TASK_DIR="$PROJECT_ROOT/.trusty-agents/tasks/regression"
 OUT_BASE="$PROJECT_ROOT/out/regression"
-BINARY="$PROJECT_ROOT/target/debug/open-mpm"
+BINARY="$PROJECT_ROOT/target/debug/tagent"
 
 # ── Timeout compatibility (macOS lacks GNU coreutils timeout) ─────────────────
 # Prefer gtimeout (brew install coreutils), fall back to a perl one-liner shim.
@@ -88,7 +88,7 @@ fi
 
 if ! $DRY_RUN; then
   if [ ! -f "$BINARY" ]; then
-    echo "Binary not found — building open-mpm..."
+    echo "Binary not found — building tagent..."
     cargo build --manifest-path="$PROJECT_ROOT/Cargo.toml"
   fi
 fi
@@ -131,7 +131,7 @@ if $DRY_RUN; then
     out_dir="$OUT_BASE/$task_id"
     printf "%-20s  %s\n" \
       "$task_id" \
-      "open-mpm --workflow prescriptive --task-file $f --out-dir $out_dir --timeout $TIMEOUT_SECS"
+      "tagent --workflow prescriptive --task-file $f --out-dir $out_dir --timeout $TIMEOUT_SECS"
   done
   echo ""
   echo "Total: ${#TASK_FILES[@]} task(s) would run."

@@ -34,16 +34,16 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-adr` | documentation | yes | Architecture Decision Records (ADRs) — formal first-class documentation artifact for significant, hard-to-reverse architectural decisions with consistency vetting |
 | `tm-agent-architecture` | pm-workflow | no | Official vs custom agent workflow — how to safely update trusty-mpm's compose-chain agent catalog |
 | `tm-bug-reporting` | pm-workflow | no | Bug reporting protocol for the PM and agents — routes through the MCP-native list_recent_errors / preview_bug_report / report_bug pipeline |
-| `tm-capabilities` | pm-reference | no | Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, verbatim and always current. Complements (does not replace) the conceptual `tm` skill. |
+| `tm-capabilities` | pm-reference | no | Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, plus the framework's own install layout and tier precedence. Verbatim and always current. Complements (does not replace) the conceptual `tm` skill. |
 | `tm-circuit-breaker` | pm-framework | no | Complete circuit breaker enforcement patterns with examples and remediation for the trusty-mpm PM |
 | `tm-cli-operations` | pm-reference | yes | Operate the tm / trusty-mpm CLI — set up and manage MCP servers, drive session lifecycle, and run health diagnostics |
-| `tm-delegation-patterns` | pm-reference | no | Delegation matrices and agent-selection decision trees for the trusty-mpm PM |
+| `tm-delegation-patterns` | pm-reference | no | Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it |
 | `tm-doctor` |  | no | Run a full trusty-mpm system diagnostic checking instructions, agents, skills, memory, and search services |
 | `tm-git-file-tracking` | pm-workflow | no | Protocol for tracking files immediately after agent creation, before marking work complete |
 | `tm-init` | pm-workflow | yes | Initialize or intelligently refresh a project for trusty-mpm — analyze the repo and scaffold or update CLAUDE.md (project instructions), register the project with the daemon, and offer update/context/catchup modes |
 | `tm-issues-prune` | pm-workflow | yes | Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred) |
 | `tm-postmortem` | pm-workflow | yes | Analyze session errors captured across trusty-* daemons and route them through the bug-reporting pipeline |
-| `tm-pr-workflow` | pm-workflow | no | Branch protection, trusty-review gate, squash-merge, and worktree discipline for landing work on main |
+| `tm-pr-workflow` | pm-workflow | no | Branch protection, per-PR changelog fragment requirement (changelog.d file format and category line), trusty-review merge gate, squash-merge, and worktree discipline for landing work on main |
 | `tm-session-management` | pm-workflow | yes | PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration |
 | `tm-session-pause` | pm-workflow | yes | Pause the current PM session — snapshot todos, git state, and context to a project-local session file, prune stale worktrees, and print the resume path |
 | `tm-session-resume` | pm-workflow | yes | Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context |

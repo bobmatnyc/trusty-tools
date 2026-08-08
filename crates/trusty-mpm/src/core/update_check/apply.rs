@@ -14,7 +14,8 @@
 //! Test: this module's `tests` cover redeploy-clears-staleness and prune-removes-
 //! deselected against a `FakeGitBackend`-seeded catalog.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::deploy_agents_filtered;
 use crate::core::agent_manifest::{
@@ -22,11 +23,16 @@ use crate::core::agent_manifest::{
 };
 use crate::core::manifest::HarnessPlan;
 use crate::core::paths::FrameworkPaths;
+use crate::core::skill_drift::key_stem;
 use crate::core::skill_manifest::{
     SKILL_MANIFEST_FILE, SkillManifest, SkillManifestSave, with_skill_manifest_lock,
 };
-use crate::core::skill_tiers::deploy_all_skill_tiers;
+use crate::core::skill_tiers::{deploy_all_skill_tiers, list_source_stems};
 use crate::provisioner::GitBackend;
+
+mod prune_guard;
+
+use prune_guard::Verdict;
 
 /// A failure raised while applying a catalog update.
 ///
@@ -90,6 +96,31 @@ pub struct ApplyReport {
     pub agents_pruned: Vec<String>,
     /// Managed skill stems removed because the manifest no longer selects them.
     pub skills_pruned: Vec<String>,
+    /// Deselected agents a guard left in place, as `<filename>: <reason>` (#391).
+    pub agents_prune_kept: Vec<String>,
+    /// Deselected skills a guard left in place, as `<stem>: <reason>` (#391).
+    pub skills_prune_kept: Vec<String>,
+    /// Where the pruned content was copied before deletion, when anything was
+    /// deleted (#391). `None` means nothing was removed, so nothing was backed up.
+    pub prune_backup_dir: Option<PathBuf>,
+}
+
+/// One prune stage's result: what went, what stayed, and whether a backup exists.
+///
+/// Why (#391): a prune that silently declines to delete something is a guard the
+/// operator cannot see working. Carrying the kept set alongside the removed set
+/// is what lets `tm catalog apply --prune` say "left 2 alone, here is why".
+/// What: removed names, kept names each with their reason, and whether this
+/// stage wrote anything under the run's backup root.
+/// Test: `apply_prune_skips_hand_edited_skill`, `apply_prune_removes_deselected`.
+#[derive(Debug, Default)]
+struct PruneOutcome {
+    /// Names actually deleted this run.
+    removed: Vec<String>,
+    /// Names a guard declined to delete, formatted `<name>: <reason>`.
+    kept: Vec<String>,
+    /// True once this stage has copied something under the backup root.
+    used_backup: bool,
 }
 
 /// Apply a catalog update: sync, redeploy the selected set, optionally prune.
@@ -104,10 +135,40 @@ pub struct ApplyReport {
 /// [`HarnessPlan`], redeploys the selected agents/skills via the filtered
 /// deployers, and — when `prune` is set — removes managed agents/skills the plan
 /// no longer selects (and drops their manifest entries). Returns an
-/// [`ApplyReport`]. Pruning is opt-in and only ever touches MANAGED files (those
-/// in the checksum manifest); user-owned files are never removed.
+/// [`ApplyReport`].
+///
+/// Pruning is opt-in, and #391 replaced the old summary ("only ever touches
+/// MANAGED files; user-owned files are never removed") because it was true of
+/// UNMANAGED files and silent on the two kinds of user content that were in fact
+/// deletable. Precisely what prune will and will not remove:
+///
+/// - Only files the checksum manifest records as trusty-mpm-managed are eligible.
+///   A file the user dropped in was never, and is still not, a candidate.
+/// - An eligible asset is removed only when its bytes still match the checksum
+///   the ledger recorded, so a hand-edited (frozen) agent or skill stays. A
+///   skill directory is judged whole: any file under it that no ledger key
+///   claims disqualifies the directory, because `remove_dir_all` would take that
+///   file too.
+/// - A skill stem the user-custom tier supplies is never pruned, whatever the
+///   bundled include/exclude says — [`deploy_all_skill_tiers`] deploys that tier
+///   in full and exempt from those rules, but its ledger entries look identical
+///   to bundled ones.
+/// - The agent equivalent of that rule reads the ledger instead of a source
+///   directory, because the agent ledger records a tier and the skill one does
+///   not: an entry whose `Origin` is not `Bundled` is user-owned and is never
+///   pruned, matching how `agents::deployer` already treats it.
+/// - Everything actually deleted is copied under
+///   `<framework-root>/backup-catalog-prune-<timestamp>/` first;
+///   [`ApplyReport::prune_backup_dir`] names it.
+///
+/// What this does NOT promise: a stem the user has since deleted from
+/// `~/.trusty-mpm/skills/` is no longer user-tier and prunes normally, and
+/// nothing here restores a backup — that stays a human decision.
 /// Test: `apply_redeploys_and_clears_staleness`, `apply_prune_removes_deselected`,
-/// `apply_prune_spares_user_owned`.
+/// `apply_prune_spares_user_owned`, `apply_prune_removes_deselected_skill`,
+/// `apply_prune_skips_hand_edited_skill`, `apply_prune_spares_user_tier_skill`,
+/// `apply_prune_spares_untracked_file_in_a_managed_skill`,
+/// `apply_prune_backs_up_before_removing_a_skill`.
 pub fn apply_catalog<G: GitBackend>(
     git: G,
     fw: &FrameworkPaths,
@@ -167,8 +228,24 @@ pub fn apply_catalog<G: GitBackend>(
 
     // 4. Optionally prune managed artifacts the manifest no longer selects.
     if prune {
-        report.agents_pruned = prune_agents(&agent_target, &plan)?;
-        report.skills_pruned = prune_skills(&skill_target, &plan)?;
+        // #391: ONE backup root per run, so an operator undoing a prune finds
+        // everything it took in one place. Named here but created lazily — a
+        // prune that removes nothing must not litter the framework root.
+        let backup_root = prune_guard::prune_backup_root(&fw.root, chrono::Utc::now());
+        let agents = prune_agents(&agent_target, &plan, &backup_root)?;
+        let skills = prune_skills(
+            &skill_target,
+            &fw.user_skill_source_dir(),
+            &plan,
+            &backup_root,
+        )?;
+        if agents.used_backup || skills.used_backup {
+            report.prune_backup_dir = Some(backup_root);
+        }
+        report.agents_pruned = agents.removed;
+        report.agents_prune_kept = agents.kept;
+        report.skills_pruned = skills.removed;
+        report.skills_prune_kept = skills.kept;
     }
 
     Ok(report)
@@ -178,11 +255,19 @@ pub fn apply_catalog<G: GitBackend>(
 ///
 /// Why: HR-2 deferred removal of deselected agents; HR-3 supplies it behind the
 /// explicit `--prune` flag. Only MANAGED files (present in the agent checksum
-/// manifest) are eligible — a user-dropped file is never removed.
-/// What: for each manifest-managed agent filename whose stem the plan rejects,
+/// manifest) are eligible — a user-dropped file is never removed — and since
+/// #391 an eligible file is deleted only when the ledger attributes it to the
+/// framework (`Origin::Bundled`) AND its bytes still match the recorded
+/// checksum. So a hand-edited agent survives being deselected, and so does a
+/// pristine one the ledger records as user- or registry-owned.
+/// What: for each manifest-managed agent filename whose stem the plan rejects
+/// AND whose on-disk copy is framework-owned and unmodified, backs the file up
+/// under `backup_root`,
 /// deletes `<target>/<filename>` (ignoring an already-absent file) and drops the
-/// manifest entry; saves the manifest if anything changed. Returns the removed
-/// filenames, sorted.
+/// manifest entry; saves the manifest if anything changed. A modified or
+/// unreadable file keeps BOTH its content and its ledger entry — dropping the
+/// entry would reclassify it as user-owned and freeze it against future deploys.
+/// Returns the removed and kept names, sorted.
 ///
 /// CONCURRENCY (#4409): the whole load-modify-save runs under the shared ledger
 /// lock, because `target` is now the ONE machine-global agent tier rather than a
@@ -198,9 +283,14 @@ pub fn apply_catalog<G: GitBackend>(
 /// residual window means a session launching between the two steps can deploy an
 /// agent this prune then removes; that agent returns on the next launch or
 /// sync-assets, since deploy is idempotent. No update is ever lost.
-/// Test: `apply_prune_removes_deselected`, `apply_prune_spares_user_owned`.
-fn prune_agents(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyError> {
-    with_agent_manifest_lock(target, || prune_agents_locked(target, plan))
+/// Test: `apply_prune_removes_deselected`, `apply_prune_spares_user_owned`,
+/// `apply_prune_skips_hand_edited_agent`, `apply_prune_spares_a_user_origin_agent`.
+fn prune_agents(
+    target: &Path,
+    plan: &HarnessPlan,
+    backup_root: &Path,
+) -> Result<PruneOutcome, ApplyError> {
+    with_agent_manifest_lock(target, || prune_agents_locked(target, plan, backup_root))
 }
 
 /// The body of [`prune_agents`], run while holding the ledger lock.
@@ -209,10 +299,15 @@ fn prune_agents(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyE
 /// section is one expression so the lock's scope cannot be misread. Never call
 /// it directly, and never from inside another `with_agent_manifest_lock` on the
 /// same directory (`flock` on a second descriptor in one process deadlocks).
-/// Test: `apply_prune_removes_deselected`, `apply_prune_spares_user_owned`.
-fn prune_agents_locked(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyError> {
+/// Test: `apply_prune_removes_deselected`, `apply_prune_spares_user_owned`,
+/// `apply_prune_skips_hand_edited_agent`, `apply_prune_spares_a_user_origin_agent`.
+fn prune_agents_locked(
+    target: &Path,
+    plan: &HarnessPlan,
+    backup_root: &Path,
+) -> Result<PruneOutcome, ApplyError> {
     let mut manifest = AgentManifest::load(target);
-    let mut pruned: Vec<String> = Vec::new();
+    let mut outcome = PruneOutcome::default();
 
     let candidates: Vec<String> = manifest.managed.keys().cloned().collect();
     for filename in candidates {
@@ -220,30 +315,65 @@ fn prune_agents_locked(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>,
         if plan.agent_selected(stem) {
             continue;
         }
-        remove_if_present(&target.join(&filename))?;
+        // #391: deselected is not the same as disposable — check the ledger
+        // still attributes the file to the framework, and that it is still the
+        // one trusty-mpm wrote, before deleting it.
+        if let Verdict::Kept(why) = prune_guard::agent_verdict(&manifest, target, &filename) {
+            tracing::info!(agent = %filename, reason = %why, "not pruning a deselected agent");
+            outcome.kept.push(format!("{filename}: {why}"));
+            continue;
+        }
+        let path = target.join(&filename);
+        if path.exists() {
+            prune_guard::back_up_file(&path, backup_root, &Path::new("agents").join(&filename))?;
+            outcome.used_backup = true;
+        }
+        remove_if_present(&path)?;
         manifest.managed.remove(&filename);
-        pruned.push(filename);
+        outcome.removed.push(filename);
     }
 
-    if !pruned.is_empty() {
+    if !outcome.removed.is_empty() {
         manifest
             .save(target)
             .map_err(|e| ApplyError::Prune(e.to_string()))?;
         // The manifest file itself is never an agent; ensure it is left intact.
         debug_assert!(target.join(AGENT_MANIFEST_FILE).exists());
     }
-    pruned.sort_unstable();
-    Ok(pruned)
+    outcome.removed.sort_unstable();
+    outcome.kept.sort_unstable();
+    Ok(outcome)
 }
 
 /// Remove managed skill directories the plan no longer selects; return stems.
 ///
 /// Why: the skill counterpart to [`prune_agents`]. Skills deploy as
-/// `<target>/<stem>/SKILL.md`, so pruning removes the whole skill directory.
-/// What: for each manifest-managed skill stem the plan rejects, removes
-/// `<target>/<stem>/` (ignoring absence) and drops the manifest entry; saves the
-/// manifest if anything changed. The [`SkillManifest`] is keyed by stem, matching
-/// the skill deployer. Returns the removed stems, sorted.
+/// `<target>/<stem>/SKILL.md`, so pruning removes the whole skill directory —
+/// which is why #391 gave it TWO guards rather than one. A checksum gate alone
+/// protects a hand-edited skill (its bytes no longer match) but waves through a
+/// PRISTINE user-custom one, because [`deploy_all_skill_tiers`] deploys
+/// `~/.trusty-mpm/skills/` in full, exempt from the bundled include/exclude, and
+/// the ledger records no origin tier to tell the two apart afterwards.
+///
+/// The tier half is answered from the LIVE user source
+/// ([`list_source_stems`]), not from a recorded origin field. A schema field
+/// would have to decide what every pre-existing entry means, and the only
+/// available default — "bundled" — is precisely this bug; deriving it from the
+/// same directory `deploy_all_skill_tiers` reads makes the two structurally
+/// unable to disagree, and needs no migration.
+/// What: for each manifest-managed skill STEM the plan rejects, that the user
+/// tier does not supply, and whose deployed directory holds nothing but
+/// unmodified tm-deployed files, copies the directory under `backup_root`,
+/// removes `<target>/<stem>/` (ignoring absence) and drops EVERY ledger key
+/// belonging to that stem; saves the manifest if anything changed. Returns the
+/// removed and kept stems, sorted.
+///
+/// Candidates are stems, not raw ledger keys: a key like
+/// `<stem>/references/x.md` names a file the skill CARRIES, and judging it
+/// independently let an `include` rule that matched the stem but not the nested
+/// key drop that file's ledger entry while leaving the file on disk — after
+/// which the deployer reads it as user-owned and never updates it again (#4881's
+/// freeze shape, reached from this path).
 ///
 /// CONCURRENCY (#4881): the whole load-modify-save runs under the skill ledger
 /// lock, for the same reason [`prune_agents`] does — an unlocked prune racing a
@@ -255,9 +385,20 @@ fn prune_agents_locked(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>,
 /// a worse hazard than the residual window. A skill deployed between the two
 /// steps that this prune then removes returns on the next deploy — deploy is
 /// idempotent, and no ledger update is ever lost.
-/// Test: `apply_prune_removes_deselected`.
-fn prune_skills(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyError> {
-    with_skill_manifest_lock(target, || prune_skills_locked(target, plan))
+/// Test: `apply_prune_removes_deselected_skill`, `apply_prune_skips_hand_edited_skill`,
+/// `apply_prune_spares_user_tier_skill`.
+fn prune_skills(
+    target: &Path,
+    user_source: &Path,
+    plan: &HarnessPlan,
+    backup_root: &Path,
+) -> Result<PruneOutcome, ApplyError> {
+    // Read OUTSIDE the lock: this is the user's own source directory, not the
+    // deploy target the lock serialises.
+    let user_stems = list_source_stems(user_source)?;
+    with_skill_manifest_lock(target, || {
+        prune_skills_locked(target, plan, &user_stems, backup_root)
+    })
 }
 
 /// The body of [`prune_skills`], run while holding the skill ledger lock.
@@ -265,29 +406,63 @@ fn prune_skills(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyE
 /// Why/What: mirrors [`prune_agents_locked`] — the critical section is one
 /// expression so the lock's scope cannot be misread. Never call it directly, and
 /// never from inside another `with_skill_manifest_lock` on the same directory.
-/// Test: `apply_prune_removes_deselected`.
-fn prune_skills_locked(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>, ApplyError> {
+/// Test: `apply_prune_removes_deselected_skill`, `apply_prune_skips_hand_edited_skill`,
+/// `apply_prune_spares_user_tier_skill`,
+/// `apply_prune_spares_untracked_file_in_a_managed_skill`.
+fn prune_skills_locked(
+    target: &Path,
+    plan: &HarnessPlan,
+    user_stems: &BTreeSet<String>,
+    backup_root: &Path,
+) -> Result<PruneOutcome, ApplyError> {
     let mut manifest = SkillManifest::load(target);
     // #4881: the snapshot the merging save replays this run's delta against —
     // here the delta is REMOVALS, which `save_merging` applies to the current
     // on-disk document rather than reverting a concurrent writer's inserts.
     let base = manifest.clone();
-    let mut pruned: Vec<String> = Vec::new();
+    let mut outcome = PruneOutcome::default();
 
-    let candidates: Vec<String> = manifest.managed.keys().cloned().collect();
+    // #391: candidates are STEMS. A ledger key may name a carried file
+    // (`<stem>/references/x.md`); it is pruned with its skill, never on its own.
+    let candidates: BTreeSet<String> = manifest
+        .managed
+        .keys()
+        .map(|key| key_stem(key).to_string())
+        .collect();
     for stem in candidates {
         if plan.skill_selected(&stem) {
             continue;
         }
+        // #391: the bundled include/exclude does not govern the user-custom
+        // tier, so it must not be able to select a user stem for deletion.
+        if user_stems.contains(&stem) {
+            tracing::info!(
+                skill = %stem,
+                "not pruning a deselected skill — the user-custom tier supplies it"
+            );
+            outcome
+                .kept
+                .push(format!("{stem}: supplied by the user-custom skill tier"));
+            continue;
+        }
+        // #391: and the directory must still hold only unmodified tm-deployed
+        // files — `remove_dir_all` takes everything else with it.
+        if let Verdict::Kept(why) = prune_guard::skill_verdict(&manifest, target, &stem) {
+            tracing::info!(skill = %stem, reason = %why, "not pruning a deselected skill");
+            outcome.kept.push(format!("{stem}: {why}"));
+            continue;
+        }
         let skill_dir = target.join(&stem);
         if skill_dir.is_dir() {
+            prune_guard::back_up_tree(&skill_dir, backup_root, &Path::new("skills").join(&stem))?;
+            outcome.used_backup = true;
             std::fs::remove_dir_all(&skill_dir).map_err(|e| ApplyError::Prune(e.to_string()))?;
         }
-        manifest.managed.remove(&stem);
-        pruned.push(stem);
+        manifest.managed.retain(|key, _| key_stem(key) != stem);
+        outcome.removed.push(stem);
     }
 
-    if !pruned.is_empty() {
+    if !outcome.removed.is_empty() {
         // #4881: the skill DIRECTORIES are already removed, so this save must
         // publish or the manifest keeps listing files that no longer exist.
         if manifest
@@ -303,8 +478,9 @@ fn prune_skills_locked(target: &Path, plan: &HarnessPlan) -> Result<Vec<String>,
         }
         debug_assert!(target.join(SKILL_MANIFEST_FILE).exists());
     }
-    pruned.sort_unstable();
-    Ok(pruned)
+    outcome.removed.sort_unstable();
+    outcome.kept.sort_unstable();
+    Ok(outcome)
 }
 
 /// Delete a file if it exists, treating "already gone" as success.

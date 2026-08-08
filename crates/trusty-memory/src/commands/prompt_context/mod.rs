@@ -54,8 +54,11 @@ use crate::prompt_log::{PromptLogEntry, PromptLogger};
 use crate::{hook_prompt_excerpt, HookType, InjectionKind};
 
 use fetch::{fetch_global_prompt_context, fetch_palace_kg_triples, fetch_palace_recall};
-use filter::{filter_drawers_by_deny_tags, select_relevant_triples};
+use filter::{
+    filter_drawers_by_deny_tags, filter_drawers_by_relevance_floor, select_relevant_triples,
+};
 use format::{compose_injection, count_facts};
+use trusty_common::memory_core::retrieval::DEFAULT_RELEVANCE_FLOOR;
 
 /// HTTP path for the global hot-facts block.
 pub(super) const PROMPT_CONTEXT_PATH: &str = "/api/v1/kg/prompt-context";
@@ -124,25 +127,47 @@ const EMIT_DEADLINE: Duration = Duration::from_millis(300);
 
 /// Default top-K for drawer recall and KG triple selection.
 ///
-/// Why: 5 + 5 keeps the injection focused on the strongest signal without
-/// flooding the prompt. With a 4 KB cap on total output, this leaves ample
-/// budget for hot facts and per-bullet content.
+/// Why (#5037): 5 was a hard limit on how much a *good* recall could return,
+/// chosen when nothing distinguished a good recall from a bad one — every
+/// query returned 5 entries whether or not any of them matched, so a bigger K
+/// only meant more noise. The relevance floor removes that coupling: above the
+/// floor, extra slots can only fill with candidates that actually cleared it,
+/// and below it they stay empty. Measured over 80 real logged hook prompts
+/// against the live palace, K=12 with the floor active renders a drawer section
+/// of at most ~2.7 KB, which fits [`INJECTION_BYTE_CAP`] alongside hot facts
+/// and KG triples.
 /// What: a `usize` constant used unless the env override below is set.
 /// Test: `prompt_context_recalls_palace_drawers` uses the default.
-pub(super) const DEFAULT_TOP_K: usize = 5;
+pub(super) const DEFAULT_TOP_K: usize = 12;
+
+/// Upper bound on the operator-supplied [`ENV_TOP_K`] override.
+///
+/// Why: the ceiling exists so a mistyped override cannot blow the byte budget.
+/// It has to stay above [`DEFAULT_TOP_K`] to remain an escape hatch at all.
+/// What: `30`, raised from 20 alongside the default (#5037).
+/// Test: `configured_top_k_clamps_to_bounds`.
+pub(super) const MAX_TOP_K: usize = 30;
+
+// A ceiling at or below the default would silently cap every operator override,
+// which is the escape hatch dead. Enforced at compile time so the two constants
+// cannot drift apart in a later edit.
+const _: () = assert!(MAX_TOP_K > DEFAULT_TOP_K);
 
 /// Hard byte cap on the rendered injection.
 ///
-/// Why: hook-injection budgets in Claude Code are small (~few KB) and
-/// every byte we emit is a token the model has to spend reading. 4 KB is
-/// a comfortable ceiling above the typical render and well under any
-/// downstream limit.
-/// What: `4 * 1024` bytes. Sections are appended until the cap is hit;
+/// Why: hook-injection budgets in Claude Code are small and every byte we emit
+/// is a token the model has to spend reading. #5037 raised this from 4 KB
+/// because the relevance floor changed what fills it: the cap now bounds
+/// *above-floor* content rather than a fixed-size mixture of hits and noise, so
+/// the same ceiling was costing real matches to hold room for candidates that
+/// no longer get rendered.
+/// What: `8 * 1024` bytes. Sections are appended until the cap is hit;
 /// truncation emits an explicit `…` marker so downstream readers know
 /// the block was cut.
-/// Test: `prompt_context_recalls_palace_drawers` exercises the budget
-/// implicitly by asserting a real (non-placeholder) injection.
-pub(super) const INJECTION_BYTE_CAP: usize = 4 * 1024;
+/// Test: `compose_injection_truncates_at_cap`;
+/// `prompt_context_recalls_palace_drawers` exercises the budget implicitly by
+/// asserting a real (non-placeholder) injection.
+pub(super) const INJECTION_BYTE_CAP: usize = 8 * 1024;
 
 /// Per-drawer-content preview cap inside the injection.
 ///
@@ -157,10 +182,22 @@ pub(super) const DRAWER_PREVIEW_CHARS: usize = 220;
 ///
 /// Why: gives operators an emergency knob without re-deploying. Optional
 /// — when unset / unparseable / zero, [`DEFAULT_TOP_K`] is used.
-/// What: a string env var parsed as a `usize`; clamped to `[1, 20]` to
+/// What: a string env var parsed as a `usize`; clamped to `[1, MAX_TOP_K]` to
 /// keep the byte budget meaningful.
-/// Test: not unit-tested (env mutation across parallel tests is hostile).
+/// Test: `configured_top_k_clamps_to_bounds` covers the clamp arithmetic.
 pub const ENV_TOP_K: &str = "TRUSTY_MEMORY_PROMPT_TOP_K";
+
+/// Env override for the relevance floor applied to recalled drawers.
+///
+/// Why (issue #5037): the ticket asks for a *configurable* minimum, because the
+/// right threshold depends on the embedder and on how a given palace is
+/// written, and neither is knowable from here. Setting it to `0` disables the
+/// gate and restores the pre-#5037 behaviour exactly, which is the escape hatch
+/// an operator needs if the default over-cuts on their corpus.
+/// What: a string env var parsed as an `f32` and clamped to `[0.0, 1.0]`; when
+/// unset or unparseable, `trusty_common`'s `DEFAULT_RELEVANCE_FLOOR` is used.
+/// Test: `configured_relevance_floor_clamps_to_bounds`.
+pub const ENV_MIN_SCORE: &str = "TRUSTY_MEMORY_PROMPT_MIN_SCORE";
 
 /// Env override for the deny-listed drawer tags filtered out of recall.
 ///
@@ -427,9 +464,12 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     // slower of drawers/kg); joining all three caps the fetch phase at
     // ~1× HTTP_TIMEOUT regardless of palace_slug.
     let global_fut = fetch_global_prompt_context(&client, &base);
-    let (global_facts, drawers, kg_triples) = match &palace_slug {
+    let (global_facts, drawers, withheld, kg_triples) = match &palace_slug {
         Some(slug) => {
             let top_k = configured_top_k();
+            // #5037 (requirement 3): the recall query is `user_prompt` whole —
+            // never a first line, a prefix, or an excerpt. `hook_prompt_excerpt`
+            // exists for telemetry only and must not be used here.
             let drawers_fut = fetch_palace_recall(&client, &base, slug, &user_prompt, top_k);
             let kg_fut = fetch_palace_kg_triples(&client, &base, slug);
             let (global_facts, drawers, kg_all) = tokio::join!(global_fut, drawers_fut, kg_fut);
@@ -439,10 +479,16 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
             // back to global hot facts via the existing branch below.
             let deny_tags = configured_deny_tags();
             let drawers = filter_drawers_by_deny_tags(drawers, &deny_tags);
+            // #5037: the deny filter judges provenance; this one judges
+            // relevance. It runs second so a drawer excluded for its tags is
+            // never also counted as "withheld below the floor" — the notice
+            // would then promise `memory_recall` results the deny list also
+            // suppresses.
+            let floor = filter_drawers_by_relevance_floor(drawers, configured_relevance_floor());
             let kg_filtered = select_relevant_triples(&kg_all, &user_prompt, top_k);
-            (global_facts, drawers, kg_filtered)
+            (global_facts, floor.kept, floor.withheld, kg_filtered)
         }
-        None => (global_fut.await, Vec::new(), Vec::new()),
+        None => (global_fut.await, Vec::new(), 0, Vec::new()),
     };
 
     // 5. Compose the injection. If every section is empty, emit the legacy
@@ -451,6 +497,7 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     let composed = compose_injection(
         global_facts.as_deref(),
         &drawers,
+        withheld,
         &kg_triples,
         palace_slug.as_deref(),
     );
@@ -582,16 +629,51 @@ fn parse_user_prompt(stdin_payload: &str) -> String {
 ///
 /// Why: operator escape hatch with a strict ceiling so accidental large
 /// values can't blow the byte budget.
-/// What: parses the env string as a `usize`; on success clamps to
-/// `[1, 20]`; on failure returns [`DEFAULT_TOP_K`].
-/// Test: not unit-tested (env mutation races); covered by the default
-/// path through `prompt_context_recalls_palace_drawers`.
+/// What: reads the env var and hands the raw string to [`clamp_top_k`], which
+/// owns the parse and the clamp so both are testable without env mutation.
+/// Test: `configured_top_k_clamps_to_bounds` covers [`clamp_top_k`]; the
+/// default path is covered by `prompt_context_recalls_palace_drawers`.
 fn configured_top_k() -> usize {
-    std::env::var(ENV_TOP_K)
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .map(|k| k.clamp(1, 20))
+    clamp_top_k(std::env::var(ENV_TOP_K).ok().as_deref())
+}
+
+/// Parse and clamp a raw [`ENV_TOP_K`] value.
+///
+/// Why: split from [`configured_top_k`] so the arithmetic can be asserted
+/// directly — env mutation across parallel tests is hostile.
+/// What: parses `raw` as a `usize` and clamps to `[1, MAX_TOP_K]`. `None`,
+/// unparseable, and zero all fall back to [`DEFAULT_TOP_K`].
+/// Test: `configured_top_k_clamps_to_bounds`.
+fn clamp_top_k(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|k| *k > 0)
+        .map(|k| k.clamp(1, MAX_TOP_K))
         .unwrap_or(DEFAULT_TOP_K)
+}
+
+/// Read the optional [`ENV_MIN_SCORE`] env var, clamped to `[0.0, 1.0]`.
+///
+/// Why (issue #5037): see [`ENV_MIN_SCORE`] — the floor has to be tunable per
+/// corpus, and settable to `0` to turn the gate off entirely.
+/// What: reads the env var and hands the raw string to [`clamp_floor`].
+/// Test: `configured_relevance_floor_clamps_to_bounds` covers [`clamp_floor`].
+fn configured_relevance_floor() -> f32 {
+    clamp_floor(std::env::var(ENV_MIN_SCORE).ok().as_deref())
+}
+
+/// Parse and clamp a raw [`ENV_MIN_SCORE`] value.
+///
+/// Why: same split as [`clamp_top_k`] — assertable without touching the
+/// process environment.
+/// What: parses `raw` as an `f32` and clamps to `[0.0, 1.0]`. `None`,
+/// unparseable, and NaN fall back to `DEFAULT_RELEVANCE_FLOOR`. A parsed `0.0`
+/// is honoured, disabling the gate.
+/// Test: `configured_relevance_floor_clamps_to_bounds`.
+fn clamp_floor(raw: Option<&str>) -> f32 {
+    raw.and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|f| !f.is_nan())
+        .map(|f| f.clamp(0.0, 1.0))
+        .unwrap_or(DEFAULT_RELEVANCE_FLOOR)
 }
 
 /// Resolve the effective deny-list of drawer tags for prompt-context recall.

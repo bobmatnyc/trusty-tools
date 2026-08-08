@@ -216,7 +216,7 @@ let graph = SymbolGraph::parse_file("src/main.rs")?;
 
 **Important**: `symgraph-parser` brings in the `links = "tree-sitter"` native
 library slot. Enable it in at most one crate per build graph (typically
-`open-mpm`). Downstream crates that only need the data types enable `symgraph`
+`trusty-agents`). Downstream crates that only need the data types enable `symgraph`
 (contracts only) and stop there.
 
 ## Migrations (`migrations` feature)

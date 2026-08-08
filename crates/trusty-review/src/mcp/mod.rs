@@ -221,9 +221,10 @@ pub(crate) async fn dispatch_deferred(
 /// HTTP search + analyze clients from config (the analyze client defaults to
 /// `http://localhost:7879`, i.e. loopback to the hosting analyze daemon, so
 /// embedded reviews get authoritative static-analysis context), and returns the
-/// assembled `AppState`. No dedup store is opened — embedded callers do not post
-/// comments (`allow_posting=false` in every tool handler), so cross-process
-/// dedup is unnecessary.
+/// assembled `AppState`. #5064: the dedup requirement is declared through
+/// `DedupNeed::NotNeeded` rather than by passing a bare `None` — embedded
+/// callers never post (`allow_posting=false` in every tool handler), so the
+/// store is not opened and the file stays free for a posting-capable sibling.
 /// Test: the build path is network/credential-bound (AWS / OpenRouter) and is
 /// therefore exercised by the live smoke test rather than a unit test; the
 /// dispatch/tools surface it feeds is covered by `mcp::tests` and
@@ -264,13 +265,17 @@ pub async fn build_review_state() -> Result<AppState> {
         "trusty-review embedded AppState built"
     );
 
+    // #5064: every AppState builder routes the decision through `open_for`.
+    let dedup = crate::store::open_dedup_for(&config.log_dir, crate::store::DedupNeed::NotNeeded)
+        .map_err(|e| anyhow::anyhow!("failed to resolve dedup store: {e}"))?;
+
     Ok(AppState::with_verifier_and_dedup(
         config,
         llm,
         verifier,
         Arc::new(search),
         Some(Arc::new(analyze)),
-        None,
+        dedup,
     ))
 }
 

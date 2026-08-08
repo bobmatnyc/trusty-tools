@@ -137,7 +137,7 @@ pub(crate) struct PickerScope {
     pub(crate) sort: SessionSortArg,
     /// Case-insensitive substring filter re-applied after every re-fetch
     /// (#3483); `None` shows every (live) session.
-    pub(crate) term: Option<String>,
+    pub(crate) term: Option<SessionFilter>,
 }
 
 impl PickerScope {
@@ -181,16 +181,38 @@ pub(crate) async fn fetch_managed_raw(
     Ok(req.send().await?.error_for_status()?.text().await?)
 }
 
-/// Parse a raw managed-session list body into a scoped `Vec` for display.
+/// Deserialize a raw managed-session list body — every row, unscoped.
+///
+/// Why: the listing-time auto-prune must see the FULL fleet, including the dead
+/// rows the default view hides (#4994). Splitting the deserialize away from the
+/// display scoping ([`scope_for_display`]) is what lets the pipeline run in the
+/// only order that works: parse → prune → scope. Before #4994 the scoping ran
+/// inside this function, upstream of the prune, which was harmless only because
+/// nothing it dropped was ever prunable.
+/// What: deserializes `ManagedListResponse` and hands back its `sessions`
+/// verbatim, in the daemon's ascending-slot order.
+/// Test: `scope_for_display_all_keeps_tombstone_in_slot_order` (via the pair),
+/// `session_ls_prunes_dead_records_on_piped_invocation`.
+pub(crate) fn parse_managed_sessions(raw: &str) -> anyhow::Result<Vec<ManagedSessionSummary>> {
+    Ok(serde_json::from_str::<ManagedListResponse>(raw)?.sessions)
+}
+
+/// Apply the default-vs-`--all` display scoping to an already-pruned list.
 ///
 /// Why: the static table and the picker share one filtering/sorting policy so
 /// the two views never diverge (#1809/#1841).
-/// What: deserializes `ManagedListResponse`; when `all` is false, drops
-/// decommissioned records via [`filter_live_sessions`] (a `"deleted"` slot
-/// tombstone, #3034, is NOT a decommissioned record and always passes through
-/// this branch too — see [`super::managed::is_live_session_state`]'s doc).
-/// When `all` is true, keeps every row — live, decommissioned, AND tombstoned
-/// — but stable-sorts ONLY `"decommissioned"` records to the end.
+/// What: when `all` is false, drops decommissioned records, soft-deleted
+/// records, and (#4994) records the listing-time sweep classified dead, via
+/// [`filter_live_sessions`] (a `"deleted"` slot tombstone, #3034, is NOT a
+/// decommissioned record and always passes through this branch too — see
+/// [`super::managed::is_live_session_state`]'s doc).
+///
+/// 🔴 `dead_ids` must be the set the sweep that just ran over THIS list
+/// produced — never the wire's `unresumable` flag re-derived here. See
+/// [`super::managed::is_live_session_state`] for the live session that
+/// distinction keeps visible.
+/// When `all` is true, keeps every row — live, decommissioned, dead, AND
+/// tombstoned — but stable-sorts ONLY `"decommissioned"` records to the end.
 ///
 /// `"deleted"` (#3034) tombstones are deliberately EXCLUDED from that
 /// sink-to-bottom sort key, even though a reviewer might expect both "dead"
@@ -202,7 +224,7 @@ pub(crate) async fn fetch_managed_raw(
 /// Bob's #3034 directive requires it to render at its ORIGINAL position in the
 /// numbered listing, not wherever a liveness sort would relocate it, so an
 /// operator scanning the table top-to-bottom sees the exact gap where a
-/// session used to be. `[`render_session_table`](super::managed::render_session_table)
+/// session used to be. `[`render_session_table`](super::managed_render::render_session_table)
 /// and the picker menu both label each row with its own `slot` field (not a
 /// recomputed position), so this is not merely cosmetic — a sink-to-bottom
 /// move for tombstones would visually separate a deleted slot from its live
@@ -214,25 +236,23 @@ pub(crate) async fn fetch_managed_raw(
 /// slot order untouched.
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
 /// `ls_source_id_filter_selects_correct_slug` in `tests_behavior_c_tests.rs`;
-/// `parse_scoped_sessions_all_keeps_tombstone_in_slot_order` in
+/// `scope_for_display_all_keeps_tombstone_in_slot_order` in
 /// `commands/session_tests.rs` covers the sink-to-bottom exclusion this doc
 /// describes.
-pub(crate) fn parse_scoped_sessions(
-    raw: &str,
+pub(crate) fn scope_for_display(
+    sessions: Vec<ManagedSessionSummary>,
     all: bool,
-) -> anyhow::Result<Vec<ManagedSessionSummary>> {
-    let fetched = serde_json::from_str::<ManagedListResponse>(raw)?.sessions;
-    let sessions = if all {
-        let mut s = fetched;
-        // Sink ONLY soft-retired "decommissioned" records — never "deleted"
-        // slot tombstones, which must stay in their original slot position
-        // (see this function's doc for the full reasoning).
-        s.sort_by_key(|sess| u8::from(sess.state == "decommissioned"));
-        s
-    } else {
-        filter_live_sessions(fetched)
-    };
-    Ok(sessions)
+    dead_ids: &std::collections::HashSet<String>,
+) -> Vec<ManagedSessionSummary> {
+    if !all {
+        return filter_live_sessions(sessions, dead_ids);
+    }
+    // Sink ONLY soft-retired "decommissioned" records — never "deleted"
+    // slot tombstones, which must stay in their original slot position
+    // (see this function's doc for the full reasoning).
+    let mut sessions = sessions;
+    sessions.sort_by_key(|sess| u8::from(sess.state == "decommissioned"));
+    sessions
 }
 
 /// Sort order for the `tm ls` / `tm sessions ls` table and picker (#3483).
@@ -299,48 +319,106 @@ fn join_non_empty(words: &[String]) -> Option<String> {
     }
 }
 
-/// Case-insensitive substring filter over a session's visible identifying
-/// columns (#3483).
+/// Which columns a filter term is matched against.
 ///
-/// Why: the operator scans `id`, `name`, the project slug, `state`, and `task`
-/// on the rendered table/picker — the filter should match anything they can
-/// actually see, not an internal-only field.
-/// What: keeps a session when `term` (lowercased) is a substring of ANY of:
-/// `id`, `name`, `source_id` (project), `state`, `task`. A `None`/absent field
-/// is simply skipped. `term = None` is a no-op (returns `sessions` unchanged).
+/// Why: `tm ls <term>` and `tm f <pattern>` share one filter/sort/render path
+/// but ask different questions. `tm ls` matches everything the operator can see
+/// on the row, which is the right default when they are hunting and only half
+/// remember where the string lives. `tm f` is the narrow tool: "show me the
+/// sessions CALLED this", and a task description mentioning the word must not
+/// pad the answer. The distinction is data on the filter, not a second
+/// filtering function, so neither behaviour can drift from the other.
+/// What: [`Visible`](FilterScope::Visible) matches `id`, `name`, `source_id`,
+/// `state`, and `task`; [`Name`](FilterScope::Name) matches `name` only.
+/// Test: `filter_sessions_by_name_ignores_non_name_columns`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilterScope {
+    /// Every column the table renders (`tm ls <term>`, #3483).
+    Visible,
+    /// The `NAME` column only (`tm f <pattern>`).
+    Name,
+}
+
+/// A case-insensitive substring filter plus the columns it applies to.
+///
+/// Why: see [`FilterScope`] — the scope has to ride along with the term through
+/// `run_ls_connector` → `session_ls` → the picker's re-fetch loop, so the
+/// picker keeps filtering the way the invoking command asked.
+/// What: an owned lowercase-compared needle and its [`FilterScope`]. Construct
+/// via [`SessionFilter::visible`] or [`SessionFilter::name`].
+/// Test: `filter_sessions_by_term_*`, `filter_sessions_by_name_*`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionFilter {
+    /// The needle, already lowercased at construction.
+    needle_lower: String,
+    /// Which columns [`SessionFilter::matches`] reads.
+    scope: FilterScope,
+}
+
+impl SessionFilter {
+    /// Filter over every visible column — the `tm ls` grammar's behaviour.
+    pub(crate) fn visible(term: impl AsRef<str>) -> Self {
+        Self::new(term, FilterScope::Visible)
+    }
+
+    /// Filter over the `NAME` column only — `tm f <pattern>`.
+    pub(crate) fn name(term: impl AsRef<str>) -> Self {
+        Self::new(term, FilterScope::Name)
+    }
+
+    fn new(term: impl AsRef<str>, scope: FilterScope) -> Self {
+        Self {
+            needle_lower: term.as_ref().to_lowercase(),
+            scope,
+        }
+    }
+
+    /// Does `s` match this filter?
+    ///
+    /// Why: a `None`/absent optional column must be skipped rather than treated
+    /// as an empty string, which every term would trivially "contain".
+    /// What: case-insensitive `contains` over the columns [`Self::scope`]
+    /// selects.
+    /// Test: `filter_sessions_by_term_*`, `filter_sessions_by_name_*`.
+    pub(crate) fn matches(&self, s: &ManagedSessionSummary) -> bool {
+        let fields: &[Option<&str>] = match self.scope {
+            FilterScope::Visible => &[
+                Some(s.id.as_str()),
+                Some(s.name.as_str()),
+                s.source_id.as_deref(),
+                Some(s.state.as_str()),
+                s.task.as_deref(),
+            ],
+            FilterScope::Name => &[Some(s.name.as_str())],
+        };
+        fields
+            .iter()
+            .flatten()
+            .any(|field| field.to_lowercase().contains(&self.needle_lower))
+    }
+}
+
+/// Apply a [`SessionFilter`] to a session list (#3483).
+///
+/// Why: the static table and the interactive picker must filter identically, so
+/// both call this rather than open-coding the predicate.
+/// What: keeps the sessions [`SessionFilter::matches`] accepts. `filter = None`
+/// is a no-op (returns `sessions` unchanged).
 /// Test: `filter_sessions_by_term_matches_name`,
 /// `filter_sessions_by_term_matches_task`,
 /// `filter_sessions_by_term_matches_source_id`,
 /// `filter_sessions_by_term_is_case_insensitive`,
 /// `filter_sessions_by_term_no_match_returns_empty`,
-/// `filter_sessions_by_term_none_is_noop`.
+/// `filter_sessions_by_term_none_is_noop`,
+/// `filter_sessions_by_name_ignores_non_name_columns`.
 pub(crate) fn filter_sessions_by_term(
     sessions: Vec<ManagedSessionSummary>,
-    term: Option<&str>,
+    filter: Option<&SessionFilter>,
 ) -> Vec<ManagedSessionSummary> {
-    let Some(term) = term else {
+    let Some(filter) = filter else {
         return sessions;
     };
-    let needle = term.to_lowercase();
-    sessions
-        .into_iter()
-        .filter(|s| session_matches_term(s, &needle))
-        .collect()
-}
-
-/// Pure predicate backing [`filter_sessions_by_term`]; `needle_lower` must
-/// already be lowercased.
-fn session_matches_term(s: &ManagedSessionSummary, needle_lower: &str) -> bool {
-    [
-        Some(s.id.as_str()),
-        Some(s.name.as_str()),
-        s.source_id.as_deref(),
-        Some(s.state.as_str()),
-        s.task.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|field| field.to_lowercase().contains(needle_lower))
+    sessions.into_iter().filter(|s| filter.matches(s)).collect()
 }
 
 /// The attached→active→everything-else group a session belongs in (owner
@@ -426,11 +504,13 @@ fn recency_key(s: &ManagedSessionSummary) -> &str {
 /// Why: the interactive picker (both call sites) needs the deserialized, filtered
 /// session list; combining the GET and the parse keeps re-fetch-after-detach a
 /// single call and guarantees identical scoping to the static list.
-/// What: [`fetch_managed_raw`], then [`parse_scoped_sessions`], then
+/// What: [`fetch_managed_raw`], then [`parse_managed_sessions`], then
 /// [`super::session_picker_prune::prune_and_report`] — every session confirmed
 /// dead on TWO consecutive listings is cleared from the registry (capped per
 /// call) instead of sitting in the list forever printing "use [d<N>] to remove
-/// the record".
+/// the record" — and only THEN [`scope_for_display`]. That order is
+/// load-bearing (#4994): the default view now hides dead rows, so scoping first
+/// would hand the prune a list with its own targets already removed.
 ///
 /// #4702: the prune used to be behind an `allow_auto_prune` opt-in that only
 /// the TTY-gated call sites ever passed. That inconsistency is the defect —
@@ -451,7 +531,7 @@ fn recency_key(s: &ManagedSessionSummary) -> &str {
 ///     `auto_prune_always_requests_record_only_never_full_teardown`.
 ///
 /// Test: HTTP path in `tests/session_manager_mvp.rs`; the parse/filter seam is
-/// unit-tested via `parse_scoped_sessions`; the auto-prune seam by
+/// unit-tested via `scope_for_display`; the auto-prune seam by
 /// `auto_prune_*` in `tests_behavior_d_tests.rs`.
 pub(crate) async fn fetch_live_sessions(
     client: &reqwest::Client,
@@ -460,8 +540,11 @@ pub(crate) async fn fetch_live_sessions(
     all: bool,
 ) -> anyhow::Result<Vec<ManagedSessionSummary>> {
     let raw = fetch_managed_raw(client, url, source_id).await?;
-    let sessions = parse_scoped_sessions(&raw, all)?;
-    Ok(super::session_picker_prune::prune_and_report(client, url, sessions).await)
+    let fetched = parse_managed_sessions(&raw)?;
+    // `!all` is exactly whether this call will drop the dead rows, which is what
+    // decides the banner's "hidden" suffix (#4994).
+    let listing = super::session_picker_prune::prune_and_report(client, url, fetched, !all).await;
+    Ok(scope_for_display(listing.sessions, all, &listing.dead_ids))
 }
 
 /// Find the 0-based position in `sessions` whose stable `slot` equals `n`
@@ -584,7 +667,7 @@ pub(crate) fn next_launch_slot(sessions: &[ManagedSessionSummary]) -> u32 {
 /// Test: `guided_picker_numeric_deleted_slot_blocked`,
 /// `guided_picker_bare_enter_unresumable_session_blocked`,
 /// `guided_picker_numeric_unresumable_session_blocked`.
-fn decide_for_index(
+pub(crate) fn decide_for_index(
     sessions: &[ManagedSessionSummary],
     idx: usize,
     bare_enter_needs_restart: bool,
@@ -1015,7 +1098,7 @@ pub(crate) async fn run_tty_picker(
         // Issue TBD: re-apply the scope's filter/sort so the redisplayed menu
         // never drifts from the one the operator picked against.
         sessions = fetch_live_sessions(client, url, scope.source_id.as_deref(), false).await?;
-        sessions = filter_sessions_by_term(sessions, scope.term.as_deref());
+        sessions = filter_sessions_by_term(sessions, scope.term.as_ref());
         sort_sessions(&mut sessions, scope.sort);
     }
     Ok(())
@@ -1066,7 +1149,7 @@ pub(crate) async fn run_ls_connector(
     current: bool,
     all: bool,
     sort: SessionSortArg,
-    term: Option<String>,
+    term: Option<SessionFilter>,
 ) -> anyhow::Result<()> {
     // `--current` derives the source_id from the cwd git remote, exactly like
     // `tm session ls --current`. `--source-id` and `--current` are mutually
@@ -1108,13 +1191,13 @@ pub(crate) async fn run_ls_connector(
             .await;
         }
     };
-    let mut sessions = filter_sessions_by_term(sessions, term.as_deref());
+    let mut sessions = filter_sessions_by_term(sessions, term.as_ref());
     sort_sessions(&mut sessions, sort);
 
     if !should_show_picker(stdin_tty, stdout_tty, json, all, sessions.len()) {
         // 0 sessions on a TTY: print the static "no managed sessions" line rather
         // than an empty picker.
-        super::managed::render_session_table(&sessions, sid.as_deref());
+        super::managed_render::render_session_table(&sessions, sid.as_deref());
         return Ok(());
     }
 

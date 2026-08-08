@@ -6,7 +6,7 @@
 //! logic keeps the two contracts identical.
 //!
 //! What: `default_socket_path(palace)` returns
-//! `$TMPDIR/trusty-bm25-<palace>.sock` (falling back to `/tmp` if `TMPDIR`
+//! `$TMPDIR/trusty-<uid>/trusty-bm25-<palace>.sock` (falling back to `/tmp`
 //! is unset or empty); `cleanup_stale_socket` best-effort removes the file
 //! at the given path, ignoring "not found".
 //!
@@ -61,17 +61,19 @@ pub fn sanitise_palace(palace: &str) -> String {
 /// `/var/folders/...`, while Linux servers usually leave `TMPDIR` unset and
 /// expect `/tmp`. Honouring the env var keeps the socket inside whatever
 /// scratch space the OS assigned the daemon.
-/// What: returns `<TMPDIR>/trusty-bm25-<palace>.sock`. If `TMPDIR` is
-/// unset, empty, or whitespace, falls back to `/tmp`. The palace fragment
-/// is sanitised via [`sanitise_palace`].
+/// What: returns `<$TMPDIR or /tmp>/trusty-<uid>/trusty-bm25-<palace>.sock`.
+/// The palace fragment is sanitised via [`sanitise_palace`].
+///
+/// #5099: the socket used to sit directly in `$TMPDIR`, falling back to `/tmp`.
+/// On a Linux host with `TMPDIR` unset that is world-writable and cannot be
+/// narrowed, so the uid-keyed subdirectory from
+/// [`trusty_common::uds::scratch_socket_dir`] is interposed and held at `0700`.
+/// This must stay byte-identical to `trusty_common::bm25_client`'s resolver —
+/// client and daemon have to agree on the path.
 /// Test: `default_socket_path_uses_tmpdir`.
 pub fn default_socket_path(palace: &str) -> PathBuf {
-    let dir = match std::env::var("TMPDIR") {
-        Ok(p) if !p.trim().is_empty() => PathBuf::from(p),
-        _ => PathBuf::from("/tmp"),
-    };
     let fname = format!("{SOCKET_PREFIX}{}{SOCKET_SUFFIX}", sanitise_palace(palace));
-    dir.join(fname)
+    trusty_common::uds::scratch_socket_dir().join(fname)
 }
 
 /// Best-effort remove a (possibly-stale) socket file before bind.

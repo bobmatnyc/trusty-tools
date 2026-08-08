@@ -147,7 +147,6 @@ crates/trusty-analyze/src/mcp/review.rs	tr_review_health_routes
 crates/trusty-analyze/src/service/events.rs	sse_stream_emits_fact_upserted
 crates/trusty-analyze/src/service/handlers/analysis.rs	diagnostics_endpoint_returns_empty_when_no_tools
 crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_default_strips_content
-crates/trusty-analyze/src/service/handlers/graph.rs	scip_ingest_round_trip
 crates/trusty-analyze/src/service/handlers/review.rs	github_pr_endpoint_requires_token
 crates/trusty-analyze/src/service/routes.rs	sse_stream_emits_fact_upserted
 crates/trusty-analyze/src/types/complexity.rs	custom_thresholds_change_detection_results
@@ -210,7 +209,6 @@ crates/trusty-common/src/memory_core/dream/recall_benchmark.rs	dream_recall_benc
 crates/trusty-common/src/memory_core/registry.rs	evict_idle_skips_recently_accessed_handle
 crates/trusty-common/src/memory_core/registry.rs	open_hydrates_persisted_palaces
 crates/trusty-common/src/memory_core/retrieval/handle.rs	decay_applied_in_l2_score
-crates/trusty-common/src/memory_core/retrieval/handle.rs	deferred_embed_backfills_vector_once_embedder_ready
 crates/trusty-common/src/memory_core/retrieval/handle.rs	palace_handle_read_only_when_locked_by_another_process
 crates/trusty-common/src/memory_core/retrieval/handle.rs	remember_classifies_session_events
 crates/trusty-common/src/memory_core/semantic_consolidation/inference.rs	ollama_inference_new_stores_fields

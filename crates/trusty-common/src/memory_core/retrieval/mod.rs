@@ -10,15 +10,25 @@
 //! Test: `cargo test -p trusty-common --features memory-core retrieval::`
 //! exercises L0/L1 cache and L2 vector retrieval end-to-end.
 
+// #4906: the deferred-embed lane (retry + durable failure ledger) and the
+// vector-coverage health/repair surface that answers "which drawers have no
+// vector" and re-embeds them.
+mod deferred_embed;
+mod embed_repair;
 mod embedder;
 mod handle;
 mod layers;
+// #5037: the minimum-score gate `layers` never had — `truncate(top_k)` was its
+// only length control.
+mod relevance;
 // ADR-0027 T9: room/wing recall scoping, shared by L2 and the list paths.
 mod scope;
 // ADR-0028 D3/D4/D5 (#4886): Tier C admission and atomic retire-on-write.
 mod tier_c;
 mod types;
 
+#[cfg(test)]
+mod embed_repair_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -41,8 +51,21 @@ pub use types::{
 // Palace handle
 pub use handle::PalaceHandle;
 
+// #4906: vector-coverage health and the repair backfill. `RetryPolicy` is
+// public because a caller choosing to run a longer policy than the write-path
+// default is a legitimate operator decision.
+pub use deferred_embed::RetryPolicy;
+pub use embed_repair::{
+    AliasAudit, AliasRepairOptions, AliasRepairOutcome, AliasRepairReport, EmbedHealth,
+    VectorBackfillOptions, VectorBackfillReport,
+};
+
 // Recall scoping (ADR-0027 T9)
 pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};
+
+// #5037: relevance floor. Public because the consumer that must apply it —
+// trusty-memory's prompt-context injection — lives in another crate.
+pub use relevance::{DEFAULT_RELEVANCE_FLOOR, FloorOutcome, apply_relevance_floor};
 
 // ADR-0028 Tier C admission (#4886). The write half (`persist_with_retirement`)
 // stays crate-internal — every writer reaches it through

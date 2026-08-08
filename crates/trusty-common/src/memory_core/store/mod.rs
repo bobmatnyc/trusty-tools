@@ -8,6 +8,8 @@
 
 pub mod chat_sessions;
 pub mod concurrent_open;
+// #4906: durable record of drawers whose embed permanently failed.
+pub mod embed_ledger;
 pub mod hnsw_store;
 pub mod kg;
 pub mod kg_redb;
@@ -30,6 +32,9 @@ pub mod wings;
 
 pub use chat_sessions::{ChatSession, ChatSessionMeta, ChatSessionStore};
 pub use concurrent_open::{OpenIntent, OpenMode};
+// #4906: the ledger row type; the read/write helpers stay module-qualified so
+// call sites read as `embed_ledger::record(..)`.
+pub use embed_ledger::EmbedFailure;
 pub use kg::{KnowledgeGraph, Triple};
 pub use l1_cache::{L1Cache, L1CacheError};
 pub use palace_store::{PalaceStore, PalaceStoreError};

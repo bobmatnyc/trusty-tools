@@ -120,6 +120,10 @@ pub mod project_trust;
 pub mod protected_dirs;
 pub mod provisioning_stage;
 pub mod push_guard;
+// `tm reinstall`: the two-hop asset redeploy across every deploy destination,
+// and the install-provenance route its `--binary` flag takes.
+pub mod binary_reinstall;
+pub mod reinstall;
 pub mod scaffold_gitignore;
 pub mod session;
 pub mod session_assets;
@@ -146,6 +150,7 @@ pub mod update_check;
 pub mod version_staleness;
 pub mod workspace_liveness;
 pub mod workspace_scan;
+pub mod worktree_index;
 pub mod worktree_naming;
 
 pub use connect::{ResolveResult, SessionSummary, resolve_target};

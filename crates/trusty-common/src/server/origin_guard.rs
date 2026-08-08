@@ -127,6 +127,34 @@ pub fn origin_is_loopback(origin: &str) -> bool {
     }
 }
 
+/// Classify whether an `Origin` header value is a native webview shell running
+/// on this machine. (#5052)
+///
+/// Why: a Tauri desktop shell serves its own frontend from a synthetic origin
+/// rather than an `http://127.0.0.1` URL, so a same-machine-origins policy that
+/// only knew about loopback would break the packaged app's cross-origin reads
+/// against the sidecar. The origin is minted by the webview runtime, not by any
+/// page — a remote site cannot claim it — so trusting these exact three strings
+/// is equivalent in strength to trusting loopback. Kept next to
+/// [`origin_is_loopback`] because they answer the same question ("is this
+/// origin the operator's own machine?") and must not drift apart.
+/// What: EXACT match (never a prefix or suffix test) against the three origins
+/// Tauri v2 uses: `tauri://localhost` (macOS/iOS), `http://tauri.localhost`
+/// (Windows/Android), and `https://tauri.localhost`. Anything else — including
+/// `https://tauri.localhost.evil.com` — is `false`.
+///
+/// This is deliberately NOT wired into [`guard_write_origin`]: widening the
+/// CSRF guard is a separate decision with a different blast radius, and #5052
+/// is a read-disclosure fix. See `same_origin_cors` for the sole consumer.
+/// Test: `origin_is_local_webview_accepts_tauri_origins`,
+/// `origin_is_local_webview_rejects_lookalikes`.
+pub fn origin_is_local_webview(origin: &str) -> bool {
+    matches!(
+        origin,
+        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+    )
+}
+
 /// Check whether an `Origin` header value matches one of the daemon's own
 /// bind-derived, non-loopback addresses (#3269).
 ///
@@ -309,6 +337,33 @@ mod tests {
         assert!(!origin_is_loopback("127.0.0.1:7070")); // no scheme
         assert!(!origin_is_loopback(""));
         assert!(!origin_is_loopback("garbage"));
+    }
+
+    /// Why: #5052 — the packaged Tauri shell's own webview origin must count as
+    /// same-machine, or the desktop app loses every cross-origin read against
+    /// its sidecar the moment the CORS policy stops being `Any`.
+    /// Test: this test.
+    #[test]
+    fn origin_is_local_webview_accepts_tauri_origins() {
+        assert!(origin_is_local_webview("tauri://localhost"));
+        assert!(origin_is_local_webview("http://tauri.localhost"));
+        assert!(origin_is_local_webview("https://tauri.localhost"));
+    }
+
+    /// Why: SECURITY — the check must be an exact match. A `contains`/
+    /// `starts_with` test would accept the attacker-registrable
+    /// `https://tauri.localhost.evil.com`, handing a remote page the same trust
+    /// as the desktop shell.
+    /// Test: this test.
+    #[test]
+    fn origin_is_local_webview_rejects_lookalikes() {
+        assert!(!origin_is_local_webview("https://tauri.localhost.evil.com"));
+        assert!(!origin_is_local_webview("http://tauri.localhost:1234"));
+        assert!(!origin_is_local_webview(
+            "https://evil.com/tauri://localhost"
+        ));
+        assert!(!origin_is_local_webview("tauri://evil.com"));
+        assert!(!origin_is_local_webview(""));
     }
 
     /// Why: #3269 regression guard — a Tailscale bind's own resolved address

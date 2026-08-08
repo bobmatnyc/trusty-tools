@@ -15,11 +15,12 @@ use serde_json::Value;
 /// Why: a typed enum lets `dispatch` branch on the failure kind and map it
 /// to the correct JSON-RPC error code or in-band MCP tool error shape without
 /// parsing error strings.
-/// What: four variants — `UnknownTool` (no route), `InvalidParams` (bad args),
+/// What: five variants — `UnknownTool` (no route), `InvalidParams` (bad args),
 /// `Transport` (HTTP-level failure), `StageNotReady` (issue #138 pre-flight
-/// failure with structured retry hint).
-/// Test: every variant is exercised by at least one unit test in `tests.rs` or
-/// `tests_lane.rs`.
+/// failure with structured retry hint), `IndexNotReady` (issue #4715 — the
+/// session's advertised index has never been built).
+/// Test: every variant is exercised by at least one unit test in `tests.rs`,
+/// `tests_lane.rs`, or `tests_not_ready.rs`.
 #[derive(Debug)]
 pub(super) enum DispatchError {
     UnknownTool,
@@ -33,6 +34,15 @@ pub(super) enum DispatchError {
         message: String,
         current_stages: Value,
         suggested_tools: Vec<&'static str>,
+    },
+    /// Issue #4715 — the daemon 404'd on the index it advertised as this
+    /// session's default, i.e. the worktree has never been indexed. Distinct
+    /// from a genuine unknown index because it is transient and retryable.
+    /// Carries the prose message and the structured payload built by
+    /// [`super::not_ready`].
+    IndexNotReady {
+        message: String,
+        payload: Value,
     },
 }
 

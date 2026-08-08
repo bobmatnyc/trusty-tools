@@ -22,8 +22,7 @@ commands:
         description: Start MCP HTTP/SSE server on this port
       - name: fastembed-cache
         type_hint: PATH
-        default: .fastembed_cache
-        description: Path to the fastembed model cache
+        description: "Deprecated no-op, accepted and ignored (#5067)"
     examples:
       - cmd: trusty-analyze serve
       - cmd: trusty-analyze serve --port 7879 --mcp

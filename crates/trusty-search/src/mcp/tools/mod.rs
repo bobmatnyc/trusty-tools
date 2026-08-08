@@ -15,6 +15,9 @@
 //! - [`misc`]        — `search_health`, `chat`, `get_call_chain`, `grep`,
 //!   `upgrade`
 //! - [`descriptors`] — static `tool_descriptors()` for `tools/list`
+//! - [`not_ready`]   — the `INDEX_NOT_READY` contract (issue #4715): a daemon
+//!   404 on the index this session ADVERTISED means "not built yet", which is
+//!   retryable, not "no such index", which is permanent
 //! - [`http`]        — shared HTTP transport helpers (`get`, `post`, `delete`, …)
 //! - [`types`]       — `DispatchError`, `require_str`, response-wrapping helpers
 //!
@@ -33,12 +36,15 @@ pub(crate) mod descriptors;
 pub(crate) mod http;
 pub(crate) mod index;
 pub(crate) mod misc;
+pub(crate) mod not_ready;
 pub(crate) mod search;
 pub(crate) mod typeahead;
 pub(crate) mod types;
 
 pub use descriptors::{tool_descriptors, tool_descriptors_pinned};
+pub use not_ready::{INDEX_NOT_READY, INDEX_NOT_READY_CODE};
 
+use not_ready::wrap_index_not_ready_error;
 use types::{
     wrap_stage_not_ready_error, wrap_text_content, wrap_tool_error, wrap_tool_result, DispatchError,
 };
@@ -219,7 +225,7 @@ impl McpServer {
                 return Response::ok(id, serde_json::json!({ "tools": tools }));
             }
             // OpenRPC 1.3.2 discovery — see `mcp::openrpc`. Returns the
-            // full service description so orchestrators (open-mpm, etc.)
+            // full service description so orchestrators (trusty-agents, etc.)
             // can introspect every tool and its required
             // `search.read`/`search.write` scope without bespoke adapters.
             "rpc.discover" => {
@@ -255,6 +261,11 @@ impl McpServer {
                     id,
                     wrap_stage_not_ready_error(&message, &current_stages, &suggested_tools),
                 ),
+                // Issue #4715: a not-ready index is an in-band tool error with
+                // a structured `_meta` payload — never a zero-hit success body.
+                Err(DispatchError::IndexNotReady { message, payload }) => {
+                    Response::ok(id, wrap_index_not_ready_error(&message, &payload))
+                }
             }
         } else {
             match outcome {
@@ -288,6 +299,16 @@ impl McpServer {
                     let mut resp = Response::err(id, STAGE_NOT_READY_CODE, message);
                     if let Some(ref mut e) = resp.error {
                         e.data = Some(data);
+                    }
+                    resp
+                }
+                // Issue #4715: bare-method form has no `_meta` slot, so the
+                // same structured payload rides in the error `data` field under
+                // an app-level code distinct from every "not found" code.
+                Err(DispatchError::IndexNotReady { message, payload }) => {
+                    let mut resp = Response::err(id, INDEX_NOT_READY_CODE, message);
+                    if let Some(ref mut e) = resp.error {
+                        e.data = Some(payload);
                     }
                     resp
                 }
@@ -332,3 +353,6 @@ mod tests_tools_list;
 // Issue #882: empty-query MCP tests (separate file — line-cap budget).
 #[cfg(test)]
 mod tests_empty_query;
+// Issue #4715: INDEX_NOT_READY contract tests.
+#[cfg(test)]
+mod tests_not_ready;

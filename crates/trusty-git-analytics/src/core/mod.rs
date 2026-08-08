@@ -9,6 +9,7 @@
 //! - [`db`] — SQLite database wrapper with WAL mode and versioned migrations
 //! - [`errors`] — crate-wide error enum and `Result` alias
 //! - [`models`] — domain structs for commits, authors, classifications, etc.
+//! - [`progress`] — optional, non-blocking pipeline progress bus (#5197)
 //! - [`quality`] — per-engineer-per-week quality scoring (1–5 T-shirt)
 //! - [`revert`] — shared commit-message revert detection
 
@@ -18,6 +19,7 @@ pub mod effort;
 pub mod effort_percentile;
 pub mod errors;
 pub mod models;
+pub mod progress;
 pub mod quality;
 pub mod revert;
 

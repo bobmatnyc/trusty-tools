@@ -123,7 +123,7 @@ pub const WINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wings");
 /// Test: `store::wings::tests::wing_create_is_idempotent`.
 pub const WING_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("wing_keys");
 
-/// Payload store (for `open-mpm`'s `TrustyBackedMemoryStore`).
+/// Payload store (for `trusty-agents`'s `TrustyBackedMemoryStore`).
 ///
 /// Why: Payloads are namespaced by segment and addressed by id; share the
 ///      same redb env as the KG so payload + KG ops can ride a single
@@ -180,6 +180,28 @@ pub const VECTOR_KEYS: TableDefinition<&str, u64> = TableDefinition::new("vector
 /// Test: Coverage lives in `crate::memory_core::store::hnsw_store::tests`
 ///       (`delete_filters_results`).
 pub const DELETED_VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("deleted_vectors");
+
+/// Persisted vector-id allocator (issue #5005).
+///
+/// Why: `HnswStore` used to allocate vector ids from a process-local
+///      `AtomicU64` seeded at open from `max(VECTORS, VECTOR_KEYS) + 1`. Two
+///      live stores over the same database — which the in-process vector-db
+///      cache deliberately supports, see
+///      `crate::memory_core::store::vector::open_or_get_cached_db` — each
+///      seeded their own counter from the same high-water mark and then handed
+///      out the same ids, so `VECTOR_KEYS` aliased several drawers onto one
+///      `vector_id` and `VECTORS` overwrote in place. Keeping the reservation
+///      in redb and bumping it inside the same write transaction as the insert
+///      makes allocation serialisable with every other writer on the file.
+/// What: Single-row table. Key = [`NEXT_VECTOR_ID`], value = the next
+///       unissued `u64` vector_id.
+/// Test: `crate::memory_core::store::hnsw_store::tests::
+///       two_live_stores_over_one_file_never_alias_ids` and
+///       `old_palace_without_a_seq_row_is_seeded_on_open`.
+pub const VECTOR_ID_SEQ: TableDefinition<&str, u64> = TableDefinition::new("vector_id_seq");
+
+/// The only key stored in [`VECTOR_ID_SEQ`].
+pub const NEXT_VECTOR_ID: &str = "next_vector_id";
 
 /// Chat-session store (for the trusty-memory web UI's chat panel).
 ///
@@ -611,6 +633,7 @@ mod tests {
             VECTORS.name(),
             VECTOR_KEYS.name(),
             DELETED_VECTORS.name(),
+            VECTOR_ID_SEQ.name(),
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

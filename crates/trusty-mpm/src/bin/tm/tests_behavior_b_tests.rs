@@ -1739,3 +1739,34 @@ fn launch_paths_prepare_through_the_isolated_seam() {
          through `prepare_isolated_session` and add it to the list above"
     );
 }
+
+/// The default must touch NO binary and clobber NOTHING — a `tm reinstall`
+/// typed with no flags refreshes assets only.
+#[test]
+fn cli_parses_reinstall() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "reinstall"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Reinstall(crate::cli::ReinstallArgs {
+            force: false,
+            binary: false,
+            yes: false
+        })
+    ));
+}
+
+/// `--yes` only means "skip the binary prompt", so clap must reject it on its
+/// own rather than let it read as blanket consent.
+#[test]
+fn cli_parses_reinstall_binary() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "reinstall", "--binary", "--yes"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Reinstall(crate::cli::ReinstallArgs {
+            binary: true,
+            yes: true,
+            ..
+        })
+    ));
+    assert!(Cli::try_parse_from(["trusty-mpm", "reinstall", "--yes"]).is_err());
+}
