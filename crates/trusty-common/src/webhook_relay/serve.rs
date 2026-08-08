@@ -184,7 +184,10 @@ pub fn dispatch_frame(frame: &[u8], sink: &dyn DeliverySink) -> RelayResponse {
     let request: RelayRequest = match serde_json::from_slice(frame) {
         Ok(r) => r,
         Err(e) => {
-            return RelayResponse::refuse(CODE_PARSE_ERROR, format!("unparseable relay frame: {e}"));
+            return RelayResponse::refuse(
+                CODE_PARSE_ERROR,
+                format!("unparseable relay frame: {e}"),
+            );
         }
     };
 

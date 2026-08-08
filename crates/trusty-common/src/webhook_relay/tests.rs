@@ -271,7 +271,10 @@ fn inbox_persist_is_durable_before_it_returns() {
 
     let stored: RelayDelivery =
         serde_json::from_slice(&std::fs::read(&owned.path).expect("read entry")).expect("decode");
-    assert_eq!(stored, d, "the stored copy must be the frame we were handed");
+    assert_eq!(
+        stored, d,
+        "the stored copy must be the frame we were handed"
+    );
 }
 
 #[test]
@@ -311,7 +314,11 @@ fn inbox_entry_path_sanitises_a_hostile_delivery_id() {
     let long = "x".repeat(4096);
     let name = inbox.entry_path(&long);
     let base = name.file_name().expect("filename").to_string_lossy();
-    assert!(base.len() < 128, "filename must stay short, got {}", base.len());
+    assert!(
+        base.len() < 128,
+        "filename must stay short, got {}",
+        base.len()
+    );
 }
 
 #[test]
@@ -519,10 +526,13 @@ async fn serve_keeps_answering_after_a_refusal() {
     let inbox = Inbox::open(tmp.path().join("inbox")).expect("open inbox");
     let (sock, _stop) = spawn_listener(tmp.path(), Arc::new(inbox.clone()));
 
-    let bad: RelayResponse =
-        crate::uds::send_framed_request(&sock, &serde_json::json!({"junk": true}), Duration::from_secs(5))
-            .await
-            .expect("round trip");
+    let bad: RelayResponse = crate::uds::send_framed_request(
+        &sock,
+        &serde_json::json!({"junk": true}),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("round trip");
     assert!(!bad.is_ack());
 
     let d = delivery("after-refusal");
@@ -618,5 +628,99 @@ async fn serve_concurrent_deliveries_of_one_id_produce_one_stored_copy() {
         inbox.list().expect("list").len(),
         1,
         "a repeated delivery id must yield exactly one stored copy"
+    );
+}
+
+// ─── The listener a supervised child runs ────────────────────────────────────
+
+#[test]
+fn listener_open_creates_the_inbox_before_binding() {
+    // A misconfigured data directory must fail before the socket exists, so
+    // console's spawn probe reports a failed start rather than a live process
+    // that will refuse every delivery.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("open.sock");
+    let listener = super::listener::WebhookListener::open(&sock, tmp.path().join("inbox"))
+        .expect("open listener");
+
+    assert!(listener.inbox().root().is_dir(), "inbox must exist");
+    assert!(!sock.exists(), "open must not bind anything");
+}
+
+#[tokio::test]
+async fn listener_serves_a_delivery_and_cleans_up_its_socket() {
+    // The whole supervised-child lifecycle: bind, take durable ownership, ack,
+    // exit on shutdown, and leave no socket file behind for the next spawn.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("child.sock");
+    let inbox_root = tmp.path().join("inbox");
+    let listener = super::listener::WebhookListener::open(&sock, &inbox_root).expect("open");
+    let inbox = listener.inbox().clone();
+
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let running = tokio::spawn(async move {
+        listener
+            .run(async {
+                let _ = stop_rx.await;
+            })
+            .await
+    });
+
+    // Poll for the bind rather than sleeping a fixed interval.
+    let mut response: Option<RelayResponse> = None;
+    let d = delivery("listener-1");
+    for _ in 0..200 {
+        let frame = RelayFrame::new(
+            &d.delivery_id,
+            &d.source,
+            &d.event,
+            &d.headers,
+            &d.body_b64,
+            &d.provenance,
+            d.received_at_unix_ms,
+            d.attempts,
+        );
+        if let Ok(resp) = crate::uds::send_framed_request::<_, RelayResponse>(
+            &sock,
+            &frame,
+            Duration::from_secs(5),
+        )
+        .await
+        {
+            response = Some(resp);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(
+        response.expect("the listener must answer").is_ack(),
+        "a durably-held delivery must be acked"
+    );
+    assert_eq!(inbox.list().expect("list").len(), 1);
+
+    stop_tx.send(()).expect("signal shutdown");
+    running.await.expect("join").expect("clean exit");
+    assert!(
+        !sock.exists(),
+        "the socket file must be unlinked so the next spawn binds cleanly"
+    );
+}
+
+#[tokio::test]
+async fn listener_refuses_to_take_over_a_live_socket() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("busy.sock");
+    let _live = crate::uds::bind_hardened(&sock).expect("bind the live owner");
+
+    let err = super::listener::WebhookListener::open(&sock, tmp.path().join("inbox"))
+        .expect("open")
+        .run(std::future::pending::<()>())
+        .await
+        .expect_err("a second listener must not steal a served socket");
+
+    assert!(
+        format!("{err}").contains("already serving"),
+        "expected an already-serving refusal, got {err}"
     );
 }

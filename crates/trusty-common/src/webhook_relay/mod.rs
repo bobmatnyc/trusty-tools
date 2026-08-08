@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub mod inbox;
+pub mod listener;
 pub mod serve;
 
 /// The receive half's tests (#5182), kept out of this file so the wire contract
@@ -40,6 +41,7 @@ pub mod serve;
 mod receive_tests;
 
 pub use inbox::{Inbox, InboxError, Ownership};
+pub use listener::{ListenerError, WebhookListener, run_until_signal};
 pub use serve::{
     DeliverySink, LISTENER_SHUTDOWN_FLUSH, ServeOptions, SinkRejection, dispatch_frame, serve_until,
 };

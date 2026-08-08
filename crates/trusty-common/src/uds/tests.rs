@@ -556,3 +556,54 @@ async fn peer_uid_of_self_connection_is_self() {
         "a connection from this process must report this process's uid"
     );
 }
+
+// ── singleton bind (#5182) ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn bind_singleton_binds_a_fresh_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("fresh.sock");
+
+    let listener = bind_singleton_hardened(&sock).await.expect("bind fresh");
+
+    assert_eq!(mode_of(&sock), SOCKET_MODE, "a takeover must still harden");
+    drop(listener);
+}
+
+#[tokio::test]
+async fn bind_singleton_takes_over_a_stale_socket_file() {
+    // Why: a console-supervised child that is SIGKILLed leaves its socket file
+    // behind. Without the takeover the next spawn fails EADDRINUSE forever and
+    // every delivery stays pending — the state #5182 exists to leave.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("stale.sock");
+    let dead = bind_hardened(&sock).expect("bind first");
+    drop(dead); // tokio does not unlink on drop, so the file survives.
+    assert!(sock.exists(), "the corpse must still be on disk");
+
+    let listener = bind_singleton_hardened(&sock)
+        .await
+        .expect("a socket nobody serves must be taken over");
+
+    assert_eq!(mode_of(&sock), SOCKET_MODE);
+    drop(listener);
+}
+
+#[tokio::test]
+async fn bind_singleton_refuses_a_socket_someone_is_serving() {
+    // Two listeners on one path means the kernel picks which one a delivery
+    // reaches, so the second must fail rather than unlink a live owner.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("live.sock");
+    let _live = bind_hardened(&sock).expect("bind the live owner");
+
+    let err = bind_singleton_hardened(&sock)
+        .await
+        .expect_err("a served socket must not be taken over");
+
+    assert!(
+        matches!(err, UdsSecurityError::AlreadyServing { .. }),
+        "expected AlreadyServing, got {err:?}"
+    );
+    assert!(sock.exists(), "the live owner's socket must survive");
+}
