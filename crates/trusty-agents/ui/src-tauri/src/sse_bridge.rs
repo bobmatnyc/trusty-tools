@@ -58,9 +58,20 @@ struct DeltaPayload {
 pub fn start_event_bridge(app: AppHandle, port: u16) {
     tauri::async_runtime::spawn(async move {
         let base = api_base(port);
+        // #5052 (critic MEDIUM-2): the sidecar inherits this process's
+        // environment, so when the operator configured a token it reads the
+        // same var we do — that is the credential this bridge must present.
+        let token = std::env::var("TAGENT_API_TOKEN")
+            .or_else(|_| std::env::var("OPEN_MPM_API_TOKEN"))
+            .ok()
+            .filter(|t| !t.is_empty());
         loop {
-            if let Err(e) = pump_stream(&app, &base).await {
-                tracing::debug!(?e, "event bridge stream ended; will reconnect");
+            if let Err(e) = pump_stream(&app, &base, token.as_deref()).await {
+                // #5052 (critic MEDIUM-2): `debug!` hid a PERMANENT failure —
+                // a token-guarded sidecar 401s every attempt and the desktop
+                // stream dies silently, looking like "the assistant stopped
+                // streaming". A dead stream must be visible in default logs.
+                tracing::warn!(?e, "event bridge stream failed; retrying");
             }
             tokio::time::sleep(RECONNECT_BACKOFF).await;
         }
@@ -76,32 +87,48 @@ pub fn start_event_bridge(app: AppHandle, port: u16) {
 /// What: `POST /api/events/ticket` → the `ticket` field of the JSON body.
 /// Test: covered end-to-end by launching the desktop shell against a live
 /// sidecar; the server side is `trusty-agents`' `api::server::tests::event_tickets`.
-async fn mint_ticket(client: &reqwest::Client, base: &str) -> Result<String, String> {
-    let body: serde_json::Value = client
-        .post(format!("{base}/api/events/ticket"))
-        .send()
-        .await
-        .map_err(|e| format!("mint: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("mint status: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("mint body: {e}"))?;
+async fn mint_ticket(
+    client: &reqwest::Client,
+    base: &str,
+    token: Option<&str>,
+) -> Result<String, String> {
+    let body: serde_json::Value =
+        with_bearer(client.post(format!("{base}/api/events/ticket")), token)
+            .send()
+            .await
+            .map_err(|e| format!("mint: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("mint status: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("mint body: {e}"))?;
     body.get("ticket")
         .and_then(|t| t.as_str())
         .map(str::to_string)
         .ok_or_else(|| "mint response had no ticket".to_string())
 }
 
+/// Attach `Authorization: Bearer <token>` when the operator configured one.
+///
+/// Both the mint call and the stream call need it: `/api/events/ticket` is
+/// bearer-gated by `auth_middleware`, and `/api/events` accepts the bearer
+/// directly (which is why a server-side client never depends on the ticket
+/// round-trip succeeding).
+fn with_bearer(req: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+    match token {
+        Some(t) => req.bearer_auth(t),
+        None => req,
+    }
+}
+
 /// Connect to the sidecar's event stream and pump SSE frames until it ends.
-async fn pump_stream(app: &AppHandle, base: &str) -> Result<(), String> {
+async fn pump_stream(app: &AppHandle, base: &str, token: Option<&str>) -> Result<(), String> {
     let client = reqwest::Client::new();
     // #5052: a fresh ticket per connection attempt — cheaper and more robust
     // than caching one across the reconnect backoff and discovering it expired.
-    let ticket = mint_ticket(&client, base).await?;
+    let ticket = mint_ticket(&client, base, token).await?;
     let url = format!("{base}/api/events?ticket={ticket}");
-    let mut resp = client
-        .get(&url)
+    let mut resp = with_bearer(client.get(&url), token)
         .send()
         .await
         .map_err(|e| format!("connect: {e}"))?

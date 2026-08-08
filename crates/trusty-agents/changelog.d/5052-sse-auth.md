@@ -14,9 +14,10 @@ Security
   short-lived ticket minted at the new `POST /api/events/ticket`, which a
   browser can put in the `EventSource` URL. Minting is a write method, so it is
   behind the router-wide same-origin guard even when no operator token is
-  configured — which is what closes the shipped default. A ticket that leaks
-  into an access log or `Referer` grants five minutes of read-only stream
-  access, not the whole `/api/*` write surface.
+  configured — which is what closes the shipped default. A ticket expires 5
+  minutes after its last use and 1 hour after issue whatever happens in
+  between, and grants only the read-only event stream — never the `/api/*`
+  write surface, which can spawn arbitrary subprocesses.
 
   `/api/health` and `/api/config` stay exempt deliberately: the sidecar polls
   health before it holds any credential, and `/api/config` publishes only the

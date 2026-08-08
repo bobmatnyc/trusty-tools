@@ -13,10 +13,10 @@
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use tower::ServiceExt;
 
-use super::super::event_tickets::EventTicketStore;
+use super::super::event_tickets::{EventStreamAuth, EventTicketStore};
 use super::super::routes::{build_router, build_router_with_config};
 use super::super::state::AppState;
 
@@ -190,6 +190,79 @@ async fn ticket_does_not_unlock_the_rest_of_the_api() {
     assert_eq!(status_of(&app, req).await, StatusCode::UNAUTHORIZED);
 }
 
+// -- the ticket path on a TOKEN-CONFIGURED server (#5052, critic HIGH) --
+//
+// Every success case above uses `default_router()`, which has no token — so
+// none of them exercised `auth_middleware`, which axum layers OUTSIDE the
+// handler. `bearer_token_opens_event_stream` passed because the HEADER cleared
+// that middleware, not because the ticket path worked. It did not: the server
+// minted tickets it would then always 401. And since `serve_with_config`
+// refuses a non-loopback bind without a token, a token-configured server is the
+// ONLY way to run off-loopback — the deployment #5052 was filed about, where
+// the browser stream was therefore dead. These are the cases that were missing.
+
+/// Why: THE critic HIGH. A browser holding a valid ticket and no
+/// `Authorization` header — the only thing `EventSource` can do — must reach
+/// the stream on a token-configured server. Fails with 401 against the
+/// pre-fix head, where `auth_middleware` rejected it before `EventStreamAuth`
+/// ever ran.
+/// Test: this test.
+#[tokio::test]
+async fn ticket_opens_event_stream_on_a_token_configured_server() {
+    let app = token_router("secret");
+    // The ticket is minted WITH the bearer (the UI holds the token); the stream
+    // request deliberately carries no header at all.
+    let ticket = mint_ticket(&app, Some("secret")).await;
+    assert_eq!(
+        status_of(&app, get_events(&format!("?ticket={ticket}"))).await,
+        StatusCode::OK,
+    );
+}
+
+/// Why: the exemption that makes the ticket reachable must not weaken the
+/// negative case — a bogus ticket and no header is still 401 with a token set.
+/// Test: this test.
+#[tokio::test]
+async fn bogus_ticket_is_rejected_on_a_token_configured_server() {
+    assert_eq!(
+        status_of(&token_router("secret"), get_events("?ticket=forged")).await,
+        StatusCode::UNAUTHORIZED,
+    );
+}
+
+/// Why: an EXPIRED ticket must not survive the exemption either. Exercised
+/// against `EventStreamAuth` directly — the router hides its ticket store in a
+/// request extension, and the decision under test is the auth one, not routing.
+/// Test: this test.
+#[test]
+fn expired_ticket_is_rejected_by_stream_auth_with_a_token_configured() {
+    let auth = EventStreamAuth::new(Some("secret".to_string()));
+    let ticket = auth.mint().ticket;
+    let no_headers = HeaderMap::new();
+
+    assert!(auth.authorize(&no_headers, Some(&ticket)), "fresh ticket");
+    auth.store().expire_all_for_test();
+    assert!(
+        !auth.authorize(&no_headers, Some(&ticket)),
+        "expired ticket must be refused even though a token is configured"
+    );
+
+    // The bearer path is unaffected by ticket expiry.
+    let mut bearer = HeaderMap::new();
+    bearer.insert(
+        header::AUTHORIZATION,
+        "Bearer secret".parse().expect("header value"),
+    );
+    assert!(auth.authorize(&bearer, None));
+    // And a wrong bearer with no ticket is still refused.
+    let mut wrong = HeaderMap::new();
+    wrong.insert(
+        header::AUTHORIZATION,
+        "Bearer wrong!".parse().expect("header value"),
+    );
+    assert!(!auth.authorize(&wrong, None));
+}
+
 // -- the mint endpoint's own gates --
 
 /// Why: with a token configured, minting must require it — otherwise the ticket
@@ -328,6 +401,25 @@ fn store_is_capacity_bounded() {
         let _ = store.mint();
     }
     assert!(store.len() <= 32, "live tickets: {}", store.len());
+}
+
+/// Why: SECURITY (#5052, critic MEDIUM-1) — the sliding window must not be able
+/// to renew a ticket past its absolute lifetime, or a ticket recovered from an
+/// access log and polled every few minutes becomes a permanent credential.
+/// Test: this test.
+#[test]
+fn sliding_ttl_cannot_outlive_the_absolute_cap() {
+    let store = EventTicketStore::default();
+    let ticket = store.mint().ticket;
+    // Redeem once (which slides the idle window), then push only the ABSOLUTE
+    // deadline into the past while leaving the idle window wide open.
+    assert!(store.redeem(&ticket));
+    store.expire_hard_deadline_for_test();
+    assert!(
+        !store.redeem(&ticket),
+        "a refreshed idle window must not outlive MAX_TICKET_LIFETIME"
+    );
+    assert_eq!(store.len(), 0, "hard-expired tickets are pruned");
 }
 
 /// Why: the obvious negative case — an unrelated string is not a ticket.

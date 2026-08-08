@@ -13,8 +13,9 @@
 //! A ticket rather than the bearer token itself in `?token=`: the URL is the one
 //! part of the request that leaks — into access logs, the `Referer` header, and
 //! browser history. A ticket that leaks grants read-only access to the event
-//! stream for a few minutes; the bearer token that leaks grants the whole
-//! `/api/*` write surface, which can spawn arbitrary subprocesses, forever.
+//! stream, expiring after 5 minutes idle and after 1 hour absolutely however
+//! often it is used; the bearer token that leaks grants the whole `/api/*`
+//! write surface, which can spawn arbitrary subprocesses, forever.
 //!
 //! What: [`EventTicketStore`] mints unguessable ticket strings and redeems them
 //! for a sliding TTL window. [`EventStreamAuth`] is the request-time decision:
@@ -44,6 +45,18 @@ use super::auth::bearer_token_matches;
 /// this value is not an upper bound on stream lifetime.
 pub(super) const TICKET_TTL: Duration = Duration::from_secs(300);
 
+/// Hard ceiling on a ticket's total life, regardless of how often it is
+/// redeemed. (#5052, critic MEDIUM-1)
+///
+/// Why: a purely sliding window has a failure mode — a ticket recovered from an
+/// access log and then polled every four minutes renews forever, so the
+/// "short-lived credential" the whole ticket design rests on quietly becomes a
+/// permanent one. The absolute cap makes the bound unconditional.
+/// Chosen an hour because it self-heals: when a live client's ticket hits the
+/// ceiling its next reconnect 401s, and both shipped clients (the Svelte
+/// `connectEventSource` loop and the desktop `sse_bridge`) re-mint on error.
+const MAX_TICKET_LIFETIME: Duration = Duration::from_secs(3600);
+
 /// Cap on simultaneously-live tickets, so a client that mints in a loop cannot
 /// grow the store without bound. The oldest ticket is evicted past this.
 const MAX_LIVE_TICKETS: usize = 32;
@@ -51,7 +64,18 @@ const MAX_LIVE_TICKETS: usize = 32;
 /// One minted, not-yet-expired ticket.
 struct LiveTicket {
     value: String,
+    /// End of the sliding idle window; refreshed on every redemption.
     expires_at: Instant,
+    /// End of the absolute lifetime; never moves after mint.
+    expires_hard_at: Instant,
+}
+
+impl LiveTicket {
+    /// Whether this ticket is still usable at `now` — inside BOTH the sliding
+    /// idle window and the absolute lifetime.
+    fn is_live(&self, now: Instant) -> bool {
+        self.expires_at > now && self.expires_hard_at > now
+    }
 }
 
 /// Body returned by `POST /api/events/ticket`. (#5052)
@@ -98,7 +122,7 @@ impl EventTicketStore {
 
         let now = Instant::now();
         let mut live = self.lock();
-        live.retain(|t| t.expires_at > now);
+        live.retain(|t| t.is_live(now));
         if live.len() >= MAX_LIVE_TICKETS {
             // Evict the entry closest to expiry — the one whose loss costs the
             // least. `min_by_key` over a <= 32-entry Vec is not worth a heap.
@@ -114,6 +138,7 @@ impl EventTicketStore {
         live.push(LiveTicket {
             value: value.clone(),
             expires_at: now + TICKET_TTL,
+            expires_hard_at: now + MAX_TICKET_LIFETIME,
         });
 
         EventTicketResponse {
@@ -128,7 +153,8 @@ impl EventTicketStore {
     /// SAME url after a dropped connection — invalidating on first use would
     /// turn every transient network blip into a permanently dead stream.
     /// Refreshing on redemption instead means an ACTIVELY reconnecting client
-    /// keeps working indefinitely while an abandoned ticket still ages out.
+    /// keeps working while an abandoned ticket still ages out — bounded by
+    /// [`MAX_TICKET_LIFETIME`], which the refresh can never push past.
     /// What: prunes expired entries, then compares `presented` against every
     /// remaining ticket with the same constant-time comparison the bearer token
     /// uses (#3761) — a short-circuiting `==` or a `HashMap` lookup would leak
@@ -136,11 +162,12 @@ impl EventTicketStore {
     /// Every entry is compared even after a hit, so the time taken does not
     /// reveal WHICH ticket matched.
     /// Test: `redeem_rejects_unknown_ticket`, `redeem_rejects_expired_ticket`,
-    /// `minted_ticket_is_redeemable_more_than_once`.
+    /// `minted_ticket_is_redeemable_more_than_once`,
+    /// `sliding_ttl_cannot_outlive_the_absolute_cap`.
     pub(super) fn redeem(&self, presented: &str) -> bool {
         let now = Instant::now();
         let mut live = self.lock();
-        live.retain(|t| t.expires_at > now);
+        live.retain(|t| t.is_live(now));
 
         let mut hit = None;
         for (idx, ticket) in live.iter().enumerate() {
@@ -150,7 +177,11 @@ impl EventTicketStore {
         }
         match hit {
             Some(idx) => {
-                live[idx].expires_at = now + TICKET_TTL;
+                // #5052 (critic MEDIUM-1): the sliding window may extend the
+                // idle deadline but never past the absolute lifetime, so a
+                // ticket polled forever still dies at `MAX_TICKET_LIFETIME`.
+                let hard = live[idx].expires_hard_at;
+                live[idx].expires_at = (now + TICKET_TTL).min(hard);
                 true
             }
             None => false,
@@ -179,6 +210,18 @@ impl EventTicketStore {
         let past = Instant::now() - Duration::from_secs(1);
         for t in self.lock().iter_mut() {
             t.expires_at = past;
+        }
+    }
+
+    /// Test-only: force every live ticket past its ABSOLUTE lifetime while
+    /// leaving the sliding idle window wide open, so `MAX_TICKET_LIFETIME` is
+    /// reachable without waiting an hour.
+    #[cfg(test)]
+    pub(super) fn expire_hard_deadline_for_test(&self) {
+        let past = Instant::now() - Duration::from_secs(1);
+        for t in self.lock().iter_mut() {
+            t.expires_hard_at = past;
+            t.expires_at = Instant::now() + TICKET_TTL;
         }
     }
 }
@@ -215,6 +258,13 @@ impl EventStreamAuth {
         self.tickets.mint()
     }
 
+    /// Test-only: the underlying store, so a test can age its tickets without
+    /// reaching into the router's request extensions.
+    #[cfg(test)]
+    pub(super) fn store(&self) -> &EventTicketStore {
+        &self.tickets
+    }
+
     /// Whether this request may read the event stream.
     ///
     /// Why: the exact opposite of the pre-#5052 rule, which let EVERY request
@@ -228,7 +278,8 @@ impl EventStreamAuth {
     /// Test: `event_stream_without_credential_is_rejected`,
     /// `event_stream_without_credential_is_rejected_with_token_configured`,
     /// `minted_ticket_opens_event_stream`, `bearer_token_opens_event_stream`,
-    /// `event_stream_with_unknown_ticket_is_rejected`.
+    /// `event_stream_with_unknown_ticket_is_rejected`,
+    /// `ticket_opens_event_stream_on_a_token_configured_server`.
     pub(super) fn authorize(&self, headers: &HeaderMap, ticket: Option<&str>) -> bool {
         if let Some(expected) = self.token.as_deref()
             && let Some(presented) = bearer_header(headers)

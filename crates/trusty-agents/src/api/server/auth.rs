@@ -6,7 +6,9 @@
 //! non-loopback `--bind`, which `serve_with_config` refuses to start without a
 //! token. It gates the sensitive `/api/*` routes while exempting the
 //! `/api/health` and `/api/config` bootstrap probes and the embedded UI assets.
-//! #5052: `/api/events` is NO LONGER exempt — see `auth_middleware` and
+//! #5052: `/api/events` is exempt HERE but not unauthenticated — it is gated in
+//! `events_sse::events_handler`, which takes this bearer token OR a ticket a
+//! browser `EventSource` can carry. See `auth_middleware` and
 //! `super::event_tickets`.
 //! What: `ApiConfig` carries the bind + port + optional token;
 //! `auth_middleware` enforces the token; `ApiClientConfig` tells the UI whether
@@ -137,15 +139,19 @@ pub(super) fn bearer_token_matches(expected: &str, provided: &str) -> bool {
 ///     no information from an attacker while breaking the browser's only way to
 ///     learn it needs a token.
 ///
-/// `/api/events` USED to be a third exemption, on the grounds that a browser
-/// `EventSource` cannot send an `Authorization` header. That was a
-/// cross-origin disclosure of live conversation content, not a telemetry
-/// trade-off (#5052): the stream carries `PmThinking.text`, `AgentMessage.text`,
-/// and `PmDelegating.task_preview`, and any page in the operator's browser could
-/// read it from `127.0.0.1` with no credential at all. It is now authenticated
-/// by ticket — see `super::event_tickets`.
-/// What: For requests under `/api/*` (other than `/api/health` and
-/// `/api/config`), checks `Authorization: Bearer <token>` and returns 401 JSON
+/// `/api/events` is a third exempt path, but for the opposite reason it used to
+/// be: it is not unauthenticated, it is authenticated SOMEWHERE ELSE. Pre-#5052
+/// it streamed conversation content — `PmThinking.text`, `AgentMessage.text`,
+/// `PmDelegating.task_preview` — to anyone, and any page in the operator's
+/// browser could read it from `127.0.0.1`. It is now gated inside
+/// `events_sse::events_handler`, which accepts this same bearer token OR a
+/// ticket a browser `EventSource` can carry in the URL, and 401s with neither.
+/// The gate had to move into the handler because this middleware wraps the
+/// routes from the outside: a ticket-only request was rejected here before
+/// `EventStreamAuth` ever saw it.
+/// What: For requests under `/api/*` (other than `/api/health`, `/api/config`,
+/// and the separately-gated `/api/events`), checks
+/// `Authorization: Bearer <token>` and returns 401 JSON
 /// `{"error":"unauthorized"}` on mismatch. #3761: the comparison is
 /// constant-time (`bearer_token_matches`) — this is the higher-value secret of
 /// the two the server holds, so it gets the same treatment as the relay token.
@@ -168,7 +174,20 @@ pub(super) async fn auth_middleware(
     // streams conversation content and is now gated by a ticket that a browser
     // EventSource CAN carry (see `super::event_tickets`). Both remaining
     // exemptions are justified in this function's doc comment.
-    if path == "/api/health" || path == "/api/config" || !path.starts_with("/api/") {
+    // #5052 (critic HIGH): `/api/events` is exempt HERE and gated in the handler
+    // instead. This middleware is layered OUTSIDE the routes, so a request
+    // carrying only a ticket never reached `EventStreamAuth` — the server minted
+    // tickets it would then always 401, and since a non-loopback bind REQUIRES a
+    // token, the browser stream was dead in exactly the deployment #5052 was
+    // filed about. The exemption is safe only because `events_handler` accepts
+    // the same bearer token this middleware would have checked, AND a ticket;
+    // with neither it returns 401. It is an EXACT path match, so the sibling
+    // `/api/events/ticket` mint route stays fully covered here.
+    if path == "/api/health"
+        || path == "/api/config"
+        || path == "/api/events"
+        || !path.starts_with("/api/")
+    {
         return next.run(req).await;
     }
 

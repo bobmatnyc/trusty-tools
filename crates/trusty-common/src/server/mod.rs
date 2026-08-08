@@ -115,9 +115,11 @@ where
 /// [`origin_matches_self`] against `self_origins`. Methods and headers stay
 /// `Any`; credentials are NOT allowed, so no ambient cookie/auth is ever
 /// attached cross-origin.
-/// Test: `same_origin_cors_predicate_*` below;
-/// `cross_origin_event_stream_is_not_cors_readable` in trusty-agents'
-/// `api::server::tests::guard`.
+/// Test: `same_origin_cors_predicate_allows_local`,
+/// `same_origin_cors_predicate_rejects_remote` below; end-to-end in
+/// trusty-agents' `api::server::tests::event_tickets` —
+/// `cross_origin_request_gets_no_cors_reflection` and
+/// `loopback_origin_is_cors_reflected`.
 pub fn same_origin_cors(self_origins: SelfOrigins) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(move |origin, _parts| {
@@ -200,7 +202,7 @@ where
 /// guard uses.
 /// Test: `with_guarded_middleware_same_origin_cors_composes` below; the
 /// end-to-end behaviour is covered by trusty-agents'
-/// `api::server::tests::guard`.
+/// `api::server::tests::event_tickets`.
 pub fn with_guarded_middleware_same_origin_cors<S>(
     router: Router<S>,
     self_origins: SelfOrigins,
