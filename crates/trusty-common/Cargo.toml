@@ -158,6 +158,9 @@ genco = { version = "0.19", optional = true }
 # Heavy deps gated behind the feature so downstream crates that only
 # want chat / mcp / symgraph pay zero cost.
 hex = { workspace = true, optional = true }
+# Optional: enabled by the `webhook-hmac` feature (#5089 step 3). The GitHub
+# `X-Hub-Signature-256` verifier is the crate's only HMAC consumer.
+hmac = { workspace = true, optional = true }
 hnsw_rs = { workspace = true, optional = true }
 git2 = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
@@ -338,6 +341,19 @@ uds = ["dep:thiserror"]
 # Off by default so a consumer that only binds a socket does not compile the
 # child-process lifecycle.
 uds-supervisor = ["uds"]
+# Enables the `webhook_hmac` module: the single GitHub `X-Hub-Signature-256`
+# verifier (issue #5089 step 3, ADR-0034 §3), replacing the two divergent
+# copies in trusty-analyze and trusty-review. Pulls in `hmac`, and turns on the
+# `sha2` / `hex` deps this crate already declares optional.
+webhook-hmac = ["dep:hmac", "dep:sha2", "dep:hex"]
+# Enables the `webhook_relay` module: the console->target relay wire contract
+# (issue #5089 step 3, ADR-0034 §3). The sender is trusty-console and the
+# receivers are trusty-review / trusty-analyze, neither of which can depend on
+# the console — so the frame, its owned counterpart, and the ack-bearing
+# response live here where both halves read them. Implies `webhook-hmac`
+# because the frame's provenance record describes that verification. Adds no
+# new dependencies beyond `serde` / `serde_json`, already unconditional.
+webhook-relay = ["webhook-hmac"]
 # Bundle the ONNX Runtime static libs via fastembed's
 # `ort-download-binaries-native-tls`. Right choice for macOS and modern
 # Linux (glibc ≥ 2.38). Mutually exclusive with `embedder-load-dynamic`

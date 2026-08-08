@@ -11426,6 +11426,7 @@ dependencies = [
  "git2",
  "hex",
  "hf-hub 0.3.2",
+ "hmac 0.12.1",
  "hnsw_rs",
  "indexmap 2.14.0",
  "keyring",
@@ -11481,6 +11482,7 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "clap",
  "dirs 5.0.1",
  "http-body-util",
@@ -11491,6 +11493,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tower",
  "tower-http",

@@ -746,6 +746,33 @@ pub mod health_probe;
 #[cfg(all(unix, feature = "uds"))]
 pub mod uds;
 
+/// GitHub webhook HMAC-SHA256 verification (#5089 step 3, ADR-0034 §3).
+///
+/// Why: the check exists twice today and the two copies disagree on what an
+/// unset secret means — `trusty-review` rejects, `trusty-analyze` processes the
+/// payload anyway. ADR-0034 §3 collapses verification to one place (console)
+/// and unifies the policy to fail-closed; this module is that place.
+/// What: Exposes [`webhook_hmac::verify_github_signature`], its three-state
+/// [`webhook_hmac::SignatureVerdict`], and [`webhook_hmac::sign_github_body`]
+/// for test harnesses.
+/// Test: `cargo test -p trusty-common --features webhook-hmac webhook_hmac::`.
+#[cfg(feature = "webhook-hmac")]
+pub mod webhook_hmac;
+
+/// Console->target webhook relay wire contract (#5089 step 3, ADR-0034 §3).
+///
+/// Why: the sender (`trusty-console`) and the receivers (`trusty-review`,
+/// `trusty-analyze`) cannot depend on each other, so a method name or field
+/// list held by only one half is two copies waiting to drift.
+/// What: Exposes [`webhook_relay::RELAY_METHOD`], the borrowed
+/// [`webhook_relay::RelayFrame`] the sender writes, the owned
+/// [`webhook_relay::RelayRequest`] a receiver reads, and
+/// [`webhook_relay::RelayResponse`], whose `ack` is the only thing that
+/// licenses the sender to delete its spool entry.
+/// Test: `cargo test -p trusty-common --features webhook-relay webhook_relay::`.
+#[cfg(feature = "webhook-relay")]
+pub mod webhook_relay;
+
 /// Global tracing subscriber initialisation helpers.
 ///
 /// Why: Every trusty-* binary needs the same verbosity ladder, `RUST_LOG`

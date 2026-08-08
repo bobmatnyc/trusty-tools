@@ -48,6 +48,7 @@ mod tests;
 
 pub mod dir;
 mod peer;
+pub mod rpc;
 
 /// On-demand supervision of a UDS-serving child process (#5089 step 2).
 ///
@@ -67,6 +68,7 @@ pub mod supervisor;
 
 pub use dir::prepare_socket_dir;
 pub use peer::{ensure_peer_is_self, peer_uid, self_uid};
+pub use rpc::{MAX_FRAME_BYTES, UdsRpcError, send_framed_request};
 #[cfg(feature = "uds-supervisor")]
 pub use supervisor::{
     ServiceTimeouts, SocketVerdict, SpawnSpec, SupervisorConfig, SupervisorError,
