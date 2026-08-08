@@ -84,7 +84,8 @@ pub enum SkillRemoval {
 /// print separately.
 /// What: the deploy tier's label, the stem, whether the directory was deleted,
 /// and — when it was not — why.
-/// Test: `retire_removes_a_pristine_orphan`, `retire_keeps_a_hand_edited_orphan`.
+/// Test: `retire_removes_a_pristine_orphan`,
+/// `retire_keeps_a_hand_edited_orphan_but_releases_the_ledger`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetiredSkill {
     /// The deploy tier's label, e.g. `operator home`.
@@ -286,7 +287,8 @@ fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Resu
 /// to call an unlocked inner deploy entry point, a worse hazard than the
 /// residual window. A skill deployed between the two is retired only if no
 /// source has it, which cannot be true of one just deployed.
-/// Test: `retire_removes_a_pristine_orphan`, `retire_keeps_a_hand_edited_orphan`,
+/// Test: `retire_removes_a_pristine_orphan`,
+/// `retire_keeps_a_hand_edited_orphan_but_releases_the_ledger`,
 /// `retire_spares_a_user_tier_skill`, `retire_spares_a_project_tier_skill`,
 /// `retire_is_a_noop_when_nothing_is_orphaned`.
 pub fn retire_orphans_in(
