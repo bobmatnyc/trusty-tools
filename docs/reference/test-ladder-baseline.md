@@ -5,10 +5,9 @@
 > [`CLAUDE.md`](../../CLAUDE.md)** (Rust Test Ladder). Choose the rung there,
 > then come here for the exact command to run and for triaging a red gate.
 
-The six-step baseline-failure protocol (establish whose red it is, fix if
-branch-caused, append to the canonical issue if tracked, one canonical issue if
-not, and the literal report string) lives in `tm-pr-workflow`. It is **not**
-restated here. What follows is only what that generic version cannot carry.
+The baseline-failure protocol (establish whose red it is, fix if branch-caused,
+hand a pre-existing red to `tm-ticketing` for its disposition, and the literal
+report string) lives in `tm-workflow`. It is **not** restated here. What follows is only what that generic version cannot carry.
 
 ## Per-Rung Gate Commands
 
@@ -93,6 +92,6 @@ git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
    the ladder says otherwise. This is the one case where scoping down is
    the wrong instinct.
 
-Report it in the shape `tm-pr-workflow` mandates, naming the crate-scoped gate:
+Report it in the shape `tm-workflow` mandates, naming the crate-scoped gate:
 `change-specific gates pass; cargo test -p trusty-search blocked by canonical
 issue #N`. Never "all tests pass" while a gate is red, whoever caused it.

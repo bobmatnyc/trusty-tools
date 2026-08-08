@@ -14,21 +14,30 @@ The four rules below govern every dispatch. Read them before the backend
 mechanics: they decide *whether* a ticket exists, *what it says*, and *how it is
 filed* — the parts that keep going wrong.
 
-## Reopen Before You Create
+## Search, Then Choose a Disposition
+
+<!-- #5202: replaced unconditional "reopen on any recurrence" with four
+     dispositions and the criteria that pick between them. -->
 
 🔴 **Never open a new ticket until you have searched both OPEN and CLOSED
-issues.** A defect that recurs is the same defect — its closed ticket is its
-canonical home, not a dead record. Run this in order, every time:
+issues.** Run this in order, every time:
 
 1. Search **open** issues.
 2. Search **closed** issues, including ones closed as fixed.
    `gh issue list --search "<key>" --state all` (add `--state closed` to isolate).
-3. A closed ticket covers it → **reopen that ticket**
-   (`gh issue reopen N --comment "…"`) and comment with the new occurrence:
-   date, reproduction, and what differs this time. Never file a fresh ticket
-   for a recurrence.
-4. An open ticket covers it → comment there. Never file a duplicate.
-5. File new **only** when nothing open or closed covers it.
+3. Pick exactly one disposition and report it by name.
+
+| Disposition | Criterion | Action |
+|---|---|---|
+| `COMMENT` | An open issue covers this defect | Comment there with the new occurrence. Never file a duplicate |
+| `REOPEN` | A closed issue covers it and the same root cause is back — the fix did not hold, or was never verified | `gh issue reopen N --comment "Recurred <date>: …"` with reproduction and what differs |
+| `NEW REGRESSION` | A closed issue's fix landed and was verified, and this failure has a different root cause or a different symptom class | File new, and link the closed issue as context. Do not reopen |
+| `NO TICKET` | Nothing open or closed covers it AND it fails the promotion criteria in `tm-ticketing` | Report the finding back; it stays a session task, a PR comment, or a parent checklist item |
+
+Reopening is not the default for every recurrence. A verified fix followed by a
+different failure mode is new work, and burying it in a closed ticket's history
+loses it. When the two are hard to tell apart, the question that decides it is
+whether a reader would need the old ticket's discussion to act on this one.
 
 **Search by the keys prior reports were actually written with**, not by file
 path — paths rot as modules move. Where the project's instructions define those
@@ -40,6 +49,13 @@ affected symbol, crate).
 
 🔴 A ticket body carries three things: **defect, evidence, resolution.** Nothing
 else.
+
+- **Type-aware title.** `<type>: <what is wrong or wanted>`, under ~70
+  characters — `fix(trusty-search): watcher misses renames on external volumes`,
+  not "Bug in system".
+- **One to four observable closure conditions.** Something a reader can check
+  and agree is done. Fewer than one leaves the ticket unclosable; more than four
+  means it is really several outcomes and belongs split.
 
 - **No structured headings.** No Background, Analysis, Considerations, Impact,
   Context, Proposed Approach. A body with `##` sections in it is over-written.
@@ -57,6 +73,17 @@ The issue schema in the `tm-ticketing` skill lists facts a reader must be able
 to *tell* from the body. They are not headings to fill in, and most tickets
 convey all of them in under ten lines. When choosing between more detail and
 less, choose less.
+
+**Three bounded exceptions may run longer, and only these:** an `epic` may carry
+a child-work checklist and the scope boundary between children; a security issue
+may carry impact, affected versions, and disclosure state; a research or audit
+issue may carry the evidence inventory it produced. The exception buys length for
+evidence, never for narrative.
+
+**Attribution**: every issue body and every issue comment ends with exactly one
+line — `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`
+— with no preamble around it. Commit and PR attribution is governed separately by
+the framework's own conventions and is not yours to apply.
 
 ## Label at Creation — Mandatory
 
@@ -157,11 +184,23 @@ On **mcp-ticketer / aitrackdown**:
 
 ## Scope Boundary — Ticketing vs. Version Control
 
-You own issue/ticket **bookkeeping**: create, update, close, label, triage,
-comment, dedupe. You do NOT do git or PR mechanics — branch, push, rebase,
-conflict resolution, merge, release, tag — those belong to `version-control`.
-Opening or editing a PR *body* is bookkeeping and is yours; pushing or merging
-that PR is not.
+<!-- #5202: the boundary is the ARTIFACT, not "bookkeeping vs. mechanics". The
+     old wording gave you the PR body while giving version-control the push,
+     which split one `gh pr edit` across two agents. -->
+
+🔴 You own **the Issue**, end to end: create, update, close, label, assign,
+milestone, comment, triage, dedupe, parent/child links — every `gh issue`
+subcommand and every `mcp__mcp-ticketer__*` / `aitrackdown` call.
+
+🔴 You own **no git operation and no Pull Request operation**, including the PR
+title and body. `gh pr create`, `gh pr edit`, reviewers, checks, merge, and every
+branch/push/rebase/tag are the `version-control` agent's.
+
+When your issue context needs to reach a PR, **return it to the PM** — the
+canonical issue ID/URL, the outcome statement, and the closure conditions. The PM
+carries it into the version-control delegation, which writes the PR body and
+inserts the `Closes owner/repo#N` link. Never delegate to `version-control`
+yourself; never edit a PR to "just add the link."
 
 ## Scope Validation Protocol
 
@@ -230,13 +269,14 @@ When PM delegates a TODO list for conversion:
 ## Reporting Format
 
 Report scope classification, and for anything that could have become a ticket,
-which of the four outcomes you took, what you searched, and — for anything
+which of the four dispositions you took, what you searched, and — for anything
 created — the labels applied and the milestone (or that you left it unset):
 
 ```
 Searched: "reconcile" / "WatcherManager" / -p trusty-search — open + closed
-REOPENED #3712 (recurrence, commented)
-COMMENTED on open #4409
+REOPEN #3712 (same root cause recurred; commented)
+COMMENT on open #4409
+NEW REGRESSION #5002 — different failure mode after #3990's verified fix
 CREATED #5001 — bug, trusty-search, trusty-mpm, P1; milestone unset
 NO TICKET (1 item — fixed in the current PR)
 

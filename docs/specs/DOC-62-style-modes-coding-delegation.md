@@ -171,7 +171,8 @@ workflow evaluated on GitHub's runners from a fresh `actions/checkout`. The
 **trusty-review gate is process-enforced, not CI-enforced** — it has no
 workflow file; it is invoked by the PM via
 `mcp__trusty-review__review_diff`/`review_pr`
-(`crates/trusty-mpm/src/assets/skills/tm-pr-workflow.md:100-108`). It is
+(`crates/trusty-mpm/src/assets/skills/tm-workflow.md`, "The trusty-review
+Gate" — the skill was `tm-pr-workflow` until #5202 consolidated it). It is
 therefore the one gate on the list whose enforcement a lower-ceremony
 *convention* could plausibly erode, even though no parameter can reach it.
 §3.2 SM-10 addresses this directly.

@@ -57,7 +57,7 @@ change's blast radius — no less, and no more. The framework's Low / Normal / H
 risk labels map onto the rungs below (1–2 = Low, 3–4 = Normal, 5–6 = High); when
 the question is *which command to run*, this table decides.
 
-Required tests stay in the implementation PR (`tm-pr-workflow`, "One Outcome,
+Required tests stay in the implementation PR (`tm-workflow`, "One Outcome,
 One PR"). Name the rung and paste its command in the PR body so a reviewer can
 see which rung was actually run.
 
@@ -110,8 +110,9 @@ exact report-string format: see
 issue at all is decided by the **Ticket-Promotion Gate** in the framework skill
 `tm-ticketing` — read it there. What this repo adds is *what to search by*: the
 **test name**, the **panic / error text**, the **affected symbol**, and the
-**crate**. Search open and recently closed issues on all four; append to the
-canonical issue rather than filing a second one. Rationale per key:
+**crate**. Search open and recently closed issues on all four. What to do with a
+hit — `COMMENT`, `REOPEN`, `NEW REGRESSION`, or `NO TICKET` — is `tm-ticketing`'s
+disposition to make, not automatically an append (#5202). Rationale per key:
 [docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md).
 
 🔴 **Why/What/Test doc pattern with proportional depth** — public items carry
@@ -270,7 +271,7 @@ exception. Docs-only, CI-only, test-only and `testdata/` PRs may skip it.
 crates/<crate>/changelog.d/<issue-or-pr-number>-<short-slug>.md
 ```
 
-Fragment format and category line: `Skill(skill="tm-pr-workflow")`. Assembler
+Fragment format and category line: `Skill(skill="tm-workflow")`. Assembler
 and CI-gate specifics:
 [docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md).
 
@@ -308,11 +309,12 @@ cd .claude/worktrees/<dirname>
 
 **End-to-end delivery chain:** accepted outcome → optional issue → worktree
 branch → one cohesive PR → applicable Rust gates → trusty-review gate →
-squash-merge → worktree cleanup. The framework skill `tm-pr-workflow` owns the
-full sequence and the optional-issue rule; this file adds only the Rust-specific
-gates (see the Rust Test Ladder above). *(This project-instruction host was
-`.trusty-mpm/INSTRUCTIONS.md` until #4286 retired it; the delivery chain itself
-now lives in `tm-pr-workflow`.)*
+squash-merge → worktree cleanup. The framework skill `tm-workflow` owns the
+full sequence, and `tm-ticketing` owns whether the optional issue exists; this
+file adds only the Rust-specific gates (see the Rust Test Ladder above). *(This
+project-instruction host was `.trusty-mpm/INSTRUCTIONS.md` until #4286 retired
+it; the delivery chain moved to `tm-pr-workflow` and then into `tm-workflow`
+when #5202 consolidated the two.)*
 
 🔴 **A worktree is a writer; the branch is the workstream.** The durable unit is
 the **branch** — one branch per workstream, and a session owns exactly one

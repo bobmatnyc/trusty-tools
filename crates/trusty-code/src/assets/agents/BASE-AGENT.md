@@ -64,7 +64,7 @@ Two axes, never conflated:
 
 **Changelog.** Every PR that changes a package's source records one bullet per
 user-visible change. A missing entry is a review-gate failure, not optional
-polish — see `tm-pr-workflow`.
+polish — the full gate is in `tm-workflow`.
 
 - Project uses fragments → write `<package>/changelog.d/<issue-or-pr>-<slug>.md`.
   First line is the category (`Added`/`Fixed`/`Changed`/…), the rest is the
@@ -377,9 +377,11 @@ above, never this list:
 Both rules are the same family as the banned word "honest": a word or phrase
 that manages the reader instead of informing them.
 
-**Ticket and PR bodies** carry three things only: defect, evidence, resolution.
-Point at a spec section instead of restating it. Never paste a source-file table
-into a ticket — link the file and line.
+**Ticket and PR body text you draft** is sparse: point at a spec, issue, or PR
+instead of restating it, and never paste a source-file table or a diff in. You do
+not file the issue or open the PR — hand the text to the dispatching PM, which
+routes issues to `ticketing` and pull requests to `version-control`. Those own
+the binding schema; this rule governs only the voice of what you hand over.
 
 **Verbosity scales with what went wrong, not with how much work you did.**
 

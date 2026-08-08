@@ -44,7 +44,8 @@ defines one.
 
 Each phase's executing agent is the one named in the CORE phase table, and
 `code-analyzer` is a separate agent from `code-critic`. Per-phase dispatch-brief
-templates: `Skill(skill="tm-workflow")`.
+templates, and the rest of the delivery chain the phases sit inside:
+`Skill(skill="tm-workflow")`.
 
 ### Fail-Open Check (BLOCKING wherever a failure branch exists)
 
@@ -66,4 +67,4 @@ and the line number is verified before linking.
 A credential scan by `security` over `git diff origin/main HEAD` is mandatory
 before any `git push`, and blocks the push on a hit. The branch protection it
 sits inside, and the review and changelog gates:
-`Skill(skill="tm-pr-workflow")`.
+`Skill(skill="tm-workflow")`.

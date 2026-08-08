@@ -1465,8 +1465,8 @@ const FOLDED_ROUTING_MAPPINGS_PROMPT: &[(&str, &str)] = &[
         "code-analyzer vs code-critic are distinct",
     ),
     (
-        "never goes to `version-control`",
-        "P6 — ticket bookkeeping stays with ticketing",
+        "the Issue is `ticketing`'s, whole (P6)",
+        "P6 — the whole Issue stays with ticketing (#5202)",
     ),
     // The verbatim-name rule, which gated both deleted tables.
     (
@@ -1673,7 +1673,7 @@ fn every_skill_pointer_names_the_call_rather_than_decorating() {
     for skill in [
         "tm-verification-protocols",
         "tm-git-file-tracking",
-        "tm-pr-workflow",
+        "tm-workflow",
         "tm-session-management",
         "tm-circuit-breaker",
         "tm-delegation-patterns",
