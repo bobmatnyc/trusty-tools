@@ -20,3 +20,4 @@ pub mod override_cmd;
 pub mod pr_metrics;
 pub mod report;
 pub mod rules;
+pub mod tui;

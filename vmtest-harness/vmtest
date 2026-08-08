@@ -90,6 +90,21 @@ VMTEST_DIRTY_CHECK="${VMTEST_DIRTY_CHECK:-0}"
 # `verify_degraded_probe`'s header in lib/verify.sh for what it does.
 VMTEST_DEGRADED_CHECK="${VMTEST_DEGRADED_CHECK:-0}"
 CONF_EFFECTIVE=''
+# #4924: EMPTY until a credential include has actually been written into the
+# guest; then the guest-side PATH of that file. Two jobs in one global: the
+# emptiness is the "did we propagate?" flag, and the value is what teardown needs
+# to NAME in the --keep retention warning, so the path literal lives in exactly
+# one place instead of being recomposed in a second file.
+#
+# NOT NAMED `VMTEST_*`, for the reason RUN_T0_EPOCH and CONF_EFFECTIVE are not:
+# §12.3 rule 2 reserves every `VMTEST_<KEY>` spelling for §8.2's mechanical
+# override channel. Here the hazard is sharper than usual — `propagate_github_token`
+# IS a key, so its override is the real, operator-facing
+# `VMTEST_PROPAGATE_GITHUB_TOKEN`, and an internal global spelled
+# `VMTEST_GITHUB_TOKEN_PROPAGATED` would sit one word-order away from it in the
+# same feature. One of the two is documented and settable by an operator; the
+# other must never be either.
+CRED_PROPAGATED_PATH=''
 # Wall-clock start of the run, and the scenario's full-stack deadline.  Neither
 # is named `VMTEST_*`: §12.3 rule 2 reserves every `VMTEST_<KEY>` spelling for
 # §8.2's mechanical override channel, and `install_timeout` IS a key — so a
@@ -119,7 +134,8 @@ EXPECTED_TSV="$VMTEST_HARNESS_DIR/expected-binaries.tsv"
 CONF_KEYS='cpu memory_mib disk_gib guest_home guest_src_dir guest_target_dir
 host_min_memory_gib host_warn_physical_cores boot_ready_timeout
 boot_ready_interval stopped_timeout stopped_interval provision_timeout
-install_timeout health_timeout health_interval repo_url default_branch'
+install_timeout health_timeout health_interval repo_url default_branch
+propagate_github_token'
 
 # The complete key set of base-image.pin (DOC-2 §3.2, plus §3.3's
 # by-construction `enforcement` key, which P1-T3 did not need).
@@ -595,6 +611,17 @@ vmtest_cleanup() {
                 wait "$VMTEST_VM_RUN_PID" 2>/dev/null || :   # reap, never kill
             fi
             log "teardown: --keep — '${VMTEST_VM:-}' is stopped and PRESERVED (not deleted)"
+            # #4924: --keep is the moment the operator learns the guest survives,
+            # so it is the only moment at which "and it still holds your
+            # credential" is actionable. The caveat is in README.md, which nobody
+            # reads while watching a run finish. Gated on the path being set, so a
+            # no-token run and patterns (a)/(c) — which never propagate — stay
+            # silent. `warn`, not `log`: this is the feature's residual risk, and
+            # it is the operator's to decide about, not the harness's.
+            if [ -n "${CRED_PROPAGATED_PATH:-}" ]; then
+                warn "--keep: this VM RETAINS your GITHUB_TOKEN, as a base64 Authorization header at ${CRED_PROPAGATED_PATH} (#4924). Base64 is ENCODING, NOT ENCRYPTION — anyone who can read the VM image or this host's home directory can reverse it."
+                warn "--keep: delete it with \`vmtest clean --include-kept\`. If this VM has been SHARED OR COPIED, REVOKE THE TOKEN — deleting the VM afterwards does not undo exposure that already happened."
+            fi
             vm_manual_hint keep "${VMTEST_VM:-}"
             VMTEST_RUNDIR_OWNED=0
         else
@@ -1242,8 +1269,37 @@ preflight_capacity() {
         || warn "requested cpu=${requested} exceeds the host's ${cores} physical cores"
 }
 
+# preflight_config — #4924: validate the config values whose SHAPE the harness
+# depends on, before anything else in preflight and long before a VM exists.
+#
+# WHY IT IS ITS OWN FUNCTION AND NOT PART OF `conf_load`, stated so it is not
+# "tidied" back in: `conf_load` is shared with `vmtest clean`, and a typo'd
+# override must never be able to break cleanup — cleanup is the one operation you
+# most need working when the configuration is already broken. `clean` calls
+# `conf_load` and `preflight_host_deps` and never calls `preflight`, so this runs
+# for `run` alone.
+#
+# IT IS THE FIRST STEP OF `preflight`, ahead of the host-dependency checks, so a
+# bad value is reported in a second rather than after a 30 s+ boot — and because
+# `run --dry-run` halts before the clone, --dry-run catches it too, which is
+# where an operator would most expect a configuration typo to surface.
+#
+# Anything that is not exactly `true` or `false` is REFUSED rather than guessed
+# at. Guessing is what makes `VMTEST_PROPAGATE_GITHUB_TOKEN=0` — which reads as
+# "off" and is not — silently propagate a credential the operator asked to
+# withhold.
+preflight_config() {
+    local value
+    value=$(conf_get propagate_github_token)
+    case "$value" in
+        true|false) ;;
+        *) die 10 "propagate_github_token must be exactly 'true' or 'false', got '${value}' (origin: $(conf_origin propagate_github_token); override with VMTEST_PROPAGATE_GITHUB_TOKEN). 0/1/yes/no/on/off are refused, not interpreted: this key decides whether a host credential crosses into the guest, so a value the harness would have to guess at is a refusal." ;;
+    esac
+}
+
 preflight() {
     log '--- preflight (DOC-1 §4.1) ---'
+    preflight_config
     preflight_host_deps
     preflight_pin
     # BEFORE the VM-state checks, and that order is the fix (issue #15): the
@@ -1361,7 +1417,11 @@ cmd_run() {
 # The run lifecycle (P3-T1 … P3-T5).  DOC-1 §3.1's sequence, with `verify`
 # still empty at this phase.
 #
-#   clone -> size -> boot -> vm_wait_ready -> [N1] -> provision -> scenario
+#   clone -> size -> boot -> vm_wait_ready -> [N1] -> provision -> [credentials]
+#   -> scenario
+#
+# `[credentials]` is #4924's pattern-(b)-only step and is a no-op — never a
+# failure — under every other pattern.
 #
 # Teardown is NOT here.  It is the EXIT trap's job and only the EXIT trap's job,
 # on every path including failure and interrupt (DOC-2 §Shell discipline).
@@ -1400,6 +1460,15 @@ run_lifecycle() {
     negative_probe_n1 "$VMTEST_VM"
 
     provision_guest "$VMTEST_VM"
+
+    # #4924: hand the host's $GITHUB_TOKEN to the guest so pattern (b)'s clone is
+    # authenticated. Called unconditionally and gated INSIDE the function, whose
+    # very first statement is the pattern test — every branch that can `die` sits
+    # below it, so an expired host token cannot fail `run local` or
+    # `run released`, neither of which contacts github.com at all. It is called
+    # here rather than inside `provision_guest` so that provisioning's wall-clock
+    # measurement keeps meaning what its baseline meant.
+    provision_github_token "$VMTEST_VM"
 
     # The opt-in dirty-worktree check (see the note at scenario_dispatch).  The
     # fixtures are created BEFORE the scenario runs, because the property under

@@ -158,6 +158,34 @@ describe('production build', () => {
 		}
 	});
 
+	// Why: the assertion above proves only that a FILE exists. A page whose
+	// component threw during prerender, or one wired to the wrong `Tool` record,
+	// still writes an HTML shell and still passes it — and with six hand-authored
+	// pages, a copy/paste that leaves two routes rendering the same crate is the
+	// realistic failure, not a missing file. Nothing else in this suite reads a
+	// tool page's body.
+	// What: for each `TOOLS` entry, re-derives what that page must contain from
+	// the same record the page renders from, and pins it to the route's own
+	// artifact — the `<h1>` must name THAT crate, and the unit stamp, tagline,
+	// lede, install command, and docs link must all be present.
+	it('renders each flagship page from its own tool record, not a shell', () => {
+		for (const tool of TOOLS) {
+			const file = `tools/${tool.slug}.html`;
+			const html = readFileSync(path.join(STATIC, file), 'utf8');
+
+			const heading = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/);
+			expect(heading, `${file} has no <h1>`).not.toBeNull();
+			expect(heading?.[1], `${file} <h1>`).toContain(tool.name);
+
+			for (const copy of [tool.unit, tool.tagline, tool.lede, tool.install]) {
+				expect(html, `${file} is missing ${JSON.stringify(copy)}`).toContain(copy);
+			}
+			if (tool.docsPath) {
+				expect(html, `${file} does not link ${tool.docsPath}`).toContain(`href="${tool.docsPath}"`);
+			}
+		}
+	});
+
 	it('loads no subresource from a third-party origin', () => {
 		for (const name of ['index.html', 'docs.html', ...docPages(), ...toolPages()]) {
 			const html = readFileSync(path.join(STATIC, name), 'utf8');
