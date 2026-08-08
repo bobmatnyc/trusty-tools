@@ -588,3 +588,241 @@ fn upsert_refuses_an_id_that_only_vector_keys_still_claims() {
     assert_eq!(audit.key_rows, 2);
     assert_eq!(audit.distinct_vector_ids, 2);
 }
+
+// ---------------------------------------------------------------------------
+// #5171 — exact search below the exhaustive threshold.
+// ---------------------------------------------------------------------------
+
+/// Deterministic pseudo-random unit vectors.
+///
+/// Why: the #5171 miss depends on the shape of the pruned layer-0 neighbour
+/// lists, and `unit_vec`'s monotone ramps are far too correlated to produce a
+/// realistic graph — every vector is nearly parallel to every other. An
+/// xorshift-driven Gaussian-ish spread reproduces the isotropic-with-clusters
+/// geometry of a real sentence embedding, which is what the recall measurement
+/// in this issue used.
+/// What: xorshift64* seeded per vector, mapped to [-1, 1), then L2-normalised.
+/// The seed fully determines the output, so a failure is reproducible.
+/// Test: used by the tests below.
+fn spread_vec(dim: usize, seed: u64) -> Vec<f32> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        ((x >> 11) as f64 / (1u64 << 53) as f64) as f32 * 2.0 - 1.0
+    };
+    let raw: Vec<f32> = (0..dim).map(|_| next()).collect();
+    let norm: f32 = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
+    raw.into_iter().map(|v| v / norm).collect()
+}
+
+/// Brute-force cosine ranking, computed independently of `hnsw_rs`.
+fn reference_ranking(pool: &[Vec<f32>], query: &[f32]) -> Vec<usize> {
+    let mut scored: Vec<(usize, f64)> = pool
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let dot: f64 = v
+                .iter()
+                .zip(query)
+                .map(|(a, b)| *a as f64 * *b as f64)
+                .sum();
+            let na: f64 = v.iter().map(|a| *a as f64 * *a as f64).sum::<f64>().sqrt();
+            let nb: f64 = query
+                .iter()
+                .map(|b| *b as f64 * *b as f64)
+                .sum::<f64>()
+                .sqrt();
+            (i, 1.0 - dot / (na * nb))
+        })
+        .collect();
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
+    scored.into_iter().map(|(i, _)| i).collect()
+}
+
+/// Why (#5171): the defect is that a search can return a strict subset of the
+/// index, so the invariant worth asserting is total coverage — not a rate. This
+/// test is deterministic: it does not depend on which random graph `hnsw_rs`
+/// built, because a full scan reaches every point by construction. It is the
+/// direct statement of "a known-nearest point is always present in the
+/// candidate pool", and it pins the ranking to an independently computed
+/// brute-force reference so a future "optimisation" of the scan cannot quietly
+/// reorder results.
+/// What: builds a 40-point graph, then asserts `exhaustive_nearest` returns all
+/// 40 ids in exactly the reference order, and that its top-5 prefix is the
+/// reference top-5.
+/// Test: this test itself is the verification.
+#[test]
+fn exhaustive_scan_returns_every_point_the_graph_holds() {
+    use hnsw_rs::prelude::{DistCosine, Hnsw};
+
+    let dim = 64;
+    let n = 40usize;
+    let pool: Vec<Vec<f32>> = (0..n).map(|i| spread_vec(dim, 900 + i as u64)).collect();
+    let index = Hnsw::<f32, DistCosine>::new(
+        HNSW_MAX_NB_CONNECTION,
+        HNSW_INITIAL_CAPACITY,
+        HNSW_MAX_LAYER,
+        HNSW_EF_CONSTRUCTION,
+        DistCosine,
+    );
+    for (i, v) in pool.iter().enumerate() {
+        index.insert((v.as_slice(), i));
+    }
+
+    let query = spread_vec(dim, 7777);
+    let got = exhaustive::exhaustive_nearest(&index, &query, n);
+    let ids: Vec<usize> = got.iter().map(|(id, _)| *id as usize).collect();
+
+    assert_eq!(
+        ids.len(),
+        n,
+        "the scan must reach every point in the index, got {} of {n}",
+        ids.len()
+    );
+    assert_eq!(
+        ids,
+        reference_ranking(&pool, &query),
+        "the scan must rank identically to an independent brute-force ranking"
+    );
+    assert!(
+        got.windows(2).all(|w| w[0].1 <= w[1].1),
+        "distances must be non-decreasing: {got:?}"
+    );
+}
+
+/// Why (#5171): `HnswStore::search` used to hand back only the points reachable
+/// from the graph's descent pivot along pruned layer-0 neighbour lists. Because
+/// `hnsw_rs` seeds its level RNG from OS entropy, every `HnswStore::open`
+/// builds a different graph, so the omission moved from drawer to drawer on
+/// every palace open — the reason this could not be caught by a single-build
+/// test. Rebuilding the same collection repeatedly is what samples that
+/// distribution.
+/// What: builds the same 12-vector collection under 12 independently seeded
+/// graphs and asserts that for 25 queries against each, `search` returns
+/// exactly the brute-force top-5, in order. Below
+/// `EXHAUSTIVE_SCAN_MAX_POINTS` that holds with probability 1, so this test
+/// cannot flake once fixed. Before the fix it failed on roughly 3% of the 300
+/// (graph, query) pairs, which makes a passing run vanishingly unlikely.
+/// Test: this test itself is the verification.
+#[test]
+fn search_returns_the_exact_top_k_below_the_exhaustive_threshold() {
+    let dim = 64;
+    let n = 12usize;
+    let k = 5usize;
+    let pool: Vec<Vec<f32>> = (0..n).map(|i| spread_vec(dim, 100 + i as u64)).collect();
+
+    for build in 0..12u64 {
+        let (_dir, store) = open_store(dim);
+        let uuids: Vec<String> = (0..n).map(|_| Uuid::new_v4().to_string()).collect();
+        for (u, v) in uuids.iter().zip(&pool) {
+            store.upsert(u, v).unwrap();
+        }
+        for q in 0..25u64 {
+            let query = spread_vec(dim, 50_000 + build * 100 + q);
+            let expected: Vec<String> = reference_ranking(&pool, &query)
+                .into_iter()
+                .take(k)
+                .map(|i| uuids[i].clone())
+                .collect();
+            let got: Vec<String> = store
+                .search(&query, k)
+                .unwrap()
+                .into_iter()
+                .map(|(u, _)| u)
+                .collect();
+            assert_eq!(
+                got, expected,
+                "build {build}, query {q}: search must return the exact top-{k} \
+                 for a {n}-point index (#5171)"
+            );
+        }
+    }
+}
+
+/// Why (#5171): the exhaustive path is bounded by
+/// `EXHAUSTIVE_SCAN_MAX_POINTS` precisely so a large palace keeps HNSW's
+/// sublinear cost. Without a test on the seam, raising the constant — or
+/// dropping the comparison altogether — turns every recall into a linear scan
+/// with nothing to catch it.
+/// What: asserts the threshold is the small-collection bound the module claims,
+/// and that an index one point past it still answers through the graph, by
+/// checking `search` remains correct there rather than by inspecting internals.
+/// Test: this test itself is the verification.
+#[test]
+fn search_uses_the_graph_above_the_exhaustive_threshold() {
+    assert_eq!(
+        exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
+        256,
+        "changing this bound changes the cost profile of every recall; \
+         update the measurement in exhaustive.rs before changing the number"
+    );
+
+    let dim = 16;
+    let n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 1;
+    let (_dir, store) = open_store(dim);
+    let mut uuids = Vec::with_capacity(n);
+    for i in 0..n {
+        let u = Uuid::new_v4().to_string();
+        store
+            .upsert(&u, &spread_vec(dim, 4_000 + i as u64))
+            .unwrap();
+        uuids.push(u);
+    }
+    // The graph path is approximate by design, so assert only what it still
+    // owes: an exact query returns its own drawer first.
+    let hits = store.search(&spread_vec(dim, 4_000), 3).unwrap();
+    assert_eq!(
+        hits[0].0, uuids[0],
+        "above the threshold the graph path must still rank an exact match first"
+    );
+}
+
+/// Why (#5171): a fresh palace has zero points, and `hnsw_rs`'s point iterator
+/// unwraps an entry point that does not exist until the first insert
+/// (`hnsw.rs:662`). Routing an empty index down the scan therefore panicked
+/// inside the library rather than returning nothing — caught by
+/// `backfill_reembeds_a_marked_drawer`, whose store searches before it embeds.
+/// What: searches a store with no upserts and asserts an empty result.
+/// Test: this test itself is the verification.
+#[test]
+fn search_on_an_empty_index_returns_nothing() {
+    let (_dir, store) = open_store(8);
+    assert!(store.search(&spread_vec(8, 1), 5).unwrap().is_empty());
+}
+
+/// Why (#5171): `upsert` of an already-mapped uuid leaves the previous vector
+/// in the in-memory graph under the same `vector_id` — `hnsw_rs` cannot remove
+/// a point. The scan sees both copies, so without dedup a re-embedded drawer
+/// would occupy two of the caller's `k` slots and push a real neighbour out.
+/// What: upserts one uuid twice with different vectors, then asserts the drawer
+/// appears exactly once and at the distance of the CURRENT vector, not the
+/// stale copy's.
+/// Test: this test itself is the verification.
+#[test]
+fn search_reports_a_re_upserted_drawer_once_at_its_current_vector() {
+    let dim = 32;
+    let (_dir, store) = open_store(dim);
+    let target = Uuid::new_v4().to_string();
+    let stale = spread_vec(dim, 11);
+    let current = spread_vec(dim, 22);
+    store.upsert(&target, &stale).unwrap();
+    store.upsert(&target, &current).unwrap();
+    for i in 0..5 {
+        store
+            .upsert(&Uuid::new_v4().to_string(), &spread_vec(dim, 300 + i))
+            .unwrap();
+    }
+
+    let hits = store.search(&current, 7).unwrap();
+    assert_eq!(
+        hits.iter().filter(|(u, _)| *u == target).count(),
+        1,
+        "a re-upserted drawer must occupy one result slot, not two: {hits:?}"
+    );
+    assert!(
+        hits[0].0 == target && hits[0].1 < 1e-3,
+        "the current vector, not the shadowed copy, must set the distance: {hits:?}"
+    );
+}

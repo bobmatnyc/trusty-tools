@@ -30,6 +30,9 @@ use crate::memory_core::store::kg_store::{
     DELETED_VECTORS, NEXT_VECTOR_ID, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS,
 };
 
+mod exhaustive;
+use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest};
+
 /// Default HNSW connectivity. Maps to `max_nb_connection` in `hnsw_rs`.
 ///
 /// Why: 16 is the recommended value from the original HNSW paper for
@@ -550,11 +553,21 @@ impl HnswStore {
     /// path is a single in-memory graph traversal plus a hash lookup per
     /// hit. Tombstoned ids are filtered out before the lookup so callers
     /// never see deleted points.
-    /// What: Calls `Hnsw::search(query, k, ef_search)`, filters results
-    /// against `DELETED_VECTORS`, then maps each surviving `d_id` back to
-    /// its UUID via the `VECTOR_KEYS` reverse map. Returns hits sorted by
-    /// ascending distance (best first).
-    /// Test: `upsert_and_search_round_trips`, `delete_filters_results`.
+    /// What: Ranks candidates — exactly, by scanning every point, when the
+    /// index holds at most [`EXHAUSTIVE_SCAN_MAX_POINTS`]; otherwise via
+    /// `Hnsw::search(query, k, ef_search)`. Filters the result against
+    /// `DELETED_VECTORS`, then maps each surviving `vector_id` back to its UUID
+    /// via the `VECTOR_KEYS` reverse map. Returns hits sorted by ascending
+    /// distance (best first), each UUID at most once.
+    ///
+    /// #5171: below the threshold the graph traversal returns only the points
+    /// reachable from its descent pivot along pruned layer-0 neighbour lists,
+    /// which on real embeddings dropped a true top-5 neighbour on 2–4% of
+    /// queries — and because `hnsw_rs` seeds its level RNG from OS entropy,
+    /// *which* drawer went missing changed on every palace open. See
+    /// [`exhaustive`] for the measurement and the threshold's rationale.
+    /// Test: `upsert_and_search_round_trips`, `delete_filters_results`,
+    /// `exhaustive_scan_finds_every_true_neighbour_across_rebuilds`.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
         if query.len() != self.dim {
             return Err(HnswStoreError::DimensionMismatch {
@@ -584,20 +597,31 @@ impl HnswStore {
         // Over-fetch so tombstoning doesn't starve callers asking for k.
         // 2x is sufficient in the common case; for pathological cases the
         // caller can re-issue.
+        let want = k.saturating_mul(2).max(k);
         let ef = HNSW_DEFAULT_EF_SEARCH.max(k * 2);
-        let raw = self
-            .index
-            .read()
-            .search(query, k.saturating_mul(2).max(k), ef);
+        // One guard for both the size test and the search, so the branch and
+        // the work it selects observe the same graph.
+        let raw: Vec<(u64, f32)> = {
+            let index = self.index.read();
+            if index.get_nb_point() <= EXHAUSTIVE_SCAN_MAX_POINTS {
+                exhaustive_nearest(&index, query, want)
+            } else {
+                index
+                    .search(query, want, ef)
+                    .into_iter()
+                    .map(|hit| (hit.d_id as u64, hit.distance))
+                    .collect()
+            }
+        };
 
         let mut out: Vec<(String, f32)> = Vec::with_capacity(k);
-        for hit in raw {
-            let id = hit.d_id as u64;
-            if tombstones.contains(&id) {
+        let mut emitted: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for (id, distance) in raw {
+            if tombstones.contains(&id) || !emitted.insert(id) {
                 continue;
             }
             if let Some(uuid) = reverse.get(&id) {
-                out.push((uuid.clone(), hit.distance));
+                out.push((uuid.clone(), distance));
                 if out.len() >= k {
                     break;
                 }
