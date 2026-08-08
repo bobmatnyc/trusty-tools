@@ -14,8 +14,16 @@
 //! [`RecallQueryShape`]. Pure and allocation-light; no I/O.
 //! Test: `envelope_strip_recovers_the_payload`,
 //! `over_window_query_is_reduced_to_whole_units`,
-//! `short_query_passes_through_untouched`, `token_estimate_never_splits_a_unit`,
+//! `short_query_passes_through_untouched`,
+//! `token_estimate_never_underestimates`, `cjk_is_one_token_per_char`,
+//! `unbreakable_oversized_token_still_yields_a_query`,
 //! `configured_query_budget_clamps_to_bounds`.
+//!
+//! The estimator errs high by construction on every input class it cannot model
+//! exactly. That is the load-bearing property: an over-estimate trims a little
+//! more than necessary and reports it, while an under-estimate hands the
+//! embedder a query it cuts silently *and* leaves [`RecallQueryShape`] reporting
+//! no loss — a monitor that says healthy while the loss happens (#4972 review).
 //!
 //! Why not chunk-and-pool (the third option #4972 lists): pooling needs either
 //! N embedder round trips inside a 1.5 s hook budget ([`super::BODY_DEADLINE`])

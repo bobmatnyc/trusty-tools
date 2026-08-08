@@ -1259,26 +1259,92 @@ fn injection_drops_provenance_tags() {
 #[test]
 fn injection_caps_rendered_tag_count() {
     use format::{render_tags, MAX_RENDERED_TAGS};
-    let tags: Vec<String> = (0..12).map(|i| format!("topic-{i}")).collect();
+    // Realistic tag lengths, not `topic-N`. These are the shapes the live
+    // palace actually stores — the 7-character fixture this test used to carry
+    // could not have caught the byte-budget hole the #5038 review found.
+    let tags: Vec<String> = [
+        "slate-prioritization-in-flight",
+        "trusty-search-reinstall-in-flight",
+        "standing-instruction",
+        "session-2eb72dca",
+        "resume-target",
+        "issue-2833",
+        "bob-decision",
+        "trusty-mpm",
+        "status",
+        "kg",
+        "redb",
+        "python",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     let rendered = render_tags(&tags).expect("tags must render");
-    assert_eq!(
-        rendered.matches('`').count() / 2,
-        MAX_RENDERED_TAGS,
-        "exactly MAX_RENDERED_TAGS tags may render; got: {rendered}"
+    let shown = rendered.matches('`').count() / 2;
+    assert!(
+        shown <= MAX_RENDERED_TAGS,
+        "at most MAX_RENDERED_TAGS tags may render; got {shown}: {rendered}"
     );
     assert!(
-        rendered.contains(&format!("+{} more", 12 - MAX_RENDERED_TAGS)),
+        rendered.contains(&format!("+{} more", tags.len() - shown)),
         "held-back tags must be announced, not dropped silently; got: {rendered}"
     );
     assert!(
-        !rendered.contains("topic-11"),
+        !rendered.contains("python"),
         "the tail of the tag list must not render; got: {rendered}"
     );
+}
+
+/// Why (#5038 review): `MAX_RENDERED_TAGS` is argued from "a label must never
+/// outweigh the payload it labels" but enforces a *count*, and a count cannot
+/// bound bytes — four 55-character tags blow a 220-character budget while
+/// satisfying the cap. The old test used 7-character `topic-N` fixtures, so its
+/// length assertion could never fail no matter how wrong the cap was.
+/// What: four tags of 55 characters each — well inside the count cap, well past
+/// the char budget. Asserts the rendered suffix stays within
+/// `MAX_RENDERED_TAG_CHARS`, that fewer than the count cap render as a result,
+/// and that the ones dropped for length are still announced.
+/// Test: itself.
+#[test]
+fn injection_caps_rendered_tag_bytes() {
+    use format::{render_tags, MAX_RENDERED_TAGS, MAX_RENDERED_TAG_CHARS};
+    const TAG_CHARS: usize = 55;
+    let long: Vec<String> = (0..4)
+        .map(|i| {
+            let stem = format!("workstream-{i}-");
+            format!("{stem}{}", "x".repeat(TAG_CHARS - stem.chars().count()))
+        })
+        .collect();
+    assert_eq!(
+        long[0].chars().count(),
+        TAG_CHARS,
+        "fixture must be 55 chars"
+    );
+    let rendered = render_tags(&long).expect("tags must render");
     assert!(
-        rendered.len() < DRAWER_PREVIEW_CHARS,
-        "a tag label must stay under the content budget it labels ({DRAWER_PREVIEW_CHARS}); \
-         got {} bytes: {rendered}",
-        rendered.len()
+        rendered.chars().count() <= MAX_RENDERED_TAG_CHARS,
+        "the tag label must stay inside its {MAX_RENDERED_TAG_CHARS}-char budget; \
+         got {} chars: {rendered}",
+        rendered.chars().count()
+    );
+    let shown = rendered.matches('`').count() / 2;
+    assert!(
+        shown < MAX_RENDERED_TAGS,
+        "with 55-char tags the byte budget must bind before the count cap; \
+         got {shown} tags: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("+{} more", long.len() - shown)),
+        "tags held back for length must be announced too; got: {rendered}"
+    );
+
+    // The deliberate exception: one tag longer than the whole budget still
+    // renders, because `_(tags: +1 more)_` communicates strictly less.
+    let huge = vec![format!("w-{}", "y".repeat(400))];
+    let rendered = render_tags(&huge).expect("a single oversized tag still renders");
+    assert!(
+        rendered.contains(&huge[0]),
+        "the lone tag must survive whole"
     );
 }
 

@@ -36,8 +36,30 @@ use super::{DRAWER_PREVIEW_CHARS, INJECTION_BYTE_CAP};
 /// that has only a 220-character preview to go on — but the surplus is
 /// announced (`+N more`) rather than rendered, matching the withheld-signal
 /// rule the #5037 ruling sets for drawers.
+///
+/// The count alone does not enforce the rule it is argued from: four 55-char
+/// tags exceed 220 characters, and no cap on *how many* can prevent that.
+/// [`MAX_RENDERED_TAG_CHARS`] enforces the byte side directly; this constant is
+/// the common-case cap, that one is the guarantee (#5038 review).
 /// Test: `injection_caps_rendered_tag_count`.
 pub(super) const MAX_RENDERED_TAGS: usize = 4;
+
+/// Hard character ceiling on one drawer's rendered tag suffix.
+///
+/// Why (#5038 review): [`MAX_RENDERED_TAGS`] is justified by "a label must never
+/// outweigh the payload it labels" but enforces a count, which is only a proxy.
+/// Tag length is not bounded anywhere — a palace using long hyphenated tags
+/// (`slate-prioritization-in-flight`, `trusty-search-reinstall-in-flight`, both
+/// real tags from the corpus) blows the budget at four. This makes the stated
+/// rule the actual invariant rather than an argument for a different one.
+/// What: [`DRAWER_PREVIEW_CHARS`] — the same budget the content preview gets, so
+/// the label can at most equal its payload, never exceed it. Measured in
+/// characters, matching how `DRAWER_PREVIEW_CHARS` measures the content. One
+/// exception, deliberate: a *single* tag longer than the whole budget still
+/// renders whole, because a suffix reading only `_(tags: +1 more)_` tells the
+/// model strictly less than the tag would.
+/// Test: `injection_caps_rendered_tag_bytes`.
+pub(super) const MAX_RENDERED_TAG_CHARS: usize = DRAWER_PREVIEW_CHARS;
 
 /// Compose the final injection block.
 ///
@@ -174,20 +196,28 @@ pub(super) fn render_tags(tags: &[String]) -> Option<String> {
     if topical.is_empty() {
         return None;
     }
+    // Room the `+N more` marker and the `)_` close will need. Reserving it up
+    // front is what keeps the *finished* suffix inside the budget, rather than
+    // only the part written before the marker.
+    const TRAILER_RESERVE: usize = ", +99 more)_".len();
     let mut out = String::from("  _(tags: ");
-    for (i, tag) in topical.iter().take(MAX_RENDERED_TAGS).enumerate() {
-        if i > 0 {
+    let mut shown = 0usize;
+    for tag in &topical {
+        // `, ` separator (after the first) + two backticks + the tag itself.
+        let width = usize::from(shown > 0) * 2 + 2 + tag.chars().count();
+        let projected = out.chars().count() + width + TRAILER_RESERVE;
+        if shown == MAX_RENDERED_TAGS || (shown > 0 && projected > MAX_RENDERED_TAG_CHARS) {
+            break;
+        }
+        if shown > 0 {
             out.push_str(", ");
         }
         out.push('`');
         out.push_str(tag);
         out.push('`');
+        shown += 1;
     }
-    if let Some(hidden) = topical
-        .len()
-        .checked_sub(MAX_RENDERED_TAGS)
-        .filter(|n| *n > 0)
-    {
+    if let Some(hidden) = topical.len().checked_sub(shown).filter(|n| *n > 0) {
         out.push_str(&format!(", +{hidden} more"));
     }
     out.push_str(")_");
