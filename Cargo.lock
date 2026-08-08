@@ -10288,7 +10288,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "2.11.0"
+version = "2.12.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -10298,10 +10298,12 @@ dependencies = [
  "chrono-tz",
  "clap",
  "criterion",
+ "crossterm 0.28.1",
  "csv",
  "futures",
  "git2",
  "indicatif 0.17.11",
+ "ratatui 0.29.0",
  "rayon",
  "regex",
  "reqwest 0.12.28",

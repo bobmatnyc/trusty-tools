@@ -101,3 +101,26 @@ health_interval	1
 # --- source (DOC-1 §6.2) ---
 repo_url	https://github.com/bobmatnyc/trusty-tools.git
 default_branch	main
+
+# --- credential propagation (#4924) ---
+#
+# #4924: whether `vmtest run branch` hands the HOST's $GITHUB_TOKEN to the guest,
+# so the guest's `git clone` of repo_url is AUTHENTICATED instead of sharing the
+# anonymous github.com rate limit with the host and every concurrent guest on the
+# same egress IP. Patterns (a) and (c) never contact github.com and never receive
+# it, whatever this says.
+#
+# THE TOKEN ITSELF IS NOT A CONFIGURATION KEY AND MUST NEVER BECOME ONE.
+# `print_banner` prints every key's value on stdout on every run, INCLUDING
+# --dry-run. Only this boolean — which is safe to print — lives here; the secret
+# is read straight from the host process environment at provision time and
+# crosses to the guest on stdin.
+#
+# NOT A TIMEOUT, so P8-T2's measurement-or-`judgment call` rule does not apply.
+# The fail-safe direction is WITHHOLD: propagation happens only when the
+# effective value is exactly `true`. `true` and `false` are the only accepted
+# values and `preflight_config` rejects anything else BEFORE a VM is cloned, so a
+# typo'd VMTEST_PROPAGATE_GITHUB_TOKEN=0 costs a second rather than a 30 s+ boot.
+# An absent $GITHUB_TOKEN is NOT an error: the run clones anonymously, exactly as
+# it did before this key existed.
+propagate_github_token	true
