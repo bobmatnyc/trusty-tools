@@ -1200,3 +1200,242 @@ async fn handle_prompt_context_fails_open_on_slow_daemon() {
          (a stalled daemon must never make the hook wait out its own timeout)"
     );
 }
+
+/// Why (issue #5038, symptom 1): `memory_remember` stamps every drawer with the
+/// reserved `creator:*` namespace — `creator:cwd` alone is a ~90-character
+/// absolute path — and the injection rendered all of it. Over 17,176 real
+/// firings those tags are 33.4% of every tag byte injected. They tell a model
+/// nothing about what the drawer says.
+/// What: a drawer carrying provenance tags among topical ones through
+/// `render_tags`; asserts no `creator:` survives and the topical tags do.
+/// Test: itself.
+#[test]
+fn injection_drops_provenance_tags() {
+    use format::render_tags;
+    let tags: Vec<String> = [
+        "rust",
+        "creator:client=trusty-memory-mcp",
+        "tokio",
+        "creator:version=0.21.2",
+        "creator:source=mcp",
+        "creator:cwd=/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.base",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let rendered = render_tags(&tags).expect("topical tags must still render");
+    assert!(
+        !rendered.contains("creator:"),
+        "provenance must not reach the injection; got: {rendered}"
+    );
+    assert!(
+        rendered.contains("`rust`") && rendered.contains("`tokio`"),
+        "topical tags must survive; got: {rendered}"
+    );
+
+    // A drawer whose only tags are provenance renders no suffix at all — 2.8%
+    // of drawers in the corpus were exactly this shape.
+    let only_provenance: Vec<String> = tags
+        .iter()
+        .filter(|t| t.starts_with("creator:"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        render_tags(&only_provenance),
+        None,
+        "an all-provenance tag list must render nothing, not an empty suffix"
+    );
+}
+
+/// Why (issue #5038, symptom 2): tag lists rendered in full, uncapped — the
+/// median drawer carried 17 tags and the `_(tags: …)_` suffix was 53.0% of
+/// every byte the hook injected, outweighing the content preview it labels on
+/// 82.3% of drawers.
+/// What: a 12-tag drawer through `render_tags`; asserts exactly
+/// `MAX_RENDERED_TAGS` render, the surplus is announced rather than dropped
+/// silently, and the whole suffix stays under the content budget the cap was
+/// chosen against.
+/// Test: itself.
+#[test]
+fn injection_caps_rendered_tag_count() {
+    use format::{render_tags, MAX_RENDERED_TAGS};
+    // Realistic tag lengths, not `topic-N`. These are the shapes the live
+    // palace actually stores — the 7-character fixture this test used to carry
+    // could not have caught the byte-budget hole the #5038 review found.
+    let tags: Vec<String> = [
+        "slate-prioritization-in-flight",
+        "trusty-search-reinstall-in-flight",
+        "standing-instruction",
+        "session-2eb72dca",
+        "resume-target",
+        "issue-2833",
+        "bob-decision",
+        "trusty-mpm",
+        "status",
+        "kg",
+        "redb",
+        "python",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let rendered = render_tags(&tags).expect("tags must render");
+    let shown = rendered.matches('`').count() / 2;
+    assert!(
+        shown <= MAX_RENDERED_TAGS,
+        "at most MAX_RENDERED_TAGS tags may render; got {shown}: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("+{} more", tags.len() - shown)),
+        "held-back tags must be announced, not dropped silently; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("python"),
+        "the tail of the tag list must not render; got: {rendered}"
+    );
+}
+
+/// Why (#5038 review): `MAX_RENDERED_TAGS` is argued from "a label must never
+/// outweigh the payload it labels" but enforces a *count*, and a count cannot
+/// bound bytes — four 55-character tags blow a 220-character budget while
+/// satisfying the cap. The old test used 7-character `topic-N` fixtures, so its
+/// length assertion could never fail no matter how wrong the cap was.
+/// What: four tags of 55 characters each — well inside the count cap, well past
+/// the char budget. Asserts the rendered suffix stays within
+/// `MAX_RENDERED_TAG_CHARS`, that fewer than the count cap render as a result,
+/// and that the ones dropped for length are still announced.
+/// Test: itself.
+#[test]
+fn injection_caps_rendered_tag_bytes() {
+    use format::{render_tags, MAX_RENDERED_TAGS, MAX_RENDERED_TAG_CHARS};
+    const TAG_CHARS: usize = 55;
+    let long: Vec<String> = (0..4)
+        .map(|i| {
+            let stem = format!("workstream-{i}-");
+            format!("{stem}{}", "x".repeat(TAG_CHARS - stem.chars().count()))
+        })
+        .collect();
+    assert_eq!(
+        long[0].chars().count(),
+        TAG_CHARS,
+        "fixture must be 55 chars"
+    );
+    let rendered = render_tags(&long).expect("tags must render");
+    assert!(
+        rendered.chars().count() <= MAX_RENDERED_TAG_CHARS,
+        "the tag label must stay inside its {MAX_RENDERED_TAG_CHARS}-char budget; \
+         got {} chars: {rendered}",
+        rendered.chars().count()
+    );
+    let shown = rendered.matches('`').count() / 2;
+    assert!(
+        shown < MAX_RENDERED_TAGS,
+        "with 55-char tags the byte budget must bind before the count cap; \
+         got {shown} tags: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("+{} more", long.len() - shown)),
+        "tags held back for length must be announced too; got: {rendered}"
+    );
+
+    // The deliberate exception: one tag longer than the whole budget still
+    // renders, because `_(tags: +1 more)_` communicates strictly less.
+    let huge = vec![format!("w-{}", "y".repeat(400))];
+    let rendered = render_tags(&huge).expect("a single oversized tag still renders");
+    assert!(
+        rendered.contains(&huge[0]),
+        "the lone tag must survive whole"
+    );
+}
+
+/// Why (issue #5038, end to end): the unit tests above pin `render_tags` in
+/// isolation. This one proves the whole chain — real MCP write path stamping
+/// `creator:*`, real HTTP recall, real composition — never puts provenance or
+/// an uncapped tag list into what Claude Code actually receives.
+/// What: seeds a palace through `memory_remember` (which attaches the
+/// attribution namespace exactly as production does) with drawers carrying more
+/// topical tags than the cap, recalls with a matching prompt, and asserts the
+/// rendered injection carries no `creator:` and no bullet over the cap.
+/// Test: itself.
+/// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+#[cfg(feature = "axum-server")]
+#[tokio::test]
+async fn prompt_context_injection_has_no_provenance_tags() {
+    use format::MAX_RENDERED_TAGS;
+    let _guard = crate::commands::env_test_lock().lock().await;
+    unsafe {
+        std::env::remove_var(ENV_MIN_SCORE);
+        std::env::remove_var(ENV_RECALL_DENY_TAGS);
+    }
+    let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+        spin_up_test_daemon_with_palace("prompt-ctx-tag-render").await;
+
+    for (text, tags) in [
+        (
+            "Rust integration uses tokio for async tasks and serde for JSON encoding",
+            vec![
+                "rust", "tokio", "serde", "async", "json", "encoding", "runtime", "crate",
+            ],
+        ),
+        (
+            "Rust error handling prefers thiserror in libraries and anyhow in binaries",
+            vec![
+                "rust",
+                "thiserror",
+                "anyhow",
+                "errors",
+                "libraries",
+                "binaries",
+                "convention",
+            ],
+        ),
+    ] {
+        let tags_json: Vec<serde_json::Value> = tags.iter().map(|t| json!(t)).collect();
+        let _ = crate::tools::dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": slug,
+                "text": text,
+                "room": "General",
+                "tags": tags_json,
+            }),
+        )
+        .await
+        .expect("memory_remember");
+    }
+
+    let payload = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": project_dir.to_string_lossy(),
+        "prompt": "how does rust integration work with tokio and serde?"
+    })
+    .to_string();
+    let body = build_injection_body(&payload).await;
+
+    assert_ne!(
+        body, EMPTY_PLACEHOLDER,
+        "fixture must actually recall something for this test to mean anything"
+    );
+    assert!(
+        body.contains("_(tags:"),
+        "fixture must render a tag suffix for this test to mean anything; got:\n{body}"
+    );
+    assert!(
+        !body.contains("creator:"),
+        "no provenance tag may reach the injection; got:\n{body}"
+    );
+    for bullet in body.lines().filter(|l| l.contains("_(tags:")) {
+        let shown = bullet
+            .split("_(tags:")
+            .nth(1)
+            .map(|suffix| suffix.matches('`').count() / 2)
+            .unwrap_or(0);
+        assert!(
+            shown <= MAX_RENDERED_TAGS,
+            "bullet renders {shown} tags, over the cap of {MAX_RENDERED_TAGS}: {bullet}"
+        );
+    }
+
+    addr_handle.shutdown().await;
+}
