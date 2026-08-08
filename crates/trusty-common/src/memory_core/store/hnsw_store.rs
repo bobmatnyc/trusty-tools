@@ -31,7 +31,7 @@ use crate::memory_core::store::kg_store::{
 };
 
 mod exhaustive;
-use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest};
+use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowed};
 
 /// Default HNSW connectivity. Maps to `max_nb_connection` in `hnsw_rs`.
 ///
@@ -322,6 +322,19 @@ pub struct HnswStore {
     /// `delete`, and `compact_orphans`.
     /// Test: `vector_writes_rejected_on_snapshot` (in `vector.rs`).
     read_only: bool,
+    /// `vector_id`s that have more than one point in the in-memory graph.
+    ///
+    /// Why (#5171): `hnsw_rs` cannot remove a point, so re-upserting a mapped
+    /// uuid leaves its previous embedding in the graph under the same id. A
+    /// search that scores the drawer by that stale copy reports content the
+    /// drawer no longer holds. Knowing exactly which ids are ambiguous lets
+    /// `search` re-read only those from `VECTORS` instead of re-reading every
+    /// candidate — the steady state is empty, and this costs nothing there.
+    /// What: written by `upsert` when the uuid already had a mapping. Starts
+    /// empty at every `open`, which is correct: `open` rebuilds the graph with
+    /// one point per live vector.
+    /// Test: `search_scores_a_re_upserted_drawer_by_its_current_vector`.
+    shadowed: RwLock<std::collections::HashSet<u64>>,
 }
 
 impl HnswStore {
@@ -460,6 +473,7 @@ impl HnswStore {
             index: Arc::new(RwLock::new(index)),
             dim,
             read_only,
+            shadowed: RwLock::new(std::collections::HashSet::new()),
         })
     }
 
@@ -515,6 +529,9 @@ impl HnswStore {
         let encoded: Vec<u8> = postcard::to_allocvec(&vector.to_vec())?;
         let wtx = self.db.begin_write()?;
         let vector_id;
+        // #5171: a re-upsert leaves the old embedding in the graph under this
+        // same id, so `search` must re-read the authoritative vector for it.
+        let shadows_previous;
         {
             let mut vectors = wtx.open_table(VECTORS)?;
             let mut keys = wtx.open_table(VECTOR_KEYS)?;
@@ -525,6 +542,7 @@ impl HnswStore {
             // (immutable borrow of `keys`) is dropped before we re-borrow
             // `keys` mutably for `insert`.
             let existing: Option<u64> = keys.get(uuid)?.map(|g| g.value());
+            shadows_previous = existing.is_some();
             vector_id = match existing {
                 Some(id) => id,
                 None => {
@@ -541,6 +559,9 @@ impl HnswStore {
         wtx.commit()?;
 
         self.index.read().insert((vector, vector_id as usize));
+        if shadows_previous {
+            self.shadowed.write().insert(vector_id);
+        }
 
         Ok(vector_id)
     }
@@ -554,11 +575,12 @@ impl HnswStore {
     /// hit. Tombstoned ids are filtered out before the lookup so callers
     /// never see deleted points.
     /// What: Ranks candidates — exactly, by scanning every point, when the
-    /// index holds at most [`EXHAUSTIVE_SCAN_MAX_POINTS`]; otherwise via
-    /// `Hnsw::search(query, k, ef_search)`. Filters the result against
-    /// `DELETED_VECTORS`, then maps each surviving `vector_id` back to its UUID
-    /// via the `VECTOR_KEYS` reverse map. Returns hits sorted by ascending
-    /// distance (best first), each UUID at most once.
+    /// palace holds at most [`EXHAUSTIVE_SCAN_MAX_POINTS`] live drawers;
+    /// otherwise via `Hnsw::search(query, k, ef_search)`. Re-scores any drawer
+    /// that has a shadow copy in the graph against its `VECTORS` row, filters
+    /// the result against `DELETED_VECTORS`, then maps each surviving
+    /// `vector_id` back to its UUID via the `VECTOR_KEYS` reverse map. Returns
+    /// hits sorted by ascending distance (best first), each UUID at most once.
     ///
     /// #5171: below the threshold the graph traversal returns only the points
     /// reachable from its descent pivot along pruned layer-0 neighbour lists,
@@ -567,7 +589,8 @@ impl HnswStore {
     /// *which* drawer went missing changed on every palace open. See
     /// [`exhaustive`] for the measurement and the threshold's rationale.
     /// Test: `upsert_and_search_round_trips`, `delete_filters_results`,
-    /// `exhaustive_scan_finds_every_true_neighbour_across_rebuilds`.
+    /// `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
+    /// `search_scores_a_re_upserted_drawer_by_its_current_vector`.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
         if query.len() != self.dim {
             return Err(HnswStoreError::DimensionMismatch {
@@ -599,12 +622,14 @@ impl HnswStore {
         // caller can re-issue.
         let want = k.saturating_mul(2).max(k);
         let ef = HNSW_DEFAULT_EF_SEARCH.max(k * 2);
-        // One guard for both the size test and the search, so the branch and
-        // the work it selects observe the same graph.
-        let raw: Vec<(u64, f32)> = {
+        // #5171: `reverse.len()` is the LIVE drawer count. `get_nb_point()`
+        // would also count tombstones and re-upsert shadows, so a small palace
+        // could churn past the threshold mid-session and silently revert to the
+        // approximate path.
+        let mut raw: Vec<(u64, f32)> = {
             let index = self.index.read();
-            if index.get_nb_point() <= EXHAUSTIVE_SCAN_MAX_POINTS {
-                exhaustive_nearest(&index, query, want)
+            if reverse.len() <= EXHAUSTIVE_SCAN_MAX_POINTS {
+                exhaustive_nearest(&index, query, want, &tombstones)
             } else {
                 index
                     .search(query, want, ef)
@@ -613,6 +638,16 @@ impl HnswStore {
                     .collect()
             }
         };
+
+        // #5171: a drawer with two embeddings in the graph is scored against
+        // the one `VECTORS` holds, never against the copy it superseded.
+        let shadowed = self.shadowed.read();
+        if !shadowed.is_empty() {
+            let rtx = self.db.begin_read()?;
+            let vectors = rtx.open_table(VECTORS)?;
+            resolve_shadowed(&mut raw, &shadowed, query, &vectors)?;
+        }
+        drop(shadowed);
 
         let mut out: Vec<(String, f32)> = Vec::with_capacity(k);
         let mut emitted: std::collections::HashSet<u64> = std::collections::HashSet::new();

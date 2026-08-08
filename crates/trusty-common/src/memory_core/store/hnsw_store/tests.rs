@@ -672,7 +672,7 @@ fn exhaustive_scan_returns_every_point_the_graph_holds() {
     }
 
     let query = spread_vec(dim, 7777);
-    let got = exhaustive::exhaustive_nearest(&index, &query, n);
+    let got = exhaustive::exhaustive_nearest(&index, &query, n, &Default::default());
     let ids: Vec<usize> = got.iter().map(|(id, _)| *id as usize).collect();
 
     assert_eq!(
@@ -793,15 +793,20 @@ fn search_on_an_empty_index_returns_nothing() {
 }
 
 /// Why (#5171): `upsert` of an already-mapped uuid leaves the previous vector
-/// in the in-memory graph under the same `vector_id` — `hnsw_rs` cannot remove
-/// a point. The scan sees both copies, so without dedup a re-embedded drawer
-/// would occupy two of the caller's `k` slots and push a real neighbour out.
-/// What: upserts one uuid twice with different vectors, then asserts the drawer
-/// appears exactly once and at the distance of the CURRENT vector, not the
-/// stale copy's.
+/// in the graph under the same `vector_id` — `hnsw_rs` cannot remove a point.
+/// Ranking that drawer by whichever copy is nearer scores it as an exact match
+/// for text it no longer holds; `VectorStore::search` turns distance 0.0 into
+/// score 1.0, so a re-embedded drawer would clear a 0.99 near-duplicate
+/// threshold against superseded content. `palace_reembed` creates this state in
+/// bulk.
+/// What: upserts one uuid twice, then queries with the STALE vector — the only
+/// input that separates "scored by the current vector" from "scored by the
+/// nearer copy", since querying `current` makes the two agree. Asserts the
+/// drawer is not an exact match for what it no longer holds, that the distance
+/// is the one its current vector gives, and that it takes one result slot.
 /// Test: this test itself is the verification.
 #[test]
-fn search_reports_a_re_upserted_drawer_once_at_its_current_vector() {
+fn search_scores_a_re_upserted_drawer_by_its_current_vector() {
     let dim = 32;
     let (_dir, store) = open_store(dim);
     let target = Uuid::new_v4().to_string();
@@ -815,14 +820,130 @@ fn search_reports_a_re_upserted_drawer_once_at_its_current_vector() {
             .unwrap();
     }
 
-    let hits = store.search(&current, 7).unwrap();
-    assert_eq!(
-        hits.iter().filter(|(u, _)| *u == target).count(),
-        1,
-        "a re-upserted drawer must occupy one result slot, not two: {hits:?}"
-    );
+    // The discriminating query: the vector the drawer USED to hold.
+    let hits = store.search(&stale, 7).unwrap();
+    let scored = hits
+        .iter()
+        .find(|(u, _)| *u == target)
+        .unwrap_or_else(|| panic!("target must still be reachable: {hits:?}"));
     assert!(
-        hits[0].0 == target && hits[0].1 < 1e-3,
-        "the current vector, not the shadowed copy, must set the distance: {hits:?}"
+        scored.1 > 1e-3,
+        "a superseded vector must not score its drawer as an exact match \
+         (distance {}, hits {hits:?})",
+        scored.1
+    );
+    // `DistCosine` between two independent random unit vectors in 32 dims sits
+    // far from 0; the assertion below is that the reported distance is the
+    // current vector's, to within f32 noise.
+    let expected = 1.0
+        - stale.iter().zip(&current).map(|(a, b)| a * b).sum::<f32>()
+            / (stale.iter().map(|a| a * a).sum::<f32>().sqrt()
+                * current.iter().map(|b| b * b).sum::<f32>().sqrt());
+    assert!(
+        (scored.1 - expected).abs() < 1e-4,
+        "distance must come from the current vector ({expected}), got {}",
+        scored.1
+    );
+
+    assert_eq!(
+        store
+            .search(&current, 7)
+            .unwrap()
+            .iter()
+            .filter(|(u, _)| *u == target)
+            .count(),
+        1,
+        "a re-upserted drawer must occupy one result slot, not two"
+    );
+}
+
+/// Why (#5171): re-scoring reads the `VECTORS` row a candidate claims, and
+/// `compact_orphans` can remove that row between the search and the read. There
+/// is no honest distance to report for a drawer whose vector is gone, and the
+/// stale graph copy is exactly what must not be reported, so the candidate is
+/// dropped instead.
+/// What: shadows a `vector_id` by re-upserting it, deletes its `VECTORS` row
+/// through the store's own db handle, and asserts search omits it and still
+/// returns the other drawers.
+/// Test: this test itself is the verification.
+#[test]
+fn search_drops_a_shadowed_candidate_whose_vector_row_is_gone() {
+    let dim = 16;
+    let (_dir, store) = open_store(dim);
+    let target = Uuid::new_v4().to_string();
+    let id = store.upsert(&target, &spread_vec(dim, 5)).unwrap();
+    store.upsert(&target, &spread_vec(dim, 6)).unwrap();
+    let others: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+    for (i, u) in others.iter().enumerate() {
+        store.upsert(u, &spread_vec(dim, 700 + i as u64)).unwrap();
+    }
+
+    let wtx = store.db.begin_write().unwrap();
+    {
+        let mut vectors = wtx.open_table(VECTORS).unwrap();
+        vectors.remove(id).unwrap();
+    }
+    wtx.commit().unwrap();
+
+    let hits = store.search(&spread_vec(dim, 6), 5).unwrap();
+    assert!(
+        !hits.iter().any(|(u, _)| *u == target),
+        "a drawer with no vector row must not be reported: {hits:?}"
+    );
+    assert_eq!(hits.len(), 3, "the other drawers still rank: {hits:?}");
+}
+
+/// Why (#5171): the exhaustive path is selected on the LIVE drawer count, not
+/// on `Hnsw::get_nb_point()`. `delete` never removes a point from the graph and
+/// `upsert` inserts unconditionally, so a graph-count test lets a small palace
+/// churn past the threshold within one session and silently revert to the
+/// approximate path — the fix disabling itself with no signal.
+/// What: fills a store past the threshold, deletes back down to a handful of
+/// live drawers (leaving 300 points in the graph), and asserts search is exact
+/// again — which only holds on the scan path.
+/// Test: this test itself is the verification.
+#[test]
+fn deleting_drawers_does_not_push_a_small_palace_off_the_exhaustive_path() {
+    let dim = 16;
+    let total = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 44;
+    let (_dir, store) = open_store(dim);
+    let uuids: Vec<String> = (0..total).map(|_| Uuid::new_v4().to_string()).collect();
+    let vecs: Vec<Vec<f32>> = (0..total)
+        .map(|i| spread_vec(dim, 8_000 + i as u64))
+        .collect();
+    for (u, v) in uuids.iter().zip(&vecs) {
+        store.upsert(u, v).unwrap();
+    }
+    let keep = 6usize;
+    for u in &uuids[keep..] {
+        store.delete(u).unwrap();
+    }
+    assert_eq!(store.len().unwrap(), keep, "only the kept drawers are live");
+
+    let query = spread_vec(dim, 99_001);
+    let mut expected: Vec<(usize, f32)> = (0..keep)
+        .map(|i| {
+            let dot: f32 = vecs[i].iter().zip(&query).map(|(a, b)| a * b).sum();
+            let na: f32 = vecs[i].iter().map(|a| a * a).sum::<f32>().sqrt();
+            let nb: f32 = query.iter().map(|b| b * b).sum::<f32>().sqrt();
+            (i, 1.0 - dot / (na * nb))
+        })
+        .collect();
+    expected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+    let got: Vec<String> = store
+        .search(&query, keep)
+        .unwrap()
+        .into_iter()
+        .map(|(u, _)| u)
+        .collect();
+    assert_eq!(
+        got,
+        expected
+            .iter()
+            .map(|(i, _)| uuids[*i].clone())
+            .collect::<Vec<_>>(),
+        "a palace with {keep} live drawers must stay on the exact path however \
+         many dead points the graph still carries"
     );
 }
