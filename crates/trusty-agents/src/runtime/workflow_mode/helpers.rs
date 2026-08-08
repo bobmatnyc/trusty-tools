@@ -44,7 +44,8 @@ pub(super) async fn build_runner_for_workflow(
     let path = if workflow_name.ends_with(".json") || workflow_name.contains('/') {
         PathBuf::from(workflow_name)
     } else {
-        PathBuf::from(".trusty-agents/workflows").join(format!("{workflow_name}.json"))
+        // #5227: resolve hierarchically, not from the CWD alone.
+        resolve_workflows_dir(workflow_name).join(format!("{workflow_name}.json"))
     };
 
     // Soft failure: if we can't read the workflow yet, just return the
@@ -289,23 +290,52 @@ pub(super) async fn build_init_context() -> Option<crate::init::InitContext> {
     }
 }
 
-/// Pre-flight check that the project's `.trusty-agents/{agents,workflows}/` dirs
-/// exist, emitting actionable bootstrap errors when they don't (#218).
+/// Pre-flight check that `agents/` and `workflows/` config directories are
+/// reachable somewhere on the search hierarchy (#218, #5227).
 ///
 /// Why: Extracted from `run_workflow` so the orchestration body stays focused;
 /// failing here with a clear message beats a cryptic sub-agent spawn panic.
-/// What: Bails with copy-paste bootstrap instructions when either dir is absent.
-/// Test: Exercised via the workflow integration tests (missing-dir path).
+/// What: Thin wrapper that resolves the same hierarchical search paths agent
+/// and workflow resolution use, then delegates to
+/// [`check_workflow_project_dirs_in`].
+/// Test: `check_workflow_project_dirs_in`'s hermetic tests carry the coverage;
+/// this wrapper only resolves the paths.
 pub(super) fn check_workflow_project_dirs() -> Result<()> {
+    // #5227: consult the registry's hierarchy, not the process CWD alone.
+    let config_dir = crate::default_bundled_config_dir();
+    check_workflow_project_dirs_in(
+        &agents::registry::agent_search_paths(&config_dir),
+        &agents::registry::workflow_search_paths(&config_dir),
+    )
+}
+
+/// Hermetic core of [`check_workflow_project_dirs`] — takes the resolved
+/// search paths explicitly (#5227).
+///
+/// Why: The pre-flight used to test one CWD-derived path while the registry
+/// loaded agents hierarchically, so a process launched with a CWD that has no
+/// `.trusty-agents/` — the macOS `.app` sidecar runs with `cwd = /` — bailed
+/// with ``no `.trusty-agents/agents/` found in /`` moments after logging
+/// `agent registry loaded … count=28`. Taking the paths as a parameter also
+/// makes this testable without mutating the process-global CWD or `$HOME`.
+/// What: Succeeds as soon as ANY path in each list is a directory; otherwise
+/// bails naming every path that was searched, so the next reader does not have
+/// to guess which tier was missing.
+/// Test: `preflight_accepts_a_global_agents_dir_when_cwd_has_none`,
+/// `preflight_error_names_every_searched_agent_path`,
+/// `preflight_requires_a_workflows_dir_somewhere`.
+pub(super) fn check_workflow_project_dirs_in(
+    agent_paths: &[PathBuf],
+    workflow_paths: &[PathBuf],
+) -> Result<()> {
     use anyhow::bail;
-    let cwd_for_check = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let agents_dir_check = cwd_for_check.join(".trusty-agents").join("agents");
-    if !agents_dir_check.exists() {
+    if !agent_paths.iter().any(|p| p.is_dir()) {
         bail!(
-            "no `.trusty-agents/agents/` found in {}.\n\n\
-             trusty-agents needs an agent config directory in the current project.\n\
-             To bootstrap a new project, copy bundled defaults from your \
-             trusty-agents install:\n\n  \
+            "no `agents/` config directory found on any search path.\n\n\
+             Searched (highest priority first):\n{}\n\n\
+             trusty-agents needs an agent config directory in the current \
+             project or under `$HOME`. To bootstrap a project, copy bundled \
+             defaults from your trusty-agents install:\n\n  \
                mkdir -p .trusty-agents\n  \
                cp -r <trusty-agents-source>/.trusty-agents/agents .trusty-agents/\n  \
                cp -r <trusty-agents-source>/.trusty-agents/workflows .trusty-agents/\n  \
@@ -313,20 +343,61 @@ pub(super) fn check_workflow_project_dirs() -> Result<()> {
              Also ensure `.env.local` (or the env) contains `OPENROUTER_API_KEY=...`.\n\
              A future `tagent init` subcommand will automate this; \
              see GitHub issue #218.",
-            cwd_for_check.display()
+            render_searched_paths(agent_paths)
         );
     }
-    let workflows_dir_check = cwd_for_check.join(".trusty-agents").join("workflows");
-    if !workflows_dir_check.exists() {
+    if !workflow_paths.iter().any(|p| p.is_dir()) {
         bail!(
-            "no `.trusty-agents/workflows/` found in {}.\n\n\
-             Copy bundled workflow definitions from your trusty-agents install:\n\n  \
+            "no `workflows/` config directory found on any search path.\n\n\
+             Searched (highest priority first):\n{}\n\n\
+             Copy bundled workflow definitions from your trusty-agents \
+             install:\n\n  \
                cp -r <trusty-agents-source>/.trusty-agents/workflows .trusty-agents/\n\n\
              See GitHub issue #218.",
-            cwd_for_check.display()
+            render_searched_paths(workflow_paths)
         );
     }
     Ok(())
+}
+
+/// Resolve the workflows directory that should serve `<name>.json` (#5227).
+///
+/// Why: `--workflow <name>` used a single CWD-relative
+/// `.trusty-agents/workflows`, so a process whose CWD has no `.trusty-agents/`
+/// could resolve every agent hierarchically and still fail `WorkflowNotFound`.
+/// Agents already fall back to `~/.trusty-agents/agents`; workflows now fall
+/// back the same way, and `runtime::startup` deploys the bundled definitions
+/// into `~/.trusty-agents/workflows` so that tier is populated.
+/// What: Returns the highest-priority search path that actually holds
+/// `<name>.json`; failing that, the highest-priority path that exists at all
+/// (so the engine's own error names a real directory); failing that, the
+/// legacy CWD-relative default.
+/// Test: `resolve_workflows_dir_prefers_the_tier_holding_the_definition`,
+/// `resolve_workflows_dir_falls_back_to_the_legacy_default`.
+pub(super) fn resolve_workflows_dir(name: &str) -> PathBuf {
+    let paths = agents::registry::workflow_search_paths(&crate::default_bundled_config_dir());
+    resolve_workflows_dir_in(&paths, name)
+}
+
+/// Hermetic core of [`resolve_workflows_dir`] — takes the candidate tiers
+/// explicitly so tests need not touch `$HOME` or the process CWD.
+fn resolve_workflows_dir_in(paths: &[PathBuf], name: &str) -> PathBuf {
+    let file = format!("{name}.json");
+    paths
+        .iter()
+        .find(|p| p.join(&file).is_file())
+        .or_else(|| paths.iter().find(|p| p.is_dir()))
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(".trusty-agents/workflows"))
+}
+
+/// Render a search-path list as indented `  - <path>` lines for an error body.
+fn render_searched_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| format!("  - {}", p.display()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Resolve the workflow artifacts directory, auto-generating one when the
@@ -459,4 +530,111 @@ pub(super) async fn load_user_memory_suffix() -> Option<String> {
 /// Test: Exercised via the workflow integration tests.
 pub(super) async fn refresh_global_skills_cache(cwd_for_skills: &Path) {
     crate::skills::global_cache::refresh_global_cache(cwd_for_skills).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why (#5227): the defect. Agent resolution walks the hierarchy, so a
+    /// process whose CWD holds no `.trusty-agents/agents/` still resolves
+    /// agents from `~/.trusty-agents/agents/` — the macOS `.app` sidecar runs
+    /// with `cwd = /` and hits exactly this. The pre-flight consulted the CWD
+    /// alone and bailed anyway, killing every Implementation task launched
+    /// from the GUI. Pinning the fix: a lower-priority tier that exists is
+    /// enough.
+    /// Test: itself.
+    #[test]
+    fn preflight_accepts_a_global_agents_dir_when_cwd_has_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global_agents = tmp.path().join("home/.trusty-agents/agents");
+        let global_workflows = tmp.path().join("home/.trusty-agents/workflows");
+        std::fs::create_dir_all(&global_agents).unwrap();
+        std::fs::create_dir_all(&global_workflows).unwrap();
+
+        // Highest-priority tier (the CWD-relative one) is absent, exactly as
+        // it is under `cwd = /`.
+        let missing_project = tmp.path().join("cwd/.trusty-agents");
+        let agent_paths = vec![missing_project.join("agents"), global_agents];
+        let workflow_paths = vec![missing_project.join("workflows"), global_workflows];
+
+        check_workflow_project_dirs_in(&agent_paths, &workflow_paths).unwrap();
+    }
+
+    /// Why: the old message named only the CWD, which is what made the failure
+    /// hard to diagnose — the reader could not tell which tiers were consulted.
+    /// Test: itself.
+    #[test]
+    fn preflight_error_names_every_searched_agent_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("one/agents");
+        let b = tmp.path().join("two/agents");
+        let err = check_workflow_project_dirs_in(&[a.clone(), b.clone()], &[])
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains(&a.display().to_string()),
+            "missing {a:?}: {err}"
+        );
+        assert!(
+            err.contains(&b.display().to_string()),
+            "missing {b:?}: {err}"
+        );
+    }
+
+    /// Why: a `workflows/` tier that exists nowhere must still fail loudly —
+    /// widening the agent search must not silently drop the workflow check.
+    /// Test: itself.
+    #[test]
+    fn preflight_requires_a_workflows_dir_somewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let workflows = tmp.path().join("nowhere/workflows");
+
+        let err = check_workflow_project_dirs_in(&[agents], std::slice::from_ref(&workflows))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("`workflows/`"), "{err}");
+        assert!(err.contains(&workflows.display().to_string()), "{err}");
+    }
+
+    /// Why (#5227): a lower-priority tier holding the definition must beat a
+    /// higher-priority tier that merely exists — otherwise deploying the
+    /// bundled workflows to `$HOME` would be shadowed by any project that has
+    /// a `.trusty-agents/workflows/` directory for unrelated reasons.
+    /// Test: itself.
+    #[test]
+    fn resolve_workflows_dir_prefers_the_tier_holding_the_definition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = tmp.path().join("project/workflows");
+        let populated = tmp.path().join("home/workflows");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&populated).unwrap();
+        std::fs::write(populated.join("prescriptive.json"), "{}").unwrap();
+
+        let resolved =
+            resolve_workflows_dir_in(&[empty.clone(), populated.clone()], "prescriptive");
+        assert_eq!(resolved, populated);
+
+        // With no tier holding it, the highest-priority EXISTING tier wins so
+        // the engine's own error names a real directory.
+        let resolved = resolve_workflows_dir_in(&[empty.clone(), populated], "absent");
+        assert_eq!(resolved, empty);
+    }
+
+    /// Why: when no tier exists at all the caller still needs a path to report;
+    /// keep the pre-#5227 default rather than an empty one.
+    /// Test: itself.
+    #[test]
+    fn resolve_workflows_dir_falls_back_to_the_legacy_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nothing/here");
+        assert_eq!(
+            resolve_workflows_dir_in(&[missing], "prescriptive"),
+            PathBuf::from(".trusty-agents/workflows")
+        );
+    }
 }

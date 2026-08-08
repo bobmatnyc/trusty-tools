@@ -533,30 +533,34 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 
 ### MCP Tools
 
-The MCP server registers **21 tools** (authoritative source:
-`src/mcp/tools/descriptors.rs` `tool_descriptors`):
+<!-- BEGIN GENERATED: mcp-tools -->
+The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+this table is generated from it, not maintained by hand.
 
-- `search` — hybrid search (BM25 + vector + KG, RRF-fused)
-- `search_lexical` — BM25-only lexical search
-- `search_semantic` — vector-only semantic search
-- `search_kg` — knowledge-graph expansion search
-- `search_all` — fan-out across every registered index
-- `search_similar` — code-to-code similarity from a seed file/function
-- `index_file` — add/update one file
-- `remove_file` — remove one file
-- `list_indexes` — enumerate registered indexes
-- `create_index` — register a new index
-- `delete_index` — delete an index
-- `reindex` — trigger full reindex
-- `index_status` — per-index stats
-- `search_health` — daemon liveness
-- `list_chunks` — paginated enumeration of an index's chunks
-- `get_call_chain` — KG caller/callee chain for a symbol
-- `grep` — literal/regex grep fallback over the corpus
-- `chat` — OpenRouter conversational Q&A
-- `upgrade` — check for / install a new trusty-search version
-- `console_metrics` — daemon health + index aggregate stats for the trusty-console dashboard
-- `typeahead` — per-keystroke autocomplete suggestions for an index
+| Tool | Arguments | Summary |
+|---|---|---|
+| `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
+| `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
+| `create_index` | `id`, `root_path`, `follow_links?` | Register a new (empty) index |
+| `delete_index` | `index_id` | Delete a registered index and all its data |
+| `get_call_chain` | `index_id`, `entry_point`, `direction?`, `include_source?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
+| `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `glob?`, `index_id?`, `invert_match?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
+| `index_file` | `index_id`, `path`, `content` | Add or update one file in an index |
+| `index_status` | `index_id` | Get stats for an index (chunk count, root path) |
+| `list_chunks` | `index_id`, `after?`, `limit?`, `offset?` | Paginated enumeration of every chunk in an index (issue #54). |
+| `list_indexes` | — | List all registered indexes on this daemon |
+| `reindex` | `index_id`, `root_path?` | Trigger a full reindex of a collection (async, returns immediately) |
+| `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
+| `search` | `index_id`, `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
+| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `full_content?`, `index_id?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
+| `search_health` | — | Probe daemon liveness and version |
+| `search_kg` | `index_id`, `query`, `mode?`, `path_prefix?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
+| `search_lexical` | `index_id`, `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
+| `search_semantic` | `index_id`, `query`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
+| `search_similar` | `file`, `function?`, `index?`, `top_k?` | Find chunks semantically similar to a given file/function via HNSW (issue #31) |
+| `typeahead` | `query`, `index_id?`, `limit?`, `mode?` | Fast per-keystroke autocomplete suggestions for an index. |
+| `upgrade` | `check?`, `confirm?` | Check for or install a new version of trusty-search (issue #537). |
+<!-- END GENERATED: mcp-tools -->
 
 ## Stack
 
@@ -1046,7 +1050,7 @@ via `cargo install trusty-search`.
 - `EntityExtractor` Phase A structural entities (functions, classes, imports)
 - `SymbolGraph` KG expansion (callers_of / callees_of, 1–2 hop, EdgeKind multipliers)
 - `FileWatcher` with notify-debouncer-mini, 500ms debounce
-- MCP server: full JSON-RPC 2.0 stdio + HTTP/SSE transport, 21 tools (per `src/mcp/tools/descriptors.rs`)
+- MCP server: full JSON-RPC 2.0 stdio + HTTP/SSE transport (see [MCP Tools](#mcp-tools))
 - Daemon: auto-port, fs4 PID lockfile, graceful shutdown, persistent model cache
 - Svelte 5 admin UI embedded in binary via `include_dir`
 - OpenRouter chat proxy with search context injection

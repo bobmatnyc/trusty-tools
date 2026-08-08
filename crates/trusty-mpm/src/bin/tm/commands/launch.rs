@@ -290,7 +290,14 @@ pub(crate) async fn launch(
     //     receives is built below and written by `prepare_isolated_session`.
 
     // Resolve the PM model (config > frontmatter > default).
-    let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_default();
+    // #5207: `load_effective_default` folds the project's committed
+    // `.trusty-mpm.toml` and the previously-orphaned `config.yaml`
+    // `default_model` into the same chain, so both actually reach a launch
+    // instead of being written and ignored. It resolves the framework root
+    // internally: the #4203 guard forbids this file from naming the framework
+    // paths' default constructor at all, and matches on source text, so even a
+    // comment spelling that symbol out would trip it.
+    let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(&managed_path));
     let pm_model = trusty_mpm::core::model_inject::resolve_pm_model(&mpm_cfg, None);
 
     // Build the `--append-system-prompt` text from the managed clone (where the

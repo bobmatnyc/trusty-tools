@@ -255,6 +255,10 @@ tower = { version = "0.5", features = ["util"] }
 # Why: issue #1672 mtime reconcile tests need to set file mtimes precisely so
 # `collect_stale_files_by_mtime` returns the expected set.
 filetime = "0.2"
+# docgen (#5205 follow-up): `tests/generated_docs.rs` renders the MCP tool
+# section of README.md / CLAUDE.md from `tool_descriptors()`. Test-facing
+# only, so the feature is enabled here rather than on the production dep.
+trusty-common = { version = "0.30", default-features = false, features = ["docgen"] }
 
 [features]
 # Default: bundle ORT static libs via trusty-embedder. Works on macOS and

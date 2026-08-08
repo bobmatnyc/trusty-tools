@@ -586,8 +586,10 @@ pub fn tool_descriptors() -> Value {
     let mut tools = descriptors::base_tool_descriptors();
     if let Some(arr) = tools.as_array_mut() {
         arr.push(console_metrics::descriptor());
+        // #630 / #5205: the descriptors are always compiled (see
+        // `descriptors::review_tool_descriptors`); only the append is gated.
         #[cfg(feature = "review")]
-        arr.extend(review::review_tool_descriptors());
+        arr.extend(descriptors::review_tool_descriptors());
     }
     tools
 }

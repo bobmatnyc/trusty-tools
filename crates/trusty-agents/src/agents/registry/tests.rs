@@ -557,6 +557,44 @@ fn agent_search_paths_order() {
     }
 }
 
+/// Why (#5227): `workflow_search_paths` and `agent_search_paths` must be the
+/// SAME hierarchy with a different leaf — if they ever diverge, the pre-flight
+/// starts disagreeing with resolution again, which is the defect this
+/// consolidation exists to prevent.
+/// Test: itself.
+#[test]
+fn workflow_search_paths_uses_the_workflows_leaf() {
+    // HOME_LOCK serializes with other tests that mutate $HOME process-wide.
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: test-only; we restore HOME at the end.
+    unsafe {
+        std::env::set_var("HOME", "/tmp/home-test");
+    }
+
+    let config = Path::new("/opt/trusty-agents/config");
+    let agents = agent_search_paths(config);
+    let workflows = super::workflow_search_paths(config);
+
+    assert_eq!(agents.len(), workflows.len());
+    for (a, w) in agents.iter().zip(workflows.iter()) {
+        assert_eq!(
+            a.parent(),
+            w.parent(),
+            "tier order diverged: {a:?} vs {w:?}"
+        );
+        assert_eq!(a.file_name().unwrap(), "agents");
+        assert_eq!(w.file_name().unwrap(), "workflows");
+    }
+
+    unsafe {
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
 #[test]
 fn build_roster_section_includes_all_registered_agents() {
     let tmp = TempDir::new().unwrap();

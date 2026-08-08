@@ -269,6 +269,13 @@ postcard = { workspace = true }
 
 [features]
 default = []
+# Enables the `docgen` module: marker-delimited generated documentation
+# regions (`<!-- BEGIN GENERATED: <id> -->`) plus the MCP-tool-table renderer
+# and the check-or-rewrite gate the consumer crates' `tests/generated_docs.rs`
+# drive. Test-facing only — enable it in `[dev-dependencies]`, not in
+# `[dependencies]`. Adds no new dependency: `serde_json` is already
+# unconditional here, so the flag gates module compilation alone.
+docgen = []
 # Enables the `catchup` module: DOC-28 incremental catch-up engine for the
 # trusty-mpm ↔ trusty-code cutover bridge (#1762). Provides
 # `CatchupOptions`, `generate_catchup_context`, `run_catchup`,

@@ -408,6 +408,24 @@ pub mod stdio_mcp_client;
 #[cfg(feature = "update-check")]
 pub mod update;
 
+/// Generated documentation regions — the code as the single source for the
+/// volatile facts crate READMEs state (#5205 follow-up).
+///
+/// Why: MCP tool tables and counts were hand-maintained in both `README.md`
+/// and `CLAUDE.md`, so they drifted from the descriptor functions and each
+/// wrong entry had to be fixed twice. Three crates need the same machinery, so
+/// it lives here rather than in three copies.
+/// What: Gated behind the `docgen` feature (test-facing; enable it in
+/// `[dev-dependencies]`). Exposes [`docgen::tool_rows`] and
+/// [`docgen::render_tool_section`] (deterministic, name-sorted rendering),
+/// [`docgen::assert_region`] / [`docgen::sync_region`] (check, or rewrite under
+/// `UPDATE_DOCS=1`), and the `descriptor_source!` macro that makes the cited
+/// symbol compiler-checked.
+/// Test: `cargo test -p trusty-common --features docgen`, plus
+/// `tests/generated_docs.rs` in trusty-search, trusty-memory, trusty-analyze.
+#[cfg(feature = "docgen")]
+pub mod docgen;
+
 /// Error-capture layer for the trusty-* consent-gated bug-reporting system
 /// (bug-reporting Phase 1, issue #479).
 ///
