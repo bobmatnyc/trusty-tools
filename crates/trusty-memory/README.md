@@ -254,7 +254,7 @@ complete, current list of tool names read `tool_definitions()` in
 | `memory_recall` | `palace, query, top_k?` | Hybrid BM25+vector recall (L0/L1/L2 layers). |
 | `memory_recall_deep` | `palace, query, top_k?` | Deep recall (L3 — slower, higher recall). |
 | `memory_list` | `palace, room?, tag?, limit?` | List stored memories, optionally filtered. |
-| `memory_forget` | `palace, drawer_id` | Delete a specific memory by ID. |
+| `memory_forget` | `palace, drawer_id` | Delete a specific memory by ID. Returns `status: "deleted"` when a drawer was removed, `status: "not_found"` when the id was never stored (#5231). |
 
 ### Palace management tools
 

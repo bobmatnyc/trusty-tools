@@ -231,7 +231,7 @@ async fn cli_forget_removes_drawer() {
         )
         .await
         .unwrap();
-    handle.forget(id).await.unwrap();
+    assert_eq!(handle.forget(id).await.unwrap(), ForgetOutcome::Deleted);
 
     let results = recall_with_default_embedder(&handle, "Quokkas ephemeral", 5)
         .await
@@ -239,6 +239,105 @@ async fn cli_forget_removes_drawer() {
     assert!(
         !results.iter().any(|r| r.drawer.id == id),
         "forgotten drawer should not appear in recall results"
+    );
+}
+
+/// Build a real on-disk palace handle rooted under `dir`.
+///
+/// Why: the forget-outcome tests need `PalaceHandle::open` (redb + L1 on disk),
+/// not the in-memory `make_handle`, because the reopen assertion is the point.
+/// What: creates `<dir>/<id>` and opens a handle over it.
+/// Test: used by the `forget_*` tests below.
+fn open_disk_palace(dir: &std::path::Path, id: &str) -> (Palace, Arc<PalaceHandle>) {
+    let palace = Palace {
+        id: PalaceId::new(id),
+        name: id.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: dir.join(id),
+    };
+    std::fs::create_dir_all(&palace.data_dir).unwrap();
+    let handle = PalaceHandle::open(&palace).unwrap();
+    (palace, handle)
+}
+
+/// Regression test for issue #5231.
+///
+/// Why: `forget` returned `Ok(())` for a drawer id that was never stored, so
+/// `memory_forget` reported `"deleted"` for a delete that never happened.
+/// `drawers.retain` cannot report a miss, and nothing else checked.
+/// What: forgets a random UUID against a populated palace and asserts the
+/// outcome is `NotFound` and the stored drawer is untouched.
+/// Test: this test.
+#[tokio::test]
+async fn forget_reports_not_found_for_an_unknown_drawer() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let (_palace, handle) = open_disk_palace(dir.path(), "forget-miss");
+
+    let kept = handle
+        .remember(
+            "Numbats eat about twenty thousand termites a day".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let outcome = handle.forget(Uuid::new_v4()).await.unwrap();
+    assert_eq!(outcome, ForgetOutcome::NotFound);
+    assert!(!outcome.is_deleted());
+
+    assert!(
+        handle.drawers.read().iter().any(|d| d.id == kept),
+        "a no-op forget must not disturb the drawers that do exist"
+    );
+}
+
+/// Issue #5231 durability half: `Deleted` has to mean durably deleted.
+///
+/// Why: `open_with_intent` reloads the drawer table from redb and fills gaps
+/// from the L1 snapshot, so a drawer whose metadata row survived a forget comes
+/// back on the next open — which would make a reported `"deleted"` a lie one
+/// restart later. This is why `forget` now fails rather than warns when the
+/// metadata delete fails for a drawer that existed.
+/// What: remembers a drawer, forgets it (asserting `Deleted`), drops the
+/// handle, reopens the same palace directory, and asserts the drawer is gone
+/// from the reloaded table.
+/// Test: this test.
+#[tokio::test]
+async fn forget_reports_deleted_and_the_drawer_stays_gone_after_reopen() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let (palace, handle) = open_disk_palace(dir.path(), "forget-durable");
+
+    let id = handle
+        .remember(
+            "Pangolin scales are made of keratin, like fingernails".into(),
+            RoomType::General,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let outcome = handle.forget(id).await.unwrap();
+    assert_eq!(outcome, ForgetOutcome::Deleted);
+    assert!(!handle.drawers.read().iter().any(|d| d.id == id));
+    handle.flush().unwrap();
+    drop(handle);
+
+    let reopened = PalaceHandle::open(&palace).unwrap();
+    assert!(
+        !reopened.drawers.read().iter().any(|d| d.id == id),
+        "a drawer reported deleted must not come back on reopen"
+    );
+    // And forgetting it a second time is now honest about having found nothing.
+    assert_eq!(
+        reopened.forget(id).await.unwrap(),
+        ForgetOutcome::NotFound,
+        "second forget of the same id must report not_found"
     );
 }
 

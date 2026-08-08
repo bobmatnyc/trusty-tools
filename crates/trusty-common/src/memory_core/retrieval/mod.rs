@@ -45,7 +45,8 @@ pub use embedder::{shared_embedder, shared_embedder_initialized};
 
 // Core types
 pub use types::{
-    CrossPalaceResult, L0Identity, L1Essential, RecallResult, RememberOptions, RetrievalLayers,
+    CrossPalaceResult, ForgetOutcome, L0Identity, L1Essential, RecallResult, RememberOptions,
+    RetrievalLayers,
 };
 
 // Palace handle

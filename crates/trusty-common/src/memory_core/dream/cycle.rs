@@ -63,13 +63,18 @@ pub(super) async fn content_prune_pass(
         }
     }
 
-    let count = victims.len();
+    // #5231: report drawers actually dropped. This loop can also exit early on
+    // the wall-clock budget, so `victims.len()` over-reported even when every
+    // attempted forget succeeded.
+    let mut count = 0usize;
     for id in victims {
         if started.elapsed() >= budget {
             break;
         }
-        if let Err(e) = handle.forget(id).await {
-            tracing::warn!(?id, "dream content prune: forget failed: {e:#}");
+        match handle.forget(id).await {
+            Ok(outcome) if outcome.is_deleted() => count += 1,
+            Ok(_) => {}
+            Err(e) => tracing::warn!(?id, "dream content prune: forget failed: {e:#}"),
         }
     }
     Ok(count)
@@ -233,7 +238,11 @@ pub(super) async fn dedup_pass(
                 (hit_drawer.clone(), drawer.clone())
             };
             merge_into(handle, &survivor, &loser);
-            let _ = handle.forget(loser.id).await;
+            // #5231: surface a failed loser-eviction instead of discarding it —
+            // silently keeping the loser leaves the merged content duplicated.
+            if let Err(e) = handle.forget(loser.id).await {
+                tracing::warn!(id = ?loser.id, "dream dedup: loser evict failed: {e:#}");
+            }
             already_removed.insert(loser.id);
             merges += 1;
             // Only one merge per source to keep behavior predictable.
@@ -280,9 +289,14 @@ pub(super) async fn prune_pass(
         }
     }
 
-    let count = victims.len();
+    // #5231: report drawers actually dropped, not candidates considered.
+    let mut count = 0usize;
     for id in victims {
-        let _ = handle.forget(id).await;
+        match handle.forget(id).await {
+            Ok(outcome) if outcome.is_deleted() => count += 1,
+            Ok(_) => {}
+            Err(e) => tracing::warn!(?id, "dream prune: forget failed: {e:#}"),
+        }
     }
     Ok(count)
 }
@@ -703,8 +717,11 @@ pub async fn consolidate_scoped(
         if !seen.insert(id) {
             continue;
         }
+        // #5231: a superseded id that is no longer in the drawer table was not
+        // evicted by this pass and must not be counted as one.
         match handle.forget(id).await {
-            Ok(()) => evicted += 1,
+            Ok(outcome) if outcome.is_deleted() => evicted += 1,
+            Ok(_) => tracing::warn!(?id, "dream_consolidate_room: superseded id not in palace"),
             Err(e) => tracing::warn!(?id, "dream_consolidate_room: evict failed: {e:#}"),
         }
     }

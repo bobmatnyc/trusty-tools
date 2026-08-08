@@ -1,0 +1,5 @@
+Fixed
+
+- `PalaceHandle::forget` now returns `ForgetOutcome` (`Deleted` / `NotFound`) instead of `Result<()>`, so a caller can tell a real delete from a no-op. `drawers.retain` never reports whether it matched, so forgetting a drawer id that was never stored was indistinguishable from deleting one (closes [#5231](https://github.com/bobmatnyc/trusty-tools/issues/5231))
+  - a failed drawer-metadata delete is now an error rather than a `warn!` when the drawer existed: redb is what `PalaceHandle::open` reloads the drawer table from, so a surviving row resurrects the drawer on the next open. The metadata delete also runs first, so that failure leaves the drawer wholly intact instead of half-deleted. Vector and KG-triple removal stay best-effort — survivors are orphans reclaimed by `palace_compact`, not undead drawers
+  - `purge_expired` and the dream `prune_pass` / `content_prune_pass` / `dream_consolidate_room` counters now report drawers actually removed rather than candidates attempted; the content-prune count could also exceed reality by exiting early on its wall-clock budget
