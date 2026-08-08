@@ -1200,3 +1200,277 @@ async fn handle_prompt_context_fails_open_on_slow_daemon() {
          (a stalled daemon must never make the hook wait out its own timeout)"
     );
 }
+
+/// Why (issue #5038, symptom 1): `memory_remember` stamps every drawer with the
+/// reserved `creator:*` namespace — `creator:cwd` alone is a ~90-character
+/// absolute path — and the injection rendered all of it. Over 17,176 real
+/// firings those tags are 33.4% of every tag byte injected. They tell a model
+/// nothing about what the drawer says.
+/// What: a drawer carrying provenance tags among topical ones through
+/// `render_tags`; asserts no `creator:` survives and the topical tags do.
+/// Test: itself.
+#[test]
+fn injection_drops_provenance_tags() {
+    use format::render_tags;
+    let tags: Vec<String> = [
+        "rust",
+        "creator:client=trusty-memory-mcp",
+        "tokio",
+        "creator:version=0.21.2",
+        "creator:source=mcp",
+        "creator:cwd=/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.base",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let rendered = render_tags(&tags).expect("topical tags must still render");
+    assert!(
+        !rendered.contains("creator:"),
+        "provenance must not reach the injection; got: {rendered}"
+    );
+    assert!(
+        rendered.contains("`rust`") && rendered.contains("`tokio`"),
+        "topical tags must survive; got: {rendered}"
+    );
+
+    // A drawer whose only tags are provenance renders no suffix at all — 2.8%
+    // of drawers in the corpus were exactly this shape.
+    let only_provenance: Vec<String> = tags
+        .iter()
+        .filter(|t| t.starts_with("creator:"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        render_tags(&only_provenance),
+        None,
+        "an all-provenance tag list must render nothing, not an empty suffix"
+    );
+}
+
+/// Why (issue #5038, symptom 2): tag lists rendered in full, uncapped — the
+/// median drawer carried 17 tags and the `_(tags: …)_` suffix was 53.0% of
+/// every byte the hook injected, outweighing the content preview it labels on
+/// 82.3% of drawers.
+/// What: a 12-tag drawer through `render_tags`; asserts exactly
+/// `MAX_RENDERED_TAGS` render, the surplus is announced rather than dropped
+/// silently, and the whole suffix stays under the content budget the cap was
+/// chosen against.
+/// Test: itself.
+#[test]
+fn injection_caps_rendered_tag_count() {
+    use format::{render_tags, MAX_RENDERED_TAGS};
+    let tags: Vec<String> = (0..12).map(|i| format!("topic-{i}")).collect();
+    let rendered = render_tags(&tags).expect("tags must render");
+    assert_eq!(
+        rendered.matches('`').count() / 2,
+        MAX_RENDERED_TAGS,
+        "exactly MAX_RENDERED_TAGS tags may render; got: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("+{} more", 12 - MAX_RENDERED_TAGS)),
+        "held-back tags must be announced, not dropped silently; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("topic-11"),
+        "the tail of the tag list must not render; got: {rendered}"
+    );
+    assert!(
+        rendered.len() < DRAWER_PREVIEW_CHARS,
+        "a tag label must stay under the content budget it labels ({DRAWER_PREVIEW_CHARS}); \
+         got {} bytes: {rendered}",
+        rendered.len()
+    );
+}
+
+/// Why (issue #5038, end to end): the unit tests above pin `render_tags` in
+/// isolation. This one proves the whole chain — real MCP write path stamping
+/// `creator:*`, real HTTP recall, real composition — never puts provenance or
+/// an uncapped tag list into what Claude Code actually receives.
+/// What: seeds a palace through `memory_remember` (which attaches the
+/// attribution namespace exactly as production does) with drawers carrying more
+/// topical tags than the cap, recalls with a matching prompt, and asserts the
+/// rendered injection carries no `creator:` and no bullet over the cap.
+/// Test: itself.
+/// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+#[cfg(feature = "axum-server")]
+#[tokio::test]
+async fn prompt_context_injection_has_no_provenance_tags() {
+    use format::MAX_RENDERED_TAGS;
+    let _guard = crate::commands::env_test_lock().lock().await;
+    unsafe {
+        std::env::remove_var(ENV_MIN_SCORE);
+        std::env::remove_var(ENV_RECALL_DENY_TAGS);
+    }
+    let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+        spin_up_test_daemon_with_palace("prompt-ctx-tag-render").await;
+
+    for (text, tags) in [
+        (
+            "Rust integration uses tokio for async tasks and serde for JSON encoding",
+            vec![
+                "rust", "tokio", "serde", "async", "json", "encoding", "runtime", "crate",
+            ],
+        ),
+        (
+            "Rust error handling prefers thiserror in libraries and anyhow in binaries",
+            vec![
+                "rust",
+                "thiserror",
+                "anyhow",
+                "errors",
+                "libraries",
+                "binaries",
+                "convention",
+            ],
+        ),
+    ] {
+        let tags_json: Vec<serde_json::Value> = tags.iter().map(|t| json!(t)).collect();
+        let _ = crate::tools::dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": slug,
+                "text": text,
+                "room": "General",
+                "tags": tags_json,
+            }),
+        )
+        .await
+        .expect("memory_remember");
+    }
+
+    let payload = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": project_dir.to_string_lossy(),
+        "prompt": "how does rust integration work with tokio and serde?"
+    })
+    .to_string();
+    let body = build_injection_body(&payload).await;
+
+    assert_ne!(
+        body, EMPTY_PLACEHOLDER,
+        "fixture must actually recall something for this test to mean anything"
+    );
+    assert!(
+        body.contains("_(tags:"),
+        "fixture must render a tag suffix for this test to mean anything; got:\n{body}"
+    );
+    assert!(
+        !body.contains("creator:"),
+        "no provenance tag may reach the injection; got:\n{body}"
+    );
+    for bullet in body.lines().filter(|l| l.contains("_(tags:")) {
+        let shown = bullet
+            .split("_(tags:")
+            .nth(1)
+            .map(|suffix| suffix.matches('`').count() / 2)
+            .unwrap_or(0);
+        assert!(
+            shown <= MAX_RENDERED_TAGS,
+            "bullet renders {shown} tags, over the cap of {MAX_RENDERED_TAGS}: {bullet}"
+        );
+    }
+
+    addr_handle.shutdown().await;
+}
+
+/// Why (issue #4972, end to end): the unit tests in `query` pin the shaping in
+/// isolation. This one proves the metric survives the whole hook — an
+/// over-window `<task-notification>` prompt must reach `/recall` reshaped and
+/// leave a record of it on the enriched-prompt log line, which is the same
+/// corpus the 52%-over-window rate was measured from. Before this change the
+/// embedder cut the query at token 512 and nothing anywhere recorded it.
+/// What: fires the hook with a 22 KB envelope-wrapped prompt, then parses the
+/// JSONL log and asserts `recall_query` reports an over-budget original, a
+/// within-budget send, a stripped envelope, and a non-zero dropped-unit count.
+/// Test: itself.
+/// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+#[cfg(feature = "axum-server")]
+#[tokio::test]
+async fn prompt_context_logs_recall_query_shape() {
+    let _guard = crate::commands::env_test_lock().lock().await;
+    unsafe {
+        std::env::remove_var(ENV_MIN_SCORE);
+        std::env::remove_var(super::query::ENV_QUERY_TOKEN_BUDGET);
+    }
+    let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+        spin_up_test_daemon_with_palace("prompt-ctx-query-shape").await;
+    let _ = crate::tools::dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": slug,
+            "text": "Rust integration uses tokio for async tasks and serde for JSON encoding",
+            "room": "General",
+            "tags": [json!("rust")],
+        }),
+    )
+    .await
+    .expect("memory_remember");
+
+    // The exact shape 65.3% of logged hook prompts arrive in: a machine
+    // envelope whose head is task ids and absolute paths, wrapping a long
+    // agent report.
+    let long_result = "The retrieval relevance floor interacts with the top_k cap.\n".repeat(400);
+    let prompt = format!(
+        "<task-notification>\n\
+         <task-id>a23c46a0439fa7881</task-id>\n\
+         <tool-use-id>toolu_01PvoC76SpHX65DVbJi7sPes</tool-use-id>\n\
+         <output-file>/private/tmp/claude-502/-Users-masa-projects/tasks/a23.output</output-file>\n\
+         <status>completed</status>\n\
+         <summary>Agent \"rust integration\" finished</summary>\n\
+         <result>{long_result}</result>\n\
+         </task-notification>"
+    );
+    assert!(prompt.len() > 20_000, "fixture must be far past the window");
+
+    let payload = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": project_dir.to_string_lossy(),
+        "prompt": prompt,
+    })
+    .to_string();
+    let _ = build_injection_body(&payload).await;
+
+    let logs_dir = trusty_common::resolve_data_dir("trusty-memory")
+        .expect("resolve data dir")
+        .join("logs");
+    let log_file = std::fs::read_dir(&logs_dir)
+        .expect("logs dir")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("enriched-prompts."))
+        })
+        .expect("an enriched-prompts log file");
+    let content = std::fs::read_to_string(&log_file).expect("read log");
+    let entry: crate::prompt_log::PromptLogEntry = content
+        .lines()
+        .filter_map(|l| serde_json::from_str::<crate::prompt_log::PromptLogEntry>(l).ok())
+        .next_back()
+        .expect("at least one parseable log line");
+
+    let shape = entry
+        .recall_query
+        .expect("an over-window query must leave a shape record, not truncate silently");
+    assert!(
+        shape.original_tokens > shape.budget_tokens,
+        "fixture must exceed the budget; got {shape:?}"
+    );
+    assert!(
+        shape.sent_tokens <= shape.budget_tokens,
+        "the query sent to the embedder must fit its window; got {shape:?}"
+    );
+    assert!(
+        shape.envelope_stripped,
+        "the task-notification envelope must be stripped; got {shape:?}"
+    );
+    assert!(
+        shape.units_dropped > 0 && shape.reshaped(),
+        "the reduction must be recorded, not silent; got {shape:?}"
+    );
+
+    addr_handle.shutdown().await;
+}

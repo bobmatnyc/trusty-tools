@@ -98,6 +98,46 @@ impl PromptLogConfig {
     }
 }
 
+/// What shaping did to the recall query before it was embedded (#4972).
+///
+/// Why: the query used to go to the embedder whole and come back cut at the
+/// 512-token window with "no warning, no metric, and no signal to the caller"
+/// — the defect as filed. This struct is the metric. It rides the enriched-
+/// prompt log line, which is the same corpus the 52%-over-window rate was
+/// measured from, so the rate after the fix is one `jq` filter away:
+/// `jq 'select(.recall_query.units_dropped > 0)'`.
+/// What: token estimates before and after shaping, the budget in force, and
+/// what was removed. Absent from the JSON when no palace was resolved and no
+/// recall was attempted.
+/// Test: `single_event_roundtrip` covers serialisation;
+/// `prompt_context::tests::over_window_query_is_reduced_to_whole_units` covers
+/// the values.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallQueryShape {
+    /// Estimated tokens in the raw prompt, before any shaping.
+    pub original_tokens: usize,
+    /// Estimated tokens actually sent to `/recall`.
+    pub sent_tokens: usize,
+    /// Token budget in force for this firing.
+    pub budget_tokens: usize,
+    /// Whether a task-notification envelope was reduced to its payload.
+    pub envelope_stripped: bool,
+    /// Whole units (lines, or words) dropped to fit the budget.
+    pub units_dropped: usize,
+}
+
+impl RecallQueryShape {
+    /// True when shaping changed the query the embedder saw.
+    ///
+    /// Why: the pass-through case is the common one and must stay quiet — a
+    /// warn on every firing is a warn nobody reads.
+    /// What: `envelope_stripped || units_dropped > 0`.
+    /// Test: `prompt_context::tests::short_query_passes_through_untouched`.
+    pub fn reshaped(&self) -> bool {
+        self.envelope_stripped || self.units_dropped > 0
+    }
+}
+
 /// One enriched-prompt log entry — written as a single JSONL line.
 ///
 /// Why: the consumer is a human running `jq` over a day's worth of injections
@@ -131,6 +171,10 @@ pub struct PromptLogEntry {
     /// Number of unread messages in the inbox-check injection, when applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unread_messages_count: Option<usize>,
+    /// How the recall query was shaped before embedding (#4972). `None` when no
+    /// palace resolved, so no recall was attempted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recall_query: Option<RecallQueryShape>,
     /// Wall-clock duration of the invocation, in milliseconds.
     pub duration_ms: u64,
 }
@@ -162,8 +206,20 @@ impl PromptLogEntry {
             injection_length,
             palace_facts_count: None,
             unread_messages_count: None,
+            recall_query: None,
             duration_ms: 0,
         }
+    }
+
+    /// Builder: attach how the recall query was shaped (prompt-context only).
+    ///
+    /// Why (#4972): the shaping is only observable if it reaches the log.
+    /// What: sets `recall_query`; `None` leaves the field off the JSON line.
+    /// Test: `prompt_context::tests::over_window_query_is_reduced_to_whole_units`.
+    #[must_use]
+    pub fn with_recall_query(mut self, shape: Option<RecallQueryShape>) -> Self {
+        self.recall_query = shape;
+        self
     }
 
     /// Builder: set the duration this hook invocation took.
