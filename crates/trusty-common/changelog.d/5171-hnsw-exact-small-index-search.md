@@ -26,3 +26,11 @@ Fixed
   than the graph's point count, so deletes and re-embeds accumulating within a
   session can no longer push a small palace back onto the approximate path
   (#5171)
+- Below the threshold, `HnswStore::search` no longer trims its candidate list
+  before re-scoring re-embedded drawers. A drawer that has been re-embedded is
+  ranked provisionally by whichever of its two embeddings is nearer, and
+  trimming on that optimistic score let a drawer whose SUPERSEDED vector sat
+  near the query push a genuinely nearer drawer out of the results entirely —
+  the same lost-neighbour symptom this fix exists to remove, reached through
+  re-embedding rather than through the graph. `palace_reembed` puts every
+  drawer in that state (#5171)

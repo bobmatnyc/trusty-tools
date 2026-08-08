@@ -13,10 +13,13 @@
 //! at these sizes, no more expensive. 93% of this machine's 94 real palaces
 //! hold 64 vectors or fewer.
 //! What: [`exhaustive_nearest`] evaluates the index's own `DistCosine` against
-//! every point the graph holds and keeps the closest `want` by `vector_id`, so
-//! its distances are identical to the ones the traversal would have reported
-//! for the same points. [`resolve_shadowed`] then re-scores any drawer that has
-//! more than one embedding in the graph against the one `VECTORS` holds.
+//! every point the graph holds and keeps one entry per `vector_id`, so its
+//! distances are identical to the ones the traversal would have reported for
+//! the same points. [`resolve_shadowed`] then re-scores any drawer that has
+//! more than one embedding in the graph against the one `VECTORS` holds. The
+//! scan deliberately hands back its FULL ranking: a shadowed drawer's
+//! provisional distance is optimistic, so any cut taken before re-scoring can
+//! drop a true neighbour — see [`exhaustive_nearest`].
 //! Test: `exhaustive_scan_returns_every_point_the_graph_holds`,
 //! `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
 //! `search_scores_a_re_upserted_drawer_by_its_current_vector`.
@@ -51,30 +54,42 @@ use redb::ReadableTable;
 /// `deleting_drawers_does_not_push_a_small_palace_off_the_exhaustive_path`.
 pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 256;
 
-/// Every point in `index`, ranked by exact distance to `query`, best first.
+/// Every live point in `index`, ranked by exact distance to `query`, best
+/// first — the whole ranking, not a prefix of it.
 ///
 /// Why: see the module header — below [`EXHAUSTIVE_SCAN_MAX_POINTS`] the graph
 /// traversal can silently omit a true nearest neighbour, and a full scan cannot.
 /// What: walks the point indexation (which visits layer 0 upward and yields
 /// every stored point exactly once), skips `tombstoned` ids, evaluates the
 /// index's own distance function, keeps one entry per `vector_id` so a
-/// re-upsert's shadow copy cannot occupy two result slots, and returns at most
-/// `want` `(vector_id, distance)` pairs sorted ascending by distance.
+/// re-upsert's shadow copy cannot occupy two result slots, and returns every
+/// surviving `(vector_id, distance)` pair sorted ascending by distance.
 ///
-/// Tombstones are excluded here rather than by the caller because `want` is a
-/// small over-fetch: `delete` never removes a point from the graph, so a palace
-/// that has deleted most of its drawers would otherwise fill every returned
-/// slot with dead ids and hand the caller nothing.
+/// Tombstones are excluded here rather than by the caller because `delete`
+/// never removes a point from the graph, so a palace that has deleted most of
+/// its drawers would otherwise spend a distance evaluation on every dead point
+/// and rank it against live ones.
 ///
-/// The distance kept for a shadowed id is provisional — it is whichever copy
-/// is nearer, which is not necessarily the current one. [`resolve_shadowed`]
-/// corrects it before the caller sees it; nothing else may rely on the value.
+/// Why this returns everything rather than a `want`-sized prefix (#5171): the
+/// distance held for a shadowed id is PROVISIONAL — it is whichever of the
+/// drawer's copies is nearer, and `min` is optimistic. Cutting the list on that
+/// provisional key lets a drawer whose SUPERSEDED vector sits near the query
+/// evict a drawer whose CURRENT vector is a true neighbour, before
+/// [`resolve_shadowed`] can correct either score. That is the same
+/// missing-true-neighbour defect #5171 exists to close, reached through
+/// re-embedding instead of through graph reachability, and `palace_reembed`
+/// marks every drawer shadowed. Any bounding of the result must therefore
+/// happen AFTER re-scoring; [`super::HnswStore::search`] does it with the
+/// `out.len() >= k` break on the already-corrected ranking. Cost is bounded by
+/// the gate that selects this path: at most one entry per live drawer, so at
+/// most [`EXHAUSTIVE_SCAN_MAX_POINTS`] plus whatever dead-but-untombstoned
+/// overhang the graph carries.
 /// Test: `exhaustive_scan_returns_every_point_the_graph_holds`,
-/// `search_scores_a_re_upserted_drawer_by_its_current_vector`.
+/// `search_scores_a_re_upserted_drawer_by_its_current_vector`,
+/// `search_keeps_a_true_neighbour_a_shadowed_decoy_would_evict`.
 pub(super) fn exhaustive_nearest(
     index: &Hnsw<'static, f32, DistCosine>,
     query: &[f32],
-    want: usize,
     tombstoned: &HashSet<u64>,
 ) -> Vec<(u64, f32)> {
     // `hnsw_rs`'s point iterator unwraps the entry point (`hnsw.rs:662`), which
@@ -104,7 +119,6 @@ pub(super) fn exhaustive_nearest(
     // identically — `f32::total_cmp` alone leaves equal distances in HashMap
     // iteration order, which is not stable across runs.
     ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
-    ranked.truncate(want);
     ranked
 }
 
@@ -127,9 +141,15 @@ pub(super) fn exhaustive_nearest(
 /// is dropped rather than reported at a distance nothing backs. Re-sorts, since
 /// re-scoring can reorder. Costs one point read per shadowed candidate and
 /// nothing at all when no re-upsert has happened since the palace was opened,
-/// which is the steady state.
+/// which is the steady state. On the scan path `candidates` is the full live
+/// ranking rather than a small over-fetch, because a cut taken before this
+/// function runs is taken on the wrong key (see [`exhaustive_nearest`]); after
+/// a bulk `palace_reembed` that is one point read per live drawer, bounded by
+/// [`EXHAUSTIVE_SCAN_MAX_POINTS`], on a path that already evaluates a distance
+/// against every point.
 /// Test: `search_scores_a_re_upserted_drawer_by_its_current_vector`,
-/// `search_drops_a_shadowed_candidate_whose_vector_row_is_gone`.
+/// `search_drops_a_shadowed_candidate_whose_vector_row_is_gone`,
+/// `search_keeps_a_true_neighbour_a_shadowed_decoy_would_evict`.
 pub(super) fn resolve_shadowed<T: ReadableTable<u64, &'static [u8]>>(
     candidates: &mut Vec<(u64, f32)>,
     shadowed: &HashSet<u64>,

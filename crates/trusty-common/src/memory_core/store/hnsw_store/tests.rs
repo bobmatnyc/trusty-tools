@@ -617,6 +617,18 @@ fn spread_vec(dim: usize, seed: u64) -> Vec<f32> {
     raw.into_iter().map(|v| v / norm).collect()
 }
 
+/// Unit vector at `degrees` in the plane spanned by axes 0 and 1, so the cosine
+/// distance between two of them is `1 - cos(Δdegrees)` — monotone in the angle
+/// and checkable by hand. `spread_vec` cannot express "nearer than A but
+/// farther than B" without solving for it.
+fn planar_vec(dim: usize, degrees: f32) -> Vec<f32> {
+    let mut v = vec![0.0f32; dim];
+    let radians = degrees.to_radians();
+    v[0] = radians.cos();
+    v[1] = radians.sin();
+    v
+}
+
 /// Brute-force cosine ranking, computed independently of `hnsw_rs`.
 fn reference_ranking(pool: &[Vec<f32>], query: &[f32]) -> Vec<usize> {
     let mut scored: Vec<(usize, f64)> = pool
@@ -672,7 +684,7 @@ fn exhaustive_scan_returns_every_point_the_graph_holds() {
     }
 
     let query = spread_vec(dim, 7777);
-    let got = exhaustive::exhaustive_nearest(&index, &query, n, &Default::default());
+    let got = exhaustive::exhaustive_nearest(&index, &query, &Default::default());
     let ids: Vec<usize> = got.iter().map(|(id, _)| *id as usize).collect();
 
     assert_eq!(
@@ -945,5 +957,118 @@ fn deleting_drawers_does_not_push_a_small_palace_off_the_exhaustive_path() {
             .collect::<Vec<_>>(),
         "a palace with {keep} live drawers must stay on the exact path however \
          many dead points the graph still carries"
+    );
+}
+
+/// Why (#5171): re-scoring a shadowed drawer fixes its DISTANCE but not its
+/// SELECTION, and selection is what #5171 is about. `exhaustive_nearest` ranks
+/// a shadowed id on `min(stale, current)`, which is optimistic, so cutting the
+/// candidate list on that provisional key promotes a drawer whose superseded
+/// vector sits near the query over one whose current vector is a true
+/// neighbour — and evicts the true neighbour before anything corrects either
+/// score. `palace_reembed` marks every drawer shadowed, which is the maximal
+/// case. Same missing-true-neighbour defect, reached through re-embedding
+/// instead of through graph reachability.
+/// What: one truth drawer at 40° from the query, and six decoys that each USED
+/// to hold a vector nearer than that (10°–15°) and now hold one much farther
+/// (80°–85°). Six exceeds `want` = 2k, so on the provisional key the decoys
+/// fill every slot. Asserts the truth drawer is still ranked first, which only
+/// holds if the list is cut after re-scoring.
+/// Test: this test itself is the verification.
+#[test]
+fn search_keeps_a_true_neighbour_a_shadowed_decoy_would_evict() {
+    let dim = 16;
+    let k = 2usize;
+    let (_dir, store) = open_store(dim);
+
+    let query = planar_vec(dim, 0.0);
+    let truth = Uuid::new_v4().to_string();
+    store.upsert(&truth, &planar_vec(dim, 40.0)).unwrap();
+
+    let decoys: Vec<String> = (0..6)
+        .map(|i| {
+            let u = Uuid::new_v4().to_string();
+            store.upsert(&u, &planar_vec(dim, 10.0 + i as f32)).unwrap();
+            store.upsert(&u, &planar_vec(dim, 80.0 + i as f32)).unwrap();
+            u
+        })
+        .collect();
+
+    let hits = store.search(&query, k).unwrap();
+    assert_eq!(
+        hits.len(),
+        k,
+        "seven live drawers must fill k={k}: {hits:?}"
+    );
+    assert_eq!(
+        hits[0].0, truth,
+        "the nearest LIVE drawer must survive selection — a re-embedded drawer \
+         may be ranked only by the vector it currently holds, never by the one \
+         it superseded (hits {hits:?}, decoys {decoys:?})"
+    );
+    // 1 - cos(40°) = 0.234. A decoy scored by its stale copy would be under
+    // 0.04; scored by its current copy, over 0.8.
+    assert!(
+        (hits[0].1 - 0.234).abs() < 1e-3,
+        "the truth drawer's distance must be its own (0.234), got {}",
+        hits[0].1
+    );
+}
+
+/// Why (#5171): `upsert` cannot insert the shadow point into the graph and mark
+/// the id in `shadowed` atomically, so one of the two orders leaves a window
+/// where a concurrent `search` misbehaves. The asymmetry is one-directional: a
+/// search that sees the shadow point WITHOUT the flag scores the drawer by
+/// whichever copy is nearer, which is the whole defect; a search that sees the
+/// flag WITHOUT the shadow point re-reads the already-committed `VECTORS` row
+/// and gets the right answer at the cost of one point read. So the flag must go
+/// first.
+/// What: holds the graph's write lock so the re-upsert parks at its
+/// `index.insert`, then asserts the flag is already set while it is parked —
+/// which is precisely the state a search in that window would observe. Polls
+/// rather than sleeps, so the passing path costs microseconds; the failing path
+/// is the one that waits, and it cannot pass by luck because the marking is
+/// unreachable until the lock is released.
+/// Test: this test itself is the verification.
+#[test]
+fn upsert_marks_a_shadow_before_the_graph_can_serve_it() {
+    let dim = 8;
+    let (_dir, store) = open_store(dim);
+    let store = Arc::new(store);
+    let target = Uuid::new_v4().to_string();
+    let id = store.upsert(&target, &planar_vec(dim, 0.0)).unwrap();
+    assert!(
+        !store.shadowed.read().contains(&id),
+        "a first upsert shadows nothing"
+    );
+
+    let graph = store.index.write();
+    let writer = {
+        let store = Arc::clone(&store);
+        let target = target.clone();
+        std::thread::spawn(move || store.upsert(&target, &planar_vec(dim, 90.0)).unwrap())
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut marked = false;
+    while std::time::Instant::now() < deadline {
+        if store.shadowed.read().contains(&id) {
+            marked = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    drop(graph);
+    assert_eq!(
+        writer.join().expect("upsert thread"),
+        id,
+        "the re-upsert reuses the drawer's id"
+    );
+
+    assert!(
+        marked,
+        "the shadow flag must be set before the shadow point can be reached \
+         through the graph — a search in the window between them would score \
+         the drawer by its superseded vector (#5171)"
     );
 }
