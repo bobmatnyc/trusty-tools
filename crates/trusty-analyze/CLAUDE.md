@@ -406,13 +406,19 @@ GET  /indexes/:id/clusters?k=N&method=bow
 ## MCP Tools
 
 Parity rule: every HTTP endpoint has an MCP tool equivalent. The MCP server
-registers **17 tools** (authoritative source: `src/mcp/mod.rs`
-`tool_definitions`):
+assembles its tool list from three sources (authoritative source:
+`src/mcp/mod.rs` `tool_descriptors`): 18 base descriptors always present
+(`src/mcp/descriptors.rs` `base_tool_descriptors`), plus `console_metrics`
+(always appended), plus three `tr_review_*` tools appended only when built
+with the `review` Cargo feature. The exact count depends on the build — read
+`tool_descriptors()` rather than a fixed number.
 
 `complexity_hotspots`, `find_smells`, `analyze_quality`, `run_diagnostics`,
 `list_facts`, `upsert_fact`, `delete_fact`, `analyzer_health`, `extract_graph`,
 `cluster_concepts`, `ingest_scip`, `extract_ner`, `suggest_refactors`,
-`review_diff`, `deep_analysis`, `review_github_pr`, `list_entities`.
+`review_diff`, `deep_analysis`, `review_github_pr`, `list_entities`,
+`list_analyze_indexes`, `console_metrics`, and — with `--features review` —
+`tr_review_pr`, `tr_review_diff`, `tr_review_health`.
 
 ### Transports
 
@@ -502,7 +508,7 @@ trusty-common must never depend on trusty-search or trusty-analyze.
 
 ```bash
 # Step 1 — start trusty-search first (REQUIRED; analyzer will not start without it)
-trusty-search daemon   # port 7878
+trusty-search start   # port 7878
 
 # Step 2 — build everything
 cargo build
@@ -575,8 +581,9 @@ tree-sitter adapters are all functional.
   `blame.rs`, `quality.rs`, `facts.rs`, `concept_cluster.rs`, `linker.rs`,
   `explain.rs`, `github.rs`
 - axum HTTP sidecar (`src/service/`) on port 7879
-- MCP stdio + HTTP/SSE server (`src/mcp/`) — 17 tools (authoritative source:
-  `src/mcp/mod.rs` `tool_definitions`)
+- MCP stdio + HTTP/SSE server (`src/mcp/`) — 18 base tools + `console_metrics`,
+  plus 3 more under `--features review` (authoritative source: `src/mcp/mod.rs`
+  `tool_descriptors`)
 - CLI subcommands: `serve`, `analyze`, `facts list/upsert`, `health`
 - Daemon PID lockfile (fs4), graceful shutdown, `--search-url` flag
 - `LanguageAnalyzer` trait + 15 tree-sitter adapters, all implemented:

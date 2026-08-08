@@ -241,12 +241,10 @@ The MCP server registers **45 tools** (authoritative source:
 `tool_definitions_lists_all_tools` test). All are exposed via both the MCP
 protocol (over the `serve --stdio` path) and the HTTP API (`/api/v1/`). The
 `palace` argument is required unless the server was started with `--palace
-<name>`. The tables below cover the primary surface; the full roster also
-includes `memory_note`, `memory_recall_all`, `palace_delete`,
-`palace_update`, `palace_compact`, `kg_gaps`, `kg_bootstrap`, `add_alias`,
-`discover_aliases`, `list_prompt_facts`, `remove_prompt_fact`,
-`get_prompt_context`, `memory_send_message`, `upgrade`, and
-`console_metrics`.
+<name>`. The tables below cover the primary surface, not all 45 — for the
+complete, current list of tool names read `tool_definitions()` in
+`src/tools/definitions.rs`, or the exhaustive name list asserted by
+`tool_definitions_lists_all_tools` in `src/tools/tests.rs`.
 
 ### Memory tools
 
@@ -290,9 +288,12 @@ conversation session manager. Turns are stored verbatim and bypass the
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `memory_dream` | `palace?` | Run a consolidation cycle (merge near-duplicates, prune, compact). |
 | `dream_consolidate_room` | `palace, room?, max_age_days?=7` | On-demand, synchronous LLM consolidation scoped to one room (omit `room` for all rooms). Summarises facts older than `max_age_days` into canonical drawers, then evicts the superseded originals. `Task` drawers are always skipped. No-op when no inference backend is configured. Returns `{ summary_facts_created, facts_evicted }`. |
-| `memory_status` | — | Global statistics (total drawers, vectors, KG triples). |
+| `palace_dream` | `palace, room?, max_age_days?=7` | Alias for `dream_consolidate_room`, exposed under the `palace_*` naming convention. Same behaviour and return shape. |
+
+Global daemon statistics (total drawers, vectors, KG triples) are available
+via `GET /api/v1/status` — an HTTP-only endpoint (`StatusPayload` in
+`src/service/types.rs`); there is no corresponding MCP tool.
 
 ### Task drawers (protected memory)
 
@@ -307,7 +308,7 @@ will survive every subsequent dream cycle until explicitly deleted.
 
 ## Dream Cycle: Semantic Consolidation (issue #87)
 
-The `memory_dream` tool (and the background idle-dream timer) now includes an
+The `palace_dream` / `dream_consolidate_room` tools (and the background idle-dream timer) now include an
 **inference-backed semantic consolidation phase** after the existing NLP passes
 (dedup, prune, closet-refresh):
 

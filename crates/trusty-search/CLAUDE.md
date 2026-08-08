@@ -533,8 +533,8 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 
 ### MCP Tools
 
-The MCP server registers **18 tools** (authoritative source:
-`src/mcp/tools.rs` `tool_definitions`):
+The MCP server registers **21 tools** (authoritative source:
+`src/mcp/tools/descriptors.rs` `tool_definitions`):
 
 - `search` — hybrid search (BM25 + vector + KG, RRF-fused)
 - `search_lexical` — BM25-only lexical search
@@ -554,6 +554,9 @@ The MCP server registers **18 tools** (authoritative source:
 - `get_call_chain` — KG caller/callee chain for a symbol
 - `grep` — literal/regex grep fallback over the corpus
 - `chat` — OpenRouter conversational Q&A
+- `upgrade` — check for / install a new trusty-search version
+- `console_metrics` — daemon health + index aggregate stats for the trusty-console dashboard
+- `typeahead` — per-keystroke autocomplete suggestions for an index
 
 ## Stack
 
@@ -1043,7 +1046,7 @@ via `cargo install trusty-search`.
 - `EntityExtractor` Phase A structural entities (functions, classes, imports)
 - `SymbolGraph` KG expansion (callers_of / callees_of, 1–2 hop, EdgeKind multipliers)
 - `FileWatcher` with notify-debouncer-mini, 500ms debounce
-- MCP server: full JSON-RPC 2.0 stdio + HTTP/SSE transport, 18 tools (per `src/mcp/tools.rs`)
+- MCP server: full JSON-RPC 2.0 stdio + HTTP/SSE transport, 21 tools (per `src/mcp/tools/descriptors.rs`)
 - Daemon: auto-port, fs4 PID lockfile, graceful shutdown, persistent model cache
 - Svelte 5 admin UI embedded in binary via `include_dir`
 - OpenRouter chat proxy with search context injection
