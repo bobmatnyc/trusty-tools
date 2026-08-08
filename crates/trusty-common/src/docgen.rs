@@ -210,7 +210,9 @@ fn arguments(schema: Option<&Value>) -> String {
 /// `--features review`. A section stating one number is false under the other
 /// configuration, so the rows carry the composition instead.
 /// What: returns the rows with `availability` set to `label`.
-/// Test: `analyze_section_states_both_configurations` in
+/// Test: `render_adds_availability_column_only_when_labelled`. The composition
+/// claim itself is pinned cross-crate by
+/// `section_is_correct_for_this_build_configuration` in
 /// `crates/trusty-analyze/tests/generated_docs.rs`.
 #[must_use]
 pub fn labelled(rows: Vec<ToolRow>, label: &str) -> Vec<ToolRow> {
@@ -230,7 +232,9 @@ pub fn labelled(rows: Vec<ToolRow>, label: &str) -> Vec<ToolRow> {
 /// reaches the output), emits a count sentence, an authoritative-source
 /// pointer, and a two- or three-column table. Panics on duplicate tool names,
 /// which would make the table silently lossy.
-/// Test: `render_is_sorted_and_stable`, `render_adds_availability_column`.
+/// Test: `render_is_sorted_and_stable`,
+/// `render_adds_availability_column_only_when_labelled`,
+/// `render_escapes_pipes_in_summaries`, `render_rejects_duplicate_names`.
 #[must_use]
 pub fn render_tool_section(source: &str, count_note: &str, rows: &[ToolRow]) -> String {
     let mut rows: Vec<&ToolRow> = rows.iter().collect();
