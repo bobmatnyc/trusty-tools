@@ -56,6 +56,64 @@ orphaned. The authoritative session state remains
 `~/.trusty-mpm/session-manager/sessions.json`; the dual-root scan is the
 migration-aware filesystem discovery layer.
 
+## The project-level `.trusty-mpm.toml` (#5207)
+
+Every surface above is **per-host**. A project's own conventions — "this repo
+launches on main, never in a worktree" — had to be re-declared by every operator
+on every machine, and could never be reviewed or versioned. Since #5207
+trusty-mpm also reads one file **from the project itself**:
+
+```
+<project>/.trusty-mpm.toml
+```
+
+```toml
+# Do this repo's managed sessions get a per-session git worktree?
+worktree = false
+# Default model id or tier alias for sessions launched in this project.
+default_model = opus
+```
+
+**This file is committed.** It is tracked in git, travels with clones, and shows
+up in PR diffs. That is the point of it, and it is why the file sits at the
+project ROOT rather than inside `<project>/.trusty-mpm/`: that directory holds
+machine-local session state, so projects gitignore it wholesale (this repository
+ignores `.trusty-mpm/*`, which already makes the #4832 `framework/manifest.toml`
+layer untrackable here). A file that must be committed cannot live in a
+directory that exists to hold uncommittable state.
+
+Where a setting appears here, this file is the **top** of its precedence chain:
+
+| Setting | Precedence, highest first |
+|---|---|
+| `worktree` | `.trusty-mpm.toml` → the `projects.json` registry → built-in `true` |
+| `default_model` | `.trusty-mpm.toml` → `config.yaml`'s `default_model` → `config.toml`'s `[models] default` → built-in `sonnet` |
+
+`default_model` is a *default*: an explicit `--model`, a per-agent
+`[models.agents]` entry, and an agent's own frontmatter are all more specific and
+still win over it.
+
+Two settings are deliberately **not** here. `workspace_root` decides where a
+project gets cloned, so it cannot be read from a project that does not exist
+yet — it stays host-level. `auto_resume` is a property of the operator's
+supervisor rather than of the repository.
+
+### Unknown keys
+
+This file is parsed with `serde(deny_unknown_fields)`. `worktre = false` is an
+error, not a silently-ignored key. At spawn time a rejected file contributes
+nothing at all — resolution falls through to the next layer and the parse error
+is logged at `error` level naming the offending key. Nothing in a file that
+failed to parse is trusted, because a typo means the author's intent is unknown
+rather than partially known, and because a committed file is shared: one bad push
+must not brick every operator's session launches.
+
+The two **host** config files are not strict, on purpose. Both answer a parse
+failure by returning defaults, so denying unknown fields there would upgrade "one
+key is ignored" into "the entire file is ignored" — a worse failure than the one
+it fixes. They keep the lenient parse and instead log a warning naming every key
+they dropped.
+
 ## Relationship to the legacy `~/.trusty-mpm/config.toml`
 
 trusty-mpm's older `~/.trusty-mpm/config.toml` (agent sources, per-agent model

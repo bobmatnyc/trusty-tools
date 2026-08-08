@@ -188,6 +188,10 @@ mod tests {
             ".trusty-mpm/",
             ".trusty-mpm/framework/",
             ".trusty-mpm/config.toml",
+            // #5207: the committed project config MUST stay trackable — being
+            // reviewable in a PR is the entire reason it exists. Scaffolding an
+            // ignore rule over it would silently defeat the feature.
+            crate::core::project_config::PROJECT_CONFIG_FILE,
         ] {
             assert!(
                 !content.lines().any(|l| l.trim() == spared),

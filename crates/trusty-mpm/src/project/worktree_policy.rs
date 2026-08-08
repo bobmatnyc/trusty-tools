@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 
 use super::record::{Project, repo_url_matches};
 use super::registry::ProjectRegistry;
+use crate::core::project_config::load_or_report;
 
 /// Directory name, under the framework root, holding `projects.json`.
 ///
@@ -132,6 +133,60 @@ pub async fn worktree_enabled_for_origin_at(registry_dir: &Path, origin: &str) -
             true
         }
     }
+}
+
+/// The project's own answer, read from its committed `.trusty-mpm.toml` (#5207).
+///
+/// Why: the registry (`projects.json`) is MACHINE-GLOBAL, so "this repo launches
+/// on main" had to be re-declared by every operator on every host and could
+/// never be reviewed. The project itself is the right place to state a property
+/// of its own workflow, and a committed file travels with the clone. This is
+/// split from [`worktree_enabled_for_project`] so the layer can be asserted on
+/// its own, without a registry.
+/// What: `Some(v)` when the project ships a config that sets `worktree`; `None`
+/// when the file is absent, sets no `worktree` key, or was REJECTED (an
+/// unknown key or a bad type — [`load_or_report`] logs it and yields nothing).
+/// A project that declines to decide falls through to the registry.
+/// Test: `worktree_project_config_overrides_registry`,
+/// `worktree_project_config_absent_falls_back_to_registry`,
+/// `worktree_project_config_malformed_falls_back_to_registry`.
+pub fn worktree_override_in_project(project_dir: &Path) -> Option<bool> {
+    load_or_report(project_dir).and_then(|cfg| cfg.worktree)
+}
+
+/// Resolve worktree isolation for a project that EXISTS ON DISK (#5207).
+///
+/// Why: the in-project spawn branch has already resolved the local checkout
+/// before it asks this question, so it can consult the project's own committed
+/// config — the highest-precedence layer. The clone-based branch cannot: there
+/// is no project directory yet, which is why
+/// [`worktree_enabled_for_origin`] remains the entry point there rather than
+/// being replaced by this one.
+/// What: precedence, highest first — the project's `.trusty-mpm.toml`
+/// (`worktree`), then the machine-global registry record, then the built-in
+/// `true`. Every fallible step still resolves toward `true`, so no failure can
+/// silently strip a project of the isolation it had before #3455.
+/// Test: `worktree_project_config_overrides_registry`,
+/// `worktree_project_config_can_force_isolation_on`,
+/// `worktree_project_config_absent_falls_back_to_registry`,
+/// `worktree_project_config_malformed_falls_back_to_registry`,
+/// `worktree_defaults_true_with_neither_layer`.
+pub async fn worktree_enabled_for_project(
+    project_dir: &Path,
+    registry: &ProjectRegistry,
+    origin: &str,
+) -> bool {
+    // #5207: the project's committed config outranks the machine-global
+    // registry, so the repo's own workflow wins over one operator's local state.
+    if let Some(decided) = worktree_override_in_project(project_dir) {
+        tracing::debug!(
+            dir = %project_dir.display(),
+            worktree = decided,
+            "worktree policy: decided by the project's committed .trusty-mpm.toml"
+        );
+        return decided;
+    }
+    worktree_enabled_for_origin(registry, origin).await
 }
 
 #[cfg(test)]

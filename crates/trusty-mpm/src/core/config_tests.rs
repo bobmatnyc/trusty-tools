@@ -414,3 +414,95 @@ engineer = "haiku"
     let m = resolve_agent_model(&cfg_empty, "nobody", None, None);
     assert_eq!(m, "claude-sonnet-4-5");
 }
+
+// ── default-model layering (#5207) ───────────────────────────────────────────
+//
+// Why: `TrustyToolsConfig::default_model` was written by the console Config tab
+// and the `config_write` MCP tool and read by nothing. These pin the chain that
+// now consumes it, and the project layer that outranks it.
+
+/// The project's committed `.trusty-mpm.toml` tops the default-model chain.
+/// Test: itself.
+#[test]
+fn project_default_model_tops_the_chain() {
+    let cfg = MpmConfig {
+        models: ModelsConfig {
+            default: Some("haiku".into()),
+            ..ModelsConfig::default()
+        },
+        ..MpmConfig::default()
+    }
+    .with_default_model_layers(Some("opus"), Some("sonnet"));
+
+    assert_eq!(
+        resolve_agent_model(&cfg, "nobody", None, None),
+        "claude-opus-4-5",
+        "the project layer must beat both host layers"
+    );
+}
+
+/// The host YAML `default_model` beats the host TOML `[models] default`.
+///
+/// Why: that is the contract the field's own editor advertises — the console
+/// placeholder reads "(unset — uses ~/.trusty-mpm/config.toml)", i.e. the TOML
+/// is the FALLBACK for this field, so a set YAML value must win.
+/// Test: itself.
+#[test]
+fn yaml_default_model_beats_toml_default() {
+    let cfg = MpmConfig {
+        models: ModelsConfig {
+            default: Some("haiku".into()),
+            ..ModelsConfig::default()
+        },
+        ..MpmConfig::default()
+    }
+    .with_default_model_layers(None, Some("opus"));
+
+    assert_eq!(
+        resolve_agent_model(&cfg, "nobody", None, None),
+        "claude-opus-4-5"
+    );
+}
+
+/// With neither new layer set, the TOML default is untouched — no regression.
+/// Test: itself.
+#[test]
+fn default_model_layers_are_a_no_op_when_unset() {
+    let base = MpmConfig {
+        models: ModelsConfig {
+            default: Some("haiku".into()),
+            ..ModelsConfig::default()
+        },
+        ..MpmConfig::default()
+    };
+    let layered = base.clone().with_default_model_layers(None, None);
+    assert_eq!(base, layered, "absent layers must change nothing");
+}
+
+/// A default — from any layer — still loses to the MORE SPECIFIC settings.
+///
+/// Why: `default_model` is a default, not an override. Wiring it must not let a
+/// project silently outrank an operator's explicit `--model` or a per-agent
+/// pin.
+/// Test: itself.
+#[test]
+fn project_default_model_still_loses_to_more_specific_settings() {
+    let mut models = ModelsConfig::default();
+    models.agents.insert("engineer".into(), "haiku".into());
+    let cfg = MpmConfig {
+        models,
+        ..MpmConfig::default()
+    }
+    .with_default_model_layers(Some("opus"), None);
+
+    assert_eq!(
+        resolve_agent_model(&cfg, "engineer", None, Some("sonnet")),
+        "claude-sonnet-4-5",
+        "an explicit --model must beat the project default"
+    );
+    assert_eq!(
+        resolve_agent_model(&cfg, "engineer", None, None),
+        "claude-haiku-4-5",
+        "a per-agent pin must beat the project default"
+    );
+}

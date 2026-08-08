@@ -12,8 +12,10 @@
 //! - `store`  — [`ProjectStore`] on-disk JSON persistence.
 //! - `registry` — [`ProjectRegistry`] lifecycle manager.
 //! - `resolver` — NL→project resolver, session↔project binding, fleet grouping.
-//! - `worktree_policy` — the registry-keyed `worktree` opt-out decision
-//!   (#3455), shared by the daemon and the out-of-process `tm` CLI (#4300).
+//! - `worktree_policy` — the `worktree` opt-out decision, shared by the daemon
+//!   and the out-of-process `tm` CLI (#3455, #4300). Since #5207 a project's
+//!   own committed `.trusty-mpm.toml` outranks the machine-global registry;
+//!   see [`worktree_enabled_for_project`].
 //! Test: each submodule carries inline unit tests; run with
 //! `cargo test -p trusty-mpm`.
 
@@ -32,5 +34,6 @@ pub use resolver::{
 pub use store::ProjectStoreError;
 pub use worktree_policy::{
     registry_data_dir, registry_data_dir_under, worktree_enabled_for_origin,
-    worktree_enabled_for_origin_at, worktree_enabled_in,
+    worktree_enabled_for_origin_at, worktree_enabled_for_project, worktree_enabled_in,
+    worktree_override_in_project,
 };
