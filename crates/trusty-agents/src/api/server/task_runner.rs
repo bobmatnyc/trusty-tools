@@ -91,9 +91,16 @@ pub(super) async fn run_task(id: &str, req: TaskRequest, state: AppState) -> Res
     let id_for_stderr = id.to_string();
     let state_for_stderr = state.clone();
     let stderr_join = tokio::spawn(async move {
+        // #4321: the child's diagnostics are the ONLY explanation of a
+        // non-zero exit, and until now they went to the parent's own stderr
+        // and nowhere else — invisible when the parent is a GUI-launched
+        // sidecar. Keep a bounded tail so `run_task` can put them in the
+        // response the user actually reads.
+        let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
         if let Some(stderr) = stderr_handle {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                push_stderr_tail(&mut tail, &line);
                 // #192 Phase B: relay structured Event JSON from the child
                 // subprocess to the parent's process-global event bus. SSE
                 // subscribers see them in real time. We deliberately check
@@ -153,6 +160,7 @@ pub(super) async fn run_task(id: &str, req: TaskRequest, state: AppState) -> Res
                 }
             }
         }
+        Vec::from(tail)
     });
 
     let mut stdout_buf = Vec::new();
@@ -161,12 +169,13 @@ pub(super) async fn run_task(id: &str, req: TaskRequest, state: AppState) -> Res
     }
     let status = child.wait().await?;
     // Drain stderr task before returning so we don't drop progress events.
-    let _ = stderr_join.await;
+    // #4321: it now also hands back the tail of the child's diagnostics.
+    let stderr_tail = stderr_join.await.unwrap_or_default();
 
     if !status.success() {
         return Ok(PmResponse::error(
             id,
-            format!("subprocess exited with status {:?}", status.code()),
+            format_subprocess_failure(status.code(), &stderr_tail),
         ));
     }
 
@@ -192,6 +201,71 @@ pub(super) async fn run_task(id: &str, req: TaskRequest, state: AppState) -> Res
             format!("failed to parse workflow JSON output: {e}"),
         )),
     }
+}
+
+/// How many trailing stderr lines `run_task` keeps to explain a failed child.
+const STDERR_TAIL_LINES: usize = 20;
+
+/// How many bytes of any single stderr line are kept.
+const STDERR_TAIL_LINE_BYTES: usize = 500;
+
+/// Record one child stderr line into the bounded failure-explanation tail
+/// (#4321).
+///
+/// Why: a non-zero child exit used to reach the user as nothing but
+/// `subprocess exited with status Some(1)` — the child's own message ("no
+/// `.trusty-agents/agents/` found in /") went to the parent's stderr, which is
+/// invisible when the parent is the GUI-launched API sidecar. The tail is
+/// bounded because a chatty or looping child must not be able to grow the
+/// stored `PmResponse` without limit.
+/// What: skips the two structured protocol prefixes (those are events, not
+/// diagnostics), strips the child's tracing colour codes via the crate's
+/// existing [`crate::debugger::tui::strip_ansi`] — this text lands in a chat
+/// bubble, where a raw `\x1b[2m` renders as garbage — truncates the line on a
+/// char boundary to [`STDERR_TAIL_LINE_BYTES`], and evicts the oldest entry
+/// past [`STDERR_TAIL_LINES`].
+/// Test: `stderr_tail_keeps_only_the_last_n_lines`,
+/// `stderr_tail_skips_structured_protocol_lines`,
+/// `stderr_tail_truncates_an_overlong_line`, `stderr_tail_strips_ansi_colour`.
+fn push_stderr_tail(tail: &mut std::collections::VecDeque<String>, line: &str) {
+    if line.starts_with(EVENT_LINE_PREFIX) || line.starts_with("__OMPM_PROGRESS__ ") {
+        return;
+    }
+    let line = crate::debugger::tui::strip_ansi(line);
+    if line.trim().is_empty() {
+        return;
+    }
+    let mut end = STDERR_TAIL_LINE_BYTES.min(line.len());
+    while end < line.len() && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    tail.push_back(line[..end].to_string());
+    while tail.len() > STDERR_TAIL_LINES {
+        tail.pop_front();
+    }
+}
+
+/// Build the user-facing narrative for a child that exited non-zero (#4321).
+///
+/// Why: exit status alone is undiagnosable. Both GUI delivery paths render
+/// this string verbatim (`ui/src-tauri/src/task_commands.rs`,
+/// `ui/src/lib/transport.ts`), so whatever the child said has to be in it.
+/// What: keeps `subprocess exited with status {code:?}` as the leading text —
+/// the two existing delivery-path tests match on it as a prefix — and appends
+/// the captured tail, or an explicit statement that the child said nothing.
+/// Test: `subprocess_failure_narrative_carries_child_stderr`,
+/// `subprocess_failure_narrative_states_when_child_was_silent`,
+/// `subprocess_failure_narrative_keeps_the_legacy_prefix`.
+fn format_subprocess_failure(code: Option<i32>, stderr_tail: &[String]) -> String {
+    let head = format!("subprocess exited with status {code:?}");
+    if stderr_tail.is_empty() {
+        return format!("{head} (the child wrote nothing to stderr)");
+    }
+    format!(
+        "{head}\n\nchild stderr (last {} line(s)):\n{}",
+        stderr_tail.len(),
+        stderr_tail.join("\n")
+    )
 }
 
 /// Resolve the current executable path (used for self-respawn).
@@ -267,4 +341,93 @@ pub(super) async fn maybe_emit_recap(state: &AppState, session_id: &str) {
             .map(|row| (row.step.clone(), row.result.clone()))
             .collect(),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    fn tail_of(lines: &[&str]) -> Vec<String> {
+        let mut t: VecDeque<String> = VecDeque::new();
+        for l in lines {
+            push_stderr_tail(&mut t, l);
+        }
+        Vec::from(t)
+    }
+
+    /// The #4321 reproducer, verbatim: `tagent --workflow prescriptive --json
+    /// --task <text>` spawned with the GUI sidecar's cwd (`/`). Before the fix
+    /// the user saw only the first line of this narrative and had no way to
+    /// learn what the child objected to.
+    #[test]
+    fn subprocess_failure_narrative_carries_child_stderr() {
+        let tail = tail_of(&[
+            "  INFO trusty_agents::runtime::startup: trusty-agents v0.38.6 build #1736",
+            "Error: no `.trusty-agents/agents/` found in /.",
+        ]);
+        let narrative = format_subprocess_failure(Some(1), &tail);
+        assert!(
+            narrative.contains("no `.trusty-agents/agents/` found in /."),
+            "child's real error must reach the user: {narrative}"
+        );
+    }
+
+    #[test]
+    fn subprocess_failure_narrative_states_when_child_was_silent() {
+        let narrative = format_subprocess_failure(Some(1), &[]);
+        assert!(narrative.contains("wrote nothing to stderr"), "{narrative}");
+    }
+
+    /// Both GUI delivery paths (`task_commands.rs`, `transport.ts`) and their
+    /// tests match this text as a prefix, so it must stay leading.
+    #[test]
+    fn subprocess_failure_narrative_keeps_the_legacy_prefix() {
+        assert!(
+            format_subprocess_failure(Some(1), &["boom".to_string()])
+                .starts_with("subprocess exited with status Some(1)")
+        );
+    }
+
+    #[test]
+    fn stderr_tail_keeps_only_the_last_n_lines() {
+        let lines: Vec<String> = (0..STDERR_TAIL_LINES + 5)
+            .map(|i| format!("l{i}"))
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let tail = tail_of(&refs);
+        assert_eq!(tail.len(), STDERR_TAIL_LINES);
+        assert_eq!(tail.first().unwrap(), "l5");
+        assert_eq!(tail.last().unwrap(), &format!("l{}", STDERR_TAIL_LINES + 4));
+    }
+
+    #[test]
+    fn stderr_tail_skips_structured_protocol_lines() {
+        let event_line = format!("{EVENT_LINE_PREFIX}{{\"kind\":\"x\"}}");
+        let tail = tail_of(&[
+            &event_line,
+            "__OMPM_PROGRESS__ {\"name\":\"research\"}",
+            "",
+            "Error: real failure",
+        ]);
+        assert_eq!(tail, vec!["Error: real failure".to_string()]);
+    }
+
+    /// The child's tracing output is colourised; the narrative is rendered as
+    /// chat text, so the escapes have to go.
+    #[test]
+    fn stderr_tail_strips_ansi_colour() {
+        let tail = tail_of(&["\x1b[2m2026-08-08T17:49:13Z\x1b[0m \x1b[31mError: boom\x1b[0m"]);
+        assert_eq!(tail, vec!["2026-08-08T17:49:13Z Error: boom".to_string()]);
+    }
+
+    #[test]
+    fn stderr_tail_truncates_an_overlong_line() {
+        // Multi-byte chars: the truncation must land on a char boundary
+        // rather than panicking on a slice into the middle of one.
+        let long = "é".repeat(STDERR_TAIL_LINE_BYTES);
+        let tail = tail_of(&[&long]);
+        assert!(tail[0].len() <= STDERR_TAIL_LINE_BYTES);
+        assert!(!tail[0].is_empty());
+    }
 }
