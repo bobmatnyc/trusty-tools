@@ -165,6 +165,18 @@ enum Commands {
     /// binary (epic #2400 Wave 1, #2405).
     Config(trusty_common::inference::config::ConfigCommand),
 
+    /// Serve the console webhook relay over a Unix socket, then exit (#5182).
+    ///
+    /// Binds `trusty-review-webhook.sock` in the hardened scratch directory —
+    /// the socket `trusty-console` has been relaying to since #5089 step 3 —
+    /// writes each verified delivery to a durable inbox, and acknowledges only
+    /// after that write is fsync'd. The ack is what lets console delete its own
+    /// copy, so acking earlier would lose the delivery outright.
+    ///
+    /// Not a resident daemon: console spawns this on demand and SIGTERMs it.
+    /// Run it by hand only to inspect the socket.
+    WebhookListen,
+
     /// Manage the macOS launchd LaunchAgent for the review daemon (#2557).
     ///
     /// `install` writes `~/Library/LaunchAgents/com.trusty.trusty-review.plist`
@@ -233,6 +245,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         #[cfg(feature = "report")]
         Commands::Report(args) => cli_report::cmd_report(config, args).await,
         Commands::Calibrate(args) => cmd_calibrate(config, args).await,
+        Commands::WebhookListen => trusty_review::webhook_listener::run().await,
         Commands::Config(cmd) => cmd.run().await,
         // Port is handled synchronously in `main` before this function is
         // called; this arm is unreachable at runtime but required for
