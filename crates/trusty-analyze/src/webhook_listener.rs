@@ -26,7 +26,7 @@
 
 use std::path::PathBuf;
 
-use trusty_common::webhook_relay::{analyze_socket_path, ListenerError, WebhookListener};
+use trusty_common::webhook_relay::{analyze_socket_path, WebhookListener};
 
 /// Directory name the inbox occupies under the crate's data directory.
 const INBOX_DIR_NAME: &str = "webhook-inbox";
@@ -56,7 +56,7 @@ pub fn inbox_root() -> anyhow::Result<PathBuf> {
 ///
 /// # Errors
 ///
-/// [`ListenerError::Inbox`] when the inbox cannot be prepared, or an
+/// [`trusty_common::webhook_relay::ListenerError::Inbox`] when the inbox cannot be prepared, or an
 /// `anyhow::Error` when the data directory cannot be resolved.
 ///
 /// Test: `listener_opens_against_a_temp_inbox`.

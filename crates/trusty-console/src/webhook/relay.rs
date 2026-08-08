@@ -25,7 +25,6 @@
 //! `UnixListener` bound through `bind_hardened`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use trusty_common::uds::{UdsRpcError, send_framed_request};

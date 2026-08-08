@@ -1169,9 +1169,24 @@ async fn integration_from_env_delivery_survives_a_console_restart() {
         Some(&tmp.path().to_string_lossy()),
     );
     let prior_secret = swap_env(SECRET_ENV, Some(SECRET));
+    // #5182: `from_env` now attaches a supervisor that STARTS the target, so
+    // without this the test launches a real `trusty-review` from the developer's
+    // PATH, which promptly acks and clears the spool the test is asserting on.
+    // External mode is the operator-facing opt-out (ADR-0011): dial whatever is
+    // there, never spawn.
+    let prior_external = swap_env(spawn::ENV_EXTERNAL_TARGETS, Some("1"));
 
     let outcome = async {
-        // ── first boot: nothing is listening, as until #5089 step 4 ──────────
+        // The remaining nondeterminism is a webhook listener the operator is
+        // already running on this machine. Name it rather than flake on it.
+        let live_socket = trusty_common::webhook_relay::review_socket_path();
+        assert!(
+            tokio::net::UnixStream::connect(&live_socket).await.is_err(),
+            "a trusty-review webhook listener is already serving {};              stop it before running this test, which asserts on an unreachable target",
+            live_socket.display()
+        );
+
+        // ── first boot: nothing is listening ────────────────────────────────
         let ingress = WebhookIngress::from_env().expect("build ingress from env");
         assert!(
             ingress
@@ -1232,6 +1247,7 @@ async fn integration_from_env_delivery_survives_a_console_restart() {
         prior_data_dir.as_deref(),
     );
     swap_env(SECRET_ENV, prior_secret.as_deref());
+    swap_env(spawn::ENV_EXTERNAL_TARGETS, prior_external.as_deref());
     outcome
 }
 
