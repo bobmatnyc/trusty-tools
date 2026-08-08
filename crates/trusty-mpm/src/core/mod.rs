@@ -59,6 +59,8 @@ pub mod claude_mpm_session;
 
 pub mod compress;
 pub mod config;
+/// Unrecognised-key reporting for the host-level config files (#5207).
+pub mod config_keys;
 pub mod connect;
 pub mod delegation_authority;
 pub mod deploy_validate;
@@ -113,6 +115,8 @@ pub mod pid_registry;
 pub mod process;
 pub mod project;
 pub mod project_aliases;
+/// The committed, project-level `.trusty-mpm.toml` config surface (#5207).
+pub mod project_config;
 pub mod project_discovery;
 // #4880: the project skill tier redeploys on project-manifest change.
 pub mod project_skill_tier;
