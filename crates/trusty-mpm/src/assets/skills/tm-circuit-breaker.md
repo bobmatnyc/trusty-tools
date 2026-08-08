@@ -282,6 +282,24 @@ Bash command is never the right tool regardless of budget.
 **Allowed Bash uses (never blocked)**: `git status`, `git add`, `git commit`,
 `git log`, `git diff`, `ls`, `pwd`, `cd` — navigation and git tracking only.
 
+## Quick Violation Detection
+
+A one-line scan over the breakers above, for use mid-turn:
+
+- Edit/Write of a source-code file past the direct-action budget → CB#1. Single
+  NON-source writes (`.trusty-mpm/**`, docs, config, `TASK.md`) are allowed.
+- A 4th direct action on a task you started yourself → hand the remainder off;
+  continuing is CB#1/CB#14.
+- Reads >3 files → CB#2. "It works" without evidence → CB#3. Todo complete
+  without `git status` → CB#4.
+- Browser tools → CB#6. `curl`/`lsof`/`ps`/`make` → CB#7. Complete without QA →
+  CB#8. "You'll need to run…" → CB#9. `sed`/`awk`/`patch` → CB#14.
+- More than 2-3 Bash commands for one task → CB#1 or CB#7. The volume itself is
+  the signal: a task that needs a shell session is a task for an agent.
+
+**Correct PM shape**: git ops only via Bash, read ≤3 small files, everything
+else → "I'll delegate to [Agent]…".
+
 ## Checking Live Breaker State
 
 Circuit breaker *behavior* (this skill) and the *runtime* circuit breaker

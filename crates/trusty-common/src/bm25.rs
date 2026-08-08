@@ -4,7 +4,7 @@
 //! index, and several other trusty-* crates already speak BM25. Hoisting the
 //! implementation into `trusty-common` (gated behind the `bm25` feature) lets
 //! every consumer share one tokenizer + scorer rather than re-implementing the
-//! algorithm. Originally ported from open-mpm `src/context/bm25.rs`; no
+//! algorithm. Originally ported from trusty-agents `src/context/bm25.rs`; no
 //! external crate deps remain.
 //!
 //! What: a code-aware tokenizer (`tokenize`, with camelCase / PascalCase /

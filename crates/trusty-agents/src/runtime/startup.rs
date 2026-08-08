@@ -345,20 +345,20 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             // #3329: `--bind <addr>` / `--bind=<addr>`; default loopback. A
             // non-loopback bind without a token is refused inside
             // serve_with_config (loopback-only doctrine).
-            let mut bind: std::net::IpAddr = std::net::Ipv4Addr::LOCALHOST.into();
+            let mut bind: Option<std::net::IpAddr> = None;
             let mut iter = raw_args.iter();
             while let Some(a) = iter.next() {
                 if a == "--bind"
                     && let Some(v) = iter.next()
                     && let Ok(ip) = v.parse::<std::net::IpAddr>()
                 {
-                    bind = ip;
+                    bind = Some(ip);
                     break;
                 }
                 if let Some(rest) = a.strip_prefix("--bind=")
                     && let Ok(ip) = rest.parse::<std::net::IpAddr>()
                 {
-                    bind = ip;
+                    bind = Some(ip);
                     break;
                 }
             }
@@ -390,7 +390,8 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
                 api::watchdog::arm_parent_death_watchdog(pp);
             }
 
-            api::server::serve_with_config(api::server::ApiConfig { bind, port, token }).await?;
+            api::server::serve_with_config(api::server::ApiConfig::with_bind(bind, port, token))
+                .await?;
             return Ok(false);
         }
     }

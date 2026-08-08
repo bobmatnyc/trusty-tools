@@ -15,18 +15,21 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::palace::RoomType;
 use trusty_common::memory_core::retrieval::{
-    recall_across_palaces, recall_deep_in_room, recall_in_room, RememberOptions,
+    list_drawers_in_wing, recall_across_palaces, recall_deep_scoped, recall_scoped, scope_admits,
+    PalaceHandle, RecallScope, RememberOptions,
 };
 use trusty_common::memory_core::timeouts;
 use uuid::Uuid;
+
+use super::wing_ops::resolve_wing_arg;
 
 use super::bm25::{
     bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_into_recall, serialize_recall,
 };
 use super::helpers::{
-    attach_mcp_attribution, blocklist_gate, content_gate, dedup_gate, mcp_remember_opts,
-    open_palace_handle, parse_tags, resolve_palace, room_label, skipped_envelope, write_drawer,
-    WriteDrawerParams,
+    apply_tier_c, attach_mcp_attribution, blocklist_gate, content_gate, dedup_gate,
+    mcp_remember_opts, open_palace_handle, parse_tags, resolve_palace, resolve_tier_c, room_label,
+    skipped_envelope, write_drawer, WriteDrawerParams,
 };
 
 pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
@@ -145,6 +148,23 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
         }
     }
     let room_label_for_kg = room_label(&room);
+    // ADR-0027 T9: optional wing scope. Absent (the overwhelmingly common
+    // case) means the palace's default wing, which is byte-identical to the
+    // pre-wing write path. Present means this room belongs to that wing, so
+    // `engineer`/`Planning` and `pm`/`Planning` are two different rooms.
+    // Without this the write path could never reach a non-default wing and
+    // wing-scoped recall would be permanently empty outside the default.
+    let wing_handle = open_palace_handle(state, palace)?;
+    let wing_id = resolve_wing_arg(&wing_handle, &args, "memory_remember")?;
+    // #4886: ADR-0028 D3/D4. `fact_key` is what makes this a Tier C write; a
+    // slot that fails admission degrades to an ordinary drawer, and the
+    // envelope below reports which tier the write actually landed in.
+    let admission = resolve_tier_c(&args, "memory_remember")?;
+    let mut opts = RememberOptions {
+        wing_id,
+        ..mcp_remember_opts(force, defer_embedding, allow_secret_like)
+    };
+    let (tier, refusal) = apply_tier_c(&admission, &mut opts);
     let drawer_id = write_drawer(
         state,
         WriteDrawerParams {
@@ -153,16 +173,21 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
             tags,
             room,
             importance: 0.5,
-            opts: mcp_remember_opts(force, defer_embedding, allow_secret_like),
+            opts,
             room_label_for_kg,
         },
     )
     .await?;
-    Ok(json!({
+    let mut out = json!({
         "drawer_id": drawer_id.to_string(),
         "palace": palace,
         "status": "stored",
-    }))
+        "tier": tier,
+    });
+    if let Some(reason) = refusal {
+        out["tier_c_refused"] = json!(reason);
+    }
+    Ok(out)
 }
 
 pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<Value> {
@@ -258,6 +283,17 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     // note() preset skips the token threshold; we keep the default
     // filter for noise patterns. No MCP-stricter min_tokens override
     // is needed because `enforce_min_tokens = false`.
+    // #4886: same Tier C surface as `memory_remember`. `memory_note` is the
+    // more likely home for a current fact — it is the short, curated, pinned
+    // `importance = 1.0` path, which is exactly the privilege ADR-0028 §C5
+    // measured at 8.25x median injection lift and D4 requires be paired with a
+    // retirement condition.
+    let admission = resolve_tier_c(&args, "memory_note")?;
+    let mut opts = RememberOptions {
+        defer_embedding,
+        ..RememberOptions::note()
+    };
+    let (tier, refusal) = apply_tier_c(&admission, &mut opts);
     let drawer_id = write_drawer(
         state,
         WriteDrawerParams {
@@ -266,21 +302,45 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
             tags,
             room,
             importance: 1.0,
-            opts: RememberOptions {
-                defer_embedding,
-                ..RememberOptions::note()
-            },
+            opts,
             room_label_for_kg,
         },
     )
     .await
     .context("PalaceHandle::remember_with_options (note)")?;
-    Ok(json!({
+    let mut out = json!({
         "drawer_id": drawer_id.to_string(),
         "palace": palace,
         "status": "stored",
         "drawer_type": "UserFact",
-    }))
+        "tier": tier,
+    });
+    if let Some(reason) = refusal {
+        out["tier_c_refused"] = json!(reason);
+    }
+    Ok(out)
+}
+
+/// Whether a recall may use the vector lane, or must take the degraded
+/// L0/L1 + BM25 fallback.
+///
+/// Why (#4836): the degraded fallback ignores the query except through an
+/// optional BM25 lane, so taking it when the embedder is in fact live makes
+/// `memory_recall` answer every query with the same drawers — which is what it
+/// did for the whole life of any daemon whose startup warm-up failed once. The
+/// readiness latch alone cannot be trusted for this decision: a recall that
+/// degrades never calls [`AppState::embedder`], so it can never observe the
+/// recovery that would clear the latch. Asking the embedder cell directly
+/// breaks that deadlock, and costs one atomic load.
+/// What: `true` when readiness is `Ready`, or when the shared embedder is
+/// already initialised regardless of the latch. Never triggers a cold init, so
+/// issue #1970's "never block a recall on embedder warm-up" guarantee holds.
+/// Test: `different_queries_return_different_drawers`,
+/// `deep_recall_also_discriminates_by_query` (tests/recall_query_discrimination.rs)
+/// — both drive recall with a live embedder behind a stranded `Warming` latch.
+fn vector_lane_available(state: &AppState) -> bool {
+    state.readiness() != DaemonReadiness::Warming
+        || trusty_common::memory_core::retrieval::shared_embedder_initialized()
 }
 
 /// Degraded-embedder recall fallback (issue #1970): L0/L1 + BM25 only.
@@ -299,22 +359,26 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
 /// scopes L2/L3 — a caller who narrowed to one room must never be handed
 /// another room's drawer just because the daemon happened to be warming. L0/L1
 /// are deliberately left unfiltered, matching `retrieval::recall_in_room`.
-/// Test: `recall_falls_back_to_bm25_and_l0_l1_while_warming`,
-/// `recall_deep_falls_back_to_bm25_and_l0_l1_while_warming`.
+/// Test: `recall_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`,
+/// `recall_deep_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`.
 async fn recall_without_embedder(
     state: &AppState,
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
     palace: &str,
     query: &str,
-    room: Option<&RoomType>,
+    scope: &RecallScope,
     top_k: usize,
 ) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
     let mut results = trusty_common::memory_core::retrieval::retrieve_l0_l1(handle);
-    let target_room_id = room
-        .map(|r| trusty_common::memory_core::store::rooms::resolve_room_filter_id(&handle.kg, r));
+    // ADR-0027 T7 filtered this lane by room; T9 (#4809) widens it to the whole
+    // scope so a WING-scoped recall issued while the embedder is warming is
+    // filtered too. Without that, the warming path would return unscoped
+    // results — a scope boundary failing open, which is a leak, not a
+    // degraded result.
+    let allowed = scope.allowed_room_ids(&handle.kg);
     if let Some(bm25_hits) = bm25_search_optional(state, palace, query, top_k).await {
         for hydrated in bm25_hits_to_recall_results(handle, &bm25_hits) {
-            if target_room_id.is_some_and(|rid| hydrated.drawer.room_id != rid) {
+            if !scope_admits(&allowed, hydrated.drawer.room_id) {
                 continue;
             }
             if !results.iter().any(|r| r.drawer.id == hydrated.drawer.id) {
@@ -347,6 +411,37 @@ fn recall_room_filter(args: &Value) -> Option<RoomType> {
         .map(RoomType::parse)
 }
 
+/// Combine the optional `room` (T7) and `wing` (T9) arguments into one scope.
+///
+/// Why (ADR-0027 #4806 + #4809): a room is a topic and a wing is an owner, so
+/// the two arguments are different axes and every read path must agree on what
+/// they mean together. Resolving them in ONE helper is what keeps
+/// `memory_recall`, `memory_recall_deep`, and `memory_list` from drifting into
+/// three spellings of the same option (ADR-0027 D4.1).
+/// What: `RecallScope::Wing` when `wing` is present, `RecallScope::Room` when
+/// only `room` is, `RecallScope::All` when neither. Supplying BOTH is an error
+/// — "that topic inside that scope" is a real query this ticket does not
+/// implement, and honouring one while dropping the other is exactly the
+/// invisible failure ADR-0027 exists to remove. An unknown wing errors here
+/// too, via `resolve_wing_arg`.
+/// Test: `recall_rejects_wing_and_room_together`,
+/// `recall_rejects_an_unknown_wing`.
+fn recall_scope(handle: &PalaceHandle, args: &Value, tool: &str) -> Result<RecallScope> {
+    let room = recall_room_filter(args);
+    match resolve_wing_arg(handle, args, tool)? {
+        Some(wing_id) => {
+            if room.is_some() {
+                return Err(anyhow!(
+                    "{tool}: 'wing' and 'room' together are not supported yet — \
+                     pass one or the other"
+                ));
+            }
+            Ok(RecallScope::Wing(wing_id))
+        }
+        None => Ok(RecallScope::from_room_filter(room)),
+    }
+}
+
 pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "memory_recall")?;
     let query = args
@@ -354,16 +449,22 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("memory_recall: missing 'query'"))?;
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-    let room = recall_room_filter(&args);
 
     let handle = open_palace_handle(state, &palace)?;
+    // ADR-0027 T7 + T9: resolved BEFORE the warming short-circuit below, so a
+    // wing- or room-scoped recall is filtered on every path. Resolving it after
+    // that early return would let a scoped recall issued during embedder warmup
+    // come back unfiltered.
+    let scope = recall_scope(&handle, &args, "memory_recall")?;
 
     // Issue #1970: while the embedder is still warming up, return BM25 +
     // L0/L1 results immediately instead of blocking/erroring on embedder
     // state.
-    if state.readiness() == DaemonReadiness::Warming {
-        let results =
-            recall_without_embedder(state, &handle, &palace, query, room.as_ref(), top_k).await;
+    // #4836: gate on the embedder's real state, not the readiness latch alone —
+    // this fallback ignores the query, so entering it while the embedder is live
+    // makes every query return the same drawers.
+    if !vector_lane_available(state) {
+        let results = recall_without_embedder(state, &handle, &palace, query, &scope, top_k).await;
         return Ok(serialize_recall(&palace, query, results));
     }
 
@@ -373,13 +474,13 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // When the daemon is unavailable or the env var is unset, the
     // helper returns `None` and we return the vector-only results
     // verbatim — zero behavioural change for existing deployments.
-    // ADR-0027 T7: the BM25 lane needs no room filter of its own here —
+    // ADR-0027 T7: the BM25 lane needs no scope filter of its own here —
     // `fuse_bm25_into_recall` only *boosts* drawers already present in the
     // vector list (it never appends BM25-only hits), and that list is already
-    // room-scoped, so no out-of-room drawer can enter through the lexical
+    // scoped, so no out-of-scope drawer can enter through the lexical
     // lane. The warming path above is different: it hydrates BM25-only hits,
     // which is why it filters explicitly.
-    let vector_fut = recall_in_room(&handle, embedder.as_ref(), query, room, top_k);
+    let vector_fut = recall_scoped(&handle, embedder.as_ref(), query, &scope, top_k);
     let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
     let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
     let mut results = vector_res.context("recall")?;
@@ -396,21 +497,22 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("memory_recall_deep: missing 'query'"))?;
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-    // ADR-0027 T7: deep recall is no longer the odd one out — it takes the
-    // same `room` scope as `memory_recall`.
-    let room = recall_room_filter(&args);
 
     let handle = open_palace_handle(state, &palace)?;
+    // ADR-0027 T7 + T9: deep recall is no longer the odd one out — it takes the
+    // same `room`/`wing` scope as `memory_recall`, resolved before the warming
+    // short-circuit so no path can return unscoped results.
+    let scope = recall_scope(&handle, &args, "memory_recall_deep")?;
 
     // Issue #1970: same warming-fallback posture as memory_recall.
-    if state.readiness() == DaemonReadiness::Warming {
-        let results =
-            recall_without_embedder(state, &handle, &palace, query, room.as_ref(), top_k).await;
+    // #4836: and the same embedder-state gate, for the same reason.
+    if !vector_lane_available(state) {
+        let results = recall_without_embedder(state, &handle, &palace, query, &scope, top_k).await;
         return Ok(serialize_recall(&palace, query, results));
     }
 
     let embedder = state.embedder().await?;
-    let results = recall_deep_in_room(&handle, embedder.as_ref(), query, room, top_k)
+    let results = recall_deep_scoped(&handle, embedder.as_ref(), query, &scope, top_k)
         .await
         .context("recall_deep")?;
     Ok(serialize_recall(&palace, query, results))
@@ -419,16 +521,19 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
 pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "memory_list")?;
     let handle = open_palace_handle(state, &palace)?;
-    let room = args
-        .get("room")
-        .and_then(|v| v.as_str())
-        .map(RoomType::parse);
     let tag = args
         .get("tag")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-    let drawers = handle.list_drawers(room, tag, limit);
+    // ADR-0027 T9: `wing` narrows to one scope's rooms; absent, this is the
+    // unchanged pre-wing listing. Same shared resolver the recall paths use, so
+    // all three agree on what `wing` and `room` mean together.
+    let drawers = match recall_scope(&handle, &args, "memory_list")? {
+        RecallScope::Wing(wing_id) => list_drawers_in_wing(&handle, wing_id, tag, limit),
+        RecallScope::Room(room) => handle.list_drawers(Some(room), tag, limit),
+        RecallScope::All => handle.list_drawers(None, tag, limit),
+    };
     let payload: Vec<Value> = drawers
         .iter()
         .map(|d| {
@@ -486,7 +591,9 @@ async fn recall_all_without_embedder(
     let mut merged = Vec::new();
     for handle in handles {
         let palace_id = handle.id.as_str().to_string();
-        let hits = recall_without_embedder(state, handle, &palace_id, query, None, top_k).await;
+        let hits =
+            recall_without_embedder(state, handle, &palace_id, query, &RecallScope::All, top_k)
+                .await;
         merged.extend(hits.into_iter().map(|result| {
             trusty_common::memory_core::retrieval::CrossPalaceResult {
                 palace_id: palace_id.clone(),
@@ -523,13 +630,14 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
         crate::service::helpers::open_palaces_blocking(state, &palaces, "memory_recall_all").await;
 
     // Issue #1970: BM25 + L0/L1 fallback across every palace while warming.
-    let results = if state.readiness() == DaemonReadiness::Warming {
+    // #4836: gated on the embedder's real state, as the per-palace paths are.
+    let results = if !vector_lane_available(state) {
         recall_all_without_embedder(state, &handles, query, top_k).await
     } else {
+        // #4836: `embedder()` now yields the type-erased shared embedder
+        // directly, so the local re-erasure this used to need is gone.
         let embedder = state.embedder().await?;
-        let erased: std::sync::Arc<dyn trusty_common::memory_core::embed::Embedder + Send + Sync> =
-            embedder;
-        recall_across_palaces(&handles, &erased, query, top_k, deep)
+        recall_across_palaces(&handles, &embedder, query, top_k, deep)
             .await
             .context("recall_across_palaces")?
     };

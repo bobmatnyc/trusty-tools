@@ -85,13 +85,29 @@ pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>> {
         .cloned()
 }
 
+/// Whether the process-wide shared embedder has been initialised.
+///
+/// Why (#4836): a daemon's readiness flag is a latch written by a single
+/// startup warm-up attempt, so it can say `Warming` long after the embedder has
+/// in fact initialised. Callers that degrade on that flag alone served a
+/// query-independent recall fallback for the daemon's whole life. This lets such
+/// a caller check the embedder itself before degrading — and it must not force
+/// a cold init, or the check would reintroduce exactly the startup stall the
+/// degraded path exists to avoid.
+/// What: `OnceCell::initialized()` on `SHARED_EMBEDDER`. Cheap and lock-free;
+/// monotonic (never returns `true` then `false`).
+/// Test: `shared_embedder_initialized_flips_after_seeding`.
+pub fn shared_embedder_initialized() -> bool {
+    SHARED_EMBEDDER.initialized()
+}
+
 /// Pre-seed the shared embedder with a `MockEmbedder` for offline tests.
 ///
 /// Why: CI environments cannot download the ~23 MB ONNX model from HuggingFace
 /// without hitting HTTP 429 rate limits. Calling this before any `remember` /
 /// `recall` / `dream_cycle` operation in tests avoids the download entirely by
 /// pre-populating the process-wide `SHARED_EMBEDDER` cell with a deterministic
-/// hash-based mock (issue #850 — mirrors the fix applied to open-mpm in #813).
+/// hash-based mock (issue #850 — mirrors the fix applied to trusty-agents in #813).
 /// What: Attempts `OnceCell::set` with a 384-dim `MockEmbedder`. Idempotent
 /// — if the cell was already set (by an earlier test in the same process), the
 /// call is a silent no-op; the first caller wins.

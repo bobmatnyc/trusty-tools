@@ -9,16 +9,16 @@
 
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::kg_store::{
-    ACTIVE_SUBJECT_COUNTS, DRAWERS, TRIPLES, TRIPLES_BY_OBJECT, TRIPLES_BY_PREDICATE, TripleValue,
-    decode_u64, decode_value, encode_object_index_key, encode_predicate_index_key,
-    encode_triple_key, encode_u64, encode_value,
+    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TRIPLES_BY_OBJECT,
+    TRIPLES_BY_PREDICATE, TripleValue, decode_u64, decode_value, encode_object_index_key,
+    encode_predicate_index_key, encode_triple_key, encode_u64, encode_value,
 };
 use anyhow::{Context, Result};
 use redb::ReadableTable;
 
 use super::super::kg::Triple;
 use super::store::KgStoreRedb;
-use super::types::{BatchOpResult, BatchWriteOp, drawer_to_record};
+use super::types::{BatchOpResult, BatchWriteOp};
 use super::write_ops::{batch_assert, batch_delete_drawer, batch_retract, batch_upsert_drawer};
 
 impl KgStoreRedb {
@@ -171,13 +171,16 @@ impl KgStoreRedb {
             }
 
             // Drawers — straight upsert. UUID keys collide cleanly on duplicates.
+            // #4884: routed through `batch_upsert_drawer` rather than a local
+            // insert so an import maintains DRAWERS_BY_FACT_KEY like every
+            // other write path; an import that skipped it would leave the slot
+            // index blind to every drawer it brought in.
             let mut drawers_t = wtx.open_table(DRAWERS).context("open drawers table")?;
+            let mut by_fact_key = wtx
+                .open_table(DRAWERS_BY_FACT_KEY)
+                .context("open drawers_by_fact_key table")?;
             for drawer in &drawers {
-                let record = drawer_to_record(drawer);
-                let bytes = encode_value(&record).context("encode drawer for import")?;
-                let id_bytes = *drawer.id.as_bytes();
-                drawers_t
-                    .insert(id_bytes.as_slice(), bytes.as_slice())
+                batch_upsert_drawer(&mut drawers_t, &mut by_fact_key, drawer)
                     .context("insert imported drawer")?;
             }
         }
@@ -224,6 +227,11 @@ impl KgStoreRedb {
                 .open_table(ACTIVE_SUBJECT_COUNTS)
                 .context("open active_subject_counts table")?;
             let mut drawers_t = wtx.open_table(DRAWERS).context("open drawers table")?;
+            // #4884: opened alongside DRAWERS so a batched drawer op maintains
+            // the slot index inside the same commit as the row it changes.
+            let mut by_fact_key = wtx
+                .open_table(DRAWERS_BY_FACT_KEY)
+                .context("open drawers_by_fact_key table")?;
 
             for (idx, op) in ops.iter().enumerate() {
                 let res: Result<BatchOpResult> = match op {
@@ -245,11 +253,13 @@ impl KgStoreRedb {
                     )
                     .map(BatchOpResult::Retracted),
                     BatchWriteOp::UpsertDrawer(drawer) => {
-                        batch_upsert_drawer(&mut drawers_t, drawer)
+                        batch_upsert_drawer(&mut drawers_t, &mut by_fact_key, drawer)
                             .map(|_| BatchOpResult::DrawerUpserted)
                     }
-                    BatchWriteOp::DeleteDrawer(id) => batch_delete_drawer(&mut drawers_t, *id)
-                        .map(|_| BatchOpResult::DrawerDeleted),
+                    BatchWriteOp::DeleteDrawer(id) => {
+                        batch_delete_drawer(&mut drawers_t, &mut by_fact_key, *id)
+                            .map(|_| BatchOpResult::DrawerDeleted)
+                    }
                 };
                 match res {
                     Ok(r) => results.push(r),

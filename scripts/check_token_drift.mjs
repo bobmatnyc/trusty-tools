@@ -100,6 +100,17 @@ const ALLOWLIST = [];
 //
 // `lightSelector`/`darkSelector`: block-scoped regex for each theme block
 //   (the last capture group is the block body).
+//
+// `file` is REPO-ROOT-relative, not crate-relative — an entry does not have to
+// live under `crates/`. Registering a root-level consumer such as `website/`
+// (#5092) is therefore a config entry here, not a code change: pick the mode
+// its stylesheet already uses (Tailwind -> "rgb-triple" with a mappings table,
+// plain CSS -> "hex"), give it its own theme selectors, and add it to the list.
+// check_token_drift.test.mjs pins that root-relative resolution (#5095).
+//
+// Nothing DISCOVERS unregistered consumers: a new UI that never gets an entry
+// here is simply not checked, and the gate stays green. Adding the entry is
+// part of landing the UI.
 // ---------------------------------------------------------------------------
 const ENFORCED = [
   {

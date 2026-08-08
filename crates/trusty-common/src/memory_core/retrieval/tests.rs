@@ -651,6 +651,23 @@ async fn shared_embedder_is_singleton() {
     );
 }
 
+/// Why (#4836): callers need to ask "is the embedder live?" without triggering a
+/// cold init. The recall handlers use exactly this to avoid serving a
+/// query-independent fallback while a stale readiness latch says `Warming`, so
+/// the accessor must report the cell's real state rather than a cached guess.
+/// What: seeds the shared cell, then asserts the accessor reports initialised.
+/// (The pre-seed state is not asserted: this static is process-wide and other
+/// tests in this binary may legitimately have initialised it first.)
+/// Test: This test itself.
+#[test]
+fn shared_embedder_initialized_flips_after_seeding() {
+    seed_shared_embedder_with_mock();
+    assert!(
+        shared_embedder_initialized(),
+        "the shared embedder must report initialised once seeded"
+    );
+}
+
 /// Why: Closet tag boost should raise a tagged drawer's rank above an
 /// untagged but otherwise-similar drawer.
 /// What: Insert two drawers — one whose content shares keywords with the
@@ -1011,6 +1028,120 @@ async fn purge_expired_drops_only_past_ttl() {
     assert!(remaining.contains(&permanent_id));
 }
 
+/// Regression test for #4885: a drawer that expires mid-session must stop
+/// being served WITHOUT reopening the palace.
+///
+/// Why this is the whole ticket: production opens the palace once as
+/// `OpenIntent::Writer` and holds the handle for the daemon's lifetime, so the
+/// open-time sweep never runs again. Before the read-time filter, an expired
+/// drawer kept being injected until the daemon restarted. The handle here is
+/// built once and never reopened, which is exactly the production shape.
+///
+/// It also covers a second gap: `l1_drawers` is filled from the L1 cache
+/// snapshot, and the open-time sweep only retains over the full drawer table —
+/// so an expired drawer in that snapshot survived even a reopen.
+#[test]
+fn expired_l1_drawer_is_excluded_without_reopen() {
+    let dir = tempdir().unwrap();
+    let mut handle = make_handle(dir.path());
+    let room_id = uuid::Uuid::new_v4();
+
+    let mut expired = Drawer::new(room_id, "PR #4818 is in flight at head d3963848");
+    expired.importance = 0.95;
+    expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+    let expired_id = expired.id;
+
+    let mut live = Drawer::new(room_id, "write plainly");
+    live.importance = 0.9;
+    let live_id = live.id;
+
+    handle.add_drawer(expired);
+    handle.add_drawer(live);
+    handle.refresh_l1();
+
+    // Both are in L1 — the filter has to run at read time, not at load time.
+    assert!(
+        handle.l1_drawers.iter().any(|d| d.id == expired_id),
+        "precondition: the expired drawer is cached in L1"
+    );
+
+    let results = retrieve_l0_l1(&handle);
+    let returned: Vec<uuid::Uuid> = results.iter().map(|r| r.drawer.id).collect();
+    assert!(
+        !returned.contains(&expired_id),
+        "an expired drawer must not be served by L0/L1"
+    );
+    assert!(
+        returned.contains(&live_id),
+        "an unexpired drawer must still be served"
+    );
+}
+
+/// #4885: the same gate on the semantic path. The vector index still holds an
+/// expired drawer's embedding until a sweep compacts it, so L2 can score a hit
+/// against a drawer whose TTL passed after this handle was opened.
+#[tokio::test]
+async fn expired_drawer_is_excluded_from_l2() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let room_id = uuid::Uuid::new_v4();
+
+    let mut expired = Drawer::new(room_id, "Rust is a systems programming language");
+    expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+    let expired_id = expired.id;
+
+    let vecs = embedder
+        .embed_batch(std::slice::from_ref(&expired.content))
+        .await
+        .unwrap();
+    handle
+        .vector_store
+        .upsert(expired_id, vecs[0].clone())
+        .await
+        .unwrap();
+    handle.add_drawer(expired);
+
+    let results = retrieve_l2(
+        &handle,
+        embedder.as_ref(),
+        "systems programming Rust",
+        None,
+        5,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !results.iter().any(|r| r.drawer.id == expired_id),
+        "L2 must not return a drawer past its TTL, even on a strong vector hit"
+    );
+}
+
+/// #4885: read-time enforcement FILTERS, it does not delete. The expired
+/// drawer stays in the store — reclamation belongs to `purge_expired` and the
+/// open-time sweep — so a recall can never fail because a cleanup failed.
+#[test]
+fn read_time_expiry_filters_without_deleting() {
+    let dir = tempdir().unwrap();
+    let mut handle = make_handle(dir.path());
+    let room_id = uuid::Uuid::new_v4();
+
+    let mut expired = Drawer::new(room_id, "stale point-in-time fact");
+    expired.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+    let expired_id = expired.id;
+    handle.add_drawer(expired);
+    handle.refresh_l1();
+
+    let results = retrieve_l0_l1(&handle);
+    assert!(!results.iter().any(|r| r.drawer.id == expired_id));
+
+    assert!(
+        handle.drawers.read().iter().any(|d| d.id == expired_id),
+        "the read path must leave the drawer in place for the sweep to reclaim"
+    );
+}
+
 /// Regression test for issue #633: recall must rank by semantic similarity
 /// rather than raw importance.
 ///
@@ -1139,6 +1270,7 @@ fn rescore_l1_by_similarity_patches_scores() {
         drawer_type: crate::memory_core::palace::DrawerType::UserFact,
         expires_at: None,
         completed_at: None,
+        fact_key: None,
     };
 
     // L1 drawer that appears in the similarity map.
@@ -1446,5 +1578,603 @@ async fn recall_deep_in_room_scopes_l3_hits() {
             .iter()
             .any(|r| r.layer == 3 && uuid_prefix_eq(r.drawer.id, frontend_id)),
         "an out-of-room drawer reached a room-scoped deep recall"
+    );
+}
+
+// ── ADR-0027 T9: wing scoping ────────────────────────────────────────────
+//
+// These live here rather than beside `scope.rs` because the wing-scoped read
+// paths need a real `PalaceHandle` (vector store + KG), and `make_handle`
+// above is that harness. Duplicating it next to `scope.rs` would fork the
+// fixture.
+
+use crate::memory_core::room_identity::DEFAULT_WING_ID;
+use crate::memory_core::store::rooms::resolve_or_create_room_in_wing_sync;
+use crate::memory_core::store::wings::{ensure_default_wing, resolve_or_create_wing_sync};
+
+/// Seed the default wing plus a named one, and return `(wing_id, room_id)`
+/// for a room called `label` inside it.
+fn wing_with_room(handle: &PalaceHandle, wing: &str, label: &str) -> (Uuid, Uuid) {
+    ensure_default_wing(&handle.kg).expect("seed default wing");
+    let store = handle.kg.store();
+    let (wing_id, _) = resolve_or_create_wing_sync(&store, wing).expect("create wing");
+    let room = RoomType::parse(label);
+    let room_id = resolve_or_create_room_in_wing_sync(&store, &room, wing_id).expect("create room");
+    (wing_id, room_id)
+}
+
+#[test]
+fn scope_all_matches_everything() {
+    // `RecallScope::All` must resolve to NO filter — distinct from a filter
+    // that admits nothing. Collapsing the two would turn an unresolvable
+    // scope into an unfiltered read.
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    assert!(
+        RecallScope::All.allowed_room_ids(&handle.kg).is_none(),
+        "All must be 'no filter', not 'empty filter'"
+    );
+    assert!(scope_admits(&None, Uuid::new_v4()));
+}
+
+#[test]
+fn wing_scope_is_fail_closed() {
+    // A scope boundary that fails open is a leak (#3064's criterion), so an
+    // unknown wing admits NOTHING rather than everything.
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    ensure_default_wing(&handle.kg).expect("seed");
+    let allowed = RecallScope::Wing(Uuid::from_u128(999)).allowed_room_ids(&handle.kg);
+    assert_eq!(allowed, Some(std::collections::HashSet::new()));
+    assert!(!scope_admits(&allowed, Uuid::new_v4()));
+}
+
+#[test]
+fn wing_scope_returns_only_that_wings_drawers() {
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let (engineer, eng_room) = wing_with_room(&handle, "engineer", "Planning");
+    let (pm, pm_room) = wing_with_room(&handle, "pm", "Planning");
+
+    let eng_drawer = Drawer::new(eng_room, "engineer planning note");
+    let eng_id = eng_drawer.id;
+    let pm_drawer = Drawer::new(pm_room, "pm planning note");
+    let pm_id = pm_drawer.id;
+    handle.add_drawer(eng_drawer);
+    handle.add_drawer(pm_drawer);
+
+    let eng_hits = list_drawers_in_wing(&handle, engineer, None, 50);
+    assert_eq!(eng_hits.len(), 1, "engineer wing sees only its own drawer");
+    assert_eq!(eng_hits[0].id, eng_id);
+
+    let pm_hits = list_drawers_in_wing(&handle, pm, None, 50);
+    assert_eq!(pm_hits.len(), 1);
+    assert_eq!(pm_hits[0].id, pm_id);
+
+    // The default wing owns neither of them.
+    assert!(list_drawers_in_wing(&handle, DEFAULT_WING_ID, None, 50).is_empty());
+}
+
+#[test]
+fn same_named_rooms_in_two_wings_stay_distinct() {
+    // ADR-0027 D2 pattern 3: `engineer/Planning` and `pm/Planning` coexist
+    // without `Custom("engineer-planning")` name mangling.
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let (_e, eng_room) = wing_with_room(&handle, "engineer", "Planning");
+    let (_p, pm_room) = wing_with_room(&handle, "pm", "Planning");
+    assert_ne!(
+        eng_room, pm_room,
+        "one label in two wings must be two rooms"
+    );
+}
+
+#[tokio::test]
+async fn wing_scoped_recall_returns_only_that_wing() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let (engineer, eng_room) = wing_with_room(&handle, "engineer", "Planning");
+    let (_pm, pm_room) = wing_with_room(&handle, "pm", "Planning");
+
+    // Deliberately DISTINCT content per wing. Near-identical vectors would
+    // make the targeted query's hit depend on approximate-index recall rather
+    // than on the wing filter, which is the thing under test here.
+    let eng = Drawer::new(eng_room, "Rust is a systems programming language");
+    let eng_id = eng.id;
+    let pm = Drawer::new(pm_room, "the launch review happens every quarter");
+    let pm_id = pm.id;
+    for d in [&eng, &pm] {
+        let vecs = embedder
+            .embed_batch(std::slice::from_ref(&d.content))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(d.id, vecs[0].clone())
+            .await
+            .unwrap();
+    }
+    handle.add_drawer(eng);
+    handle.add_drawer(pm);
+
+    let results = retrieve_l2_scoped(
+        &handle,
+        embedder.as_ref(),
+        "systems programming Rust",
+        &RecallScope::Wing(engineer),
+        5,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !results.is_empty(),
+        "the engineer wing has a matching drawer"
+    );
+    assert!(
+        results.iter().all(|r| uuid_prefix_eq(r.drawer.id, eng_id)),
+        "wing scope must exclude the other wing, got: {:?}",
+        results.iter().map(|r| r.drawer.id).collect::<Vec<_>>()
+    );
+    assert!(
+        !results.iter().any(|r| uuid_prefix_eq(r.drawer.id, pm_id)),
+        "a pm-wing drawer leaked through an engineer-wing scope"
+    );
+}
+
+#[tokio::test]
+async fn unscoped_recall_is_unchanged_by_wings() {
+    // The "wing is never required of a caller" guarantee at the read surface:
+    // an unscoped L2 over a palace that HAS wings must return exactly what an
+    // unfiltered L2 always returned — both drawers, neither hidden.
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let (_e, eng_room) = wing_with_room(&handle, "engineer", "Planning");
+    let (_p, pm_room) = wing_with_room(&handle, "pm", "Planning");
+
+    let eng = Drawer::new(eng_room, "Rust is a systems programming language");
+    let pm = Drawer::new(pm_room, "the launch review happens every quarter");
+    let ids = [eng.id, pm.id];
+    let pm_id = pm.id;
+    for d in [&eng, &pm] {
+        let vecs = embedder
+            .embed_batch(std::slice::from_ref(&d.content))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(d.id, vecs[0].clone())
+            .await
+            .unwrap();
+    }
+    handle.add_drawer(eng);
+    handle.add_drawer(pm);
+
+    // "Nothing is hidden" is asserted on `list_drawers`, which reads the
+    // in-memory drawer table exactly. Asserting it on L2 instead would demand
+    // 100% recall from an APPROXIMATE HNSW index — a guarantee the vector
+    // store does not make and must not be tested for. That mistake made an
+    // earlier version of this test flaky.
+    let listed = handle.list_drawers(None, None, 50);
+    for id in ids {
+        assert!(
+            listed.iter().any(|d| d.id == id),
+            "an unscoped list must still see every wing's drawers"
+        );
+    }
+
+    // And an unscoped L2 is genuinely un-filtered by wings: a drawer living in
+    // a NON-default wing is reachable when no wing is named. One targeted
+    // query, one expected hit — no reliance on the index returning everything.
+    let results = retrieve_l2(
+        &handle,
+        embedder.as_ref(),
+        "the launch review happens every quarter",
+        None,
+        5,
+    )
+    .await
+    .unwrap();
+    assert!(
+        results.iter().any(|r| uuid_prefix_eq(r.drawer.id, pm_id)),
+        "an unscoped recall must not filter out a non-default wing's drawer"
+    );
+}
+
+#[tokio::test]
+async fn unscoped_write_still_lands_in_the_default_wing() {
+    // The write-side half of the same guarantee: a caller that never mentions
+    // a wing gets the default wing and the pre-T9 room id, unchanged.
+    // `remember` embeds, so the process-wide shared embedder must be seeded
+    // with the mock first (issue #850) — without this the real ONNX embedder
+    // can win the `OnceCell` race and change what every other test in this
+    // binary embeds with.
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    ensure_default_wing(&handle.kg).expect("seed");
+    let id = handle
+        .remember(
+            "a perfectly ordinary curated fact about the project".to_string(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .expect("remember");
+
+    let drawer = handle
+        .drawers
+        .read()
+        .iter()
+        .find(|d| d.id == id)
+        .cloned()
+        .expect("stored");
+    let scoped = crate::memory_core::store::wings::rooms_in_wing(&handle.kg, DEFAULT_WING_ID)
+        .expect("scope");
+    assert!(
+        scoped.contains(&drawer.room_id),
+        "a wing-less write must land in the default wing"
+    );
+    assert!(
+        list_drawers_in_wing(&handle, DEFAULT_WING_ID, None, 50)
+            .iter()
+            .any(|d| d.id == id)
+    );
+}
+
+#[tokio::test]
+async fn wing_scoped_deep_recall_returns_only_that_wing() {
+    // ADR-0027 T9: L3 must honour a wing exactly as L2 does. Without this,
+    // `recall_deep` would silently ignore a scope — the invisible-failure class
+    // the ADR exists to remove. Library-level so the guarantee is pinned where
+    // the filter lives, not only through the MCP surface.
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+    let (engineer, eng_room) = wing_with_room(&handle, "engineer", "Planning");
+    let (_pm, pm_room) = wing_with_room(&handle, "pm", "Planning");
+
+    let eng = Drawer::new(eng_room, "Rust is a systems programming language");
+    let eng_id = eng.id;
+    let pm = Drawer::new(pm_room, "the launch review happens every quarter");
+    let pm_id = pm.id;
+    for d in [&eng, &pm] {
+        let vecs = embedder
+            .embed_batch(std::slice::from_ref(&d.content))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(d.id, vecs[0].clone())
+            .await
+            .unwrap();
+    }
+    handle.add_drawer(eng);
+    handle.add_drawer(pm);
+
+    let results = retrieve_l3_scoped(
+        &handle,
+        embedder.as_ref(),
+        "Rust systems programming",
+        &RecallScope::Wing(engineer),
+        5,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        results.iter().any(|r| uuid_prefix_eq(r.drawer.id, eng_id)),
+        "engineer-wing deep recall returned no matching drawer"
+    );
+    assert!(
+        !results.iter().any(|r| uuid_prefix_eq(r.drawer.id, pm_id)),
+        "a pm-wing drawer leaked through an engineer-wing deep recall"
+    );
+}
+
+// ── #4904: importance must tilt the ranking, not replace it ─────────────────
+
+/// Build a unit vector at a chosen cosine similarity to `reference`.
+///
+/// Why (#4904): the ranking defect only shows up when two candidates are close
+/// in similarity and far apart in importance — the shape the live palace
+/// measured (0.067 similarity spread against a 0.436 importance spread). A
+/// hash-based `MockEmbedder` cannot be steered to that shape, so the test
+/// synthesises the vectors and inserts them into the store directly.
+/// What: normalises `reference`, picks a direction orthogonal to it by
+/// Gram-Schmidt against a `seed`-selected sign pattern, and returns
+/// `cos * r̂ + sqrt(1 - cos²) * ô`. Varying `seed` spreads the fillers over
+/// distinct directions instead of stacking them on one plane.
+/// Test: used by `l2_ranks_similar_low_importance_above_less_similar_high_importance`.
+fn vec_at_cosine(reference: &[f32], cos: f32, seed: usize) -> Vec<f32> {
+    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let rn = norm(reference);
+    let r: Vec<f32> = reference.iter().map(|x| x / rn).collect();
+    // Sign pattern keyed on `seed` — guarantees a non-parallel starting vector
+    // for any non-degenerate reference, and a different one per seed.
+    let base: Vec<f32> = (0..r.len())
+        .map(|i| {
+            if (i / (seed + 1)).is_multiple_of(2) {
+                1.0
+            } else {
+                -1.0
+            }
+        })
+        .collect();
+    let dot: f32 = base.iter().zip(&r).map(|(s, x)| s * x).sum();
+    let mut o: Vec<f32> = base.iter().zip(&r).map(|(s, x)| s - dot * x).collect();
+    let on = norm(&o);
+    for x in o.iter_mut() {
+        *x /= on;
+    }
+    let sin = (1.0 - cos * cos).max(0.0).sqrt();
+    r.iter().zip(&o).map(|(a, b)| cos * a + sin * b).collect()
+}
+
+/// Fill a handle's vector index with off-topic drawers around `qv`.
+///
+/// Why (#4904): `hnsw_rs` recall on a two-point graph is not reliable — the
+/// pre-existing `dream_cycle_merges_duplicates` failure is the same shape, a
+/// top-3 search over two vectors that intermittently returns one. A ranking
+/// assertion must not inherit that, so the index is padded to a couple of dozen
+/// points before anything is asserted about ordering.
+///
+/// #5162 corrects what that padding buys. It does NOT make the search
+/// exhaustive, as this comment used to claim: measured over 20,000 builds of
+/// this fixture, the miss rate is 0.3–0.6% at every pool size from 6 to 42
+/// points, because the miss is a connectivity property of the layer-0 graph and
+/// not a density one. See [`ranking_fixture_with_both_candidates`] for the
+/// measurement and for what the ranking tests do about it.
+/// What: inserts `n` drawers at cosines stepping down from 0.60, each on its own
+/// orthogonal direction, with mid-range importance so they cannot dominate under
+/// either the old or the new formula.
+/// Test: used by the two #4904 ranking tests below.
+async fn pad_index(handle: &PalaceHandle, qv: &[f32], n: usize) {
+    let room_id = Uuid::new_v4();
+    for i in 0..n {
+        let mut d = Drawer::new(room_id, format!("unrelated filler drawer {i}"));
+        d.importance = 0.5;
+        handle
+            .vector_store
+            .upsert(d.id, vec_at_cosine(qv, 0.60 - 0.02 * i as f32, i + 2))
+            .await
+            .unwrap();
+        handle.add_drawer(d);
+    }
+}
+
+/// Why (#4904): `rank_score` is the one place the three ranking inputs meet, so
+/// the tiebreaker property is asserted on it directly rather than inferred from
+/// an end-to-end ordering.
+/// What: asserts a 0.05-wide similarity gap survives a full-width importance
+/// gap, that importance still orders equal-similarity candidates, and that the
+/// clamp holds.
+/// Test: this is the test.
+#[test]
+fn rank_score_keeps_importance_a_tiebreaker() {
+    use super::layers::rank_score;
+
+    // The measured production shape: similarity differs by 0.05, importance by
+    // the full range. Similarity must win.
+    let more_similar_less_important = rank_score(0.80, 0.05, 0.0);
+    let less_similar_most_important = rank_score(0.75, 1.00, 0.0);
+    assert!(
+        more_similar_less_important > less_similar_most_important,
+        "importance overrode a 0.05 similarity gap: {more_similar_less_important} vs \
+         {less_similar_most_important}"
+    );
+
+    // With similarity equal, importance still decides — it is a tiebreaker,
+    // not a no-op.
+    assert!(
+        rank_score(0.70, 1.00, 0.0) > rank_score(0.70, 0.05, 0.0),
+        "importance stopped breaking ties between equally-similar candidates"
+    );
+
+    // The closet boost and the 1.0 clamp are unchanged.
+    assert!(rank_score(0.70, 0.5, 0.15) > rank_score(0.70, 0.5, 0.0));
+    assert_eq!(rank_score(1.0, 1.0, 0.15), 1.0);
+}
+
+/// Why (#4904): the hook injected ~1,211 tokens per prompt while missing
+/// curated facts because L2 scored `eff_importance * similarity`. With
+/// `eff_importance` spanning 0.436 inside a candidate pool whose similarity
+/// spans 0.067, the product ranked by importance and ignored relevance — a
+/// 400-drawer self-retrieval probe on the live palace scored recall@1 102/400
+/// under that formula against 291/400 for similarity alone.
+/// What: two drawers with hand-built vectors 0.05 apart in cosine and at
+/// opposite ends of the importance range. Under the old formula the
+/// high-importance drawer wins (0.75 × 1.0 = 0.75 beats 0.80 × 0.05 = 0.04);
+/// under [`rank_score`] the more similar one does.
+/// Test: this is the test.
+#[tokio::test]
+async fn l2_ranks_similar_low_importance_above_less_similar_high_importance() {
+    init_embedder();
+    let embedder = shared_embedder().await.unwrap();
+
+    let query = "context budget startup memory migration duplicate deletion";
+    let qv = embedder
+        .embed_batch(&[query.to_string()])
+        .await
+        .unwrap()
+        .remove(0);
+
+    let (_dir, handle, on_topic_id, loud_id) = ranking_fixture_with_both_candidates(&qv).await;
+
+    let results = retrieve_l2(&handle, embedder.as_ref(), query, None, 5)
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 5, "top_k=5 over a padded index");
+    assert!(
+        uuid_prefix_eq(results[0].drawer.id, on_topic_id),
+        "the more similar drawer must rank first; importance won instead \
+         (top={:?} scores={:?})",
+        results[0].drawer.id,
+        results.iter().map(|r| r.score).collect::<Vec<_>>()
+    );
+    // #5162: this assertion used to carry no evidence, so the CI failure it
+    // produced said only "expected the high-importance drawer second" and the
+    // investigation had to reconstruct the scores from scratch. Dump the same
+    // components the first assertion does.
+    assert!(
+        uuid_prefix_eq(results[1].drawer.id, loud_id),
+        "expected the high-importance drawer second, got {:?} \
+         (order={:?} scores={:?})",
+        results[1].drawer.id,
+        results.iter().map(|r| r.drawer.id).collect::<Vec<_>>(),
+        results.iter().map(|r| r.score).collect::<Vec<_>>()
+    );
+}
+
+/// Build the #4904 ranking fixture on an index whose candidate pool provably
+/// contains both drawers.
+///
+/// Why (#5162): `hnsw_rs` seeds its level-assignment RNG from OS entropy inside
+/// `Hnsw::new`, so every index build is a different random graph, and layer-0
+/// neighbour lists are pruned by Navarro's heuristic. Some of those graphs leave
+/// the 0.75-cosine drawer unreachable from the descent pivot — `search` walks
+/// the pivot's connected component and returns 15–20 of the 26 points, never
+/// offering that drawer as a candidate at all. Measured over 20,000 builds of
+/// this exact fixture: 85 misses (0.42%), always the runner-up and never the
+/// winner, which is precisely the shape of the `main` failure — `results[0]`
+/// held, `results[1]` did not. It is not density: the rate is 0.3–0.6% at every
+/// pool size from 6 to 42 points, and neither `set_keeping_pruned` (58/20,000)
+/// nor `set_extend_candidates` (90/20,000) removes it.
+///
+/// Whether the approximate index surfaces a candidate is a property of the
+/// index, with its own tests. It is not the ranking rule this test is named for,
+/// and it must not decide whether that rule looks broken.
+/// What: rebuilds the fixture until `vector_store::search` returns a full
+/// candidate pool containing both drawers, then hands it back. The retry
+/// condition reads the CANDIDATE POOL only, never the ranked output, so it
+/// cannot mask a ranking regression: a broken `rank_score` still yields a pool
+/// with both drawers on the first attempt and still fails the assertions.
+/// Test: `l2_ranks_similar_low_importance_above_less_similar_high_importance`.
+async fn ranking_fixture_with_both_candidates(
+    qv: &[f32],
+) -> (tempfile::TempDir, PalaceHandle, Uuid, Uuid) {
+    // At a 0.42% per-build miss rate, 12 attempts leave a 4e-30 chance of
+    // exhausting them — the assertion below is a corruption check, not a
+    // flake budget.
+    const MAX_ATTEMPTS: usize = 12;
+    // The pool `retrieve_l2` will see: top_k=5 over-fetches 3x.
+    const POOL: usize = 15;
+
+    for _ in 0..MAX_ATTEMPTS {
+        let dir = tempdir().unwrap();
+        let handle = make_handle(dir.path());
+        let room_id = Uuid::new_v4();
+
+        let mut on_topic = Drawer::new(room_id, "the fact the user was actually asking for");
+        on_topic.importance = 0.05;
+        let on_topic_id = on_topic.id;
+
+        let mut loud = Drawer::new(room_id, "an unrelated but maximally important drawer");
+        loud.importance = 1.0;
+        let loud_id = loud.id;
+
+        handle
+            .vector_store
+            .upsert(on_topic_id, vec_at_cosine(qv, 0.80, 0))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(loud_id, vec_at_cosine(qv, 0.75, 1))
+            .await
+            .unwrap();
+        handle.add_drawer(on_topic);
+        handle.add_drawer(loud);
+        pad_index(&handle, qv, 24).await;
+
+        let pool = handle.vector_store.search(qv, POOL).await.unwrap();
+        let has_both = [on_topic_id, loud_id]
+            .iter()
+            .all(|id| pool.iter().any(|h| uuid_prefix_eq(h.drawer_id, *id)));
+        if has_both && pool.len() == POOL {
+            return (dir, handle, on_topic_id, loud_id);
+        }
+    }
+    panic!(
+        "{MAX_ATTEMPTS} index builds in a row failed to surface both ranking \
+         drawers in a {POOL}-candidate pool; at the measured 0.42% miss rate \
+         that is not chance — the vector store or the fixture is broken"
+    );
+}
+
+/// Why (#4904): the three explanations for a fact missing from an injection —
+/// absent from the candidate set, present but below the cutoff, never queried —
+/// are indistinguishable from the truncated top-k alone. The pre-truncation
+/// trace is what separates them, so it must survive refactors of the scoring
+/// loop.
+/// What: captures `tracing` events on [`RANK_TRACE_TARGET`] across a `top_k=1`
+/// L2 call and asserts every candidate the HNSW pool yielded was traced, not
+/// just the one that survived truncation.
+/// Test: this is the test.
+#[tokio::test]
+async fn l2_rank_trace_emits_one_event_per_candidate() {
+    use std::sync::Mutex;
+    use tracing::subscriber::with_default;
+
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+
+    let query = "trace every candidate before truncation";
+    let qv = embedder
+        .embed_batch(&[query.to_string()])
+        .await
+        .unwrap()
+        .remove(0);
+    pad_index(&handle, &qv, 24).await;
+
+    // The pool `retrieve_l2` will see: `top_k=1` over-fetches to 3.
+    let pool = handle.vector_store.search(&qv, 3).await.unwrap();
+    assert_eq!(
+        pool.len(),
+        3,
+        "expected a 3-wide over-fetched candidate pool"
+    );
+
+    #[derive(Clone, Default)]
+    struct Counter(Arc<Mutex<usize>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Counter {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() == super::layers::RANK_TRACE_TARGET {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+    }
+
+    let counter = Counter::default();
+    let seen = counter.0.clone();
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::DEBUG)
+            .with(counter);
+        // `retrieve_l2` is async; drive it to completion inside the dispatch
+        // scope so every event is attributed to this subscriber.
+        let fut = retrieve_l2(&handle, embedder.as_ref(), query, None, 1);
+        let results = with_default(subscriber, || futures::executor::block_on(fut)).unwrap();
+        assert_eq!(results.len(), 1, "top_k=1 must truncate to one result");
+    }
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        pool.len(),
+        "every candidate must be traced, including the ones truncation drops"
     );
 }

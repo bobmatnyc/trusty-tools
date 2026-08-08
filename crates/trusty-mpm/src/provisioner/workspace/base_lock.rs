@@ -1,69 +1,151 @@
-//! Advisory locking + bare-repo detection for `RealGitBackend::ensure_base_checkout`.
+//! Advisory locking + checkout detection for `RealGitBackend::ensure_base_checkout`.
 //!
 //! Why: split out of `workspace.rs` (which grew past the 500-SLOC production
 //! cap once trusty-review's PR #1936 / #1935 findings were fixed) to keep
 //! both files under the mechanical `scripts/check_line_cap.sh` gate. Grouping
 //! these items together here — rather than trimming their Why/What/Test
 //! documentation — keeps the fix's rationale fully documented in place.
-//! What: [`is_established_bare_checkout`] replaces the fragile
-//! `HEAD.is_file()` idempotency probe (review finding #2) with a real
-//! `git rev-parse --is-bare-repository` check; [`acquire_base_checkout_lock`]
-//! (backed by [`BaseCheckoutLock`], a dependency-free marker-file mutex) plus
-//! [`lock_is_stale`] serialize the check-and-clone window across concurrent
-//! callers to fix the TOCTOU provisioning race (review finding #1).
-//! [`stale_base_dir_error`] turns the "the base path is occupied by a broken,
-//! non-bare directory" state into an actionable operator error (issue #1937
-//! item 1), and is shared by BOTH backends; [`fake_is_established_bare_checkout`]
-//! / [`write_fake_bare_checkout`] let `FakeGitBackend` mirror the real backend's
-//! `rev-parse`-based validity semantics rather than a superficial file-exists
-//! probe (issue #1937 item 3).
+//! What: [`is_established_checkout`] replaces the fragile `HEAD.is_file()`
+//! idempotency probe (review finding #2) with a real `git rev-parse` check;
+//! [`acquire_base_checkout_lock`] (backed by [`BaseCheckoutLock`], a
+//! dependency-free marker-file mutex) plus [`lock_is_stale`] serialize the
+//! check-and-clone window across concurrent callers to fix the TOCTOU
+//! provisioning race (review finding #1). [`stale_base_dir_error`] turns the
+//! "the base path is occupied by a broken directory" state into an actionable
+//! operator error (issue #1937 item 1), and is shared by BOTH backends;
+//! [`fake_is_established_checkout`] / [`write_fake_checkout`] let
+//! `FakeGitBackend` mirror the real backend's `rev-parse`-based validity
+//! semantics rather than a superficial file-exists probe (issue #1937 item 3).
 //! [`stale_base_quarantine_path`] backs that error's non-destructive recovery
 //! hint (issue #3605: the hint used to be a literal `rm -rf`).
+//!
+//! #4270 moved the base checkout from `<project_dir>/.base` (bare) to
+//! `<project_dir>` itself (non-bare), converging on the shape the in-project
+//! spawn path already produces. The detection predicate moved with it, and
+//! [`protected_dir_error`] guards the cases that move introduces: a project
+//! directory already holding git or trusty-mpm state, whose worktrees may be
+//! live.
 //! Test: `ensure_base_checkout_recovers_from_concurrent_race`,
-//! `ensure_base_checkout_rejects_stale_non_bare_directory`,
+//! `ensure_base_checkout_rejects_stale_directory`,
 //! `base_checkout_lock_recovers_stale_lock_marker`,
-//! `fake_ensure_base_checkout_rejects_stale_non_bare_directory`,
-//! `stale_base_dir_error_suggests_quarantine_not_deletion`, all in
+//! `fake_ensure_base_checkout_rejects_stale_directory`,
+//! `stale_base_dir_error_suggests_quarantine_not_deletion`,
+//! `provision_in_leaves_an_existing_dot_base_store_untouched`, all in
 //! `provisioner/workspace/tests.rs`.
 
 use std::path::{Path, PathBuf};
 
 use super::ProvisionError;
 
-/// Determine whether `dir` is an already-established BARE git checkout.
+/// Determine whether `dir` is an already-established git checkout ROOT.
 ///
 /// Why: the previous idempotency guard for [`super::RealGitBackend`]'s
 /// `ensure_base_checkout` (`base_dir.join("HEAD").is_file()`) only checks for
 /// a file literally named `HEAD` at the root of `base_dir` — it never
 /// confirms that directory is actually a valid, complete git repository. A
 /// directory that merely contains a stray `HEAD` file (e.g. left behind by a
-/// `git clone --bare` that crashed mid-clone — git writes `HEAD` early,
-/// before the rest of the object database/refs — or any other stale/corrupt
-/// artifact) would pass the old check and be silently mistaken for an
-/// established shared base (trusty-review finding #2 on PR #1936 / #1935).
-/// `git rev-parse --is-bare-repository` is the canonical way git itself
-/// answers this question, so it cannot be fooled by directory layout alone.
-/// This helper is also reused to resolve the TOCTOU provisioning race
-/// (finding #1): after acquiring [`acquire_base_checkout_lock`], re-running
-/// this check tells the caller whether a concurrent caller already finished
-/// establishing a valid base while this one was waiting.
-/// What: shells out to `git -C dir rev-parse --is-bare-repository` and
-/// returns `true` only when the command exits successfully AND stdout trims
-/// to exactly `"true"`. Returns `false` (never panics) if the subprocess
-/// fails to spawn, exits non-zero (not a git repository at all), or prints
-/// anything else (e.g. `"false"` for a non-bare repo).
+/// clone that crashed mid-flight — git writes `HEAD` early, before the rest
+/// of the object database/refs — or any other stale/corrupt artifact) would
+/// pass the old check and be silently mistaken for an established shared base
+/// (trusty-review finding #2 on PR #1936 / #1935). Asking git itself cannot be
+/// fooled by directory layout alone. This helper is also reused to resolve the
+/// TOCTOU provisioning race (finding #1): after acquiring
+/// [`acquire_base_checkout_lock`], re-running this check tells the caller
+/// whether a concurrent caller already finished establishing a valid base
+/// while this one was waiting.
+///
+/// #4270: the base checkout is now the non-bare clone at `<project_dir>`, the
+/// same one `daemon::managed_routes::inproject::ensure_base_clone` establishes,
+/// so the predicate asks for a WORKING TREE whose root is `dir` itself. The
+/// toplevel comparison is load-bearing twice over: a `dir` nested inside some
+/// unrelated enclosing repository would otherwise report `true` without holding
+/// a clone of its own, and a bare repository (the legacy `.base` shape) reports
+/// `false` because it has no working tree at all.
+/// What: shells out to `git -C dir rev-parse --show-toplevel` and returns
+/// `true` only when the command exits successfully AND the printed toplevel
+/// canonicalizes to the same path as `dir`. Returns `false` (never panics) if
+/// the subprocess fails to spawn, exits non-zero (not a git working tree),
+/// or names a different root.
 /// Test: `ensure_base_checkout_recovers_from_concurrent_race`,
-/// `ensure_base_checkout_rejects_stale_non_bare_directory`.
-pub(super) fn is_established_bare_checkout(dir: &Path) -> bool {
+/// `ensure_base_checkout_rejects_stale_directory`.
+pub(super) fn is_established_checkout(dir: &Path) -> bool {
     use std::process::Command;
     let dir_s = dir.to_string_lossy();
-    match Command::new("git")
-        .args(["-C", &dir_s, "rev-parse", "--is-bare-repository"])
+    let out = match Command::new("git")
+        .args(["-C", &dir_s, "rev-parse", "--show-toplevel"])
         .output()
     {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim() == "true",
+        Ok(out) if out.status.success() => out,
+        _ => return false,
+    };
+    let toplevel = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    match (std::fs::canonicalize(&toplevel), std::fs::canonicalize(dir)) {
+        (Ok(top), Ok(here)) => top == here,
         _ => false,
     }
+}
+
+/// Directory name of the LEGACY per-project bare base store retired by #4270.
+///
+/// Why: one literal, shared by the two guards that must recognise a legacy
+/// store and refuse to touch it. Re-exported from [`crate::core::harness_root`]
+/// rather than respelled, so the reader that maps a `.base` common-dir back to
+/// its project and the writer that refuses to clobber it can never disagree.
+/// What: `.base`.
+/// Test: `provision_in_leaves_an_existing_dot_base_store_untouched`.
+pub(super) use crate::core::harness_root::BASE_CLONE_DIRNAME as LEGACY_BASE_DIRNAME;
+
+/// Build the refusal for a project directory holding git or trusty-mpm state —
+/// or `None` when it holds none.
+///
+/// Why (#4270): provisioning now clones the base into `<project_dir>` itself,
+/// and `git clone` refuses a non-empty destination. Before #4270 `base_dir` was
+/// `<project_dir>/.base`, which for an in-project-shaped project does not
+/// exist, so [`stale_base_dir_error`] returned `None` and its `mv` hint was
+/// unreachable there. Pointing `base_dir` at the project directory made that
+/// hint reachable — aimed at the directory holding `.worktrees/<id>` for every
+/// live session, and at `.base` with every worktree beneath it. That is the
+/// #3605 string with a bigger target, so the whole class is diverted here to a
+/// refusal that suggests nothing which moves or deletes anything.
+///
+/// Reaching this on a HEALTHY repository is the case that makes it matter:
+/// [`is_established_checkout`] reports `false` for a transient git spawn
+/// failure, a missing `git` binary, and a dubious-ownership rejection alike, so
+/// a momentary hiccup lands here with `.git` present. Naming that state and
+/// stopping is right in every one of those; suggesting a rename is not.
+///
+/// KNOWN REGRESSION, accepted. A crashed `git clone` leaves a partial `.git`,
+/// so the half-clone #1937 item 1 was written for now lands here and gets NO
+/// quarantine command — on the pre-#4270 code it reached the `mv` hint, because
+/// a partial BARE clone writes no `.git`. Recovery for that case is genuinely
+/// worse. It is accepted because a half-clone and a healthy checkout whose git
+/// probe just failed are indistinguishable from here, and one of them holds
+/// live worktrees: guessing wrong in the recoverable direction destroys work,
+/// guessing wrong in this direction costs the operator one manual decision.
+/// What: returns `Some(ProvisionError::Git(..))` naming `project_dir` and the
+/// protected entry [`crate::core::harness_root::protected_state_in`] found;
+/// `None` otherwise, leaving the caller on its normal path.
+/// Test: `provision_in_leaves_an_existing_dot_base_store_untouched`,
+/// `stale_base_dir_error_never_offers_to_move_a_dir_holding_live_worktrees`.
+fn protected_dir_error(project_dir: &Path) -> Option<ProvisionError> {
+    let found = crate::core::harness_root::protected_state_in(project_dir)?;
+    Some(ProvisionError::Git(format!(
+        "cannot establish the base checkout at {project}: it holds {found}, so it \
+         already carries git or trusty-mpm state.\n\
+         \n\
+         Anything under it may be in use — a `{worktrees}/<id>` worktree, or a \
+         `{legacy}` store owning worktrees of its own — and one of those sessions may \
+         be live right now. trusty-mpm will not move, rename, or delete any of it, and \
+         neither should you while a session is running.\n\
+         \n\
+         If this project has a `{legacy}` store, retiring it is a manual step for once \
+         no session needs it (#4270). If `.git` is present, this path expected git to \
+         recognise a checkout here and it did not — check that `git -C {project} \
+         rev-parse --show-toplevel` succeeds before retrying.",
+        project = project_dir.display(),
+        legacy = LEGACY_BASE_DIRNAME,
+        worktrees = crate::session_manager::decommission::WORKTREES_DIRNAME,
+    )))
 }
 
 /// Build the timestamped sibling path a stale base directory should be
@@ -86,13 +168,13 @@ pub(super) fn stale_base_quarantine_path(base_dir: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Build an actionable error for a base-checkout path occupied by a broken,
-/// non-bare directory — or return `None` when the path is safe to clone into.
+/// Build an actionable error for a base-checkout path occupied by a broken
+/// directory — or return `None` when the path is safe to clone into.
 ///
-/// Why: `ensure_base_checkout` correctly refuses to reuse a `<project_dir>/.base`
-/// that is not a valid bare checkout (a leftover from a crashed mid-clone, or a
-/// stale non-bare directory), but the resulting failure used to be an opaque
-/// `git clone --bare` "destination path already exists" message that gives the
+/// Why: `ensure_base_checkout` correctly refuses to reuse a base path that is
+/// not a valid checkout (a leftover from a crashed mid-clone, or any other
+/// stale directory), but the resulting failure used to be an opaque
+/// `git clone` "destination path already exists" message that gives the
 /// operator no recovery path (issue #1937 item 1). This error is, however,
 /// consumed almost exclusively by an autonomous agent, which executes a
 /// suggested command verbatim — so the message's own recovery hint is a
@@ -108,25 +190,30 @@ pub(super) fn stale_base_quarantine_path(base_dir: &Path) -> PathBuf {
 /// message states the shared-ownership blast radius explicitly, which is the
 /// context whose absence made the destructive hint look safe to follow.
 /// What: returns `None` when `base_dir` is absent or empty (either is safe —
-/// `git clone --bare` accepts a missing or empty target); otherwise returns
+/// `git clone` accepts a missing or empty target); otherwise returns
 /// `Some(ProvisionError::Git(..))` whose message names the exact path, warns
 /// that the path is shared across sessions, and gives a single non-destructive
 /// `mv <path> <path>.stale-<timestamp>` command. It never emits a recursive
-/// delete. Callers MUST invoke this only AFTER confirming the path is not
-/// already a valid bare checkout (via [`is_established_bare_checkout`]) so a
-/// healthy base is never flagged.
-/// Test: `ensure_base_checkout_rejects_stale_non_bare_directory`,
-/// `fake_ensure_base_checkout_rejects_stale_non_bare_directory` (both assert
+/// delete. A whole class is answered ahead of that, via [`protected_dir_error`]:
+/// a directory holding git or trusty-mpm state gets a refusal that suggests
+/// moving nothing (#4270), because the `mv` hint aimed at a project directory
+/// would rename live worktrees out from under their sessions. Only foreign
+/// debris — no `.git`, no `.base`, no `.worktrees` — still gets the quarantine
+/// hint. Callers MUST invoke this only AFTER confirming the path is not already
+/// a valid checkout (via [`is_established_checkout`]) so a healthy base is
+/// never flagged.
+/// Test: `ensure_base_checkout_rejects_stale_directory`,
+/// `fake_ensure_base_checkout_rejects_stale_directory` (both assert
 /// the message names the path and carries the quarantine hint), and
 /// `stale_base_dir_error_suggests_quarantine_not_deletion` (asserts the message
 /// contains NO destructive command — the #3605 regression guard).
 pub(super) fn stale_base_dir_error(base_dir: &Path) -> Option<ProvisionError> {
-    // A missing dir (NotFound) or an empty dir (no entries) is fine: `git clone
-    // --bare` clones cleanly into either. Only a NON-empty dir that is not a
-    // valid bare checkout is the stale/broken state worth reporting. Any OTHER
+    // A missing dir (NotFound) or an empty dir (no entries) is fine: `git clone`
+    // clones cleanly into either. Only a NON-empty dir that is not a
+    // valid checkout is the stale/broken state worth reporting. Any OTHER
     // read_dir error (e.g. permission-denied) must NOT be swallowed as "absent":
     // treating an unreadable directory as non-empty forces an actionable error
-    // here instead of letting `git clone --bare` fail later with an opaque
+    // here instead of letting `git clone` fail later with an opaque
     // message — exactly the failure mode this helper exists to prevent.
     let non_empty = match std::fs::read_dir(base_dir) {
         Ok(mut entries) => entries.next().is_some(),
@@ -136,9 +223,15 @@ pub(super) fn stale_base_dir_error(base_dir: &Path) -> Option<ProvisionError> {
     if !non_empty {
         return None;
     }
+    // #4270: a directory holding git or trusty-mpm state is occupied, but
+    // nothing about it is stale — and the quarantine hint below must never be
+    // aimed at it. Only foreign debris reaches the `mv` suggestion.
+    if let Some(err) = protected_dir_error(base_dir) {
+        return Some(err);
+    }
     Some(ProvisionError::Git(format!(
-        "base checkout path {path} exists but is not a valid bare git checkout \
-         (likely a leftover from a crashed clone, or a stale non-bare directory).\n\
+        "base checkout path {path} exists but is not a valid git checkout \
+         (likely a leftover from a crashed clone, or a stale directory).\n\
          \n\
          WARNING: this path is the SHARED git base for EVERY trusty-mpm worktree of \
          this project, and other sessions may be using it right now. Destroying it \
@@ -156,48 +249,49 @@ pub(super) fn stale_base_dir_error(base_dir: &Path) -> Option<ProvisionError> {
     )))
 }
 
-/// Determine whether `dir` is an already-established (fake) BARE checkout,
-/// mirroring [`is_established_bare_checkout`]'s intent for `FakeGitBackend`.
+/// Determine whether `dir` is an already-established (fake) checkout,
+/// mirroring [`is_established_checkout`]'s intent for `FakeGitBackend`.
 ///
 /// Why: `FakeGitBackend::ensure_base_checkout` used to treat a lone
 /// `dir.join("HEAD").is_file()` as proof of an established base — the exact
 /// superficial file-existence probe the real backend abandoned in favour of
-/// `git rev-parse --is-bare-repository` (issue #1937 item 3). A future test
-/// author using the fake to simulate a stale `.base` (a stray `HEAD` file with
-/// no repository structure) would have gotten a false-positive "already
-/// established" pass, hiding the very stale-directory bug a real-backend test
-/// would catch. This check restores that fidelity in the filesystem-light fake.
-/// What: returns `true` only when BOTH a root-level `HEAD` file exists AND a
-/// root-level `config` file marked `bare = true` exists — the structural
-/// markers [`write_fake_bare_checkout`] writes to simulate a real bare clone. A
-/// directory containing only a stray `HEAD` (the stale-mid-clone shape) fails
-/// the `config` check and reads as NOT established, matching the real backend.
-/// Test: `fake_ensure_base_checkout_rejects_stale_non_bare_directory`,
+/// asking git (issue #1937 item 3). A future test author using the fake to
+/// simulate a stale base (a stray `HEAD` file with no repository structure)
+/// would have gotten a false-positive "already established" pass, hiding the
+/// very stale-directory bug a real-backend test would catch. This check
+/// restores that fidelity in the filesystem-light fake.
+/// What: returns `true` only when the `.git/config` file
+/// [`write_fake_checkout`] writes exists — the same marker
+/// `FakeGitBackend::is_git_repo` and `clone_repo` already use, and the
+/// filesystem-light stand-in for the real backend's working-tree probe. A
+/// directory containing only a stray `HEAD` (the stale-mid-clone shape) reads
+/// as NOT established, matching the real backend.
+/// Test: `fake_ensure_base_checkout_rejects_stale_directory`,
 /// `provision_reuses_base_checkout_across_sessions`.
-pub(super) fn fake_is_established_bare_checkout(dir: &Path) -> bool {
-    dir.join("HEAD").is_file()
-        && std::fs::read_to_string(dir.join("config"))
-            .map(|c| c.contains("bare = true"))
-            .unwrap_or(false)
+pub(super) fn fake_is_established_checkout(dir: &Path) -> bool {
+    dir.join(".git").join("config").is_file()
 }
 
 /// Write the minimal structural markers that make a directory read as an
-/// established (fake) bare checkout.
+/// established (fake) checkout.
 ///
 /// Why: `FakeGitBackend::ensure_base_checkout` must leave behind enough state
-/// that [`fake_is_established_bare_checkout`] recognises it on the next call
+/// that [`fake_is_established_checkout`] recognises it on the next call
 /// (idempotent reuse across sessions) while still being distinguishable from a
 /// stale directory that merely holds a stray `HEAD` file (issue #1937 item 3).
-/// What: creates `dir` (and parents) and writes a `HEAD` ref pointer plus a
-/// `config` file carrying the `bare = true` marker — the two files
-/// [`fake_is_established_bare_checkout`] requires. Returns any I/O error as
-/// [`ProvisionError::Io`].
+/// What: creates `dir/.git` (and parents) and writes a `config` naming
+/// `repo_url` as `origin`, matching what `FakeGitBackend::clone_repo` produces
+/// so `is_git_repo`/`remote_url` answer consistently for a faked base clone.
+/// Returns any I/O error as [`ProvisionError::Io`].
 /// Test: `provision_reuses_base_checkout_across_sessions` (second provision is a
-/// no-op reuse), `fake_ensure_base_checkout_rejects_stale_non_bare_directory`.
-pub(super) fn write_fake_bare_checkout(dir: &Path) -> Result<(), ProvisionError> {
-    std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join("HEAD"), "ref: refs/heads/main\n")?;
-    std::fs::write(dir.join("config"), "[core]\n\tbare = true\n")?;
+/// no-op reuse), `fake_ensure_base_checkout_rejects_stale_directory`.
+pub(super) fn write_fake_checkout(dir: &Path, repo_url: &str) -> Result<(), ProvisionError> {
+    let git_dir = dir.join(".git");
+    std::fs::create_dir_all(&git_dir)?;
+    std::fs::write(
+        git_dir.join("config"),
+        format!("[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = {repo_url}\n"),
+    )?;
     Ok(())
 }
 
@@ -239,7 +333,7 @@ pub(super) const LOCK_STALE_AFTER: std::time::Duration = std::time::Duration::fr
 /// Why: the lock must live NEXT TO `base_dir` (not inside it), since
 /// `base_dir` itself may not exist yet when the lock is first acquired.
 /// What: `<base_dir's parent>/<base_dir's file name>.lock`, e.g.
-/// `<project_dir>/.base.lock` for the standard `.base` base-checkout name.
+/// `<repos_root>/<owner>/<repo>.lock` for a `<owner>/<repo>` project dir.
 /// Test: exercised transitively by every `ensure_base_checkout` test.
 pub(super) fn base_checkout_lock_path(base_dir: &Path) -> PathBuf {
     match (base_dir.parent(), base_dir.file_name()) {
@@ -277,8 +371,8 @@ impl Drop for BaseCheckoutLock {
 ///
 /// Why: resolves the TOCTOU race (#1935 review finding #1) at its root by
 /// serializing the whole check-and-clone window, rather than trying to
-/// detect and recover from corruption after the fact — real `git clone
-/// --bare` is not safe against a concurrent writer into the same target
+/// detect and recover from corruption after the fact — a real `git clone`
+/// is not safe against a concurrent writer into the same target
 /// directory (empirically observed failure mode without this lock: two
 /// interleaved clones can corrupt each other's partial checkout, e.g.
 /// colliding on copying `hooks/commit-msg.sample`, rather than cleanly
@@ -318,7 +412,7 @@ pub(super) fn acquire_base_checkout_lock(
                 // after which BOTH callers could hold the lock at once. We
                 // accept this window deliberately: this is an ADVISORY lock, not
                 // a correctness-critical mutex — the only thing it guards is a
-                // rare first-provision `git clone --bare` collision (finding #1),
+                // rare first-provision `git clone` collision (finding #1),
                 // and `LOCK_STALE_AFTER` (5 min) is set comfortably longer than
                 // `LOCK_ACQUIRE_TIMEOUT` (60 s) precisely so a live,
                 // slow-but-progressing clone is never mistaken for an abandoned

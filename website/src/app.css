@@ -1,0 +1,333 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Why: the Foundry v2 token layer for the public site (#5097, epic #5092).
+ * docs/design/UI/design-system/tokens.css is the canonical hex source; this
+ * file is this package's hand-transcription of it, following the convention
+ * the three existing Tailwind consumers already use (trusty-agents #3387,
+ * trusty-code-gui #3153/#3380, trusty-mpm-gui #3488) rather than a fourth.
+ *
+ * What: every custom property below is a SPACE-SEPARATED RGB TRIPLE
+ * ("R G B", not "#rrggbb"), because tailwind.config.js consumes them as
+ * `rgb(var(--color-*) / <alpha-value>)` — the only form from which Tailwind
+ * can generate opacity-modified utilities (`bg-foundry-primary/10`). A bare
+ * `var(--color-*)` silently generates no rule for those; see the note in
+ * crates/trusty-agents/ui/tailwind.config.js. The trailing hex comment on
+ * each line is the canonical value it was transcribed from.
+ *
+ * The light block is the default; the dark block overrides every property.
+ * `.dark` (not a data-attribute) is the activation selector, matching
+ * tailwind.config.js's `darkMode: 'class'` and src/lib/theme/index.ts, which
+ * toggles that class on <html> — the same mechanism as
+ * crates/trusty-agents/ui/src/stores/theme.ts.
+ *
+ * --trusty-surface-hover is carried over VERBATIM under its canonical name
+ * rather than mapped: it bakes its own per-theme alpha, so it does not fit
+ * the <alpha-value> triple convention. It is read directly via var() in the
+ * few places a hover wash is needed.
+ *
+ * Registration with the drift gate (scripts/check_token_drift.mjs, owned by
+ * PR #5103) is a one-line ENFORCED entry:
+ *   file: "website/src/app.css", mode: "rgb-triple",
+ *   lightSelector: /:root\s*\{([\s\S]*?)\n\}/, darkSelector: /\.dark\s*\{([\s\S]*?)\n\}/
+ * Both blocks below are deliberately the FIRST such selectors in this file so
+ * those non-greedy regexes land on them.
+ *
+ * Test: `src/lib/theme/tokens.test.ts` re-derives every value here from the
+ * canonical tokens.css and fails on any drift, in both themes.
+ */
+:root {
+	color-scheme: light dark;
+
+	--color-content-bg: 245 239 231; /* #F5EFE7 */
+	--color-card-bg: 255 253 249; /* #FFFDF9 */
+	--color-surface-raised: 239 230 216; /* #EFE6D8 */
+	--color-border: 216 201 180; /* #D8C9B4 */
+	--color-border-strong: 196 176 150; /* #C4B096 */
+	--color-text-primary: 43 28 18; /* #2B1C12 */
+	--color-text-secondary: 110 88 67; /* #6E5843 */
+	--color-text-muted: 138 116 96; /* #8A7460 */
+	--color-text-inverse: 255 255 255; /* #FFFFFF */
+	--color-primary: 183 65 14; /* #B7410E */
+	--color-primary-hover: 138 47 11; /* #8A2F0B */
+	--color-success: 63 111 42; /* #3F6F2A */
+	--color-warning: 176 125 16; /* #B07D10 */
+	--color-danger: 194 51 31; /* #C2331F */
+	--color-info: 61 107 138; /* #3D6B8A */
+	--color-sidebar-bg: 43 28 18; /* #2B1C12 */
+	--color-sidebar-text: 230 216 200; /* #E6D8C8 */
+	--color-sidebar-muted: 165 138 107; /* #A58A6B */
+	--color-sidebar-accent: 233 185 138; /* #E9B98A */
+	--color-sidebar-border: 70 49 31; /* #46311F */
+
+	--trusty-surface-hover: rgba(183, 65, 14, 0.06);
+}
+
+.dark {
+	--color-content-bg: 32 22 18; /* #201612 */
+	--color-card-bg: 43 28 18; /* #2B1C12 */
+	--color-surface-raised: 56 37 19; /* #382513 */
+	--color-border: 70 49 31; /* #46311F */
+	--color-border-strong: 92 65 38; /* #5C4126 */
+	--color-text-primary: 240 231 216; /* #F0E7D8 */
+	--color-text-secondary: 203 182 156; /* #CBB69C */
+	--color-text-muted: 165 138 107; /* #A58A6B */
+	--color-text-inverse: 32 22 18; /* #201612 */
+	--color-primary: 217 119 66; /* #D97742 */
+	--color-primary-hover: 232 144 92; /* #E8905C */
+	--color-success: 143 191 106; /* #8FBF6A */
+	--color-warning: 217 168 58; /* #D9A83A */
+	--color-danger: 224 106 82; /* #E06A52 */
+	--color-info: 123 167 196; /* #7BA7C4 */
+	--color-sidebar-bg: 23 16 9; /* #171009 */
+	--color-sidebar-text: 230 216 200; /* #E6D8C8 */
+	--color-sidebar-muted: 165 138 107; /* #A58A6B */
+	--color-sidebar-accent: 233 185 138; /* #E9B98A */
+	--color-sidebar-border: 56 37 19; /* #382513 */
+
+	--trusty-surface-hover: rgba(217, 119, 66, 0.09);
+}
+
+/* Self-hosted OFL faces from static/fonts/ — copied from
+   crates/trusty-agents/ui/public/fonts/ with their licences. Deliberately no
+   CDN: the site must render with no external font host. */
+@font-face {
+	font-family: 'Chakra Petch';
+	font-style: normal;
+	font-weight: 500;
+	font-display: swap;
+	src: url('/fonts/chakra-petch-500.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'Chakra Petch';
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url('/fonts/chakra-petch-600.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'Chakra Petch';
+	font-style: normal;
+	font-weight: 700;
+	font-display: swap;
+	src: url('/fonts/chakra-petch-700.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'IBM Plex Sans';
+	font-style: normal;
+	font-weight: 400 700;
+	font-display: swap;
+	src: url('/fonts/ibm-plex-sans-var.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'IBM Plex Mono';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('/fonts/ibm-plex-mono-400.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'IBM Plex Mono';
+	font-style: normal;
+	font-weight: 500;
+	font-display: swap;
+	src: url('/fonts/ibm-plex-mono-500.woff2') format('woff2');
+}
+@font-face {
+	font-family: 'IBM Plex Mono';
+	font-style: normal;
+	font-weight: 600;
+	font-display: swap;
+	src: url('/fonts/ibm-plex-mono-600.woff2') format('woff2');
+}
+
+@layer base {
+	html {
+		/* Anchor links from the doc reader (#5098) must not land under the
+		   sticky header. */
+		scroll-padding-top: 5rem;
+	}
+
+	body {
+		@apply bg-foundry-bg font-sans text-foundry-text antialiased;
+	}
+
+	/* Foundry: "machines talk mono" — ids, paths, counts, versions. */
+	code,
+	pre,
+	kbd,
+	samp {
+		@apply font-mono;
+	}
+
+	/* Why: the default UA focus ring is invisible against the rust palette in
+	   dark mode, and `:focus-visible` keeps it off mouse clicks. The accent is
+	   the only token that clears WCAG 1.4.11's 3:1 non-text minimum against
+	   every surface here (4.87:1 light, 5.63:1 dark) — the border tokens do
+	   NOT (1.42:1 / 1.45:1), so they must never carry a focus indicator. */
+	:focus-visible {
+		@apply outline-none ring-2 ring-foundry-primary ring-offset-2 ring-offset-foundry-bg;
+	}
+}
+
+@layer components {
+	.btn {
+		@apply inline-flex items-center justify-center gap-2 rounded border-[1.5px] px-4 py-2 text-sm font-semibold transition-colors;
+	}
+
+	/* PRIMARY: solid rust. White on #B7410E is 5.56:1; #201612 on #D97742 is
+	   5.63:1 — both clear AA for normal text. */
+	.btn-primary {
+		@apply border-foundry-primary bg-foundry-primary text-foundry-inverse hover:border-foundry-primary-hover hover:bg-foundry-primary-hover;
+	}
+
+	/* SECONDARY: card background + line border, per Foundry's rule that every
+	   button tier gets a distinct background. */
+	.btn-secondary {
+		@apply border-foundry-border-strong bg-foundry-card text-foundry-text hover:border-foundry-primary;
+	}
+
+	.card {
+		@apply rounded-lg border-[1.5px] border-foundry-border bg-foundry-card p-6;
+	}
+
+	/* Rectangular mono stamp, 4px-ish radius — never a pill. */
+	.badge {
+		@apply inline-block rounded-sm border border-foundry-border-strong px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-foundry-secondary;
+	}
+
+	/* Foundry's mono uppercase section label. Uses text-secondary, not
+	   text-muted: at this size the light-mode muted token is 3.87:1 and fails
+	   AA (see tokens.test.ts / README). */
+	.eyebrow {
+		@apply font-mono text-xs uppercase tracking-[0.18em] text-foundry-secondary;
+	}
+
+	/* Documentation prose (#5098). Every foreground/background pair used here
+	   is pinned by `src/lib/docs/prose-contrast.test.ts`, which recomputes the
+	   ratios from `app.css` itself in BOTH themes. Three canonical tokens are
+	   routed around and appear nowhere below:
+	     --color-text-muted on the page ground   3.87:1 light
+	     --color-primary on --color-surface-raised 4.50:1 (so no link may sit
+	       on a raised surface — hence the table head uses the CARD ground,
+	       where the same link is 5.47:1)
+	     --color-warning on the page ground      3.18:1 light
+	   Body copy is text-primary (14.39:1 / 14.45:1); anything quieter is
+	   text-secondary (5.86:1 / 9.04:1), never muted. */
+	.doc-prose {
+		@apply text-foundry-text;
+	}
+
+	.doc-prose > * + * {
+		@apply mt-4;
+	}
+
+	.doc-prose h1 {
+		@apply mt-0 font-display text-3xl font-bold tracking-tight sm:text-4xl;
+	}
+
+	.doc-prose h2 {
+		@apply mt-12 border-b border-foundry-border pb-2 font-display text-2xl font-semibold tracking-tight;
+	}
+
+	.doc-prose h3 {
+		@apply mt-8 font-display text-xl font-semibold;
+	}
+
+	.doc-prose h4,
+	.doc-prose h5,
+	.doc-prose h6 {
+		@apply mt-6 font-semibold;
+	}
+
+	.doc-prose a {
+		@apply text-foundry-primary underline decoration-1 underline-offset-2 hover:decoration-2;
+	}
+
+	/* A link that leaves the site says so. The 147 links into unpublished
+	   parts of the repository all carry this. */
+	.doc-prose a.doc-link-external::after {
+		content: '\2197';
+		font-size: 0.75em;
+		vertical-align: super;
+		margin-left: 0.15em;
+	}
+
+	.doc-prose ul {
+		@apply list-disc pl-6;
+	}
+
+	.doc-prose ol {
+		@apply list-decimal pl-6;
+	}
+
+	.doc-prose li + li,
+	.doc-prose li > ul,
+	.doc-prose li > ol {
+		@apply mt-1;
+	}
+
+	.doc-prose li::marker {
+		@apply text-foundry-secondary;
+	}
+
+	.doc-prose blockquote {
+		@apply border-l-[3px] border-foundry-border-strong pl-4 text-foundry-secondary;
+	}
+
+	.doc-prose hr {
+		@apply my-8 border-foundry-border;
+	}
+
+	/* Inline code sets NO colour, deliberately: inside a link it must stay
+	   link-coloured (5.47:1 on this ground), and in body copy it inherits
+	   text-primary (16.18:1). Setting a colour here would break the first. */
+	.doc-prose :not(pre) > code {
+		@apply rounded-sm border border-foundry-border bg-foundry-card px-1 py-px text-[0.9em];
+	}
+
+	.doc-prose pre {
+		@apply relative overflow-x-auto rounded border-[1.5px] border-foundry-border bg-foundry-raised p-4 pt-7 text-sm leading-relaxed;
+	}
+
+	.doc-prose pre > code {
+		@apply border-0 bg-transparent p-0 text-inherit;
+	}
+
+	/* The fenced block's language hint, lifted onto the <pre> by render.ts. */
+	.doc-prose pre[data-lang]::before {
+		content: attr(data-lang);
+		@apply absolute right-3 top-2 font-mono text-[10px] uppercase tracking-wider text-foundry-secondary;
+	}
+
+	/* Wide tables scroll inside this wrapper so the PAGE never scrolls
+	   sideways. render.ts inserts it around every table. */
+	.doc-table {
+		@apply my-6 overflow-x-auto rounded border-[1.5px] border-foundry-border;
+	}
+
+	.doc-prose table {
+		@apply w-full border-collapse text-left text-sm;
+	}
+
+	.doc-prose thead {
+		@apply bg-foundry-card;
+	}
+
+	.doc-prose th {
+		@apply border-b-[1.5px] border-foundry-border px-3 py-2 font-semibold;
+	}
+
+	.doc-prose td {
+		@apply border-b border-foundry-border px-3 py-2 align-top;
+	}
+
+	.doc-prose tbody tr:last-child td {
+		@apply border-b-0;
+	}
+
+	.doc-prose input[type='checkbox'] {
+		@apply mr-2 align-middle accent-foundry-primary;
+	}
+}

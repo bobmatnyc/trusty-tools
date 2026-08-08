@@ -1,6 +1,6 @@
 # Bake-off Integration Test Project
 
-This is a test project for validating open-mpm installation.
+This is a test project for validating trusty-agents installation.
 
 ## Project Type
 Python — FastAPI REST API with pytest tests

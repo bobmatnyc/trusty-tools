@@ -1,8 +1,8 @@
 //! tc-services: shared service implementations for the Trusty ecosystem.
 //!
 //! Why: API integrations (CTO DB, Granola, Google Workspace) were
-//! reimplemented independently in open-mpm, trusty-izzie, and the Python CTO
-//! bot. This crate consolidates the *service-layer adapters* — schema
+//! reimplemented independently in trusty-agents, trusty-izzie, and the Python
+//! CTO bot. This crate consolidates the *service-layer adapters* — schema
 //! emission + dispatch — into one host-agnostic place so every Rust consumer
 //! reuses the same code instead of re-deriving it.
 //! What: Each module exposes a `Service`-shaped type with `all()` (one
@@ -11,6 +11,6 @@
 //! them in whatever tool abstraction they use.
 //! Test: Per-module unit tests; see `cto_db`.
 
-pub mod cto_db; // CTO SQLite service (migrated from open-mpm, #484 Phase 1)
+pub mod cto_db; // CTO SQLite service (migrated from trusty-agents, #484 Phase 1)
 pub mod granola; // Native Granola API client (#488 Phase 2)
 pub mod gworkspace; // Google Workspace bridge — Calendar + Tasks (#488 Phase 2)

@@ -33,6 +33,7 @@ use super::hnsw_swap::begin_staged_hnsw_swap;
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
 use super::semaphore::{index_semaphore, reindex_semaphore_for, BACKGROUND_QUEUE_DEPTH};
+use super::stage_timings::StageTimings;
 use super::stages::{mark_reindex_failed, now_rfc3339, schedule_progress_cleanup};
 use super::staging;
 use super::validate;
@@ -241,6 +242,10 @@ pub(super) async fn run_reindex(
     // move changes the root prefix only. Do NOT clear the hash cache on a
     // root move for colocated indexes.
     let is_colocated = crate::service::colocated_storage::has_colocated_storage(&canonical_root);
+    // #5024: the hash-cache load is a full redb table scan on a warm index —
+    // measure it rather than leaving it in the residual.
+    let mut stage_timings = StageTimings::default();
+    let hash_cache_started = Instant::now();
     let hashes_loaded: usize = if let Some(state) = resume.as_ref() {
         // #3979: on a resume the STAGED corpus is the authority for what is
         // already done, so the cache is replaced by its hash table rather than
@@ -284,6 +289,7 @@ pub(super) async fn run_reindex(
     } else {
         hash_cache::load_into_cache(&handle, &hashes).await
     };
+    stage_timings.hash_cache_ms = hash_cache_started.elapsed().as_millis() as u64;
 
     // Issue #317: emit `walk_complete` BEFORE `start`.
     progress
@@ -333,6 +339,10 @@ pub(super) async fn run_reindex(
     }
 
     // Issue #28, Phase 4 + #603: stage the rebuilt corpus.
+    // #5024: this is where an incremental run copies every live-corpus row into
+    // the fresh staging store — the single largest non-embed cost on a warm
+    // reindex, and the stage a corpus-reuse scheme would have to beat.
+    let carryover_started = Instant::now();
     let corpus_swap_tmp: Option<PathBuf> =
         if staging::should_stage(handle.indexer.read().await.has_corpus_store()) {
             match begin_staged_corpus_swap(
@@ -383,6 +393,7 @@ pub(super) async fn run_reindex(
             drop(resume);
             None
         };
+    stage_timings.carryover_ms = carryover_started.elapsed().as_millis() as u64;
 
     // Issue #3970: stage the periodic HNSW snapshot too, mirroring the redb
     // corpus staging above. Unlike the corpus (staged only when a durable
@@ -461,6 +472,9 @@ pub(super) async fn run_reindex(
     // Bounded channel — capacity 1 keeps memory in the same envelope as
     // the prior sequential loop (one batch in transit, one being committed).
     let (tx, mut rx) = mpsc::channel::<super::batch::ParsedReadyBatch>(1);
+    // #5024: wall time of the whole pipeline, so the gap against the summed
+    // subsystem accumulators exposes embedder warm-up and channel stalls.
+    let pipeline_started = Instant::now();
     let producer_ctx = ctx.clone();
     let producer_mem_abort = mem_abort.clone();
     let producer_index_id = index_id.0.clone();
@@ -575,6 +589,8 @@ pub(super) async fn run_reindex(
         }
     }
 
+    stage_timings.pipeline_ms = pipeline_started.elapsed().as_millis() as u64;
+
     // Delegate post-loop work: prune, KG rebuild, corpus swap, terminal event, GC.
     let finish_ctx = FinishCtx {
         handle,
@@ -617,5 +633,5 @@ pub(super) async fn run_reindex(
         chunks_dropped_by_cap: total_chunks_dropped_by_cap,
         mem_limit_hit,
     };
-    super::finish::finish_reindex(finish_ctx, batch_totals).await;
+    super::finish::finish_reindex(finish_ctx, batch_totals, stage_timings).await;
 }

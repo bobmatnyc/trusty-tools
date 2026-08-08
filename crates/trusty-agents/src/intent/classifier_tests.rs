@@ -226,9 +226,23 @@ fn slash_command_with_whitespace_prefix() {
 // Section 6: Exhaustive ACTION_VERBS constant coverage
 // =====================================================================
 
+// #4319 OWNER DECISION (2026-07-29, final iteration — seventh follow-up):
+// `Implementation` is reachable via exactly 4 signals, NONE of them a word
+// list (see `classify_intent`'s doc comment). No verb — hard or plain, alone
+// or corroborated by ANY word list, including `TECHNICAL_CONTEXT_WORDS` — is
+// evidence for `Implementation`. All 23 `ACTION_VERBS` entries (including the
+// 4 `route::TCODE_HARD_VERBS` names for the SEPARATE `route.rs` router)
+// behave identically in `classify_intent` now: round 6 proved that "hard verb
+// + TECHNICAL_CONTEXT_WORDS co-occurrence" was STILL exploitable ("fix my gym
+// session", "debug the incident report from the fender bender", "refactor
+// the outage in our friendship", and ~24 more ordinary sentences using words
+// already in that list all crashed — see `classifier_regression_tests.rs` for the
+// full regression). Only a repo-file token, a snake_case identifier, an
+// error/stack-trace marker, or a leading `/` reaches Implementation now.
+
 #[test]
-fn every_action_verb_triggers_implementation() {
-    let action_verbs = [
+fn no_verb_reaches_implementation_from_a_technical_context_word_alone() {
+    let verbs = [
         "write",
         "create",
         "build",
@@ -253,27 +267,77 @@ fn every_action_verb_triggers_implementation() {
         "debug",
         "check",
     ];
-    for verb in &action_verbs {
-        let input = format!("{} something now", verb);
-        assert_eq!(
-            classify_intent(&input),
+    for verb in &verbs {
+        // Bare verb, no context at all -> never Implementation.
+        let bare = format!("{verb} something now");
+        assert_ne!(
+            classify_intent(&bare),
             IntentClass::Implementation,
-            "action verb '{}' should trigger Implementation",
+            "'{bare}' (bare verb, no context) should NOT trigger Implementation"
+        );
+        // Verb plus a genuine TECHNICAL_CONTEXT_WORDS entry ("bug") — this
+        // used to be sufficient for the 4 hard verbs (round 6); it is not
+        // sufficient for ANY verb now — lands on Research instead.
+        let corroborated = format!("{verb} the login bug");
+        assert_ne!(
+            classify_intent(&corroborated),
+            IntentClass::Implementation,
+            "'{corroborated}' (verb + 'bug') should NOT trigger Implementation — no word list feeds Implementation"
+        );
+        assert_eq!(
+            classify_intent(&corroborated),
+            IntentClass::Research,
+            "'{corroborated}' should land on Research"
+        );
+    }
+}
+
+#[test]
+fn plain_action_verbs_never_trigger_implementation_from_context_alone() {
+    let plain_verbs = [
+        "write", "create", "build", "run", "add", "update", "delete", "test", "deploy", "generate",
+        "show", "list", "find", "search", "remove", "rename", "install", "compile", "check",
+    ];
+    for verb in &plain_verbs {
+        // No context at all.
+        let bare = format!("{} something now", verb);
+        assert_ne!(
+            classify_intent(&bare),
+            IntentClass::Implementation,
+            "'{}' alone (no context) should NOT trigger Implementation",
             verb
+        );
+        // WITH a generic technical-context word — still must not reach
+        // Implementation (this is the exact proven regression: a plain
+        // verb plus a generic noun is ambiguous, not unambiguous).
+        let with_context = format!("{} the session token now", verb);
+        assert_ne!(
+            classify_intent(&with_context),
+            IntentClass::Implementation,
+            "'{}' plus a generic context word ('{}') should still NOT trigger Implementation",
+            verb,
+            with_context
         );
     }
 }
 
 #[test]
 fn action_verb_case_insensitive() {
-    assert_eq!(
-        classify_intent("WRITE A SCRIPT"),
-        IntentClass::Implementation
-    );
-    assert_eq!(classify_intent("Fix The Bug"), IntentClass::Implementation);
+    // "WRITE A SCRIPT" no longer reaches Implementation — "script" is an
+    // AMBIGUOUS context word (Research-only), not an unambiguous signal.
+    assert_eq!(classify_intent("WRITE A SCRIPT"), IntentClass::Research);
+    // #4319 seventh follow-up: "fix" carries no special status anymore —
+    // "bug" is a TECHNICAL_CONTEXT_WORDS entry, so "Fix The Bug" is a verb +
+    // generic context word -> Research, not Implementation (formally
+    // rescinded as a must-work-Implementation case by the owner; see
+    // `classify_intent`'s doc comment history, round 7).
+    assert_eq!(classify_intent("Fix The Bug"), IntentClass::Research);
+    // "Deploy to production" — "production" is likewise ambiguous context
+    // (Research-only): a plain verb + generic noun is ambiguous, not
+    // unambiguous evidence of a coding request.
     assert_eq!(
         classify_intent("Deploy to production"),
-        IntentClass::Implementation
+        IntentClass::Research
     );
 }
 

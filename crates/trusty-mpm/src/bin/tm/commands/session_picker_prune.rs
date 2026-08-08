@@ -47,8 +47,10 @@
 //!      attempts until the sentinel expires ([`STALE_DAEMON_TTL_SECS`], 1
 //!      hour) — self-healing: one probe per hour against a genuinely stale
 //!      daemon, not a permanent lockout once it's restarted. Records held
-//!      back by this gate fold into [`AutoPruneOutcome::pending`], never
-//!      silently disappearing from the reported count.
+//!      back by this gate fold into [`AutoPruneOutcome::pending`], as does a
+//!      record whose decommission was attempted and FAILED (#4995 review) —
+//!      neither may disappear from the reported count, because that count is
+//!      the only notice the operator gets that rows were withheld.
 //!
 //! What: [`prune_and_report`] is the production entry point (resolves the
 //! marker file under `~/.trusty-mpm` and prints the operator summary);
@@ -172,12 +174,54 @@ pub(crate) struct AutoPruneOutcome {
     /// Count of records actually decommissioned this call (never more than
     /// [`AUTO_PRUNE_CAP`]).
     pub(crate) pruned: usize,
-    /// Count of `unresumable` records NOT acted on this call — a first
-    /// sighting (not yet confirmed), confirmed-but-over-the-cap, or held
-    /// back because the stale-daemon gate is active (owner request
-    /// 2026-07-30 follow-up — this must fold in here or the reported count
-    /// under-represents exactly the batch that gate is protecting).
+    /// Count of dead records NOT cleared this call — a first sighting (not yet
+    /// confirmed), confirmed-but-over-the-cap, held back because the
+    /// stale-daemon gate is active (owner request 2026-07-30 follow-up), or
+    /// attempted and FAILED (#4995 review). Every one of those four must fold
+    /// in here: this count is the sole gate on the operator banner, and each
+    /// left out is a row hidden from the default view with nothing said about
+    /// it.
+    ///
+    /// Invariant: `pending == dead_ids.len()`, by construction — see
+    /// [`dead_ids`](Self::dead_ids).
     pub(crate) pending: usize,
+    /// Ids WITHIN [`kept`](Self::kept) that [`is_dead_record`] classified dead
+    /// but the sweep could not clear this call (#4994).
+    ///
+    /// 🔴 This — not the wire's `unresumable` flag — is what the default `tm ls`
+    /// view hides. The two are not the same set, and the difference is a live
+    /// session. `unresumable` is computed daemon-side from a record's PERSISTED
+    /// state; `reconcile_live_state` then overwrites the DISPLAY state without
+    /// recomputing it, so the wire can ship `state: "active"` alongside
+    /// `unresumable: true` for a session whose pane is running right now. The
+    /// prune already refuses to touch such a row ([`is_clearable_state`]'s
+    /// `stopped|errored` gate, and the `live_tmux_names` guard from PR #4725
+    /// round 2), so hiding on the raw flag would have made it hidden AND
+    /// unreapable — the exact "running agent unreachable through `tm`" outcome
+    /// those guards were built to prevent. Keying off this field instead makes
+    /// `hidden ⟺ prunable` true by construction.
+    ///
+    /// 🔴 `dead_ids.len() == pending` — the hidden set and the reported count
+    /// are the same rows, and every arm that leaves a record in
+    /// [`kept`](Self::kept) must increment `pending` to keep it that way. That
+    /// held only for three of the four arms until #4995's review: a FAILED
+    /// decommission left the record here (hidden) while counting it nowhere, so
+    /// a call where every attempt failed printed no banner at all. Test:
+    /// `auto_prune_counts_failed_decommissions_so_the_banner_still_prints`.
+    pub(crate) dead_ids: HashSet<String>,
+}
+
+/// What one listing-time prune hands its caller (#4994).
+///
+/// Why: the display scoping needs BOTH halves — the surviving rows and which of
+/// them the sweep classified dead — and they must come from the same call, or
+/// the view is scoped against a classification some other invocation computed.
+pub(crate) struct PrunedListing {
+    /// Every session surviving the sweep, dead-but-unreaped ones included.
+    pub(crate) sessions: Vec<ManagedSessionSummary>,
+    /// The subset of `sessions` the sweep classified dead — see
+    /// [`AutoPruneOutcome::dead_ids`].
+    pub(crate) dead_ids: HashSet<String>,
 }
 
 /// Everything the prune needs from its environment, resolved once per
@@ -265,8 +309,16 @@ pub(crate) async fn prune_and_report(
     client: &reqwest::Client,
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
-) -> Vec<ManagedSessionSummary> {
-    prune_and_report_at(client, url, sessions, &PruneContext::production()).await
+    hides_dead_rows: bool,
+) -> PrunedListing {
+    prune_and_report_at(
+        client,
+        url,
+        sessions,
+        &PruneContext::production(),
+        hides_dead_rows,
+    )
+    .await
 }
 
 /// [`prune_and_report`] with an injected [`PruneContext`] — the testable core.
@@ -282,7 +334,8 @@ pub(crate) async fn prune_and_report_at(
     url: &str,
     sessions: Vec<ManagedSessionSummary>,
     ctx: &PruneContext,
-) -> Vec<ManagedSessionSummary> {
+    hides_dead_rows: bool,
+) -> PrunedListing {
     let outcome = auto_prune_dead_records_at(
         client,
         url,
@@ -298,14 +351,42 @@ pub(crate) async fn prune_and_report_at(
             if outcome.pruned == 1 { "" } else { "s" }
         );
     }
-    if outcome.pending > 0 {
-        eprintln!(
-            "tm: {} more dead record{} pending confirmation",
-            outcome.pending,
-            if outcome.pending == 1 { "" } else { "s" }
-        );
+    if let Some(banner) = pending_banner(outcome.pending, hides_dead_rows) {
+        eprintln!("{banner}");
     }
-    outcome.kept
+    PrunedListing {
+        sessions: outcome.kept,
+        dead_ids: outcome.dead_ids,
+    }
+}
+
+/// Build the "N more dead records pending confirmation" line, or `None` when
+/// there is nothing to report (#4994; extracted #4995 review).
+///
+/// Why: this line is the ONLY notice an operator gets that rows were withheld
+/// from the default view, so whether it prints is a behavior worth asserting
+/// directly rather than through a proxy for it. As an `eprintln!` inline in
+/// [`prune_and_report_at`] it could not be — a test could only check the
+/// `pending` count the branch happens to key on, which is what let a failed
+/// decommission suppress the banner unnoticed.
+/// What: `None` when `pending == 0`. The "(hidden; …)" suffix appears only when
+/// `hides_dead_rows` — `--json` and `--all` PRINT these rows, and claiming they
+/// are hidden where they are visibly listed sends the operator looking for a
+/// view they are already in.
+/// Test: `auto_prune_counts_failed_decommissions_so_the_banner_still_prints`.
+pub(crate) fn pending_banner(pending: usize, hides_dead_rows: bool) -> Option<String> {
+    if pending == 0 {
+        return None;
+    }
+    let suffix = if hides_dead_rows {
+        " (hidden; `tm ls --all` to see them)"
+    } else {
+        ""
+    };
+    Some(format!(
+        "tm: {pending} more dead record{} pending confirmation{suffix}",
+        if pending == 1 { "" } else { "s" }
+    ))
 }
 
 /// The workdir candidates a LISTED session carries on the wire (#4702).
@@ -341,25 +422,26 @@ fn workdir_candidates(s: &ManagedSessionSummary) -> [Option<&str>; 2] {
 ///     none is unverifiable, and is kept);
 ///   * every candidate's probe came back a definitive `Ok(false)`. A probe
 ///     `Err` (permission denied, transient I/O) counts as "possibly present";
-///   * every candidate's PARENT DIRECTORY exists — see below.
+///   * every candidate's absence is CORROBORATED by a surviving directory above
+///     it ([`absence_corroborated`]) — see below.
 ///
-/// 🔴 The parent check is not defensive padding, it is the whole point of the
-/// word "verified". `try_exists("/Volumes/Unplugged/work/proj")` returns
+/// 🔴 The reachability check is not defensive padding, it is the whole point of
+/// the word "verified". `try_exists("/Volumes/Unplugged/work/proj")` returns
 /// `Ok(false)`, NOT `Err`, when the volume is not mounted — ENOENT on an
 /// intermediate component is indistinguishable from ENOENT on the leaf. Without
-/// this check, unplugging an external drive reads as "verified gone" for every
-/// session on it, and one `tm ls` tombstones the lot. Requiring the parent to
-/// exist means the only thing we ever call gone is a leaf missing from a
-/// directory we can still see. This errs toward keeping — a workspace whose
-/// whole parent tree was deleted is kept rather than cleared, which costs one
-/// stale row and risks nothing. Measured 2026-08-03: 4 of 5 spot-checked
-/// stopped workspaces still existed on disk.
+/// it, unplugging an external drive reads as "verified gone" for every session
+/// on it, and one `tm ls` tombstones the lot. The only thing we ever call gone
+/// is a leaf missing from a directory we can still see. This errs toward
+/// keeping — costing one stale row and risking nothing. Measured 2026-08-03:
+/// 4 of 5 spot-checked stopped workspaces still existed on disk.
 ///
 /// What: for each of [`workdir_candidates`], `tokio::fs::try_exists` on the path
-/// itself and on `Path::parent()`.
+/// itself, then [`absence_corroborated`] on the surviving tree above it.
 /// Test: `auto_prune_clears_stopped_record_whose_workspace_is_gone`,
 /// `auto_prune_keeps_stopped_record_whose_workspace_still_exists`,
-/// `auto_prune_keeps_record_whose_parent_directory_is_unreachable`.
+/// `auto_prune_keeps_record_whose_parent_directory_is_unreachable`,
+/// `auto_prune_clears_record_whose_worktree_root_survived_the_removal`,
+/// `auto_prune_keeps_record_when_the_worktree_root_itself_is_gone`.
 async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
     let mut probed_any = false;
     for candidate in workdir_candidates(s).into_iter().flatten() {
@@ -370,18 +452,100 @@ async fn workspace_verified_gone(s: &ManagedSessionSummary) -> bool {
             Ok(true) | Err(_) => return false,
             Ok(false) => {}
         }
-        // #4702: the leaf is absent — but is its directory even reachable? An
-        // unmounted volume answers `Ok(false)` for every path under it.
-        let Some(parent) = std::path::Path::new(candidate).parent() else {
-            // No parent (a bare relative name, or the filesystem root itself) —
-            // nothing to corroborate against, so refuse to call it gone.
-            return false;
-        };
-        if !tokio::fs::try_exists(parent).await.unwrap_or(false) {
+        // #4872: the leaf is absent — corroborate against the nearest surviving
+        // worktree root, because `git worktree remove` takes leaf and parent
+        // together and a parent-only probe can never tell that apart.
+        if !absence_corroborated(std::path::Path::new(candidate)).await {
             return false;
         }
     }
     probed_any
+}
+
+/// Directory-name pairs naming a git-worktree CONTAINER — the stable root under
+/// which this project's worktrees are created and removed (#4872).
+///
+/// Why: `git worktree remove` unlinks the whole tree in one operation, so a
+/// removed worktree's leaf, its parent and its grandparent all vanish together.
+/// A parent-only probe therefore cannot distinguish "the worktree was removed"
+/// from "the volume is unmounted", and #4872's four stuck records could never
+/// advance. The container directory is not itself part of any worktree, so it
+/// survives every removal and disappears only when the filesystem holding it is
+/// genuinely unreachable — which is exactly the corroborating anchor the
+/// immediate parent fails to be.
+/// What: `(parent-dir-name, container-dir-name)` pairs matched against a
+/// candidate's ancestors — `.base/.worktrees` (session worktrees) and
+/// `.claude/worktrees` (the worktree root `CLAUDE.md` documents).
+const WORKTREE_CONTAINER_MARKERS: [(&str, &str); 2] =
+    [(".base", ".worktrees"), (".claude", "worktrees")];
+
+/// Whether `dir` is a worktree CONTAINER — the directory that HOLDS worktrees,
+/// never an individual worktree itself.
+///
+/// 🔴 Read the name literally: this is `true` for `.base/.worktrees` and
+/// `.claude/worktrees`, and `false` for every worktree inside them. It is the
+/// exact OPPOSITE of `session_manager::worktree_safety::is_worktree_root`, which
+/// asks whether a path is the root of ONE worktree (`git rev-parse
+/// --show-toplevel`). The two answer contradictory questions about the same
+/// paths, so they must never share a name (PR #4874 review).
+///
+/// What: matches the LAST TWO path components against
+/// [`WORKTREE_CONTAINER_MARKERS`], so it holds for any checkout location and for
+/// nested worktrees alike.
+/// Test: `auto_prune_clears_record_whose_worktree_root_survived_the_removal`.
+fn is_worktree_container(dir: &Path) -> bool {
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let Some(parent) = dir
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+    else {
+        return false;
+    };
+    WORKTREE_CONTAINER_MARKERS
+        .iter()
+        .any(|(p, c)| *p == parent && *c == name)
+}
+
+/// Decide whether an absent `candidate` is absent because something was DELETED
+/// (corroborated) or because its filesystem is unreachable (#4872).
+///
+/// Why: see [`WORKTREE_CONTAINER_MARKERS`]. This deliberately does NOT settle for
+/// "some ancestor exists" — `/Volumes` survives every unmount, so that weaker
+/// rule would reinstate exactly the mass-tombstone the guard was written to
+/// prevent.
+/// What: walks the ancestors nearest-first. When any [`is_worktree_container`]
+/// ancestor still exists, the tree below it was removed — corroborated. When the
+/// path has such an ancestor but NONE of them exist, the whole checkout is
+/// unreachable — not corroborated. A path with no container ancestor at all
+/// falls back to the original immediate-parent rule, unchanged.
+/// Test: `auto_prune_clears_record_whose_worktree_root_survived_the_removal`,
+/// `auto_prune_keeps_record_when_the_worktree_root_itself_is_gone`,
+/// `auto_prune_keeps_record_whose_parent_directory_is_unreachable`.
+async fn absence_corroborated(candidate: &Path) -> bool {
+    let mut saw_container = false;
+    for ancestor in candidate
+        .ancestors()
+        .skip(1)
+        .filter(|a| is_worktree_container(a))
+    {
+        saw_container = true;
+        if tokio::fs::try_exists(ancestor).await.unwrap_or(false) {
+            return true;
+        }
+    }
+    if saw_container {
+        return false;
+    }
+    // No worktree container in this path: fall back to the immediate parent. A path
+    // with no parent (a bare relative name, or the filesystem root itself) has
+    // nothing to corroborate against, so refuse to call it gone.
+    match candidate.parent() {
+        Some(parent) => tokio::fs::try_exists(parent).await.unwrap_or(false),
+        None => false,
+    }
 }
 
 /// Whether a record's lifecycle state makes it eligible for a record-only
@@ -550,6 +714,10 @@ pub(crate) async fn auto_prune_dead_records_at(
             kept: sessions,
             pruned: 0,
             pending: 0,
+            // No liveness signal means no classification, so nothing is hidden
+            // either — the fail-closed contract now covers the view as well as
+            // the sweep (#4994).
+            dead_ids: HashSet::new(),
         };
     };
 
@@ -564,6 +732,10 @@ pub(crate) async fn auto_prune_dead_records_at(
             kept.push(s);
         }
     }
+
+    // #4994: the classification the default view hides is captured HERE, from
+    // the same partition the sweep acts on — never re-derived from the wire.
+    let mut dead_ids: HashSet<String> = dead.iter().map(|s| s.id.clone()).collect();
 
     let mut seen = load_seen(marker_path);
     let mut changed = false;
@@ -584,6 +756,7 @@ pub(crate) async fn auto_prune_dead_records_at(
             kept,
             pruned: 0,
             pending: 0,
+            dead_ids,
         };
     }
 
@@ -629,6 +802,14 @@ pub(crate) async fn auto_prune_dead_records_at(
     // into `pending` — otherwise "N more dead records pending confirmation"
     // under-reports exactly the batch this gate is protecting.
     let mut stale_daemon_held = 0usize;
+    // #4995 review (MEDIUM): a record whose decommission FAILED stays in `kept`
+    // and in `dead_ids` — so the default view hides it — and must therefore be
+    // counted for exactly the reason `stale_daemon_held` is. Left uncounted, a
+    // call where every decommission failed reported `pending == 0`, skipped the
+    // banner entirely, and dropped those rows off `tm ls` with no notice: silent
+    // hiding arriving through the error path, which is the failure this whole
+    // feature exists to prevent.
+    let mut decommission_failed = 0usize;
 
     if already_stale_daemon {
         stale_daemon_held = to_prune.len();
@@ -640,9 +821,15 @@ pub(crate) async fn auto_prune_dead_records_at(
                 DecommissionOutcome::Pruned => {
                     pruned += 1;
                     seen.remove(&s.id);
+                    // It is gone from `kept`, so it must leave `dead_ids` too —
+                    // the set describes rows still on screen.
+                    dead_ids.remove(&s.id);
                     changed = true;
                 }
-                DecommissionOutcome::Failed => kept.push(s),
+                DecommissionOutcome::Failed => {
+                    decommission_failed += 1;
+                    kept.push(s);
+                }
                 DecommissionOutcome::StaleDaemon => {
                     newly_stale_daemon = true;
                     stale_daemon_held += 1;
@@ -669,7 +856,7 @@ pub(crate) async fn auto_prune_dead_records_at(
         );
     }
 
-    let pending = confirmed.len() + first_sighting.len() + stale_daemon_held;
+    let pending = confirmed.len() + first_sighting.len() + stale_daemon_held + decommission_failed;
     kept.extend(confirmed);
     kept.extend(first_sighting);
 
@@ -681,6 +868,7 @@ pub(crate) async fn auto_prune_dead_records_at(
         kept,
         pruned,
         pending,
+        dead_ids,
     }
 }
 

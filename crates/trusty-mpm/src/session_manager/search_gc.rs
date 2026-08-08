@@ -29,17 +29,39 @@ use serde::Deserialize;
 use tracing::{debug, info, warn};
 
 use super::decommission::is_session_worktree;
+use super::index_delete_guard::{DeleteOutcome, DestructiveIndexDelete};
 use super::manager::SessionManager;
 
-/// Per-request timeout for trusty-search index-lifecycle HTTP calls.
+/// Per-request timeout for the READ-ONLY trusty-search calls in this module
+/// (the sweep's index listing and status probes).
 ///
 /// Why: these calls run off the interactive request path (decommission,
 /// periodic GC) but must still never hang the daemon indefinitely if
-/// trusty-search is wedged.
+/// trusty-search is wedged. The destructive DELETE carries its own timeouts
+/// inside [`DestructiveIndexDelete`] (#4743).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Connect timeout, tighter than the overall request timeout so an
 /// unreachable host fails fast.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// How old a `.worktrees` root must be before a 0-chunk index rooted at it is
+/// eligible for deletion (#5065 review).
+///
+/// Why: `chunk_count == 0` used to mean "created and abandoned", because the
+/// index was minted at session LAUNCH, by which point the session record
+/// already claimed the path and [`is_orphan_index`]'s claimed-by-a-live-session
+/// check covered the whole population window. #5060 mints it at worktree
+/// CREATION instead, before any record exists, and the index legitimately reads
+/// 0 chunks for the entire lexical walk — 33.5 s measured on this workspace,
+/// longer on a bigger one. The sweep runs every 60 s (`daemon/mod.rs`), so
+/// without a grace window the sweep can delete a brand-new worktree's index out
+/// from under the walk that is populating it.
+///
+/// 300 s is one sweep interval plus ~4x the measured walk. Erring long is
+/// nearly free: the only cost of an over-long window is that a genuinely
+/// abandoned 0-chunk index survives a few extra sweeps, and the sweep runs
+/// forever. Erring short deletes live work.
+const ORPHAN_GRACE: Duration = Duration::from_secs(300);
 
 /// Whether — and under which id — a session's workspace should lose its
 /// trusty-search index on decommission (#2033).
@@ -87,50 +109,34 @@ pub(super) fn disposable_workspace_index_id(
 /// unreachable or erroring search daemon must NEVER block or fail session
 /// teardown, so every outcome is logged and swallowed here — the caller
 /// (`decommission_with_root`) invokes this unconditionally.
-/// What: resolves the daemon's base URL via
-/// `trusty_common::resolve_daemon_base_url`; when discoverable, issues a
-/// short-timeout `DELETE` and logs the outcome (removed / non-2xx / transport
-/// error) at info/warn. A `None` base (daemon never started) is a debug-logged
-/// no-op.
-/// Test: exercised via the live-daemon decommission integration path; the
-/// daemon-unreachable branch mirrors the shared `trusty_common::search_index`
-/// register path's (both skip cleanly on a missing address file).
+/// What: acquires the [`DestructiveIndexDelete`] capability and, when granted,
+/// issues the DELETE and logs the outcome (removed / non-2xx / transport error)
+/// at info/warn. A refused capability — daemon never started, or this is a test
+/// process (#4743) — is a no-op, logged by `acquire` itself.
+/// Test: exercised via the live-daemon decommission integration path;
+/// `decommission_issues_no_request_to_a_live_daemon_under_test` pins that a
+/// test process reaches the daemon zero times.
 pub(super) async fn delete_search_index_best_effort(index_id: &str) {
-    let Some(base) = trusty_common::resolve_daemon_base_url("trusty-search") else {
-        debug!(
-            index_id,
-            "trusty-search daemon not discoverable; skipping index removal on decommission (#2033)"
-        );
+    // #4743: no base URL, no client, no `?delete_data=true` without this. A
+    // test process cannot acquire it, so the request is never built at all.
+    let Some(deleter) = DestructiveIndexDelete::acquire() else {
         return;
     };
-    let client = match build_client() {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("trusty-search index-delete client build failed: {e}");
-            return;
-        }
-    };
-    // Issue #4123: trusty-search's `DELETE /indexes/:id` now preserves on-disk
-    // data unless `delete_data=true` is passed. Opt in — the workspace this
-    // index describes is a disposable worktree that decommission is about to
-    // delete, so nothing will ever re-register at that root and preserved
-    // index data would be unreachable garbage on disk forever.
-    let url = format!("{base}/indexes/{index_id}?delete_data=true");
-    match client.delete(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
+    match deleter.delete(index_id).await {
+        DeleteOutcome::Removed => {
             info!(
                 index_id,
                 "decommission: removed trusty-search index (#2033)"
             );
         }
-        Ok(resp) => {
+        DeleteOutcome::Rejected(status) => {
             warn!(
                 index_id,
-                status = %resp.status(),
+                %status,
                 "decommission: trusty-search index delete returned non-2xx"
             );
         }
-        Err(e) => {
+        DeleteOutcome::Transport(e) => {
             warn!(
                 index_id,
                 "decommission: trusty-search index delete failed: {e}"
@@ -139,8 +145,8 @@ pub(super) async fn delete_search_index_best_effort(index_id: &str) {
     }
 }
 
-/// Build the short-timeout `reqwest::Client` shared by every search-index
-/// lifecycle call in this module.
+/// Build the short-timeout `reqwest::Client` shared by the READ-ONLY
+/// search-index calls in this module.
 fn build_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
@@ -188,15 +194,26 @@ pub(super) struct IndexSnapshot {
 /// touches a manually-registered, persistent, non-session project index),
 /// (b) neither `entry.root_path` nor its canonicalized form appears in
 /// `in_use_workspace_paths` (a live session still claims this root), and (c)
-/// `entry.chunk_count == 0` OR `entry.root_path` no longer exists on disk.
+/// `entry.root_path` no longer exists on disk, OR `entry.chunk_count == 0` and
+/// the root is at least `grace` old.
+///
+/// The grace window (#5065 review) applies ONLY to the 0-chunk half: an index
+/// whose root is gone from disk is unambiguously an orphan at any age, and
+/// there is nothing left to stat. See [`ORPHAN_GRACE`] for why the 0-chunk half
+/// needs one at all. Age is read from the root directory's creation time,
+/// falling back to its mtime where the filesystem has no birth time; the
+/// fallback's failure mode is a slightly longer window, never a shorter one.
 /// Test: `is_orphan_index_false_for_non_worktree_root`,
 /// `is_orphan_index_false_when_claimed_by_active_session`,
 /// `is_orphan_index_true_for_zero_chunk_unclaimed_worktree`,
 /// `is_orphan_index_true_for_deleted_root_path`,
-/// `is_orphan_index_false_for_populated_unclaimed_worktree_that_still_exists`.
+/// `is_orphan_index_false_for_populated_unclaimed_worktree_that_still_exists`,
+/// `is_orphan_index_spares_a_freshly_created_worktree_root`,
+/// `is_orphan_index_grace_does_not_protect_a_root_that_is_gone`.
 pub(super) fn is_orphan_index(
     entry: &IndexSnapshot,
     active_workspace_paths: &HashSet<PathBuf>,
+    grace: Duration,
 ) -> bool {
     if !is_session_worktree(&entry.root_path) {
         return false;
@@ -209,7 +226,31 @@ pub(super) fn is_orphan_index(
     if active_workspace_paths.contains(&canonical) {
         return false;
     }
-    entry.chunk_count == 0 || !entry.root_path.exists()
+    if !entry.root_path.exists() {
+        return true;
+    }
+    entry.chunk_count == 0 && !root_is_within_grace(&entry.root_path, grace)
+}
+
+/// Is `root` younger than `grace` — i.e. too new for a 0-chunk reading to mean
+/// anything (#5065 review)?
+///
+/// Why: isolated so the age rule is one testable place rather than a clause
+/// buried in [`is_orphan_index`], and so the metadata fallback order is stated
+/// once.
+/// What: prefers the directory's creation time and falls back to its mtime when
+/// the platform or filesystem has no birth time. Returns `false` when neither
+/// is readable — an unreadable root gets no protection, matching the rest of
+/// this module's bias toward reclaiming what it cannot account for.
+/// Test: `is_orphan_index_spares_a_freshly_created_worktree_root`.
+fn root_is_within_grace(root: &Path, grace: Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(root) else {
+        return false;
+    };
+    let Ok(stamp) = meta.created().or_else(|_| meta.modified()) else {
+        return false;
+    };
+    stamp.elapsed().map(|age| age < grace).unwrap_or(true) // a future timestamp (clock skew) reads as brand new
 }
 
 /// Fetch `(id, root_path)` for every index registered with the daemon.
@@ -280,17 +321,36 @@ impl SessionManager {
     /// `chunk_count`, and applies [`is_orphan_index`]. Under `dry_run` the
     /// matching ids are logged and returned without deleting anything
     /// (mirrors `PruneWorktreesRequest`'s dry-run-by-default convention);
-    /// otherwise each is removed via `DELETE /indexes/:id`, logged
-    /// individually (no silent truncation), and returned. Returns `Ok(vec![])`
-    /// without error when the daemon is undiscoverable — the sweep is
-    /// best-effort, like the rest of the orphan-GC loop.
+    /// otherwise each is removed via the [`DestructiveIndexDelete`] capability,
+    /// logged individually (no silent truncation), and returned. Returns
+    /// `Ok(vec![])` without error when the daemon is undiscoverable — the sweep
+    /// is best-effort, like the rest of the orphan-GC loop.
+    ///
+    /// #4743: a non-dry-run sweep acquires the destructive capability BEFORE
+    /// listing anything, so a test process returns `Ok(vec![])` having made no
+    /// request at all rather than enumerating the operator's real indexes.
     /// Test: `is_orphan_index_*` cover the pure decision; this async
     /// orchestration is exercised via the daemon-unreachable no-op path in
-    /// `sweep_orphaned_search_indexes_noop_when_daemon_unreachable`.
+    /// `sweep_orphaned_search_indexes_noop_when_daemon_unreachable`, and the
+    /// test-process refusal by `sweep_makes_no_request_under_a_test_harness`.
     pub async fn sweep_orphaned_search_indexes(
         &self,
         dry_run: bool,
     ) -> anyhow::Result<Vec<String>> {
+        // #4743: acquire the destructive capability BEFORE doing any work, not
+        // at the delete. A sweep that lists indexes and probes each one only to
+        // discover at the last step that it may not delete has already spent a
+        // round-trip per index against a daemon it has no business acting on.
+        // `dry_run` needs no capability — it deletes nothing by definition.
+        let deleter = if dry_run {
+            None
+        } else {
+            match DestructiveIndexDelete::acquire() {
+                Some(d) => Some(d),
+                None => return Ok(Vec::new()),
+            }
+        };
+
         let Some(base) = trusty_common::resolve_daemon_base_url("trusty-search") else {
             debug!("trusty-search daemon not discoverable; skipping index orphan sweep (#2033)");
             return Ok(Vec::new());
@@ -313,38 +373,41 @@ impl SessionManager {
                 root_path,
                 chunk_count,
             };
-            if is_orphan_index(&snapshot, &active_workspace_paths) {
+            if is_orphan_index(&snapshot, &active_workspace_paths, ORPHAN_GRACE) {
                 candidates.push(id);
             }
         }
 
-        if dry_run {
+        // No capability means `dry_run` — the only other way to get here
+        // without one is the early return above.
+        let Some(deleter) = deleter else {
             for id in &candidates {
                 info!(index_id = %id, "search-index-gc (dry-run): would remove orphaned/0-chunk index");
             }
             return Ok(candidates);
-        }
+        };
 
         let mut removed = Vec::new();
         for id in candidates {
-            // Issue #4123: opt in to data deletion — same rationale as
-            // `delete_search_index_best_effort`. Every candidate here is a
-            // worktree-scoped index with no live session, so its data is
-            // unreachable garbage; a bare DELETE would silently leak it.
-            let url = format!("{base}/indexes/{id}?delete_data=true");
-            match client.delete(&url).send().await {
-                Ok(resp) if resp.status().is_success() => {
+            // #4743: the `?delete_data=true` opt-in that used to be formatted
+            // inline here now lives inside the capability, so this loop and the
+            // decommission-time delete share one destructive door instead of
+            // two independently-guarded ones. Its #4123 rationale is unchanged:
+            // every candidate is a worktree-scoped index with no live session,
+            // so its data is unreachable garbage a bare DELETE would leak.
+            match deleter.delete(&id).await {
+                DeleteOutcome::Removed => {
                     info!(index_id = %id, "search-index-gc: removed orphaned/0-chunk index");
                     removed.push(id);
                 }
-                Ok(resp) => {
+                DeleteOutcome::Rejected(status) => {
                     warn!(
                         index_id = %id,
-                        status = %resp.status(),
+                        %status,
                         "search-index-gc: delete returned non-2xx"
                     );
                 }
-                Err(e) => {
+                DeleteOutcome::Transport(e) => {
                     warn!(index_id = %id, "search-index-gc: delete failed: {e}");
                 }
             }
@@ -419,6 +482,12 @@ mod tests {
     }
 
     // ---- is_orphan_index ---------------------------------------------------
+    //
+    // A fixture root is created moments before the assertion, so every test
+    // asserting the pre-#5065 "0 chunks means orphan" rule passes
+    // `Duration::ZERO` to opt out of the age check. The two grace tests below
+    // pass the real `ORPHAN_GRACE` — that split is the point: the first group
+    // pins the rule for an AGED root, the second pins that a NEW one is spared.
 
     #[test]
     fn is_orphan_index_false_for_non_worktree_root() {
@@ -427,7 +496,7 @@ mod tests {
             root_path: PathBuf::from("/Users/dev/persistent-project"),
             chunk_count: 0,
         };
-        assert!(!is_orphan_index(&entry, &HashSet::new()));
+        assert!(!is_orphan_index(&entry, &HashSet::new(), Duration::ZERO));
     }
 
     #[test]
@@ -441,7 +510,7 @@ mod tests {
             chunk_count: 0,
         };
         let active: HashSet<PathBuf> = [wt].into_iter().collect();
-        assert!(!is_orphan_index(&entry, &active));
+        assert!(!is_orphan_index(&entry, &active, Duration::ZERO));
     }
 
     #[test]
@@ -454,7 +523,7 @@ mod tests {
             root_path: wt,
             chunk_count: 0,
         };
-        assert!(is_orphan_index(&entry, &HashSet::new()));
+        assert!(is_orphan_index(&entry, &HashSet::new(), Duration::ZERO));
     }
 
     #[test]
@@ -467,7 +536,7 @@ mod tests {
             root_path: PathBuf::from("/nonexistent/owner/repo/.worktrees/gone-session"),
             chunk_count: 500,
         };
-        assert!(is_orphan_index(&entry, &HashSet::new()));
+        assert!(is_orphan_index(&entry, &HashSet::new(), Duration::ZERO));
     }
 
     #[test]
@@ -483,6 +552,60 @@ mod tests {
             root_path: wt,
             chunk_count: 42,
         };
-        assert!(!is_orphan_index(&entry, &HashSet::new()));
+        assert!(!is_orphan_index(&entry, &HashSet::new(), Duration::ZERO));
+    }
+
+    /// Regression for the #5060 creation-time race (#5065 review): a
+    /// just-created worktree root is spared even though its index reads 0
+    /// chunks and no session record claims it yet.
+    ///
+    /// Why: this is the exact state #5060 introduces and holds for the whole
+    /// ~33.5 s lexical walk. Worktree creation registers the index BEFORE any
+    /// session record carries `workspace_path`, so the sweep's
+    /// claimed-by-a-live-session check — which covered this window when the
+    /// index was minted at LAUNCH — no longer does. The sweep runs every 60 s,
+    /// so it lands inside the window and deletes the index out from under the
+    /// walk populating it. The consequence is not just a lost index: session
+    /// launch then re-creates it with the vector lane on, undoing the
+    /// BM25+KG-only ruling.
+    /// What: builds the precise racing state (fresh `.worktrees` root, 0
+    /// chunks, unclaimed) and asserts it is NOT an orphan under the real
+    /// `ORPHAN_GRACE`. `is_orphan_index_true_for_zero_chunk_unclaimed_worktree`
+    /// above pins that the same shape IS still reclaimed once aged, so this is
+    /// a delay, not a blanket exemption.
+    /// Test: this test.
+    #[test]
+    fn is_orphan_index_spares_a_freshly_created_worktree_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = worktree_path(tmp.path(), "just-created");
+        std::fs::create_dir_all(&wt).unwrap();
+        let entry = IndexSnapshot {
+            id: "just-created".into(),
+            root_path: wt,
+            chunk_count: 0,
+        };
+        assert!(
+            !is_orphan_index(&entry, &HashSet::new(), ORPHAN_GRACE),
+            "a worktree created seconds ago reads 0 chunks because its walk is \
+             still running — deleting it here is the #5060 race"
+        );
+    }
+
+    /// The grace window protects a POPULATING index, never a vanished one.
+    ///
+    /// Why: the obvious way to write the grace check is to gate the whole
+    /// orphan verdict on age. That would make a worktree whose directory was
+    /// removed moments ago unreclaimable for the whole window, and — because
+    /// the root cannot be stat'd at all — the age read would have to guess.
+    /// The window belongs to the 0-chunk half only.
+    /// Test: this test.
+    #[test]
+    fn is_orphan_index_grace_does_not_protect_a_root_that_is_gone() {
+        let entry = IndexSnapshot {
+            id: "vanished".into(),
+            root_path: PathBuf::from("/nonexistent/owner/repo/.worktrees/vanished"),
+            chunk_count: 0,
+        };
+        assert!(is_orphan_index(&entry, &HashSet::new(), ORPHAN_GRACE));
     }
 }

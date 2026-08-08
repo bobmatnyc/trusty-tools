@@ -156,15 +156,30 @@ pub const OLD_LAYOUT_BACKUP_SUFFIX: &str = ".old-layout-backup-";
 /// aside (rather than erroring) upholds the project's "operator does nothing"
 /// north-star: the fresh clone proceeds automatically and the old data is preserved
 /// under a clearly-named backup the operator can inspect or delete at leisure.
-/// What: acts ONLY when `base_path` exists, is a directory, is non-empty, and has
-/// NO top-level `.git` (the precise old-layout signature). In that case it renames
-/// `base_path` to a sibling `<repo><OLD_LAYOUT_BACKUP_SUFFIX><unix_nanos>` and
-/// returns `Ok(Some(backup))`. Empty dirs, already-`.git` dirs, and absent paths
-/// are left untouched (`Ok(None)`) — git clone handles an empty/absent dir fine and
-/// the caller handles the `.git` case before ever calling this. Loudly `warn!`s so
-/// the migration is never silent.
+///
+/// #4270 carves a whole class out of that automatic rename: a directory holding
+/// git or trusty-mpm state. A project directory with `.base` or `.worktrees`
+/// matches the old-layout signature exactly (non-empty, no top-level `.git`)
+/// but is nothing like it — those hold real repositories and checked-out
+/// worktrees, and renaming the parent orphans every one of them at once,
+/// possibly while a session is live. That is the #3605 failure mode with a
+/// bigger blast radius, so this returns `Err` there instead. The `.git`
+/// early-return below does not make `.git` redundant in that check:
+/// `Path::exists` answers `false` for an entry it lacks permission to stat, so
+/// an EACCES blip on `.git` would otherwise fall through to the rename.
+/// What: acts ONLY when `base_path` exists, is a directory, is non-empty, has
+/// NO top-level `.git` (the precise old-layout signature), and holds none of the
+/// protected entries [`crate::core::harness_root::protected_state_in`] names. In
+/// that case it renames `base_path` to a sibling
+/// `<repo><OLD_LAYOUT_BACKUP_SUFFIX><unix_nanos>` and returns `Ok(Some(backup))`.
+/// Empty dirs, already-`.git` dirs, and absent paths are left untouched
+/// (`Ok(None)`) — git clone handles an empty/absent dir fine and the caller
+/// handles the `.git` case before ever calling this. Loudly `warn!`s so the
+/// migration is never silent.
 /// Test: `ensure_base_clone_migrates_old_layout_dir_aside`,
-/// `migrate_old_layout_aside_ignores_empty_and_git_dirs`.
+/// `migrate_old_layout_aside_ignores_empty_and_git_dirs`,
+/// `migrate_old_layout_aside_refuses_a_dir_holding_a_dot_base_store`,
+/// `migrate_old_layout_aside_refuses_a_dir_holding_live_worktrees`.
 fn migrate_old_layout_aside(base_path: &Path) -> Result<Option<PathBuf>, String> {
     // Absent path or an existing `.git` dir are both non-old-layout: nothing to do.
     if !base_path.exists() || base_path.join(".git").exists() {
@@ -189,6 +204,24 @@ fn migrate_old_layout_aside(base_path: &Path) -> Result<Option<PathBuf>, String>
         .is_none();
     if is_empty {
         return Ok(None);
+    }
+
+    // #4270: never rename a directory holding git or trusty-mpm state. The
+    // `.git` early-return above cannot cover this on its own — `Path::exists`
+    // answers `false` for an entry it cannot stat, so an EACCES blip reads as
+    // "no git dir" and the rename proceeds over live work.
+    if let Some(found) = crate::core::harness_root::protected_state_in(base_path) {
+        return Err(format!(
+            "inproject: refusing to migrate {base} aside because it holds {found}, so it \
+             already carries git or trusty-mpm state. A `{worktrees}/<id>` worktree or a \
+             `{legacy}` store under it may belong to a live session, and renaming the \
+             parent orphans every one of them. trusty-mpm will not move, rename, or \
+             delete it; retiring a `{legacy}` store is a manual step for once no session \
+             needs it.",
+            base = base_path.display(),
+            legacy = crate::core::harness_root::BASE_CLONE_DIRNAME,
+            worktrees = crate::session_manager::decommission::WORKTREES_DIRNAME,
+        ));
     }
 
     // Non-empty, no top-level `.git` → this is the pre-#1803 old layout. Move it
@@ -397,7 +430,13 @@ pub fn worktree_name_collides(base_path: &Path, worktree_name: &str) -> bool {
 /// record's `workspace_path`, which `spawn_managed_inproject` sets to this
 /// same path) rather than re-deriving a path from the session id.
 /// What: runs `git -C <base_path> worktree add -b session/<worktree_name>
-/// <base_path>/.worktrees/<worktree_name>`. Returns the worktree path on
+/// <base_path>/.worktrees/<worktree_name> <start-point>`, where `<start-point>`
+/// is `origin/<default-branch>` freshly fetched by
+/// [`super::inproject_start_point::resolve`] (#4957 — omitting it inherits the
+/// base checkout's local `HEAD`, which starts every session as stale as the
+/// operator's last `git pull`). A fetch that fails degrades to the last-known
+/// remote-tracking ref (or `HEAD`) and is `warn!`-logged, never silent.
+/// Returns the worktree path on
 /// success. Fails loudly (rather than silently clobbering) if the target
 /// worktree directory already exists — callers are expected to have already
 /// steered `SessionManager::resolve_session_name` away from a colliding name
@@ -410,7 +449,8 @@ pub fn worktree_name_collides(base_path: &Path, worktree_name: &str) -> bool {
 /// to reclaim this worktree.
 /// Test: covered by integration tests against a real temp repo;
 /// `create_session_worktree_rejects_existing_worktree_dir`,
-/// `create_session_worktree_writes_owner_sentinel` (#3649).
+/// `create_session_worktree_writes_owner_sentinel` (#3649),
+/// `session_worktree_branches_from_fetched_origin_not_stale_local_main` (#4957).
 pub fn create_session_worktree(
     base_path: &Path,
     worktree_name: &str,
@@ -427,19 +467,37 @@ pub fn create_session_worktree(
         ));
     }
 
+    // #4957: cut the session branch from the freshly-fetched remote default
+    // branch. Omitting the start-point inherits the base checkout's local
+    // HEAD, which is stale on any machine that has not pulled recently.
+    let start_point = super::inproject_start_point::resolve(base_path);
+    if let Some(reason) = start_point.warning() {
+        warn!(
+            base = %base_path.display(),
+            branch = %branch,
+            "inproject: session worktree is NOT branched from a freshly-fetched origin — {reason}"
+        );
+    }
+
     info!(
         base = %base_path.display(),
         worktree = %worktree_path.display(),
         branch = %branch,
+        start_point = start_point.git_ref().unwrap_or("HEAD"),
         "inproject: creating per-session worktree"
     );
 
-    let out = std::process::Command::new("git")
+    let mut add_cmd = std::process::Command::new("git");
+    add_cmd
         .arg("-C")
         .arg(base_path)
         .args(["worktree", "add", "-b"])
         .arg(&branch)
-        .arg(&worktree_path)
+        .arg(&worktree_path);
+    if let Some(git_ref) = start_point.git_ref() {
+        add_cmd.arg(git_ref);
+    }
+    let out = add_cmd
         .output()
         .map_err(|e| format!("inproject: git worktree add failed to spawn: {e}"))?;
 
@@ -480,6 +538,15 @@ pub fn create_session_worktree(
     }
 
     info!(worktree = %worktree_path.display(), "inproject: per-session worktree created");
+
+    // #5060: register this worktree with trusty-search NOW rather than waiting
+    // for a session to launch in it. Fire-and-forget on a detached thread — a
+    // cold BM25+KG walk of a large repo takes ~35s, and worktree creation must
+    // never wait on it. The index is BM25+KG only (no embeddings); see
+    // `core::worktree_index`. Its teardown is already owned by
+    // `session_manager::search_gc`, which derives the same id (#2033).
+    crate::core::worktree_index::index_new_worktree_in_background(worktree_path.clone());
+
     Ok(worktree_path)
 }
 
@@ -665,60 +732,19 @@ fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
     }
 }
 
-/// Best-effort-idempotent: add `.worktrees/` to the base clone's `.git/info/exclude`.
+/// Keep the base clone's `.worktrees/` out of `git status` AND out of reach of
+/// `git clean -ffd`.
 ///
-/// Why: per-session worktrees live at `<base>/.worktrees/<session-id>/`; without
-/// a gitignore entry `git status` inside the base clone reports the `.worktrees/`
-/// directory as untracked, polluting the output for every harness that runs there.
-/// Adding to `.git/info/exclude` (not `.gitignore`) keeps the entry local to the
-/// clone and does not affect any committed `.gitignore`.
-/// What: creates `<base>/.git/info/` if absent, then reads the current exclude
-/// file and appends `.worktrees/` only when the entry is absent. The read-then-
-/// append window means concurrent callers racing at first launch may each observe
-/// an absent entry and both append — resulting in a duplicate line. Git tolerates
-/// duplicate patterns (same set is matched), so this is safe; single-caller
-/// invocations are strictly idempotent. Returns `Ok(())` on success or when the
-/// entry already exists; propagates I/O errors.
-/// Test: `ensure_worktrees_gitignored_idempotent`.
-pub fn ensure_worktrees_gitignored(base_path: &Path) -> Result<(), String> {
-    let info_dir = base_path.join(".git").join("info");
-    std::fs::create_dir_all(&info_dir).map_err(|e| {
-        format!(
-            "inproject: could not create .git/info/ at {}: {e}",
-            info_dir.display()
-        )
-    })?;
-
-    let exclude_path = info_dir.join("exclude");
-    let existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
-
-    // Idempotent: skip if the entry is already present.
-    if existing.lines().any(|line| line.trim() == ".worktrees/") {
-        return Ok(());
-    }
-
-    // Append with a leading newline when the file does not already end with one.
-    let entry = if existing.is_empty() || existing.ends_with('\n') {
-        ".worktrees/\n".to_string()
-    } else {
-        "\n.worktrees/\n".to_string()
-    };
-
-    use std::io::Write as _;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&exclude_path)
-        .map_err(|e| format!("inproject: could not open .git/info/exclude: {e}"))?;
-    file.write_all(entry.as_bytes())
-        .map_err(|e| format!("inproject: could not write .git/info/exclude: {e}"))?;
-
-    info!(
-        path = %exclude_path.display(),
-        "inproject: added .worktrees/ to .git/info/exclude"
-    );
-    Ok(())
-}
+/// Why: re-exported here (rather than defined here) so this module's existing
+/// callers keep the short spelling, exactly like [`worktree_branch_for`] above.
+/// The single source of truth moved to [`crate::core::worktree_naming`] in
+/// #4270 because `provisioner::workspace` — which is NOT gated behind the
+/// `daemon` feature — now produces the identical topology and needs the same
+/// entry. See that module for the `git clean` evidence.
+/// What: appends `.worktrees/` to `<base>/.git/info/exclude`, idempotently.
+/// Test: `ensure_worktrees_gitignored_idempotent`,
+/// `worktrees_exclude_entry_protects_against_double_force_clean`.
+pub use crate::core::worktree_naming::ensure_worktrees_gitignored;
 
 /// Read the `remote.origin.url` from a git repository at `path`.
 ///

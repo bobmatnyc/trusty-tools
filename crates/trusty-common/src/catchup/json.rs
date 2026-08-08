@@ -23,7 +23,9 @@ use super::CatchupOptions;
 use super::derive_palace_id_for;
 use super::git::{CommitSummary, git_commits_since};
 use super::palace::fetch_recent_palace_drawers;
-use super::session_finder::{PausedSession, find_paused_sessions};
+use super::session_finder::{
+    FilteredSessions, PausedSession, filter_sessions_since, find_paused_sessions,
+};
 use super::state::load_catchup_state;
 
 /// A single paused session, restructured as JSON fields instead of markdown
@@ -161,6 +163,58 @@ pub struct CatchupJson {
     pub recent_commits: Vec<CommitSummary>,
     /// Recent memory-palace drawers since the watermark.
     pub recent_memory: Vec<RecentMemoryJson>,
+    /// How many paused sessions were withheld because they could not be dated.
+    ///
+    /// Why: an empty `sessions` array means "nothing paused since your last
+    /// catch-up" — unless this is non-zero, in which case sessions DID exist
+    /// and were withheld. The watermark advances either way, so without this
+    /// count a withheld session is invisible to the caller forever and there is
+    /// nothing to tell them to re-run with `full` (#5072).
+    /// What: [`session_finder::FilteredSessions::dropped_undatable`]; always 0
+    /// when `full` is set, since a full catch-up applies no watermark.
+    /// Test: `generate_catchup_json_reports_undatable_drop_count`.
+    pub undatable_sessions_dropped: usize,
+}
+
+impl CatchupJson {
+    /// Fold another project's digest into this one.
+    ///
+    /// Why: `session_context_catchup --all-projects` merges a digest per
+    /// project, and every field has to merge — including
+    /// `undatable_sessions_dropped`, which SUMS rather than concatenating. The
+    /// caller previously hand-rolled three `extend` calls plus a `+=`, where
+    /// forgetting the `+=` would drop the receipt for every project after the
+    /// first and leave the suite green (#5072).
+    /// What: appends `sessions` / `recent_commits` / `recent_memory` and adds
+    /// `undatable_sessions_dropped`, saturating.
+    /// Test: `absorb_sums_dropped_counts_and_concatenates_the_rest`.
+    pub fn absorb(&mut self, other: CatchupJson) {
+        self.sessions.extend(other.sessions);
+        self.recent_commits.extend(other.recent_commits);
+        self.recent_memory.extend(other.recent_memory);
+        self.undatable_sessions_dropped = self
+            .undatable_sessions_dropped
+            .saturating_add(other.undatable_sessions_dropped);
+    }
+}
+
+/// Project a filter outcome into the two [`CatchupJson`] fields it feeds.
+///
+/// Why: the withheld count has to reach the caller, and nothing else pins that
+/// it does — an undatable session is unreachable through the filesystem once
+/// both [`PausedSession`] arms fall back to mtime, so no end-to-end test can
+/// drive the count non-zero. Replacing the count with a literal `0` here would
+/// otherwise leave the whole suite green while the receipt silently stopped
+/// working, which is the same fail-open class #5072 is about. This is the seam
+/// that makes the wire testable.
+/// What: maps `kept` through [`paused_session_to_json`] and returns
+/// `dropped_undatable` alongside it, unchanged.
+/// Test: `sessions_payload_propagates_dropped_count`.
+fn sessions_payload(filtered: FilteredSessions) -> (Vec<PausedSessionJson>, usize) {
+    (
+        filtered.kept.iter().map(paused_session_to_json).collect(),
+        filtered.dropped_undatable,
+    )
 }
 
 /// Generate a structured (JSON) catch-up digest for the given options.
@@ -188,21 +242,12 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
         load_catchup_state(&palace_id).map(|s| s.last_catchup_at)
     };
 
-    let sessions = match find_paused_sessions(&opts.project_dir) {
-        Ok(sessions) => {
-            let sessions: Vec<_> = if let Some(wm) = watermark {
-                sessions
-                    .into_iter()
-                    .filter(|s| s.sort_key().is_none_or(|ts| ts > wm))
-                    .collect()
-            } else {
-                sessions
-            };
-            sessions.iter().map(paused_session_to_json).collect()
-        }
+    // #5072: shared fail-closed predicate — see `filter_sessions_since`.
+    let (sessions, undatable_sessions_dropped) = match find_paused_sessions(&opts.project_dir) {
+        Ok(found) => sessions_payload(filter_sessions_since(found, watermark)),
         Err(e) => {
             eprintln!("catchup: warning: could not scan paused sessions: {e}");
-            Vec::new()
+            (Vec::new(), 0)
         }
     };
 
@@ -241,6 +286,7 @@ pub async fn generate_catchup_json(opts: &CatchupOptions) -> CatchupJson {
         sessions,
         recent_commits,
         recent_memory,
+        undatable_sessions_dropped,
     }
 }
 
@@ -364,6 +410,196 @@ mod tests {
             json.recent_commits.is_empty(),
             "future watermark should exclude all commits: {:?}",
             json.recent_commits
+        );
+    }
+
+    /// Why: issue #5072 — the live `session_context_catchup` call on
+    /// `bobmatnyc/trusty-tools` returned exactly one session, the hand-written
+    /// `session-20260730-bounce.md`, with every field empty or null, while
+    /// dozens of well-formed newer snapshots sat in the same directory. The
+    /// watermark filter admitted the bounce file precisely BECAUSE its
+    /// timestamp could not be derived (`is_none_or` treats an unknown key as
+    /// "newer than the watermark"), and dropped every snapshot whose timestamp
+    /// could be. The result was an inverted digest: only the record that could
+    /// not be dated survived.
+    /// What: reproduces that directory shape — one well-formed dated snapshot
+    /// plus one undated hand-written file — behind a far-future watermark. No
+    /// session is newer than 2099, so the digest must be empty. Before the fix
+    /// it contained the undated file.
+    /// Test: itself.
+    #[tokio::test]
+    async fn generate_catchup_json_excludes_undatable_session_behind_watermark() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(&tmp);
+
+        let sessions_dir = tmp.path().join(".trusty-mpm").join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("session-20260806-211305.md"),
+            "## Summary\nReal work.\n\n## Next Steps\nShip it.\n",
+        )
+        .unwrap();
+        // Hand-written snapshot: the filename carries no parseable
+        // `YYYYMMDD-HHMMSS`, and the body uses none of the parsed section
+        // headers — so every field would render empty if it leaked through.
+        fs::write(
+            sessions_dir.join("session-20260730-bounce.md"),
+            "# Session snapshot — pre-daemon-bounce\n\n## What landed this leg\n- stuff\n",
+        )
+        .unwrap();
+
+        let palace_id = derive_palace_id_for(tmp.path());
+        save_catchup_state(
+            &palace_id,
+            &CatchupState {
+                last_catchup_at: "2099-01-01T00:00:00Z".parse().unwrap(),
+                palace_id: palace_id.clone(),
+                last_git_sha: None,
+            },
+        )
+        .unwrap();
+
+        let opts = CatchupOptions {
+            project_dir: tmp.path().to_path_buf(),
+            memory_url: "http://127.0.0.1:19999".to_string(),
+            include_git: false,
+            include_palace: false,
+            git_limit: 50,
+            drawer_limit: 15,
+            full: false,
+        };
+
+        let json = generate_catchup_json(&opts).await;
+        assert!(
+            json.sessions.is_empty(),
+            "a snapshot with no derivable timestamp must not survive a watermark \
+             that every datable snapshot fails: {:?}",
+            json.sessions
+                .iter()
+                .map(|s| s.source_file.clone())
+                .collect::<Vec<_>>()
+        );
+        // Both files are datable — the hand-written one by its mtime — so
+        // nothing was withheld; they simply predate 2099.
+        assert_eq!(json.undatable_sessions_dropped, 0);
+    }
+
+    /// Why: the withheld count is a receipt, not diagnostics — the watermark
+    /// advances past a withheld session and never returns for it, so a caller
+    /// seeing an empty `sessions` array must be able to tell "nothing paused"
+    /// from "sessions existed and could not be dated" (#5072).
+    /// What: seeds a claude-mpm session whose recorded `paused_at` is
+    /// unparseable AND whose mtime is unreadable — achieved by deleting the
+    /// file after load is impossible, so this asserts the plumbing instead: a
+    /// datable-but-too-old corpus reports 0, proving the count tracks undatable
+    /// exclusions specifically rather than every filtered-out session.
+    /// Test: itself, with `filter_sessions_since_reports_dropped_count` pinning
+    /// the counting rule directly.
+    #[tokio::test]
+    async fn generate_catchup_json_reports_undatable_drop_count() {
+        let tmp = TempDir::new().unwrap();
+        init_git_repo(&tmp);
+        let sessions_dir = tmp.path().join(".trusty-mpm").join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join("session-20260101-000000.md"),
+            "## Summary\nOld.\n",
+        )
+        .unwrap();
+
+        let palace_id = derive_palace_id_for(tmp.path());
+        save_catchup_state(
+            &palace_id,
+            &CatchupState {
+                last_catchup_at: "2099-01-01T00:00:00Z".parse().unwrap(),
+                palace_id: palace_id.clone(),
+                last_git_sha: None,
+            },
+        )
+        .unwrap();
+
+        let opts = CatchupOptions {
+            project_dir: tmp.path().to_path_buf(),
+            memory_url: "http://127.0.0.1:19999".to_string(),
+            include_git: false,
+            include_palace: false,
+            git_limit: 50,
+            drawer_limit: 15,
+            full: false,
+        };
+
+        let json = generate_catchup_json(&opts).await;
+        assert!(json.sessions.is_empty());
+        assert_eq!(
+            json.undatable_sessions_dropped, 0,
+            "a merely-too-old session is filtered, not withheld — the count \
+             must not conflate the two"
+        );
+    }
+
+    fn claude_session(resume: &str) -> PausedSession {
+        use crate::catchup::mpm_session::ClaudeMpmSession;
+        PausedSession::ClaudeMpm {
+            session: ClaudeMpmSession {
+                resume_instructions: Some(resume.to_string()),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Why: #5072 — the withheld count must reach `CatchupJson`, and no
+    /// end-to-end test can prove it does: an undatable session is unreachable
+    /// through the filesystem once both `PausedSession` arms fall back to
+    /// mtime, so replacing the count with a literal `0` at the call site left
+    /// the whole suite green. This pins the wire itself.
+    /// What: a non-zero `dropped_undatable` survives the projection unchanged,
+    /// alongside the mapped sessions.
+    /// Test: itself.
+    #[test]
+    fn sessions_payload_propagates_dropped_count() {
+        let (sessions, dropped) = sessions_payload(FilteredSessions {
+            kept: vec![claude_session("a"), claude_session("b")],
+            dropped_undatable: 7,
+        });
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            dropped, 7,
+            "the withheld count must not be reset in transit"
+        );
+    }
+
+    /// Why: `--all-projects` merges one digest per project, and the withheld
+    /// count SUMS where every other field concatenates. Hand-rolling that
+    /// merge is how a receipt gets dropped for every project after the first
+    /// (#5072).
+    /// What: two digests fold into one with concatenated arrays and an added
+    /// count.
+    /// Test: itself.
+    #[test]
+    fn absorb_sums_dropped_counts_and_concatenates_the_rest() {
+        let mut a = CatchupJson {
+            sessions: vec![paused_session_to_json(&claude_session("a"))],
+            recent_memory: vec![RecentMemoryJson {
+                title: "t1".into(),
+                tags: vec![],
+            }],
+            undatable_sessions_dropped: 2,
+            ..Default::default()
+        };
+        a.absorb(CatchupJson {
+            sessions: vec![paused_session_to_json(&claude_session("b"))],
+            recent_memory: vec![RecentMemoryJson {
+                title: "t2".into(),
+                tags: vec![],
+            }],
+            undatable_sessions_dropped: 3,
+            ..Default::default()
+        });
+        assert_eq!(a.sessions.len(), 2);
+        assert_eq!(a.recent_memory.len(), 2);
+        assert_eq!(
+            a.undatable_sessions_dropped, 5,
+            "withheld counts sum across projects, never overwrite"
         );
     }
 

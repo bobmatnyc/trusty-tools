@@ -29,8 +29,11 @@ pub mod reconcile;
 pub mod reindex;
 pub mod roots_registry;
 pub mod server;
+pub mod shutdown_budget;
 pub mod shutdown_flush;
 pub mod stall_tracker;
+/// #4250: retry for indexes parked by a warm-boot restore timeout.
+pub mod timeout_recovery;
 pub mod ui;
 pub mod walker;
 pub mod warm_boot;

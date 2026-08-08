@@ -1,7 +1,7 @@
 //! Declarative CLI help system with "did you mean?" suggestions.
 //!
 //! Why: every standalone trusty-* binary (search, memory, analyze, mpm-cli, tga,
-//! open-mpm) was rendering its `--help` and unknown-subcommand error output
+//! trusty-agents) was rendering its `--help` and unknown-subcommand error output
 //! independently, so the formats drifted over time. Issue #216 centralises the
 //! help model into one declarative YAML schema, one canonical renderer, and one
 //! Jaro-Winkler suggester so the six binaries share a single user-facing voice.

@@ -507,6 +507,16 @@ impl PalaceRegistry {
             &handle.kg,
             &drawers,
         );
+        // ADR-0027 T9: seed the default wing every room already points at.
+        // Ordered AFTER the room backfill only for log readability — the two
+        // are independent, because `RoomRecord::wing_id` has been
+        // `DEFAULT_WING_ID` since T1, so no room row needs rewriting for its
+        // wing to exist. This writes exactly one row and never touches
+        // `ROOMS` or `DRAWERS`.
+        crate::memory_core::store::wings::ensure_default_wing_fail_open(
+            handle.id.as_str(),
+            &handle.kg,
+        );
     }
 
     /// Resolve a palace-level alias, but ONLY when the requested palace is
@@ -582,7 +592,7 @@ impl PalaceRegistry {
     /// Open a registry rooted at `data_root` and pre-hydrate every persisted
     /// palace into the in-memory LRU cache.
     ///
-    /// Why: Issue #52 — production hosts (open-mpm) want a single call that
+    /// Why: Issue #52 — production hosts (trusty-agents) want a single call that
     /// brings up the full registry on daemon startup so that recall paths
     /// don't pay a lazy-open latency on the first request after a restart.
     /// Existing call sites continue to use `new()` + `open_palace()`; this is

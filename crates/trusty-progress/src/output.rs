@@ -202,7 +202,7 @@ impl Write for SharedBuf {
 }
 
 /// Why: Terminal detection is the one piece of environment-coupled logic; we
-/// use std's `IsTerminal` (stable, well below the 1.91 MSRV) rather than adding
+/// use std's `IsTerminal` (stable, well below the 1.94 MSRV) rather than adding
 /// an `is-terminal`/`atty` crate, keeping the dep tree to just `indicatif` +
 /// `thiserror`.
 /// What: Returns whether stderr is an interactive terminal.

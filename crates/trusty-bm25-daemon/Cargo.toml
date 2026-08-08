@@ -1,9 +1,9 @@
 [package]
 name = "trusty-bm25-daemon"
-version = "0.1.3"
+version = "0.2.0"
 publish = true
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.94"
 description = "Per-palace BM25 lexical-index subprocess for the trusty-* ecosystem (issue #156)"
 license.workspace = true
 authors.workspace = true
@@ -39,7 +39,7 @@ crate-type = ["rlib"]
 # Uses the in-tree, zero-dep BM25 implementation from trusty-common
 # (`bm25` feature). Keeps the tokenizer's camelCase / alpha↔digit splits
 # in lock-step with every other consumer (trusty-search, trusty-memory).
-trusty-common = { workspace = true, features = ["bm25"] }
+trusty-common = { workspace = true, features = ["bm25", "uds"] }
 tokio = { workspace = true, features = ["full"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

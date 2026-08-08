@@ -29,7 +29,10 @@
 
 use std::future::IntoFuture as _;
 
-use super::{format_state_column, format_tombstone_row, short_timestamp, truncate};
+use super::super::managed_render::{
+    format_ls_row, format_state_column, format_tombstone_row, short_timestamp, state_column_width,
+    truncate,
+};
 use super::{session_activity, session_decommission, session_resume, session_stop};
 
 #[test]
@@ -110,8 +113,8 @@ fn format_state_column_leaves_healthy_state_unchanged() {
 /// never a blank-looking row that could be mistaken for "no session here".
 #[test]
 fn format_tombstone_row_shows_slot_and_placeholder() {
-    assert_eq!(format_tombstone_row(1), "1      -- deleted --");
-    assert_eq!(format_tombstone_row(42), "42     -- deleted --");
+    assert_eq!(format_tombstone_row(1, false), "1      -- deleted --");
+    assert_eq!(format_tombstone_row(42, false), "42     -- deleted --");
 }
 
 #[test]
@@ -845,4 +848,246 @@ async fn session_activity_not_found_errors() {
         err.to_string().contains("nonexistent-id"),
         "error should name the missing id: {err}"
     );
+}
+
+// ── `tm ls` column color (NUM + NAME) ───────────────────────────────────────
+
+/// Minimal summary fixture for the row-formatting cases.
+fn ls_session(name: &str, slot: u32) -> trusty_mpm::client::ManagedSessionSummary {
+    trusty_mpm::client::ManagedSessionSummary {
+        id: "11111111-2222-3333-4444-555555555555".into(),
+        name: name.to_string(),
+        state: "active".into(),
+        persisted_state: None,
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        created_at: Some("2026-08-05T12:34:56Z".into()),
+        last_activity_at: None,
+        pending_decision: None,
+        proposed_default: None,
+        source_id: None,
+        task: Some("do the thing".into()),
+        cwd: None,
+        claude_session_id: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: None,
+        unresumable: false,
+        stale_assets: false,
+        stale_assets_unchecked: false,
+        attached: false,
+        slot,
+        deleted: false,
+    }
+}
+
+/// Strip every ANSI SGR escape, leaving the text a terminal actually draws.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Why: the `tm-NNNN` ↔ `NNNN` correspondence does not exist — a name's
+/// trailing serial comes from `allocate_serial` (per-project, reuses gaps)
+/// while `NUM` is a global slot. Painting both columns one hue would assert a
+/// relationship that is false, and the more records retention evicts, the more
+/// often the two numbers coincide by accident.
+/// What: asserts both columns are wrapped in an SGR escape and that the two
+/// escapes differ.
+/// Test: this test.
+#[test]
+fn ls_row_colors_num_and_name_in_distinct_hues() {
+    let row = format_ls_row(&ls_session("tm-trusty-tools-01", 7), true, 14);
+    assert!(
+        row.starts_with("\u{1b}[35m7\u{1b}[0m"),
+        "NUM colored: {row:?}"
+    );
+    assert!(
+        row.contains("\u{1b}[36mtm-trusty-tools-01\u{1b}[0m"),
+        "NAME colored: {row:?}"
+    );
+    assert_ne!(
+        "\u{1b}[35m", "\u{1b}[36m",
+        "NUM and NAME must not share a hue"
+    );
+}
+
+/// Why: `NO_COLOR`, a pipe, and every scripted reader must see exactly the
+/// bytes the table produced before color existed.
+/// What: asserts the plain row carries no escape at all, and that stripping the
+/// escapes from the colored row reproduces it byte-for-byte.
+/// Test: this test.
+#[test]
+fn ls_row_plain_when_color_disabled() {
+    let s = ls_session("tm-trusty-tools-01", 7);
+    let plain = format_ls_row(&s, false, 14);
+    assert!(!plain.contains('\u{1b}'), "no escapes: {plain:?}");
+    assert_eq!(
+        strip_ansi(&format_ls_row(&s, true, 14)),
+        plain,
+        "color must change bytes only inside the escapes"
+    );
+    let tomb_plain = format_tombstone_row(7, false);
+    assert!(!tomb_plain.contains('\u{1b}'));
+    assert_eq!(strip_ansi(&format_tombstone_row(7, true)), tomb_plain);
+}
+
+/// Why: `{:<5}`/`{:<24}` measure the formatted value, so an ANSI-wrapped column
+/// would come out ~9 chars narrow and stagger every row after it — including
+/// the tombstone row, whose `NUM` field is padded by the same helper.
+/// What: asserts the VISIBLE width of a colored row equals that of the plain
+/// row, for a short name, a name at the truncation boundary, and a tombstone.
+/// Test: this test.
+#[test]
+fn ls_row_alignment_matches_with_and_without_color() {
+    for name in ["a", "tm-trusty-tools-01", &"x".repeat(60)] {
+        for slot in [1u32, 107] {
+            let s = ls_session(name, slot);
+            assert_eq!(
+                strip_ansi(&format_ls_row(&s, true, 14)).chars().count(),
+                format_ls_row(&s, false, 14).chars().count(),
+                "row width drifts for name={name:?} slot={slot}"
+            );
+        }
+    }
+    for slot in [1u32, 107] {
+        assert_eq!(
+            strip_ansi(&format_tombstone_row(slot, true))
+                .chars()
+                .count(),
+            format_tombstone_row(slot, false).chars().count(),
+            "tombstone row width drifts for slot={slot}"
+        );
+        // And the tombstone's NUM column is the same width as a live row's, so
+        // the two row shapes line up under the same header.
+        let plain = format_tombstone_row(slot, false);
+        assert_eq!(
+            &plain[..7],
+            &format_ls_row(&ls_session("n", slot), false, 14)[..7],
+            "tombstone NUM column matches the live row's"
+        );
+    }
+}
+
+/// Why: `ID` is the widest cell on the row and was the only uncolored one, so
+/// the table read as a wall of undifferentiated UUID. It is dimmed rather than
+/// hued because it exists to be copy-pasted, not scanned — and it must be a
+/// THIRD escape, distinct from `NUM`'s and `NAME`'s, so no two columns blur
+/// together.
+/// What: asserts the id is wrapped in the dim SGR escape, and that the three
+/// column escapes are pairwise distinct.
+/// Test: this test.
+#[test]
+fn ls_row_colors_id_column_dimmed() {
+    let s = ls_session("tm-trusty-tools-01", 7);
+    let row = format_ls_row(&s, true, 14);
+    assert!(
+        row.contains(&format!("\u{1b}[2m{}\u{1b}[0m", s.id)),
+        "ID colored dim: {row:?}"
+    );
+    let hues = ["\u{1b}[35m", "\u{1b}[2m", "\u{1b}[36m"];
+    for (i, a) in hues.iter().enumerate() {
+        for b in &hues[i + 1..] {
+            assert_ne!(a, b, "NUM/ID/NAME must not share a hue");
+        }
+    }
+}
+
+/// Why: the `STATE` cell is the state PLUS any annotation, and the column was a
+/// hardcoded `{:<14}`. `attached [stale-assets]` is 23 chars, so an annotated
+/// row pushed `NAME`/`TASK`/`CREATED` nine columns right and staggered the
+/// table — visible in any real `tm ls`.
+/// What: asserts the computed width covers the longest annotated cell, is
+/// floored at the historical 14 when nothing is annotated, and ignores
+/// tombstone rows (which have no `STATE` cell).
+/// Test: this test.
+#[test]
+fn state_column_width_absorbs_longest_annotation() {
+    let plain = vec![ls_session("a", 1), ls_session("b", 2)];
+    assert_eq!(
+        state_column_width(&plain),
+        14,
+        "an all-plain listing keeps the historical width"
+    );
+
+    let mut stale = ls_session("c", 3);
+    stale.attached = true;
+    stale.stale_assets = true;
+    let annotated = vec![ls_session("a", 1), stale];
+    // "attached [stale-assets]" — the widest cell the table can produce.
+    assert_eq!(
+        state_column_width(&annotated),
+        "attached [stale-assets]".len()
+    );
+
+    let mut tomb = ls_session("d", 4);
+    tomb.deleted = true;
+    tomb.state = "a-very-long-state-string-that-is-not-rendered".into();
+    assert_eq!(
+        state_column_width(&[tomb]),
+        14,
+        "a tombstone row has no STATE cell and must not widen the column"
+    );
+}
+
+/// Why: this is the alignment bug itself. Before the fix, an annotated row's
+/// `NAME` started nine columns right of every plain row's, because the
+/// annotation overflowed a fixed-width `STATE`. The fix is only real if the
+/// columns after `STATE` start at the SAME offset on both row shapes.
+///
+/// It also proves padding is computed on VISIBLE text: the assertion runs on
+/// the colored rows with the escapes stripped, so padding measured on the
+/// escaped string would put `NAME` ~9 chars early on every colored row and
+/// fail here.
+/// What: renders a plain row and an annotated row at the listing's shared
+/// width, then asserts the `NAME` column begins at the same character offset in
+/// both — in plain output and in stripped colored output.
+/// Test: this test.
+#[test]
+fn ls_table_columns_align_when_a_row_carries_an_annotation() {
+    let plain = ls_session("plain-name", 1);
+    let mut annotated = ls_session("stale-name", 2);
+    annotated.attached = true;
+    annotated.stale_assets = true;
+    let sessions = vec![plain.clone(), annotated.clone()];
+    let width = state_column_width(&sessions);
+
+    let name_offset = |row: &str, name: &str| row.find(name).expect("name present in row");
+    for use_color in [false, true] {
+        let a = strip_ansi(&format_ls_row(&plain, use_color, width));
+        let b = strip_ansi(&format_ls_row(&annotated, use_color, width));
+        assert_eq!(
+            name_offset(&a, "plain-name"),
+            name_offset(&b, "stale-name"),
+            "NAME column drifts between a plain and an annotated row (use_color={use_color})"
+        );
+    }
+
+    // And the annotation is actually present — otherwise the offsets above
+    // would agree for the trivial reason that nothing was annotated.
+    assert!(format_ls_row(&annotated, false, width).contains("attached [stale-assets]"));
+
+    // Padding is computed on the VISIBLE text: stripping the escapes from the
+    // colored row must reproduce the plain row byte-for-byte. Padding measured
+    // on the escaped string would eat ~9 spaces per colored column here.
+    for s in [&plain, &annotated] {
+        assert_eq!(
+            strip_ansi(&format_ls_row(s, true, width)),
+            format_ls_row(s, false, width),
+            "padding must be measured on visible text, not the ANSI-wrapped string"
+        );
+    }
 }

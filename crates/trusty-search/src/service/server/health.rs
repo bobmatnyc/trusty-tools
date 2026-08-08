@@ -262,7 +262,7 @@ fn bootstrap_state_str(state: BootstrapState) -> &'static str {
 pub(super) async fn health_handler(
     State(state): State<Arc<SearchAppState>>,
 ) -> Json<HealthResponse> {
-    // Why: open-mpm (and other external integrators) probe `/health` to detect
+    // Why: trusty-agents (and other external integrators) probe `/health` to detect
     // a running trusty-search daemon before spawning their own. Including
     // `indexes` count lets the caller verify the daemon is not only alive but
     // also has the expected registry populated (issue #34).
@@ -275,7 +275,7 @@ pub(super) async fn health_handler(
     // Issue #1006 — Option B: this handler MUST NOT block on any contended
     // lock. An embed stall (CoreML/CUDA) can hold `embedder_slot` in a write
     // lock for up to 30 s; `.await`-ing it here would block the health handler
-    // for the same duration, causing external probes (trusty-review, open-mpm)
+    // for the same duration, causing external probes (trusty-review, trusty-agents)
     // to see a false "daemon down". All lock accesses below use either the
     // watch-based `is_embedder_ready()` (no lock) or `try_read()` / `try_lock()`
     // (returns immediately rather than parking the handler).
@@ -478,6 +478,30 @@ pub(super) async fn health_handler(
         .unwrap_or_default();
     warmboot_summary.indexes_lazy = state.cold_store.len();
     warmboot_summary.indexes_failed = state.cold_store.failed_len();
+    // #4250: report the LIVE timeout cohort, the same way `indexes_lazy` and
+    // `indexes_failed` are already re-read live, rather than the count frozen
+    // at boot completion. Before the recovery pass existed the two were the
+    // same number forever; now the count falls as indexes are driven back, and
+    // a count that does NOT fall is the operator's signal that recovery is
+    // failing — which the frozen counter could never distinguish.
+    let live_timeout_cohort = state.cold_store.timed_out_len();
+    let stored_timeout_count = warmboot_summary.indexes_skipped_timeout;
+    warmboot_summary.indexes_skipped_timeout = live_timeout_cohort;
+    if live_timeout_cohort > 0 {
+        warmboot_summary.warm_boot_degraded = true;
+    } else if stored_timeout_count > 0 {
+        // Edge: this boot HAD timeouts and the cohort has now drained, so the
+        // boot-time counter must stop pinning the flag.
+        // `recompute_warm_boot_degraded` re-derives it from every live input
+        // (TCC, count drop, failed lanes), so this un-latches without weakening
+        // any other degraded signal. Edge-triggered, mirroring the
+        // defer-embed-epoch trigger above — no extra handle scan per poll.
+        recompute_warm_boot_degraded(&state);
+        if let Ok(mut s) = state.warmboot_summary.lock() {
+            s.indexes_skipped_timeout = 0;
+            warmboot_summary.warm_boot_degraded = s.warm_boot_degraded;
+        }
+    }
 
     // Issue #1870: a registered index whose durable redb corpus failed to open
     // on warm-boot (`DatabaseAlreadyOpen` from an in-process double-open, or an
@@ -737,14 +761,19 @@ pub(super) async fn health_handler(
 /// `recompute_does_not_flag_an_in_progress_tail_job_as_degraded` in
 /// `tests_health_degraded.rs`.
 pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) {
-    let (degraded_by_tcc, degraded_by_timeout, old) = match state.warmboot_summary.lock() {
-        Ok(summary) => (
-            summary.indexes_skipped_tcc > 0,
-            summary.indexes_skipped_timeout > 0,
-            summary.warm_boot_degraded,
-        ),
+    let (degraded_by_tcc, old) = match state.warmboot_summary.lock() {
+        Ok(summary) => (summary.indexes_skipped_tcc > 0, summary.warm_boot_degraded),
         Err(_) => return,
     };
+    // #4250: this used to read the FROZEN boot-time `indexes_skipped_timeout`,
+    // on the stated premise that "a scan timeout genuinely CANNOT heal without
+    // a daemon restart (the index in question never loaded at all)". That
+    // premise held only because nothing retried a timed-out index; the
+    // recovery pass makes it false in both directions. Reading the LIVE cohort
+    // means a daemon that got its indexes back stops reporting degraded, and —
+    // the direction that matters more — an index that never came back keeps a
+    // signal of its own instead of being averaged away by a boot counter.
+    let degraded_by_timeout = state.cold_store.timed_out_len() > 0;
 
     let prior_count = state
         .prior_index_count

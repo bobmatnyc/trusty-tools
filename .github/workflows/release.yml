@@ -60,7 +60,7 @@
 #   cross-compile. Alternatives considered and rejected are recorded in the PR
 #   for #2533.
 #
-#   CAVEAT — ORT-bundling crates (trusty-search, trusty-analyze), discovered
+#   CAVEAT — ORT-bundling crates, discovered
 #   via a real workflow_dispatch dry-run CI validation while building #2037:
 #   their DEFAULT `bundled-ort` feature links a prebuilt ONNX Runtime archive
 #   that was itself compiled with a real GNU toolchain (GNU libstdc++ ABI).
@@ -69,16 +69,23 @@
 #   unlinkable ABI), so the final link fails with `undefined symbol:
 #   std::...` — a genuine cargo-zigbuild + prebuilt-GNU-C++-archive
 #   limitation, not a one-line flag fix (confirmed: passing `-lstdc++`
-#   explicitly does not resolve it). So for these two crates the x86_64 leg
+#   explicitly does not resolve it). So for such crates the x86_64 leg
 #   below (see `native_linux_entry` in the matrix-generation step) is left on
 #   its ORIGINAL native `cargo build` — unchanged glibc floor, exactly what
 #   shipped before #2037, NOT a regression. Their portable-Linux option
 #   remains the existing `x86_64-linux-al2023` asset built with `--features
 #   load-dynamic` (dlopen()s a system ONNX Runtime at runtime instead of
 #   linking one at build time, sidestepping the ABI problem entirely). The
-#   NEW aarch64 leg reuses that same load-dynamic feature set for these two
+#   NEW aarch64 leg reuses that same load-dynamic feature set for those
 #   crates (see the matrix-generation step below) — proven working in CI,
 #   since it never links ONNX Runtime at build time either.
+#
+#   #5067: `trusty-analyze` used to be in this set. Its `bundled-ort` default
+#   existed solely for a neural clustering embedder no caller selected, and
+#   loading that model stalled daemon boot on an untimed network call. With
+#   the embedder removed the crate links no ONNX Runtime, so it takes the
+#   ordinary glibc-2.17 zigbuild legs and publishes no AL2023 variant.
+#   `trusty-search` is the only ORT-bundling crate left.
 #
 # 2533: THE ARM64 LINUX LEG IS BLOCKING, AND MISSING ASSETS ARE AUDITED.
 #   The arm64 leg used to be `best_effort` (continue-on-error). Because a
@@ -212,7 +219,7 @@ jobs:
           # ── Tag-prefix aliases (issue #1128) ─────────────────────────────────
           # Some crates publish to crates.io under a SHORT package name that
           # differs from their directory / canonical crate name, and the
-          # documented release convention (.trusty-mpm/INSTRUCTIONS.md "Git Tag / Release
+          # documented release convention (CLAUDE.md "Git Tag / Release
           # Convention", abbreviation table) lets contributors tag with either
           # form. We canonicalize the alias here so every downstream consumer —
           # the per-crate config map, the homebrew-bump case statement, the
@@ -306,19 +313,23 @@ jobs:
             # The trusty-analyze [[bin]] target is confirmed in trusty-analyze/Cargo.toml.
             # trusty-console was REMOVED from the install surface in #1318
             # (single-owner-per-binary); it now ships as its own release job.
-            # required-features=["http-server"]; default = ["http-server","bundled-ort"].
+            # required-features=["http-server"]; default = ["http-server"].
             # UI-embedding crate: SKIP_UI_BUILD=1
-            # ORT-bundling (bundled-ort default): AL2023 load-dynamic variant needed.
-            # trusty-analyze DOES have an `http-server` feature (unlike trusty-search),
-            # so the AL2023 flags are: --no-default-features --features http-server,load-dynamic.
+            # No ORT bundling since #5067 removed the unused neural clustering
+            # embedder along with the bundled-ort/load-dynamic/cuda features, so
+            # there is no longer a load-dynamic build to publish and the Linux
+            # asset is an ordinary zigbuild with the 2.17 glibc baseline. The
+            # installer dropped trusty-analyze from ORT_CRATES in the same change;
+            # re-enabling AL2023_VARIANT here without restoring load-dynamic would
+            # fail the build.
             CARGO_PKG="trusty-analyze"
             BINARIES="trusty-analyze"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
-            AL2023_VARIANT="true"
-            AL2023_NO_DEFAULT="true"
-            AL2023_FEATURES="http-server,load-dynamic"
+            AL2023_VARIANT="false"
+            AL2023_NO_DEFAULT="false"
+            AL2023_FEATURES=""
 
           elif [[ "$CRATE" == "trusty-review" ]]; then
             # Binaries: trusty-review
@@ -987,18 +998,18 @@ jobs:
       # so we install via rustup directly. Standard (macOS) and linux-zigbuild
       # runners both use the action — zigbuild just needs the target's std lib
       # installed via rustup same as a native build would.
-      - name: Install Rust 1.91 (MSRV) via rustup — AL2023
+      - name: Install Rust 1.94 (MSRV) via rustup — AL2023
         if: matrix.variant == 'al2023'
         shell: bash
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain 1.91 \
+            | sh -s -- -y --profile minimal --default-toolchain 1.94 \
                        --target ${{ matrix.target }}
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Install Rust (MSRV 1.91) — standard + linux-zigbuild runners
+      - name: Install Rust (MSRV 1.94) — standard + linux-zigbuild runners
         if: matrix.variant == 'standard' || matrix.variant == 'linux-zigbuild'
-        uses: dtolnay/rust-toolchain@1.91
+        uses: dtolnay/rust-toolchain@1.94
         with:
           targets: ${{ matrix.target }}
 
@@ -1019,13 +1030,13 @@ jobs:
           # architecture; without this they share one key, so whichever leg
           # saves first hands the other its `target/` — including host-compiled
           # build-script binaries of the wrong architecture. Keeping the old
-          # unqualified `al2023-1.91-` restore-key would reintroduce exactly
+          # unqualified `al2023-1.94-` restore-key would reintroduce exactly
           # that cross-arch restore through the fallback path, so the fallbacks
           # are target-scoped too.
-          key: al2023-1.91-${{ matrix.target }}-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
+          key: al2023-1.94-${{ matrix.target }}-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            al2023-1.91-${{ matrix.target }}-${{ matrix.crate }}-
-            al2023-1.91-${{ matrix.target }}-
+            al2023-1.94-${{ matrix.target }}-${{ matrix.crate }}-
+            al2023-1.94-${{ matrix.target }}-
 
       - name: Cache cargo registry + artefacts (standard + linux-zigbuild)
         if: matrix.variant == 'standard' || matrix.variant == 'linux-zigbuild'
@@ -1224,11 +1235,11 @@ jobs:
       # alongside LICENSE and README.md, and computes a .sha256 checksum.
       #
       # Asset naming: <crate>-<version>-<asset_suffix>.tar.gz
-      #   macOS:        trusty-analyze-0.5.0-aarch64-apple-darwin.tar.gz
-      #   Linux x86_64: trusty-analyze-0.5.0-x86_64-unknown-linux-gnu.tar.gz  (glibc 2.17 baseline)
-      #   Linux arm64:  trusty-analyze-0.5.0-aarch64-unknown-linux-gnu.tar.gz (glibc 2.17 baseline, best-effort — issue #2037)
-      #   AL2023 amd64: trusty-analyze-0.5.0-x86_64-linux-al2023.tar.gz
-      #   AL2023 arm64: trusty-analyze-0.5.0-aarch64-linux-al2023.tar.gz  (2533 follow-up)
+      #   macOS:        trusty-search-0.5.0-aarch64-apple-darwin.tar.gz
+      #   Linux x86_64: trusty-search-0.5.0-x86_64-unknown-linux-gnu.tar.gz  (glibc 2.17 baseline)
+      #   Linux arm64:  trusty-search-0.5.0-aarch64-unknown-linux-gnu.tar.gz (glibc 2.17 baseline, best-effort — issue #2037)
+      #   AL2023 amd64: trusty-search-0.5.0-x86_64-linux-al2023.tar.gz  (ORT crates only)
+      #   AL2023 arm64: trusty-search-0.5.0-aarch64-linux-al2023.tar.gz  (2533 follow-up)
       - name: Strip, package, and checksum
         id: package
         shell: bash
@@ -1531,8 +1542,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Install Rust (MSRV 1.91)
-        uses: dtolnay/rust-toolchain@1.91
+      - name: Install Rust (MSRV 1.94)
+        uses: dtolnay/rust-toolchain@1.94
 
       - name: Cache cargo registry + artefacts
         uses: Swatinem/rust-cache@v2

@@ -261,6 +261,49 @@ impl SessionStore {
         self.save().await
     }
 
+    /// Insert or update many records in ONE reload + ONE save.
+    ///
+    /// Why: the retention sweep stamps `terminal_at` on every legacy terminal
+    /// record it meets. Doing that through [`Self::upsert`] would reload and
+    /// rewrite the whole `sessions.json` once per record — 76 full-file writes
+    /// on the first sweep against a real store.
+    /// What: reloads once (so a concurrent out-of-process write is not lost),
+    /// applies every record, saves once. An empty batch is a no-op that skips
+    /// both the reload and the write.
+    /// Test: `store_upsert_many_writes_all_in_one_pass`.
+    pub async fn upsert_many(&mut self, records: Vec<SessionRecord>) -> Result<(), StoreError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        self.reload_if_changed().await?;
+        for record in records {
+            self.data.sessions.insert(record.id.to_string(), record);
+        }
+        self.save().await
+    }
+
+    /// Remove many records in ONE reload + ONE save; returns how many existed.
+    ///
+    /// Why: the batched sibling of [`Self::remove`], for the same reason
+    /// [`Self::upsert_many`] exists. Reporting the count of records that were
+    /// actually present keeps the caller's log honest about what it removed
+    /// rather than what it asked to remove.
+    /// What: reloads once, removes each id, saves once, returns the number of
+    /// ids that were present. An empty batch is a no-op returning 0.
+    /// Test: `store_remove_many_removes_present_ids_only`.
+    pub async fn remove_many(&mut self, ids: &[ManagedSessionId]) -> Result<usize, StoreError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        self.reload_if_changed().await?;
+        let removed = ids
+            .iter()
+            .filter(|id| self.data.sessions.remove(&id.to_string()).is_some())
+            .count();
+        self.save().await?;
+        Ok(removed)
+    }
+
     /// Look up a session record by id, reloading from disk first if it changed.
     ///
     /// Why: the manager's `get()` method needs a typed lookup that returns a
@@ -374,7 +417,55 @@ mod tests {
             pane_id: None,
             injection_status: Default::default(),
             worktree_owner: None,
+            terminal_at: None,
         }
+    }
+
+    /// Why: the batched primitives exist so one sweep is one file write; a
+    /// batch that silently dropped records would corrupt the store.
+    /// What: writes three records in one call and asserts all three land.
+    /// Test: this test.
+    #[tokio::test]
+    async fn store_upsert_many_writes_all_in_one_pass() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut store = SessionStore::load(dir.path()).await.expect("load");
+        let ids: Vec<_> = (0..3).map(|_| ManagedSessionId::new()).collect();
+        store
+            .upsert_many(ids.iter().copied().map(make_record).collect())
+            .await
+            .expect("upsert_many");
+
+        let mut reader = SessionStore::load(dir.path()).await.expect("reload");
+        assert_eq!(reader.all().await.expect("all").len(), 3);
+        for id in &ids {
+            assert!(reader.get(id).await.is_ok(), "{id} persisted");
+        }
+    }
+
+    /// Why: the retention sweep reports how many records it actually evicted;
+    /// counting ids it was merely asked about would overstate the deletion.
+    /// What: removes one present and one absent id, asserts the count is 1 and
+    /// the untouched record survives.
+    /// Test: this test.
+    #[tokio::test]
+    async fn store_remove_many_removes_present_ids_only() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut store = SessionStore::load(dir.path()).await.expect("load");
+        let present = ManagedSessionId::new();
+        let survivor = ManagedSessionId::new();
+        store
+            .upsert_many(vec![make_record(present), make_record(survivor)])
+            .await
+            .expect("seed");
+
+        let absent = ManagedSessionId::new();
+        let removed = store
+            .remove_many(&[present, absent])
+            .await
+            .expect("remove_many");
+        assert_eq!(removed, 1, "only the present id counts as removed");
+        assert!(store.get(&present).await.is_err(), "present id evicted");
+        assert!(store.get(&survivor).await.is_ok(), "survivor untouched");
     }
 
     /// Build a record with an explicit state so tests can write a specific

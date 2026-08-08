@@ -40,6 +40,34 @@ pub const METHOD_DELETE: &str = "delete";
 /// [`METHOD_DELETE`] — the hot path must never invoke this.
 pub const METHOD_REBUILD: &str = "rebuild";
 
+/// JSON-RPC method: report how much corpus this daemon is actually serving.
+///
+/// Why: without it the protocol can answer "here are your hits" but not "is
+/// there anything to hit". A palace indexed to 20% of its drawers and a palace
+/// indexed to 100% return the same empty hit list for a query that misses, so
+/// a caller cannot tell a genuine no-match from a corpus that was never
+/// backfilled — the fail-open shape where partial coverage reads as working
+/// coverage. `stats` is what makes those two states distinguishable.
+/// What: takes no params; returns [`StatsResult`].
+/// Test: `stats_result_round_trips`, `dispatch_request_handles_stats`.
+pub const METHOD_STATS: &str = "stats";
+
+/// JSON-RPC method: report which of the caller's `doc_id`s this daemon does
+/// NOT hold.
+///
+/// Why: `stats` reports a COUNT, and a count cannot answer "does the daemon
+/// hold a document for every drawer this palace has". The two diverge as soon
+/// as the corpus contains a document the palace no longer has — a drawer that
+/// was forgotten, or a doc id that predates a rename — because `doc_count`
+/// then measures a different set than the caller is asking about. A caller
+/// that compares `doc_count >= my_drawer_count` reads "covered" off a corpus
+/// that shares no ids with it at all. This method compares the actual sets.
+/// What: params `{"doc_ids": [..]}`; returns [`MissingDocsResult`] naming the
+/// subset the daemon has never seen. Extra documents the daemon holds are not
+/// reported — they do not affect coverage of the ids asked about.
+/// Test: `missing_docs_result_round_trips`, `dispatch_request_handles_missing_docs`.
+pub const METHOD_MISSING_DOCS: &str = "missing_docs";
+
 /// JSON-RPC version string. The protocol mandates this exact value.
 pub const JSONRPC_VERSION: &str = "2.0";
 
@@ -147,6 +175,53 @@ pub struct DeleteResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebuildResult {
     pub doc_count: usize,
+}
+
+/// Successful result for the `stats` method.
+///
+/// Why: two numbers answer two different questions. `doc_count` answers "is
+/// this palace indexed, and to what extent" — a backfiller compares it against
+/// the palace's drawer count to decide between skip, repair, and full run.
+/// `total_text_bytes` answers "how much memory is this daemon's corpus worth"
+/// — [`crate::index::PalaceBm25Index`] holds every document's full text in a
+/// `BTreeMap`, so per-daemon RSS scales with this figure and a supervisor
+/// enforcing an RSS cap wants it visible rather than inferred.
+/// What: `doc_count` is the live document count (post-delete, post-rebuild);
+/// `total_text_bytes` is the summed byte length of the retained document text.
+/// Test: `stats_result_round_trips`, `dispatch_request_handles_stats`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsResult {
+    pub doc_count: usize,
+    pub total_text_bytes: u64,
+}
+
+/// Params for the `missing_docs` method.
+///
+/// Why: the caller supplies the set it cares about rather than asking the
+/// daemon to enumerate its whole corpus, so the answer is O(caller's ids) on
+/// the wire and stays correct no matter how many stale documents the daemon
+/// is still holding.
+/// What: the doc ids to test for presence. An empty list is legal and yields
+/// an empty answer.
+/// Test: `missing_docs_result_round_trips`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingDocsParams {
+    pub doc_ids: Vec<String>,
+}
+
+/// Successful result for the `missing_docs` method.
+///
+/// Why: `missing.is_empty()` is a set statement — "the daemon holds a document
+/// for every id you named" — which is the claim a backfiller actually needs
+/// and the one a count cannot make. `checked` is echoed back so a caller can
+/// tell a genuinely-empty answer from a request that was silently truncated.
+/// What: `missing` is the subset of the requested ids the daemon does not
+/// hold, in request order; `checked` is how many ids were examined.
+/// Test: `missing_docs_result_round_trips`, `dispatch_request_handles_missing_docs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissingDocsResult {
+    pub missing: Vec<String>,
+    pub checked: usize,
 }
 
 /// One hit returned by the `search` method.
@@ -349,5 +424,50 @@ mod tests {
         let raw = r#"{"jsonrpc":"2.0","method":"rebuild","params":{},"id":4}"#;
         let parsed: RpcRequest = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.method, "rebuild");
+    }
+
+    #[test]
+    fn stats_result_round_trips() {
+        let r = StatsResult {
+            doc_count: 1311,
+            total_text_bytes: 4_194_304,
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"doc_count\":1311"));
+        let back: StatsResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.doc_count, 1311);
+        assert_eq!(back.total_text_bytes, 4_194_304);
+    }
+
+    #[test]
+    fn stats_request_round_trips_without_params() {
+        let raw = r#"{"jsonrpc":"2.0","method":"stats","id":5}"#;
+        let parsed: RpcRequest = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.method, METHOD_STATS);
+        assert!(parsed.params.is_none());
+    }
+
+    /// Why: `missing` is what a caller reads coverage off, so the wire shape
+    /// has to survive a round trip exactly — a dropped or renamed field would
+    /// decode as "nothing missing", which is the fail-open direction.
+    /// Test: this test itself.
+    #[test]
+    fn missing_docs_result_round_trips() {
+        let params = MissingDocsParams {
+            doc_ids: vec!["a".into(), "b".into()],
+        };
+        let raw = serde_json::to_string(&params).unwrap();
+        let back: MissingDocsParams = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.doc_ids, vec!["a".to_string(), "b".to_string()]);
+
+        let result = MissingDocsResult {
+            missing: vec!["b".into()],
+            checked: 2,
+        };
+        let raw = serde_json::to_string(&result).unwrap();
+        assert!(raw.contains("\"missing\":[\"b\"]"), "got: {raw}");
+        let back: MissingDocsResult = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.missing, vec!["b".to_string()]);
+        assert_eq!(back.checked, 2);
     }
 }

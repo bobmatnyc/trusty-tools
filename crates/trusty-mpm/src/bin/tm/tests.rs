@@ -15,7 +15,7 @@ use clap::Parser;
 
 use crate::cli::{
     AgentAction, CatalogAction, Cli, Command, DEFAULT_URL, DoctorFlags, McpCmd, McpTransportArg,
-    MetaAction, ProjectAction, SessionAction, SlackCmd, TelegramCmd,
+    MemoryAction, MetaAction, ProjectAction, SessionAction, ShellArg, SlackCmd, TelegramCmd,
 };
 use crate::commands::misc::{CATALOG_STALE_MSG, CATALOG_UNKNOWN_MSG, NON_GIT_FALLBACK_HINT};
 use crate::formatters::banner::{
@@ -277,6 +277,8 @@ fn cli_parses_doctor() {
             flags: DoctorFlags {
                 prune_stale_skills: false,
                 fix_skills: false,
+                fix: false,
+                yes: false,
                 include_frozen: false,
             }
         }
@@ -292,6 +294,8 @@ fn cli_parses_doctor_prune_stale_skills() {
             flags: DoctorFlags {
                 prune_stale_skills: true,
                 fix_skills: false,
+                fix: false,
+                yes: false,
                 include_frozen: false,
             }
         }
@@ -314,6 +318,8 @@ fn cli_parses_doctor_fix_skills() {
             flags: DoctorFlags {
                 prune_stale_skills: false,
                 fix_skills: true,
+                fix: false,
+                yes: false,
                 include_frozen: false,
             }
         }
@@ -336,6 +342,60 @@ fn cli_parses_doctor_fix_skills() {
         Cli::try_parse_from(["trusty-mpm", "doctor", "--include-frozen"]).is_err(),
         "--include-frozen without --fix-skills must be rejected"
     );
+}
+
+/// #4948: `--fix` is a DRY RUN, and writing needs `--yes` on top of it.
+///
+/// Why: `--fix` rewrites project settings files and deployed skills. The CLI
+/// is where "the default cannot write" is actually enforced, so it gets a test
+/// — a `--yes` that parses without `--fix` would let a future refactor reach a
+/// write path from a flag the operator thinks is inert.
+/// Test: this test.
+#[test]
+fn cli_parses_doctor_fix() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--fix"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                fix: true,
+                yes: false,
+                fix_skills: false,
+                ..
+            }
+        }
+    ));
+
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--fix", "--yes"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                fix: true,
+                yes: true,
+                ..
+            }
+        }
+    ));
+
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "doctor", "--yes"]).is_err(),
+        "--yes without --fix must be rejected"
+    );
+
+    // `--include-frozen` requires EITHER repair flag (issue #4948 widened the
+    // `requires` from `--fix-skills` alone to the `repair` group).
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--fix", "--include-frozen"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            flags: DoctorFlags {
+                fix: true,
+                include_frozen: true,
+                ..
+            }
+        }
+    ));
 }
 
 #[test]
@@ -2017,4 +2077,98 @@ fn non_git_dir_fallback_prints_help_hint() {
         "NON_GIT_FALLBACK_HINT must reference --help for discoverability: \
          {NON_GIT_FALLBACK_HINT:?}"
     );
+}
+
+/// Why (#4837): `tm memory import` is the zero-inference bulk-load path;
+/// its required `--palace` and the default (write-enabled) mode must parse.
+#[test]
+fn cli_parses_memory_import() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "import",
+        "/tmp/mem",
+        "--palace",
+        "trusty-tools",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Import {
+                    dir,
+                    palace,
+                    dry_run,
+                    json,
+                    allow_secret_like,
+                    memory_url,
+                },
+        } => {
+            assert_eq!(dir, std::path::PathBuf::from("/tmp/mem"));
+            assert_eq!(palace, "trusty-tools");
+            assert!(!dry_run, "writes are the default mode");
+            assert!(!json);
+            assert!(!allow_secret_like);
+            assert!(memory_url.is_none(), "URL defaults to daemon discovery");
+        }
+        other => panic!("expected Memory/Import, got {other:?}"),
+    }
+}
+
+/// Why (#4837): `--dry-run` is the safety flag an operator reaches for first,
+/// and `--json` is the machine-readable report a caller verifies with — both
+/// must round-trip, together with the explicit `--memory-url` override.
+#[test]
+fn cli_parses_memory_import_dry_run_json() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "import",
+        "/tmp/mem",
+        "--palace",
+        "p",
+        "--dry-run",
+        "--json",
+        "--allow-secret-like",
+        "--memory-url",
+        "http://127.0.0.1:7070",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Import {
+                    dry_run,
+                    json,
+                    allow_secret_like,
+                    memory_url,
+                    ..
+                },
+        } => {
+            assert!(dry_run);
+            assert!(json);
+            assert!(allow_secret_like);
+            assert_eq!(memory_url.as_deref(), Some("http://127.0.0.1:7070"));
+        }
+        other => panic!("expected Memory/Import, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_shell_init() {
+    // The dialect is a closed set: a typo must be refused at parse time rather
+    // than reaching the emitter and printing a snippet for the wrong shell.
+    for (arg, want) in [
+        ("zsh", ShellArg::Zsh),
+        ("bash", ShellArg::Bash),
+        ("fish", ShellArg::Fish),
+    ] {
+        let cli = Cli::try_parse_from(["trusty-mpm", "shell-init", arg]).unwrap();
+        match cli.command.unwrap() {
+            Command::ShellInit { shell } => assert_eq!(shell, want),
+            other => panic!("expected ShellInit, got {other:?}"),
+        }
+    }
+    assert!(Cli::try_parse_from(["trusty-mpm", "shell-init", "ksh"]).is_err());
+    assert!(Cli::try_parse_from(["trusty-mpm", "shell-init"]).is_err());
 }

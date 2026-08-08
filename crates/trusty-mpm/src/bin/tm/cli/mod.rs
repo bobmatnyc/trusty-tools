@@ -438,6 +438,33 @@ pub(crate) enum Command {
         #[arg(long)]
         reconcile_skills: bool,
     },
+    /// Redeploy the bundled agents and skills to EVERY deploy destination,
+    /// and optionally reinstall the binary.
+    ///
+    /// Why: an asset change reaches a running session only after both deploy
+    /// hops have run into the directory that session reads from, and different
+    /// launchers read from different directories — `tm install` writes the
+    /// tm-managed config dir and `~/.claude/skills`, a daemon-managed session
+    /// additionally writes the project's `.claude/skills`, and the standalone
+    /// driver (`tm run`/`load`/`login`) writes `~/.trusty-mpm/claude-config/`
+    /// and never refreshes the source at all (issue #4849). So "I reinstalled"
+    /// has meant "one of them is current". This makes it mean all of them, and
+    /// reports per destination what was deployed, repaired, preserved, and
+    /// failed.
+    ///
+    /// Ownership is unchanged from the deployers: a framework-owned file that
+    /// drifted or was corrupted is repaired (issue #4408), a file you own or
+    /// edited is preserved. `--force` is the explicit clobber, and backs every
+    /// file up before overwriting it.
+    ///
+    /// The binary is NOT touched unless `--binary` is passed, and even then the
+    /// route is decided by install provenance (issue #4033): a crates.io
+    /// install upgrades through the shared update path, a `cargo install
+    /// --path` install rebuilds from its recorded source directory, and
+    /// anything unclassifiable REFUSES rather than guessing.
+    ///
+    /// Test: `cli_parses_reinstall`, `cli_parses_reinstall_binary`.
+    Reinstall(ReinstallArgs),
     /// Handle a Claude Code lifecycle hook (PreToolUse / PostToolUse / Stop).
     ///
     /// Why: `tm install` registers `trusty-mpm hook` as Claude Code's
@@ -464,6 +491,20 @@ pub(crate) enum Command {
         /// Run in PM-enforcement mode (blocks direct edits; steers to delegate).
         #[arg(long)]
         pm_guard: bool,
+    },
+    /// Deterministic trusty-memory palace maintenance (issue #4837).
+    ///
+    /// Why: bulk-loading a directory of memory files into a palace is ETL —
+    /// read file, map frontmatter onto drawer fields, write. Routing it
+    /// through an agent cost 622k tokens for 120 files, because every tool
+    /// round re-sends the agent's accumulated context. This group is the
+    /// zero-inference path, and the prerequisite for issue #4834.
+    /// What: the `tm memory <action>` command group (currently `import`).
+    /// Test: `cli_parses_memory_import*` in `tests.rs`.
+    Memory {
+        /// Action to run.
+        #[command(subcommand)]
+        action: MemoryAction,
     },
     /// Compress a piped command's stdout — the `tm hook` PreToolUse Bash
     /// command-rewrite spike's filter stage (issue #1956, Option 0).
@@ -769,18 +810,33 @@ pub(crate) enum Command {
         cmd: WatchCmd,
     },
 
-    /// Register a GitHub repo alias for the standalone managed driver (DOC-24).
+    /// Register a repo alias for the standalone managed driver (DOC-24).
     ///
     /// Why: declares an alias→URL mapping without cloning so users can register
     /// their fleet cheaply and `tm load <alias>` lazily.
-    /// What: persists `{alias, url}` to `<root>/registry.json` and
-    /// prints `registered <alias> → <url>`.
-    /// Test: `cli_parses_register`.
+    /// What: `tm register <owner/repo> [alias]`. `owner/repo` is the primary
+    /// form and GitHub is assumed, so `tm register bobmatnyc/trusty-tools`
+    /// registers `https://github.com/bobmatnyc/trusty-tools`. A full URL is the
+    /// alternative form and any host works there. With no alias, one is derived
+    /// as hyphen-joined `owner-repo` (`bobmatnyc-trusty-tools`). The legacy
+    /// `tm register <alias> <url>` order still works — whichever positional
+    /// names a repo is taken as the repo (#4912). Browser paths into a repo
+    /// (`.../tree/main`, `.../pull/123`) and relative paths are refused.
+    /// Persists `{alias, url}` to `<root>/registry.json` and prints
+    /// `registered <alias> → <url>`.
+    /// Test: `register_args_tests.rs`.
     Register {
-        /// Short alias identifier (e.g. `my-project`).
-        alias: String,
-        /// Clone-able GitHub URL (HTTPS or SSH).
+        /// Repo to register: `<owner>/<repo>` (GitHub assumed), or a full URL
+        /// such as `https://github.com/<owner>/<repo>` or
+        /// `git@github.com:<owner>/<repo>.git` for any host.
+        ///
+        /// #4912: this position also accepts the legacy alias-first form; the
+        /// repo is detected by shape, so `tm register <alias> <url>` still works.
         url: String,
+        /// Short alias identifier (e.g. `my-project`).
+        ///
+        /// Optional — defaults to `owner-repo` derived from the repo.
+        alias: Option<String>,
         /// Overwrite an existing alias with a different URL.
         #[arg(long)]
         force: bool,
@@ -873,6 +929,28 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
+    /// Find a session by NAME, filtering as you type — `tm f [pattern]`.
+    ///
+    /// Why: `tm ls <term>` is a one-shot filter over every visible column, so a
+    /// wrong guess means retyping the whole command, and a task description
+    /// mentioning "api" pads the answer to "which sessions are CALLED
+    /// api-something". `tm f` keeps the list on screen and narrows it per
+    /// keystroke against the NAME only, which is the lookup an operator with
+    /// ~90 sessions runs constantly. `tm ls` is unchanged — it stays the
+    /// one-shot, pipeable listing.
+    /// What: opens the type-to-filter picker. `[pattern]` seeds the filter box;
+    /// typing narrows, Up/Down select, Enter opens the highlighted session (the
+    /// same resume path the numbered picker uses), Esc cancels, Backspace edits,
+    /// Ctrl-U clears. Matching is case-insensitive substring on the name.
+    /// Piped, `--json`, `--all`, or `TERM=dumb` never enter raw mode: they print
+    /// the same static filtered table `tm ls` would.
+    /// Test: `cli_parses_f_pattern`, `cli_parses_f_multi_word_pattern`,
+    /// `cli_parses_f_bare_is_allowed`, `cli_parses_f_json`,
+    /// `cli_f_source_id_and_current_conflict`; the fallback gate by
+    /// `interactive_filter_allowed_*`.
+    #[command(name = "f")]
+    F(FindArgs),
+
     /// Clone or refresh the managed workspace for a registered alias (DOC-24).
     ///
     /// Why: `load` is the idempotent step that materializes a registered alias
@@ -894,25 +972,50 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
-    /// Launch an interactive `claude` session for a managed alias (DOC-24).
+    /// Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias.
     ///
-    /// Why: `tm run` is the claude-mpm replacement — it launches Claude Code
-    /// with `CLAUDE_CONFIG_DIR=<root>/claude-config` so the global
-    /// hooks/MCPs are supplied and the real `~/.claude` is excluded.
-    /// What: loads the alias if needed, checks credentials, and spawns `claude`
-    /// with inherited stdio.
-    /// Test: `cli_parses_run_standalone`.
+    /// Why (#4990): `tm run` accepted only a DOC-24 registry alias, so starting
+    /// work on a repo that was neither registered nor already cloned had no
+    /// entry point. `tm run <owner>/<repo>` is that cold start, and it lands on
+    /// the DAEMON-MANAGED system (ADR-0030): the checkout goes to
+    /// `~/trusty-mpm-projects/<owner>/<repo>`, and the session is a real
+    /// `SessionRecord` with a tmux pane that shows up in `tm ls` and
+    /// `tm sessions` — not a blocking foreground `claude`.
+    /// What: a positional naming a repo (`<owner>/<repo>` with GitHub assumed,
+    /// or a full URL for any host — classified by the same predicate
+    /// `tm register` uses) clones or verifies the managed checkout, then hands
+    /// off to the `tm launch` path. A positional naming a registered alias
+    /// keeps the unchanged standalone behaviour: load if needed, check
+    /// credentials, spawn `claude` with inherited stdio and
+    /// `CLAUDE_CONFIG_DIR=<root>/claude-config`.
+    ///
+    /// Reusing an existing managed checkout FAILS LOUD when its `origin` names
+    /// a different repository — trusty-mpm never re-points a remote. A DIRTY
+    /// checkout is not an error: the fast-forward is skipped, a warning naming
+    /// the path and what is uncommitted is printed, and the session starts
+    /// anyway. Its branch is cut from a freshly-fetched
+    /// `origin/<default-branch>`, so it does not inherit the checkout's state.
+    ///
+    /// `--root` applies to the alias form only. The managed checkout's location
+    /// is set by `TRUSTY_MPM_REPOS_ROOT` / `TRUSTY_MPM_WORKSPACE_ROOT`.
+    /// Test: `cli_parses_run_standalone`, `run_target_tests.rs`.
     Run {
-        /// Registered alias to run.
-        alias: String,
+        /// `<owner>/<repo>` (GitHub assumed), a full repository URL, or a
+        /// registered alias (see `tm ls --projects`).
+        target: String,
         /// Optional initial task to pre-seed (currently unused by MVP).
         #[arg(long)]
         task: Option<String>,
-        /// Override the managed root (default: `~/.trusty-mpm`).
+        /// Override the managed root (default: `~/.trusty-mpm`). ALIAS FORM ONLY.
         ///
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
         /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
         /// default `~/.trusty-mpm`.
+        ///
+        /// With an `<owner>/<repo>` target this root is not consulted — the
+        /// managed checkout lives under `TRUSTY_MPM_REPOS_ROOT` /
+        /// `TRUSTY_MPM_WORKSPACE_ROOT` instead — so passing it there warns
+        /// rather than being silently ignored.
         ///
         /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
         #[arg(long)]
@@ -938,6 +1041,24 @@ pub(crate) enum Command {
         /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
         #[arg(long)]
         root: Option<String>,
+    },
+
+    /// Print a shell wrapper so `tm run <alias>` leaves you in that repo.
+    ///
+    /// Why: `tm run <alias>` launches a session in the alias's repo directory,
+    /// but a child process cannot change its parent shell's cwd — so when the
+    /// session exits the shell is still where it started and a later bare `tm`
+    /// re-detects the wrong project. Only a function sourced into the shell can
+    /// fix that, so `tm` prints one.
+    /// What: writes a `tm` wrapper function to stdout. The user installs it
+    /// themselves — `eval "$(tm shell-init zsh)"` in `~/.zshrc`, or
+    /// `tm shell-init fish | source` in `config.fish`. This command NEVER
+    /// writes to a shell rc file, and nothing else in trusty-mpm does either.
+    /// Test: `cli_parses_shell_init`.
+    ShellInit {
+        /// Shell dialect to emit (`zsh`, `bash`, or `fish`).
+        #[arg(value_enum)]
+        shell: ShellArg,
     },
 
     /// One-time keychain login for managed `tm run` sessions (WI-10, DOC-24).
@@ -1116,10 +1237,18 @@ pub(crate) enum Command {
 /// caller signature widen in step. One flattened struct keeps the dispatch a
 /// single binding and gives the actions a place to be documented together.
 /// What: a clap `Args` group; every field is opt-in and defaults to off, so a
-/// bare `tm doctor` is unchanged and READ-ONLY.
+/// bare `tm doctor` is unchanged and READ-ONLY. The `repair` arg group holds
+/// the two flags that select a repair (`--fix`, `--fix-skills`) so
+/// `--include-frozen` can require either one without duplicating the check.
 /// Test: `cli_parses_doctor`, `cli_parses_doctor_prune_stale_skills`,
-/// `cli_parses_doctor_fix_skills`.
+/// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`.
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
+#[command(group(
+    clap::ArgGroup::new("repair")
+        .args(["fix", "fix_skills"])
+        .multiple(true)
+        .required(false)
+))]
 pub struct DoctorFlags {
     /// Hidden manual escape hatch: force-remove stale pre-rename
     /// `~/.claude/skills/mpm-*` directories.
@@ -1157,13 +1286,102 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix_skills: bool,
 
-    /// With `--fix-skills`, also overwrite skills that were HAND-EDITED
-    /// after deployment.
+    /// Repair every finding tm can prove it owns. DRY RUN unless `--yes`.
+    ///
+    /// Why (#4948): doctor checks were pull-only, so findings persisted
+    /// for weeks — 23 legacy skill copies, 26 project settings files
+    /// carrying tm hook entries, a repairable skill drift — all `Warn`,
+    /// none actionable without a separate command the operator had to know
+    /// existed. This runs the repairs whose target is something tm itself
+    /// wrote: the skill redeploy (`skill_staleness`), the project hook
+    /// cleanup (`hooks_contamination`), and the push-guard retrofit
+    /// (`push_guard`).
+    /// What: on its own it CHANGES NOTHING — it prints, per item and with
+    /// the path, exactly what it would do. `--yes` performs the writes.
+    /// It never deletes: `legacy_sources` findings under `~/.claude` are
+    /// reported as refused, because a copy there may be hand-edited and a
+    /// directory name cannot prove otherwise. Worktree checks stay
+    /// report-only.
+    #[arg(long)]
+    pub fix: bool,
+
+    /// With `--fix`, actually perform the repairs instead of previewing.
+    ///
+    /// Why (#4948): these repairs rewrite files the operator can see and
+    /// care about, so a preview is the default and writing is a second
+    /// deliberate act. Every overwrite is still backed up first.
+    /// What: promotes `--fix` from a dry run to an applied run.
+    #[arg(long, requires = "fix")]
+    pub yes: bool,
+
+    /// With `--fix` or `--fix-skills`, also overwrite skills that were
+    /// HAND-EDITED after deployment.
     ///
     /// Why (#4604): a frozen file is deliberate user customization, not
     /// rot, so overwriting one is an explicit opt-in and never the default
     /// fix path. Every overwrite is still backed up first.
     /// What: promotes `DriftedFrozen` findings into the repair set.
-    #[arg(long, requires = "fix_skills")]
+    #[arg(long, requires = "repair")]
     pub include_frozen: bool,
+}
+
+/// Flags for [`Command::Reinstall`].
+///
+/// Why: a struct variant with three fields makes the `main.rs` dispatch arm
+/// wrap onto three lines, and that file sits against the 500-SLOC production
+/// cap — `tm shell-init` (#4986) and this command each adding one line took it
+/// over. Carrying the flags in a `clap::Args` struct keeps the arm to ONE line
+/// and stops the next subcommand paying the same tax.
+/// What: the three `tm reinstall` flags, flattened by clap so the parsed CLI
+/// surface is identical to the inline struct-variant form it replaces.
+/// Test: `cli_parses_reinstall`, `cli_parses_reinstall_binary`.
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct ReinstallArgs {
+    /// Overwrite files you own or edited, backing each one up first.
+    #[arg(long)]
+    pub(crate) force: bool,
+    /// Also reinstall the `tm` binary, routed by install provenance.
+    #[arg(long)]
+    pub(crate) binary: bool,
+    /// Skip the `--binary` confirmation prompt.
+    #[arg(long, requires = "binary")]
+    pub(crate) yes: bool,
+}
+
+/// Flags for [`Command::F`] (`tm f`).
+///
+/// Why: same reason as [`ReinstallArgs`] — five fields as a struct variant make
+/// the `main.rs` dispatch arm wrap onto seven lines, and that file sits against
+/// the 500-SLOC production cap. Flattened by clap, so the parsed CLI surface is
+/// identical to the inline form.
+/// What: the pattern seed plus the four `tm ls`-mirroring flags.
+/// Test: `cli_parses_f_pattern`, `cli_parses_f_bare_is_allowed`,
+/// `cli_parses_f_json`, `cli_f_source_id_and_current_conflict`.
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct FindArgs {
+    /// Substring to seed the filter with (case-insensitive, name only).
+    ///
+    /// Optional — bare `tm f` opens the picker with an empty filter box.
+    /// Multiple words are joined with a single space and matched as one
+    /// substring.
+    #[arg(value_name = "PATTERN", num_args = 0..)]
+    pub(crate) pattern: Vec<String>,
+    /// Output the raw daemon managed-session JSON (byte-for-byte
+    /// passthrough), forcing static output even on a TTY.
+    ///
+    /// As with `tm ls --json`, the passthrough is the complete unfiltered
+    /// fleet — scripts consuming it do their own filtering.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Also restrict to this `owner/repo` slug (passed to the daemon).
+    #[arg(long)]
+    pub(crate) source_id: Option<String>,
+    /// Derive `source_id` from the cwd's git remote.
+    ///
+    /// Mutually exclusive with `--source-id`; passing both is a parse error.
+    #[arg(long, conflicts_with = "source_id")]
+    pub(crate) current: bool,
+    /// Include decommissioned tombstone sessions (forces static output).
+    #[arg(long)]
+    pub(crate) all: bool,
 }

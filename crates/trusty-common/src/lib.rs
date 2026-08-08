@@ -112,6 +112,31 @@ pub mod bin_resolve;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 
+/// Label-correct LaunchAgent activation with legacy eviction and rollback
+/// (#4868). macOS-only, like [`launchd`] itself.
+///
+/// Why: `install()` + `bootstrap()` could write one plist and activate a
+/// different unit, bounced daemons that had not changed, and left the service
+/// down when a bootstrap failed.
+/// What: [`launchd::LaunchdConfig::install_and_activate`] and its
+/// [`launchd_activate::Activation`] outcome.
+/// Test: `cargo test -p trusty-common launchd_activate`.
+#[cfg(target_os = "macos")]
+pub mod launchd_activate;
+
+/// Canonical launchd labels for every trusty-* LaunchAgent (#4868).
+///
+/// Why: each daemon crate, the installer's mirror table, the Makefiles, and
+/// the install scripts each restated their own label literal, so they drifted
+/// — `trusty-search service install` bootstrapped `com.trusty.trusty-search`
+/// while launchd had `com.trusty.search` loaded, activating nothing.
+/// What: [`launchd_labels::SERVICES`] plus the `com.trusty.<stem>` convention
+/// as executable code, and the legacy aliases an upgrade must evict.
+/// Deliberately NOT macOS-gated, unlike [`launchd`], so the drift tests run on
+/// Linux CI too.
+/// Test: `cargo test -p trusty-common launchd_labels`.
+pub mod launchd_labels;
+
 /// Authoritative, three-state launchd supervision detection (issue #4469).
 ///
 /// Why: the env-var heuristic this replaces let an unsupervised child
@@ -195,7 +220,7 @@ pub mod embedder_client;
 /// Why: trusty-memory, trusty-search, and the per-palace
 /// `trusty-bm25-daemon` subprocess all want one shared BM25 implementation
 /// so the tokenizer's camelCase / PascalCase / alpha↔digit splits stay
-/// consistent across the workspace. Originally ported from open-mpm; now
+/// consistent across the workspace. Originally ported from trusty-agents; now
 /// the single source of truth lives here.
 /// What: Gated behind the `bm25` feature. Adds no new dependencies — pure
 /// `std` + `tracing` (already required).
@@ -239,7 +264,7 @@ pub mod bm25_client;
 
 /// Symbol-graph engine (formerly the `trusty-symgraph` crate).
 ///
-/// Why: All trusty-* tools that touch source code (open-mpm, trusty-search,
+/// Why: All trusty-* tools that touch source code (trusty-agents, trusty-search,
 /// trusty-analyze) want the same `EntityType` / `RawEntity` / `EdgeKind`
 /// data shapes and (for orchestrators) the same tree-sitter pipeline. Living
 /// here lets the workspace ship one tree-sitter `links =` slot instead of
@@ -334,7 +359,7 @@ pub mod sld;
 /// unknown-subcommand error output independently, so the formats drifted
 /// apart over time. Centralising the help model into one YAML schema, one
 /// canonical renderer, and one Jaro-Winkler suggester keeps the six binaries
-/// (search, memory, analyze, mpm-cli, tga, open-mpm) speaking with a single
+/// (search, memory, analyze, mpm-cli, tga, trusty-agents) speaking with a single
 /// user-facing voice.
 /// What: gated behind the `cli-help` feature. Pulls in `serde_yaml`, `strsim`,
 /// and `indexmap`. Exposes `HelpConfig` / `CommandDef` / `FlagDef` / `Example`
@@ -641,6 +666,23 @@ pub mod slack_format;
 /// Test: `cargo test -p trusty-common -- data_dir::tests`.
 pub mod data_dir;
 
+/// Runtime "am I a `cargo test` process?" detection (issue #4255).
+///
+/// Why: every existing guard against a test run mutating the operator's live
+/// state was either compile-time (`cfg(test)`, which does not reach a crate's
+/// `tests/` or `[[bin]]` targets) or a per-test convention someone had to
+/// remember. Both were forgotten, and the live `indexes.toml` accumulated
+/// throwaway fixture roots as a result. A runtime check is the only one that
+/// also covers the cross-process case, where a test POSTs to a REAL daemon.
+/// Unconditional (not feature-gated) because trusty-search consumes it from a
+/// path that no feature flag governs.
+/// What: exposes [`test_harness::running_under_test_harness`] plus the
+/// [`test_harness::FORCE_ENV`] / [`test_harness::ALLOW_PRODUCTION_ENV`]
+/// override names.
+/// Test: `cargo test -p trusty-common -- test_harness::tests`.
+pub mod test_harness;
+pub use test_harness::running_under_test_harness;
+
 /// Cross-process locked read-modify-write for whole-file JSON documents.
 ///
 /// Why: `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s `tokens.json`
@@ -684,6 +726,52 @@ pub mod daemon_addr;
 /// What: Exposes [`health_probe::probe_health`].
 /// Test: covered via daemon_addr integration tests.
 pub mod health_probe;
+
+/// Unix-domain-socket permission enforcement (issue #5099).
+///
+/// Why: ADR-0031 and ADR-0032 both argue for UDS over loopback TCP on the
+/// strength of a `0600` socket, and no production code created one — every
+/// `set_permissions` hit in the workspace was a test fixture. Four bind sites
+/// each called `UnixListener::bind` bare. This is the single entry point they
+/// now share, so the permission contract cannot drift between them.
+/// What: Exposes [`uds::bind_hardened`] (`0700` directory, `0600` socket),
+/// [`uds::prepare_socket_dir`], [`uds::scratch_socket_dir`] (the per-uid
+/// replacement for the `$TMPDIR`-with-`/tmp`-fallback convention), and
+/// [`uds::ensure_peer_is_self`] (`SO_PEERCRED` / `getpeereid`).
+/// Test: `cargo test -p trusty-common --features uds uds::` — the `--features`
+/// flag is load-bearing. `uds` is not a default feature, so the bare
+/// `-p trusty-common` form compiles the module out and reports 0 tests run
+/// while exiting 0. CI's `cargo test --workspace` enables it via feature
+/// unification from `trusty-embedderd` and `trusty-bm25-daemon`.
+#[cfg(all(unix, feature = "uds"))]
+pub mod uds;
+
+/// GitHub webhook HMAC-SHA256 verification (#5089 step 3, ADR-0034 §3).
+///
+/// Why: the check exists twice today and the two copies disagree on what an
+/// unset secret means — `trusty-review` rejects, `trusty-analyze` processes the
+/// payload anyway. ADR-0034 §3 collapses verification to one place (console)
+/// and unifies the policy to fail-closed; this module is that place.
+/// What: Exposes [`webhook_hmac::verify_github_signature`], its three-state
+/// [`webhook_hmac::SignatureVerdict`], and [`webhook_hmac::sign_github_body`]
+/// for test harnesses.
+/// Test: `cargo test -p trusty-common --features webhook-hmac webhook_hmac::`.
+#[cfg(feature = "webhook-hmac")]
+pub mod webhook_hmac;
+
+/// Console->target webhook relay wire contract (#5089 step 3, ADR-0034 §3).
+///
+/// Why: the sender (`trusty-console`) and the receivers (`trusty-review`,
+/// `trusty-analyze`) cannot depend on each other, so a method name or field
+/// list held by only one half is two copies waiting to drift.
+/// What: Exposes [`webhook_relay::RELAY_METHOD`], the borrowed
+/// [`webhook_relay::RelayFrame`] the sender writes, the owned
+/// [`webhook_relay::RelayRequest`] a receiver reads, and
+/// [`webhook_relay::RelayResponse`], whose `ack` is the only thing that
+/// licenses the sender to delete its spool entry.
+/// Test: `cargo test -p trusty-common --features webhook-relay webhook_relay::`.
+#[cfg(feature = "webhook-relay")]
+pub mod webhook_relay;
 
 /// Global tracing subscriber initialisation helpers.
 ///

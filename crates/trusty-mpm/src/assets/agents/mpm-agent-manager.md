@@ -39,6 +39,45 @@ cargo test -p trusty-mpm bundle -- --nocapture
 ### Deployment
 Agents deploy to `~/.trusty-mpm/framework/agents/` via `trusty-mpm install`. Each agent in `ALL` is written with `InstallPolicy::Overwrite` so framework upgrades replace prior versions. `InstallPolicy` is a real, honored choice, not boilerplate: `Overwrite` (every agent today) always refreshes on install; `SeedOnce` exists for a genuinely user-owned artifact and is written only once, never clobbered by an upgrade (`--force` resets it back to the shipped default).
 
+### Claude Code Runtime Resolution — where to write so an agent WINS
+
+Deployment above decides what lands on disk. This decides which definition
+Claude Code loads when two files share a `name`:
+
+| Priority | Location | Scope |
+|---|---|---|
+| 1 (highest) | Managed settings | Organization-wide |
+| 2 | `--agents` CLI flag | Current session |
+| 3 | `.claude/agents/` | Current project |
+| 4 | `~/.claude/agents/` | All your projects |
+| 5 (lowest) | Plugin's `agents/` directory | Where plugin is enabled |
+
+🔴 **For AGENTS project beats user. For SKILLS personal (`~/.claude/skills/`)
+beats project. Same two scopes, opposite order.** Anyone who assumes one rule
+covers both will place a file that silently loses. `mpm-skills-manager` carries
+the skill half — never transfer this rule to skills.
+
+**To make an agent win over a user-level one, write it to the PROJECT tier** —
+`<project>/.claude/agents/<name>.md`. Built-ins `Explore`, `Plan`, and
+`general-purpose` are always registered and ARE shadowable by a same-named
+custom agent.
+
+- `CLAUDE_CONFIG_DIR` relocates the ENTIRE `~/.claude` tree wholesale;
+  `~/.claude/agents/` does not keep loading alongside it. tm's bundled roster
+  deploys into `$CLAUDE_CONFIG_DIR/agents` — the USER tier (4), which the
+  project tier (3) outranks. Bundled agent names are NOT namespaced, so this
+  collision is live: a project-tier `rust-engineer` stub beat the real 25 KB
+  agent for a full day (#4408). `tm doctor`'s `asset_tier` check reports it.
+- No frontmatter field declares a tier. Scope is filesystem location only. tm
+  reads a `category:` key; Claude Code ignores it, so it can never be used to
+  win a collision.
+- `plugin:` (a `plugin-name:agent-name` namespace) is the only reserved,
+  guaranteed-non-collidable namespace.
+- Nested project `.claude/agents/`: the definition closest to the working
+  directory wins (v2.1.178+). Two files with the same `name` in the SAME
+  directory tree resolve by filesystem read order with NO documented
+  precedence — `/doctor` flags that as a duplicate. Never rely on it.
+
 ### Adding a New Agent
 1. Create `crates/trusty-mpm/src/assets/agents/<name>.md` with 5-field frontmatter
 2. Add a `pub const` in `core/bundle.rs` with `include_str!`

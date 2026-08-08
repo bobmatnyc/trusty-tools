@@ -182,6 +182,7 @@ async fn seed_sessions(
             pane_id: None,
             injection_status: Default::default(),
             worktree_owner: None,
+            terminal_at: None,
         };
         store.upsert(rec).await.expect("seed upsert");
         ids.push(id);
@@ -317,6 +318,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         pane_id: None,
         injection_status: Default::default(),
         worktree_owner: None,
+        terminal_at: None,
     }
 }
 

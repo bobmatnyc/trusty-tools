@@ -1,17 +1,17 @@
 ---
 name: tm-capabilities
-description: Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, verbatim and always current. Complements (does not replace) the conceptual `tm` skill.
+description: Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, plus the framework's own install layout and tier precedence. Verbatim and always current. Complements (does not replace) the conceptual `tm` skill.
 user-invocable: false
-version: "1.0.0"
+version: "1.1.0"
 category: pm-reference
-tags: [reference, generated, cli, mcp, agents, skills, doctor]
+tags: [reference, generated, cli, mcp, agents, skills, doctor, framework]
 effort: low
 ---
 
 # tm-capabilities — Generated Harness Capability Catalog
 
 > **AUTO-GENERATED — do not hand-edit.** This file and its `references/
-> {cli,mcp-tools,agents,skills,doctor}.md` siblings are produced by
+> {cli,mcp-tools,agents,skills,doctor,framework}.md` siblings are produced by
 > `tm generate capabilities` from the harness's own in-process data (clap's
 > command-tree introspection, the MCP tool catalog, the bundled agent/skill
 > roster, and a maintained doctor-check list cross-checked against
@@ -37,11 +37,12 @@ relevant `references/*.md` file here when you need an exact answer.
 
 | Question | Load |
 |---|---|
-| "What are the exact `tm <command>` subcommands / flags?" | `references/cli.md` (54 top-level commands) |
+| "What are the exact `tm <command>` subcommands / flags?" | `references/cli.md` (58 top-level commands) |
 | "What MCP tools exist and what parameters do they take?" | `references/mcp-tools.md` (33 tools, plus sibling-daemon pointers) |
 | "What agents can I delegate to, and what do they declare?" | `references/agents.md` (37 concrete agents) |
 | "What skills exist, and are they user-invocable?" | `references/skills.md` (52 bundled skills) |
-| "What does a `tm doctor` check name actually mean?" | `references/doctor.md` (29 checks) |
+| "What does a `tm doctor` check name actually mean?" | `references/doctor.md` (30 checks) |
+| "Where do agents/skills/instructions actually live, and which tier wins?" | `references/framework.md` (install layout, tier precedence, doc index) |
 | "How do the pieces fit into an end-to-end flow?" | `references/workflows.md` (hand-authored, not generated) |
 
 ## Relationship to Other Skills

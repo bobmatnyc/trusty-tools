@@ -4,7 +4,7 @@
 //! process — that keeps it pure and testable. The daemon needs the other half:
 //! actually running `tmux` and interpreting its exit status. This module is
 //! distilled from `ai-commander`'s `commander-tmux` orchestrator and
-//! `open-mpm`'s `tm` manager — find the binary once, run argv, classify the
+//! `trusty-agents`'s `tm` manager — find the binary once, run argv, classify the
 //! "no server running" empty-list case.
 //! What: [`TmuxDriver`] wraps the resolved `tmux` path; it can create/kill/list
 //! sessions, send keystrokes, and capture pane output. [`SessionInfo`] is one
@@ -127,7 +127,7 @@ pub struct SessionInfo {
     pub name: String,
     /// Unix epoch seconds the session was created.
     pub created: i64,
-    /// Whether a client is currently attached.
+    /// Whether at least one client is currently attached.
     pub attached: bool,
 }
 
@@ -135,10 +135,16 @@ impl SessionInfo {
     /// Parse one `name:created:attached` row from `list-sessions`.
     ///
     /// Why: a single parser keeps the format in sync with
-    /// `core::tmux::SESSION_LIST_FORMAT`.
-    /// What: splits on `:`; tolerates a malformed `attached` flag by defaulting
-    /// it to `false`.
-    /// Test: `parses_session_row`.
+    /// `core::tmux::SESSION_LIST_FORMAT`. The third field is
+    /// `#{session_attached}`, which tmux documents as the NUMBER of clients the
+    /// session is attached to — not a boolean. Comparing it to the literal
+    /// `"1"` therefore read every session with two or more clients as detached,
+    /// and `tm ls` labelled it `(active)` instead of `(attached)`.
+    /// What: splits on `:`; the attachment field is parsed as a count and any
+    /// value `> 0` means attached. A missing or unparseable field still
+    /// degrades to `false` rather than failing the row.
+    /// Test: `parses_session_row`, `parses_multi_client_session_row_as_attached`,
+    /// `attachment_flips_to_detached_when_client_count_drops_to_zero`.
     pub fn parse(line: &str) -> Result<Self> {
         let mut parts = line.splitn(3, ':');
         let name = parts
@@ -150,7 +156,13 @@ impl SessionInfo {
             .next()
             .and_then(|s| s.parse::<i64>().ok())
             .ok_or_else(|| Error::Protocol(format!("bad tmux created field: {line:?}")))?;
-        let attached = parts.next().map(|s| s == "1").unwrap_or(false);
+        // PR #4983: `#{session_attached}` is a client COUNT, not a flag — a
+        // session with a second terminal on it reports `2`, and the old
+        // `== "1"` test read that as detached.
+        let attached = parts
+            .next()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_some_and(|clients| clients > 0);
         Ok(Self {
             name,
             created,
@@ -318,9 +330,10 @@ impl TmuxDriver {
     /// What: loads [`crate::core::trusty_tools_config::TrustyToolsConfig`],
     /// resolves the `tmux:` section via
     /// [`crate::core::trusty_tools_config::resolve_tmux_options`] (defaults:
-    /// 100,000-line history-limit, mouse on), and runs each
-    /// [`crate::core::tmux::scrollback_option_commands`] entry via
-    /// [`Self::run`]. Best-effort: `set-option -g` is idempotent (safe to
+    /// 100,000-line history-limit, mouse on, alternate-screen on), and runs
+    /// each [`crate::core::tmux::scrollback_option_commands`] entry via
+    /// [`Self::run`] — including the `-wg`-scoped `alternate-screen` entry
+    /// (#5151). Best-effort: `set-option` is idempotent (safe to
     /// call before every session creation) and virtually never fails on a
     /// tmux new enough to run trusty-mpm at all, but a failure here must
     /// never block session creation/restart — each failure is logged and the
@@ -333,7 +346,11 @@ impl TmuxDriver {
     pub fn apply_scrollback_options(&self) {
         let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
         let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
-        for cmd in crate::core::tmux::scrollback_option_commands(opts.history_limit, opts.mouse) {
+        for cmd in crate::core::tmux::scrollback_option_commands(
+            opts.history_limit,
+            opts.mouse,
+            opts.alternate_screen,
+        ) {
             if let Err(e) = self.run(&cmd) {
                 warn!("tmux scrollback/mouse option {cmd:?} failed (non-fatal): {e}");
             }

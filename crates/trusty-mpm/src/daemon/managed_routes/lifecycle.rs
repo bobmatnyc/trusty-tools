@@ -658,8 +658,10 @@ async fn spawn_managed_cloned(
 
     // Step 2: create the tmux session rooted at the provisioned workspace.
     // #1935: `owned=false` — the workspace is now a `git worktree` slice of a
-    // shared, persistent base checkout (`<project_dir>/.base/`), not an
-    // independently-owned full clone. Bulk `remove_dir_all` would leave the
+    // shared, persistent base checkout, not an independently-owned full clone.
+    // #4270: that base checkout is `<project_dir>` itself and the worktree is
+    // `<project_dir>/.worktrees/<id>`, the same shape `spawn_managed_inproject`
+    // produces. Bulk `remove_dir_all` would leave the
     // base checkout's git worktree metadata and session branch ref dangling;
     // `session_manager::decommission` instead detects the `.worktrees/<id>`
     // shape (`is_session_worktree`) and runs `git worktree remove --force` +
@@ -1438,10 +1440,25 @@ pub(super) async fn front_gate_or_escalate(
 /// resume defensively re-applies [`crate::core::session_launch::ensure_status_line`]
 /// — the ONE prep step confirmed idempotent/non-clobbering by its own doc
 /// comment — so such a session self-heals the next time it is resumed. The
-/// broader prep pipeline (agent/skill redeploy, CLAUDE.md merge, MCP injection)
-/// is intentionally NOT re-run here: those steps are not all confirmed safe to
-/// repeat against an already-running workspace, so re-running them on every
-/// resume risks a different class of bug for a narrower payoff.
+/// broader prep pipeline is only PARTLY skipped here — see the next paragraph.
+///
+/// #4873 correction. This comment used to claim that "agent/skill redeploy,
+/// CLAUDE.md merge, MCP injection" were all intentionally NOT re-run on
+/// resume. Two thirds of that was false, and it misled a defect report into
+/// blaming this function for stale skills. `resume_managed` calls no
+/// `prepare_session*` itself, true — but it calls `adapter.spawn_resume`, and
+/// `ClaudeCodeAdapter::spawn_resume` calls
+/// `runtime::claude_code::prepare_managed_config`, which runs the agent
+/// redeploy AND the skill redeploy (via
+/// [`crate::core::managed_config::ensure_managed_config_dir`]) and re-runs
+/// every MCP injector. Agents, skills, and MCP entries therefore DO refresh on
+/// every resume, satisfying the deploy-on-every-run ruling.
+///
+/// What is genuinely not re-run is the per-WORKSPACE half of `prepare_session`
+/// — the `CLAUDE.md` merge and the project-tier `.claude/` payload — because
+/// those steps are not all confirmed safe to repeat against an already-running
+/// workspace. `ensure_deployment_complete` below still repairs that tier when
+/// it is MISSING files, just not when it is merely stale.
 ///
 /// #2647 worktree/upstream sync: before the statusline self-heal, every
 /// resume also calls

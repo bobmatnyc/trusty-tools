@@ -49,6 +49,14 @@ pub mod proxy;
 pub mod routes;
 pub mod server;
 pub mod service;
+pub mod webhook;
+
+/// How often the background sweep re-attempts pending webhook deliveries.
+///
+/// The sweep is the *recovery* mechanism, not the detection one — a stuck
+/// delivery is detected by `GET /api/console/metrics/webhooks`, which scans the
+/// spool on the request and therefore stays honest even if this loop dies.
+const WEBHOOK_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) mod url_util;
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -414,7 +422,20 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
     // not 403'd by the same-origin guard. Loopback stays trusted unconditionally
     // regardless of bind mode.
     let self_origins = routes::origin_guard::SelfOrigins::from_bind_addrs(&addrs);
-    let router = server::build_router_with_self_origins(state.clone(), self_origins);
+
+    // ── webhook ingress (#5089 step 3, ADR-0034) ────────────────────────────
+    // `?` on purpose: a console that cannot open its spool must not start and
+    // serve `/api/webhooks/{source}` anyway, because a delivery it cannot
+    // durably record is a delivery it must refuse — and an unmounted route
+    // would 404 instead of 5xx, which GitHub logs and no one reads.
+    let ingress = webhook::WebhookIngress::from_env()
+        .context("open the webhook spool under the console data directory")?;
+    info!(
+        spool = %ingress.spool().root().display(),
+        "webhook ingress ready at POST /api/webhooks/{{source}}"
+    );
+    webhook::start_retry_sweep(ingress.clone(), WEBHOOK_RETRY_INTERVAL);
+    let router = server::build_router_with_webhooks(state.clone(), self_origins, ingress);
 
     // ── bind primary listener ───────────────────────────────────────────────
     let primary_addr = *addrs.first().context("bind address list is empty")?;

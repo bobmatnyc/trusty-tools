@@ -240,9 +240,13 @@ impl VerifyTailReport {
 /// TRANSPORT-level observation that nothing accepted the connection or nothing
 /// answered in time. A schema mismatch, an unusable body, or a squatter on a
 /// documented port all mean *something* answered, so restarting is a guess — and
-/// `kickstart -k` is not a polite restart (no `ExitTimeOut` in the shared plist
-/// renderer, so launchd SIGKILLs 20s after SIGTERM, inside trusty-search's
-/// ≥30s-per-index flush budget). That gate is only expressible now that the
+/// `kickstart -k` is not a polite restart: it SIGTERMs and SIGKILLs at the
+/// `ExitTimeOut` boundary. #4393 raised that boundary — the shared plist
+/// renderer now declares 60s where it previously emitted no key at all and
+/// launchd applied its measured 5s default — so a restart no longer lands
+/// inside trusty-search's 30s-per-index flush floor. The gate stands anyway: a
+/// restart nobody asked for still costs a warm-boot. It is only expressible now
+/// that the
 /// transport is HTTP: a subprocess probe cannot produce a `Refused`.
 ///
 /// The mirror property matters just as much: a genuinely dead daemon still

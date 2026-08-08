@@ -33,8 +33,8 @@ use crate::{
         prompt::{ReviewContext, ReviewPrMeta},
         runner::{ReviewDeps, ReviewInput},
         runner_helpers::{
-            abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
-            finalize_run,
+            DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments,
+            build_author_rationale, finalize_run,
         },
         verify::maybe_verify,
         voice_config::build_voice_config,
@@ -121,7 +121,7 @@ pub(super) async fn run_mapreduce_branch(
              could not review"
                 .to_string(),
         );
-        return abort_dry(result, config, input, deps);
+        return abort_dry(result, config, input, deps, DedupClaim::Held).await;
     }
 
     // When the synthesis pass (#1663) ran successfully, `reduced.grade` carries

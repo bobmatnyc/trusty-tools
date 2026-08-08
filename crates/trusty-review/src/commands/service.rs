@@ -45,15 +45,19 @@ pub enum ServiceAction {
 
 /// Reverse-DNS label for the LaunchAgent.
 ///
-/// Why: this MUST equal `trusty_installer`'s
-/// `plist_label::plist_label_for("trusty-review")` (which derives
-/// `com.trusty.trusty-review` by convention) or `tctl start`/`tctl stop` would
-/// target a launchd job that `service install` never created. Pinning the
-/// constant here and asserting it in a test guards that cross-crate contract.
+/// Why: this MUST equal the label `tctl start`/`tctl stop` targets, or those
+/// commands drive a launchd job that `service install` never created. Pinning
+/// the literal here and asserting it against the installer's copy is what
+/// #4868 replaced: two constants that had to agree became one both crates read.
+///
+/// #4868: the value moved from `com.trusty.trusty-review` onto the
+/// `com.trusty.<stem>` convention every loaded trusty-* unit obeys. The old
+/// label is recorded as a legacy alias, so an install evicts a unit left by a
+/// prior version rather than running beside it.
 /// What: the `Label` key value and the `<label>.plist` base name.
 /// Test: `service_label_matches_tctl_convention`.
 #[cfg(target_os = "macos")]
-pub const LAUNCHD_LABEL: &str = "com.trusty.trusty-review";
+pub const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::REVIEW;
 
 /// Dispatch a `trusty-review service <action>` invocation.
 ///
@@ -143,21 +147,49 @@ fn launchd_config() -> Result<trusty_common::launchd::LaunchdConfig> {
         throttle_interval: 10,
         env_vars: Vec::new(),
         fd_limit: None,
+        working_directory: None,
     }
     .with_daemon_path())
 }
 
+/// Install the LaunchAgent and load it.
+///
+/// #4868: review's label genuinely CHANGES with this fix
+/// (`com.trusty.trusty-review` → `com.trusty.review`), and a
+/// `com.trusty.trusty-review.plist` exists on the owner's host right now. A bare
+/// `install()` + `bootstrap()` would strand it while `plist_label_for` — and so
+/// `tctl start trusty-review` and `tctl stack doctor` — moved to the new name,
+/// leaving the old plist behind for a future bootstrap to resurrect (#2938).
+/// `install_and_activate` boots it out and deletes it.
 #[cfg(target_os = "macos")]
 fn service_install() -> Result<()> {
     let cfg = launchd_config()?;
-    cfg.install()
-        .map_err(|e| anyhow::anyhow!("install LaunchAgent plist: {e}"))?;
     let plist_path = cfg.plist_path()?;
-    println!("[ok] Wrote LaunchAgent plist: {}", plist_path.display());
-
-    cfg.bootstrap()
-        .map_err(|e| anyhow::anyhow!("launchctl bootstrap: {e}"))?;
+    let outcome = cfg
+        .install_and_activate(trusty_common::launchd_labels::legacy_labels_for(
+            LAUNCHD_LABEL,
+        ))
+        .map_err(|e| anyhow::anyhow!("install LaunchAgent: {e}"))?;
+    for label in outcome.evicted() {
+        println!(
+            "[warn] Evicted the stale LaunchAgent {label} — it named this daemon under an old label."
+        );
+    }
     let domain = format!("gui/{}", trusty_common::launchd::current_uid());
+    if matches!(
+        outcome,
+        trusty_common::launchd_activate::Activation::AlreadyCurrent { .. }
+    ) {
+        println!(
+            "[ok] {LAUNCHD_LABEL} is already loaded in {domain} with this exact unit — left running."
+        );
+        println!(
+            "  Logs:    {}\n  Status:  trusty-review service status",
+            cfg.log_dir.display()
+        );
+        return Ok(());
+    }
+    println!("[ok] Wrote LaunchAgent plist: {}", plist_path.display());
     println!(
         "[ok] trusty-review service installed and started ({LAUNCHD_LABEL} loaded into {domain})."
     );
@@ -172,6 +204,14 @@ fn service_install() -> Result<()> {
 fn service_uninstall() -> Result<()> {
     let cfg = launchd_config()?;
     let plist_path = cfg.plist_path()?;
+    // #4868: a host that never ran the migrating install still has the unit
+    // under its old label. Removing only the canonical plist printed "nothing
+    // to do" while leaving that one loaded.
+    for label in cfg.evict_legacy(trusty_common::launchd_labels::legacy_labels_for(
+        LAUNCHD_LABEL,
+    )) {
+        println!("[ok] Unloaded and removed the stale LaunchAgent {label}");
+    }
     if plist_path.exists() {
         // bootout is best-effort: a not-loaded agent is fine here.
         let _ = cfg.bootout();
@@ -239,14 +279,22 @@ fn service_logs() -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Why: the label is a cross-crate contract — `tctl` derives
-    /// `com.trusty.trusty-review` in `plist_label_for` and bootstraps THAT
-    /// plist; a drift here silently breaks `tctl start trusty-review`.
-    /// What: asserts the constant equals the convention-derived label.
+    /// Why: the label is a cross-crate contract — `tctl` resolves it through
+    /// `plist_label_for` and bootstraps THAT plist, so drift silently breaks
+    /// `tctl start trusty-review`. #4868: the assertion moved off a re-typed
+    /// literal onto the registry both sides read, so the test can no longer
+    /// certify a label the installer disagrees with.
+    /// What: the constant equals the canonical registry label.
     /// Test: this is the test.
     #[test]
     fn service_label_matches_tctl_convention() {
-        assert_eq!(LAUNCHD_LABEL, "com.trusty.trusty-review");
+        assert_eq!(LAUNCHD_LABEL, trusty_common::launchd_labels::REVIEW);
+        assert!(
+            trusty_common::launchd_labels::legacy_labels_for(LAUNCHD_LABEL)
+                .contains(&"com.trusty.trusty-review"),
+            "the pre-#4868 label must stay recorded as legacy, or an upgrade \
+             leaves that unit loaded beside the new one"
+        );
     }
 
     /// Why: the launchd agent must start the HTTP webhook daemon with an

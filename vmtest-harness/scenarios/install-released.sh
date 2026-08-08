@@ -22,10 +22,19 @@
 #
 # Under the SUPERSEDED D2 this pattern covered SIX crates and asserted `tm`
 # KNOWN-ABSENT, on the premise that `trusty-mpm` was unpublished. Both halves
-# were wrong. It now covers EIGHT — seven after the D2 reversal restored
-# `trusty-mpm`, eight after the D3 amendment added `trusty-review` — and asserts
+# were wrong. It now covers NINE — seven after the D2 reversal restored
+# `trusty-mpm`, eight after the D3 amendment added `trusty-review`, nine after
+# the 2026-08-05 amendment added `trusty-console` (#4921) — and asserts
 # `tm` **PRESENT**. A run that does not find `tm` is a FAILURE, where under the
 # superseded D2 it was the expected result.
+#
+# PATTERN (a) IS KNOWN-RED ON `trusty-console` AS OF 2026-08-05 (#4917). The
+# registry has 0.4.0, which has no `service` subcommand; `tctl start` bootstraps
+# launchd membership by invoking `<binary> service install`, so the daemon never
+# comes up and `verify_daemon_liveness` fails. 0.5.0 in the working tree has it,
+# which is why (b)/(c) are green. That is this pattern doing its job — release
+# skew is the class of defect only (a) can produce — and the fix is a release,
+# tracked at #4917, NOT a special case here.
 #
 # NOTHING IN THIS FILE ENCODES THAT AS A LIST. The install set is
 # `tsv_scope_packages` and the assertion set is `expect_a` in
@@ -37,7 +46,7 @@
 # never `tsv_scope_crate_dirs` — `crates/trusty-git-analytics/` publishes as
 # **`tga`**, and `cargo install trusty-git-analytics --locked` does not exist
 # (DOC-2 §9.2, DOC-1 D3). This is the ONE place the two accessors are not
-# interchangeable, and both emit eight values, so the mistake is invisible to a
+# interchangeable, and both emit nine values, so the mistake is invisible to a
 # count. `install_assert_install_count` is therefore passed the accessor and
 # asserts SET equality.
 #
@@ -60,8 +69,8 @@ scenario_install_released() {
     source_deliver_released
 
     # 2. Install each in-scope PACKAGE from crates.io — `cargo install <pkg>
-    #    --locked`, once per package (EIGHT today), never once per binary
-    #    (THIRTEEN today) and never `--bin` (DOC-2 §12.2).
+    #    --locked`, once per package (NINE today), never once per binary
+    #    (FOURTEEN today) and never `--bin` (DOC-2 §12.2).
     #
     #    Install order is TSV row order (§F-10(b)); `trusty-installer` precedes
     #    N2 in row order already, which is what N2 needs.
@@ -69,9 +78,16 @@ scenario_install_released() {
     #    `install_from_registry` asserts `rustc --version` before building
     #    (DOC-1 §8.4) and passes `--locked` unconditionally — see its banner for
     #    the E0063 incident that makes `--locked` mandatory rather than tidy.
-    for _pkg in $(tsv_scope_packages); do
+    #    #16: `for _pkg in $(tsv_scope_packages)` discarded the accessor's
+    #    status outright — a `die 60` inside the for-list neither classified nor
+    #    aborted, and the loop simply ran zero times. It writes to a path now,
+    #    and `while read < file` runs in THIS shell, not a subshell.
+    _scope="$VMTEST_TMPDIR/scope-packages.txt"
+    tsv_scope_packages "$_scope"
+    while IFS= read -r _pkg; do
+        [ -n "$_pkg" ] || continue
         install_from_registry "$VMTEST_VM" "$_pkg"
-    done
+    done < "$_scope"
 
     # 2b. THE RUN-LEVEL TRIPWIRE (P5-T8), driven by PATTERN (a)'S accessor.
     #     Same function, same ledger, same guarantee: exactly one install per
@@ -93,7 +109,7 @@ scenario_install_released() {
 
     # 4. Expectations that follow from those steps (DOC-1 §3.6).
     #
-    #    `expect_a` is `present` on all THIRTEEN in-scope rows — including `tm`
+    #    `expect_a` is `present` on all FOURTEEN in-scope rows — including `tm`
     #    and `trusty-mpm`. That is the D2 reversal, asserted rather than
     #    described.
     verify_binaries "$VMTEST_VM" a

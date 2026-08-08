@@ -164,7 +164,7 @@ Prune managed sessions by state and compact tombstones. `state` selects which re
 
 ## `session_context_catchup`
 
-Return a STRUCTURED (JSON, not prose) resume digest for `project_dir`: paused sessions (native trusty-mpm + legacy claude-mpm formats), recent git commits, and recent memory-palace activity — the same three sources `tm session catchup` renders as markdown, restructured as typed fields. This is a manual PEEK: it NEVER advances the incremental-catchup watermark (only automatic session-start injection does that), so calling it repeatedly is always safe and `watermark_advanced` in the result is always `false`.
+Return a STRUCTURED (JSON, not prose) resume digest for `project_dir`: paused sessions (native trusty-mpm + legacy claude-mpm formats), recent git commits, and recent memory-palace activity — the same three sources `tm session catchup` renders as markdown, restructured as typed fields. This is a manual PEEK: it NEVER advances the incremental-catchup watermark (only automatic session-start injection does that), so calling it repeatedly is always safe and `watermark_advanced` in the result is always `false`. An empty `sessions` array means "nothing paused since your last catch-up" ONLY when `undatable_sessions_dropped` is 0 — non-zero means that many paused sessions exist but could not be dated and were withheld; re-call with `full: true` to see them. `sessions` and `resolved_snapshot` answer different questions ("what paused since last catch-up" vs "what should I resume from") and legitimately disagree under a recent watermark.
 
 | Parameter | Type | Required |
 |---|---|---|

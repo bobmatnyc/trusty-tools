@@ -41,6 +41,11 @@ pub async fn spawn_socket_listener(listener: tokio::net::UnixListener) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                // #5099: a foreign-uid peer is dropped without being served.
+                if let Err(e) = trusty_common::uds::ensure_peer_is_self(&stream) {
+                    tracing::warn!(error = %e, "ctrl: rejected connection");
+                    continue;
+                }
                 tokio::spawn(handle_socket_connection(stream));
             }
             Err(e) => {

@@ -23,6 +23,8 @@ pub(crate) mod delete;
 // cannot detect that the process answering it is the unsupervised one.
 pub(crate) mod doctor_fix_skills;
 pub(crate) mod doctor_orphan;
+// #4948: the `tm doctor --fix` driver — dry-run by default, `--yes` to write.
+pub(crate) mod doctor_repair;
 pub(crate) mod doctor_stale;
 pub(crate) mod first_run;
 pub(crate) mod generate;
@@ -45,11 +47,14 @@ pub(crate) mod launchd_probe;
 pub(crate) mod managed;
 // #2919: merged-PR reclaim-pass rendering, split out of `managed` for the cap.
 pub(crate) mod managed_merged_prs;
+/// The `tm ls` table renderer, split out of `managed` for the SLOC cap.
+pub(crate) mod managed_render;
 pub(crate) mod managed_root;
 pub(crate) mod managed_route;
 pub(crate) mod managed_workspace;
 pub(crate) mod manager;
 pub(crate) mod mcp;
+pub(crate) mod memory;
 pub(crate) mod meta;
 pub(crate) mod misc;
 pub(crate) mod pane_identity;
@@ -57,6 +62,7 @@ pub(crate) mod picker_delete;
 pub(crate) mod pm_guard;
 pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
+pub(crate) mod pm_guard_cost;
 pub(crate) mod pm_guard_deny_by_default;
 pub(crate) mod pm_guard_fanout;
 pub(crate) mod pm_guard_routing;
@@ -65,16 +71,24 @@ pub(crate) mod projects;
 pub(crate) mod prune;
 pub(crate) mod push_guard;
 pub(crate) mod reconcile_worktrees;
+// #4912: `tm register` positional resolution — URL first, alias optional, with
+// the legacy alias-first order still accepted.
+pub(crate) mod register_args;
+pub(crate) mod reinstall;
 pub(crate) mod rename;
 pub(crate) mod repair;
+pub(crate) mod run_target;
 pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod sessctl;
 pub(crate) mod session;
 pub(crate) mod session_picker;
+pub(crate) mod session_picker_filter;
 pub(crate) mod session_picker_prune;
 pub(crate) mod session_picker_rename;
 pub(crate) mod session_picker_render;
+// The `tm shell-init` wrapper emitter — print-only; it never writes an rc file.
+pub(crate) mod shell_init;
 pub(crate) mod slack;
 pub(crate) mod sm_serve;
 pub(crate) mod spawn_disclaimed;

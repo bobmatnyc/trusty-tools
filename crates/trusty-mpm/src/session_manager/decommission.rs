@@ -14,6 +14,8 @@
 
 use std::path::Path;
 
+use chrono::Utc;
+
 use tracing::{info, warn};
 
 use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
@@ -531,7 +533,9 @@ impl SessionManager {
         // would sit in the human-confirmation queue forever.
         record.pending_decision = None;
         record.proposed_default = None;
-        record.state = ManagedSessionState::Decommissioned;
+        // Stamps `terminal_at` as well as `state` — the retention sweep's clock
+        // starts here, not at `created_at`.
+        record.set_lifecycle_state(ManagedSessionState::Decommissioned, Utc::now());
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session record tombstoned (record-only)");
         Ok((record, false))
@@ -585,7 +589,7 @@ impl SessionManager {
     /// | 1 | `graceful_terminate_runtime` — SIGTERM + `kill_session` the pane | no |
     /// | 2 | `remove_session_worktree` — `git worktree remove --force`, `fs::remove_dir_all` fallback, `git worktree prune`, `git branch -D` (dirty-gated, #4344) | no |
     /// | 3 | `fs::remove_dir_all` on an SM-owned workspace (containment-gated) | no |
-    /// | 4 | `delete_search_index_best_effort` — cross-daemon `DELETE /indexes/{id}` | no |
+    /// | 4 | `delete_search_index_best_effort` — cross-daemon `DELETE /indexes/{id}` (never from a test process, #4743) | no |
     /// | 5 | clears `workspace_path`/`workspace_owned` when nothing is on disk | store-only |
     /// | 6 | clears `pending_decision`/`proposed_default` (#4400) | store-only |
     /// | 7 | writes state `Decommissioned` | store-only |
@@ -816,7 +820,9 @@ impl SessionManager {
         // dirty-worktree-refused teardown — all reach this line).
         record.pending_decision = None;
         record.proposed_default = None;
-        record.state = ManagedSessionState::Decommissioned;
+        // Stamps `terminal_at` as well as `state` — the retention sweep's clock
+        // starts here, not at `created_at`.
+        record.set_lifecycle_state(ManagedSessionState::Decommissioned, Utc::now());
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
         Ok((record, workspace_removed))

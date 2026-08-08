@@ -70,6 +70,7 @@ impl From<LegacyDrawerRecord> for DrawerRecord {
             drawer_type: None,
             expires_at_ms: None,
             completed_at_ms: None,
+            fact_key: None,
         }
     }
 }
@@ -115,8 +116,85 @@ impl From<PreTaskDrawerRecord> for DrawerRecord {
             drawer_type: p.drawer_type,
             expires_at_ms: p.expires_at_ms,
             completed_at_ms: None,
+            fact_key: None,
         }
     }
+}
+
+/// spec-001-era on-disk shape of a drawer row (with `completed_at_ms` but
+/// without the #4884 `fact_key`).
+///
+/// Why: #4884 — the same positional-postcard problem `PreTaskDrawerRecord`
+/// exists for. Adding `fact_key` to `DrawerRecord` means every row written
+/// between spec-001 and #4884 stops decoding as the current shape; without
+/// this link the reader would skip straight to `PreTaskDrawerRecord` and
+/// silently drop each row's `completed_at`, marking open tasks done-unknown.
+/// What: mirrors the pre-#4884 `DrawerRecord` field-for-field; `From` lifts it
+/// into the modern record with `fact_key = None`.
+/// Test: `pre_fact_key_drawer_row_migrates_fact_key_to_none`, plus the
+/// round-trip coverage in `drawer_fact_key_round_trips_through_redb`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct PreFactKeyDrawerRecord {
+    pub room_id: String,
+    pub content: String,
+    pub importance: f32,
+    pub tags: Vec<String>,
+    pub source_file: Option<String>,
+    pub created_at_ms: i64,
+    #[serde(default)]
+    pub drawer_type: Option<String>,
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
+    #[serde(default)]
+    pub completed_at_ms: Option<i64>,
+}
+
+impl From<PreFactKeyDrawerRecord> for DrawerRecord {
+    fn from(p: PreFactKeyDrawerRecord) -> Self {
+        DrawerRecord {
+            room_id: p.room_id,
+            content: p.content,
+            importance: p.importance,
+            tags: p.tags,
+            source_file: p.source_file,
+            created_at_ms: p.created_at_ms,
+            drawer_type: p.drawer_type,
+            expires_at_ms: p.expires_at_ms,
+            completed_at_ms: p.completed_at_ms,
+            fact_key: None,
+        }
+    }
+}
+
+/// Decode a stored `DRAWERS` value, walking the migration chain newest→oldest.
+///
+/// Why: #4884 added a fourth on-disk shape, and the chain had been open-coded
+/// inside `load_drawers`. The `DRAWERS_BY_FACT_KEY` index maintenance in
+/// `write_ops` has to read a row's prior `fact_key` before overwriting it, so a
+/// second copy of the chain would otherwise appear there — and two copies is
+/// exactly how a shape gets added to one and forgotten in the other, which
+/// presents as rows silently losing whichever field the stale copy predates.
+/// What: tries `DrawerRecord`, then `PreFactKeyDrawerRecord` (pre-#4884), then
+/// `PreTaskDrawerRecord` (#61-era), then `LegacyDrawerRecord` (pre-#61),
+/// lifting each older shape forward with its missing fields defaulted. Order is
+/// load-bearing: postcard rejects trailing bytes, so a newer row cannot decode
+/// as an older shape, but an older row would decode as a still-older one and
+/// drop fields. Returns the LAST error when every shape fails.
+/// Test: `pre_fact_key_drawer_row_migrates_fact_key_to_none`,
+/// `pre_task_drawer_row_migrates_completed_at_to_none`,
+/// `drawer_type_round_trips_through_redb`.
+pub(super) fn decode_drawer_record(bytes: &[u8]) -> Result<DrawerRecord, postcard::Error> {
+    use crate::memory_core::store::kg_store::decode_value;
+    if let Ok(r) = decode_value::<DrawerRecord>(bytes) {
+        return Ok(r);
+    }
+    if let Ok(r) = decode_value::<PreFactKeyDrawerRecord>(bytes) {
+        return Ok(r.into());
+    }
+    if let Ok(r) = decode_value::<PreTaskDrawerRecord>(bytes) {
+        return Ok(r.into());
+    }
+    decode_value::<LegacyDrawerRecord>(bytes).map(Into::into)
 }
 
 /// Build a `DrawerRecord` from a live `Drawer`.
@@ -142,6 +220,9 @@ pub(super) fn drawer_to_record(drawer: &Drawer) -> DrawerRecord {
         drawer_type: Some(drawer.drawer_type.as_str().to_string()),
         expires_at_ms: drawer.expires_at.map(|d| d.timestamp_millis()),
         completed_at_ms: drawer.completed_at.map(|d| d.timestamp_millis()),
+        // #4884: carried verbatim — the slot name is the writer's, never
+        // normalised here, so the index key and the record always agree.
+        fact_key: drawer.fact_key.clone(),
     }
 }
 

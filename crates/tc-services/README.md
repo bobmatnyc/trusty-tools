@@ -144,7 +144,7 @@ println!("Synced {} people from Google Workspace", stats.people_updated);
 
 - **directory MCP**: User and org lookups via MCP API
 - **trusty-mpm**: Context and preferences for agent dispatch
-- **open-mpm**: Directory context for agent workflows
+- **trusty-agents**: Directory context for agent workflows
 - **tc-assistant**: CTO assistant CLI commands
 
 ### Data Sources

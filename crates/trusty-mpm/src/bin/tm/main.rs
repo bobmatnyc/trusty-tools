@@ -29,6 +29,7 @@ use commands::{
     install::install,
     launch::{connect, launch},
     manager::manager,
+    memory::memory,
     misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
     project::project,
     projects::projects,
@@ -38,6 +39,10 @@ use commands::{
     slack::slack,
     telegram::telegram,
 };
+
+#[cfg(test)]
+#[path = "test_support.rs"]
+mod test_support;
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -464,6 +469,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
+        Some(Command::Reinstall(args)) => commands::reinstall::run(args).await,
         Some(Command::Hook { pm_guard }) => {
             if pm_guard {
                 commands::pm_guard::pm_guard(&url).await
@@ -471,6 +477,7 @@ async fn main() -> anyhow::Result<()> {
                 hook(&client, &url).await
             }
         }
+        Some(Command::Memory { action }) => memory(action).await,
         Some(Command::Compress { tool }) => run_compress(&tool).await,
         Some(Command::Daemon {
             addr,
@@ -540,14 +547,16 @@ async fn main() -> anyhow::Result<()> {
         // DOC-24: standalone managed driver commands.
         // Each command resolves ManagedPaths once at entry (closes #1566):
         // --root flag > TRUSTY_MPM_ROOT env > XDG config file > default.
+        // #4912: positionals are `<url> [alias]`, with the legacy `<alias> <url>`
+        // order still accepted — the handler detects which one is the URL.
         Some(Command::Register {
-            alias,
             url,
+            alias,
             force,
             root,
         }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
-            commands::standalone::register_cmd(&paths, &alias, &url, force)
+            commands::standalone::register_cmd(&paths, &url, alias.as_deref(), force)
         }
         Some(Command::Ls {
             terms,
@@ -567,35 +576,35 @@ async fn main() -> anyhow::Result<()> {
                 // #2311: bare `tm ls` is the interactive managed-session connector
                 // (TTY-aware; static + pipeable when non-TTY / --json / --all / 0).
                 let (sort, term) = commands::session_picker::parse_ls_terms(&terms);
+                // #3483 scope: `tm ls <term>` matches every visible column.
+                let filter = term.map(commands::session_picker::SessionFilter::visible);
                 commands::session_picker::run_ls_connector(
-                    &client, &url, json, source_id, current, all, sort, term,
+                    &client, &url, json, source_id, current, all, sort, filter,
                 )
                 .await
             }
+        }
+        // `tm f [pattern]` — the type-to-filter picker. It gates on TTY-ness
+        // BEFORE touching raw mode and degrades to the static filtered table.
+        Some(Command::F(args)) => {
+            commands::session_picker_filter::run_f_command(&client, &url, args).await
         }
         Some(Command::Load { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::load_cmd(&paths, &alias)
         }
-        Some(Command::Run { alias, task, root }) => {
-            // F5: --task is not yet implemented in the MVP standalone driver.
-            // Per spec (DOC-24), autonomous/task dispatch is the session-manager
-            // layer, not `tm run`. Warn clearly so the flag is not silently
-            // dropped without user awareness.
-            if let Some(ref t) = task {
-                eprintln!(
-                    "warning: --task '{t}' is not yet implemented in the standalone MVP \
-                     and will be ignored. Task dispatch is handled by the session-manager \
-                     layer (a future phase of DOC-24)."
-                );
-            }
-            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
-            commands::standalone::run_cmd(&paths, &alias)
+        // #4990: `tm run` now carries two disjoint targets. A repo shape
+        // (`<owner>/<repo>` or a full URL) cold-starts a DAEMON-MANAGED session;
+        // a registry alias keeps the unchanged DOC-24 standalone behaviour. The
+        // routing decision lives in `run_target` so it is unit-testable.
+        Some(Command::Run { target, task, root }) => {
+            commands::run_target::run(&client, &url, &target, task, root).await
         }
         Some(Command::Path { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::path_cmd(&paths, &alias)
         }
+        Some(Command::ShellInit { shell }) => commands::shell_init::run_shell_init(shell),
         Some(Command::Login { root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::login_cmd(&paths)

@@ -33,9 +33,12 @@ use crate::protocol::{
 ///
 /// Why: a previous run may have left a socket file that would cause `EADDRINUSE`
 /// on the next bind attempt. Removing it first is the idiomatic Unix pattern.
-/// What: removes any existing file at `path` (ignoring "not found"), then
-/// calls `UnixListener::bind`.
-/// Test: covered by the concurrent_embed integration test.
+/// What: removes any existing file at `path` (ignoring "not found"), then binds
+/// through [`trusty_common::uds::bind_hardened`], which holds the containing
+/// directory at `0700` and narrows the socket to `0600` before the first accept
+/// (#5099 — this bind used to be bare, leaving the socket at the process umask).
+/// Test: `bind_uds_listener_produces_a_0600_socket`, plus the concurrent_embed
+/// integration test for the accept path.
 pub fn bind_uds_listener(path: &Path) -> Result<UnixListener> {
     // Best-effort cleanup of a stale socket file.
     if let Err(e) = std::fs::remove_file(path) {
@@ -43,7 +46,8 @@ pub fn bind_uds_listener(path: &Path) -> Result<UnixListener> {
             tracing::warn!("failed to remove stale UDS socket {}: {e}", path.display());
         }
     }
-    UnixListener::bind(path).with_context(|| format!("bind UDS socket at {}", path.display()))
+    trusty_common::uds::bind_hardened(path)
+        .with_context(|| format!("bind UDS socket at {}", path.display()))
 }
 
 /// Accept connections in a loop, spawning a per-connection handler task.
@@ -51,13 +55,20 @@ pub fn bind_uds_listener(path: &Path) -> Result<UnixListener> {
 /// Why: a single-threaded accept loop with detached per-connection tasks
 /// scales well for the daemon's expected load (dozens of concurrent in-host
 /// clients, short-lived requests).
-/// What: loops `listener.accept().await`; on each accepted stream, clones the
-/// `BatchQueue` handle and spawns [`handle_connection`].
+/// What: loops `listener.accept().await`; on each accepted stream, verifies the
+/// peer's uid matches this process's own (#5099) and then clones the
+/// `BatchQueue` handle and spawns [`handle_connection`]. A foreign-uid peer is
+/// dropped without being served — the filesystem mode should already have made
+/// that unreachable, and this is what turns the mode into an enforced boundary.
 /// Test: covered by `concurrent_embed.rs` integration test.
 pub async fn run_uds_accept_loop(listener: UnixListener, queue: Arc<BatchQueue>) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                if let Err(e) = trusty_common::uds::ensure_peer_is_self(&stream) {
+                    tracing::warn!("rejected UDS connection: {e}");
+                    continue;
+                }
                 let q = Arc::clone(&queue);
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, q).await {
@@ -183,6 +194,25 @@ mod tests {
     fn test_queue() -> BatchQueue {
         let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(EMBED_DIM));
         BatchQueue::new(embedder, BatchConfig::default())
+    }
+
+    /// #5099 regression: the daemon's own bind path must produce a 0600
+    /// socket in a 0700 directory. Against the pre-fix commit this bind was
+    /// bare and the socket came back at the process umask (0755 under 022).
+    #[tokio::test]
+    async fn bind_uds_listener_produces_a_0600_socket() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sockets");
+        let sock = dir.join("embedderd.sock");
+
+        let _listener = bind_uds_listener(&sock).expect("bind");
+
+        let mode =
+            |p: &std::path::Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode(&sock), 0o600, "socket must be 0600");
+        assert_eq!(mode(&dir), 0o700, "socket dir must be 0700");
     }
 
     #[tokio::test]

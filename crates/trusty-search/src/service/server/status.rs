@@ -83,12 +83,31 @@ pub(super) fn first_existing_mtime_rfc3339(
         })
 }
 
+/// Report one index's stages, capabilities, and on-disk footprint.
+///
+/// Why: a bare hot-registry miss used to be a flat 404, which says the index
+/// never existed. A cold-parked or restore-failed index DOES exist — it is just
+/// not resident — and `search_handler` has always distinguished the two. #4715
+/// makes a 404 here mean what it means there, because the MCP layer now reads
+/// this endpoint's 404 as "never indexed" and would otherwise report a built
+/// index as one that was never built.
+/// What: 404 only when the id is absent from the hot registry, the cold store,
+/// AND the failed set; 503 when it is cold-parked or permanently failed.
+/// Test: `status_404_only_when_absent_from_every_store` and
+/// `cold_parked_index_status_is_503_not_404`.
 pub(super) async fn index_status_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+    let handle = match state.registry.get(&index_id) {
+        Some(h) => h,
+        // #4715: registered but not resident — exists, cannot be served yet.
+        None if state.cold_store.contains(&index_id) || state.cold_store.is_failed(&index_id) => {
+            return Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        None => return Err(StatusCode::NOT_FOUND),
+    };
     let indexer = handle.indexer.read().await;
     // Issue #111: surface `path_filter` so callers can see which glob filter
     // (if any) is active for the index. Returns `null` when no filter is set.

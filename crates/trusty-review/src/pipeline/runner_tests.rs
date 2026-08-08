@@ -1847,3 +1847,192 @@ fn build_author_rationale_single_field_only() {
         "absent description must not render a heading"
     );
 }
+
+// ─── #5064: the dedup claim gate fails closed ────────────────────────────────
+
+/// Why: this is the arm that made #5064 dangerous. The store now refuses to
+/// start without a claim gate, but the *operation* path used to log
+/// `"dedup claim failed (proceeding without dedup)"` and review anyway — so a
+/// stuck holder produced an ungated live comment, and another on redelivery.
+/// A stuck holder is not hypothetical: a rolling upgrade where a pre-fix
+/// `serve --stdio` is still running produces exactly one.
+/// What: `Contended` must map to `Abort`, never `Proceed`.
+/// Test: this test.
+#[test]
+fn classify_claim_contended_aborts() {
+    let gate = classify_claim(Err(DedupError::Contended {
+        path: "/tmp/dedup.redb".to_string(),
+        waited_ms: 2000,
+    }));
+    match gate {
+        ClaimGate::Abort(reason) => assert!(
+            reason.contains("locked"),
+            "the abort reason must name the contention: {reason}"
+        ),
+        ClaimGate::Proceed => {
+            panic!("a contended claim must NOT proceed — that posts an ungated comment (#5064)")
+        }
+        ClaimGate::DuplicateSkip => panic!("a contended claim is not a duplicate"),
+    }
+}
+
+/// Why: every `DedupError` means the same thing operationally — the gate did
+/// not engage — so the fail-closed rule cannot be special-cased to one variant.
+/// What: `Open`, `Transaction`, and `Serde` all abort too.
+/// Test: this test.
+#[test]
+fn classify_claim_open_error_aborts() {
+    for err in [
+        DedupError::Open("no such file".to_string()),
+        DedupError::Transaction("commit failed".to_string()),
+        DedupError::Serde("bad json".to_string()),
+    ] {
+        assert!(
+            matches!(classify_claim(Err(err)), ClaimGate::Abort(_)),
+            "every store error must abort — the gate did not engage"
+        );
+    }
+}
+
+/// Why: the fail-closed rule must not break the happy path.
+/// What: `Claimed` proceeds.
+/// Test: this test.
+#[test]
+fn classify_claim_claimed_proceeds() {
+    assert!(matches!(
+        classify_claim(Ok(ClaimOutcome::Claimed)),
+        ClaimGate::Proceed
+    ));
+}
+
+/// Why: a completed review for this SHA is the case dedup exists to catch.
+/// What: `Skipped` is a duplicate, distinct from an abort.
+/// Test: this test.
+#[test]
+fn classify_claim_skipped_is_duplicate() {
+    assert!(matches!(
+        classify_claim(Ok(ClaimOutcome::Skipped)),
+        ClaimGate::DuplicateSkip
+    ));
+}
+
+/// Why: the round-1 fix routed the failed-claim path into `abort_dry`, which
+/// releases the dedup claim so a retry can re-run. That is right for every
+/// other abort — they own the claim — and wrong for this one, which never
+/// acquired it. `release` is an unconditional `table.remove(key)`, so a failed
+/// claim erased whatever record was on disk, including a `Completed` one
+/// another process wrote. The next trigger for that SHA then posts a duplicate
+/// comment: exactly the outcome the fail-closed change exists to prevent.
+/// What: another process completes a review for a SHA; this review aborts on a
+/// failed claim for the same SHA; the completed record must survive.
+/// Test: this test. Fails when `abort_dry` releases unconditionally.
+#[tokio::test]
+async fn failed_claim_abort_does_not_delete_another_processes_record() {
+    use crate::store::DedupStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dedup.redb");
+
+    // A different process owns and completes the review for this head SHA.
+    let owner_store = DedupStore::open(&path).expect("open");
+    owner_store
+        .claim_blocking("acme", "backend", 42, "sha-owned")
+        .expect("claim");
+    owner_store
+        .complete_blocking("acme", "backend", 42, "sha-owned")
+        .expect("complete");
+    drop(owner_store);
+
+    // This review holds no claim — its own `claim()` failed.
+    let mut deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+    deps.dedup = Some(Arc::new(DedupStore::open(&path).expect("open")));
+
+    let mut result = ReviewResult::new("acme", "backend", 42, "t", "u");
+    result.head_sha = "sha-owned".to_string();
+    let input = ReviewInput {
+        diff_source: DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "backend".to_string(),
+            pr: 42,
+            token: String::new(),
+        },
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Serve,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+
+    let out = abort_dry(
+        result,
+        &default_config(),
+        &input,
+        &deps,
+        DedupClaim::NotHeld,
+    )
+    .await;
+    assert!(out.dry_run, "an abort is always dry-run");
+
+    // The other process's completed claim must still suppress a re-review.
+    let checker = DedupStore::open(&path).expect("open");
+    assert_eq!(
+        checker
+            .claim_blocking("acme", "backend", 42, "sha-owned")
+            .unwrap(),
+        ClaimOutcome::Skipped,
+        "aborting on a FAILED claim deleted another process's completed record — \
+         the next trigger for this SHA would post a duplicate comment (#5064)"
+    );
+}
+
+/// Why: the owning abort must still release, or a review that dies mid-flight
+/// leaves an `InProgress` record that suppresses its own retry.
+/// What: a review that acquired the claim and then aborts leaves the SHA
+/// re-claimable.
+/// Test: this test.
+#[tokio::test]
+async fn held_claim_abort_still_releases() {
+    use crate::store::DedupStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dedup.redb");
+    let store = Arc::new(DedupStore::open(&path).expect("open"));
+    store
+        .claim_blocking("acme", "backend", 42, "sha-held")
+        .expect("claim");
+
+    let mut deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+    deps.dedup = Some(Arc::clone(&store));
+
+    let mut result = ReviewResult::new("acme", "backend", 42, "t", "u");
+    result.head_sha = "sha-held".to_string();
+    let input = ReviewInput {
+        diff_source: DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "backend".to_string(),
+            pr: 42,
+            token: String::new(),
+        },
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Serve,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+
+    abort_dry(result, &default_config(), &input, &deps, DedupClaim::Held).await;
+
+    assert_eq!(
+        store
+            .claim_blocking("acme", "backend", 42, "sha-held")
+            .unwrap(),
+        ClaimOutcome::Claimed,
+        "an owning abort must release so the retry can re-run"
+    );
+}

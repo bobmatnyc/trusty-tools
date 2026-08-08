@@ -95,39 +95,84 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
 /// to or restart any `"decommissioned"`/`"deleted"` session before any daemon
 /// round-trip. Both guards key off the session's own state/flags, not off
 /// whether this predicate decided to show or hide the row.
-/// What: returns `false` for `"decommissioned"` (always hidden) and for
-/// `"deleted"` when `is_slot_tombstone` is `false` (a soft-deleted, still-in-store
-/// record); returns `true` for every other state, and for `"deleted"` when
+/// #4994 adds the third input, `classified_dead`. Until it did, this predicate
+/// consulted lifecycle state alone and never asked whether the session still
+/// existed: a record with `state == "stopped"` whose tmux pane is gone AND whose
+/// workspace directory no longer exists anywhere on disk took the catch-all
+/// `true` arm into the default view. Six such rows sat in the owner's default
+/// `tm ls`, each already rendered `[dead]`. Hiding them is a VISIBILITY change
+/// only; the records are untouched and `tm ls --all` still lists every one.
+///
+/// 🔴 `classified_dead` is the listing-time sweep's own verdict
+/// ([`AutoPruneOutcome::dead_ids`](crate::commands::session_picker_prune::AutoPruneOutcome::dead_ids)),
+/// NEVER the wire's `unresumable` flag. The flag is computed daemon-side from a
+/// record's PERSISTED state and `reconcile_live_state` then overwrites the
+/// DISPLAY state without recomputing it, so the wire ships `state: "active"`
+/// with `unresumable: true` for a session whose pane is running right now —
+/// reachable any time a daemon restart resets records to persisted `Stopped`
+/// and this repo's own post-merge `git worktree remove` takes the workspace
+/// while the pane survives. Hiding on the flag would hide that session, and the
+/// prune would then refuse to reap it (`is_clearable_state`'s `stopped|errored`
+/// gate; the `live_tmux_names` guard from PR #4725 round 2) — hidden AND
+/// unreapable, which is precisely the "running agent unreachable through `tm`"
+/// outcome those guards exist to prevent. Keying off the classification instead
+/// makes `hidden ⟺ prunable` hold by construction.
+///
+/// The `classified_dead` arm sits deliberately BELOW the `"deleted"` arm, so a
+/// #3034 slot tombstone still renders at its slot regardless.
+/// What: returns `false` for `"decommissioned"` (always hidden), for
+/// `"deleted"` when `is_slot_tombstone` is `false` (a soft-deleted,
+/// still-in-store record), and for any other state when `classified_dead` is
+/// `true` (#4994); returns `true` otherwise — including for `"deleted"` when
 /// `is_slot_tombstone` is `true` (a #3034 numbered-slot tombstone).
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
 /// `is_live_session_state_excludes_soft_deleted_record`,
-/// `is_live_session_state_keeps_slot_tombstone_visible` in
-/// `tests_behavior_c_tests.rs`.
-pub(crate) fn is_live_session_state(state: &str, is_slot_tombstone: bool) -> bool {
+/// `is_live_session_state_keeps_slot_tombstone_visible`,
+/// `is_live_session_state_hides_a_record_the_prune_classified_dead`,
+/// `is_live_session_state_keeps_resumable_stopped_record`,
+/// `is_live_session_state_keeps_slot_tombstone_even_when_classified_dead` in
+/// `tests_behavior_e_tests.rs`.
+pub(crate) fn is_live_session_state(
+    state: &str,
+    is_slot_tombstone: bool,
+    classified_dead: bool,
+) -> bool {
     match state {
         "decommissioned" => false,
         "deleted" => is_slot_tombstone,
-        _ => true,
+        // #4994: the sweep confirmed no pane and no workspace on disk, so this
+        // row is hidden from the default view exactly like `decommissioned`.
+        _ => !classified_dead,
     }
 }
 
 /// Filter a session list to only live sessions for display in the picker (#1809).
 ///
 /// Why: the picker must never show decommissioned tombstones (or a
-/// soft-deleted, still-in-store record) by default; the `--all` opt-in
+/// soft-deleted, still-in-store record, or — since #4994 — a record the
+/// listing-time sweep classified dead) by default; the `--all` opt-in
 /// re-enables them for `tm session ls` via this module's path. A #3034
 /// numbered-slot tombstone (`ManagedSessionSummary::deleted == true`) is
 /// deliberately kept regardless — see [`is_live_session_state`]'s doc.
-/// What: retains only sessions whose `(state, deleted)` pair passes
-/// [`is_live_session_state`].
-/// Test: `picker_filter_excludes_decommissioned_keeps_active` in
-/// `tests_behavior_c_tests.rs`.
+///
+/// 🔴 `dead_ids` must come from the SAME sweep that just ran over this list —
+/// see [`crate::commands::session_picker::scope_for_display`]. That forces two
+/// things at once: the filter runs AFTER the prune (dropping a dead row
+/// upstream would starve the sweep of the records it exists to reap, so they
+/// would accumulate in the store forever, now invisibly), and it hides only
+/// what the sweep is willing to reap.
+/// What: retains only sessions whose `(state, deleted, dead_ids-membership)`
+/// triple passes [`is_live_session_state`].
+/// Test: `picker_filter_excludes_decommissioned_keeps_active`,
+/// `picker_filter_hides_only_what_the_prune_classified_dead`,
+/// `picker_filter_keeps_a_live_row_flagged_unresumable`.
 pub(crate) fn filter_live_sessions(
     sessions: Vec<ManagedSessionSummary>,
+    dead_ids: &std::collections::HashSet<String>,
 ) -> Vec<ManagedSessionSummary> {
     sessions
         .into_iter()
-        .filter(|s| is_live_session_state(&s.state, s.deleted))
+        .filter(|s| is_live_session_state(&s.state, s.deleted, dead_ids.contains(&s.id)))
         .collect()
 }
 
@@ -138,8 +183,9 @@ pub(crate) fn filter_live_sessions(
 /// What: GETs `/api/v1/sessions/managed` (with an optional `?source_id=` filter
 /// that the daemon already supports) and prints a table with id, state, name,
 /// task (truncated to 30 chars), and created_at; or raw JSON with `--json`.
-/// By default, decommissioned tombstone sessions are hidden from the table (#1809);
-/// `--all` (i.e. `all=true`) opts in to the full unfiltered list. The `--json`
+/// By default, decommissioned tombstone sessions (#1809) and dead `unresumable`
+/// records (#4994) are hidden from the table; `--all` (i.e. `all=true`) opts in
+/// to the full unfiltered list. The `--json`
 /// path always returns the raw daemon response unfiltered.
 /// The source_id filter is passed straight through as a query parameter rather
 /// than doing client-side filtering so callers get the daemon's authoritative view.
@@ -167,7 +213,7 @@ pub(crate) async fn session_ls(
     source_id: Option<&str>,
     all: bool,
     sort: crate::commands::session_picker::SessionSortArg,
-    term: Option<String>,
+    term: Option<crate::commands::session_picker::SessionFilter>,
 ) -> anyhow::Result<()> {
     let ctx = crate::commands::session_picker_prune::PruneContext::production();
     session_ls_at(client, url, json, source_id, all, sort, term, &ctx).await
@@ -192,9 +238,17 @@ pub(crate) async fn session_ls(
 /// a prune triggered by this invocation shows up on the next one. A response the
 /// client cannot parse degrades to a plain passthrough with no prune: the raw
 /// echo is the contract there, the prune is a best-effort side task.
+///
+/// #4994: the pipeline is parse → prune → scope. The prune runs on the FULL
+/// deserialized list, and
+/// [`scope_for_display`](crate::commands::session_picker::scope_for_display)
+/// applies the default-view filter afterwards. Scoping first would hide dead
+/// rows from the sweep that reaps them.
 /// Test: `session_ls_prunes_dead_records_on_piped_invocation`,
 /// `session_ls_json_passthrough_prunes_dead_records`,
-/// `session_ls_json_never_refetches_after_pruning`.
+/// `session_ls_json_never_refetches_after_pruning`; the scoping half by
+/// `picker_filter_hides_only_what_the_prune_classified_dead` and
+/// `scope_for_display_all_keeps_dead_record_visible`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_ls_at(
     client: &reqwest::Client,
@@ -203,7 +257,7 @@ pub(crate) async fn session_ls_at(
     source_id: Option<&str>,
     all: bool,
     sort: crate::commands::session_picker::SessionSortArg,
-    term: Option<String>,
+    term: Option<crate::commands::session_picker::SessionFilter>,
     ctx: &crate::commands::session_picker_prune::PruneContext,
 ) -> anyhow::Result<()> {
     // Fetch the response body ONCE via the shared fetch path. `--json` echoes
@@ -211,211 +265,42 @@ pub(crate) async fn session_ls_at(
     // order/whitespace for scripts); the table path deserializes the SAME text
     // rather than issuing a second GET.
     let raw = crate::commands::session_picker::fetch_managed_raw(client, url, source_id).await?;
-    let parsed = crate::commands::session_picker::parse_scoped_sessions(&raw, all);
+    let parsed = crate::commands::session_picker::parse_managed_sessions(&raw);
     if json {
         // Raw JSON passthrough is always unfiltered/unsorted — scripts rely on
         // byte-for-byte. #4702: prune as a side effect, then echo the body we
         // ALREADY have. No re-GET — see this function's doc.
         if let Ok(sessions) = parsed {
-            crate::commands::session_picker_prune::prune_and_report_at(client, url, sessions, ctx)
-                .await;
+            // `--json` echoes the raw body, dead rows included, so the banner
+            // must not claim anything was hidden (#4994).
+            crate::commands::session_picker_prune::prune_and_report_at(
+                client, url, sessions, ctx, false,
+            )
+            .await;
         }
         println!("{raw}");
         return Ok(());
     }
-    let sessions =
-        crate::commands::session_picker_prune::prune_and_report_at(client, url, parsed?, ctx).await;
+    let listing =
+        crate::commands::session_picker_prune::prune_and_report_at(client, url, parsed?, ctx, !all)
+            .await;
+    // #4994: scope AFTER the prune, never before — and against that sweep's own
+    // verdict, so the rows hidden here are exactly the rows it will reap.
+    let sessions = crate::commands::session_picker::scope_for_display(
+        listing.sessions,
+        all,
+        &listing.dead_ids,
+    );
     let mut sessions =
-        crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_deref());
+        crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_ref());
     crate::commands::session_picker::sort_sessions(&mut sessions, sort);
-    render_session_table(&sessions, source_id);
+    crate::commands::managed_render::render_session_table(&sessions, source_id);
     Ok(())
 }
 
-/// Render the static `tm session ls` / `tm ls` table for a scoped session list.
-///
-/// Why: both the static list command and the `tm ls` connector's non-picker path
-/// (0 sessions, or a piped/`--json`/`--all` invocation) must print the identical
-/// table, so the row formatting lives in one place rather than being duplicated
-/// across the two entry points.
-/// What: prints a "no managed sessions[ for <slug>]" line when the list is empty;
-/// otherwise prints the header + one row per session, prefixed by its stable
-/// `NUM` slot (#3034) — the SAME number the interactive picker shows and
-/// resolves `d<N>` against, so a number captured from this static table stays
-/// valid for a later picker session (or vice versa). A tombstoned row (`s.deleted`)
-/// prints ONLY its slot number and `-- deleted --`, every other field blanked, so
-/// a deleted session's number is never silently reused for its former neighbors.
-/// A live row shows id, state, truncated name, task/`(interactive)` placeholder,
-/// short created-at, and any pending decision. The STATE column appends
-/// `[dead]` (#2595) when the server-computed `unresumable` flag is set — the
-/// session's workspace no longer exists anywhere on disk, so `tm session
-/// resume`/the picker's restart would only ever fail; the operator's
-/// actionable remedy is `tm session rm`. It also appends `[stale-assets]`
-/// (#2444) when the server-computed `stale_assets` flag is set — the
-/// session's deployed agents/skills have drifted from the catalog; the remedy
-/// is `tm sessions sync-assets <id>` — or `[assets ?]` (#4322) when the daemon
-/// skipped the probe for that row (`stopped` sessions), so the operator reads
-/// "undetermined" rather than mistaking a missing marker for "assets fresh".
-/// Test: `ls_source_id_filter_selects_correct_slug` covers the scoping seam; the
-/// table bytes are exercised by `tests/session_manager_mvp.rs`;
-/// `format_state_column_appends_dead_marker` and
-/// `format_state_column_appends_stale_assets_marker` cover the two markers via
-/// the extracted pure helper, [`format_state_column`];
-/// `format_tombstone_row_shows_slot_and_placeholder` covers the #3034
-/// deleted-slot row via its own extracted pure helper, [`format_tombstone_row`].
-pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id: Option<&str>) {
-    if sessions.is_empty() {
-        if let Some(sid) = source_id {
-            println!("no managed sessions for {sid}");
-        } else {
-            println!("no managed sessions");
-        }
-        return;
-    }
-    // Table header
-    println!(
-        "{:<5}  {:<36}  {:<14}  {:<24}  {:<30}  CREATED",
-        "NUM", "ID", "STATE", "NAME", "TASK"
-    );
-    for s in sessions {
-        if s.deleted {
-            // #3034: the slot stays reserved — never silently reused by a
-            // later session — so the operator sees exactly which number is
-            // now dead rather than having it vanish from the listing.
-            println!("{}", format_tombstone_row(s.slot));
-            continue;
-        }
-        // #1841 Fix 3: show a descriptive placeholder for sessions with no task.
-        let task = s
-            .task
-            .as_deref()
-            .map(|t| truncate(t, 30))
-            .unwrap_or_else(|| "(interactive)".to_string());
-        let created = s
-            .created_at
-            .as_deref()
-            .map(short_timestamp)
-            .unwrap_or_default();
-        let pending = s
-            .pending_decision
-            .as_deref()
-            .map(|d| format!(" [pending: {d}]"))
-            .unwrap_or_default();
-        // #2595: flag a dead pick (stopped/errored with no workdir candidate
-        // left on disk) right in the STATE column — the operator sees it
-        // without having to select the session and hit a 422 first. An
-        // ATTACHED session (live-tmux reconciled by the daemon) reads
-        // `attached` rather than the raw `active` so the operator can tell a
-        // session they're connected to from a merely-running one.
-        let base_state = if s.attached {
-            "attached"
-        } else {
-            s.state.as_str()
-        };
-        let unchecked = s.stale_assets_unchecked;
-        let state = format_state_column(base_state, s.unresumable, s.stale_assets, unchecked);
-        println!(
-            // #1841 Fix 5: truncate name with ellipsis when it exceeds column width.
-            "{:<5}  {:<36}  {:<14}  {:<24}  {:<30}  {}{}",
-            s.slot,
-            s.id,
-            state,
-            truncate(&s.name, 24),
-            task,
-            created,
-            pending
-        );
-    }
-}
-
-/// Format the `-- deleted --` tombstone row for a deleted slot (issue #3034).
-///
-/// Why: extracted as a pure function — mirroring [`format_state_column`] — so
-/// the exact tombstone row text is unit-testable without capturing stdout.
-/// What: returns `"{slot:<5}  -- deleted --"`, matching the live row's `NUM`
-/// column width so the table stays aligned.
-/// Test: `format_tombstone_row_shows_slot_and_placeholder`.
-fn format_tombstone_row(slot: u32) -> String {
-    format!("{slot:<5}  -- deleted --")
-}
-
-/// Format the STATE column value for one `tm session ls` row (#2595, #2444).
-///
-/// Why: extracted as a pure function so the `[dead]`/`[stale-assets]` markers
-/// are unit-testable without capturing `render_session_table`'s stdout.
-/// What: renders the base state (`deleted` → the `--deleted--` marker, #2012;
-/// every other state verbatim), then appends `" [dead]"` when `unresumable` is
-/// `true` (the session is `stopped`/`errored` with no workdir candidate left on
-/// disk, so a resume is guaranteed to fail), and `" [stale-assets]"` when
-/// `stale` (the summary's `stale_assets`) is `true` — the session's deployed
-/// agents/skills have drifted from the catalog and `tm sessions sync-assets
-/// <id>` fixes it — or `" [assets ?]"` when `unchecked` (the summary's
-/// `stale_assets_unchecked`) is `true` (#4322: the daemon
-/// did not probe this row — the list path skips `stopped` sessions — so
-/// staleness is UNDETERMINED, not known-fresh; `tm sessions sync-assets <id>`
-/// is still the remedy, and resuming the session determines it). The two asset
-/// markers are mutually exclusive — an unprobed row has no verdict to report —
-/// so a stale verdict always wins if both flags somehow arrive set. Markers can
-/// otherwise appear together.
-/// Test: `format_state_column_appends_dead_marker`,
-/// `format_state_column_appends_stale_assets_marker`,
-/// `format_state_column_appends_unchecked_assets_marker`,
-/// `format_state_column_leaves_healthy_state_unchanged`,
-/// `format_state_column_renders_deleted_marker`.
-fn format_state_column(state: &str, unresumable: bool, stale: bool, unchecked: bool) -> String {
-    // A `deleted` record (soft-deleted via `tm sessions delete`) renders as the
-    // `--deleted--` marker so the master list REFLECTS the deletion instead of
-    // the row silently vanishing (#2012 marker).
-    let mut out = if state == "deleted" {
-        "--deleted--".to_string()
-    } else {
-        state.to_string()
-    };
-    if unresumable {
-        out.push_str(" [dead]");
-    }
-    if stale {
-        out.push_str(" [stale-assets]");
-    } else if unchecked {
-        out.push_str(" [assets ?]");
-    }
-    out
-}
-
-/// Truncate a string to at most `max` characters, appending `…` when cut.
-///
-/// Why: task descriptions can be arbitrarily long; the ls table needs a bounded
-/// column width.
-/// What: returns `&s[..max-1]…` when `s.chars().count() > max`, else `s`.
-/// Test: `truncate_clips_and_appends_ellipsis` in the module-level unit tests.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let end = s
-            .char_indices()
-            .nth(max.saturating_sub(1))
-            .map(|(i, _)| i)
-            .unwrap_or(s.len());
-        format!("{}\u{2026}", &s[..end])
-    }
-}
-
-/// Render an RFC-3339 timestamp as a short local-ish string (`YYYY-MM-DD HH:MM`).
-///
-/// Why: the full RFC-3339 value is too wide for a table column; a date+time
-/// prefix is human-readable without truncating important information.
-/// What: takes the first 16 characters of the timestamp string (`YYYY-MM-DDTHH:MM`),
-/// replaces the `T` separator with a space, and returns the result. Falls back to
-/// the raw string if it is shorter than 16 chars.
-/// Test: `short_timestamp_formats_correctly`.
-fn short_timestamp(s: &str) -> String {
-    if s.len() >= 16 {
-        s[..16].replace('T', " ")
-    } else {
-        s.to_string()
-    }
-}
+// The `tm ls` table renderer — `render_session_table` and its pure row/column
+// formatters — lives in the sibling `commands::managed_render` module (this
+// file is at the 500-SLOC production cap).
 
 /// `tm session activity <id>` — inspect a managed session's activity state.
 ///
@@ -903,6 +788,19 @@ pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
                     report.agents_pruned.len(),
                     report.skills_pruned.len()
                 );
+            }
+            // #391: a guard that declines to delete is invisible unless it says
+            // so — the operator asked for a prune and must be told what survived
+            // it, and where the deleted content went.
+            if let Some(backup) = &report.prune_backup_dir {
+                println!("  backed up to {}", backup.display());
+            }
+            for line in report
+                .agents_prune_kept
+                .iter()
+                .chain(report.skills_prune_kept.iter())
+            {
+                println!("  kept: {line}");
             }
         }
     }

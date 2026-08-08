@@ -40,6 +40,31 @@
 /// `resolve_expected_python_provider_forces_cpu`.
 pub(super) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Acquire [`ENV_LOCK`], recovering from a poisoned lock instead of panicking.
+///
+/// Why (issue #4940): `ENV_LOCK.lock().unwrap()` turned one failing test into
+/// seven. When `default_model_matches_sentence_transformers_reference` panicked
+/// on a CI runner that could not download the ONNX model, it poisoned the lock,
+/// and the six `resolve_*` tests — pure model/provider/cache-dir resolution
+/// logic that never touches fastembed — then failed with `PoisonError` instead
+/// of passing, burying the one real cause under six casualties.
+///
+/// Why recovery is correct here, not papering over a failure: poisoning exists
+/// to warn that DATA behind the mutex may be half-updated. `ENV_LOCK` is a
+/// `Mutex<()>` — it guards no data, only serialisation order. The state it
+/// actually protects is the process environment, and that is restored by
+/// [`EnvVarGuard`]'s `Drop`, which runs during the panicking test's unwind. So
+/// the next `lock()` caller observes a consistent environment; propagating
+/// poison communicates nothing except "some other test failed", which the test
+/// harness already reports.
+/// What: `lock()`, mapping `PoisonError` to the guard it carries.
+/// Test: `poisoned_env_lock_is_still_acquirable`.
+pub(super) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// RAII helper: set or clear an env var for the duration of a test and restore
 /// it on drop.
 ///
@@ -84,5 +109,53 @@ impl Drop for EnvVarGuard {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ENV_LOCK, env_lock};
+
+    /// Why: issue #4940 — a single ONNX-model initialisation failure in
+    /// `default_model_matches_sentence_transformers_reference` reported as
+    /// SEVEN failures, because the panic poisoned [`ENV_LOCK`] and the six
+    /// `resolve_*` tests then died on `PoisonError` at their
+    /// `ENV_LOCK.lock().unwrap()`. Those six exercise pure resolution logic
+    /// and must not be reachable from another test's failure.
+    /// What: poisons the real static the way a failing test does — unwind with
+    /// the guard live — then asserts [`env_lock`] still hands out a guard.
+    /// Test: this test.
+    #[test]
+    fn poisoned_env_lock_is_still_acquirable() {
+        let poisoner = std::thread::Builder::new()
+            .name("env-lock-poisoner-4940".into())
+            .spawn(|| {
+                let _g = env_lock();
+                panic!("deliberate panic while holding ENV_LOCK — see #4940");
+            })
+            .expect("spawning the poisoner thread must succeed");
+        assert!(
+            poisoner.join().is_err(),
+            "the poisoner thread must actually have panicked"
+        );
+        assert!(
+            ENV_LOCK.is_poisoned(),
+            "a panic with the guard live must poison ENV_LOCK — otherwise this \
+             test proves nothing"
+        );
+
+        // #4940: the line that used to be `ENV_LOCK.lock().unwrap()`. It is
+        // what turned one failure into seven.
+        drop(env_lock());
+
+        assert!(
+            ENV_LOCK.lock().is_err(),
+            "env_lock() must RECOVER from poison, not silently clear it — the \
+             flag stays set so a genuine data-guarding mutex elsewhere is \
+             unaffected by this policy"
+        );
+
+        // Leave the shared static clean for whatever test runs next.
+        ENV_LOCK.clear_poison();
     }
 }

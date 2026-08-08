@@ -11,6 +11,7 @@
 
 pub mod agent;
 pub mod agent_builder;
+pub mod agent_cost;
 pub mod agent_deployer;
 pub mod agent_manifest;
 pub mod agent_metadata;
@@ -64,6 +65,7 @@ pub mod deploy_validate;
 pub mod deterministic_overseer;
 pub mod discovery;
 pub mod doctor;
+pub mod doctor_repair;
 pub mod error;
 pub mod exit_codes;
 pub mod external_session;
@@ -90,6 +92,7 @@ pub mod manifest;
 pub mod mcp_config;
 pub mod mcp_test;
 pub mod memory;
+pub mod memory_import;
 pub mod model_inject;
 pub mod names;
 pub mod oauth_token;
@@ -111,10 +114,16 @@ pub mod process;
 pub mod project;
 pub mod project_aliases;
 pub mod project_discovery;
+// #4880: the project skill tier redeploys on project-manifest change.
+pub mod project_skill_tier;
 pub mod project_trust;
 pub mod protected_dirs;
 pub mod provisioning_stage;
 pub mod push_guard;
+// `tm reinstall`: the two-hop asset redeploy across every deploy destination,
+// and the install-provenance route its `--binary` flag takes.
+pub mod binary_reinstall;
+pub mod reinstall;
 pub mod scaffold_gitignore;
 pub mod session;
 pub mod session_assets;
@@ -141,6 +150,7 @@ pub mod update_check;
 pub mod version_staleness;
 pub mod workspace_liveness;
 pub mod workspace_scan;
+pub mod worktree_index;
 pub mod worktree_naming;
 
 pub use connect::{ResolveResult, SessionSummary, resolve_target};

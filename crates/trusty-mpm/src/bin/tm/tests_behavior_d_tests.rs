@@ -924,7 +924,7 @@ fn ls_connector_should_show_picker_flags_and_empty_static() {
 // `sort_sessions` are the pure list operations it feeds.
 
 use crate::commands::session_picker::{
-    SessionSortArg, filter_sessions_by_term, parse_ls_terms, sort_sessions,
+    SessionFilter, SessionSortArg, filter_sessions_by_term, parse_ls_terms, sort_sessions,
 };
 
 /// Bare `tm ls` (no positional words) → default sort, no filter.
@@ -1058,7 +1058,7 @@ fn filter_sessions_by_term_matches_name() {
         ls_test_session("api-worker", "active", None, None, None, None),
         ls_test_session("web-frontend", "active", None, None, None, None),
     ];
-    let out = filter_sessions_by_term(sessions, Some("API"));
+    let out = filter_sessions_by_term(sessions, Some(&SessionFilter::visible("API")));
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].name, "api-worker");
 }
@@ -1070,7 +1070,7 @@ fn filter_sessions_by_term_matches_task() {
         ls_test_session("s1", "active", None, None, None, Some("fix the login bug")),
         ls_test_session("s2", "active", None, None, None, Some("write docs")),
     ];
-    let out = filter_sessions_by_term(sessions, Some("login"));
+    let out = filter_sessions_by_term(sessions, Some(&SessionFilter::visible("login")));
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].name, "s1");
 }
@@ -1089,7 +1089,7 @@ fn filter_sessions_by_term_matches_source_id() {
         ),
         ls_test_session("s2", "active", None, None, Some("other/repo"), None),
     ];
-    let out = filter_sessions_by_term(sessions, Some("trusty-tools"));
+    let out = filter_sessions_by_term(sessions, Some(&SessionFilter::visible("trusty-tools")));
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].name, "s1");
 }
@@ -1099,17 +1099,23 @@ fn filter_sessions_by_term_matches_source_id() {
 fn filter_sessions_by_term_is_case_insensitive() {
     let sessions = vec![ls_test_session("MyApp", "ACTIVE", None, None, None, None)];
     assert_eq!(
-        filter_sessions_by_term(sessions.clone(), Some("myapp")).len(),
+        filter_sessions_by_term(sessions.clone(), Some(&SessionFilter::visible("myapp"))).len(),
         1
     );
-    assert_eq!(filter_sessions_by_term(sessions, Some("active")).len(), 1);
+    assert_eq!(
+        filter_sessions_by_term(sessions, Some(&SessionFilter::visible("active"))).len(),
+        1
+    );
 }
 
 /// A filter matching nothing returns an empty result (not an error).
 #[test]
 fn filter_sessions_by_term_no_match_returns_empty() {
     let sessions = vec![ls_test_session("s1", "active", None, None, None, None)];
-    let out = filter_sessions_by_term(sessions, Some("nonexistent-substring"));
+    let out = filter_sessions_by_term(
+        sessions,
+        Some(&SessionFilter::visible("nonexistent-substring")),
+    );
     assert!(out.is_empty(), "no match must yield an empty result");
 }
 
@@ -1301,7 +1307,7 @@ fn filter_and_sort_combined() {
             None,
         ),
     ];
-    let mut filtered = filter_sessions_by_term(sessions, Some("api"));
+    let mut filtered = filter_sessions_by_term(sessions, Some(&SessionFilter::visible("api")));
     assert_eq!(
         filtered.len(),
         2,
@@ -1833,7 +1839,28 @@ async fn fetch_raw_live(
     let raw = crate::commands::session_picker::fetch_managed_raw(client, url, None)
         .await
         .expect("fetch raw");
-    crate::commands::session_picker::parse_scoped_sessions(&raw, false).expect("parse")
+    crate::commands::session_picker::parse_managed_sessions(&raw).expect("parse")
+}
+
+/// Scope a list the way a DEFAULT (non-`--all`) `tm ls` does, given an EMPTY
+/// dead set — i.e. exactly the pre-#4994 filter: state and slot-tombstone only.
+///
+/// 🔴 The empty set is the point, not a shortcut. `seed_dead_session` fixtures
+/// carry `unresumable: true`, so a filter keyed on that flag would drop the
+/// record whether or not the prune ever reached the daemon, and the three
+/// registry-teardown assertions below would pass under a
+/// `decommission_dead_record` that contacts nothing (critic HIGH, PR #4995
+/// review). With no dead ids the ONLY thing that can hide the record is the
+/// daemon actually flipping it to `decommissioned` — which is what those
+/// assertions exist to prove.
+fn default_view_pre_4994(
+    sessions: Vec<trusty_mpm::client::ManagedSessionSummary>,
+) -> Vec<trusty_mpm::client::ManagedSessionSummary> {
+    crate::commands::session_picker::scope_for_display(
+        sessions,
+        false,
+        &std::collections::HashSet::new(),
+    )
 }
 
 /// A FIRST sighting of an `unresumable` record is never pruned — only
@@ -1952,11 +1979,11 @@ async fn auto_prune_dead_records_removes_confirmed_unresumable_records() {
 
     // The daemon's own record must have been torn down for real (not merely
     // dropped client-side) — decommission tombstones it, which the default
-    // live-only fetch hides.
-    let refetched = fetch_raw_live(&client, &server.url).await;
+    // view hides.
+    let refetched = default_view_pre_4994(fetch_raw_live(&client, &server.url).await);
     assert!(
         !refetched.iter().any(|s| s.id == id.to_string()),
-        "the decommissioned record must no longer appear in the live listing"
+        "the decommissioned record must no longer appear in the default listing"
     );
 }
 
@@ -2300,6 +2327,115 @@ async fn auto_prune_dead_records_stale_daemon_sentinel_expires_after_ttl() {
     handle.abort();
 }
 
+/// 🔴 #4995 review (MEDIUM): every confirmed record's decommission FAILS, and
+/// the operator must still be told the rows were withheld.
+///
+/// Why: a failed decommission leaves the record in `kept` AND in `dead_ids`, so
+/// the default `tm ls` hides it. Until this fix it was counted in neither
+/// `pruned` nor `pending`, so a call where every attempt failed reported
+/// `pending == 0`, [`pending_banner`] returned `None`, and the rows dropped off
+/// the listing with nothing said — silent hiding arriving through the error
+/// path, which is the outcome #4994's whole design exists to prevent.
+///
+/// Fails before the fix: `pending` is 0, so the banner assertion gets `None`.
+/// What: a stub daemon that answers every decommission with HTTP 500 — the
+/// transport-level failure arm, distinct from the `workspace_removed: true`
+/// stale-daemon arm its sibling tests drive. Both ids are pre-seeded as already
+/// confirmed so this isolates the counting behavior from the two-sightings
+/// window.
+#[tokio::test]
+async fn auto_prune_counts_failed_decommissions_so_the_banner_still_prints() {
+    use crate::commands::managed::filter_live_sessions;
+    use crate::commands::session_picker_prune::pending_banner;
+
+    let app = axum::Router::new().route(
+        "/api/v1/sessions/managed/{id}/decommission",
+        axum::routing::post(
+            async |axum::extract::Path(_id): axum::extract::Path<String>| {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback port");
+    let addr = listener.local_addr().expect("resolve bound addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let url = format!("http://{addr}");
+
+    let client = reqwest::Client::new();
+    let root = tempfile::TempDir::new().expect("tempdir");
+    let marker_path = root.path().join("seen.json");
+
+    let mut seen = std::collections::HashMap::new();
+    seen.insert("id-a".to_string(), "2020-01-01T00:00:00Z".to_string());
+    seen.insert("id-b".to_string(), "2020-01-01T00:00:00Z".to_string());
+    std::fs::write(&marker_path, serde_json::to_string(&seen).unwrap()).unwrap();
+
+    // Both workspaces are absent under an EXISTING parent (the tempdir), which
+    // is what `workspace_verified_gone` requires to call a record dead.
+    let dead_session = |id: &str, label: &str| {
+        let mut s = stopped_session_at(id, &root.path().join(label));
+        s.state = "errored".to_string();
+        s.unresumable = true;
+        s
+    };
+
+    let outcome = auto_prune_dead_records_at(
+        &client,
+        &url,
+        vec![
+            dead_session("id-a", "gone-a"),
+            dead_session("id-b", "gone-b"),
+        ],
+        &marker_path,
+        Some(HashSet::new()),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.pruned, 0,
+        "an HTTP 500 must never be counted as a successful prune"
+    );
+    assert_eq!(
+        outcome.kept.len(),
+        2,
+        "both records survive the failed sweep"
+    );
+    let mut hidden: Vec<&str> = outcome.dead_ids.iter().map(String::as_str).collect();
+    hidden.sort_unstable();
+    assert_eq!(
+        hidden,
+        vec!["id-a", "id-b"],
+        "both records stay classified dead, so the default view hides both"
+    );
+
+    // 🔴 The defect itself: the banner is the only notice these rows were
+    // withheld, and `pending` is its sole gate.
+    assert_eq!(
+        pending_banner(outcome.pending, true).as_deref(),
+        Some("tm: 2 more dead records pending confirmation (hidden; `tm ls --all` to see them)"),
+        "a call whose every decommission failed must still name the withheld \
+         rows — before this fix `pending` was 0 and nothing printed at all"
+    );
+    assert_eq!(
+        outcome.pending,
+        outcome.dead_ids.len(),
+        "the reported count and the hidden set must be the same rows"
+    );
+
+    // And they really are hidden: the count above is not describing rows that
+    // stayed on screen.
+    assert!(
+        filter_live_sessions(outcome.kept, &outcome.dead_ids).is_empty(),
+        "the default view drops exactly the rows the banner just accounted for"
+    );
+
+    handle.abort();
+}
+
 // ── #4702: prune coverage — every invocation, and stopped records ───────────
 //
 // Two independent narrowings let dead records accumulate without bound before
@@ -2632,7 +2768,7 @@ async fn session_ls_prunes_dead_records_on_piped_invocation() {
     let ctx = hermetic_prune_ctx(&marker_path);
     ls(&ctx).await;
 
-    let live = fetch_raw_live(&client, &server.url).await;
+    let live = default_view_pre_4994(fetch_raw_live(&client, &server.url).await);
     assert!(
         !live.iter().any(|s| s.id == id.to_string()),
         "a non-TTY `tm ls` must clear a confirmed dead record from the registry"
@@ -2672,7 +2808,7 @@ async fn session_ls_json_passthrough_prunes_dead_records() {
     backdate_sightings(&marker_path, 11);
     ls_json(&hermetic_prune_ctx(&marker_path)).await;
 
-    let live = fetch_raw_live(&client, &server.url).await;
+    let live = default_view_pre_4994(fetch_raw_live(&client, &server.url).await);
     assert!(
         !live.iter().any(|s| s.id == id.to_string()),
         "`tm ls --json` must clear a confirmed dead record from the registry"
@@ -2726,6 +2862,135 @@ async fn auto_prune_keeps_record_whose_parent_directory_is_unreachable() {
     );
 
     handle.abort();
+}
+
+/// #4872: `git worktree remove` deletes the leaf, its parent AND its
+/// grandparent in one operation, so the parent-only probe left four dead records
+/// permanently stuck — never pruned, and never even marked in
+/// `auto-prune-seen.json`, so repeated `tm ls` could not advance them.
+///
+/// What: the two shapes actually observed on 2026-08-05 —
+/// `.claude/worktrees/critic-4850/crates/trusty-mpm` and
+/// `.base/.worktrees/qa-4850/crates/trusty-mpm` — with the worktree ROOT
+/// (`.claude/worktrees`, `.base/.worktrees`) still present and everything below
+/// it removed. That root surviving is what proves the removal was a deletion,
+/// not an unmount.
+///
+/// Fails before the fix: `workspace_verified_gone` returned `false` because the
+/// immediate parent (`crates/`) was gone too, so `pruned` stayed 0 forever.
+#[tokio::test]
+async fn auto_prune_clears_record_whose_worktree_root_survived_the_removal() {
+    for (marker_dir, container, worktree) in [
+        (".claude", "worktrees", "critic-4850"),
+        (".base", ".worktrees", "qa-4850"),
+    ] {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let marker_path = root.path().join("seen.json");
+        let worktree_root = root.path().join(marker_dir).join(container);
+        std::fs::create_dir_all(&worktree_root).expect("create worktree root");
+        // The worktree itself, and every level under it, is gone.
+        let removed = worktree_root
+            .join(worktree)
+            .join("crates")
+            .join("trusty-mpm");
+        let (url, captured, handle) = spawn_recording_decommission_stub().await;
+        let client = reqwest::Client::new();
+
+        let first = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![stopped_session_at("tm-deadrt40493-01", &removed)],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(first.pruned, 0, "{container}: first sighting never prunes");
+        assert_eq!(
+            first.pending, 1,
+            "{container}: the record must be RECORDED as dead — a record that \
+             never reaches `pending` never gets a marker, which is why #4872's \
+             four records could not advance across repeated `tm ls` calls"
+        );
+
+        backdate_sightings(&marker_path, 11);
+        let second = auto_prune_dead_records_at(
+            &client,
+            &url,
+            vec![stopped_session_at("tm-deadrt40493-01", &removed)],
+            &marker_path,
+            Some(HashSet::new()),
+        )
+        .await;
+        assert_eq!(
+            second.pruned, 1,
+            "{container}: a removed worktree whose ROOT still exists is \
+             verifiably deleted, not unmounted, and must be cleared"
+        );
+        assert!(second.kept.is_empty(), "{container}: nothing left to keep");
+        assert_eq!(
+            captured.lock().expect("capture lock").len(),
+            1,
+            "{container}: exactly one decommission call"
+        );
+
+        handle.abort();
+    }
+}
+
+/// #4872, the safety half: the guard's ORIGINAL purpose must survive the fix. An
+/// unmounted volume answers `Ok(false)` for every path under it, including the
+/// worktree root — so nothing is corroborated and nothing may be cleared.
+///
+/// What: the same two worktree shapes, but the whole checkout sits under a
+/// directory that does not exist. The tempdir ABOVE it does exist, standing in
+/// for `/Volumes` — which survives every unmount. A fix that settled for "some
+/// ancestor exists" would pass the sibling test above and mass-tombstone here;
+/// this test is what rules that implementation out.
+#[tokio::test]
+async fn auto_prune_keeps_record_when_the_worktree_root_itself_is_gone() {
+    for (marker_dir, container, worktree) in [
+        (".claude", "worktrees", "critic-4850"),
+        (".base", ".worktrees", "qa-4850"),
+    ] {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let marker_path = root.path().join("seen.json");
+        // `root` exists; `unmounted-volume` and everything below it does not.
+        let removed = root
+            .path()
+            .join("unmounted-volume")
+            .join(marker_dir)
+            .join(container)
+            .join(worktree)
+            .join("crates")
+            .join("trusty-mpm");
+        let (url, captured, handle) = spawn_recording_decommission_stub().await;
+        let client = reqwest::Client::new();
+
+        for round in 0..3 {
+            let outcome = auto_prune_dead_records_at(
+                &client,
+                &url,
+                vec![stopped_session_at("on-the-volume", &removed)],
+                &marker_path,
+                Some(HashSet::new()),
+            )
+            .await;
+            assert_eq!(
+                outcome.pruned, 0,
+                "{container} round {round}: an absent worktree ROOT means the \
+                 filesystem is unreachable, not that the worktree was removed"
+            );
+            if marker_path.exists() {
+                backdate_sightings(&marker_path, 11);
+            }
+        }
+        assert!(
+            captured.lock().expect("capture lock").is_empty(),
+            "{container}: no decommission may be issued for an unreachable volume"
+        );
+
+        handle.abort();
+    }
 }
 
 /// Change 3, second half (PR #4725 review): the daemon's `unresumable` verdict
@@ -3225,4 +3490,114 @@ async fn session_ls_json_never_refetches_after_pruning() {
     );
 
     handle.abort();
+}
+
+// ── `tm f` — the type-to-filter picker's CLI surface ─────────────────────────
+//
+// `f` is a new top-level command under `infer_subcommands = true`. No other
+// subcommand starts with `f`, so it shadows nothing; these tests pin that the
+// exact spelling resolves to `Command::F` and that its flags mirror `ls`.
+
+/// `tm f api` captures the pattern positionally.
+#[test]
+fn cli_parses_f_pattern() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "f", "api"]).unwrap();
+    match cli.command.unwrap() {
+        Command::F(a) => assert_eq!(a.pattern, vec!["api".to_string()]),
+        other => panic!("expected top-level f, got {other:?}"),
+    }
+}
+
+/// Multi-word patterns are captured in order; the handler joins them with a
+/// single space. Unlike `ls`, the first word is NEVER a sort keyword — `alpha`
+/// here is part of the pattern.
+#[test]
+fn cli_parses_f_multi_word_pattern() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "f", "alpha", "api"]).unwrap();
+    match cli.command.unwrap() {
+        Command::F(a) => {
+            assert_eq!(a.pattern, vec!["alpha".to_string(), "api".to_string()])
+        }
+        other => panic!("expected top-level f, got {other:?}"),
+    }
+}
+
+/// Bare `tm f` opens the picker with an empty filter box — the pattern is a
+/// seed, not a required argument.
+#[test]
+fn cli_parses_f_bare_is_allowed() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "f"]).unwrap();
+    match cli.command.unwrap() {
+        Command::F(a) => assert!(a.pattern.is_empty()),
+        other => panic!("expected top-level f, got {other:?}"),
+    }
+}
+
+/// `--json` parses and rides alongside the pattern; the handler uses it to skip
+/// the interactive path entirely.
+#[test]
+fn cli_parses_f_json() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "f", "--json", "api"]).unwrap();
+    match cli.command.unwrap() {
+        Command::F(a) => {
+            assert_eq!(a.pattern, vec!["api".to_string()]);
+            assert!(a.json);
+        }
+        other => panic!("expected top-level f --json, got {other:?}"),
+    }
+}
+
+/// `--source-id` and `--current` are mutually exclusive, matching `tm ls`.
+#[test]
+fn cli_f_source_id_and_current_conflict() {
+    let err = Cli::try_parse_from([
+        "trusty-mpm",
+        "f",
+        "--source-id",
+        "owner/repo",
+        "--current",
+        "api",
+    ]);
+    assert!(err.is_err(), "--source-id and --current must conflict");
+}
+
+/// `tm f` must not shadow any pre-existing subcommand. Under
+/// `infer_subcommands`, an `f` that collided with (say) a hypothetical `fix`
+/// would either resolve to that command or error as ambiguous — this pins that
+/// it resolves to `Command::F` itself.
+#[test]
+fn cli_f_does_not_shadow_another_subcommand() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "f", "x"]).unwrap();
+    assert!(matches!(cli.command, Some(Command::F(_))));
+}
+
+/// `tm f`'s NAME-only scope is the reason it exists next to `tm ls <term>`,
+/// whose scope stays every visible column. Both scopes go through the SAME
+/// `filter_sessions_by_term`, so this pins that the scope — not a second
+/// filter function — is what differs.
+#[test]
+fn filter_sessions_by_name_ignores_non_name_columns() {
+    let sessions = vec![
+        ls_test_session(
+            "tm-alpha-01",
+            "active",
+            None,
+            None,
+            Some("acme/api-server"),
+            Some("fix the api"),
+        ),
+        ls_test_session("tm-api-02", "active", None, None, None, None),
+    ];
+    let by_name = filter_sessions_by_term(sessions.clone(), Some(&SessionFilter::name("api")));
+    assert_eq!(
+        by_name.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        vec!["tm-api-02"],
+        "NAME scope must ignore a matching task and project slug"
+    );
+    let by_visible = filter_sessions_by_term(sessions, Some(&SessionFilter::visible("api")));
+    assert_eq!(
+        by_visible.len(),
+        2,
+        "the ls scope still matches task/source_id"
+    );
 }

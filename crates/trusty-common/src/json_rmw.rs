@@ -30,9 +30,14 @@
 //!    serialises separate processes AND separate threads that each call
 //!    [`update`], on Unix and Windows alike.
 //! 2. **All-or-nothing publish.** Readers of `path` see either the complete
-//!    previous document or the complete new one, never a partial write. The
-//!    temp file carries the writer's pid and a nanosecond stamp, so concurrent
-//!    writers never share a scratch path even if one of them bypasses the lock.
+//!    previous document or the complete new one, never a partial write: the
+//!    document is built in a temp file and moved into place with `rename`.
+//!    That is the whole of this guarantee — the temp name (pid plus a
+//!    nanosecond stamp) is scratch-path hygiene, NOT a second line of defence
+//!    for a writer that bypasses the lock. An earlier version of this comment
+//!    claimed it was; #4906's review falsified that experimentally, with 16
+//!    threads landing on a single nanosecond value and colliding. Only
+//!    guarantee 1 keeps concurrent writers apart.
 //! 3. **Never fail open.** Every failure — lock acquisition, read, parse,
 //!    serialise, write, rename — returns `Err` and leaves `path` byte-for-byte
 //!    unchanged. There is no path on which a failed update advances state, and

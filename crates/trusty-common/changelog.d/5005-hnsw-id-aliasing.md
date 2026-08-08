@@ -1,0 +1,10 @@
+Fixed
+
+- `HnswStore` no longer aliases vector ids across two live stores over one palace file, which silently overwrote one drawer's embedding with another's (closes [#5005](https://github.com/bobmatnyc/trusty-tools/issues/5005))
+  - the vector-id counter now lives in redb (`vector_id_seq`) and is reserved inside the same write transaction as the insert, so every writer on the file serialises against it; an existing palace has its counter seeded to the file's high-water mark on open, and re-raised on every subsequent open so a rolling upgrade cannot leave it behind
+  - `upsert` refuses an id that already has a `VECTORS` row: it allocates past it, or fails with `IdAllocationFailed` — it never overwrites
+  - `PalaceHandle::embed_health` and `palace_reembed` now carry an `AliasAudit`: key presence alone reported a false all-clear for this class, and `is_healthy()` is now false when any drawer is aliased
+  - an alias audit that could not run is `AliasAudit::Unavailable`, not zeros; `is_healthy()` is false for it, so a failed scan can never be read as a clean palace
+  - new `PalaceHandle::repair_aliases`: the operator surface for the repair, which had no caller at all. Dry-run by default; a real run frees the whole collision group and then re-audits, and reports `Repaired` only when that verification ran and came back clean. `Partial` and `Unavailable` are distinct outcomes and neither is a success
+  - `UsearchStore::unalias` now returns `UnaliasOutcome`, carrying the keys it freed but could not parse back into a drawer id instead of dropping them — those drawers would otherwise be missing from the operator's re-embed worklist inside a reported success
+  - `alias_audit` no longer drops collision-group keys that are not uuids, and `AliasAudit::is_clean` now consults `key_rows` vs `distinct_vector_ids` rather than the id list alone. Two `VECTOR_KEYS` rows on one `vector_id` with non-uuid keys previously reported `is_clean() == true`, `is_healthy() == true`, and a `clean` repair while leaving the collision in place — the counts come straight off the table and no parse can shrink them, so they are the signal that cannot be fooled

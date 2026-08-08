@@ -184,6 +184,25 @@ async fn list_prompt_facts_endpoint_returns_hot_triples() {
         !arr.iter().any(|r| r["predicate"] == "works_at"),
         "non-hot triple leaked into prompt facts: {arr:?}"
     );
+
+    // #4890: this endpoint is what `trusty-memory doctor`'s Tier S
+    // re-affirmation check reads, and it decodes the body straight into
+    // `Vec<TierSFact>`. Decoding it the same way here pins the wire contract the
+    // check depends on — a dropped or renamed `affirmed_at` would leave the
+    // check permanently reporting "could not determine" against a healthy
+    // daemon, which is exactly the kind of silent degradation nothing else
+    // would catch.
+    let facts: Vec<crate::prompt_facts::TierSFact> =
+        serde_json::from_slice(&bytes).expect("body must decode as the doctor decodes it");
+    let alias = facts
+        .iter()
+        .find(|f| f.subject == "ts")
+        .expect("ts alias present");
+    assert!(
+        (chrono::Utc::now() - alias.affirmed_at).num_seconds() < 60,
+        "affirmed_at must be the write time, got {}",
+        alias.affirmed_at,
+    );
 }
 
 /// Why (issue #42): `DELETE /api/v1/kg/prompt-facts` must retract the
@@ -267,4 +286,159 @@ async fn remove_prompt_fact_endpoint_soft_deletes_and_refreshes_cache() {
     let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(v["removed"], false);
+}
+
+// ---------------------------------------------------------------------------
+// #4888 — Tier S admission control over HTTP (ADR-0028 D2 / D8)
+//
+// The MCP tools are not the only way to write a hot predicate. These two
+// endpoints can each create one, so a gate that covered only the MCP surface
+// would read as protection while leaving the surface writable.
+// ---------------------------------------------------------------------------
+
+/// Build a palace named `name` and fill Tier S to the cap with conventions.
+async fn state_with_full_tier_s(name: &str) -> AppState {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+    let state = AppState::new(root).with_default_palace(Some(name.to_string()));
+    let palace = trusty_common::memory_core::Palace {
+        id: PalaceId::new(name),
+        name: name.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join(name),
+    };
+    let handle = state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create palace");
+    for i in 0..crate::prompt_facts::TIER_S_MAX_FACTS {
+        handle
+            .kg
+            .assert(Triple {
+                subject: format!("rule-{i}"),
+                predicate: "has_convention".to_string(),
+                object: format!("standing rule number {i}"),
+                valid_from: chrono::Utc::now(),
+                valid_to: None,
+                confidence: 1.0,
+                provenance: None,
+            })
+            .await
+            .expect("seed convention");
+    }
+    state
+}
+
+/// Why (#4888): `POST /api/v1/kg/aliases` writes `is_alias_for` directly, so
+/// it consumes a Tier S slot and must refuse the write past the cap with an
+/// actionable 400 rather than silently growing the always-injected surface.
+#[tokio::test]
+async fn add_alias_endpoint_enforces_tier_s_cap() {
+    let state = state_with_full_tier_s("httpcap").await;
+
+    let body = json!({"short": "tga", "full": "trusty-git-analytics"});
+    let app = router().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/kg/aliases")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("Tier S is full"), "got: {text}");
+    assert!(text.contains("remove_prompt_fact"), "got: {text}");
+
+    // Fail-closed: the alias is absent from the surface.
+    let facts = crate::prompt_facts::gather_hot_triples(&state)
+        .await
+        .expect("gather");
+    assert_eq!(facts.len(), crate::prompt_facts::TIER_S_MAX_FACTS);
+    assert!(!facts.iter().any(|(s, _, _)| s == "tga"), "{facts:?}");
+}
+
+/// Why (#4888): `POST /api/v1/palaces/{id}/kg` takes an arbitrary predicate,
+/// so it can write a hot one. This is the path `trusty-mpm`'s provisioner
+/// uses to seed its identity `is_fact`, which makes it a real bypass rather
+/// than a hypothetical one. The form constraint must hold here too.
+#[tokio::test]
+async fn kg_assert_endpoint_enforces_tier_s_form_constraint() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+    let state = AppState::new(root);
+    let palace = trusty_common::memory_core::Palace {
+        id: PalaceId::new("httpform"),
+        name: "httpform".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join("httpform"),
+    };
+    state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create palace");
+
+    let body = json!({
+        "subject": "trusty-mpm",
+        "predicate": "is_fact",
+        "object": "z".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS + 1),
+    });
+    let app = router().with_state(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces/httpform/kg")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("81 characters"), "got: {text}");
+    assert!(text.contains("limit is 80"), "got: {text}");
+
+    let facts = crate::prompt_facts::gather_hot_triples(&state)
+        .await
+        .expect("gather");
+    assert!(facts.is_empty(), "rejected write must not land: {facts:?}");
+}
+
+/// Why (#4888): the HTTP KG endpoint must stay usable for ordinary
+/// (non-hot) triples regardless of Tier S occupancy — the gate is scoped to
+/// the always-injected surface, not to the knowledge graph as a whole.
+#[tokio::test]
+async fn kg_assert_endpoint_allows_cold_predicates_at_cap() {
+    let state = state_with_full_tier_s("httpcold").await;
+
+    let body = json!({
+        "subject": "alice",
+        "predicate": "works_at",
+        "object": "z".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS + 40),
+    });
+    let app = router().with_state(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces/httpcold/kg")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }

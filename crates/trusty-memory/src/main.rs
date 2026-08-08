@@ -358,6 +358,55 @@ enum Command {
         action: RoomsAction,
     },
 
+    /// Rank existing drawers by how often they are actually injected, so a
+    /// human can decide which deserve an `expires_at` (ADR-0028, Migration).
+    ///
+    /// READ-ONLY. This never writes a drawer, never sets `expires_at`, and
+    /// never retires anything — ADR-0028 makes backfill human-gated, and a
+    /// tool that applied its own recommendations would violate that outright.
+    ///
+    /// ADR-0028 does NOT migrate the drawers already on disk. They keep
+    /// competing in L1 exactly as they do today, so this report is the only
+    /// path by which the estate's existing problem drawers get addressed —
+    /// and only when a human acts on a row.
+    ///
+    /// Ranking is by injection frequency because that is the cost the ADR
+    /// cares about: a stale drawer nobody retrieves is free, while the
+    /// motivating case is a 19-day-old session checkpoint reaching 44.8% of
+    /// turns. Counts are measured from the enriched-prompt hook logs; with no
+    /// logs present every count is 0, which the report says out loud rather
+    /// than reporting as "nothing is stale".
+    ///
+    /// No tier is suggested. ADR-0028 §C4 measured why: `resume-target` splits
+    /// 71/26 across tiers, so a tag-derived verdict would be wrong for a
+    /// quarter of rows while looking as confident as the rest. The evidence is
+    /// listed; the call is yours.
+    ///
+    ///   trusty-memory backfill-report
+    ///   trusty-memory backfill-report --palace trusty-tools --min-injections 50
+    ///   trusty-memory backfill-report --json --limit 200
+    BackfillReport {
+        /// Restrict the report to one palace slug.
+        #[arg(long, value_name = "ID")]
+        palace: Option<String>,
+
+        /// Maximum drawers to print (default 25).
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+
+        /// Hide drawers injected fewer than N times.
+        #[arg(long, value_name = "N", default_value_t = 1)]
+        min_injections: u64,
+
+        /// Emit JSON instead of the human-readable stanzas.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the hook-log directory (default `<data_root>/logs`).
+        #[arg(long, value_name = "DIR")]
+        logs_dir: Option<std::path::PathBuf>,
+    },
+
     /// Pin this project's palace slug in `.trusty-tools/trusty-memory.yaml`.
     ///
     /// Why: the lazy write in normal memory operations locks in the slug the
@@ -647,6 +696,24 @@ async fn main() -> Result<()> {
         Command::Rooms {
             action: RoomsAction::Backfill { palace, apply, .. },
         } => trusty_memory::commands::rooms::handle_rooms_backfill(palace, apply).await,
+        Command::BackfillReport {
+            palace,
+            limit,
+            min_injections,
+            json,
+            logs_dir,
+        } => {
+            trusty_memory::commands::backfill_report::handle_backfill_report(
+                trusty_memory::commands::backfill_report::ReportOptions {
+                    palace,
+                    limit,
+                    min_injections,
+                    json,
+                    logs_dir,
+                },
+            )
+            .await
+        }
         Command::Link {
             path,
             slug,
@@ -957,6 +1024,17 @@ fn spawn_startup_tasks(state: &AppState) {
             dtx,
         );
         tracing::info!(loops = n, "dream_scheduler: {n} loop(s) running (#1529)");
+
+        // BM25 backfill sweep. A no-op while the lexical lane is off, which is
+        // every deployment until the default is flipped: `spawn_startup_backfill`
+        // returns immediately when `bm25_client` is `None`.
+        trusty_memory::bm25_backfill::spawn_startup_backfill(&bg_state);
+
+        // BM25 coverage repair sweep. The write path drops on a full queue,
+        // and before this the only thing that repaired a drop was the next
+        // daemon restart — so the "drops are recoverable" trade was not true
+        // of the running process. Also a no-op while the lane is off.
+        trusty_memory::bm25_repair::spawn_repair_sweep(&bg_state);
 
         // Issue #42: once palaces are live, kick off auto-discovery against
         // cwd targeting the default palace (if configured). Without a default

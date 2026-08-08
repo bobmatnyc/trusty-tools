@@ -1,5 +1,5 @@
-# Amazon Linux 2023 / glibc 2.34 build gate for trusty-analyze (issue #605)
-# and trusty-search / trusty-embedderd (issue #2222).
+# Amazon Linux 2023 / glibc 2.34 build gate for trusty-search /
+# trusty-embedderd (issues #605, #2222).
 #
 # WHY this workflow exists:
 #   The default `bundled-ort` feature downloads a prebuilt ONNX Runtime
@@ -8,35 +8,40 @@
 #   prebuilt ORT binary references `__isoc23_strtol`, a glibc 2.38 symbol,
 #   causing a link failure on AL2023.
 #
-#   The fix is to build with `--no-default-features --features
-#   http-server,load-dynamic` (trusty-analyze) or
-#   `--no-default-features --features load-dynamic` (trusty-search), which
-#   tells the `ort` crate to dlopen a system-installed `libonnxruntime.so` at
-#   runtime instead of linking the bundled static libs. That system library
-#   just needs to satisfy the glibc present on the host.
+#   The fix is to build with `--no-default-features --features load-dynamic`,
+#   which tells the `ort` crate to dlopen a system-installed
+#   `libonnxruntime.so` at runtime instead of linking the bundled static libs.
+#   That system library just needs to satisfy the glibc present on the host.
 #
 #   This workflow proves the load-dynamic build path compiles AND links (not
-#   just `cargo check`) on a real AL2023 container for BOTH crates — so the
-#   regression cannot return silently (refs #605, #2222).
+#   just `cargo check`) on a real AL2023 container — so the regression cannot
+#   return silently (refs #605, #2222).
 #
 #   Issue #2222 gap this closes: trusty-search bundles a second binary
 #   (`trusty-embedderd`, built from `crates/trusty-search/src/bin/
 #   trusty-embedderd.rs` against the `trusty-embedderd` library crate) inside
-#   the same `cargo install trusty-search` — but until this job existed, only
-#   trusty-analyze's load-dynamic build was ever verified against a real
-#   AL2023 container. The `al2023-load-dynamic-search` job below exercises
-#   the same link step for `-p trusty-search`, which also builds the bundled
-#   `trusty-embedderd` binary target.
+#   the same `cargo install trusty-search`. The `al2023-load-dynamic-search`
+#   job exercises the link step for `-p trusty-search`, which also builds
+#   that bundled `trusty-embedderd` binary target.
 #
-# WHAT each job does:
+#   #5067: the companion `al2023-load-dynamic` job was DELETED. It built
+#   trusty-analyze with a `load-dynamic` feature that no longer exists — the
+#   feature went with the unused neural clustering embedder whose model load
+#   stalled daemon boot — so the job could only fail with `does not contain
+#   this feature: load-dynamic`. Since this workflow's `paths:` filter also
+#   fires on trusty-search, trusty-embedderd and trusty-common, leaving it
+#   would have turned every PR touching any of those crates red for an
+#   unrelated reason.
+#
+# WHAT the job does:
 #   1. Runs in an `amazonlinux:2023` container (glibc 2.34 — the exact
 #      platform that triggered #605 / #2222).
-#   2. Installs Rust 1.91 (workspace MSRV) via rustup inside the container.
+#   2. Installs Rust 1.94 (workspace MSRV) via rustup inside the container.
 #   3. Downloads the official ORT 1.20.1 linux-x64 tarball (built on Ubuntu
 #      20.04 / glibc 2.31 — compatible with AL2023's glibc 2.34) and exports
 #      ORT_DYLIB_PATH pointing at the extracted libonnxruntime.so.
-#   4. Runs the crate-specific `cargo build ... --no-default-features
-#      --features ...` invocation — full link step, not just check.
+#   4. Runs `cargo build -p trusty-search --no-default-features --features
+#      load-dynamic` — full link step, not just check.
 #
 # ORT version choice (1.20.1):
 #   The workspace Cargo.lock resolves `ort` to 2.0.0-rc.12, which downloads ORT
@@ -48,12 +53,12 @@
 #   with glibc >= 2.31 — including AL2023 (glibc 2.34).
 #
 # TRIGGERS:
-#   - push / PR touching crates/trusty-analyze/**, crates/trusty-search/**,
-#     crates/trusty-embedderd/**, crates/trusty-common/** (the shared
-#     `embedder-*` feature definitions live here), or this workflow file.
+#   - push / PR touching crates/trusty-search/**, crates/trusty-embedderd/**,
+#     crates/trusty-common/** (the shared `embedder-*` feature definitions
+#     live here), or this workflow file.
 #   - workflow_dispatch (manual re-run from the Actions UI).
 #   Deliberately NOT on every push to main — the container build is slow (~5
-#   min per job) and only these crates can affect the load-dynamic build path.
+#   min) and only this crate set can affect the load-dynamic build path.
 
 name: AL2023 load-dynamic build gate
 
@@ -61,7 +66,6 @@ on:
   push:
     branches: [main]
     paths:
-      - "crates/trusty-analyze/**"
       - "crates/trusty-search/**"
       - "crates/trusty-embedderd/**"
       - "crates/trusty-common/**"
@@ -75,7 +79,6 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
     paths:
-      - "crates/trusty-analyze/**"
       - "crates/trusty-search/**"
       - "crates/trusty-embedderd/**"
       - "crates/trusty-common/**"
@@ -103,161 +106,6 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # al2023-load-dynamic: prove `cargo build -p trusty-analyze
-  # --no-default-features --features http-server,load-dynamic` compiles AND
-  # links on Amazon Linux 2023 (glibc 2.34).
-  #
-  # Container note: amazonlinux:2023 is an official Amazon image published to
-  # Docker Hub. It ships with dnf and glibc 2.34 — the exact combination that
-  # exposed the __isoc23_strtol linker error in issue #605.
-  # --------------------------------------------------------------------------
-  al2023-load-dynamic:
-    name: AL2023 load-dynamic (glibc 2.34)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    container:
-      image: amazonlinux:2023
-
-    steps:
-      # ------------------------------------------------------------------
-      # 0. Install tar/gzip BEFORE actions/checkout.
-      #
-      #    Why: amazonlinux:2023 ships without tar and gzip.  GitHub's
-      #    actions/checkout action uses tar to extract the repo archive from
-      #    the runner's local cache — it fails immediately with
-      #    "Unable to locate executable file: tar" if tar is absent.
-      #    This step must run before ANY action that touches the workspace.
-      #    It intentionally does not depend on repo contents.
-      # ------------------------------------------------------------------
-      - name: Install tar/gzip (required by actions/checkout)
-        run: dnf install -y tar gzip
-
-      # ------------------------------------------------------------------
-      # 1. Checkout the repo inside the container.
-      # ------------------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      # ------------------------------------------------------------------
-      # 2. Install build prerequisites via dnf.
-      #    AL2023 uses dnf (not apt-get).  We need:
-      #    - gcc / gcc-c++ for the C/C++ linker and tree-sitter compilation
-      #    - make for build scripts
-      #    - openssl-devel / perl for the openssl-sys crate's build.rs
-      #    - curl / tar for the ORT tarball download below
-      #    - pkg-config for pkg-config-using crates
-      #    Note: tar and gzip are already installed in step 0 above;
-      #    listing them here again is harmless (dnf is idempotent) and
-      #    keeps this step self-documenting.
-      #
-      #    --allowerasing: amazonlinux:2023 ships curl-minimal; installing
-      #    the full `curl` package conflicts unless dnf is allowed to
-      #    replace (erase) curl-minimal first.  This flag is safe here
-      #    because curl-minimal and curl are mutually exclusive providers
-      #    of the same capability — we want the full curl for its richer
-      #    CLI options used in the ORT download step below.
-      # ------------------------------------------------------------------
-      - name: Install build prerequisites (dnf)
-        run: |
-          dnf install -y --allowerasing \
-            gcc \
-            gcc-c++ \
-            make \
-            openssl-devel \
-            perl \
-            curl \
-            tar \
-            gzip \
-            pkg-config \
-            findutils
-
-      # ------------------------------------------------------------------
-      # 3. Install Rust 1.91 (workspace MSRV) via rustup inside the container.
-      #    The dtolnay/rust-toolchain action requires the host runner's Node.js,
-      #    which isn't available inside the AL2023 container — use rustup directly.
-      # ------------------------------------------------------------------
-      - name: Install Rust 1.91 (MSRV) via rustup
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain 1.91
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          # Make cargo/rustc available in the same step for subsequent steps
-          # via GITHUB_PATH (GitHub Actions resolves PATH additions across steps).
-
-      # ------------------------------------------------------------------
-      # 4. Cache cargo registry + build artefacts.
-      #    Key includes the toolchain and the Cargo.lock hash so cache
-      #    invalidates when either changes.  The container OS is included in
-      #    the key to avoid cross-OS cache poisoning.
-      # ------------------------------------------------------------------
-      - name: Cache cargo registry and build artefacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: al2023-1.91-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            al2023-1.91-
-
-      # ------------------------------------------------------------------
-      # 5. Download the official ORT 1.20.1 linux-x64 tarball and export
-      #    ORT_DYLIB_PATH so the `ort` crate's load-dynamic path can find it.
-      #
-      #    Why 1.20.1?  See file-level comment.  The tarball contains
-      #    lib/libonnxruntime.so.<version> plus a lib/libonnxruntime.so symlink.
-      #    We point ORT_DYLIB_PATH at the versioned file so ort can dlopen it
-      #    even if symlink resolution is imperfect inside the container.
-      # ------------------------------------------------------------------
-      - name: Download ONNX Runtime ${{ env.ORT_VERSION }} (glibc 2.31 build)
-        run: |
-          ORT_DIR="/opt/onnxruntime-${ORT_VERSION}"
-          ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
-          ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
-
-          echo "Downloading ORT ${ORT_VERSION} from ${ORT_URL}"
-          curl -fsSL --retry 3 --retry-delay 5 -o "/tmp/${ORT_TARBALL}" "${ORT_URL}"
-
-          mkdir -p "${ORT_DIR}"
-          tar -xzf "/tmp/${ORT_TARBALL}" -C "${ORT_DIR}" --strip-components=1
-          rm "/tmp/${ORT_TARBALL}"
-
-          # Locate libonnxruntime.so — prefer the versioned shared object.
-          DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so.${ORT_VERSION}" | head -1)
-          if [ -z "${DYLIB_PATH}" ]; then
-            # Fall back to the unversioned symlink if present.
-            DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so" | head -1)
-          fi
-          if [ -z "${DYLIB_PATH}" ]; then
-            echo "ERROR: libonnxruntime.so not found in ${ORT_DIR}/lib after extraction."
-            find "${ORT_DIR}" -name "*.so*" || true
-            exit 1
-          fi
-
-          echo "ORT_DYLIB_PATH=${DYLIB_PATH}" >> "$GITHUB_ENV"
-          echo "Found libonnxruntime.so at: ${DYLIB_PATH}"
-          # Sanity-check: ldd the library to confirm it is a valid ELF shared object.
-          ldd "${DYLIB_PATH}" | head -5 || true
-
-      # ------------------------------------------------------------------
-      # 6. Build trusty-analyze with load-dynamic, no bundled-ort.
-      #
-      #    This is the critical step: it runs the full LINK phase (not just
-      #    cargo check), so any __isoc23_strtol or other glibc-2.38 symbol
-      #    references in the bundled ORT static libs would surface here.
-      #    With load-dynamic, the bundled libs are NOT linked — ort is told
-      #    to dlopen at runtime — so the build must succeed on glibc 2.34.
-      # ------------------------------------------------------------------
-      - name: Build trusty-analyze (load-dynamic, no bundled-ort)
-        run: |
-          echo "ORT_DYLIB_PATH=${ORT_DYLIB_PATH}"
-          cargo build -p trusty-analyze \
-            --no-default-features \
-            --features http-server,load-dynamic
-
-  # --------------------------------------------------------------------------
   # al2023-load-dynamic-search: prove `cargo build -p trusty-search
   # --no-default-features --features load-dynamic` compiles AND links on
   # Amazon Linux 2023 (glibc 2.34) — issue #2222.
@@ -275,9 +123,8 @@ jobs:
   #
   # Mirrors release.yml's AL2023 asset build flags for trusty-search
   # (`--no-default-features --features load-dynamic`, no `http-server` in the
-  # feature list — unlike trusty-analyze, trusty-search has a bare
-  # `load-dynamic` feature with no separate `http-server` gate at the
-  # trusty-search level).
+  # feature list — trusty-search has a bare `load-dynamic` feature with no
+  # separate `http-server` gate).
   # --------------------------------------------------------------------------
   al2023-load-dynamic-search:
     name: AL2023 load-dynamic (glibc 2.34) — trusty-search
@@ -288,8 +135,8 @@ jobs:
 
     steps:
       # ------------------------------------------------------------------
-      # 0. Install tar/gzip BEFORE actions/checkout (see al2023-load-dynamic
-      #    job above for rationale — amazonlinux:2023 ships without them).
+      # 0. Install tar/gzip BEFORE actions/checkout — amazonlinux:2023 ships
+      #    without either, and actions/checkout needs both to unpack.
       # ------------------------------------------------------------------
       - name: Install tar/gzip (required by actions/checkout)
         run: dnf install -y tar gzip
@@ -322,19 +169,17 @@ jobs:
             binutils
 
       # ------------------------------------------------------------------
-      # 3. Install Rust 1.91 (workspace MSRV) via rustup inside the container.
+      # 3. Install Rust 1.94 (workspace MSRV) via rustup inside the container.
       # ------------------------------------------------------------------
-      - name: Install Rust 1.91 (MSRV) via rustup
+      - name: Install Rust 1.94 (MSRV) via rustup
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain 1.91
+            | sh -s -- -y --profile minimal --default-toolchain 1.94
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       # ------------------------------------------------------------------
-      # 4. Cache cargo registry + build artefacts. Distinct cache key prefix
-      #    from the trusty-analyze job so the two large dependency graphs
-      #    (trusty-search pulls in tree-sitter grammars, usearch, etc.) don't
-      #    thrash a shared cache entry.
+      # 4. Cache cargo registry + build artefacts, under a key prefix scoped
+      #    to this job's dependency graph (tree-sitter grammars, usearch, …).
       # ------------------------------------------------------------------
       - name: Cache cargo registry and build artefacts
         uses: actions/cache@v4
@@ -344,13 +189,13 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: al2023-1.91-search-${{ hashFiles('Cargo.lock') }}
+          key: al2023-1.94-search-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            al2023-1.91-search-
+            al2023-1.94-search-
 
       # ------------------------------------------------------------------
       # 5. Download the official ORT 1.20.1 linux-x64 tarball and export
-      #    ORT_DYLIB_PATH — identical to the trusty-analyze job above.
+      #    ORT_DYLIB_PATH.
       # ------------------------------------------------------------------
       - name: Download ONNX Runtime ${{ env.ORT_VERSION }} (glibc 2.31 build)
         run: |

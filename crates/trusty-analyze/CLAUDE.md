@@ -352,7 +352,7 @@ crates/trusty-analyze/
 │   │   └── adapters/                   tree-sitter adapters (15: rust, python, java,
 │   │                                   go, typescript, javascript, c, cpp, csharp,
 │   │                                   kotlin, php, ruby, scala, swift)
-│   ├── embedder/                       BoW + neural concept-clustering embedders
+│   ├── embedder/                       BoW concept-clustering embedder
 │   ├── service/                        axum HTTP API (port 7879) + embedded UI
 │   ├── mcp/                            MCP server: stdio + HTTP/SSE transports
 │   └── commands/                       per-subcommand handlers (daemon/service/setup)
@@ -397,7 +397,7 @@ POST /indexes/:id/scip
      body: SCIP protobuf (application/octet-stream)
      → { symbols_ingested: N }
 
-GET  /indexes/:id/clusters?k=N&method=bow|neural
+GET  /indexes/:id/clusters?k=N&method=bow
      → Vec<ConceptCluster> (label, chunk_ids, centroid_terms)
 ```
 
@@ -463,7 +463,7 @@ Matches trusty-search conventions where applicable for consistency.
 | Persistence | redb 2.6 (FactStore) |
 | Concurrency | dashmap 5, tokio::sync::RwLock |
 | Concept clustering | linfa 0.7 + ndarray (k-means) |
-| Embeddings | fastembed 5.x (optional; uses cached model from trusty-search) |
+| Embeddings | hashed bag-of-words (`core::bow_embedding`); no model, no ONNX Runtime since #5067 |
 | Code parsing | tree-sitter 0.24 (multi-language AST parsing; baseline for all phases) |
 | Container runtime | Docker (sandboxed runtime execution; Phase 3+) |
 | Temporal decay | chrono 0.4 |
@@ -565,7 +565,7 @@ pin tree-sitter or other shared crates locally if they already live there.
 ## Project Status
 
 **Phase**: Phase 1 + Phase 2 complete. Full static analysis pipeline, HTTP API,
-MCP server, SCIP ingest, neural/BoW concept clustering, and language-specific
+MCP server, SCIP ingest, BoW concept clustering, and language-specific
 tree-sitter adapters are all functional.
 
 **Working:**
@@ -583,7 +583,7 @@ tree-sitter adapters are all functional.
   rust, python, java, go, typescript, javascript, c, cpp, csharp, kotlin,
   php, ruby, scala, swift (see `src/lang/adapters/`)
 - CALLS edges + cross-chunk entity linker (`#47` complete)
-- k-means concept clustering (BoW / neural) + `/indexes/:id/clusters` endpoint
+- k-means concept clustering (BoW) + `/indexes/:id/clusters` endpoint
 - SCIP protobuf ingest → knowledge graph (`#47` complete)
 - Integration self-analysis suite
 

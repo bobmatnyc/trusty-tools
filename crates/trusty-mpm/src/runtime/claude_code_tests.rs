@@ -2049,6 +2049,53 @@ fn prepare_managed_config_pins_all_builtins_on_success() {
     }
 }
 
+/// Issue #4181, code-critic HIGH on PR #5070: the SECOND `.mcp.json` write
+/// site must git-exclude the file too.
+///
+/// Why: `prepare_session_inner` is not the only place the four injectors run.
+/// `prepare_managed_config` re-runs all four on every spawn/resume, and two of
+/// its three callers reach it with no `prepare_session*` anywhere in their
+/// chain — `spawn_resume` (see `claude_code.rs`'s own doc: "NO corresponding
+/// `prepare_session*` call anywhere in its own request chain") and
+/// `build_inplace_resume_command` (`guided_inplace.rs`, "the THIRD entry
+/// point … it calls neither of those two"). Before this fix those paths wrote
+/// a machine-specific `.mcp.json` into a git workspace with no exclusion, so
+/// every resume re-dirtied a tracked file — the exact defect PR #5070 exists
+/// to close, reachable by the two paths it originally missed.
+/// What: `git init`s `cwd`, calls `prepare_managed_config` directly, and
+/// asserts `.git/info/exclude` names `.mcp.json` afterwards. Deliberately
+/// asserts on the exclude file rather than on `git status`, because the point
+/// is that the guard RAN on this path, not that a fresh tempdir happens to be
+/// clean.
+/// Test: itself; the guard's own behavior is pinned by
+/// `core::session_launch::native_mcp_tests::ensure_git_excluded_adds_mcp_json`.
+#[serial_test::serial]
+#[test]
+fn prepare_managed_config_excludes_mcp_json_from_git() {
+    let _home = HomeGuard::set();
+    let cwd_root = tempfile::tempdir().expect("tempdir");
+    let cwd = cwd_root.path();
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(cwd)
+        .status()
+        .expect("git must be on PATH to run this test");
+    assert!(status.success(), "git init failed");
+
+    prepare_managed_config("test-session", cwd)
+        .expect("prepare_managed_config must resolve a config dir under the redirected HOME");
+
+    let exclude = std::fs::read_to_string(cwd.join(".git").join("info").join("exclude"))
+        .expect("git init must create .git/info/exclude");
+    assert!(
+        exclude.lines().any(|l| l.trim() == ".mcp.json"),
+        "prepare_managed_config must git-exclude .mcp.json before the injectors write it \
+         (#4181) — the resume paths reach this function with no prepare_session; \
+         exclude file was:\n{exclude}"
+    );
+}
+
 /// Issue #3950 residual-gap fix (code-critic HIGH follow-up on PR #3951).
 ///
 /// Why: the critic traced every production caller of `RuntimeAdapter::spawn`/

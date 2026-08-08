@@ -1,6 +1,6 @@
 //! ServiceDescriptor implementation for trusty-search.
 //!
-//! Why: open-mpm (and any future unified host process) needs to link
+//! Why: trusty-agents (and any future unified host process) needs to link
 //! trusty-search directly as a library and include its tools in a single
 //! merged `rpc.discover` document. The `trusty_mcp_core::ServiceDescriptor`
 //! trait is the cross-service registration contract; implementing it lets
@@ -18,7 +18,7 @@
 
 use trusty_common::mcp::ServiceDescriptor;
 
-/// Why: implements `ServiceDescriptor` so open-mpm can link trusty-search
+/// Why: implements `ServiceDescriptor` so trusty-agents can link trusty-search
 /// directly and include its tools in a unified `rpc.discover` document.
 /// What: wraps the existing MCP tool descriptors and scope mapping; holds
 /// no state.
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn trait_object_dispatch() {
-        // Why: open-mpm collects services as `Box<dyn ServiceDescriptor>`;
+        // Why: trusty-agents collects services as `Box<dyn ServiceDescriptor>`;
         // make sure SearchMcpService is object-safe and dispatches correctly.
         // Issue #138: total bumped from 15 → 18 with the per-lane search
         // tools. Issue #537: +1 for upgrade → 19. Issue #1104: +1 for

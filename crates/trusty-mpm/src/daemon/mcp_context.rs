@@ -29,6 +29,33 @@ use serde_json::{Value, json};
 use crate::core::catchup::{CatchupOptions, generate_catchup_json, session_finder};
 use crate::daemon::state::DaemonState;
 
+/// Shape the merged digest into the `session_context_catchup` response body.
+///
+/// Why: `undatable_sessions_dropped` is a receipt — an empty `sessions` array
+/// means "nothing paused" only when it is 0 — and nothing else pins that it
+/// reaches the wire. No end-to-end test can drive it non-zero, because an
+/// undatable session is unreachable through the filesystem once both
+/// `PausedSession` arms fall back to mtime, so substituting a literal `0` here
+/// would leave the suite green while the receipt stopped working (#5072). A
+/// pure function is the seam that makes the field assertable.
+/// What: the six response keys. `watermark_advanced` is always `false` by
+/// construction — no path in this module calls `save_catchup_state`.
+/// Test: `catchup_payload_carries_the_undatable_drop_count`,
+/// `session_context_catchup_returns_expected_shape`.
+fn catchup_payload(
+    merged: &trusty_common::catchup::CatchupJson,
+    resolved_snapshot: Option<String>,
+) -> Value {
+    json!({
+        "sessions": merged.sessions,
+        "recent_commits": merged.recent_commits,
+        "recent_memory": merged.recent_memory,
+        "resolved_snapshot": resolved_snapshot,
+        "undatable_sessions_dropped": merged.undatable_sessions_dropped,
+        "watermark_advanced": false,
+    })
+}
+
 /// Back the `session_context_catchup` MCP tool.
 ///
 /// Why: gives the PM a typed, JSON-native resume digest instead of scraping
@@ -42,7 +69,12 @@ use crate::daemon::state::DaemonState;
 /// calls [`generate_catchup_json`] per project — which NEVER persists a
 /// watermark, so `watermark_advanced` in the result is unconditionally
 /// `false`. `resolved_snapshot` is resolved against the primary `project_dir`
-/// only (not every scanned project), using `session_id` when given.
+/// only (not every scanned project), using `session_id` when given; it answers
+/// "what should I resume from", while `sessions` answers "what paused since
+/// your last catch-up", so the two legitimately disagree under a recent
+/// watermark. `undatable_sessions_dropped` sums each project's withheld count
+/// so an empty `sessions` array can be told apart from sessions that exist but
+/// could not be dated (#5072).
 /// Test: `session_context_catchup_missing_project_dir_errors`,
 /// `session_context_catchup_returns_expected_shape`.
 pub async fn session_context_catchup(
@@ -81,9 +113,10 @@ pub async fn session_context_catchup(
     let config = crate::core::config::MpmConfig::load_default();
     let memory_url = trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
 
-    let mut sessions = Vec::new();
-    let mut recent_commits = Vec::new();
-    let mut recent_memory = Vec::new();
+    // #5072: `absorb` sums `undatable_sessions_dropped` across projects rather
+    // than concatenating it — an empty `sessions` array is only "nothing
+    // paused" when that total is 0.
+    let mut merged = trusty_common::catchup::CatchupJson::default();
 
     for dir in &project_dirs {
         let opts = CatchupOptions {
@@ -97,24 +130,13 @@ pub async fn session_context_catchup(
         };
         // Manual catch-up NEVER advances the watermark — only automatic
         // session-start injection does (core/session_launch/mod.rs).
-        let digest = generate_catchup_json(&opts).await;
-        sessions.extend(digest.sessions);
-        recent_commits.extend(digest.recent_commits);
-        recent_memory.extend(digest.recent_memory);
+        merged.absorb(generate_catchup_json(&opts).await);
     }
 
     let resolved_snapshot = session_finder::latest_trusty_mpm_snapshot(&primary, session_id)
         .map(|p| p.display().to_string());
 
-    Ok(json!({
-        "sessions": sessions,
-        "recent_commits": recent_commits,
-        "recent_memory": recent_memory,
-        "resolved_snapshot": resolved_snapshot,
-        // Manual catch-up is a peek — this is always false by construction:
-        // there is no code path here that calls `save_catchup_state`.
-        "watermark_advanced": false,
-    }))
+    Ok(catchup_payload(&merged, resolved_snapshot))
 }
 
 /// Back the `session_context_pause` MCP tool.
@@ -264,6 +286,31 @@ mod tests {
         assert!(result["recent_commits"].is_array());
         assert!(result["recent_memory"].is_array());
         assert!(result["resolved_snapshot"].is_null());
+        assert_eq!(result["undatable_sessions_dropped"], 0);
+    }
+
+    /// Why: #5072 — `undatable_sessions_dropped` is a receipt: an empty
+    /// `sessions` array means "nothing paused" only when it is 0. No
+    /// end-to-end test can drive it non-zero, because an undatable session is
+    /// unreachable through the filesystem once both `PausedSession` arms fall
+    /// back to mtime — so without this, substituting a literal `0` in
+    /// `catchup_payload` leaves the suite green while the receipt stops
+    /// reaching the MCP client.
+    /// What: a merged digest's non-zero count appears on the response body.
+    /// Test: itself.
+    #[test]
+    fn catchup_payload_carries_the_undatable_drop_count() {
+        let merged = trusty_common::catchup::CatchupJson {
+            undatable_sessions_dropped: 4,
+            ..Default::default()
+        };
+        let body = catchup_payload(&merged, Some("/tmp/snap.md".to_string()));
+        assert_eq!(
+            body["undatable_sessions_dropped"], 4,
+            "the withheld count must reach the wire: {body}"
+        );
+        assert_eq!(body["resolved_snapshot"], "/tmp/snap.md");
+        assert_eq!(body["watermark_advanced"], false);
     }
 
     #[tokio::test]

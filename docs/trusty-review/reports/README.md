@@ -6,16 +6,20 @@ complexity, quality metrics) with `trusty-search` as a context guide for archite
 
 ## How instances are produced
 
-Reports are produced via the `trusty-review report` subcommand:
+Reports are produced via the `trusty-review report` subcommand. `--manifest` is
+required — it points at a TOML file that declares the report title plus one or
+more `[[repositories]]` entries, each with a local `path` or a declared
+`remote`:
 
 ```bash
-trusty-review report --repo <path> --template <name> [--out <dir>]
+trusty-review report --manifest <file> [--template <name>] [--out <dir>] [--analyze]
 ```
 
 The pipeline:
 
-1. **trusty-analyze** inspects the repository, producing structured metrics (complexity, smells,
-   quality grades, LoC breakdowns, violations, risk scores).
+1. **trusty-analyze** inspects each manifest repository (when `--analyze` is
+   set), producing structured metrics (complexity, smells, quality grades, LoC
+   breakdowns, violations, risk scores).
 2. **trusty-review** loads a template skeleton (generic or CAST-specific) and fills placeholders
    from trusty-analyze output, optionally synthesizing prose (executive summary, findings narratives) via LLM.
 3. The result is a standalone markdown report (plus optional JSON) with scorecard, findings by

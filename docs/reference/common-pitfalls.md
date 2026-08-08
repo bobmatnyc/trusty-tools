@@ -7,8 +7,8 @@ implementation is a defect: fixes land N times, security patches miss copies, an
 silent behavioral drift emerges. Before writing `Command::new(...)`, `reqwest::Client`,
 `std::env::var()` for a concern used in multiple crates, search for an existing
 entry point (`git grep`, then trusty-common source tree) and extend it. See the
-common-entry-point principle and domain consolidation audit in
-[CLAUDE.md](../../CLAUDE.md).
+common-entry-point principle in [CLAUDE.md](../../CLAUDE.md) and the per-domain
+status in [domain-consolidation-audit.md](domain-consolidation-audit.md).
 
 🔴 **Using `unwrap()` in library crates** — the compiler does not stop you, but
 it violates the project's hard rule. Use `?` with `thiserror` error types in
@@ -74,15 +74,14 @@ links an ONNX Runtime build that requires glibc >= 2.38; AL2023 ships glibc
 architecture — `x86_64-linux-al2023`, or `aarch64-linux-al2023` on Graviton
 (#2533 follow-up to PR #4822) — which is already configured with
 `load-dynamic`, or reinstall with
-`--no-default-features --features load-dynamic` (`trusty-search`) /
-`--no-default-features --features http-server,load-dynamic`
-(`trusty-analyze`) plus `ORT_DYLIB_PATH` pointing at a host-compatible
+`--no-default-features --features load-dynamic` (`trusty-search`)
+plus `ORT_DYLIB_PATH` pointing at a host-compatible
 `libonnxruntime.so`. See each crate's README ("AL2023 / glibc < 2.38 hosts")
 and issue #2222. On a mismatched host, `trusty-embedderd`'s startup now fails
 fast with an explicit glibc-version error instead of hanging for up to
 `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s).
 
-🟢 **MSRV drift** — the workspace pins `rust-version = "1.91"`. Running
+🟢 **MSRV drift** — the workspace pins `rust-version = "1.94"`. Running
 `rustup update` and picking up a new nightly may introduce syntax that
 compiles locally but fails on CI. Prefer stable channel toolchains.
 
@@ -92,7 +91,11 @@ work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
 
 🟢 **`trusty-mpm-gui` is excluded from bare `cargo build`/`test`/`check`**
 (#2951) — the root `Cargo.toml`'s `default-members` list omits it, matching
-CI's existing `--workspace --exclude trusty-mpm-gui` for the same commands.
+CI's existing `--workspace --exclude trusty-mpm-gui --exclude trusty-code-gui
+--exclude trusty-agents-ui` for the same commands (the third exclusion guards
+against a build-order race: `trusty-agents-ui`'s `tauri::generate_context!()`
+reads the same `ui/dist/` that `trusty-agents`' own build.rs populates, and
+panics if it runs first).
 Use `cargo build -p trusty-mpm-gui` (or `--workspace`, which always builds
 everything regardless of `default-members`) when you actually need it. This
 also stops every agent worktree from silently producing a fresh ad-hoc-signed

@@ -21,6 +21,9 @@
 //! - `room_rename(palace, room, new_label)`         -> renamed room
 //! - `kg_assert(palace, subject, predicate, object, confidence?, provenance?)` -> ()
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
+//! - `wing_list(palace)`                            -> Vec<WingSummary>
+//! - `wing_create(palace, label)`                   -> wing_id (idempotent)
+//! - `wing_rename(palace, wing, new_label)`         -> WingSummary
 
 pub mod bm25;
 pub mod chat_definitions;
@@ -35,6 +38,10 @@ pub mod room_definitions;
 pub mod room_ops;
 pub mod task_definitions;
 pub mod task_ops;
+// ADR-0027 T9 (#4809): the wing surface ships WITH the wing entity — a level
+// nobody reads is the defect the ADR exists to correct.
+pub mod wing_definitions;
+pub mod wing_ops;
 
 // Re-export the public + cross-module surface so external call sites
 // (`crate::tools::X`) and the `super::*` glob in `tools::tests` keep
@@ -71,10 +78,11 @@ use memory_ops::{
 };
 use palace_ops::{
     handle_palace_compact, handle_palace_create, handle_palace_delete, handle_palace_info,
-    handle_palace_list, handle_palace_update,
+    handle_palace_list, handle_palace_reembed, handle_palace_unalias, handle_palace_update,
 };
 use room_ops::{handle_room_create, handle_room_list, handle_room_rename};
 use task_ops::{handle_task_add, handle_task_complete, handle_task_list};
+use wing_ops::{handle_wing_create, handle_wing_list, handle_wing_rename};
 
 /// Dispatch a tool call by name to its real handler.
 ///
@@ -106,6 +114,10 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "memory_forget" => handle_memory_forget(state, args).await,
         "palace_info" => handle_palace_info(state, args).await,
         "palace_compact" => handle_palace_compact(state, args).await,
+        // #4906: report / repair drawers that have no vector.
+        "palace_reembed" => handle_palace_reembed(state, args).await,
+        // #5005: free drawers destroyed by a vector-id collision.
+        "palace_unalias" => handle_palace_unalias(state, args).await,
         "kg_gaps" => handle_kg_gaps(state, args).await,
         "memory_recall_all" => handle_memory_recall_all(state, args).await,
         "get_prompt_context" => handle_get_prompt_context(state, args).await,
@@ -131,6 +143,10 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "room_list" => handle_room_list(state, args).await,
         "room_create" => handle_room_create(state, args).await,
         "room_rename" => handle_room_rename(state, args).await,
+        // ADR-0027 T9 (#4809): the wing surface — the scope axis over rooms.
+        "wing_list" => handle_wing_list(state, args).await,
+        "wing_create" => handle_wing_create(state, args).await,
+        "wing_rename" => handle_wing_rename(state, args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }

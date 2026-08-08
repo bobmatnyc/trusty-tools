@@ -56,6 +56,29 @@ pub const ACTIVE_SUBJECT_COUNTS: TableDefinition<&[u8], &[u8]> =
 /// Test: `round_trip_drawer_record`.
 pub const DRAWERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("drawers");
 
+/// Slot index over [`DRAWERS`]: `fact_key` → the drawer currently occupying
+/// that slot (#4884, ADR-0028 D5).
+///
+/// Why: a Tier C fact occupies a named slot, and writing `pr:4818/state`
+/// retires whatever already held it. The write path therefore has to answer
+/// "does this slot have a live occupant?" on every Tier C write, and without
+/// an index that answer costs a full `DRAWERS` scan. The precedent is
+/// [`TRIPLES_BY_OBJECT`] / [`TRIPLES_BY_PREDICATE`]: a secondary table
+/// maintained inside the same write transaction that mutates the primary row,
+/// so no reader can observe the index disagreeing with `DRAWERS`. The same
+/// discipline applies on delete — an entry pointing at a removed drawer would
+/// make the occupancy check report a slot as taken when it is free.
+/// What: Key = the `fact_key` UTF-8 bytes. The whole key is the fact_key: a
+/// slot holds at most one drawer, so unlike the triple indexes there is no
+/// second component and no length prefix to add. Value = the occupant's
+/// drawer uuid bytes (`[u8; 16]`).
+/// Test: `fact_key_index_tracks_upsert_and_delete`,
+/// `fact_key_index_follows_the_slot_on_reassignment`,
+/// `clearing_a_fact_key_drops_the_index_entry`,
+/// `deleting_a_drawer_that_lost_its_slot_leaves_the_new_owner_indexed`.
+pub const DRAWERS_BY_FACT_KEY: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("drawers_by_fact_key");
+
 /// Room registry (ADR-0027 D1.1).
 ///
 /// Why: rooms are stored in the SAME database as the drawers they index — not
@@ -78,7 +101,29 @@ pub const ROOMS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("rooms");
 /// Test: `store::room_backfill::tests::room_key_lookup_returns_registered_id`.
 pub const ROOM_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("room_keys");
 
-/// Payload store (for `open-mpm`'s `TrustyBackedMemoryStore`).
+/// Wing registry (ADR-0027 D2 / ticket T9).
+///
+/// Why: a Wing is the scope/ownership axis over rooms — the "who" to a Room's
+/// "what". It lives in the same database as the rooms it scopes for the same
+/// corruption-recovery reason [`ROOMS`] does: a surviving sidecar would
+/// authoritatively describe wings whose rooms are gone.
+/// What: Key = wing uuid bytes (`[u8; 16]`); the nil uuid is reserved for the
+/// `WingSchemaMarker` row. Value = postcard-encoded
+/// [`crate::memory_core::store::wings::WingRecord`].
+/// Test: `store::wings::tests::default_wing_is_seeded_once`.
+pub const WINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wings");
+
+/// Canonical-key index over [`WINGS`] (ADR-0027 T9).
+///
+/// Why: a caller names a wing by label, not by id, and `Engineer`/`engineer`
+/// must be one wing. Ids are READ from here, never recomputed — which is also
+/// what pins the default wing to the `DEFAULT_WING_ID` every room row already
+/// carries instead of minting a second one.
+/// What: Key = the trimmed, lowercased label. Value = wing uuid bytes.
+/// Test: `store::wings::tests::wing_create_is_idempotent`.
+pub const WING_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("wing_keys");
+
+/// Payload store (for `trusty-agents`'s `TrustyBackedMemoryStore`).
 ///
 /// Why: Payloads are namespaced by segment and addressed by id; share the
 ///      same redb env as the KG so payload + KG ops can ride a single
@@ -135,6 +180,28 @@ pub const VECTOR_KEYS: TableDefinition<&str, u64> = TableDefinition::new("vector
 /// Test: Coverage lives in `crate::memory_core::store::hnsw_store::tests`
 ///       (`delete_filters_results`).
 pub const DELETED_VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("deleted_vectors");
+
+/// Persisted vector-id allocator (issue #5005).
+///
+/// Why: `HnswStore` used to allocate vector ids from a process-local
+///      `AtomicU64` seeded at open from `max(VECTORS, VECTOR_KEYS) + 1`. Two
+///      live stores over the same database — which the in-process vector-db
+///      cache deliberately supports, see
+///      `crate::memory_core::store::vector::open_or_get_cached_db` — each
+///      seeded their own counter from the same high-water mark and then handed
+///      out the same ids, so `VECTOR_KEYS` aliased several drawers onto one
+///      `vector_id` and `VECTORS` overwrote in place. Keeping the reservation
+///      in redb and bumping it inside the same write transaction as the insert
+///      makes allocation serialisable with every other writer on the file.
+/// What: Single-row table. Key = [`NEXT_VECTOR_ID`], value = the next
+///       unissued `u64` vector_id.
+/// Test: `crate::memory_core::store::hnsw_store::tests::
+///       two_live_stores_over_one_file_never_alias_ids` and
+///       `old_palace_without_a_seq_row_is_seeded_on_open`.
+pub const VECTOR_ID_SEQ: TableDefinition<&str, u64> = TableDefinition::new("vector_id_seq");
+
+/// The only key stored in [`VECTOR_ID_SEQ`].
+pub const NEXT_VECTOR_ID: &str = "next_vector_id";
 
 /// Chat-session store (for the trusty-memory web UI's chat panel).
 ///
@@ -199,6 +266,14 @@ pub struct DrawerRecord {
     /// field defaulted to `None`.
     #[serde(default)]
     pub completed_at_ms: Option<i64>,
+    /// #4884: ADR-0028 D5 slot name. `None` for every row written before the
+    /// field existed. Because postcard is positional, adding it means
+    /// spec-001-era rows no longer decode as this shape; the reader falls back
+    /// through `PreFactKeyDrawerRecord` → `PreTaskDrawerRecord` →
+    /// `LegacyDrawerRecord`, each lifting the row forward with the fields it
+    /// predates defaulted. No existing row is rewritten to add the field.
+    #[serde(default)]
+    pub fact_key: Option<String>,
 }
 
 // ── Key encoding helpers ─────────────────────────────────────────────────
@@ -465,6 +540,7 @@ mod tests {
             drawer_type: Some("UserFact".to_string()),
             expires_at_ms: Some(1_710_000_000_000),
             completed_at_ms: Some(1_720_000_000_000),
+            fact_key: Some("pr:4818/state".to_string()),
         };
         let bytes = encode_value(&d).expect("encode");
         let decoded: DrawerRecord = decode_value(&bytes).expect("decode");
@@ -489,6 +565,7 @@ mod tests {
             drawer_type: None,
             expires_at_ms: None,
             completed_at_ms: None,
+            fact_key: None,
         };
         let bytes = encode_value(&d).expect("encode");
         let decoded: DrawerRecord = decode_value(&bytes).expect("decode");
@@ -496,6 +573,9 @@ mod tests {
         assert!(decoded.drawer_type.is_none());
         assert!(decoded.expires_at_ms.is_none());
         assert!(decoded.completed_at_ms.is_none());
+        // #4884: a drawer that claims no slot must decode as claiming none —
+        // an accidental `Some("")` would occupy a real key in the index.
+        assert!(decoded.fact_key.is_none());
     }
 
     #[test]
@@ -545,12 +625,15 @@ mod tests {
             DRAWERS.name(),
             ROOMS.name(),
             ROOM_KEYS.name(),
+            WINGS.name(),
+            WING_KEYS.name(),
             PAYLOADS.name(),
             SESSIONS.name(),
             RECALL_LOG.name(),
             VECTORS.name(),
             VECTOR_KEYS.name(),
             DELETED_VECTORS.name(),
+            VECTOR_ID_SEQ.name(),
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

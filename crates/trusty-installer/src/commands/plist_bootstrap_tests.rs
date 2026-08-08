@@ -73,15 +73,35 @@ fn fill_template_replaces_all_tokens() {
     );
 }
 
-/// Why: The label constant must match what the plist embeds (label-mismatch
-/// would cause launchctl to fail with a confusing error).
-/// What: Asserts PLIST_LABEL appears in the template.
+/// Why: the label the installer boots out must be the label the plist declares,
+/// or `launchctl` targets a job that does not exist — the #4868 defect, applied
+/// to the unit that supervises everything else.
+///
+/// #4868: this used to check the raw template for the constant, which passed as
+/// long as SOMEBODY typed the same string twice. The template now carries a
+/// `__PLIST_LABEL__` placeholder, so the assertion moved onto the FILLED output
+/// — what actually lands in `~/Library/LaunchAgents` — and additionally pins the
+/// constant to the canonical registry both the daemon and `tctl` read.
+/// What: asserts the rendered `Label` key carries `PLIST_LABEL`, that
+/// `PLIST_LABEL` is the registry's supervisor label, and that no placeholder
+/// survives.
 /// Test: This is the test.
 #[test]
 fn label_constant_matches_plist() {
+    assert_eq!(
+        PLIST_LABEL,
+        trusty_common::launchd_labels::MPM_SUPERVISOR,
+        "the supervisor label must come from the canonical registry"
+    );
+
+    let filled = fill_template("/home/testuser", "/home/testuser/.cargo/bin/tm");
     assert!(
-        PLIST_TEMPLATE.contains(PLIST_LABEL),
-        "PLIST_LABEL not found in template"
+        filled.contains(&format!("<string>{PLIST_LABEL}</string>")),
+        "the rendered Label key must carry PLIST_LABEL, got:\n{filled}"
+    );
+    assert!(
+        !filled.contains("__PLIST_LABEL__"),
+        "the label placeholder must be substituted, got:\n{filled}"
     );
 }
 

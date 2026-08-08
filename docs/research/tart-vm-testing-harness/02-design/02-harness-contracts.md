@@ -105,7 +105,36 @@ PASS  iff  for every in-scope package p:
                      ∪ {unknown, down}
                                   if member(p).plist_installed == null
                      ∪ {down}     if P ∈ {b, c} and member(p).plist_installed == false
+
+           and, since 2026-08-04, PASS additionally requires
+             |health_scope| > 0
 ```
+
+> **Amendment, 2026-08-04 — the emptiness guard, recorded as a deliberate
+> STRENGTHENING rather than a bug fix
+> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+>
+> The predicate above is a **universal quantifier** over `health_scope`, and a
+> universal over the empty set is **vacuously true**. So `verify_stack_doctor`
+> reporting `PASS: all 0 in-scope package(s) …` was **formally conformant with
+> this section** — which is exactly why it needs an owner decision and a note here
+> rather than a quiet edit. Note also that **§1.1a is not the governing text**: it
+> scopes *which* members carry a health obligation, not what happens when there
+> are none.
+>
+> It stopped being hypothetical. `tsv_scope_packages` fed this predicate through a
+> heredoc substitution, whose expansion has no status channel at all; when the
+> accessor died, the `while read` loop ran **zero** times, `n` stayed 0, `bad`
+> stayed empty, and the oracle logged a PASS on a green run. Issue #16 removed
+> that construct — but an oracle that can report PASS over nothing is a defect
+> independent of how the set came to be empty.
+>
+> The guard is `n > 0`, failing 60. It brings this oracle in line with its two
+> siblings, which already had one: `verify_binaries` refuses an expectation table
+> that yields no in-scope rows, and `_verify_daemon_set` refuses an empty derived
+> daemon set with the comment **"FAILS CLOSED"**. It also applies §9.6's own
+> doctrine — *"a table that rewrites itself to match reality asserts nothing"* —
+> to the assertion set rather than to the table.
 
 #### 1.1a Health is quantified over doctor's daemon-member set, not over the TSV
 
@@ -149,7 +178,8 @@ can never satisfy a predicate quantified over `member(p)`.
 **The two causes reach one conclusion**, which is why the original single-cause
 text could be wrong about the mechanism and still land on the correct predicate:
 none of the three is in doctor's member set, so no health obligation can attach
-to any of them. **This correction has zero runtime effect.** `verify.sh:659`
+to any of them. **This correction has zero runtime effect.** `lib/verify.sh:747`
+(cited as `verify.sh:659` until 2026-08-04; the function has grown since)
 tests membership **dynamically** —
 `jq -e --arg m "$pkg" 'any(.members[]; .member == $m)'` — so the oracle asks the
 report what it actually contains rather than deriving it from a stated cause, and
@@ -522,7 +552,7 @@ PASS  iff  tool_version is a non-empty string
 This is the one DOC-1 §7.1 source that does not exist as a contract.
 
 Every daemon does expose `GET /health`, and it returns JSON. But there is **no
-shared type in `trusty-common`** and no unified schema. There are **five**
+shared type in `trusty-common`** and no unified schema. There are **six**
 independently-evolved shapes, with no field in common beyond `status` and
 `version`:
 
@@ -533,6 +563,21 @@ independently-evolved shapes, with no field in common beyond `status` and
 | `trusty-analyze` | `crates/trusty-analyze/src/service/routes.rs:75` | `crates/trusty-analyze/src/service/routes.rs:176-180` — `status`, `version`, `search_reachable`. Handler at `routes.rs:188-201`. **The only daemon here that signals through the HTTP STATUS CODE**: 200 + `status:"ok"` when trusty-search is reachable, **503** + `status:"degraded"` when it is not. |
 | `trusty-mpm` | `crates/trusty-mpm/src/daemon/api.rs:181` | `crates/trusty-mpm/src/daemon/api/types.rs:41-87` — `status`, `catalog_stale`, `catalog_unknown`, `catalog_changes`, `supervised`, `version` |
 | `trusty-review` | `crates/trusty-review/src/service/mod.rs:130` | `crates/trusty-review/src/service/handlers.rs:171-186` — `status`, `version`, `dry_run`, `reviewer_model`, `inference`, `deps{…}` |
+| `trusty-console` | `crates/trusty-console/src/server/mod.rs:318` | **No struct at all** — an inline `json!` literal at `crates/trusty-console/src/server/mod.rs:433-438` with a hardcoded `"status":"ok"` and `CARGO_PKG_VERSION`. Exactly **two** fields, neither reflecting any state the daemon actually observes. |
+
+> **`trusty-console` added 2026-08-05** *(#4921)*, when D3 was widened to nine
+> crates and brought it into the harness's in-scope set. It was already a
+> `stable_set()` daemon, so the derived iteration set picked it up with no code
+> change — which is precisely the property the 2026-08-04 note below was written to
+> establish, now exercised for the first time.
+>
+> **It also widens the spread this section exists to document, rather than
+> narrowing it:** 22 fields at one end, 2 at the other. And its literal
+> `{"status":"ok"}` is exactly the payload the **#3364** squatter class describes —
+> a generic body on a stale port that the INTERIM predicate cannot distinguish from
+> a real one. That is not a new hazard, but `trusty-console` is now the cheapest
+> demonstration of why RC-1's envelope needs a `service` discriminator and not
+> merely an agreed field set.
 
 > **`trusty-analyze` WAS MISSING FROM THIS TABLE, AND THE OMISSION PROPAGATED**
 > *(added 2026-08-04)*. It is an in-scope package, `stable_set()` marks it a
@@ -728,7 +773,7 @@ every failure makes both impossible.
 |---|---|---|
 | **0** | — | Success. Scenario ran, every assertion passed, teardown completed. |
 | **2** | argument parsing | Usage error — unknown subcommand, bad `--runid` format (§4.2), unknown scenario name. No VM was touched. |
-| **10** | preflight | Preflight refused (DOC-1 §4.1): `tart` missing, base-image digest mismatch (§3), a VM not in `stopped` state, runid collision (§4.3), host capacity assertion failed (§8.4), `jq` missing (§JSON parsing). **No VM was created.** |
+| **10** | preflight | Preflight refused (DOC-1 §4.1): `tart` missing, base-image digest mismatch (§3), a VM not in `stopped` state, runid collision (§4.3), **another run already in progress or a crashed run's VM left behind (§4.3a)**, host capacity assertion failed (§8.4), `jq` missing (§JSON parsing). **No VM was created.** |
 | **20** | VM lifecycle | `tart clone` / `set` / `run` failed, or boot-ready polling timed out (§10.1). |
 | **30** | negative probe | The cargo-absent probe did not produce its expected result (§6). |
 | **40** | provisioning | `provision.sh` failed or timed out — including the mise-detection failures of §11. |
@@ -742,8 +787,22 @@ every failure makes both impossible.
 wins** and is what the driver exits with — a scenario failure (50) followed by a
 teardown failure does **not** become 70, because the operator needs to know what
 broke, not what broke last. Teardown failure is reported on stderr regardless, and
-is only *returned* as 70 when nothing earlier failed. Implementation: a single
-global `VMTEST_EXIT`, written once by the first `die()` and never overwritten.
+is only *returned* as 70 when nothing earlier failed. Implementation: a write-once
+slot claimed by the first `die()` and never overwritten — held in the global
+`VMTEST_EXIT` **and, since 2026-08-04, backed by a file** (`$VMTEST_TMPDIR/exit-code`,
+created `O_EXCL`) that `vmtest_cleanup` reconciles into the global.
+
+> **Amendment, 2026-08-04 — the implementation sentence, not the rule
+> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).** This
+> paragraph previously read *"a single global `VMTEST_EXIT`"*. **The rule above is
+> unchanged and is exactly what the amendment restores:** a global cannot cross a
+> fork, so a `die` inside a command substitution, a for-list, a heredoc
+> substitution or a process substitution wrote the slot in a child and lost it —
+> and the second failure, arriving in the parent, then took a slot the first
+> failure should already have held. The observed shape was `FAIL[50]` → `MEASURE
+> exit 0` → `FAIL[70]` → process exit **70**, which is precisely the override this
+> section forbids, with a code whose own row disclaims the run result. See §12.4
+> for the mechanism and §12.1 for the structural half of the fix.
 
 **Why the gaps.** Codes are spaced by ten so a phase can gain a sub-code without
 renumbering the table. Every harness code is `<= 70`, deliberately below the shell's
@@ -936,25 +995,226 @@ Immediately after acquiring, the driver writes into the run directory:
 | File | Contents |
 |---|---|
 | `pid` | the driver's PID |
+| `cmdline` | the driver's **own** command line, as `ps` reports it (added 2026-08-04, §4.3a.1) |
 | `vm` | the VM name |
 | `pattern` | `local` \| `branch` \| `released` |
 | `started` | UTC timestamp |
 | `toolchain.tsv` | written later by provisioning (§7.3) |
 | `keep` | written only if `--keep` was requested (§5.3) |
 
+`cmdline` is what makes `pid` **checkable**. A PID on its own cannot say whether
+it is still the process that wrote it, and PIDs are reused; recording the
+acquiring process's own identity lets a later reader ask *is this still you?*
+instead of guessing. It is written by the run it describes and never by a
+reader — see §4.3a.1, where the asymmetry that requirement prevents is the
+subject of a recorded defect.
+
 The run directory is removed by the cleanup trap on normal and abnormal exit,
 **except** when `keep` is present. Lock and registry are the same object: there is
 no separate lock file to get out of sync with the registry entry.
 
-**Concurrency is safe but not advised.** The mechanisms above make two simultaneous
-runs collision-free. They do not make them a good idea: DOC-1 §8.5 sizes each guest
-at 8 vCPU / 16 GB, and the research host was 18 logical cores / 64 GB
+#### 4.3a Single-run policy — **the concurrency contract is RETRACTED** (2026-08-04, issue #15)
+
+> **RETRACTION, stated before the replacement so nothing is read out of an old
+> copy.** §4.3 previously ended with a paragraph headed *"Concurrency is safe but
+> not advised"*, which specified that **preflight warns and does not fail** when
+> another run directory holds a live PID. **That paragraph is withdrawn in
+> full.** The `registry_warn_live_peers` function written to implement it has
+> been **deleted** from the driver, and `vmtest-harness/README.md` no longer
+> sizes disk "per concurrent run".
+
+**The harness supports exactly ONE run at a time.** A second run is **refused**,
+not warned about. Exit **10**, which is §2's existing "preflight refused; no VM
+was created" — no new exit code is introduced, because no new *kind* of event
+happened.
+
+*Why the retraction.* The warn-don't-fail contract was never reachable. Preflight
+refused a running `vmtest-*` VM before it ever consulted the registry, and a
+peer's VM is `running` for roughly 85% of a 9–16 minute run — so the specified
+warning could not fire in the case it was written for, and the operator instead
+received a refusal whose text said the namespace might be **wedged**. That is the
+wrong diagnosis for a healthy peer and points at the wrong remedy. Two artifacts
+disagreed with the implementation for an entire phase; retiring concurrency
+resolves the disagreement in the direction the owner chose.
+
+*Where the refusal comes from.* **The registry, not the VM listing.** The
+registry is the harness's own record of what is running; a VM's state is a
+symptom. `preflight_single_run` runs **before** the §4.1 VM-state checks, reads
+every registry entry through `registry_owner_alive` (the one place the harness
+decides whether an entry belongs to a live run), and classifies each
+non-`stopped` `vmtest-*` VM with `harness_vm_disposition` — the **same** helper
+`vmtest clean` (§5) uses.
+
+##### 4.3a.1 What "the owner is alive" means, and why it is not `kill -0`
+
+Making a registry entry a **gate** rather than a hint changed the cost of every
+error in reading one, so the reading is specified here rather than left to the
+primitive:
+
+| Observation | Verdict | Why |
+|---|---|---|
+| no run directory | not alive | nothing was ever acquired |
+| directory, no readable/numeric `pid` yet | **alive** | §4.3 acquires by `mkdir` and writes `pid` immediately after; this is exactly what a peer looks like *between* those two steps |
+| `kill -0` succeeds | alive | ours, and running |
+| `kill -0` fails, `ps` finds the process | **alive** | EPERM — it exists and belongs to **another user**. `kill -0` alone reports this identically to death |
+| `kill -0` fails, `ps` does not find it | not alive | ESRCH — provably gone |
+| alive, and `ps` shows a **different** command line from the entry's own `cmdline` | **not alive — stale entry** | the PID was reused; see below |
+| alive, and there is no `cmdline` record, or it cannot be read | **alive** | nothing was proved either way |
+| alive, and one of the two command lines is a **prefix** of the other | **alive** | that is what a record cut short looks like, and "cut short" proves nothing |
+
+Every uncertain case resolves to **alive**, because both callers' dangerous
+direction is the same one: the gate's cheap mistake is refusing a free host and
+its expensive one is admitting a second run; `clean`'s cheap mistake is skipping
+an orphan and its expensive one is deleting a live run's VM.
+
+**The reading is three-valued, and the two proofs are not each other's
+negation.** *Proved live* (the PID answers **and** shows its recorded command
+line) and *proved different* (both command lines readable **and** unequal) are
+separate questions, with *cannot say* between them. `registry_owner_alive`
+treats *cannot say* as alive. Only an operator's explicit `--include-kept` acts
+on it, and only where there is no VM to destroy (§5.4 row 3).
+
+**The peer asserts its own identity; a reader never infers it.** This is a
+requirement, not an implementation note, and it is written down because the
+first version of this mechanism violated it and was destructive. That version
+compared the peer's `ps` line against **the reading process's own filename**.
+A driver copy named `vmtest-dev` therefore looked for `vmtest-dev` inside a peer
+running `vmtest`, found nothing, concluded the live run was stale, and `clean`
+**deleted that run's stopped VM** — recorded against a real live process as
+`vmtest-realpeer stopped ORPHANED (deleted)` where every earlier revision said
+`IN-USE (live run, skipped)`. Two differently-named copies of the driver were
+the entire precondition, and DOC-1's trade statement makes deleting a live run's
+VM the one outcome that must be impossible. Comparing a **recorded** command
+line against the **observed** one for the same PID has no such asymmetry:
+nothing about the reader enters into it.
+
+##### The record's own integrity
+
+A comparison is only as good as the thing it compares against, so the record gets
+two protections and one stated exclusion.
+
+**It is written atomically.** `registry_acquire` writes each file to a temporary
+name beside it and renames, so a reader sees the old content or the whole new
+content and never half of it. This matters for `cmdline` in a way it does not
+for the others: a **partial** record does not read as *cannot say*, it reads as a
+**different** command line — positive evidence of a reused PID — and that makes a
+genuinely live run's stopped VM collectable. Every other damaged shape (empty,
+missing, unreadable, an extra line, trailing whitespace) already resolves to
+**alive**; a part-written one was the single exception, and a rename removes the
+shape rather than compensating for it downstream.
+
+**A prefix is not a difference.** Where one command line is a prefix of the
+other, the comparison says nothing — that is precisely the shape a truncated
+record takes, and records written by an older driver, or by a filesystem that
+tore the write, are not covered by the atomicity above. The guard cannot admit a
+false *live*: for a reused PID to be excused, the new process's command line
+would have to **begin with the entire command line** of the run that ended. It is
+also deliberately prefix-only — a line that shares a prefix and then diverges is
+still a different process and is still collected.
+
+**Deliberate tampering is out of the threat model, and is stated rather than
+coded against.** A `cmdline` record edited to an unrelated string, or copied from
+another entry, will make a live run's stopped VM collectable. Both require write
+access to `$VMTEST_STATE_DIR`, which is the operator's own state directory; an
+attacker with that access can simply delete the entry, or the VM. The registry is
+bookkeeping between an operator and their own runs, not a security boundary.
+
+*A note on what this narrowed as a side effect.* The old test was a bare
+substring match, so `grep -r vmtest .`, `vim vmtest-harness/vmtest` and
+`tail -f /var/log/vmtest.log` all read as live peers. Exact comparison against a
+recorded line removes that class: a bystander that merely mentions the harness
+now differs from the record and is correctly seen as a reused PID. What remains
+is narrow and stated rather than hidden — an entry with **no** record still
+resolves to alive on any live PID (entries written before this section existed,
+or written where `ps` was unavailable), and a process whose command line is
+byte-identical to the record is indistinguishable from the run itself, which is
+the right answer anyway.
+
+**PID reuse is the failure mode this section exists to prevent.** `--keep`
+leaves its registry entry behind permanently and on purpose (§5.3), macOS PIDs
+wrap at ~99,999, and a reused PID makes a finished run's entry answer "alive"
+for ever. Under an uncorroborated reading that entry refuses **every future
+run**, with a message telling the operator to wait for a run that ended weeks
+ago — and `clean --include-kept`, the one flag that exists to remove a kept VM,
+could not reach it either, because it tested ownership first. Three things
+prevent it, and all three are required:
+
+1. **Corroboration.** An entry whose PID is alive but no longer shows the
+   command line **the entry recorded for itself** is **disregarded**, and the
+   harness says so on stderr — naming both the recorded and the observed command
+   line — rather than proceeding silently. This is positive evidence, never a
+   guess.
+2. **`clean --include-kept` reaches both shapes.** It outranks a live owner for
+   a `stopped` **kept VM** (§5.3), which is precisely what `--keep` leaves
+   behind; and it prunes a **VM-less bookkeeping entry** whose owner cannot be
+   corroborated (§5.4 row 3), which is the shape a crashed run leaves before it
+   clones. `running` and `suspended` VMs are **not** weakened by the flag.
+
+   > **What that flag WILL do, stated plainly because it is a real edge and it is
+   > deliberate.** For a `stopped` VM carrying a `keep` marker, `--include-kept`
+   > deletes it **even when the owning run is corroborated live**. That is not an
+   > oversight in the ordering: `--keep` exists to leave a stopped VM for
+   > inspection, `--include-kept` exists to remove one, and requiring the owner to
+   > be dead first is what made the pairing unclearable in the first place.
+   > Deleting still needs **both** the marker and the explicit flag, and it can
+   > only ever touch a VM that is already `stopped`. The **bookkeeping** prune is
+   > the opposite way round — a corroborated live peer's entry is never pruned,
+   > under any flag — because there the flag would be removing the only record
+   > that a live run exists.
+3. **The refusal message names the escape.** Case (a) states that the entry may
+   be stale and prints both `vmtest clean --include-kept` and the exact
+   `rm -rf <registry root>/<runid>`.
+
+Requirement 2 is stated as two shapes because it shipped as one and the gap was
+real: `--include-kept` was advertised in the refusal message as the supported
+recovery, while a VM-less entry whose PID merely answered was reported
+`IN-USE (live run, no VM yet)` and left in place — so the command the harness
+told the operator to run did nothing for the case the message was about, and
+only a raw `rm -rf` worked.
+
+*The two refusals are distinct and must stay distinct*, because their remedies
+are opposites:
+
+| Case | Condition | Remedy in the message |
+|---|---|---|
+| **(a)** | a registry entry holds a live PID (and/or a `vmtest-*` VM has a live registry owner) | **WAIT** for that run to finish; do not stop it and do not `vmtest clean` it |
+| **(b)** | a `vmtest-*` VM is not `stopped` and its runid has **no** live registry owner — including `suspended`, which DOC-1 §8.2 records as wedged | **CLEAN IT UP**: run `vmtest clean`, which names the manual command for anything it refuses |
+
+Both can hold in one scan. Preflight therefore **reports every finding** before
+it dies; the `FAIL` line carries **(a)** whenever (a) applies, because waiting is
+the only action that is correct in both worlds — `clean` run beside a live peer
+acts on a false picture of the host.
+
+*The mechanisms of (a) and (b) above are unchanged and still do their jobs:*
+PID-embedded runids and the `mkdir` lock still make two runs collision-**free**;
+what has changed is that being collision-free is no longer treated as permission
+to proceed. The original sizing argument survives as the reason the policy is
+single-run at all: DOC-1 §8.5 sizes each guest at 8 vCPU / 16 GB against a
+research host of 18 logical cores / 64 GB
 (`vm-install-probe-findings.md:842-843`), which accommodates one such guest with
-"ample headroom" and two only by contending. Preflight therefore **warns** (does
-not fail) when another run directory holds a live PID. Warning rather than failing
-is a judgment call: the harness cannot know the operator's host, and refusing a
-legitimate second run on a large machine would be worse than a warning ignored on
-a small one.
+"ample headroom" and two only by contending.
+
+*One residual, recorded rather than papered over.* Two invocations started in the
+same instant can both pass the gate **before either has created its registry
+directory**, and their auto-generated runids never collide in `registry_acquire`
+either. The window is scan-to-`mkdir`, **not** scan-to-`pid`-file: a directory
+with no PID file yet reads as a live owner (§4.3a.1, row 2), which closes the
+`mkdir`-to-`pid`-write half of it. Closing the rest needs a registry-root-wide
+lock this section does not define, and a post-acquire re-check would let two
+racers refuse *each other*. For an ad-hoc, manually-run, single-operator harness
+the gate is the operator's mistake-catcher, not a mutex — and `README.md` says so
+too, because an operator reading only the README must not be told the gate is
+absolute.
+
+*Coverage.* `vmtest-harness/tests/test-preflight-single-run.sh` exercises (a)
+with and without a peer VM, the `mkdir`-to-`pid` window, (b), (b) via a **dead**
+registry PID, `suspended`, empty and non-numeric PID files, the **mixed** scan,
+the recycled-PID stale entry and its recovery through `clean --include-kept`,
+self-exclusion, TSV field splitting, and two clean-namespace regressions —
+against a stub CLI, with no VM and no network. Its liveness assertions
+(`proc_alive`, `registry_owner_impostor`, `registry_owner_corroborated`) are
+made directly, because EPERM cannot be
+reached end-to-end without a root-owned driver.
 
 ---
 
@@ -1022,6 +1282,24 @@ skip **only** `vm_delete`, which is what makes this paragraph, condition 2, and
 `vmtest clean --include-kept` removes them too, and is the intended way to tidy up
 after an inspection session.
 
+> **AMENDED 2026-08-04 (issue #15 review) — `--include-kept` now outranks
+> condition 3 for a `stopped` kept VM.** The paragraph above says the run "exits,
+> so its PID dies, so condition 3 is satisfied". **The registry entry outlives
+> the run**, and its recorded PID does not stay dead: macOS PIDs wrap, so a reused
+> PID eventually makes condition 3 fail again, permanently. `clean` then reported
+> the kept VM `IN-USE (live run, skipped)` and `--include-kept` — *the intended
+> way to tidy up after an inspection session* — could not remove it, because
+> ownership was tested first. §4.3a made the same reading a **gate**, so the same
+> entry also refused every future run: an unclearable brick with no documented
+> escape.
+>
+> The order is therefore `keep`-marker **and** `--include-kept` **first**, then
+> ownership, then the marker alone. Deleting still requires **both** the marker
+> and the explicit flag, and this changes nothing for a VM that is not `stopped`:
+> `running` and `suspended` are refused exactly as before, under every flag.
+> `clean`'s own conservative PID-reuse trade (§5.1) is untouched — a false "alive"
+> still only ever costs a skipped deletion there.
+
 #### 5.4 When `clean` cannot tell
 
 Two ambiguous cases, and the rule for each:
@@ -1030,7 +1308,7 @@ Two ambiguous cases, and the rule for each:
 |---|---|
 | `vmtest-*` VM in state `running`, no registry entry at all | **Refuses.** Reports the VM, its state, and the manual commands a human may choose to run. Exits **10**. It cannot distinguish "another user's run" from "crashed run, registry wiped", and both are cases where deleting is destructive. |
 | `vmtest-*` VM in state `suspended` | **Refuses and flags it as wedged.** Per DOC-1 §8.2, resume is broken and reproducible (`VZErrorDomain Code=12`); the manual unwedge (`mv ~/.tart/vms/<name>/state.vzvmsave{,.bak}`) is documented there as a human procedure explicitly *not* for the harness. `clean` prints that procedure and exits 10. |
-| Registry directory with no matching VM | **Prunes the directory** and says so. There is nothing to destroy; a stale registry entry is bookkeeping, not state. |
+| Registry directory with no matching VM | **Prunes the directory** and says so. There is nothing to destroy; a stale registry entry is bookkeeping, not state. **A live owner still protects it** — but *live* here means §4.3a.1's reading, and an owner that merely answers without being **corroborated** is pruned under `--include-kept` (added 2026-08-04; see §4.3a.1 requirement 2, and note that a corroborated peer's entry is never pruned under any flag). |
 | VM in state `stopped`, no registry entry | **Orphaned. Deletes.** This is the normal aftermath of an interrupted run and is the case `clean` exists for. |
 
 `vmtest clean --dry-run` performs the full classification and prints the verdict for
@@ -1591,7 +1869,8 @@ that will be slow.
 ### 9. `expected-binaries.tsv` schema
 
 DOC-1 §7.2 establishes the table as the single authoritative expectation source and
-gives a seed table of eight rows (seven until D3 was widened on 2026-07-31).
+gives a seed table of nine rows (seven until D3 was widened on 2026-07-31, eight
+until it was widened again on 2026-08-05).
 DOC-1 §7.2's own note flags the `--check-table`
 diff source of truth as unnamed and recommends the `[[bin]]` targets. This section
 gives the real schema, the real seed content enumerated from the workspace, and
@@ -1657,9 +1936,9 @@ which is a further argument for keying on package name.
 #### 9.3 Seed content
 
 Enumerated from the workspace manifests. **27** explicit `[[bin]]` targets across 20
-manifests, plus one implicit target (§9.4) — **28** rows in total. **Thirteen** rows
-are in scope; DOC-1 D3's **eight** crates produce **thirteen** binaries, not eight.
-The eight in-scope `crate_dir` values are the eight D3 directories — see §12.5 and
+manifests, plus one implicit target (§9.4) — **28** rows in total. **Fourteen** rows
+are in scope; DOC-1 D3's **nine** crates produce **fourteen** binaries, not nine.
+The nine in-scope `crate_dir` values are the nine D3 directories — see §12.5 and
 the plan's §F-3 on why the loop over them must deduplicate.
 
 > **Correction, 2026-07-31 — the explicit count read 26.** The prose said "26
@@ -1672,6 +1951,31 @@ the plan's §F-3 on why the loop over them must deduplicate.
 > to read `cargo metadata` rather than a `crates/*/Cargo.toml` glob; the prose
 > counted the manifest but not its target. "20 manifests" was right; only the target
 > total was wrong, and the table was right all along.
+
+> **Amendment, 2026-08-05 — in scope goes from thirteen rows to fourteen;
+> `trusty-console` moved (#4921).** DOC-1 D3 was widened to nine crates by its own
+> dated amendment of the same date; this section follows it. The row below moved
+> from the out-of-scope block to the END of the in-scope block and now carries
+> `in_scope=yes` with `present` in all three `expect_*` columns.
+>
+> **The 28-row total is UNCHANGED, and that is the point of the out-of-scope
+> block.** Nothing was added to the table and nothing was removed from it — the
+> `in_scope` column flipped on a row that was already carried. The counts that
+> move are the derived ones: **fourteen** in-scope rows, **nine** `crate_dir`
+> values, **nine** package names. `--check-table` prints exactly those three
+> numbers and reported `in scope: 14 binaries, 9 crate directories, 9 packages`
+> against the shipped table.
+>
+> **END, not alphabetical, and the position is load-bearing.** Appending keeps
+> `trusty-git-analytics` at `crate_dir` position 6, which the pattern-(a) prose in
+> `lib/source.sh` cites when it says the directory/package discontinuity bites
+> after five successful installs. An alphabetical insert would have moved it to 7
+> and falsified that sentence silently.
+>
+> Evidence for the row itself is recorded in DOC-1 D3's 2026-08-05 amendment: one
+> `[[bin]]`, an unconditional `/health`, `publish` by cargo default, and
+> `daemon = true` in `stable_set()` since before the harness existed. The
+> crates.io release skew that makes pattern (a) known-red on it is #4917.
 
 ```
 package	crate_dir	binary	bin_path	req_features	in_scope	expect_a	expect_b	expect_c
@@ -1688,6 +1992,7 @@ tga	trusty-git-analytics	tga	src/main.rs	-	yes	present	present	present
 trusty-mpm	trusty-mpm	tm	src/bin/tm/main.rs	cli	yes	present	present	present
 trusty-mpm	trusty-mpm	trusty-mpm	src/bin/tm/main.rs	cli	yes	present	present	present
 trusty-review	trusty-review	trusty-review	src/main.rs	-	yes	present	present	present
+trusty-console	trusty-console	trusty-console	src/main.rs	-	yes	present	present	present
 # --- out of scope per DOC-1 D3; carried so --check-table can detect additions ---
 trusty-agents	trusty-agents	tagent	src/main.rs	-	no	-	-	-
 trusty-agents-ui	trusty-agents/ui/src-tauri	trusty-agents-ui	src/main.rs	-	no	-	-	-
@@ -1697,7 +2002,6 @@ trusty-channels	trusty-channels	telegram-mcp	src/bin/telegram-mcp.rs	-	no	-	-	-
 trusty-code-gui	trusty-code-gui	trusty-code-gui	src/main.rs	-	no	-	-	-
 trusty-common	trusty-common	candle_metal_bench	src/bin/candle_metal_bench.rs	embedder-candle	no	-	-	-
 trusty-common	trusty-common	tickets-mcp	src/bin/tickets_mcp.rs	tickets	no	-	-	-
-trusty-console	trusty-console	trusty-console	src/main.rs	-	no	-	-	-
 trusty-embedderd-py	trusty-embedderd-py	trusty-embedderd-py	src/main.rs	-	no	-	-	-
 trusty-gworkspace	trusty-gworkspace	trusty-gworkspace-mcp	src/bin/trusty-gworkspace-mcp.rs	-	no	-	-	-
 trusty-kb	trusty-kb	trusty-kb	src/main.rs	-	no	-	-	-
@@ -1801,9 +2105,10 @@ right call for a document that could only flag the premise. It is the wrong call
 that the premise has been checked and D2 amended: an assertion known in advance to
 be false is not a safety net, it is a scheduled failure. Both `trusty-mpm` rows
 above now carry **`expect_a = present`**, matching DOC-1 D2 and §7.5 as amended, and
-all **thirteen** in-scope binaries are expected present under all three patterns
+all **fourteen** in-scope binaries are expected present under all three patterns
 (twelve when this paragraph was written; the thirteenth is `trusty-review`, added
-by the D3 amendment of the same date — §9.3 note 2).
+by the D3 amendment of the same date — §9.3 note 2; the fourteenth is
+`trusty-console`, added by the D3 amendment of 2026-08-05 — §9.3's amendment).
 
 The `expect_*` columns and the pattern-aware oracle **stay** regardless. With the
 gap dissolved no in-scope row currently diverges across patterns, but the columns
@@ -2067,7 +2372,7 @@ is available.
 
 ### 11. Provisioning vs preinstalled `mise`
 
-DOC-1 §3.3 says provisioning "installs `mise`, `rust@1.91`, `uv`, and `gh` in the
+DOC-1 §3.3 says provisioning "installs `mise`, `rust@1.94`, `uv`, and `gh` in the
 guest". The research says three of those four statements are wrong, and getting
 this wrong has broken an image before.
 
@@ -2100,7 +2405,7 @@ And the two prohibitions, stated in the research as instructions:
 |---|---|---|
 | `mise` | **detect and reuse. Never install.** | detection below |
 | `gh` | **detect and reuse. Never install.** | `command -v gh` under `base_path` |
-| `rust@1.91` | **install fresh** | `mise use -g rust@1.91` (measured 20.778 s, `:854`) |
+| `rust@<msrv>` | **install fresh** | `mise use -g rust@1.94` — tracks the workspace MSRV (ADR-0029); measured 20.778 s on `rust@1.91`, `:854` |
 | `uv` | **install fresh** | `mise use -g uv@latest` (measured 7.947 s, `:855`) |
 
 **Detection command for `mise`**, run under the measured base PATH (§7.1):
@@ -2158,8 +2463,8 @@ explicit or someone will delete one or trust the other:
 
 #### 11.5 Amendment to DOC-1 §3.3
 
-DOC-1 §3.3's phrasing — "installs `mise`, `rust@1.91`, `uv`, and `gh`" — is
-accurate for `rust@1.91` and `uv`, and **wrong for `mise` and `gh`**, both of which
+DOC-1 §3.3's phrasing — "installs `mise`, `rust@1.94`, `uv`, and `gh`" — is
+accurate for `rust@1.94` and `uv`, and **wrong for `mise` and `gh`**, both of which
 are preinstalled and must be reused. The measured 30 s provisioning total (DOC-1 §9,
 `vm-install-probe-findings.md:858`) already reflects reuse: it is composed of
 20.778 s of rust, 7.947 s of uv, 0.616 s of gh-already-present, and 0.617 s of
@@ -2181,13 +2486,43 @@ testing. No signature is given for anything.
 - **Arguments are positional strings.** bash 3.2 has no associative arrays and no
   namerefs (§Shell discipline), so there is no options-hash idiom available.
 - **The return channel is the exit status.** `0` = success, non-zero = failure.
-- **The value channel is stdout, and carries at most one value.** A function that
-  needs to return several values writes a TSV to a path given as an argument
-  (§7.1's `toolchain.tsv` is the pattern).
+- **The value channel is stdout, and carries at most one value** — but **only for
+  a function that cannot `die`.** A function that needs to return several values,
+  **or that can `die`, whatever it returns**, writes to a path given as an
+  argument (§7.1's `toolchain.tsv` is the pattern; `vm_list <out_tsv_path>` is the
+  in-tree precedent).
 - **Diagnostics go to stderr, always.** stdout must stay clean because §1's oracle
   parses it. DOC-1 §5.1 records that `tart exec` keeps the streams separate, which
   is what makes this discipline possible at all.
 - **Functions do not call `exit` — they call `die`,** except where noted.
+
+> **Amendment, 2026-08-04 — the out-path convention is widened from "several
+> values" to "any value, when the function can `die`"
+> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+>
+> **The two conventions as originally written were jointly unimplementable.** In
+> bash, the only way to capture a function's stdout is a command substitution,
+> and a command substitution **forks**. §12.4's `die` classifies by writing a
+> shell variable, which the fork cannot carry back. So *"emits a value on stdout"*
+> and *"classifies its own failure via `die`"* could not both hold for the same
+> function — and §12.2 paired them anyway, one line each, for
+> `provision_detect_mise` and `source_deliver_local`.
+>
+> This was not a theoretical clash. Seventeen call sites captured a die-capable
+> function's stdout; at every one the classification was lost, and at six the
+> failure was not even aborted, because `for x in $(f)`, a heredoc substitution
+> and `<(f)` **discard the child's exit status outright**. §12.4's file-backed
+> side channel recovers the *classification* at all of them; **no side channel and
+> no `set -e` variant can recover the *abort*.** Removing the fork is the only
+> mechanism that does, and the out-path is how this document already said to
+> remove it — the escape hatch existed, it was merely scoped to "several values".
+>
+> Two accessors were converted under this rule: `tsv_scope_crate_dirs <out_path>`
+> and `tsv_scope_packages <out_path>`. Both are driver-local, outside §12.2's four
+> module surfaces, so no signature table changed. `provision_detect_mise` and
+> `source_deliver_local` keep their declared `emits` and rely on the §12.4
+> backstop — their failures abort correctly today, only the classification was
+> lost, and converting them would change §12.2. That is deferred, deliberately.
 - **`lib/` files define functions and nothing else.** No top-level statements, no
   `set`, no side effects at source time.
 
@@ -2500,10 +2835,61 @@ One rule, one function:
 die() {
   _code=$1; shift
   printf 'vmtest: FAIL[%s]: %s\n' "$_code" "$*" >&2
+  # The slot is file-backed: a shell global cannot cross a fork, a file can.
+  # Write first, then ADOPT — so a `die` in this shell loses to an earlier one
+  # that was recorded in a child, which is what makes the file authoritative.
+  if [ -n "${VMTEST_TMPDIR:-}" ]; then
+    ( set -o noclobber; printf '%s\n' "$_code" > "$VMTEST_TMPDIR/exit-code" ) 2>/dev/null || :
+    _reconcile_exit_from_side_channel
+  fi
   if [ -z "${VMTEST_EXIT:-}" ]; then VMTEST_EXIT=$_code; fi
   exit "$VMTEST_EXIT"
 }
 ```
+
+> **Amendment, 2026-08-04 — the side-channel write ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+> The body above carried only the `VMTEST_EXIT` assignment until this date, and
+> the implementation was character-identical to it. **A shell global cannot cross
+> a fork**, so every `die` that fired inside `$( )`, `<( )`, a for-list or a
+> heredoc substitution assigned the slot in a child that then died with it. The
+> parent's slot stayed unset, with three consequences: the MEASURE line reported
+> `exit 0` for a run that failed 50; a later teardown `die 70` could claim the
+> slot §2 reserves for the FIRST failure; and at the constructs that discard the
+> child's status outright the failure was **swallowed entirely**. Seventeen call
+> sites were affected, and one of them — `verify_stack_doctor`'s heredoc — turned
+> a dead assertion loop into a green `PASS: all 0 in-scope package(s)`.
+>
+> A file is not forked away, so the write survives at any subshell depth.
+> `set -o noclobber` makes the create an `O_EXCL` one, which **strengthens**
+> write-once rather than merely preserving it: the previous `if [ -z … ]` was a
+> read-then-write, write-once only because the harness is single-threaded, and
+> the file version holds even against `run_watchdog`'s backgrounded children. The
+> option is set inside `( … )`, so the driver's own shell options are untouched.
+> `VMTEST_TMPDIR` exists from `conf_load` onward, i.e. before every affected
+> site; the guard covers the `die 2` / `die 10` paths that precede it, which fire
+> in the parent where the global already worked.
+>
+> **The write is immediately followed by a READ-BACK, and the two together are
+> the mechanism — neither alone is sufficient.** `die` tested only the in-shell
+> global, so a second, parent-side `die` still claimed a slot the first failure
+> already held on disk: a subshell `die 50` followed by a `die 70` left the file
+> holding 50 and exited **70**, which is the override this document forbids,
+> reached by a longer route. Adopting the file inside `die` is what makes the
+> `O_EXCL` create *decide* the verdict rather than merely record it — and it is
+> what makes the claim above about backgrounded children true rather than
+> aspirational.
+>
+> **The side channel is a backstop, not the whole fix.** It restores
+> classification everywhere, but it cannot restore an *abort* at the three
+> constructs that discard the status (for-list, heredoc, `<( )`) — nothing can,
+> which is why §12.1's out-path convention was widened in the same change.
+
+`vmtest_cleanup` reconciles the two, adopting the file's value only when nothing
+in the driver's own shell claimed the slot first. **The ordering is load-bearing:**
+reconciliation runs *after* cleanup captures the exit status and *before* both the
+MEASURE line and the `rm -rf` that removes the directory the file lives in. Under
+`--keep` the verdict is also copied into the run directory, which survives for
+postmortem.
 
 The chain is: `die` → `exit` → the `EXIT` trap → `vmtest_cleanup` → teardown → the
 process exits with `VMTEST_EXIT`. Nothing else terminates the run, and the write-once
@@ -2525,6 +2911,9 @@ Pseudocode. Signatures and composition only; **this is not runnable and no part 
 
 scenario_install_local() {
     # 1. Deliver source. Byte count is logged per DOC-1 §6.1's precision note.
+    #    A BARE assignment: the substitution's status IS the assignment's, so
+    #    `set -e` still aborts, and §12.4's side channel carries the
+    #    classification back out of the fork.
     _bytes=$(source_deliver_local "$VMTEST_VM" "$PWD" "$VMTEST_GUEST_SRC")
     log "streamed ${_bytes} bytes of git-tracked + untracked-unignored source"
 
@@ -2532,9 +2921,12 @@ scenario_install_local() {
     #    install_from_path asserts `rustc --version` in the crate directory
     #    immediately before building (DOC-1 §8.4). Shared CARGO_TARGET_DIR
     #    rides in VMTEST_GUEST_ENV (DOC-1 §8.6, §7.3).
-    for _dir in $(tsv_scope_crate_dirs); do          # column 2 where in_scope=yes
+    #    NEVER `for _dir in $(tsv_scope_crate_dirs)` — see the amendment below.
+    tsv_scope_crate_dirs "$VMTEST_TMPDIR/scope-crate-dirs.txt"   # in_scope=yes
+    while IFS= read -r _dir; do
+        [ -n "$_dir" ] || continue
         install_from_path "$VMTEST_VM" "$VMTEST_GUEST_SRC" "$_dir"
-    done
+    done < "$VMTEST_TMPDIR/scope-crate-dirs.txt"
 
     # 3. Negative probe N2 — guide-and-abort now that tctl exists (§6.2/§6.3).
     negative_probe_n2 "$VMTEST_VM"
@@ -2561,6 +2953,24 @@ scenario_install_local() {
 > would have asserted that **one** `cargo install trusty-mpm` is what produced
 > them. Every multi-binary in-scope package now gets a call; single-binary packages
 > do not need one, because for them `verify_binaries` already is the whole claim.
+
+> **Amendment, 2026-08-04 — the skeleton was prescribing the defect
+> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).** The loop
+> above read `for _dir in $(tsv_scope_crate_dirs)` until this date, and all three
+> shipped scenario files were faithful implementations of it. **A for-list's exit
+> status is discarded outright**: a `die 60` inside that substitution neither
+> classified the run nor aborted it — the loop simply ran zero times and the
+> scenario carried on having installed nothing. Every call site of both
+> `tsv_scope_*` accessors was a construct of this kind, so the P4-T4 postcondition
+> tripwires were **100% non-functional as classifiers and 60% non-functional even
+> as aborts**. The accessors now take an out_path (§12.1 as amended), and the loop
+> reads a file — `while read < file` runs in the current shell, so a `die` reaches
+> the driver and `set -e` catches a non-zero return.
+>
+> Step 1 is left as a bare assignment on purpose, and the distinction is the point:
+> `x=$(f)` **does** propagate the child's status, so it aborts correctly; only the
+> classification was lost, and §12.4's side channel is what returns it. Fixing a
+> construct that is not broken would have obscured which one was.
 
 Note what the skeleton does **not** contain: no `tart`, no `PATH`, no timeout, no
 exit code, no `if` around a lib call. Every one of those lives in a `lib/` module or

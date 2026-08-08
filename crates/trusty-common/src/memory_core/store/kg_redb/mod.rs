@@ -19,6 +19,8 @@ mod room_ops;
 mod store;
 mod tests;
 mod types;
+// ADR-0027 T9: WINGS / WING_KEYS accessors. Insert-only except the rename pair.
+mod wing_ops;
 mod write_ops;
 
 pub use store::KgStoreRedb;

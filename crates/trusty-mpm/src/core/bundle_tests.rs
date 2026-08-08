@@ -153,6 +153,7 @@ fn tm_capabilities_is_in_bundle() {
         "skills/tm-capabilities/references/agents.md",
         "skills/tm-capabilities/references/skills.md",
         "skills/tm-capabilities/references/doctor.md",
+        "skills/tm-capabilities/references/framework.md",
         "skills/tm-capabilities/references/workflows.md",
     ] {
         assert!(paths.contains(expected), "missing bundled file: {expected}");
@@ -176,6 +177,7 @@ fn tm_capabilities_constants_are_non_empty() {
     assert!(!TM_CAPABILITIES_AGENTS.trim().is_empty());
     assert!(!TM_CAPABILITIES_SKILLS.trim().is_empty());
     assert!(!TM_CAPABILITIES_DOCTOR.trim().is_empty());
+    assert!(!TM_CAPABILITIES_FRAMEWORK.trim().is_empty());
     assert!(!TM_CAPABILITIES_WORKFLOWS.trim().is_empty());
 }
 
@@ -412,11 +414,15 @@ fn bundle_table_is_complete() {
     //   `local-ops`), and `agents/elixir-engineer.md` is ADDED (Phoenix's
     //   `mix.exs` gate narrowed to Phoenix-only, which would otherwise leave
     //   plain Elixir with no engineer). -1 +1, count unchanged at 178.
-    assert_eq!(ALL.len(), 178);
+    // Issue #4946 (+1): tm-capabilities gains a sixth generated reference,
+    //   `references/framework.md` — the harness's own install layout and tier
+    //   precedence, rendered from the path constants and tier resolvers the
+    //   runtime uses. 178 + 1 = 179.
+    assert_eq!(ALL.len(), 179);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 178, "artifact paths must be unique");
+    assert_eq!(paths.len(), 179, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -984,20 +990,53 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
         "composed version-control is missing its persona-level update-branch bullet (#4792)"
     );
 
-    // (b) PM_INSTRUCTIONS.md's Parked-Subagent Re-Engagement section must
-    // survive the real PM system-prompt assembly (not just exist in the source
-    // .md file).
+    // (b) The Parked-Subagent Re-Engagement TRIGGER must survive the real PM
+    // system-prompt assembly (not just exist in the source .md file). The
+    // trigger is what cannot be deferred: an agent handing back with CI pending
+    // is the moment the PM must act, and a PM that never learns to act does not
+    // know to load anything.
     let pm_prompt = assemble_system_prompt();
     assert!(
         pm_prompt.contains("## Parked-Subagent Re-Engagement (issues #2833, #4792)"),
         "assembled PM system prompt is missing the Parked-Subagent \
          Re-Engagement section (#2833, #4792)"
     );
+    // #4969: the MECHANICS moved to `tm-delegation-patterns` (per-prompt rule: an
+    // instruction not needed on EVERY prompt lives in a skill). The resident
+    // text must therefore name the call explicitly — a bare `[SKILL: name]`
+    // mention is documentation style, not a tool invocation, and is exactly how
+    // the previous pointer decayed into decoration beside a re-inlined copy.
     assert!(
-        pm_prompt
-            .contains("never a 30-second blind poll (that is the spam counter-failure, #2833)"),
-        "assembled PM system prompt is missing the PM-side anti-spam-monitoring \
-         guidance (#2833)"
+        pm_prompt.contains(r#"Skill(skill="tm-delegation-patterns")"#),
+        "the resident re-engagement trigger must name the Skill call that \
+         carries the mechanics, not merely mention the skill (#2833, #4792)"
+    );
+    assert!(
+        !pm_prompt.contains("never a 30-second blind poll"),
+        "the anti-spam MECHANICS belong to the skill now; re-inlining them in \
+         the prompt is the redundancy this rule removes (#2833)"
+    );
+
+    // …and the mechanics must actually BE in the skill, or the pointer above is
+    // a dangling reference. Asserted against the real bundled asset.
+    let skill = TM_DELEGATION_PATTERNS;
+    assert!(
+        skill.contains("30-second blind poll") && skill.contains("counter-failure"),
+        "tm-delegation-patterns must carry the PM-side anti-spam-monitoring \
+         guidance the prompt now points at (#2833)"
+    );
+    assert!(
+        skill.contains("## PM Re-Engagement (issues #2833, #4792)"),
+        "tm-delegation-patterns must carry the PM Re-Engagement section the \
+         prompt names by title (#2833, #4792)"
+    );
+    // The skill has to be REACHABLE by relevance too: its description is what a
+    // relevance match sees, and "delegation matrices" alone never fires at the
+    // moment an agent hands back with pending CI.
+    assert!(
+        skill.contains("CI pending") && skill.contains("re-engagement"),
+        "tm-delegation-patterns' frontmatter description must mention the \
+         CI-wait / re-engagement trigger, or it cannot fire on its own (#4792)"
     );
 }
 
@@ -1182,4 +1221,104 @@ fn rust_build_performance_declared_by_rust_family_agents() {
              rust-build-performance skill: {composed}"
         );
     }
+}
+
+#[test]
+fn output_styles_keep_claude_code_coding_instructions() {
+    // Claude Code strips its built-in software-engineering instructions (how to
+    // scope changes, write comments, verify work) from any custom output style
+    // unless `keep-coding-instructions` is true — the field defaults to FALSE.
+    // All three bundled styles are PM-orchestration styles layered ON TOP of
+    // normal coding behaviour, so all three must opt back in.
+    for style in OUTPUT_STYLES {
+        let frontmatter = style
+            .content
+            .split("---")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{} must open with a YAML frontmatter block", style.id));
+        assert!(
+            frontmatter.contains("keep-coding-instructions: true"),
+            "{} frontmatter must set `keep-coding-instructions: true`, or Claude \
+             Code silently drops its built-in coding instructions",
+            style.id
+        );
+    }
+}
+
+#[test]
+fn output_styles_mirror_the_pm_prose_rules() {
+    // #2647: the output style is the only channel that survives a manual
+    // `claude` launch with no tm-appended system prompt, so the PM prose rules
+    // in `assets/instructions/sections/core.md` are MIRRORED here rather than
+    // referenced. Guard every load-bearing rule plus the #2647 rationale, so a
+    // future edit cannot quietly drop the mirror back to a dangling reference.
+    const REQUIRED: &[&str] = &[
+        "## Communication — Write Plainly",
+        "issue #2647",
+        "**No praise for the user.**",
+        "**Delete the framing opener; lead with the fact.**",
+        "**Do not embellish.**",
+        "the banned word \"honest\"",
+        "**Ticket and PR bodies**",
+        "never whether it is said",
+    ];
+    for style in OUTPUT_STYLES {
+        for needle in REQUIRED {
+            assert!(
+                style.content.contains(needle),
+                "{} is missing mirrored prose rule {needle:?} (#2647)",
+                style.id
+            );
+        }
+        // The superseded lighter rule set must be FOLDED IN, not left alongside
+        // the mirrored rules as a second overlapping statement of the same thing.
+        assert!(
+            !style.content.contains("**Tone**: Professional, neutral"),
+            "{}: the old Communication block must be folded into the mirrored \
+             prose rules, not duplicated beside them",
+            style.id
+        );
+    }
+}
+
+#[test]
+fn base_agent_graduated_verbosity_survives_composition() {
+    // Output styles do NOT apply to subagents (they run their own system
+    // prompt), so the sparse-on-success rule has to reach agents through
+    // BASE-AGENT.md composition instead. Assert it lands in a composed agent,
+    // and that it did not weaken the raw-output evidence rule it sits beside.
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("assets")
+        .join("agents");
+
+    let composed =
+        compose_agent("version-control", &assets_dir).expect("compose_agent must succeed");
+
+    assert!(
+        composed.contains("Verbosity scales with what went wrong"),
+        "composed agent is missing the graduated-verbosity rule"
+    );
+    assert!(
+        composed.contains("A long report about a clean run"),
+        "composed agent is missing the sparse-on-success rule"
+    );
+    // The evidence floor must survive verbatim next to it.
+    assert!(
+        composed.contains("Show raw output. Never summarise test results in your own words."),
+        "graduated verbosity must not weaken the raw-output rule"
+    );
+    assert!(
+        composed.contains("Sparse-on-success governs the"),
+        "composed agent is missing the evidence-rule carve-out"
+    );
+    // "Caveman" is taken: hooks/optimizer.toml uses it for an unrelated
+    // tool-output compression level. The prose rule must not collide with it.
+    assert!(
+        !composed.contains("Caveman"),
+        "graduated-verbosity rule must not reuse the optimizer's `Caveman` term"
+    );
 }

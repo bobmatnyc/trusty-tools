@@ -168,6 +168,22 @@ pub(crate) use settings::{
     inject_trusty_memory_mcp, inject_trusty_mpm_mcp, inject_trusty_review_mcp,
 };
 
+/// Re-export of the `.mcp.json` git-exclusion guard (#4181) for the OTHER
+/// site that runs the injectors.
+///
+/// Why: `prepare_session_inner` is not the only writer.
+/// `runtime::claude_code::prepare_managed_config` re-runs the same four
+/// injectors on every spawn/resume, and `spawn_resume` /
+/// `build_inplace_resume_command` reach it with no `prepare_session*` in their
+/// chain at all. Exporting the guard is what lets that second site hold the
+/// same invariant instead of silently reintroducing a dirty tracked file.
+/// What: re-exports [`native_mcp::exclude_mcp_json_from_git`] — a plain
+/// re-export, no logic of its own.
+/// Test: the guard's own behavior is pinned by
+/// `ensure_git_excluded_adds_mcp_json`; the second call site by
+/// `prepare_managed_config_excludes_mcp_json_from_git`.
+pub(crate) use native_mcp::exclude_mcp_json_from_git;
+
 /// Re-export of the resume-time worktree/upstream sync primitives (issue
 /// #2647) for reuse by `daemon::managed_routes::lifecycle::resume_managed`.
 ///
@@ -1012,7 +1028,11 @@ fn prepare_session_inner(
     // daemon's managed launch excludes the user tier where that triad would
     // otherwise be provisioned. Non-fatal: the session still launches, it
     // just won't record memory or lifecycle events via the hooks.
-    let hooks_written = match write_project_hooks(project_dir) {
+    //
+    // #5034: `[hooks] prompt_context = false` suppresses the per-prompt
+    // `trusty-memory prompt-context` injection (and strips one a prior launch
+    // wrote). Default `true` — every other hook is written either way.
+    let hooks_written = match write_project_hooks(project_dir, config.hooks.prompt_context) {
         Ok(()) => true,
         Err(err) => {
             tracing::warn!("failed to write trusty-mpm project hooks: {err}");
@@ -1035,6 +1055,12 @@ fn prepare_session_inner(
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::ConfiguringMcp,
     );
+
+    // #4181: keep `.mcp.json` out of git's index BEFORE any injector writes to
+    // it — see `native_mcp::exclude_mcp_json_from_git` for why, and why a
+    // failure here must not stop the injectors below.
+    native_mcp::exclude_mcp_json_from_git(project_dir);
+
     let mut trusty_memory_injected = false;
     if plan.inject_trusty_memory {
         // Pin the project's palace via `env.TRUSTY_MEMORY_PALACE` (issue #1605).

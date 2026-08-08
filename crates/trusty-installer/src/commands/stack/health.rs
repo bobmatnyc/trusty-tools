@@ -15,7 +15,7 @@
 use serde::Serialize;
 
 use crate::commands::probe::{health_str, probe_member_health};
-use crate::commands::stable_set::stable_set;
+use crate::commands::stable_set::daemon_members;
 use crate::output::render_json;
 
 /// One member's health row.
@@ -96,9 +96,9 @@ impl HealthReport {
 /// exit code.
 /// Test: side-effecting (probes); the report logic is tested via `HealthReport`.
 pub fn run_health(json: bool) -> i32 {
-    let members: Vec<HealthRow> = stable_set()
+    // The daemon rule is pinned once in `stable_set::daemon_members`.
+    let members: Vec<HealthRow> = daemon_members()
         .into_iter()
-        .filter(|m| m.daemon)
         .map(|m| HealthRow {
             // #4246: typed probe; the rollup renders the flat word.
             health: probe_member_health(&m.binary, m.manage)

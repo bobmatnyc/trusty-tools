@@ -51,14 +51,18 @@ pub enum ServiceAction {
 
 /// Reverse-DNS label for the LaunchAgent.
 ///
-/// Why: this MUST equal `trusty_installer`'s
-/// `plist_label::plist_label_for("trusty-console")` (`com.trusty.trusty-console`
-/// by convention) or `tctl start`/`tctl stop` would target a launchd job that
-/// `service install` never created.
+/// Why: this MUST equal the label `tctl start`/`tctl stop` targets, or those
+/// commands drive a launchd job that `service install` never created. Making
+/// both read the same registry constant is what turns "must equal" from a
+/// comment into a fact.
+///
+/// #4868: was the literal `"com.trusty.trusty-console"` while the unit launchd
+/// actually has loaded is `com.trusty.console`, so `service status` queried a
+/// label that does not exist — the same divergence that broke trusty-search.
 /// What: the `Label` key value and the `<label>.plist` base name.
 /// Test: `service_label_matches_tctl_convention`.
 #[cfg(target_os = "macos")]
-pub const LAUNCHD_LABEL: &str = "com.trusty.trusty-console";
+pub const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::CONSOLE;
 
 /// Dispatch a `trusty-console service <action>` invocation.
 ///
@@ -136,21 +140,49 @@ fn launchd_config() -> Result<trusty_common::launchd::LaunchdConfig> {
         throttle_interval: 10,
         env_vars: Vec::new(),
         fd_limit: None,
+        working_directory: None,
     }
     .with_daemon_path())
 }
 
+/// Install the LaunchAgent and load it.
+///
+/// #4868: console's label genuinely CHANGES with this fix
+/// (`com.trusty.trusty-console` → `com.trusty.console`), which makes eviction
+/// mandatory rather than tidy. A bare `install()` + `bootstrap()` on a host that
+/// ran the older installer would leave the old unit loaded AND add the new one —
+/// two console daemons on one port, the exact #2938 condition. Routing through
+/// `install_and_activate` boots the old label out first, skips the reload when
+/// nothing changed, and rolls back rather than leaving the dashboard down.
 #[cfg(target_os = "macos")]
 fn service_install() -> Result<()> {
     let cfg = launchd_config()?;
-    cfg.install()
-        .map_err(|e| anyhow::anyhow!("install LaunchAgent plist: {e}"))?;
     let plist_path = cfg.plist_path()?;
-    println!("[ok] Wrote LaunchAgent plist: {}", plist_path.display());
-
-    cfg.bootstrap()
-        .map_err(|e| anyhow::anyhow!("launchctl bootstrap: {e}"))?;
+    let outcome = cfg
+        .install_and_activate(trusty_common::launchd_labels::legacy_labels_for(
+            LAUNCHD_LABEL,
+        ))
+        .map_err(|e| anyhow::anyhow!("install LaunchAgent: {e}"))?;
+    for label in outcome.evicted() {
+        println!(
+            "[warn] Evicted the stale LaunchAgent {label} — it named this daemon under an old label."
+        );
+    }
     let domain = format!("gui/{}", trusty_common::launchd::current_uid());
+    if matches!(
+        outcome,
+        trusty_common::launchd_activate::Activation::AlreadyCurrent { .. }
+    ) {
+        println!(
+            "[ok] {LAUNCHD_LABEL} is already loaded in {domain} with this exact unit — left running."
+        );
+        println!(
+            "  Logs:    {}\n  Status:  trusty-console service status",
+            cfg.log_dir.display()
+        );
+        return Ok(());
+    }
+    println!("[ok] Wrote LaunchAgent plist: {}", plist_path.display());
     println!(
         "[ok] trusty-console service installed and started ({LAUNCHD_LABEL} loaded into {domain})."
     );
@@ -165,6 +197,14 @@ fn service_install() -> Result<()> {
 fn service_uninstall() -> Result<()> {
     let cfg = launchd_config()?;
     let plist_path = cfg.plist_path()?;
+    // #4868: a host that never ran the migrating install still has the unit
+    // under its old label. Removing only the canonical plist printed "nothing
+    // to do" while leaving that one loaded.
+    for label in cfg.evict_legacy(trusty_common::launchd_labels::legacy_labels_for(
+        LAUNCHD_LABEL,
+    )) {
+        println!("[ok] Unloaded and removed the stale LaunchAgent {label}");
+    }
     if plist_path.exists() {
         let _ = cfg.bootout();
         std::fs::remove_file(&plist_path)
@@ -230,14 +270,22 @@ fn service_logs() -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Why: the label is a cross-crate contract — `tctl` derives
-    /// `com.trusty.trusty-console` in `plist_label_for` and bootstraps THAT
-    /// plist; drift here silently breaks `tctl start trusty-console`.
-    /// What: asserts the constant equals the convention-derived label.
+    /// Why: the label is a cross-crate contract — `tctl` resolves it through
+    /// `plist_label_for` and bootstraps THAT plist, so drift silently breaks
+    /// `tctl start trusty-console`. #4868: asserting against a re-typed literal
+    /// is what made the old version of this test agree with the wrong answer
+    /// (`com.trusty.trusty-console`, while launchd has `com.trusty.console`);
+    /// it now asserts against the registry both sides read.
+    /// What: the constant equals the canonical registry label, and is NOT the
+    /// pre-#4868 full-name form.
     /// Test: this is the test.
     #[test]
     fn service_label_matches_tctl_convention() {
-        assert_eq!(LAUNCHD_LABEL, "com.trusty.trusty-console");
+        assert_eq!(LAUNCHD_LABEL, trusty_common::launchd_labels::CONSOLE);
+        assert_ne!(
+            LAUNCHD_LABEL, "com.trusty.trusty-console",
+            "the full-name form is a legacy alias, not a unit launchd has"
+        );
     }
 
     /// Why: the launchd agent must start the dashboard HTTP daemon, i.e.

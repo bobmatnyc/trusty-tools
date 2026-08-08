@@ -23,7 +23,7 @@ use crate::types::EventRow;
 /// the spawn side and gating the hook handler on the same var keeps the
 /// suppression cheap, explicit, and process-local. Re-exporting the shared
 /// constant from `trusty_common::claude_config` ensures the spawn site
-/// (`open-mpm`) and this consumer never drift apart on the literal name.
+/// (`trusty-agents`) and this consumer never drift apart on the literal name.
 /// What: thin alias for
 /// [`trusty_common::claude_config::CLAUDE_MPM_SUB_AGENT_ENV_VAR`]. Presence
 /// is what matters; the canonical value used by spawn helpers is `"1"`.
@@ -206,59 +206,12 @@ pub(crate) async fn doctor(url: &str, flags: &crate::cli::DoctorFlags) -> anyhow
         other => eprintln!("doctor: unexpected result {other:?}"),
     }
 
-    if flags.prune_stale_skills {
-        prune_stale_skills_locally();
-    }
-
-    if flags.fix_skills {
-        super::doctor_fix_skills::fix_skills_locally(flags.include_frozen);
-    }
+    // #4948: every opt-in local action the report can be followed by lives in
+    // `doctor_repair`, so this file stays the report and the actions stay
+    // together.
+    super::doctor_repair::run_post_report_actions(flags);
 
     Ok(())
-}
-
-/// Hidden `--prune-stale-skills` action — force-remove pre-rename
-/// `~/.claude/skills/mpm-*` directories.
-///
-/// Why: the mpm-*→tm-* skill rename (#1905) never deletes a skill's old
-/// directory when it is renamed (`skill_deployer::deploy_skills` only writes,
-/// never removes). In normal operation this is handled automatically and
-/// silently by the one-time startup migration
-/// (`core::stale_skills::run_stale_mpm_skills_migration_once`); this hidden
-/// flag exists only as a manual escape hatch for troubleshooting (e.g. the
-/// migration marker file was lost or hand-edited). This runs entirely
-/// against the local filesystem — like `tm install` and `tm repair` —
-/// independent of where the daemon (whose report is printed above) happens
-/// to be reachable.
-/// What: resolves `~/.claude/skills/` via [`FrameworkPaths::default`], calls
-/// [`find_stale_mpm_skills`] to list only trusty-mpm's own frozen pre-rename
-/// skill names (never an unrelated `mpm-*` skill from another tool), prints
-/// what it found, then [`remove_stale_mpm_skills`] to delete them.
-/// Test: `core::stale_skills::tests` covers the detection/removal logic this
-/// wraps; this function itself is thin I/O + printing.
-fn prune_stale_skills_locally() {
-    use trusty_mpm::core::paths::FrameworkPaths;
-    use trusty_mpm::core::stale_skills::{find_stale_mpm_skills, remove_stale_mpm_skills};
-
-    let paths = FrameworkPaths::default();
-    let dir = paths.claude_skills_dir();
-    let stale = find_stale_mpm_skills(&dir);
-    if stale.is_empty() {
-        println!(
-            "\nno stale pre-rename mpm-* skills found in {}",
-            dir.display()
-        );
-        return;
-    }
-
-    println!("\nremoving {} stale pre-rename skill(s):", stale.len());
-    for skill in &stale {
-        println!("  - {}", skill.name);
-    }
-    match remove_stale_mpm_skills(&stale) {
-        Ok(n) => println!("removed {n} stale skill directory(ies)"),
-        Err(e) => eprintln!("failed to remove stale skills: {e}"),
-    }
 }
 
 /// `validate` subcommand — diff a workspace's deployed `.claude/{agents,skills}`
@@ -484,7 +437,11 @@ pub(crate) async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
 /// Best-effort, bounded read of the last `max_bytes` of a transcript file.
 ///
 /// Why (#2610): the idle-parking detector needs the agent's final assistant
-/// message, which lives at the END of Claude Code's JSONL transcript. Reading
+/// message, which lives at the END of Claude Code's JSONL transcript. #4837
+/// added a second consumer with the same shape —
+/// [`super::pm_guard_cost::evaluate_agent_cost`] needs the newest `usage`
+/// block, also at the end — so this is `pub(crate)` rather than duplicated.
+/// Reading
 /// only the tail bounds both time and memory on a large session transcript, so
 /// the Stop/SubagentStop hook can never block the user's prompt. A tail read may
 /// slice mid-line; the detector tolerates a truncated leading line, so we accept
@@ -509,7 +466,7 @@ pub(crate) async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
 /// FIFO case returns promptly instead of hanging; also exercised end-to-end via
 /// [`detect_idle_parking_from_payload`]'s callers and the `core::idle_parking`
 /// unit tests that cover truncated tails.
-async fn read_transcript_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+pub(crate) async fn read_transcript_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     let meta = tokio::fs::metadata(path).await.ok()?;

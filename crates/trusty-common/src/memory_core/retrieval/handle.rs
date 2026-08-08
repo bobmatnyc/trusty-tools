@@ -9,16 +9,23 @@
 //! the full retrieval test suite in retrieval::tests.
 
 use super::embedder::shared_embedder;
+// #4906: the deferred-embed lane — retry, then durably record what was lost.
+use super::deferred_embed;
+// #4886: ADR-0028 Tier C admission + retire-on-write. Kept in its own module so
+// the write path's design rationale does not push this file over the SLOC cap.
+use super::tier_c;
 use super::types::{L1_CAP, RememberOptions};
 use crate::memory_core::analytics::{RecallEvent, RecallLog, query_hash};
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::filter::{FilterReject, check_secret, classify};
 use crate::memory_core::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
+use crate::memory_core::room_identity::DEFAULT_WING_ID;
 use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::kg::KnowledgeGraph;
 use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::palace_store::PalaceStore;
+use crate::memory_core::store::rooms::resolve_or_create_room_in_wing;
 use crate::memory_core::store::vector::{UsearchStore, VectorStore};
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
@@ -331,10 +338,23 @@ impl PalaceHandle {
         // logged, never fatal) and drop the entry from the in-memory list
         // so it never participates in recall. Vector tombstones are left
         // for `palace_compact` since dropping them needs an async call.
+        //
+        // #4885: this sweep is reclamation, not enforcement. It cannot be the
+        // enforcement point because the daemon opens the palace once as
+        // `OpenIntent::Writer` and holds it for the process lifetime, so
+        // anything expiring afterwards is never reconsidered here. The
+        // retrieval layers filter on every read (ADR-0028 D4); this only keeps
+        // the store from accumulating. It shares `is_expired_at` with the read
+        // path so the two cannot disagree about what "expired" means.
+        //
+        // #4886: a Tier C fact is exempt. Its `expires_at` is the retirement
+        // condition D4 demanded at admission, not a lifetime — read-time expiry
+        // already stops it being served, and deleting the row would contradict
+        // D6's "demoted, never deleted". See `Drawer::is_tier_c`.
         let now = chrono::Utc::now();
         let mut pruned = 0usize;
         all_drawers.retain(|d| {
-            let expired = d.expires_at.is_some_and(|t| t < now);
+            let expired = d.is_expired_at(now) && !d.is_tier_c();
             if expired {
                 if let Err(e) = kg.delete_drawer_sync(d.id) {
                     tracing::warn!(
@@ -585,8 +605,11 @@ impl PalaceHandle {
         // lookup that creates the row when absent — never from hashing a
         // `Debug` string. Fail-open: a registry error falls back to the legacy
         // fold so a room problem can never fail a memory write.
-        let room_id =
-            crate::memory_core::store::rooms::resolve_or_create_room(&self.kg, &room).await;
+        // ADR-0027 T9: `opts.wing_id` is `None` for every caller that predates
+        // wings, which resolves in the default wing — byte-identically to the
+        // line this replaced.
+        let wing_id = opts.wing_id.unwrap_or(DEFAULT_WING_ID);
+        let room_id = resolve_or_create_room_in_wing(&self.kg, &room, wing_id).await;
 
         let mut drawer = Drawer::new(room_id, content.clone());
         drawer.tags = tags;
@@ -601,6 +624,13 @@ impl PalaceHandle {
             None => classify(&content, DrawerType::Unknown),
         };
         drawer = drawer.with_type(final_type);
+
+        // #4886: ADR-0028 D3/D4 Tier C admission — the single enforcement
+        // point for the whole workspace. Runs after `with_type` so an admitted
+        // Tier C TTL overrides the `SessionEvent` type default, and fails
+        // closed, so a refusal leaves this drawer exactly as today's code would
+        // have written it. See `tier_c::apply_admission`.
+        tier_c::apply_admission(&mut drawer, &opts, &self.id);
         let id = drawer.id;
 
         // Embed and upsert. Use the process-wide shared embedder so we don't
@@ -615,9 +645,14 @@ impl PalaceHandle {
         // backfilled by a background task once the embedder resolves. Text
         // and KG indexing never depend on the embedder either way; this
         // branch only changes *when* the drawer becomes vector-searchable.
-        if opts.defer_embedding {
-            self.spawn_deferred_embed(id, content.clone());
-        } else {
+        //
+        // #4906: the deferred branch is SPAWNED BELOW, after the drawer reaches
+        // `self.drawers`. Spawning here raced the push: the background task
+        // refuses to record a failure for a drawer absent from that table, so a
+        // task that failed before the push wrote nothing for a drawer that was
+        // about to become durable and vector-less — the exact combination this
+        // lane exists to eliminate.
+        if !opts.defer_embedding {
             // Issue #906: both `shared_embedder()` (cold init path) and
             // `embed_batch` carry their own bounded timeouts — if the embedder
             // hangs mid-batch the remember call returns an error instead of
@@ -626,17 +661,22 @@ impl PalaceHandle {
                 .await
                 .context("acquire shared embedder for remember")?;
             let embed_timeout = timeouts::embed_batch_timeout();
-            let vecs = tokio::time::timeout(embed_timeout, embedder.embed_batch(&[content]))
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "embed_batch timed out after {:?} on remember path (issue #906); \
+            let vecs = tokio::time::timeout(
+                embed_timeout,
+                // `from_ref` rather than `&[content]`: the deferred branch below
+                // still needs `content`, so this borrows instead of moving.
+                embedder.embed_batch(std::slice::from_ref(&content)),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "embed_batch timed out after {:?} on remember path (issue #906); \
                          increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately \
                          take longer on this host",
-                        embed_timeout
-                    )
-                })?
-                .context("embed drawer content")?;
+                    embed_timeout
+                )
+            })?
+            .context("embed drawer content")?;
             if let Some(v) = vecs.into_iter().next() {
                 self.vector_store
                     .upsert(id, v)
@@ -647,14 +687,28 @@ impl PalaceHandle {
 
         // Persist drawer metadata BEFORE the in-memory push so a crash mid-op
         // cannot leave an in-memory drawer with no redb record backing it.
-        self.kg
-            .upsert_drawer(&drawer)
+        // #4886: when this drawer claims a `fact_key`, the same call retires
+        // the slot's prior occupant in the SAME redb transaction — the
+        // read-decide-write sequence runs entirely under the write guard taken
+        // above, so no concurrent writer on this palace can interleave with it.
+        let retired = tier_c::persist_with_retirement(self, &drawer)
             .await
             .context("persist drawer metadata")?;
 
         {
             let mut drawers = self.drawers.write();
+            // #4886: mirror the retirement under the SAME lock as the push, so
+            // a reader never sees the newcomer present while the displaced
+            // drawer still claims the slot.
+            tier_c::retire_in_memory(&mut drawers, retired);
             drawers.push(drawer);
+        }
+
+        // #4906: spawn the background embed only now. The drawer is in redb and
+        // in the in-memory table, so a failure arriving at any point from here
+        // on finds the drawer present and gets recorded. See the branch above.
+        if opts.defer_embedding {
+            self.spawn_deferred_embed(id, content);
         }
 
         // L1 snapshot: re-sort the in-memory table and persist top-15.
@@ -670,83 +724,39 @@ impl PalaceHandle {
         Ok(id)
     }
 
-    /// Fire-and-forget background embed + vector-store backfill for a
-    /// drawer written while the shared embedder was cold (issue #1970).
+    /// Background embed + vector-store backfill for a drawer written while the
+    /// shared embedder was cold (issue #1970).
     ///
-    /// Why: `memory_remember` / `memory_note` / `task_add` must not block
-    /// the caller behind a 30-120s CoreML/CUDA cold compile just to persist
-    /// a memory — the KG/redb write already completed synchronously by the
-    /// time this is called. This task's only job is to make the drawer's
-    /// vector show up in `retrieve_l2` / `retrieve_l3` once the shared
-    /// embedder resolves.
-    /// What: clones the `Arc<UsearchStore>` handle and spawns a detached
-    /// task that awaits `shared_embedder()` (retrying the cold init if
-    /// necessary), embeds `content` under the same bounded timeout the
-    /// synchronous path uses, and upserts the resulting vector under `id`.
-    /// Every failure mode (embedder init failure, embed timeout, upsert
-    /// error) is logged at `warn!` and dropped — the drawer is already
-    /// durable via KG/redb regardless of whether the vector backfill
-    /// succeeds.
-    /// Known limitation: if the drawer is forgotten before this task
-    /// completes, the backfilled vector becomes an orphaned entry in the
-    /// vector store. Acceptable for a best-effort background lane (mirrors
-    /// the existing best-effort tone of BM25 indexing and auto-KG
-    /// extraction elsewhere in this pipeline); tighten with an
-    /// existence check against `self.drawers` if this proves to matter in
-    /// practice.
-    /// Test: `deferred_embed_backfills_vector_once_embedder_ready` in
-    /// `retrieval::tests`.
+    /// Why: `memory_remember` / `memory_note` / `task_add` must not block the
+    /// caller behind a 30-120 s CoreML/CUDA cold compile just to persist a
+    /// memory — the KG/redb write already completed synchronously by the time
+    /// this is called. #4906: it must also not LOSE the failure. This used to
+    /// end every failure branch in a `warn!` and a bare return, which is how 39
+    /// of 1,241 live drawers ended up durable and permanently unfindable.
+    /// What: hands the job to [`deferred_embed::spawn`], which retries transient
+    /// failures with backoff and records a durable ledger row when it gives up.
+    /// The write path is still asynchronous; only the failure handling changed.
+    /// Known limitation (unchanged): a drawer forgotten before the task finishes
+    /// leaves an orphaned vector, reclaimed by `palace_compact`.
+    /// Test: `permanent_failure_writes_a_ledger_row` and
+    /// `retry_succeeds_after_transient_failures` in `embed_repair_tests`.
     fn spawn_deferred_embed(&self, id: Uuid, content: String) {
-        let vector_store = self.vector_store.clone();
-        let palace_id = self.id.clone();
-        tokio::spawn(async move {
-            let embedder = match shared_embedder().await {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(
-                        palace = %palace_id,
-                        drawer = %id,
-                        "deferred embed: shared embedder init failed (vector left unindexed): {e:#}"
-                    );
-                    return;
-                }
-            };
-            let embed_timeout = timeouts::embed_batch_timeout();
-            let vecs =
-                match tokio::time::timeout(embed_timeout, embedder.embed_batch(&[content])).await {
-                    Ok(Ok(v)) => v,
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            palace = %palace_id,
-                            drawer = %id,
-                            "deferred embed: embed_batch failed: {e:#}"
-                        );
-                        return;
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            palace = %palace_id,
-                            drawer = %id,
-                            "deferred embed: embed_batch timed out after {embed_timeout:?}"
-                        );
-                        return;
-                    }
-                };
-            if let Some(v) = vecs.into_iter().next() {
-                match vector_store.upsert(id, v).await {
-                    Ok(()) => tracing::info!(
-                        palace = %palace_id,
-                        drawer = %id,
-                        "deferred embed: vector backfill complete"
-                    ),
-                    Err(e) => tracing::warn!(
-                        palace = %palace_id,
-                        drawer = %id,
-                        "deferred embed: vector upsert failed: {e:#}"
-                    ),
-                }
-            }
-        });
+        deferred_embed::spawn(self.deferred_embed_ctx(), id, content);
+    }
+
+    /// The slice of this handle the background embed lane needs.
+    ///
+    /// Why: the spawned task outlives the `&self` borrow, so it takes owned
+    /// `Arc` clones rather than a reference.
+    /// What: palace id, vector store, drawer table, and data dir.
+    /// Test: exercised by every `embed_repair_tests` case.
+    pub(super) fn deferred_embed_ctx(&self) -> deferred_embed::DeferredEmbedCtx {
+        deferred_embed::DeferredEmbedCtx {
+            palace_id: self.id.clone(),
+            vector_store: self.vector_store.clone(),
+            drawers: self.drawers.clone(),
+            data_dir: self.data_dir.clone(),
+        }
     }
 
     /// Rebuild the closet keyword index from the current in-memory drawer table.
@@ -893,7 +903,18 @@ impl PalaceHandle {
     /// is in the past, and routes each through `forget` so the vector
     /// index and persistent metadata stay in sync. Returns the number of
     /// drawers pruned. No-op on read-only handles.
-    /// Test: `purge_expired_drops_only_past_ttl`.
+    ///
+    /// #4885: this is reclamation, not the enforcement point — recall filters
+    /// expired drawers on every read (`Drawer::is_expired_at`, ADR-0028 D4), so
+    /// a palace whose sweep never runs still never serves an expired drawer. It
+    /// remains worth calling because the read filter hides rows without freeing
+    /// the storage or the vector slot they occupy.
+    ///
+    /// #4886: Tier C drawers are skipped — for them `expires_at` is ADR-0028
+    /// D4's retirement condition rather than a lifetime, and D6 requires the
+    /// record survive its retirement. See `Drawer::is_tier_c`.
+    /// Test: `purge_expired_drops_only_past_ttl`,
+    /// `purge_expired_leaves_tier_c_drawers_alone`.
     pub async fn purge_expired(&self) -> Result<usize> {
         if self.is_read_only() {
             return Ok(0);
@@ -903,7 +924,7 @@ impl PalaceHandle {
             .drawers
             .read()
             .iter()
-            .filter(|d| d.expires_at.is_some_and(|t| t < now))
+            .filter(|d| d.is_expired_at(now) && !d.is_tier_c())
             .map(|d| d.id)
             .collect();
         let count = expired_ids.len();

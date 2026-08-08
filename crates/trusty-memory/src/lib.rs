@@ -25,7 +25,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, OnceCell, RwLock};
 use trusty_common::bm25_client::Bm25Client;
 use trusty_common::mcp::initialize_response;
-use trusty_common::memory_core::embed::FastEmbedder;
+use trusty_common::memory_core::embed::Embedder;
 use trusty_common::memory_core::{store::ChatSessionStore, PalaceRegistry};
 use trusty_common::ChatProvider;
 
@@ -75,6 +75,8 @@ impl DaemonReadiness {
 pub mod activity;
 pub mod attribution;
 pub mod authz;
+pub mod bm25_backfill;
+pub mod bm25_repair;
 pub mod bm25_supervisor;
 pub mod bootstrap;
 /// Autonomous Dreamer scheduler — spawns per-palace dream loops on daemon startup.
@@ -108,7 +110,7 @@ pub mod idle_evict;
 pub mod worker_liveness;
 // Why (issue #226): `chat` and `web` are pure axum HTTP/SSE handler
 //      surfaces. Gating them behind the `axum-server` feature is what lets
-//      library consumers (e.g. `open-mpm` linking only `MemoryMcpService`)
+//      library consumers (e.g. `trusty-agents` linking only `MemoryMcpService`)
 //      drop axum + tower-http entirely from their build graph.
 #[cfg(feature = "axum-server")]
 pub mod chat;
@@ -272,17 +274,22 @@ pub fn resolve_palace_registry_dir(data_dir: PathBuf) -> PathBuf {
 /// Why: The stdio loop and HTTP server need the same handles to the registry,
 /// data root, and embedder so MCP tools can perform real reads/writes against
 /// the live trusty-memory core. The embedder is heavy (loads ONNX weights) so
-/// we hold it behind a `OnceCell` and initialize lazily on first use.
-/// What: `Clone`-able via `Arc` fields. The registry / data root are eager;
-/// `embedder` is `Arc<OnceCell<Arc<FastEmbedder>>>` so concurrent first-use
-/// races resolve to a single shared instance.
+/// it is resolved lazily through the process-wide singleton on first use.
+///
+/// #4836: this struct used to carry its own `Arc<OnceCell<Arc<FastEmbedder>>>`,
+/// a SECOND cell independent of `retrieval::shared_embedder()`. Startup warmed
+/// the shared cell and latched `daemon_readiness` off it, while every recall
+/// consumed the private cell — so the flag reported one embedder's state while
+/// the request path used another's. One cell removes the disagreement (and the
+/// duplicate ~90 MB ONNX session) by construction.
+/// What: `Clone`-able via `Arc` fields. The registry / data root are eager; the
+/// embedder is reached via [`AppState::embedder`].
 /// Test: `app_state_default_constructs` confirms construction without panic.
 #[derive(Clone)]
 pub struct AppState {
     pub version: String,
     pub registry: Arc<PalaceRegistry>,
     pub data_root: PathBuf,
-    pub embedder: Arc<OnceCell<Arc<FastEmbedder>>>,
     /// Optional default palace applied to MCP tool calls when the caller
     /// omits the `palace` argument. Set via `trusty-memory serve --palace`.
     pub default_palace: Option<String>,
@@ -395,6 +402,22 @@ pub struct AppState {
     /// Test: `get_prompt_context_returns_cached_or_hint`,
     /// `get_prompt_context_filters_by_query`.
     pub prompt_context_cache: Arc<RwLock<prompt_facts::PromptFactsCache>>,
+    /// Serializes the Tier S check-then-write sequence (#4888).
+    ///
+    /// Why: the 20-fact cap is only a cap if it cannot be raced past.
+    /// `check_tier_s_admission` counts active facts across every palace and
+    /// then the caller writes — two callers that both observe 19 would both
+    /// pass and the surface would land at 21. Nothing else serializes them:
+    /// the KG's single-writer actor orders writes only *within* one palace,
+    /// and the count spans all of them. "Usually 20, occasionally 21" is not
+    /// the invariant ADR-0028 D8 asks for.
+    /// What: an async mutex whose guard is acquired by
+    /// `check_tier_s_admission` and returned to the caller, which must hold it
+    /// until its `kg.assert` is enqueued. Cold predicates never acquire it, so
+    /// ordinary knowledge-graph writes stay fully concurrent; hot writes are
+    /// deliberate and rare, so serializing them costs nothing measurable.
+    /// Test: `tier_s_cap_holds_under_concurrent_writes`.
+    pub tier_s_admission_lock: Arc<tokio::sync::Mutex<()>>,
     /// Persistent activity log (issue #96).
     ///
     /// Why: the dashboard activity feed used to be a pure live-stream over
@@ -556,6 +579,18 @@ pub struct AppState {
     /// Test: `bm25_index_queue_drops_when_full` exercises the full-queue
     /// branch via `bm25_index_enqueue`.
     pub bm25_index_tx: tokio::sync::mpsc::Sender<tools::Bm25IndexRequest>,
+    /// Palaces whose BM25 coverage is known to be incomplete (#5048 review).
+    ///
+    /// Why: `bm25_index_enqueue` drops on a full queue so `memory_remember`
+    /// never waits on daemon RTT. That trade is only defensible if a drop is
+    /// actually repaired, and before this field the sole production trigger for
+    /// a backfill was daemon startup — so a drop stayed invisible until the
+    /// next restart. Every observer of lost coverage marks the palace here and
+    /// [`bm25_repair::spawn_repair_sweep`] consumes it on an interval.
+    /// What: a `DashSet` of palace ids, shared by every `AppState` clone.
+    /// Idempotent — forty drops for one palace queue one repair.
+    /// Test: `bm25_repair_tests.rs`, `bm25_index_queue_drops_when_full`.
+    pub bm25_dirty: bm25_repair::DirtyPalaces,
     /// Cached result of the startup update check (issue #537).
     ///
     /// Why: `/health` should report `update_available` without hitting crates.io
@@ -613,14 +648,14 @@ impl AppState {
         // `bm25_client` / `bm25_supervisor` start as `None`; the builder
         // `with_bm25_client_from_env` rebuilds the worker with the real
         // client + supervisor once env-gated opt-in is resolved.
-        tools::spawn_bm25_index_worker(bm25_index_rx, None, None);
+        let bm25_dirty: bm25_repair::DirtyPalaces = Arc::new(dashmap::DashSet::new());
+        tools::spawn_bm25_index_worker(bm25_index_rx, None, None, Arc::clone(&bm25_dirty));
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Idle-to-disk: honour TRUSTY_MEMORY_MAX_OPEN_PALACES (default 64)
             // so operators can bound resident-palace RAM without a rebuild.
             registry: Arc::new(PalaceRegistry::from_env()),
             data_root,
-            embedder: Arc::new(OnceCell::new()),
             default_palace: None,
             chat_provider: Arc::new(OnceCell::new()),
             // #4639: bounded LRU (TRUSTY_MEMORY_MAX_OPEN_SESSION_STORES,
@@ -644,6 +679,7 @@ impl AppState {
             )),
             bound_addr: Arc::new(OnceLock::new()),
             prompt_context_cache: Arc::new(RwLock::new(prompt_facts::PromptFactsCache::default())),
+            tier_s_admission_lock: Arc::new(tokio::sync::Mutex::new(())),
             activity_log,
             bm25_client: None,
             bm25_supervisor: None,
@@ -654,6 +690,7 @@ impl AppState {
             palace_names: Arc::new(dashmap::DashMap::new()),
             pin_project_map: Arc::new(dashmap::DashMap::new()),
             bm25_index_tx,
+            bm25_dirty,
             update_available: Arc::new(std::sync::Mutex::new(None)),
             // Start in Warming state; flipped to Ready by spawn_startup_tasks
             // once the embedder warm-up succeeds (issues #910/#911).
@@ -748,6 +785,7 @@ impl AppState {
                 rx,
                 self.bm25_client.clone(),
                 self.bm25_supervisor.clone(),
+                Arc::clone(&self.bm25_dirty),
             );
             self.bm25_index_tx = tx;
             tracing::info!(
@@ -1150,9 +1188,17 @@ impl AppState {
     ///
     /// Why: tool handlers and the `/health` endpoint need a cheap, lock-free
     /// way to check whether the embedder has been initialised yet.
+    ///
     /// What: loads `daemon_readiness` with `Acquire` ordering so the caller
     /// sees all writes the startup task made before setting the state.
-    /// Test: `daemon_readiness_transitions_warming_to_ready`.
+    ///
+    /// #4836: the value read here is only as good as the writes that reach it.
+    /// It used to be written exactly once, by the startup warm-up task, so a
+    /// single failed attempt pinned the daemon at `Warming` for the rest of its
+    /// life. [`AppState::embedder`] now also flips it on success, which is the
+    /// signal that actually proves a vector search can run.
+    /// Test: `daemon_readiness_transitions_warming_to_ready`,
+    /// `resolving_the_embedder_marks_a_warming_daemon_ready`.
     pub fn readiness(&self) -> DaemonReadiness {
         DaemonReadiness::from_u8(self.daemon_readiness.load(Ordering::Acquire))
     }
@@ -1191,27 +1237,19 @@ impl AppState {
     /// warm-up task's own call, or a handler that skips the `readiness()`
     /// check). If this timeout fires the `OnceCell` is left in the unresolved
     /// state and the next call retries from scratch.
-    pub async fn embedder(&self) -> Result<Arc<FastEmbedder>> {
-        use trusty_common::memory_core::timeouts;
-        let cell = self.embedder.clone();
-        let timeout = timeouts::embedder_init_timeout();
-        let embedder = tokio::time::timeout(
-            timeout,
-            cell.get_or_try_init(|| async {
-                let e = FastEmbedder::new().await?;
-                Ok::<Arc<FastEmbedder>, anyhow::Error>(Arc::new(e))
-            }),
-        )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "AppState::embedder() timed out after {:?}; \
-                 the CoreML/CUDA model is taking unusually long to compile — \
-                 increase TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS if needed",
-                timeout
-            )
-        })??
-        .clone();
+    pub async fn embedder(&self) -> Result<Arc<dyn Embedder + Send + Sync>> {
+        // #4836: delegate to the ONE process-wide cell instead of a private
+        // second one, so initialising the embedder here is the same event the
+        // startup warm-up latches readiness off. `shared_embedder` already
+        // applies the bounded `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` init timeout
+        // and the CoreML auto-fallback, so no wrapper timeout is needed here.
+        let embedder = trusty_common::memory_core::retrieval::shared_embedder().await?;
+        // #4836: a resolved embedder is proof a vector search can run, so it is
+        // the authoritative readiness signal — not the startup task's one-shot
+        // attempt. Without this the daemon stays `Warming` forever whenever that
+        // single attempt failed, and every MCP recall serves the degraded
+        // L0/L1 fallback that ignores the query entirely.
+        self.set_ready();
         Ok(embedder)
     }
 }
@@ -1262,7 +1300,7 @@ pub async fn handle_message(state: &AppState, msg: Value) -> Value {
             "result": tools::tool_definitions_with(state.default_palace.is_some())
         }),
         // OpenRPC 1.3.2 discovery — see `openrpc.rs`. Returns the full
-        // service description so orchestrators (open-mpm, etc.) can
+        // service description so orchestrators (trusty-agents, etc.) can
         // introspect every tool and its required `memory.read`/`memory.write`
         // scope without bespoke per-server adapters.
         "rpc.discover" => json!({

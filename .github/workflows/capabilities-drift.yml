@@ -4,6 +4,21 @@
 # tree, MCP tool catalog, agent roster, skill catalog, doctor checks) matches
 # exactly what `tm generate capabilities` produces right now — a stale
 # generated file fails the job instead of silently rotting.
+#
+# DOCS-ONLY GATING (issue #4468 follow-up): this job's only inputs are the
+# harness's own in-process data — clap's CLI tree, the MCP tool catalog, the
+# bundled agent/skill rosters, a maintained doctor-check list (see
+# crates/trusty-mpm/src/core/bundle_tm_capabilities.rs's own doc comment) —
+# none of which lives under docs/. A change confined to docs/ therefore cannot
+# make this check's verdict differ, yet it previously ran a full Rust
+# toolchain install + `cargo run -p trusty-mpm` on every single PR (verified:
+# PR #4960, five files all under docs/, still paid this job's ~90s build).
+# Reuses the SAME classification ci.yml computes (`scripts/detect-docs-only.sh`,
+# via a `changes` job identical in shape to ci.yml's) rather than growing a
+# second definition of "docs-only" — this repo's common-entry-point doctrine.
+# This job is NOT in branch protection's required-checks list (verified via
+# `gh api repos/.../branches/main/protection`), so gating its steps costs
+# nothing risk-wise even in the worst case.
 name: Capabilities drift
 
 on:
@@ -26,8 +41,48 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
 
 jobs:
+  # Classify the diff as docs-only or not, mirroring ci.yml's `changes` job
+  # exactly (same script, same base-ref-refresh fix for #4688-class staleness)
+  # so this workflow never grows its own, second definition of "docs-only".
+  changes:
+    name: Detect docs-only change set
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
+      - name: Classify changed paths
+        id: detect
+        env:
+          DOCS_ONLY_BASE: origin/${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "push to ${{ github.ref }} — verifying in full, no docs-only exemption"
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/detect-docs-only.sh > /dev/null
+
   capabilities-drift:
     name: tm-capabilities generated-skill drift check
+    needs: [changes]
+    # `needs:` alone would SKIP this job when `changes` fails, and GitHub
+    # reports a skipped job as passing — a broken classifier must cost a full
+    # run, never a silent skip. Matches ci.yml's #4179 reasoning.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -35,14 +90,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # MSRV floor is 1.91 (root Cargo.toml rust-version), matching ci.yml.
-      - name: Install Rust toolchain (1.91)
-        uses: dtolnay/rust-toolchain@1.91
+      # MSRV floor is 1.94 (root Cargo.toml rust-version), matching ci.yml.
+      - name: Install Rust toolchain (1.94)
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@1.94
 
       - name: Cache cargo build
+        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: capabilities-drift
 
       - name: Check tm-capabilities generated skill for drift
+        if: needs.changes.outputs.docs_only != 'true'
         run: bash scripts/check_capabilities.sh

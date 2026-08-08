@@ -56,6 +56,12 @@ mod tests_4087;
 mod tests_4110;
 #[cfg(test)]
 mod tests_4123;
+// Issue #4715: an index-scoped 404 must rule out the cold store.
+#[cfg(test)]
+mod tests_4715;
+// #4250: timeout-parked index recovery and the /health un-latch.
+#[cfg(test)]
+mod tests_4250;
 #[cfg(test)]
 mod tests_829;
 #[cfg(test)]
@@ -196,6 +202,11 @@ pub fn build_router_with_self_origins(
     spawn_orphan_reaper_ticker(Arc::clone(&state_arc));
     spawn_residency_sweep_ticker(Arc::clone(&state_arc));
     spawn_memory_pressure_ticker(Arc::clone(&state_arc));
+    // #4250: drive indexes parked by a warm-boot restore timeout back into the
+    // registry. Nothing else will — they are absent from `list_indexes`, so a
+    // client that discovers indexes by listing never names them, and boot
+    // reconcile walks registered handles only.
+    crate::service::timeout_recovery::spawn_timeout_recovery_ticker(Arc::clone(&state_arc));
 
     let limiter = crate::service::concurrency::ConcurrencyLimiter::from_env();
     let query_timeout_cfg = QueryTimeoutConfig::from_env();

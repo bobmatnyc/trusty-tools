@@ -6535,7 +6535,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 2.0.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -11269,7 +11269,6 @@ dependencies = [
  "colored 2.2.0",
  "dashmap 6.2.1",
  "dirs 5.0.1",
- "fastembed",
  "futures",
  "futures-util",
  "hex",
@@ -11320,7 +11319,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-bm25-daemon"
-version = "0.1.3"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -11399,7 +11398,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.28.1"
+version = "0.30.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11427,6 +11426,7 @@ dependencies = [
  "git2",
  "hex",
  "hf-hub 0.3.2",
+ "hmac 0.12.1",
  "hnsw_rs",
  "indexmap 2.14.0",
  "keyring",
@@ -11482,6 +11482,7 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "clap",
  "dirs 5.0.1",
  "http-body-util",
@@ -11492,6 +11493,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tower",
  "tower-http",
@@ -11517,7 +11519,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "axum",
@@ -11578,7 +11580,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -11641,6 +11643,7 @@ dependencies = [
  "mime_guess",
  "open",
  "parking_lot",
+ "postcard",
  "redb 4.1.0",
  "reqwest 0.12.28",
  "rust-embed",
@@ -11737,7 +11740,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-progress"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "indicatif 0.17.11",
  "thiserror 1.0.69",
@@ -11759,7 +11762,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11800,7 +11803,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.42.2"
+version = "0.43.0"
 dependencies = [
  "anyhow",
  "arc-swap",

@@ -8,8 +8,9 @@
 //! many distinct "builds" across repeated `cargo run` invocations during
 //! development — which is exactly when we need the disambiguation.
 //!
-//! What: Reads `.open-mpm/state/build.json` relative to the current working
-//! directory, increments the `build` counter (defaulting to 0 if the file
+//! What: Reads `<state_dir>/build.json` (caller-supplied, e.g.
+//! `.trusty-code/state/build.json` relative to the current working
+//! directory), increments the `build` counter (defaulting to 0 if the file
 //! is missing or malformed), and writes the result back atomically via
 //! `rename(2)` from a sibling `.tmp` file.
 //!

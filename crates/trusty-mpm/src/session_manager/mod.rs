@@ -15,6 +15,8 @@ pub mod dedup;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
+// #4743: the single capability every destructive index DELETE must hold.
+mod index_delete_guard;
 pub mod injection_status;
 pub mod manager;
 pub mod naming;
@@ -26,6 +28,8 @@ pub mod record;
 pub mod rename;
 pub mod restart_ops;
 pub(crate) mod resume_workdir;
+/// Age-based eviction of terminal records and the slot numbers they hold.
+pub mod retention;
 pub mod search_gc;
 pub mod session_guard;
 pub mod slots;
@@ -48,6 +52,11 @@ pub mod worktree_safety;
 
 #[cfg(test)]
 mod tests;
+
+// #4743: the destructive index-DELETE guard, asserted against a live,
+// accepting loopback daemon rather than a dead port.
+#[cfg(test)]
+mod search_gc_guard_tests;
 
 #[cfg(test)]
 mod restart_tests;
@@ -129,6 +138,10 @@ pub use injection_status::InjectionStatus;
 pub use manager::{ManagedError, ManagedTmuxDriver, ReconcileReport, SessionManager};
 pub use prune::{MAX_EPHEMERAL_AGE_HOURS, PruneAction, PruneFilter, PruneOutcome, PrunedSession};
 pub use record::{ManagedSessionId, ManagedSessionState, RecordError, SessionRecord};
+pub use retention::{
+    RetentionDebounce, RetentionOutcome, RetentionVerdict, TERMINAL_RECORD_RETENTION_DAYS,
+    retention_verdict,
+};
 pub use session_guard::TmuxSessionGuard;
 pub use slots::{NumberedSlot, SlotRegistry};
 pub use store::{SessionStore, StoreError};

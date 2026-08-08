@@ -60,7 +60,16 @@ test.beforeEach(async ({ page }) => {
   // pattern is the only reliable way to intercept all URLs.
   await page.route('**', (route) => {
     const url = route.request().url();
-    if (url.includes('/api/events')) {
+    if (url.includes('/api/events/ticket')) {
+      // #5052: the SSE stream is authenticated by a short-lived ticket the app
+      // mints here before opening EventSource. Must be checked BEFORE the
+      // `/api/events` branch below, which would otherwise swallow it.
+      route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"ticket":"test-ticket","expires_in_secs":300}',
+      });
+    } else if (url.includes('/api/events')) {
       // SSE endpoint — return a closed stream. EventSource is mocked anyway via
       // addInitScript; this catches any code path that bypasses the mock.
       route.fulfill({

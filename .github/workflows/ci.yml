@@ -8,7 +8,7 @@
 #   fmt      – cargo fmt --all --check (stable)
 #   clippy   – cargo clippy --workspace --all-targets -D warnings (stable, SKIP_UI_BUILD=1)
 #   test     – cargo test --workspace (stable, SKIP_UI_BUILD=1, full clone for git tests)
-#   msrv     – cargo check --workspace (toolchain 1.91, SKIP_UI_BUILD=1)
+#   msrv     – cargo check --workspace (toolchain 1.94, SKIP_UI_BUILD=1)
 #   agents-ui – cargo clippy -p trusty-agents-ui (stable, WebKit2GTK-enabled runner)
 #   embedder-cuda-check – cargo check -p trusty-common --features embedder-cuda
 #                         (issue #3508: compile-check the deadlock-safety
@@ -72,10 +72,12 @@
 # with local branch refs and commit history. The test job uses fetch-depth: 0
 # to ensure a full (non-shallow) clone is present.
 #
-# MSRV NOTE: the effective MSRV is 1.91, declared as [workspace.package]
-# rust-version = "1.91" in the root Cargo.toml. It is driven by indirect
-# aws-sdk-* / aws-smithy-* crates that declare rust-version = "1.91.1". The
-# msrv job below pins dtolnay/rust-toolchain@1.91 to enforce this floor.
+# MSRV NOTE: the effective MSRV is 1.94, declared as [workspace.package]
+# rust-version = "1.94" in the root Cargo.toml. It is driven by aws-config
+# >= 1.9.0 / aws-sdk-bedrockruntime >= 1.136.0 (published 2026-07-08), which
+# declare rust-version = "1.94.1". The msrv job below pins
+# dtolnay/rust-toolchain@1.94 to enforce this floor. See
+# docs/adr/0029-msrv-1-94-and-edition-policy.md.
 
 name: CI
 
@@ -139,7 +141,7 @@ jobs:
   #
   # WHY THIS IS A JOB AND NOT A `paths:` FILTER. Five of this workflow's checks
   # are REQUIRED by branch protection (Format check, Clippy, Test, MSRV check
-  # (1.91), trusty-search daemon smoke test). GitHub does not create check runs
+  # (1.94), trusty-search daemon smoke test). GitHub does not create check runs
   # for a workflow its path/branch filters skipped, so a required context would
   # sit pending forever and a docs-only PR would become unmergeable instead of
   # fast — the trap #4468 calls out and the one
@@ -175,10 +177,37 @@ jobs:
       - name: CI helper selftests (#4179, #4468, #4421)
         run: bash scripts/check-ci-helpers-selftest.sh
 
+      # Refresh the base branch ref (same fix as #4688 in version-parity.yml's
+      # pr-version-bump job). `github.event.pull_request.base.sha` is a
+      # SNAPSHOT taken when the triggering event was delivered, but
+      # `actions/checkout`'s default ref for a pull_request event
+      # (`refs/pull/<PR>/merge`) is a GitHub-generated merge commit whose first
+      # parent tracks the base branch's CURRENT tip, refreshed continuously and
+      # independently of that snapshot. On a repo merging this frequently, the
+      # gap between "when the event fired" and "when this job actually runs"
+      # routinely spans several unrelated merges to main. `git merge-base
+      # <stale-sha> HEAD` then resolves to that stale snapshot itself (it IS an
+      # ancestor of HEAD), so the diff against it sweeps in every file touched
+      # by every commit merged to main in between — a genuinely docs-only PR
+      # gets misclassified as docs_only=false. Live instance: PR #4960 (4 files,
+      # all under docs/) was classified as 23 changed paths including a dozen
+      # unrelated trusty-mpm .rs files, because its stale base.sha lagged the
+      # live merge ref by ~25 minutes / several merges. Re-fetching
+      # `origin/<base-ref>` right before diffing pins DOCS_ONLY_BASE to the
+      # freshest tip available at diff time, closing that window.
+      - name: Refresh the base branch ref (#4688 pattern — avoid a stale merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
       - name: Classify changed paths
         id: detect
         env:
-          DOCS_ONLY_BASE: ${{ github.event.pull_request.base.sha }}
+          DOCS_ONLY_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "push to ${{ github.ref }} — verifying in full, no docs-only exemption"
@@ -440,27 +469,61 @@ jobs:
         with:
           key: test
 
-      # Restore the fastembed ONNX model cache (issue #865).
-      #
-      # Cache key: fastembed crate version (from Cargo.lock) + the two model
-      # repo IDs used by this workspace:
+      # Cache key for the fastembed ONNX models (issue #865, corrected #4940):
+      # the fastembed crate VERSION + the two model repo IDs used by this
+      # workspace:
       #   - Xenova/all-MiniLM-L6-v2  (AllMiniLML6V2Q — primary, ~22 MB)
       #   - Qdrant/all-MiniLM-L6-v2-onnx (AllMiniLML6V2 — CPU fallback, ~86 MB)
-      # Changing any of these (e.g. upgrading fastembed) rotates the key so
-      # the old model blobs are not served to the new version.
+      # Upgrading fastembed rotates the key so old model blobs are not served
+      # to a new model registry.
+      #
+      # #4940: this used to be `hashFiles('Cargo.lock')` — the hash of the
+      # WHOLE lockfile — while the comment claimed it was the fastembed
+      # version. Those are not the same thing. Any dependency bump anywhere in
+      # a 21-crate workspace rotated the key, so on a repo landing dozens of
+      # PRs a day the cache was almost always cold and almost every run
+      # re-downloaded ~110 MB from HuggingFace. Keying on the version the
+      # comment always described makes the key rotate when the models actually
+      # change and not otherwise.
+      - name: Resolve fastembed model cache key
+        if: needs.changes.outputs.docs_only != 'true'
+        id: fastembed-key
+        run: |
+          set -euo pipefail
+          ver=$(awk '/^name = "fastembed"$/ { found = 1; next }
+                     found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' Cargo.lock)
+          if [ -z "${ver}" ]; then
+            echo "::error::could not resolve the fastembed version from Cargo.lock — refusing to fall back to an unkeyed cache"
+            exit 1
+          fi
+          echo "Resolved fastembed version from Cargo.lock: ${ver}"
+          echo "key=fastembed-v${ver}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx" >> "$GITHUB_OUTPUT"
+
+      # #4940: `actions/cache/restore` + an explicit `actions/cache/save`
+      # below, NOT the combined `actions/cache`. The combined action declares
+      # `post-if: success()`, so its save step is SKIPPED whenever the job
+      # fails — visible as "Post Restore fastembed model cache -> skipped" in
+      # run 31026363957's failed Test job. That produced a ratchet: HF
+      # rate-limits the pre-seed -> no model -> the accuracy gate fails -> the
+      # job fails -> the model is never cached -> the next run is cold and
+      # rate-limited again. Two unrelated PRs (#4920, #4926) failed identically
+      # inside the same hour because both raced the same permanently-empty
+      # cache. Saving explicitly, right after a successful download and BEFORE
+      # any test runs, removes the test outcome from that path entirely.
       - name: Restore fastembed model cache
         if: needs.changes.outputs.docs_only != 'true'
         id: fastembed-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /home/runner/.cache/fastembed
-          key: fastembed-v${{ hashFiles('Cargo.lock') }}-xenova-allminilm-l6-v2-qdrant-allminilm-l6-v2-onnx
+          key: ${{ steps.fastembed-key.outputs.key }}
 
       # Pre-seed the model on a cache miss so tests never hit HuggingFace
       # concurrently (the root cause of the HTTP 429 flake). Uses hf-hub's
       # CLI-friendly URL pattern with exponential backoff: 5 attempts, waiting
       # 5, 10, 20, 40 seconds between retries. After a successful download the
-      # actions/cache post-step saves the populated directory for future runs.
+      # explicit "Save fastembed model cache" step below persists the populated
+      # directory for future runs (#4940 — no longer a post step).
       #
       # Primary model: Xenova/all-MiniLM-L6-v2 at the pinned snapshot.
       # The refs/main pointer, tokenizer files, and the quantized ONNX are
@@ -525,6 +588,7 @@ jobs:
       #       conditional's test) and capture its exit status via $?.
       - name: Pre-seed fastembed models (cache miss only)
         if: needs.changes.outputs.docs_only != 'true' && steps.fastembed-cache.outputs.cache-hit != 'true'
+        id: fastembed-preseed
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -544,9 +608,18 @@ jobs:
 
           # ── Retry helper ──────────────────────────────────────────────────
           # curl_retry <url> <dest>
-          # 5 attempts, starting with 5 s back-off, doubling each time.
+          # 7 attempts with a doubling back-off capped at 60 s: 10, 20, 40, 60,
+          # 60, 60 — ~250 s of patience.
+          #
+          # #4940: this was 5 attempts at 5/10/20/40 s, a 75-second window. In
+          # run 31026363957 HuggingFace returned HTTP 429 to all five attempts
+          # inside 75 s and the pre-seed gave up; an HF rate-limit window
+          # outlasts a minute routinely. 250 s costs nothing on the normal path
+          # (a cache hit skips this step entirely, and an un-limited download
+          # never retries) and is only spent on the runs that would otherwise
+          # fail outright.
           curl_retry() {
-            local url="$1" dest="$2" attempt=1 max=5 wait=5
+            local url="$1" dest="$2" attempt=1 max=7 wait=10
             until curl -fsSL --retry 0 "${CURL_AUTH[@]}" -o "${dest}" "${url}"; do
               if [ "${attempt}" -ge "${max}" ]; then
                 echo "ERROR: download failed after ${max} attempts: ${url}" >&2
@@ -556,6 +629,9 @@ jobs:
               sleep "${wait}"
               attempt=$(( attempt + 1 ))
               wait=$(( wait * 2 ))
+              # An `[ … ] && wait=60` one-liner would return 1 on the false
+              # branch and trip this step's `set -e`. Keep the `if`.
+              if [ "${wait}" -gt 60 ]; then wait=60; fi
             done
           }
 
@@ -696,13 +772,35 @@ jobs:
           set -e
 
           if [ "${rc}" -ne 0 ]; then
-            # Do not let actions/cache persist a partial/corrupt download
+            # Do not let the save step persist a partial/corrupt download
             # tree under this run's key: an absent cache is a safe "miss"
             # next run; a partial one would look like a permanent false
             # "hit" until the key rotates (issue #2554/#2981).
             rm -rf "${CACHE_DIR}"
-            echo "::warning::fastembed model pre-seed failed (rc=${rc}; HuggingFace rate-limit/403 or network issue) — continuing WITHOUT a pre-seeded cache. This is non-fatal: cargo test --workspace never needs the real model (non-ignored tests use a MockEmbedder via seed_shared_embedder_with_mock(), issue #850; the tests that need the real model are #[ignore]-gated and are not run in this job). See issue #2554 for details."
+            echo "seeded=false" >> "$GITHUB_OUTPUT"
+            # #4940: this warning used to end "the tests that need the real
+            # model are #[ignore]-gated and are not run in this job", which is
+            # FALSE and contradicted the block comment 30 lines above it —
+            # `default_model_matches_sentence_transformers_reference` is the
+            # documented exception and does run here. Reading that sentence is
+            # what made this failure get misdiagnosed as a flaky test rather
+            # than a missing model. State the actual consequence instead.
+            echo "::warning::fastembed model pre-seed failed (rc=${rc}; HuggingFace rate-limit/403 or network issue) — continuing WITHOUT a pre-seeded cache. CONSEQUENCE: default_model_matches_sentence_transformers_reference (crates/trusty-common/src/embedder/tests/reference_accuracy_tests.rs) is deliberately NOT #[ignore]d (issue #3493 P0 part 2) and WILL attempt its own HuggingFace download; if that is rate-limited too it fails with 'failed to initialise fastembed'. That is a missing MODEL, not an accuracy regression and not a flaky test — re-run once HuggingFace stops rate-limiting. Every other embedder test uses a MockEmbedder via seed_shared_embedder_with_mock() (issue #850) and is unaffected. See #2554 and #4940."
+          else
+            echo "seeded=true" >> "$GITHUB_OUTPUT"
           fi
+
+      # #4940: save explicitly, HERE — before any test runs — instead of
+      # relying on `actions/cache`'s post step, which is `post-if: success()`
+      # and therefore never fires on a failing job. Gated on the pre-seed
+      # having actually succeeded so a partial tree (already `rm -rf`'d above)
+      # can never be persisted as a false "hit".
+      - name: Save fastembed model cache
+        if: needs.changes.outputs.docs_only != 'true' && steps.fastembed-cache.outputs.cache-hit != 'true' && steps.fastembed-preseed.outputs.seeded == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.cache/fastembed
+          key: ${{ steps.fastembed-key.outputs.key }}
 
       # Build phase only (no test execution yet): links all ~179 test
       # binaries so the intermediate .rcgu.o codegen objects below can be
@@ -822,14 +920,14 @@ jobs:
   # is that the code *compiles* on the minimum toolchain, not that tests pass.
   # trusty-mpm-gui, trusty-code-gui, trusty-agents-ui excluded: see clippy note above.
   #
-  # Toolchain is 1.91, matching [workspace.package].rust-version = "1.91" in the
-  # root Cargo.toml. The current Cargo.lock pulls aws-sdk-*/aws-smithy-* at
-  # versions that require rustc >= 1.91.1, which sets the effective MSRV. This
-  # job pins the toolchain to that floor so the workspace is guaranteed to
-  # compile on the declared minimum.
+  # Toolchain is 1.94, matching [workspace.package].rust-version = "1.94" in the
+  # root Cargo.toml. The AWS SDK entries (aws-config, aws-sdk-bedrockruntime)
+  # resolve to versions that require rustc >= 1.94.1, which sets the effective
+  # MSRV. This job pins the toolchain to that floor so the workspace is
+  # guaranteed to compile on the declared minimum.
   # --------------------------------------------------------------------------
   msrv:
-    name: MSRV check (1.91)
+    name: MSRV check (1.94)
     needs: [changes]
     # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
     # GitHub reports a skipped required check as PASSING — reintroducing the
@@ -876,9 +974,9 @@ jobs:
           fi
           echo "After:"; df -h /
 
-      - name: Install Rust 1.91 toolchain
+      - name: Install Rust 1.94 toolchain
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@1.91
+        uses: dtolnay/rust-toolchain@1.94
 
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
@@ -893,7 +991,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          key: msrv-1-91
+          key: msrv-1-94
 
       - name: cargo check --workspace
         if: needs.changes.outputs.docs_only != 'true'
@@ -967,7 +1065,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           mkdir -p crates/trusty-agents/ui/dist
-          printf '<!doctype html><html><head><meta charset="utf-8"><title>open-mpm</title></head><body></body></html>\n' \
+          printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-agents</title></head><body></body></html>\n' \
             > crates/trusty-agents/ui/dist/index.html
 
       - name: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings

@@ -67,6 +67,85 @@ fn ensure_project_indexed_returns_derived_id_when_daemon_down() {
     assert_eq!(id, Some(expected), "id is the git-root basename");
 }
 
+/// A test process gets `SkippedUnderTest`, never a claim of registration
+/// (#5065 review).
+///
+/// Why: this is the whole point of the reporting variant. The id-only return
+/// is `Some(id)` here, identical to a genuine 2xx registration, which is why
+/// trusty-mpm's worktree hook could log `worktree index registered` for a call
+/// that never left the process. The report has to say otherwise, and the test
+/// harness is the one branch every `cargo test` run exercises for free.
+/// What: calls the reporting entry point on a real git-rooted temp project
+/// under the default (test-harness-detected) environment and asserts the id
+/// still comes back while `registration` is `SkippedUnderTest` — not
+/// `Confirmed`.
+/// Test: this test.
+#[test]
+fn reporting_says_skipped_under_test_harness() {
+    let project = scratch_dir("report-skip");
+    fs::create_dir_all(project.join(".git")).unwrap();
+
+    let report = ensure_project_indexed_reporting(&project, IndexOptions::default());
+
+    let _ = fs::remove_dir_all(&project);
+
+    assert_eq!(
+        report.registration,
+        IndexRegistration::SkippedUnderTest,
+        "a test process suppresses the write (#4255) and must say so"
+    );
+    assert!(
+        report.index_id.is_some(),
+        "the id is still returned — the fail-open contract is unchanged"
+    );
+}
+
+/// With no discoverable daemon, the report says `DaemonUnreachable` (#5065
+/// review).
+///
+/// Why: the failure mode #5045 measured at ~94% is "the daemon was not there",
+/// and it is exactly the one the id-only return renders invisible. Opting out
+/// of the #4255 harness guard is what makes this branch reachable at all; the
+/// empty data dir then guarantees `resolve_daemon_base_url` finds no address
+/// file, so no HTTP request is ever built and the operator's real daemon is
+/// never touched despite the opt-in.
+/// What: sets `TRUSTY_ALLOW_PRODUCTION_STATE=1` and points the data dir at an
+/// empty temp dir, then asserts the reported registration is
+/// `DaemonUnreachable` while the id is still returned.
+/// Test: this test.
+#[test]
+fn reporting_says_daemon_unreachable_when_no_daemon_is_discoverable() {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let data_dir = scratch_dir("report-nodaemon-data");
+    fs::create_dir_all(&data_dir).unwrap();
+    let project = scratch_dir("report-nodaemon");
+    fs::create_dir_all(project.join(".git")).unwrap();
+
+    // SAFETY: guarded by ENV_LOCK; both vars are removed below before returning.
+    unsafe {
+        std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+        std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
+    }
+
+    let report = ensure_project_indexed_reporting(&project, IndexOptions::default());
+
+    unsafe {
+        std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
+        std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+    }
+    let _ = fs::remove_dir_all(&project);
+    let _ = fs::remove_dir_all(&data_dir);
+
+    assert_eq!(
+        report.registration,
+        IndexRegistration::DaemonUnreachable,
+        "no address file means nothing was sent — that is not a registration"
+    );
+    assert!(report.index_id.is_some(), "the id is still returned");
+}
+
 #[test]
 fn ensure_project_indexed_none_for_root() {
     // Derivation yields an empty id for the filesystem root, so the helper
@@ -237,7 +316,14 @@ fn create_index_request_body_respects_allow_sensitive_path_param() {
         Path::new("/private/var/folders/xx/scratch-project"),
     ] {
         for allow in [true, false] {
-            let body = create_index_request_body("my-index", root, allow);
+            let body = create_index_request_body(
+                "my-index",
+                root,
+                IndexOptions {
+                    allow_sensitive_path: allow,
+                    ..IndexOptions::default()
+                },
+            );
             assert_eq!(
                 body.get("allow_sensitive_path"),
                 Some(&serde_json::Value::Bool(allow)),
@@ -249,6 +335,73 @@ fn create_index_request_body_respects_allow_sensitive_path_param() {
             );
         }
     }
+}
+
+/// `IndexOptions::skip_vector` reaches the `POST /indexes` wire body, and the
+/// two option flags are independent (#5060).
+///
+/// Why: a worktree index is registered BM25+KG-only by asking the daemon for
+/// `skip_vector: true`. If that flag were dropped between [`IndexOptions`] and
+/// the request body, every worktree would silently embed again — the exact
+/// cost this change exists to avoid, and invisible without an assertion,
+/// because the index would still be created and still answer queries. The
+/// cross-product also pins that `skip_vector` is not accidentally aliased to
+/// `allow_sensitive_path` (the failure mode a second positional `bool` would
+/// have invited).
+/// What: builds the body for all four `(allow_sensitive_path, skip_vector)`
+/// combinations and asserts each field independently equals what was passed.
+/// Test: this test.
+#[test]
+fn create_index_request_body_sets_skip_vector() {
+    let root = Path::new("/Users/dev/projects/my-repo/.worktrees/feat-x");
+    for allow in [true, false] {
+        for skip_vector in [true, false] {
+            let body = create_index_request_body(
+                "feat-x",
+                root,
+                IndexOptions {
+                    allow_sensitive_path: allow,
+                    skip_vector,
+                },
+            );
+            assert_eq!(
+                body.get("skip_vector"),
+                Some(&serde_json::Value::Bool(skip_vector)),
+                "body must set skip_vector: {skip_vector} (allow={allow})"
+            );
+            assert_eq!(
+                body.get("allow_sensitive_path"),
+                Some(&serde_json::Value::Bool(allow)),
+                "skip_vector must not disturb allow_sensitive_path"
+            );
+        }
+    }
+}
+
+/// `IndexOptions::default()` reproduces the pre-#5060 two-argument call.
+///
+/// Why: [`ensure_project_indexed`] is now a wrapper over
+/// [`ensure_project_indexed_with`]. If `IndexOptions`' default ever gained a
+/// non-`false` `skip_vector`, every existing caller (session launch, tcode
+/// task start) would silently stop embedding — a behaviour change with no
+/// visible error. This pins the default as the compatibility contract.
+/// What: asserts the body built from `IndexOptions::default()` is identical to
+/// one built with both flags explicitly `false`.
+/// Test: this test.
+#[test]
+fn index_options_default_matches_legacy_ensure_call() {
+    let root = Path::new("/Users/dev/projects/my-repo");
+    assert_eq!(
+        create_index_request_body("my-repo", root, IndexOptions::default()),
+        create_index_request_body(
+            "my-repo",
+            root,
+            IndexOptions {
+                allow_sensitive_path: false,
+                skip_vector: false,
+            }
+        )
+    );
 }
 
 /// End-to-end regression for issue #2914: `ensure_project_indexed`'s
@@ -286,6 +439,13 @@ fn ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body() {
         // SAFETY: guarded by ENV_LOCK; removed below before returning.
         unsafe {
             std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+            // #4255: this is the ONE test that genuinely needs the daemon-write
+            // path — asserting on the wire body requires the POST to actually
+            // happen. Opting in explicitly is safe here because the "daemon"
+            // is this test's own loopback socket, not the operator's: the
+            // override above points discovery at it. Every other caller stays
+            // guarded.
+            std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
         }
 
         // Fake daemon: accept one connection, capture the request body,
@@ -335,6 +495,7 @@ fn ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body() {
 
         unsafe {
             std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+            std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
         }
         let _ = fs::remove_dir_all(&project);
         let _ = fs::remove_dir_all(&data_dir);
@@ -532,4 +693,164 @@ fn post_index_file_exhausts_retries_and_returns_send_failed() {
     // attempts — no more, no less.
     assert_eq!(outcome, IndexOutcome::SendFailed);
     assert_eq!(accepted, MAX_INDEX_ATTEMPTS as usize);
+}
+
+/// Offer the code under test a REAL, discoverable trusty-search daemon, run
+/// `body`, and report whether anything connected to it (issue #4255).
+///
+/// Why: "no write reached the operator's daemon" cannot be proved by pointing
+/// discovery at a dead port — the fail-open path and the guarded path both
+/// look identical then. Standing up a socket that WOULD accept the write is
+/// the only arrangement where the guard is the thing making the difference.
+/// What: binds `127.0.0.1:0`, publishes that address where
+/// `resolve_daemon_base_url("trusty-search")` reads it (via an isolated
+/// `DATA_DIR_OVERRIDE_ENV` data dir, serialised on `ENV_LOCK` like every other
+/// env-mutating test here), asserts discovery actually finds it, runs `body`,
+/// restores the env, and returns `true` if a connection arrived.
+/// Test: used by the two `never_writes_to_a_daemon_under_test` tests below.
+fn daemon_was_contacted_during(body: impl FnOnce()) -> bool {
+    use crate::data_dir::{DATA_DIR_OVERRIDE_ENV, ENV_LOCK};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stand-in daemon");
+    let addr = listener.local_addr().expect("stand-in daemon local_addr");
+    listener
+        .set_nonblocking(true)
+        .expect("stand-in daemon set_nonblocking");
+
+    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let data_dir = scratch_dir("4255-daemon");
+    fs::create_dir_all(&data_dir).expect("create isolated data dir");
+    let previous = std::env::var(DATA_DIR_OVERRIDE_ENV).ok();
+    unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &data_dir) };
+    crate::write_daemon_addr("trusty-search", &addr.to_string()).expect("publish daemon addr");
+    assert_eq!(
+        crate::resolve_daemon_base_url("trusty-search"),
+        Some(format!("http://{addr}")),
+        "the stand-in daemon must be discoverable, or this test proves nothing"
+    );
+
+    body();
+
+    match previous {
+        Some(p) => unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, p) },
+        None => unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) },
+    }
+    drop(guard);
+    let _ = fs::remove_dir_all(&data_dir);
+
+    // A connection the code opened just before returning may still be in the
+    // accept queue; give it a moment rather than racing it.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    !matches!(
+        listener.accept(),
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+    )
+}
+
+/// Issue #4255: registering a project must not reach a live daemon from a test
+/// process — and must still return the derived id.
+///
+/// Why: this is the defect the ticket reports, in the form it actually
+/// occurred: trusty-code's and trusty-mpm's tests call this helper with a
+/// `tempfile` fixture root, and every such call registered that throwaway path
+/// in whatever real `indexes.toml` the discoverable daemon owned. The dead
+/// roots then stalled warm boot. `allow_sensitive_path: true` is passed
+/// deliberately — that is tcode's real caller, and the temp-dir denylist (the
+/// only prior guard) is switched off on that path, so nothing else stands
+/// between the fixture and the operator's registry.
+/// What: with a discoverable stand-in daemon, calls `ensure_project_indexed`
+/// on a temp fixture root; asserts no connection was made and the id still
+/// came back (the fail-open contract is unchanged).
+/// Test: this test.
+#[test]
+fn ensure_project_indexed_never_writes_to_a_daemon_under_test() {
+    let root = scratch_dir("4255-ensure");
+    fs::create_dir_all(&root).expect("create fixture root");
+    let mut id = None;
+
+    let contacted = daemon_was_contacted_during(|| {
+        id = ensure_project_indexed(&root, true);
+    });
+
+    assert!(
+        !contacted,
+        "ensure_project_indexed contacted a live trusty-search daemon from a test \
+         process — that is the issue #4255 registry leak"
+    );
+    assert!(
+        id.is_some(),
+        "the derived index id must still be returned; the guard suppresses the \
+         daemon write, not the caller's contract"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Issue #4255: incremental per-file indexing must not reach a live daemon
+/// from a test process either.
+///
+/// Why: `index_files_best_effort` is the other mutating entry point in this
+/// module. It does not create registry entries, but it POSTs fixture file
+/// content into a real index — corrupting the operator's search results rather
+/// than their registry. Guarding only the registration half would leave that
+/// open.
+/// What: with a discoverable stand-in daemon, calls `index_files_inner`
+/// (the synchronous body, so there is no detached thread to race) with one
+/// real file; asserts no connection was made.
+/// Test: this test.
+#[test]
+fn index_files_inner_never_writes_to_a_daemon_under_test() {
+    let root = scratch_dir("4255-incremental");
+    fs::create_dir_all(&root).expect("create fixture root");
+    let file = root.join("fixture.rs");
+    fs::write(&file, "fn fixture() {}\n").expect("write fixture file");
+
+    let contacted = daemon_was_contacted_during(|| {
+        index_files_inner(&root, std::slice::from_ref(&file));
+    });
+
+    assert!(
+        !contacted,
+        "index_files_inner pushed fixture content to a live trusty-search daemon \
+         from a test process (issue #4255)"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The `with_*` setters produce exactly what field construction would (#5065
+/// review).
+///
+/// Why: `#[non_exhaustive]` makes the setters the ONLY way another crate can
+/// build a non-default `IndexOptions`, so a setter that assigned the wrong
+/// field would silently flip an out-of-crate caller's intent — trusty-mpm asks
+/// for `skip_vector`, and getting `allow_sensitive_path` instead would both
+/// embed every worktree and disarm the denylist. In-crate tests can still use
+/// field construction, which is what makes that comparison possible here.
+/// What: asserts each setter equals the field-constructed value, and that
+/// chaining both sets both.
+/// Test: this test.
+#[test]
+fn index_options_builders_match_field_construction() {
+    assert_eq!(
+        IndexOptions::default().with_skip_vector(true),
+        IndexOptions {
+            allow_sensitive_path: false,
+            skip_vector: true,
+        }
+    );
+    assert_eq!(
+        IndexOptions::default().with_allow_sensitive_path(true),
+        IndexOptions {
+            allow_sensitive_path: true,
+            skip_vector: false,
+        }
+    );
+    assert_eq!(
+        IndexOptions::default()
+            .with_skip_vector(true)
+            .with_allow_sensitive_path(true),
+        IndexOptions {
+            allow_sensitive_path: true,
+            skip_vector: true,
+        }
+    );
 }

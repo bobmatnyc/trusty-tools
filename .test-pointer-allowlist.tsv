@@ -147,7 +147,6 @@ crates/trusty-analyze/src/mcp/review.rs	tr_review_health_routes
 crates/trusty-analyze/src/service/events.rs	sse_stream_emits_fact_upserted
 crates/trusty-analyze/src/service/handlers/analysis.rs	diagnostics_endpoint_returns_empty_when_no_tools
 crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_default_strips_content
-crates/trusty-analyze/src/service/handlers/graph.rs	scip_ingest_round_trip
 crates/trusty-analyze/src/service/handlers/review.rs	github_pr_endpoint_requires_token
 crates/trusty-analyze/src/service/routes.rs	sse_stream_emits_fact_upserted
 crates/trusty-analyze/src/types/complexity.rs	custom_thresholds_change_detection_results
@@ -210,7 +209,6 @@ crates/trusty-common/src/memory_core/dream/recall_benchmark.rs	dream_recall_benc
 crates/trusty-common/src/memory_core/registry.rs	evict_idle_skips_recently_accessed_handle
 crates/trusty-common/src/memory_core/registry.rs	open_hydrates_persisted_palaces
 crates/trusty-common/src/memory_core/retrieval/handle.rs	decay_applied_in_l2_score
-crates/trusty-common/src/memory_core/retrieval/handle.rs	deferred_embed_backfills_vector_once_embedder_ready
 crates/trusty-common/src/memory_core/retrieval/handle.rs	palace_handle_read_only_when_locked_by_another_process
 crates/trusty-common/src/memory_core/retrieval/handle.rs	remember_classifies_session_events
 crates/trusty-common/src/memory_core/semantic_consolidation/inference.rs	ollama_inference_new_stores_fields
@@ -333,8 +331,6 @@ crates/trusty-memory/src/service/types.rs	palace_list_includes_richer_counts
 crates/trusty-memory/src/tools/chat_ops.rs	chat_session_get_missing_errors
 crates/trusty-memory/src/tools/helpers.rs	dispatch_remember_rejects_short_content
 crates/trusty-memory/src/tools/memory_ops.rs	recall_all_falls_back_to_bm25_and_l0_l1_while_warming
-crates/trusty-memory/src/tools/memory_ops.rs	recall_deep_falls_back_to_bm25_and_l0_l1_while_warming
-crates/trusty-memory/src/tools/memory_ops.rs	recall_falls_back_to_bm25_and_l0_l1_while_warming
 crates/trusty-memory/src/tools/tests.rs	note_returns_warming_error_while_state_is_warming
 crates/trusty-memory/src/tools/tests.rs	recall_returns_warming_error_while_state_is_warming
 crates/trusty-memory/src/tools/tests.rs	remember_returns_warming_error_while_state_is_warming
@@ -355,7 +351,6 @@ crates/trusty-mpm/src/bin/tm/cli/actions/slack.rs	cli_parses_slack_start
 crates/trusty-mpm/src/bin/tm/cli/actions/telegram.rs	cli_parses_telegram_start
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_load_standalone
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_path_standalone
-crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_register
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_run_standalone
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_slack_start
 crates/trusty-mpm/src/bin/tm/cli/mod.rs	cli_parses_statusline
@@ -387,9 +382,7 @@ crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	delete_needs_force_errore
 crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	delete_needs_force_stopped_false
 crates/trusty-mpm/src/bin/tm/commands/prune.rs	build_plan_dry_run_has_no_side_effects
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_load
-crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_ls
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_path
-crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_register
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	cli_parses_run
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	test_rm_cmd_errors_on_unknown_alias
 crates/trusty-mpm/src/bin/tm/commands/standalone.rs	test_rm_cmd_leaves_claude_config_intact

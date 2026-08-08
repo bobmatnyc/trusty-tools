@@ -58,7 +58,7 @@ Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
 
 ### From Source with Cargo
 
-Requires Rust 1.91 or later ([install Rust](https://rustup.rs/)).
+Requires Rust 1.94 or later ([install Rust](https://rustup.rs/)).
 
 ```bash
 cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-memory --locked
@@ -601,7 +601,7 @@ no separate web server or Node.js installation is needed at runtime.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `axum-server` | **enabled** | Compiles the HTTP server, SSE endpoint, and axum-based REST API. Disable with `default-features = false` when embedding only the in-process MCP tools (e.g. from `open-mpm`). |
+| `axum-server` | **enabled** | Compiles the HTTP server, SSE endpoint, and axum-based REST API. Disable with `default-features = false` when embedding only the in-process MCP tools (e.g. from `trusty-agents`). |
 
 ```toml
 # Full daemon build — no change needed (axum-server is on by default)

@@ -228,22 +228,194 @@ pub(crate) async fn handle_palace_info(state: &AppState, args: Value) -> Result<
         .data_dir
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
-    // ADR-0027 D6 / #4807: report how many rooms the palace has. `wing_count`
-    // is deliberately absent here rather than reported as 1 — this tool never
-    // carried it, and adding a field whose only truthful value is a constant
-    // would be new dead surface. It arrives with the Wing entity (T9).
+    // ADR-0027 D6 / #4807: report how many rooms the palace has. #4809 (T9)
+    // adds `wing_count` alongside it — #4807 left it out rather than report a
+    // constant, and the Wing entity it was waiting for is now here, so this is
+    // a real count from the `WINGS` registry.
     let store = handle.kg.store();
-    let room_count = tokio::task::spawn_blocking(move || store.list_rooms().map(|r| r.len()))
-        .await
-        .context("join palace_info room count")?
-        .context("count rooms")?;
+    let (room_count, wing_count) = tokio::task::spawn_blocking(move || {
+        anyhow::Ok((store.list_rooms()?.len(), store.list_wings()?.len()))
+    })
+    .await
+    .context("join palace_info counts")?
+    .context("count rooms and wings")?;
     Ok(json!({
         "id": handle.id.as_str(),
         "name": handle.id.as_str(),
         "drawer_count": drawer_count,
         "room_count": room_count,
+        "wing_count": wing_count,
         "data_dir": data_dir,
     }))
+}
+
+/// `palace_reembed` — report, and optionally repair, drawers with no vector.
+///
+/// Why (#4906): the deferred-embed lane used to drop failures silently, leaving
+/// drawers durable in redb and permanently invisible to vector recall — 39 of
+/// 1,241 on the live `trusty-tools` palace. Fixing the write path forward
+/// repairs none of those, and the repair has to run INSIDE the daemon: the
+/// daemon holds the palace's writer lock, so a CLI would only ever get a
+/// read-only snapshot it cannot write vectors into.
+/// What: `dry_run` (the default) returns the exact set of vectorless drawer ids
+/// without touching the embedder; `dry_run: false` re-embeds them through the
+/// same primitive the write path uses. Idempotent — a second run over a
+/// repaired palace reports zero missing and does no work.
+/// Test: `dispatch_palace_reembed_dry_run_reports_counts` in `tools::tests`.
+pub(crate) async fn handle_palace_reembed(state: &AppState, args: Value) -> Result<Value> {
+    use trusty_common::memory_core::retrieval::VectorBackfillOptions;
+    let palace = resolve_palace(state, &args, "palace_reembed")?;
+    let handle = open_palace_handle(state, &palace)?;
+    // Defaults to a dry run on purpose: the first thing an operator wants is
+    // the number, and #4834 deletes source files on the strength of it.
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    let report = handle
+        .backfill_missing_vectors(VectorBackfillOptions {
+            dry_run,
+            limit,
+            ..Default::default()
+        })
+        .await?;
+    let health = handle.embed_health();
+    Ok(json!({
+        "palace": report.palace_id,
+        "dry_run": report.dry_run,
+        "drawer_count": report.drawer_count,
+        "vector_count": report.vector_count,
+        "missing": report.missing,
+        "attempted": report.attempted,
+        "repaired": report.repaired,
+        "still_failing": report.still_failing,
+        "still_missing_ids": report.still_missing_ids
+            .iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+        // Without this a shortfall is unexplained: "no embedder on this host"
+        // reads identically to "the embedder is dropping writes".
+        "embedder_ready": health.embedder_ready,
+        "recorded_failures": health.recorded_failures.len(),
+        // #5005 / #5000: `missing` counts drawers with no vector key. An
+        // aliased drawer HAS a key and is still unretrievable, so `missing: 0`
+        // was a false all-clear on the palace that lost four of them. Gate
+        // deletions on `alias_audit == "clean"` as well as `missing == 0`:
+        // `"unavailable"` means the scan failed and nothing is known, which is
+        // a block, not a pass. `vector_key_rows` / `distinct_vector_ids` are
+        // null in that case rather than 0, so no zero can be misread as clean.
+        "alias_audit": alias_audit_state(&report.alias_audit),
+        "alias_audit_error": report.alias_audit.unavailable_reason(),
+        "vector_key_rows": report.alias_audit.counts().map(|(rows, _)| rows),
+        "distinct_vector_ids": report.alias_audit.counts().map(|(_, ids)| ids),
+        // `aliased` reported 0 for an unreadable audit in the first cut, while
+        // the two fields above it correctly reported null. Every count-shaped
+        // field in this object is now absent rather than zero when nothing was
+        // read — a lone zero is exactly the misreading #5005 documents.
+        "aliased": report.alias_audit.aliased_drawer_ids().map(<[Uuid]>::len),
+        "aliased_ids": report.alias_audit.aliased_drawer_ids()
+            .map(|ids| ids.iter().map(|i| i.to_string()).collect::<Vec<_>>()),
+    }))
+}
+
+/// `palace_unalias` — free drawers destroyed by a vector-id collision so a
+/// re-embed can repair them.
+///
+/// Why (#5005): the allocator fix stops NEW aliasing and `palace_reembed` now
+/// makes existing aliasing visible, but neither repairs it — `unalias` had no
+/// caller at all, so an operator could see the damage and not act on it. The
+/// three drawers still blocking #4834 need this surface. It runs inside the
+/// daemon for the same reason `palace_reembed` does: the daemon holds the
+/// palace's writer lock, so a CLI would only get a read-only snapshot.
+/// What: `dry_run` (the default) names the exact drawer ids it would free and
+/// writes nothing. `dry_run: false` frees the whole collision group, then
+/// re-audits — `outcome` is `"repaired"` only when that verification ran and
+/// came back clean. Idempotent: a second run reports `"clean"` and frees
+/// nothing. The freed drawers still need a `palace_reembed` run to become
+/// findable, which `reembed_required` says outright.
+///
+/// 🔴 `outcome` is the field to branch on, never `freed_ids.len()`. `"partial"`
+/// and `"unavailable"` both carry ids and neither is a success.
+/// Test: `dispatch_palace_unalias_dry_run_names_ids_and_writes_nothing`, and
+/// `dispatch_palace_unalias_frees_a_real_collision_and_is_idempotent` for the
+/// write path (#5005 review: the success path had only ever run empty).
+pub(crate) async fn handle_palace_unalias(state: &AppState, args: Value) -> Result<Value> {
+    use trusty_common::memory_core::retrieval::{AliasRepairOptions, AliasRepairOutcome};
+    let palace = resolve_palace(state, &args, "palace_unalias")?;
+    let handle = open_palace_handle(state, &palace)?;
+    // Defaults to a dry run for the same reason `palace_reembed` does, and with
+    // more at stake: this one deletes vector keys.
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let report =
+        tokio::task::spawn_blocking(move || handle.repair_aliases(AliasRepairOptions { dry_run }))
+            .await
+            .context("join palace_unalias")??;
+
+    let ids = |v: &[Uuid]| v.iter().map(|i| i.to_string()).collect::<Vec<_>>();
+    let (still_aliased_ids, not_freed_ids, unparsed_keys) = match &report.outcome {
+        AliasRepairOutcome::Partial {
+            still_aliased,
+            not_freed,
+            unparsed_keys,
+        } => (
+            Some(ids(still_aliased)),
+            Some(ids(not_freed)),
+            Some(unparsed_keys.clone()),
+        ),
+        _ => (None, None, None),
+    };
+    let error = match &report.outcome {
+        AliasRepairOutcome::Unavailable { reason } => Some(reason.as_str()),
+        _ => None,
+    };
+    Ok(json!({
+        "palace": report.palace_id,
+        "dry_run": report.dry_run,
+        // Branch on this. `"clean"` and `"repaired"` are the only successes.
+        "outcome": report.outcome.as_str(),
+        "success": report.outcome.is_success(),
+        // The id SET, never a bare count: #5005 was a count reporting all-clear
+        // over real loss, and these ids are also the re-embed worklist.
+        "freed_ids": ids(&report.freed_ids),
+        "aliased_before_ids": report.before.aliased_drawer_ids().map(ids),
+        // #5005 review HIGH: a collision group whose keys are not uuids names
+        // no drawer, so `aliased_before_ids` can be EMPTY over a real
+        // collision. Non-empty here means that id list is short — read
+        // `vector_key_rows` vs `distinct_vector_ids` off `palace_reembed`, and
+        // branch on `outcome`, never on the id counts.
+        "unnameable_keys": report.unnameable_keys.clone(),
+        // Present only on a partial repair, which is exactly when a caller must
+        // not read the run as done.
+        "still_aliased_ids": still_aliased_ids,
+        "not_freed_ids": not_freed_ids,
+        "unparsed_keys": unparsed_keys,
+        "error": error,
+        // Freeing a group turns an invisible drawer into an ordinary missing
+        // one; only `palace_reembed` makes it retrievable again.
+        "reembed_required": report.reembed_required(),
+    }))
+}
+
+/// One word for how the #5005 alias audit went, for the `palace_reembed` payload.
+///
+/// Why: a caller has to be able to tell "no drawer is aliased" from "the scan
+/// failed and nothing is known" without inspecting counts — the second must
+/// never read as the first.
+/// What: `"clean"`, `"aliased"`, or `"unavailable"`.
+/// Test: `dispatch_palace_reembed_dry_run_reports_counts` in `tools::tests`.
+fn alias_audit_state(audit: &trusty_common::memory_core::retrieval::AliasAudit) -> &'static str {
+    if audit.unavailable_reason().is_some() {
+        "unavailable"
+    } else if audit.is_clean() {
+        "clean"
+    } else {
+        "aliased"
+    }
 }
 
 pub(crate) async fn handle_palace_compact(state: &AppState, args: Value) -> Result<Value> {

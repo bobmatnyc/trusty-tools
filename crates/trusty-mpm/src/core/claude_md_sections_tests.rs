@@ -850,7 +850,8 @@ fn assert_authority_intact(prompt: &str, configuration: &str) {
             prompt.contains(marker),
             "{configuration}: the delivered prompt lost the authority row {marker:?} — \
              the Prohibitions and Circuit Breakers tables are the PM's entire \
-             delegation-enforcement model and no customization may remove them (#4573)"
+             delegation-enforcement model. Only an ENFORCEMENT marker may remove \
+             them (#4838); every other override path must leave them intact (#4573)"
         );
     }
 }
@@ -896,7 +897,7 @@ fn a_hostile_core_override_cannot_delete_the_authority_tables() {
 }
 
 #[test]
-fn the_authority_tables_survive_every_override_configuration() {
+fn the_authority_tables_survive_every_override_except_an_enforcement_block() {
     // SCOPE CHANGE (#4286). This no longer claims the tables survive EVERY
     // configuration, because they do not: `enforcement` is now an ordinary
     // overridable section, so a project that writes an ENFORCEMENT block does
@@ -1207,7 +1208,8 @@ fn the_pm_allowlist_does_not_contradict_the_action_budget() {
 fn the_budget_survives_every_override_configuration() {
     // SCOPE CHANGE (#4838, the deduplication PR). This no longer claims the
     // budget survives EVERY configuration, for the same reason
-    // `the_authority_tables_survive_every_override_configuration` stopped
+    // `the_authority_tables_survive_every_override_except_an_enforcement_block`
+    // stopped
     // claiming that of the tables at #4286: `enforcement` is an ordinary
     // overridable section. #4838 also made `enforcement.md` the single
     // canonical home of the budget rule (it used to be restated in
@@ -1249,7 +1251,7 @@ fn the_budget_survives_every_override_configuration() {
 
     // #4838: an ENFORCEMENT override now DOES delete the budget rule, because
     // deduplication left `enforcement.md` as the rule's only copy. Mirrors
-    // `the_authority_tables_survive_every_override_configuration`'s
+    // `the_authority_tables_survive_every_override_except_an_enforcement_block`'s
     // `hostile_floor` arm, which records the same fact for the Prohibitions
     // and Circuit Breakers tables.
     let hostile_enforcement = TempDir::new().unwrap();
@@ -1398,7 +1400,20 @@ fn locate_blocks_ignores_other_sections() {
 /// surviving table would silently drop a real routing rule with nothing else
 /// asserting it — which is the failure this test exists to catch, not the
 /// wording of any one row.
-const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
+///
+/// #5087 moved the per-agent trigger lists and the default-model column out of
+/// the always-loaded prompt and into the `tm-delegation-patterns` skill, which
+/// loads on trigger. The assertions FOLLOW the mappings to their new home
+/// rather than being deleted — the same pattern #4574 used when the prose rules
+/// moved to the output style. Every mapping is still asserted verbatim, byte
+/// for byte; what changed is which surface has to carry it. A mapping that
+/// appears on NEITHER surface is the regression these tests exist to catch.
+///
+/// The split: a mapping stays resident when it gates a dispatch decision the PM
+/// makes without first reaching for a skill (what is delegated at all, which of
+/// two confusable agents, which tool is banned). It moves to the skill when it
+/// is lookup detail — a trigger keyword list, or an agent's default model.
+const FOLDED_ROUTING_MAPPINGS_PROMPT: &[(&str, &str)] = &[
     // Make / Mise Command Routing — the whole table lived nowhere else. `mise`
     // in particular is absent from the Prohibitions table, so this section is
     // the ONLY statement that `mise run` targets are delegated at all.
@@ -1414,27 +1429,7 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
         "every `make` and `mise run` target",
         "make/mise → local-ops",
     ),
-    (
-        "build, dist, clean, install, setup",
-        "build/dist/clean/install/setup → local-ops",
-    ),
-    (
-        "version, bump, release, publish, deploy",
-        "version/release/publish → local-ops",
-    ),
-    (
-        "`pyproject.toml`, `package.json`",
-        "the manifest-file release triggers",
-    ),
-    (
-        "`test`, `lint`, `check` (or `engineer`)",
-        "make/mise test/lint/check → qa or engineer",
-    ),
     // Ops Agent Routing.
-    (
-        "localhost, PM2, npm, docker",
-        "the local-ops trigger keywords",
-    ),
     (
         "including anything unknown or ambiguous",
         "unknown/ambiguous → local-ops",
@@ -1460,11 +1455,7 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
         "`research` → `engineer` → `local-ops` → `qa` → `documentation`",
         "the \"just do it\" full pipeline",
     ),
-    // When to Delegate to Each Agent — the per-agent facts.
-    (
-        "Prefer the language-specific engineer",
-        "the language-specific engineer preference",
-    ),
+    // When to Delegate to Each Agent — the two confusable pairs.
     (
         "APPROVED / NEEDS_IMPROVEMENT / BLOCKED",
         "the code-analyzer verdict vocabulary",
@@ -1476,6 +1467,40 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
     (
         "never goes to `version-control`",
         "P6 — ticket bookkeeping stays with ticketing",
+    ),
+    // The verbatim-name rule, which gated both deleted tables.
+    (
+        "fails to dispatch (issue #4594)",
+        "the pass-the-name-verbatim rule",
+    ),
+];
+
+/// The lookup detail #5087 relocated to `tm-delegation-patterns`. Same
+/// needles, asserted against the skill instead of the prompt.
+const FOLDED_ROUTING_MAPPINGS_SKILL: &[(&str, &str)] = &[
+    (
+        "build, dist, clean, install, setup",
+        "build/dist/clean/install/setup → local-ops",
+    ),
+    (
+        "version, bump, release, publish, deploy",
+        "version/release/publish → local-ops",
+    ),
+    (
+        "`pyproject.toml`, `package.json`",
+        "the manifest-file release triggers",
+    ),
+    (
+        "`test`, `lint`, `check` (or `engineer`)",
+        "make/mise test/lint/check → qa or engineer",
+    ),
+    (
+        "localhost, PM2, npm, docker",
+        "the local-ops trigger keywords",
+    ),
+    (
+        "Prefer the language-specific engineer",
+        "the language-specific engineer preference",
     ),
     (
         "Check git user for main-branch access",
@@ -1489,28 +1514,49 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
         "Secret scanning, attack-vector detection",
         "the security capabilities",
     ),
-    // core.md's Agent Routing — the per-agent default model column.
+    // The per-agent default-model column.
     ("| sonnet |", "the per-agent default-model column"),
     ("| opus |", "the per-agent default-model column"),
     ("| haiku |", "the per-agent default-model column"),
-    // The verbatim-name rule, which gated both deleted tables.
-    (
-        "fails to dispatch (issue #4594)",
-        "the pass-the-name-verbatim rule",
-    ),
 ];
+
+/// The bundled `tm-delegation-patterns` skill body, as shipped.
+const DELEGATION_PATTERNS_SKILL: &str = include_str!("../assets/skills/tm-delegation-patterns.md");
 
 #[test]
 fn the_surviving_routing_table_covers_every_folded_mapping() {
     let package = bundled_fallback_package().expect("manifest parses");
     let delegation = package.authored_run(&[SectionId::AgentDelegation]);
 
-    for (needle, what) in FOLDED_ROUTING_MAPPINGS {
+    for (needle, what) in FOLDED_ROUTING_MAPPINGS_PROMPT {
         assert!(
             delegation.contains(needle),
             "the collapsed routing tables lost {what}; missing {needle:?}"
         );
     }
+}
+
+#[test]
+fn the_relocated_routing_detail_is_carried_by_the_delegation_skill() {
+    // #5087: the other half of the same guarantee. These mappings left the
+    // always-loaded prompt, so the prompt-side assertion above can no longer
+    // see them — without this test, trimming the prompt would have silently
+    // deleted them with nothing failing.
+    for (needle, what) in FOLDED_ROUTING_MAPPINGS_SKILL {
+        assert!(
+            DELEGATION_PATTERNS_SKILL.contains(needle),
+            "tm-delegation-patterns lost {what}; missing {needle:?}"
+        );
+    }
+
+    // The prompt must name the call, or the relocated detail is unreachable.
+    let package = bundled_fallback_package().expect("manifest parses");
+    assert!(
+        package
+            .authored_run(&[SectionId::AgentDelegation])
+            .contains(r#"Skill(skill="tm-delegation-patterns")"#),
+        "the routing section must name the skill that now carries the detail"
+    );
 }
 
 #[test]
@@ -1563,11 +1609,7 @@ fn the_direct_action_budget_is_stated_once_and_pointed_at_elsewhere() {
         "enforcement.md holds the canonical statement"
     );
 
-    for section in [
-        SectionId::Core,
-        SectionId::Identity,
-        SectionId::NonOverridableRules,
-    ] {
+    for section in [SectionId::Core, SectionId::NonOverridableRules] {
         let body = package.authored_run(&[section]);
         assert!(
             body.contains(TITLE),
@@ -1578,6 +1620,97 @@ fn the_direct_action_budget_is_stated_once_and_pointed_at_elsewhere() {
             "{section:?} must point at the budget, not restate its mechanics"
         );
     }
+
+    // #4969: `identity` no longer references the budget AT ALL. It used to restate the
+    // whole PM identity — orchestrator role, delegation default, budget — that
+    // `core` already states, so the two sections said the same thing twice in
+    // one prompt. `identity` now defers to core's `## Identity` and keeps only
+    // the tm-session context that is genuinely its own.
+    //
+    // The anti-rot guarantee this test exists for still holds, via a two-hop
+    // chain that is asserted end to end: identity -> core's `## Identity` ->
+    // the budget title -> enforcement's canonical statement.
+    let identity = package.authored_run(&[SectionId::Identity]);
+    assert!(
+        !identity.contains(TITLE) && !identity.contains("One direct action = one PM-executed step"),
+        "identity must not restate the budget — core states it once"
+    );
+    assert!(
+        identity.contains(r#"CORE section's "Identity""#),
+        "identity must point at the section that does state it, by exact title"
+    );
+    assert!(
+        package
+            .authored_run(&[SectionId::Core])
+            .contains("## Identity"),
+        "core must carry the `## Identity` heading identity points at, or that \
+         pointer is dangling"
+    );
+}
+
+#[test]
+fn every_skill_pointer_names_the_call_rather_than_decorating() {
+    // #4969: `[SKILL: name]` is DOCUMENTATION STYLE, not a tool call. Nothing about the
+    // bracket notation makes the model invoke `Skill(skill="name")`, so a
+    // pointer written that way reads as a label and the content it points at
+    // gets re-inlined beside it by the next editor. That is exactly what had
+    // happened to the QA gate: a `[SKILL: tm-verification-protocols]` line sat
+    // directly above a full inlined copy of the skill's evidence table, routing
+    // table and forbidden-phrase list, with a second copy in `workflow`.
+    //
+    // Every pointer must therefore read as an instruction naming the call.
+    let package = bundled_fallback_package().expect("manifest parses");
+    let prompt = package.authored_run(&SectionId::CANONICAL);
+
+    assert!(
+        !prompt.contains("[SKILL:"),
+        "bare `[SKILL: …]` notation is decoration, not an instruction — write \
+         `call Skill(skill=\"name\")` so the pointer states the action"
+    );
+
+    // Every skill the prompt defers to must be named in a real call. Guards the
+    // inverse failure: deleting the inlined content AND the pointer with it.
+    for skill in [
+        "tm-verification-protocols",
+        "tm-git-file-tracking",
+        "tm-pr-workflow",
+        "tm-session-management",
+        "tm-circuit-breaker",
+        "tm-delegation-patterns",
+    ] {
+        assert!(
+            prompt.contains(&format!(r#"Skill(skill="{skill}")"#)),
+            "{skill} is deferred to but never invoked — the prompt must name \
+             the call, or the content is simply gone"
+        );
+    }
+}
+
+#[test]
+fn the_qa_evidence_contract_is_stated_once_in_the_skill() {
+    // #4969: it was stated three times. `core` inlined the evidence table, the QA
+    // routing table and the forbidden phrases beside a pointer to the skill
+    // that already held all three, and `workflow` restated nearly all of it
+    // again with no pointer at all.
+    let package = bundled_fallback_package().expect("manifest parses");
+
+    for (section, id) in [("core", SectionId::Core), ("workflow", SectionId::Workflow)] {
+        let body = package.authored_run(&[id]);
+        assert!(
+            !body.contains("Forbidden Phrases") && !body.contains("| Required Evidence |"),
+            "{section} must not restate the evidence table or forbidden phrases \
+             — they are needed at completion time, not on every prompt"
+        );
+    }
+
+    // The trigger stays resident: the PM has to know a completion claim is
+    // gated before it can know to load anything.
+    let core = package.authored_run(&[SectionId::Core]);
+    assert!(
+        core.contains("## QA Verification Gate (BLOCKING unless phase 4 is skipped)")
+            && core.contains(r#"Skill(skill="tm-verification-protocols")"#),
+        "core keeps the gate trigger and names the call that carries the detail"
+    );
 }
 
 #[test]
@@ -1586,24 +1719,85 @@ fn the_prose_rules_ban_categories_not_phrase_lists() {
     // generalize. Each must state the ban as a category or template AND mark
     // its examples non-exhaustive; asserting only the examples would rebuild
     // the exact failure they were written for.
+    //
+    // #4574 moved the rules out of `core` and into the output style, which was
+    // already carrying a live mirror of the same text — both channels are
+    // session-resident, so the project was paying for them twice. The
+    // assertions follow the rules to their one home rather than being deleted;
+    // `the_prose_rules_live_in_the_output_style_not_core` below is what keeps
+    // the second copy from coming back.
+    for style in crate::core::bundle::OUTPUT_STYLES {
+        let body = style.content;
+        let id = style.id;
+
+        assert!(
+            body.contains("**No praise for the user.**"),
+            "{id}: must carry the sycophancy rule"
+        );
+        assert!(
+            body.contains("bans the CATEGORY"),
+            "{id}: the sycophancy rule must ban the category, not four strings"
+        );
+        assert!(
+            body.contains("Non-exhaustive examples:"),
+            "{id}: the sycophancy examples must be marked non-exhaustive"
+        );
+
+        assert!(
+            body.contains("**Delete the framing opener; lead with the fact.**"),
+            "{id}: must carry the framing-opener rule"
+        );
+        assert!(
+            body.contains("`One <noun> that <its significance, or your relation to it>:`"),
+            "{id}: the framing-opener rule must state the TEMPLATE"
+        );
+        assert!(
+            body.contains("the rule is the template\nabove, never this list"),
+            "{id}: the observed instances must be marked as illustration only"
+        );
+
+        // The two rules the owner added on 2026-08-06 (#4574). Both are
+        // shape-stated, not phrase-listed, for the same reason as above.
+        assert!(
+            body.contains("Don't justify the restraint."),
+            "{id}: must carry the don't-justify-the-restraint rule"
+        );
+        assert!(
+            body.contains("No trailing emphatic negation."),
+            "{id}: must carry the trailing-emphatic-negation rule"
+        );
+    }
+}
+
+#[test]
+fn the_prose_rules_live_in_the_output_style_not_core() {
+    // #4574: `core` keeps the heading and a pointer so the PM knows the rules
+    // bind, and states none of them itself. A restatement here would be a
+    // second resident copy of text the output style already delivers — the
+    // duplication this issue removed.
     let core = bundled_fallback_package()
         .expect("manifest parses")
         .authored_run(&[SectionId::Core]);
 
-    assert!(core.contains("**No praise for the user.**"));
     assert!(
-        core.contains("bans the CATEGORY"),
-        "the sycophancy rule must ban the category, not four strings"
+        core.contains("## Prose Style — Write Plainly"),
+        "core keeps the heading — the PM has to know the rules bind"
     );
-    assert!(core.contains("Non-exhaustive examples:"));
+    assert!(
+        core.contains("Communication —\nWrite Plainly")
+            || core.contains("Communication — Write Plainly"),
+        "core must name the output-style section that carries the rules"
+    );
 
-    assert!(core.contains("**Delete the framing opener; lead with the fact.**"));
-    assert!(
-        core.contains("`One <noun> that <its significance, or your relation to it>:`"),
-        "the framing-opener rule must state the TEMPLATE"
-    );
-    assert!(
-        core.contains("the rule is the template\nabove, never this list"),
-        "the observed instances must be marked as illustration only"
-    );
+    for restated in [
+        "**No praise for the user.**",
+        "**Delete the framing opener; lead with the fact.**",
+        "bans the CATEGORY",
+        "**Do not embellish.**",
+    ] {
+        assert!(
+            !core.contains(restated),
+            "core restates {restated:?} — the rules live in the output style only (#4574)"
+        );
+    }
 }

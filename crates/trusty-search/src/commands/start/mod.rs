@@ -24,11 +24,20 @@ mod daemon;
 mod embedder;
 mod embedder_fallback;
 mod graceful_bootstrap;
+// #4395: ownership-aware orphan reaping — the reaper `daemon` calls before it
+// starts, which used to match by process name alone.
+mod reap_orphans;
 mod restore;
 mod swap_back_watchdog;
 
 #[cfg(test)]
 mod tests;
+
+// #4846: the dead-entry budget regression tests. A sibling of `tests` because
+// they need their own fixtures (a walkable tracked-root tree) and assert on
+// cost rather than on a return value.
+#[cfg(test)]
+mod tests_4846;
 
 // Epic #3524 slice 7: repeated ort<->python swap-back cycle bench/soak
 // coverage (fast deterministic tests + an opt-in real-hardware soak). A

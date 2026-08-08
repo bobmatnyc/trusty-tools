@@ -1,6 +1,6 @@
 //! OpenRPC 1.3.2 service description for `trusty-memory-mcp`.
 //!
-//! Why: Orchestrators such as open-mpm need a machine-readable manifest of
+//! Why: Orchestrators such as trusty-agents need a machine-readable manifest of
 //! every memory tool the server exposes — including the logical scopes
 //! (`memory.read` / `memory.write`) each tool requires — so they can route
 //! tasks and enforce per-tool authorisation without bespoke per-server
@@ -41,7 +41,7 @@ mod scopes {
 
 /// Return the logical scopes a given memory tool requires.
 ///
-/// Why: open-mpm and similar orchestrators need to know whether a tool
+/// Why: trusty-agents and similar orchestrators need to know whether a tool
 /// mutates state so they can enforce least-privilege auth before
 /// dispatching the call.
 /// What: Read-only tools → `["memory.read"]`; mutating tools →
@@ -76,6 +76,10 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "palace_delete"
         | "palace_update"
         | "palace_compact"
+        // #4906: dry-run is read-only but the repair writes vectors.
+        | "palace_reembed"
+        // #5005: dry-run is read-only but the repair deletes vector keys.
+        | "palace_unalias"
         | "kg_assert"
         | "add_alias"
         | "remove_prompt_fact"
@@ -105,6 +109,13 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         // renaming mutate the palace's ROOMS/ROOM_KEYS tables (never DRAWERS).
         "room_list" => &[MEMORY_READ],
         "room_create" | "room_rename" => &[MEMORY_WRITE],
+
+        // ADR-0027 T9 wing tools (#4809): a wing is a storage-scope boundary
+        // over memory, not a credential grant (ADR-0026), so it needs no new
+        // scope — listing one is a memory read, creating or renaming one
+        // mutates palace state.
+        "wing_list" => &[MEMORY_READ],
+        "wing_create" | "wing_rename" => &[MEMORY_WRITE],
 
         _ => &[],
     };

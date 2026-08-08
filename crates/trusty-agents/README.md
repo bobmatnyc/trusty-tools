@@ -229,7 +229,7 @@ sub-agents can keep conversations within model context limits.
 
 ## Global infrastructure
 
-Open-mpm maintains per-user state outside the project tree:
+trusty-agents maintains per-user state outside the project tree:
 
 ```
 ~/.trusty-agents/

@@ -17,7 +17,7 @@ pub mod mcp;
 pub mod service;
 
 // Why: surface the unified `rpc.discover` service descriptor at the crate
-// root so open-mpm and other host processes can `use trusty_search::SearchMcpService`
+// root so trusty-agents and other host processes can `use trusty_search::SearchMcpService`
 // without traversing into the internal module layout (closes #115).
 pub use service::SearchMcpService;
 

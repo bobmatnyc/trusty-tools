@@ -212,6 +212,17 @@ pub struct Drawer {
     /// `None` via `#[serde(default)]`.
     #[serde(default)]
     pub completed_at: Option<DateTime<Utc>>,
+    /// #4884: ADR-0028 D5 slot name for a Tier C ("current") fact — an
+    /// explicit, writer-chosen, namespaced key of the form
+    /// `<domain>:<id>/<aspect>` (`pr:4818/state`, `ws:foo/resume`). One slot
+    /// holds one live fact, so writing a key that is already occupied is what
+    /// will retire the prior occupant. Storage groundwork only: nothing writes
+    /// a non-`None` value yet — the Tier C write path is a later ticket — but
+    /// the field and its index (`DRAWERS_BY_FACT_KEY`) must exist first so no
+    /// row has to be rewritten when it lands. Legacy rows decode to `None` via
+    /// `#[serde(default)]`.
+    #[serde(default)]
+    pub fact_key: Option<String>,
 }
 
 impl Drawer {
@@ -235,6 +246,9 @@ impl Drawer {
             drawer_type: DrawerType::Unknown,
             expires_at: None,
             completed_at: None,
+            // #4884: a drawer claims no slot until a Tier C write names one,
+            // exactly as `expires_at` stays `None` until a TTL is set.
+            fact_key: None,
         }
     }
 
@@ -255,6 +269,56 @@ impl Drawer {
             self.expires_at = Some(self.created_at + chrono::Duration::days(7));
         }
         self
+    }
+
+    /// Whether this drawer's TTL has elapsed as of `now`.
+    ///
+    /// Why: #4885 — before this existed, "is it expired" was written out by
+    /// hand in two places (the sweep inside `PalaceHandle::open_with_intent`
+    /// and `PalaceHandle::purge_expired`) and in neither of the paths that
+    /// actually serve recall. Production opens the palace once as
+    /// `OpenIntent::Writer` and holds it for the process lifetime, so a drawer
+    /// that expired mid-session kept being returned until the daemon
+    /// restarted. ADR-0028 D4 makes read-time the enforcement point precisely
+    /// because a sweep that fails silently reintroduces that bug; one shared
+    /// predicate is what keeps the sweep and the read paths from drifting to
+    /// different answers.
+    /// What: `true` when `expires_at` is set and strictly earlier than `now`.
+    /// `None` never expires, and a TTL exactly equal to `now` has not yet
+    /// elapsed. `now` is a parameter, not `Utc::now()`, so one filtering pass
+    /// judges every drawer against a single instant and tests can pin the
+    /// clock.
+    /// Test: `is_expired_at_is_strict_and_none_never_expires` in this module;
+    /// `expired_l1_drawer_is_excluded_without_reopen` and
+    /// `expired_drawer_is_excluded_from_l2` cover the read path,
+    /// `purge_expired_drops_only_past_ttl` the sweep.
+    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|t| t < now)
+    }
+
+    /// Whether this drawer currently occupies an ADR-0028 Tier C slot (#4886).
+    ///
+    /// Why: expiry means two different things for the two kinds of drawer, and
+    /// the reclamation sweeps need to tell them apart. For an ordinary drawer,
+    /// `expires_at` is a lifetime — when it elapses the row is reclaimable, and
+    /// the sweeps hard-delete it. For a Tier C fact, `expires_at` is the
+    /// *retirement condition* D4 required at admission: when it elapses the
+    /// fact stops being privileged, which read-time expiry (#4885) already
+    /// enforces on every recall. Deleting the row on top of that would
+    /// contradict D6 ("Demoted, never deleted") and destroy the record the
+    /// supersession pointer (#4887) is meant to hang off — and D6 rejects hard
+    /// deletion on evidence, not principle: this estate hand-wrote 109
+    /// amendment edges precisely so corrections survive. So the sweeps skip
+    /// these, and a Tier C fact leaves the tier by being superseded (which
+    /// clears both fields, returning it to an ordinary permanent Tier E
+    /// drawer) rather than by being erased.
+    /// What: `true` while `fact_key` is set. A superseded drawer has had its
+    /// `fact_key` cleared by the retire-on-write path, so it is `false` again
+    /// and the sweeps treat it exactly as they treat any other drawer.
+    /// Test: `expired_tier_c_drawer_survives_the_open_time_sweep`,
+    /// `purge_expired_leaves_tier_c_drawers_alone`.
+    pub fn is_tier_c(&self) -> bool {
+        self.fact_key.is_some()
     }
 
     /// Accumulated access boost for decay calculation.
@@ -363,6 +427,41 @@ mod tests {
         let d: Drawer = serde_json::from_value(json).expect("legacy decode");
         assert_eq!(d.drawer_type, DrawerType::Unknown);
         assert!(d.expires_at.is_none());
+        // #4884: JSON written before `fact_key` existed must decode to "claims
+        // no slot", not fail the whole drawer.
+        assert!(d.fact_key.is_none());
+    }
+
+    /// #4885: the one predicate the open-time sweep, `purge_expired`, and every
+    /// retrieval layer share. Its two edges are what the callers depend on:
+    /// `None` must mean "never expires" (most drawers), and the comparison must
+    /// be strict so a drawer is not treated as expired at the exact instant its
+    /// TTL is reached.
+    #[test]
+    fn is_expired_at_is_strict_and_none_never_expires() {
+        let now = Utc::now();
+        let room = Uuid::new_v4();
+
+        let permanent = Drawer::new(room, "standing rule");
+        assert!(
+            !permanent.is_expired_at(now),
+            "expires_at = None must never expire"
+        );
+
+        let mut past = Drawer::new(room, "stale");
+        past.expires_at = Some(now - chrono::Duration::seconds(1));
+        assert!(past.is_expired_at(now));
+
+        let mut future = Drawer::new(room, "live");
+        future.expires_at = Some(now + chrono::Duration::seconds(1));
+        assert!(!future.is_expired_at(now));
+
+        let mut exact = Drawer::new(room, "boundary");
+        exact.expires_at = Some(now);
+        assert!(
+            !exact.is_expired_at(now),
+            "a TTL equal to now has not yet elapsed"
+        );
     }
 
     #[test]

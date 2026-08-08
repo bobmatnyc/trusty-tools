@@ -101,6 +101,8 @@ fn tool_definitions_drops_palace_required_when_default_set() {
         ("memory_forget", true),
         ("palace_info", true),
         ("palace_compact", true),
+        ("palace_reembed", true),
+        ("palace_unalias", true),
         ("kg_assert", true),
         ("kg_query", true),
         // Issue #664: add_alias and discover_aliases now include `palace`
@@ -136,7 +138,10 @@ fn tool_definitions_lists_all_tools() {
         .expect("tools array");
     // 34 original + 3 task tools (task_add, task_list, task_complete, issue
     // #1722) + 3 room tools (room_list, room_create, room_rename, ADR-0027 T6)
-    assert_eq!(tools.len(), 40);
+    // + 3 wing tools (wing_list, wing_create, wing_rename, ADR-0027 T9 / #4809)
+    // + 1 repair tool (palace_reembed, #4906)
+    // + 1 alias-repair tool (palace_unalias, #5005)
+    assert_eq!(tools.len(), 45);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -154,6 +159,8 @@ fn tool_definitions_lists_all_tools() {
         "palace_list",
         "palace_info",
         "palace_compact",
+        "palace_reembed",
+        "palace_unalias",
         "kg_assert",
         "kg_query",
         "memory_recall_all",
@@ -184,6 +191,10 @@ fn tool_definitions_lists_all_tools() {
         "room_list",
         "room_create",
         "room_rename",
+        // ADR-0027 T9 (#4809) — the wing surface ships with the wing entity:
+        "wing_list",
+        "wing_create",
+        "wing_rename",
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
@@ -204,6 +215,70 @@ async fn dispatch_palace_create_persists() {
         .expect("palace_list");
     let ids = listed["palaces"].as_array().expect("palaces array");
     assert!(ids.iter().any(|v| v.as_str() == Some("alpha")));
+}
+
+/// Why (#4906): the repair path has to be reachable from the daemon, because
+/// the daemon holds the palace's writer lock — a CLI would only ever get a
+/// read-only snapshot. This confirms the tool is wired end-to-end through
+/// `dispatch_tool` and that a dry run reports rather than mutates.
+/// What: creates a palace, calls `palace_reembed` with no arguments, and
+/// asserts the response carries the coverage counts and defaults to a dry run.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_palace_reembed_dry_run_reports_counts() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "reembed-test"}))
+        .await
+        .expect("palace_create");
+    let out = dispatch_tool(&state, "palace_reembed", json!({"palace": "reembed-test"}))
+        .await
+        .expect("palace_reembed");
+    assert_eq!(out["dry_run"], true, "must default to a dry run: {out}");
+    assert_eq!(out["missing"], 0);
+    assert_eq!(out["attempted"], 0);
+    assert_eq!(out["repaired"], 0);
+    assert!(out["drawer_count"].is_number());
+    assert!(out["vector_count"].is_number());
+}
+
+/// Why (#5005): `unalias` had zero call sites — the repair existed as code an
+/// operator could not run. The claim this makes is that it is now reachable
+/// through `dispatch_tool`, defaults to a dry run like `palace_reembed`, and
+/// reports an id SET rather than a count (the count-based all-clear is the
+/// defect the ticket is about). It also runs inside the daemon for the same
+/// reason `palace_reembed` does: the daemon holds the writer lock.
+/// What: creates a palace and calls `palace_unalias` with no arguments,
+/// asserting the default is a dry run, the outcome word is `clean` on a palace
+/// with nothing aliased, and the payload carries `freed_ids` as an array.
+/// Test: itself. Removing the `palace_unalias` dispatch arm makes this an
+/// unknown-tool error; defaulting `dry_run` to false fails the first assertion.
+#[tokio::test]
+async fn dispatch_palace_unalias_dry_run_names_ids_and_writes_nothing() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "unalias-test"}))
+        .await
+        .expect("palace_create");
+    let out = dispatch_tool(&state, "palace_unalias", json!({"palace": "unalias-test"}))
+        .await
+        .expect("palace_unalias must be dispatchable");
+    assert_eq!(out["dry_run"], true, "must default to a dry run: {out}");
+    assert_eq!(
+        out["outcome"], "clean",
+        "a palace with no collision is clean, not repaired: {out}"
+    );
+    assert_eq!(out["success"], true);
+    assert!(
+        out["freed_ids"]
+            .as_array()
+            .expect("freed_ids array")
+            .is_empty(),
+        "an id SET, empty here — never a bare count: {out}"
+    );
+    assert_eq!(
+        out["reembed_required"], false,
+        "nothing was freed, so nothing is owed"
+    );
+    assert!(out["error"].is_null(), "a clean run has no error: {out}");
 }
 
 /// Why (issue #1714): `force=true` bypasses slug validation with no
@@ -1746,6 +1821,15 @@ async fn bm25_index_queue_drops_when_full() {
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
         other => panic!("expected Full overflow, got {other:?}"),
     }
+
+    // #5048 review: dropping is only defensible if something repairs the drop.
+    // Removing the `mark_dirty` call from `bm25_index_enqueue`'s `Full` arm
+    // leaves this list empty and the coverage gap unrepaired until restart.
+    assert_eq!(
+        crate::bm25_repair::dirty_palaces(&state),
+        vec!["default".to_string()],
+        "a dropped index op must queue its palace for coverage repair"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -1880,88 +1964,10 @@ async fn note_succeeds_while_state_is_warming() {
     assert_eq!(result["status"], "stored");
 }
 
-/// Why (issue #1970): `memory_recall` must never block/error on embedder
-/// state — it should degrade to the BM25/L0/L1 fallback and return
-/// normally while the daemon is `Warming`.
-/// What: dispatch `memory_recall` against a Warming state and assert the
-/// call succeeds with a well-formed (possibly empty, since BM25 isn't
-/// wired up in this unit test and L1 isn't live-refreshed mid-process)
-/// results array — the key assertion is the absence of a "warming up"
-/// error, not the result content (see
-/// `bm25_hits_hydrate_from_handle_during_warmup` for content-level
-/// coverage of the fallback's BM25 hydration path).
-/// Test: this test.
-#[tokio::test]
-async fn recall_does_not_error_while_state_is_warming() {
-    let (state, _tmp) = test_state_warming();
-    let _ = dispatch_tool(
-        &state,
-        "palace_create",
-        serde_json::json!({"name": "warmtest-recall"}),
-    )
-    .await
-    .expect("palace_create");
-
-    let result = dispatch_tool(
-        &state,
-        "memory_recall",
-        serde_json::json!({
-            "palace": "warmtest-recall",
-            "query": "test query"
-        }),
-    )
-    .await
-    .expect("memory_recall must not error while Warming (issue #1970)");
-    assert!(result["results"].is_array());
-}
-
-/// Why (issue #1970): `memory_recall_deep` mirrors `memory_recall`'s
-/// warming-fallback posture.
-/// Test: this test.
-#[tokio::test]
-async fn recall_deep_does_not_error_while_state_is_warming() {
-    let (state, _tmp) = test_state_warming();
-    let _ = dispatch_tool(
-        &state,
-        "palace_create",
-        serde_json::json!({"name": "warmtest-recall-deep"}),
-    )
-    .await
-    .expect("palace_create");
-
-    let result = dispatch_tool(
-        &state,
-        "memory_recall_deep",
-        serde_json::json!({
-            "palace": "warmtest-recall-deep",
-            "query": "test query"
-        }),
-    )
-    .await
-    .expect("memory_recall_deep must not error while Warming (issue #1970)");
-    assert!(result["results"].is_array());
-}
-
-/// Why (issue #1970, was #914 Part A): `memory_recall_all` must not error
-/// while `Warming` either — it fans the same BM25/L0/L1 fallback out across
-/// every palace.
-/// Test: this test (regression guard for the gap originally fixed in #914
-/// Part A, now re-targeted at graceful degradation instead of a hard error).
-#[tokio::test]
-async fn recall_all_does_not_error_while_state_is_warming() {
-    let (state, _tmp) = test_state_warming();
-
-    let result = dispatch_tool(
-        &state,
-        "memory_recall_all",
-        serde_json::json!({
-            "q": "test query issued while warming up"
-        }),
-    )
-    .await
-    .expect("memory_recall_all must not error while Warming (issue #1970)");
-    assert!(result["results"].is_array());
-}
+// Issue #1970's degraded-recall tests for memory_recall / memory_recall_deep /
+// memory_recall_all moved to tests/recall_degraded_lane.rs (#4836): they gate on
+// a process-wide embedder cell that `dispatch_remember_then_recall` initialises
+// in this binary, so here they were order-dependent no-ops.
 
 /// Why (issue #1970): `bm25_hits_to_recall_results` is the piece that makes
 /// the warming-fallback recall path actually useful — without it, BM25
@@ -2475,4 +2481,1130 @@ async fn dispatch_palace_info_reports_room_count() {
         .expect("palace_info");
     assert_eq!(info["room_count"], 2, "{info}");
     assert_eq!(info["drawer_count"], 2);
+}
+
+// ── ADR-0028 Tier C MCP surface (#4886) ─────────────────────────────────────
+
+/// A well-formed slot is admitted and reported as Tier C, and a second write to
+/// the same slot retires the first — the "one slot, one live fact" contract
+/// (ADR-0028 D5) as an MCP client sees it.
+#[tokio::test]
+async fn dispatch_remember_admits_a_tier_c_slot() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "tierc"}))
+        .await
+        .expect("palace_create");
+
+    let first = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "tierc",
+            "text": "PR 4818 is in flight at head d39638482bfe8de462c02c4f40e02b56b16897ff",
+            "fact_key": "pr:4818/state",
+        }),
+    )
+    .await
+    .expect("first tier C write");
+    assert_eq!(first["tier"], "C", "{first}");
+    assert!(first.get("tier_c_refused").is_none(), "{first}");
+
+    let second = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "tierc",
+            "text": "PR 4818 merged as squash 4c412ae1 at head 59ae50d8 on main",
+            "fact_key": "pr:4818/state",
+            "force": true,
+        }),
+    )
+    .await
+    .expect("second tier C write");
+    assert_eq!(second["tier"], "C", "{second}");
+
+    let handle = open_palace_handle(&state, "tierc").expect("open");
+    let winner: uuid::Uuid = second["drawer_id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        handle.kg.drawer_id_for_fact_key("pr:4818/state").unwrap(),
+        Some(winner),
+        "the newer write must hold the slot"
+    );
+    assert_eq!(
+        handle.kg.load_drawers().unwrap().len(),
+        2,
+        "the superseded fact is demoted, never deleted (D6)"
+    );
+}
+
+/// Fail-closed admission is OBSERVABLE: the write still succeeds, but as an
+/// ordinary Tier E drawer, and the envelope names the reason.
+#[tokio::test]
+async fn dispatch_remember_reports_a_refused_slot_as_tier_e() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "refused"}))
+        .await
+        .expect("palace_create");
+
+    let out = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "refused",
+            "text": "A bare unnamespaced slot name would collide across every workstream",
+            "fact_key": "state",
+        }),
+    )
+    .await
+    .expect("the write degrades, it does not fail");
+    assert_eq!(out["tier"], "E", "{out}");
+    assert!(
+        out["tier_c_refused"]
+            .as_str()
+            .is_some_and(|s| s.contains("state")),
+        "{out}"
+    );
+
+    let handle = open_palace_handle(&state, "refused").expect("open");
+    assert_eq!(handle.kg.drawer_id_for_fact_key("state").unwrap(), None);
+    assert!(
+        handle
+            .kg
+            .load_drawers()
+            .unwrap()
+            .iter()
+            .all(|d| d.fact_key.is_none() && d.expires_at.is_none()),
+        "a refused write must not pick up a slot or the Tier C default TTL"
+    );
+}
+
+/// `memory_note` carries the same slot surface — it is the `importance = 1.0`
+/// path, so a stale note there is the precise failure ADR-0028 exists to stop.
+#[tokio::test]
+async fn dispatch_note_admits_a_tier_c_slot() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "tiercnote"}))
+        .await
+        .expect("palace_create");
+
+    let out = dispatch_tool(
+        &state,
+        "memory_note",
+        json!({
+            "palace": "tiercnote",
+            "content": "origin/main is at 2b83d19e right now",
+            "fact_key": "repo:trusty-tools/main-head",
+        }),
+    )
+    .await
+    .expect("memory_note");
+    assert_eq!(out["tier"], "C", "{out}");
+
+    let handle = open_palace_handle(&state, "tiercnote").expect("open");
+    let id: uuid::Uuid = out["drawer_id"].as_str().unwrap().parse().unwrap();
+    let stored = handle
+        .kg
+        .load_drawers()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.id == id)
+        .expect("stored");
+    assert_eq!(
+        stored.fact_key.as_deref(),
+        Some("repo:trusty-tools/main-head")
+    );
+    assert!(
+        stored.expires_at.is_some(),
+        "an admitted Tier C fact always carries a retirement condition (D4)"
+    );
+}
+
+/// A malformed `expires_at` STRING is a caller typo, not a degradation —
+/// silently substituting the 24-hour default would hide it.
+#[tokio::test]
+async fn dispatch_remember_rejects_an_unparseable_expires_at() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "badttl"}))
+        .await
+        .expect("palace_create");
+
+    let err = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "badttl",
+            "text": "A memory whose retirement timestamp cannot be parsed at all",
+            "fact_key": "pr:1/state",
+            "expires_at": "tomorrow",
+        }),
+    )
+    .await
+    .expect_err("an unparseable timestamp must be an error");
+    assert!(format!("{err:#}").contains("RFC 3339"), "{err:#}");
+}
+
+/// The schema advertises the two new arguments, on both write tools.
+#[test]
+fn tool_definitions_expose_the_tier_c_arguments() {
+    let defs = super::definitions::tool_definitions();
+    for tool in ["memory_remember", "memory_note"] {
+        let props = defs["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == tool)
+            .unwrap_or_else(|| panic!("{tool} missing"))["inputSchema"]["properties"]
+            .clone();
+        assert!(props.get("fact_key").is_some(), "{tool} lacks fact_key");
+        assert!(props.get("expires_at").is_some(), "{tool} lacks expires_at");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #4888 — Tier S admission control (ADR-0028 D2 / D8)
+//
+// Every test here drives the real MCP handler through `dispatch_tool`. The
+// gate is only worth anything at the surface a caller actually reaches, so
+// none of these call `check_tier_s_admission` directly.
+// ---------------------------------------------------------------------------
+
+/// Assert `count` distinct hot-predicate facts into `palace`, expecting each
+/// to be admitted. Panics with context on the first refusal.
+async fn fill_tier_s(state: &AppState, palace: &str, count: usize) {
+    for i in 0..count {
+        dispatch_tool(
+            state,
+            "kg_assert",
+            json!({
+                "palace": palace,
+                "subject": format!("rule-{i}"),
+                "predicate": "has_convention",
+                "object": format!("standing rule number {i}"),
+            }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("fact {i} should be admitted below the cap: {e:#}"));
+    }
+}
+
+/// Why (#4888): the cap is 20, so exactly 20 facts must be admitted. A gate
+/// that refused the 20th would be off-by-one in the direction that silently
+/// costs the user a slot.
+#[tokio::test]
+async fn dispatch_kg_assert_accepts_twenty_facts() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    assert_eq!(
+        listed["facts"].as_array().expect("facts array").len(),
+        crate::prompt_facts::TIER_S_MAX_FACTS,
+        "all 20 facts should be active on the surface",
+    );
+}
+
+/// Why (#4888): the 21st write must FAIL, not be silently dropped or
+/// truncated at read time. Fail-closed means the fact is absent from storage
+/// afterwards, not merely absent from the rendered block.
+#[tokio::test]
+async fn dispatch_kg_assert_rejects_twenty_first_fact() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let err = dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "one-too-many",
+            "predicate": "has_convention",
+            "object": "this rule arrives when the surface is already full",
+        }),
+    )
+    .await
+    .expect_err("the 21st fact must be rejected");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("Tier S is full"), "{msg}");
+
+    // Fail-closed: the write did not happen.
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    let facts = listed["facts"].as_array().expect("facts array");
+    assert_eq!(facts.len(), crate::prompt_facts::TIER_S_MAX_FACTS);
+    assert!(
+        !facts.iter().any(|f| f["subject"] == "one-too-many"),
+        "rejected fact must not be in storage: {listed}",
+    );
+}
+
+/// Why (#4888): "cap exceeded" alone is a dead end — the caller cannot act on
+/// it. The rejection must name the facts occupying the surface and name the
+/// tool that retires one, or the actionability requirement is unmet.
+#[tokio::test]
+async fn dispatch_kg_assert_rejection_names_existing_facts() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let err = dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "blocked",
+            "predicate": "is_fact",
+            "object": "rejected",
+        }),
+    )
+    .await
+    .expect_err("must be rejected at the cap");
+    let msg = format!("{err:#}");
+
+    // The retirement path is named explicitly.
+    assert!(msg.contains("remove_prompt_fact"), "{msg}");
+    // Every occupying fact is named, so the caller can choose one to retire.
+    for i in 0..crate::prompt_facts::TIER_S_MAX_FACTS {
+        assert!(
+            msg.contains(&format!("rule-{i} has_convention")),
+            "rejection must name existing fact rule-{i}: {msg}",
+        );
+        assert!(
+            msg.contains(&format!("standing rule number {i}")),
+            "rejection must show the object of rule-{i}: {msg}",
+        );
+    }
+}
+
+/// Why (#4888): an author who filled the surface must still be able to
+/// correct an existing rule. Re-asserting an active `(subject, predicate)`
+/// supersedes rather than adds, so occupancy is unchanged and the write is
+/// admitted even at the cap.
+#[tokio::test]
+async fn dispatch_kg_assert_allows_replacing_existing_fact_at_cap() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "rule-3",
+            "predicate": "has_convention",
+            "object": "corrected wording for rule three",
+        }),
+    )
+    .await
+    .expect("replacing an existing fact at the cap must be admitted");
+
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    let facts = listed["facts"].as_array().expect("facts array");
+    assert_eq!(
+        facts.len(),
+        crate::prompt_facts::TIER_S_MAX_FACTS,
+        "a replacement must not grow the surface",
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|f| f["object"] == "corrected wording for rule three"),
+        "replacement object should be live: {listed}",
+    );
+}
+
+/// Why (#4888): the cap is on ACTIVE facts. Retraction closes the interval
+/// (`valid_to` set) but leaves the row in storage, so a counting bug that
+/// walked raw rows instead of active ones would wedge the surface at 20
+/// forever with no way to recover.
+#[tokio::test]
+async fn dispatch_kg_assert_retracted_fact_frees_a_slot() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    // Confirm we really are wedged before retiring anything.
+    dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "successor",
+            "predicate": "has_convention",
+            "object": "waiting for a free slot",
+        }),
+    )
+    .await
+    .expect_err("cap must be enforced before retirement");
+
+    let removed = dispatch_tool(
+        &state,
+        "remove_prompt_fact",
+        json!({"subject": "rule-7", "predicate": "has_convention"}),
+    )
+    .await
+    .expect("remove_prompt_fact");
+    assert_eq!(removed["removed"], true, "{removed}");
+
+    // The retracted row is still on disk but must not consume a slot.
+    dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "successor",
+            "predicate": "has_convention",
+            "object": "admitted into the slot the retraction freed",
+        }),
+    )
+    .await
+    .expect("a retracted fact must free its slot");
+
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    let facts = listed["facts"].as_array().expect("facts array");
+    assert_eq!(facts.len(), crate::prompt_facts::TIER_S_MAX_FACTS);
+    assert!(
+        facts.iter().any(|f| f["subject"] == "successor"),
+        "{listed}"
+    );
+    assert!(
+        !facts.iter().any(|f| f["subject"] == "rule-7"),
+        "retracted fact must not be active: {listed}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #4890 — Tier S re-affirmation (ADR-0028 D8 point 4)
+// ---------------------------------------------------------------------------
+
+/// Why (#4890): this is the ticket's central semantic decision and the only
+/// place it can be proven. `affirmed_at` is derived from the active row's
+/// `valid_from` rather than stored, and the decision that re-asserting a rule
+/// **verbatim** counts as re-affirmation depends entirely on `assert`
+/// rewriting `valid_from` even when the object is byte-identical. Nothing in
+/// this crate owns that behaviour — it is `KgStoreRedb::assert`'s — so a change
+/// there (an "identical write is a no-op" optimisation, say) would silently
+/// turn the doctor check into a nag that no amount of re-affirmation could
+/// clear. This test is the tripwire for that.
+/// What: asserts a fact, records its `affirmed_at`, sleeps past the storage
+/// layer's millisecond resolution, re-asserts the SAME subject/predicate/object,
+/// and asserts the surface still holds one fact whose `affirmed_at` moved
+/// strictly forward.
+#[tokio::test]
+async fn reasserting_an_identical_fact_refreshes_affirmed_at() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "affirm"}))
+        .await
+        .expect("palace_create");
+
+    let write = json!({
+        "palace": "affirm",
+        "subject": "conv-1",
+        "predicate": "has_convention",
+        "object": "Write plainly",
+    });
+
+    dispatch_tool(&state, "kg_assert", write.clone())
+        .await
+        .expect("first assert");
+    let first = affirmed_at_of(&state, "conv-1").await;
+
+    // Timestamps persist at millisecond resolution, so two asserts inside the
+    // same millisecond would be indistinguishable and the comparison below
+    // would be measuring the clock rather than the behaviour.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    dispatch_tool(&state, "kg_assert", write)
+        .await
+        .expect("re-asserting the identical fact must be admitted");
+    let second = affirmed_at_of(&state, "conv-1").await;
+
+    assert!(
+        second > first,
+        "re-asserting a verbatim-identical rule must refresh affirmed_at \
+         (first={first}, second={second})",
+    );
+
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    assert_eq!(
+        listed["facts"].as_array().expect("facts array").len(),
+        1,
+        "a re-affirmation supersedes rather than adds: {listed}",
+    );
+}
+
+/// Read the `affirmed_at` of the single Tier S fact with the given subject.
+///
+/// Parses rather than string-compares: `to_rfc3339` emits 0, 3, 6, or 9
+/// fractional digits depending on the value, so two RFC 3339 strings do not
+/// order lexicographically (a whole-second timestamp emits no fraction at all,
+/// and `+` sorts before `.`).
+async fn affirmed_at_of(state: &AppState, subject: &str) -> chrono::DateTime<chrono::Utc> {
+    let listed = dispatch_tool(state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    let facts = listed["facts"].as_array().expect("facts array").clone();
+    let row = facts
+        .iter()
+        .find(|f| f["subject"] == subject)
+        .unwrap_or_else(|| panic!("no Tier S fact for {subject}: {listed}"))
+        .clone();
+    let raw = row["affirmed_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("affirmed_at missing or not a string: {row}"));
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .unwrap_or_else(|e| panic!("affirmed_at {raw:?} is not RFC 3339: {e}"))
+        .with_timezone(&chrono::Utc)
+}
+
+/// Why (#4888): 80 characters is the boundary and must be inclusive — a rule
+/// of exactly 80 chars is legal (ADR-0028 D2).
+#[tokio::test]
+async fn dispatch_kg_assert_accepts_object_at_char_limit() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "form"}))
+        .await
+        .expect("palace_create");
+
+    let exactly_80 = "x".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS);
+    assert_eq!(exactly_80.chars().count(), 80);
+
+    dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "form",
+            "subject": "boundary",
+            "predicate": "has_convention",
+            "object": exactly_80,
+        }),
+    )
+    .await
+    .expect("an 80-character object is within the form constraint");
+}
+
+/// Why (#4888): an 81-character object must be rejected, and the error must
+/// state the actual length and the limit so the author knows how much to cut.
+#[tokio::test]
+async fn dispatch_kg_assert_rejects_object_over_char_limit() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "form"}))
+        .await
+        .expect("palace_create");
+
+    let too_long = "x".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS + 1);
+    let err = dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "form",
+            "subject": "overlong",
+            "predicate": "has_convention",
+            "object": too_long,
+        }),
+    )
+    .await
+    .expect_err("an 81-character object must be rejected");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("81 characters"),
+        "actual length missing: {msg}"
+    );
+    assert!(msg.contains("limit is 80"), "limit missing: {msg}");
+
+    // Fail-closed: nothing was written.
+    let listed = dispatch_tool(&state, "list_prompt_facts", json!({}))
+        .await
+        .expect("list_prompt_facts");
+    assert!(
+        listed["facts"].as_array().expect("facts array").is_empty(),
+        "rejected over-long fact must not be stored: {listed}",
+    );
+}
+
+/// Why (#4888): `add_alias` writes `is_alias_for`, a hot predicate, so it
+/// consumes a Tier S slot and must be gated identically to `kg_assert`.
+/// Gating only the generic tool would leave a named bypass.
+#[tokio::test]
+async fn dispatch_add_alias_enforces_tier_s_cap() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let err = dispatch_tool(
+        &state,
+        "add_alias",
+        json!({"palace": "cap", "short": "tga", "full": "trusty-git-analytics"}),
+    )
+    .await
+    .expect_err("add_alias must respect the Tier S cap");
+    assert!(format!("{err:#}").contains("Tier S is full"), "{err:#}");
+}
+
+/// Why (#4888): `add_alias` must also enforce the form constraint — the
+/// object it writes is composed (`full (extra)`), so the length that matters
+/// is the composed one, not the raw `full` argument.
+#[tokio::test]
+async fn dispatch_add_alias_enforces_form_constraint_on_composed_object() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "form"}))
+        .await
+        .expect("palace_create");
+
+    let err = dispatch_tool(
+        &state,
+        "add_alias",
+        json!({
+            "palace": "form",
+            "short": "x",
+            "full": "y".repeat(60),
+            "extra": "z".repeat(60),
+        }),
+    )
+    .await
+    .expect_err("composed object over 80 chars must be rejected");
+    assert!(format!("{err:#}").contains("limit is 80"), "{err:#}");
+}
+
+/// Why (#4888): `discover_aliases` is the only path that can add many hot
+/// facts in one call, so it is where an ungated cap would leak worst. It must
+/// stop exactly at the cap, report what it refused, and leave the refused
+/// aliases unwritten — never overrun the budget, and never abort a bulk call
+/// so late that earlier aliases are stranded as partial state.
+#[tokio::test]
+async fn dispatch_discover_aliases_stops_at_tier_s_cap() {
+    skip_palace_enforcement();
+    let _tmp = tempfile::tempdir().expect("tempdir");
+    let root = _tmp.path().to_path_buf();
+    let state = AppState::new(root).with_default_palace(Some("disccap".to_string()));
+    dispatch_tool(&state, "palace_create", json!({"name": "disccap"}))
+        .await
+        .expect("palace_create");
+
+    // Leave exactly one free slot, then discover against the live workspace,
+    // which yields far more than one alias.
+    fill_tier_s(&state, "disccap", crate::prompt_facts::TIER_S_MAX_FACTS - 1).await;
+
+    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root")
+        .to_path_buf();
+
+    let res = dispatch_tool(
+        &state,
+        "discover_aliases",
+        json!({"project_root": workspace_root.to_string_lossy()}),
+    )
+    .await
+    .expect("discover_aliases must not abort when the budget runs out");
+
+    assert_eq!(
+        res["new"].as_u64(),
+        Some(1),
+        "exactly the one free slot should be filled: {res}",
+    );
+    let rejected = res["rejected"].as_array().expect("rejected array");
+    assert!(
+        !rejected.is_empty(),
+        "refused aliases must be reported, not silently dropped: {res}",
+    );
+    let reason = res["rejected_reason"].as_str().expect("rejected_reason");
+    assert!(reason.contains("Tier S is full"), "{reason}");
+    assert!(reason.contains("remove_prompt_fact"), "{reason}");
+
+    // The cap held: the surface is at exactly 20, never above.
+    let facts = crate::prompt_facts::gather_hot_triples(&state)
+        .await
+        .expect("gather");
+    assert_eq!(
+        facts.len(),
+        crate::prompt_facts::TIER_S_MAX_FACTS,
+        "auto-discovery must never push the surface past the cap",
+    );
+    // A refused alias is genuinely absent from storage.
+    let refused = rejected[0]["short"].as_str().expect("short");
+    assert!(
+        !facts.iter().any(|(s, _, _)| s == refused),
+        "refused alias {refused} must not be written: {facts:?}",
+    );
+}
+
+/// Why (#4888): the cap governs the always-injected surface only. A cold
+/// predicate never reaches that surface, so a full Tier S must not block
+/// ordinary knowledge-graph writes — over-broad enforcement would break every
+/// non-prompt KG user.
+#[tokio::test]
+async fn dispatch_kg_assert_cap_does_not_apply_to_cold_predicates() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "cap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "cap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "cap",
+            "subject": "alice",
+            "predicate": "works_at",
+            "object": "a description far longer than eighty characters, which is fine \
+                       because this predicate never reaches the always-injected surface",
+        }),
+    )
+    .await
+    .expect("cold predicates are unaffected by the Tier S budget");
+}
+
+/// Why (#4888): the cap is only a cap if it cannot be raced past. Counting
+/// active facts and then writing is two steps, and nothing else serializes
+/// them — the KG's single-writer actor orders writes only within one palace,
+/// while the count spans all of them. Before the admission lock, N callers
+/// that all observed 19 would all pass and the surface would land above 20.
+/// Every other Tier S test is sequential and cannot catch this.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn tier_s_cap_holds_under_concurrent_writes() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "race"}))
+        .await
+        .expect("palace_create");
+
+    // One free slot, then many writers contend for it at once.
+    fill_tier_s(&state, "race", crate::prompt_facts::TIER_S_MAX_FACTS - 1).await;
+
+    let state = std::sync::Arc::new(state);
+    let mut handles = Vec::new();
+    for i in 0..16 {
+        let state = state.clone();
+        handles.push(tokio::spawn(async move {
+            dispatch_tool(
+                &state,
+                "kg_assert",
+                json!({
+                    "palace": "race",
+                    "subject": format!("racer-{i}"),
+                    "predicate": "has_convention",
+                    "object": format!("contender {i}"),
+                }),
+            )
+            .await
+            .is_ok()
+        }));
+    }
+
+    let mut admitted = 0usize;
+    for h in handles {
+        if h.await.expect("task joined") {
+            admitted += 1;
+        }
+    }
+
+    assert_eq!(admitted, 1, "exactly one writer should win the last slot");
+    let facts = crate::prompt_facts::gather_hot_triples(&state)
+        .await
+        .expect("gather");
+    assert_eq!(
+        facts.len(),
+        crate::prompt_facts::TIER_S_MAX_FACTS,
+        "concurrent writers must never push the surface past the cap",
+    );
+}
+
+/// Why (#4888): the chat `kg_assert` tool takes `predicate` and `object`
+/// straight from the model's tool call and writes them directly, so an
+/// ordinary chat turn could push the always-injected surface past 20 or land
+/// an unbounded fact. This is the routinely-hit surface, not an admin one.
+#[tokio::test]
+async fn chat_kg_assert_tool_enforces_tier_s_cap() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "chatcap"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "chatcap", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let args = json!({
+        "palace_id": "chatcap",
+        "subject": "chat-rule",
+        "predicate": "has_convention",
+        "object": "a rule the assistant tried to add when the surface was full",
+    })
+    .to_string();
+    let res = crate::chat::tools::execute_tool("kg_assert", &args, &state).await;
+
+    let err = res["error"].as_str().unwrap_or_default();
+    assert!(err.contains("Tier S is full"), "{res}");
+    assert!(err.contains("remove_prompt_fact"), "{res}");
+    assert!(
+        res.get("status").is_none(),
+        "must not report success: {res}"
+    );
+
+    // Fail-closed: nothing landed.
+    let facts = crate::prompt_facts::gather_hot_triples(&state)
+        .await
+        .expect("gather");
+    assert_eq!(facts.len(), crate::prompt_facts::TIER_S_MAX_FACTS);
+    assert!(!facts.iter().any(|(s, _, _)| s == "chat-rule"), "{facts:?}");
+}
+
+/// Why (#4888): the chat tool must enforce the form constraint too — an
+/// unbounded object is injected verbatim into every turn.
+#[tokio::test]
+async fn chat_kg_assert_tool_enforces_form_constraint() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "chatform"}))
+        .await
+        .expect("palace_create");
+
+    let args = json!({
+        "palace_id": "chatform",
+        "subject": "verbose",
+        "predicate": "is_fact",
+        "object": "q".repeat(crate::prompt_facts::TIER_S_MAX_OBJECT_CHARS + 1),
+    })
+    .to_string();
+    let res = crate::chat::tools::execute_tool("kg_assert", &args, &state).await;
+
+    let err = res["error"].as_str().unwrap_or_default();
+    assert!(err.contains("81 characters"), "{res}");
+    assert!(err.contains("limit is 80"), "{res}");
+
+    let facts = crate::prompt_facts::gather_hot_triples(&state)
+        .await
+        .expect("gather");
+    assert!(facts.is_empty(), "rejected write must not land: {facts:?}");
+}
+
+/// Why (#4888): the chat tool must stay usable for cold predicates — the gate
+/// is scoped to the injected surface, not to the knowledge graph.
+#[tokio::test]
+async fn chat_kg_assert_tool_allows_cold_predicates_at_cap() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "chatcold"}))
+        .await
+        .expect("palace_create");
+    fill_tier_s(&state, "chatcold", crate::prompt_facts::TIER_S_MAX_FACTS).await;
+
+    let args = json!({
+        "palace_id": "chatcold",
+        "subject": "alice",
+        "predicate": "works_at",
+        "object": "z".repeat(200),
+    })
+    .to_string();
+    let res = crate::chat::tools::execute_tool("kg_assert", &args, &state).await;
+    assert_eq!(res["status"], "asserted", "{res}");
+}
+
+/// Why (#4888): `kuzu-migrate` imports `relation_type` verbatim from a legacy
+/// file, so a legacy vocabulary colliding with a hot predicate would land on
+/// the always-injected surface. A bulk legacy import is not a deliberate act
+/// of authoring a standing rule (ADR-0028 D8 point 3), so that path refuses
+/// hot predicates outright rather than counting free slots — which leaves no
+/// cap arithmetic to get wrong, and no enumeration that could fail open.
+/// Cold relation types, which is every one in practice, still import
+/// regardless of length.
+#[test]
+fn kuzu_migrate_refuses_hot_predicates_and_passes_cold_ones() {
+    use crate::prompt_facts::is_hot_predicate;
+
+    // The importer's guard is exactly `is_hot_predicate`, so every Tier S
+    // predicate is refused.
+    for p in crate::prompt_facts::HOT_PREDICATES {
+        assert!(is_hot_predicate(p), "{p} must be refused by kuzu-migrate");
+    }
+
+    // Relation types a legacy kuzu-memory store actually carries are cold, so
+    // ordinary imports are unaffected. `alias_of` is the near-miss worth
+    // pinning: it reads like an alias but is not the hot `is_alias_for`.
+    for p in [
+        "relates_to",
+        "mentions",
+        "derived_from",
+        "part_of",
+        "alias_of",
+    ] {
+        assert!(
+            !is_hot_predicate(p),
+            "{p} is an ordinary relation type and must still import",
+        );
+    }
+}
+
+/// Why (#5048 re-review): the enqueue drop was tested but the worker's own two
+/// loss paths were not, and they lose a write just as completely — a daemon
+/// that will not spawn and an index call that fails both leave the drawer out
+/// of the BM25 corpus with nothing queued to repair it.
+/// What: drives `spawn_bm25_index_worker` directly with a client pointed at a
+/// dead socket, so `client.index` fails, and asserts the palace is queued.
+/// Test: this test itself. Delete the `dirty.insert` from the index-failure arm
+/// and the queue stays empty.
+#[tokio::test]
+async fn a_failed_index_call_queues_the_palace_for_repair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dirty: crate::bm25_repair::DirtyPalaces = std::sync::Arc::new(dashmap::DashSet::new());
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+
+    // No listener at this path, so every `index` call fails at connect.
+    let client = std::sync::Arc::new(trusty_common::bm25_client::Bm25Client::new(
+        tmp.path().join("dead.sock"),
+    ));
+    // No supervisor: this isolates the index-failure arm from the spawn arm.
+    spawn_bm25_index_worker(rx, Some(client), None, std::sync::Arc::clone(&dirty));
+
+    tx.send(Bm25IndexRequest {
+        palace: "lossy".to_string(),
+        drawer_id: Uuid::new_v4().to_string(),
+        content: "content that will never reach the daemon".to_string(),
+        data_dir: tmp.path().join("bm25"),
+    })
+    .await
+    .expect("send to worker");
+
+    for _ in 0..200 {
+        if dirty.contains("lossy") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        dirty.contains("lossy"),
+        "an index call that failed lost the write and must queue the palace"
+    );
+}
+
+/// Why: the other worker loss path. A supervisor that cannot start a daemon
+/// makes the worker skip the request entirely, which is the same lost write.
+/// What: points the daemon locator at a path that does not exist so
+/// `ensure_running` fails, and asserts the palace is queued.
+/// Test: this test itself. Delete the `dirty.insert` from the spawn-failure arm
+/// and the queue stays empty.
+#[tokio::test]
+async fn a_daemon_that_will_not_spawn_queues_the_palace_for_repair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let prev = std::env::var("TRUSTY_BM25_DAEMON_BIN").ok();
+    let prev_ext = std::env::var("TRUSTY_BM25_EXTERNAL").ok();
+    // SAFETY: test-only env mutation, restored below.
+    unsafe {
+        std::env::set_var("TRUSTY_BM25_DAEMON_BIN", tmp.path().join("no-such-binary"));
+        std::env::remove_var("TRUSTY_BM25_EXTERNAL");
+    }
+
+    let dirty: crate::bm25_repair::DirtyPalaces = std::sync::Arc::new(dashmap::DashSet::new());
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+    let client = std::sync::Arc::new(trusty_common::bm25_client::Bm25Client::new(
+        tmp.path().join("unused.sock"),
+    ));
+    let supervisor = std::sync::Arc::new(crate::bm25_supervisor::Bm25Supervisor::new());
+    spawn_bm25_index_worker(
+        rx,
+        Some(client),
+        Some(supervisor),
+        std::sync::Arc::clone(&dirty),
+    );
+
+    // A palace name short enough that the socket path stays inside `sun_path`.
+    let palace = format!("nz{:x}", std::process::id() & 0xfff);
+    tx.send(Bm25IndexRequest {
+        palace: palace.clone(),
+        drawer_id: Uuid::new_v4().to_string(),
+        content: "content that will never reach a daemon".to_string(),
+        data_dir: tmp.path().join("bm25"),
+    })
+    .await
+    .expect("send to worker");
+
+    for _ in 0..400 {
+        if dirty.contains(&palace) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let queued = dirty.contains(&palace);
+
+    // SAFETY: restoring the captured prior values.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("TRUSTY_BM25_DAEMON_BIN", v),
+            None => std::env::remove_var("TRUSTY_BM25_DAEMON_BIN"),
+        }
+        if let Some(v) = prev_ext {
+            std::env::set_var("TRUSTY_BM25_EXTERNAL", v);
+        }
+    }
+
+    assert!(
+        queued,
+        "a daemon that will not spawn lost the write and must queue the palace"
+    );
+}
+
+/// Why (#5048 re-review): `Full` marked the palace dirty and `Closed`, three
+/// lines below it, logged at `debug!` and returned. Both lose the write
+/// identically — the drawer never reaches the index and nothing remembers that
+/// it did not. Fixing one arm and leaving its sibling is the shape #4683
+/// shipped with.
+/// What: drops the receiver so `try_send` returns `Closed`, then enqueues.
+/// Test: this test itself. Remove the `mark_dirty` from the `Closed` arm and
+/// the queue stays empty.
+#[tokio::test]
+async fn a_closed_index_queue_queues_the_palace_for_repair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut state = AppState::new(tmp.path().to_path_buf());
+
+    // Swap in a sender whose receiver is dropped. Waiting for the real worker
+    // to exit would race its spawn; this closes the channel deterministically.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+    drop(rx);
+    state.bm25_index_tx = tx;
+
+    assert!(
+        matches!(
+            state.bm25_index_tx.try_send(Bm25IndexRequest {
+                palace: "default".to_string(),
+                drawer_id: Uuid::new_v4().to_string(),
+                content: "probe".to_string(),
+                data_dir: state.data_root.join("default"),
+            }),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+        ),
+        "precondition: the queue must actually be closed, not merely full"
+    );
+
+    bm25_index_enqueue(&state, "default", Uuid::new_v4(), "content that is lost");
+
+    assert_eq!(
+        crate::bm25_repair::dirty_palaces(&state),
+        vec!["default".to_string()],
+        "a closed queue loses the write as completely as a full one and must queue repair"
+    );
+}
+
+/// Why (#5005 review): every `palace_unalias` test that reached `dispatch_tool`
+/// ran against an empty palace, so the only daemon-level outcome ever observed
+/// was `clean` — the branch that does nothing. The success path was proven at
+/// the store layer and assumed through the tool: nothing had shown that a real
+/// collision survives arg parsing, the `is_read_only()` routing a dry run skips,
+/// and JSON serialization to arrive as a non-empty `freed_ids`. An unobserved
+/// happy path is not a proven one, and this is the path #4834's deletion gate
+/// will call.
+/// What: seeds two drawer uuids onto one `vector_id` in the palace's own
+/// `index.usearch.redb`, then drives `palace_unalias` with `dry_run: false`
+/// through `dispatch_tool`, asserting `outcome: "repaired"`, both uuids named
+/// in `freed_ids`, and `reembed_required: true`. A second call must then report
+/// `clean` and free nothing — idempotence observed at the tool surface, not
+/// just at the store.
+/// Test: itself. Routing the write path through the read-only lock, or letting
+/// `freed_ids` serialize as a count, fails it.
+#[tokio::test]
+async fn dispatch_palace_unalias_frees_a_real_collision_and_is_idempotent() {
+    use redb::{Database, TableDefinition};
+    const VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("vectors");
+    const VECTOR_KEYS: TableDefinition<&str, u64> = TableDefinition::new("vector_keys");
+
+    let (state, tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "collide"}))
+        .await
+        .expect("palace_create");
+
+    // Two drawers, one shared vector id — the collision this PR repairs.
+    let a = uuid::Uuid::new_v4();
+    let b = uuid::Uuid::new_v4();
+    let shared_id: u64 = 7;
+    {
+        // Drop the cached handle so the palace releases its flock; the next
+        // dispatch reopens the file and sees the seeded collision.
+        state.registry.remove(&PalaceId::new("collide"));
+        let db = Database::create(tmp.path().join("collide/index.usearch.redb"))
+            .expect("open palace vector redb");
+        let wtx = db.begin_write().expect("begin");
+        {
+            let mut vectors = wtx.open_table(VECTORS).expect("vectors");
+            let mut keys = wtx.open_table(VECTOR_KEYS).expect("keys");
+            let encoded = postcard::to_allocvec(&vec![0.05_f32; 384]).expect("encode vector");
+            vectors.insert(shared_id, encoded.as_slice()).expect("vec");
+            keys.insert(a.to_string().as_str(), shared_id)
+                .expect("key a");
+            keys.insert(b.to_string().as_str(), shared_id)
+                .expect("key b");
+        }
+        wtx.commit().expect("commit");
+        drop(db); // release the flock before the palace reopens the file
+    }
+
+    let out = dispatch_tool(
+        &state,
+        "palace_unalias",
+        json!({"palace": "collide", "dry_run": false}),
+    )
+    .await
+    .expect("palace_unalias must dispatch on the write path");
+
+    assert_eq!(out["dry_run"], false, "explicit write run: {out}");
+    assert_eq!(
+        out["outcome"], "repaired",
+        "a real collision must repair, not report clean: {out}"
+    );
+    assert_eq!(out["success"], true, "{out}");
+    let freed: Vec<String> = out["freed_ids"]
+        .as_array()
+        .expect("freed_ids array")
+        .iter()
+        .map(|v| v.as_str().expect("uuid string").to_string())
+        .collect();
+    assert_eq!(freed.len(), 2, "both members of the group: {out}");
+    assert!(freed.contains(&a.to_string()), "{a} missing: {out}");
+    assert!(freed.contains(&b.to_string()), "{b} missing: {out}");
+    assert_eq!(
+        out["reembed_required"], true,
+        "freed drawers are owed a re-embed: {out}"
+    );
+    assert!(out["error"].is_null(), "{out}");
+
+    // Idempotence at the tool surface: the collision is gone, not just reported.
+    let again = dispatch_tool(
+        &state,
+        "palace_unalias",
+        json!({"palace": "collide", "dry_run": false}),
+    )
+    .await
+    .expect("second palace_unalias");
+    assert_eq!(
+        again["outcome"], "clean",
+        "the repair must be durable, not repeatable: {again}"
+    );
+    assert!(
+        again["freed_ids"]
+            .as_array()
+            .expect("freed_ids array")
+            .is_empty(),
+        "nothing left to free: {again}"
+    );
 }

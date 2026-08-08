@@ -364,8 +364,19 @@ pub(crate) async fn session(
                 source_id
             };
             let (sort, term) = crate::commands::session_picker::parse_ls_terms(&terms);
-            crate::commands::managed::session_ls(client, url, json, sid.as_deref(), all, sort, term)
-                .await?
+            // `tm sessions ls <term>` keeps the #3483 all-visible-columns scope;
+            // only `tm f` narrows to NAME.
+            let filter = term.map(crate::commands::session_picker::SessionFilter::visible);
+            crate::commands::managed::session_ls(
+                client,
+                url,
+                json,
+                sid.as_deref(),
+                all,
+                sort,
+                filter,
+            )
+            .await?
         }
         // `activity` stays on the raw path: its CLI output carries confidence,
         // token, cache, and latency detail that `CommandResult::ManagedActivity`

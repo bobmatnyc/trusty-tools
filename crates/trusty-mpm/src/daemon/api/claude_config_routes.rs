@@ -499,6 +499,7 @@ mod restart_pane_selection_tests {
             pane_id: pane_id.map(str::to_owned),
             injection_status: Default::default(),
             worktree_owner: None,
+            terminal_at: None,
         }
     }
 
