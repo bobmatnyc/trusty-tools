@@ -84,6 +84,10 @@ pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 256;
 /// the gate that selects this path: at most one entry per live drawer, so at
 /// most [`EXHAUSTIVE_SCAN_MAX_POINTS`] plus whatever dead-but-untombstoned
 /// overhang the graph carries.
+///
+/// #5171: `HnswStore::upsert` depends on this — it marks a shadow id before
+/// inserting its graph point, safe only because nothing here cuts before
+/// `resolve_shadowed` corrects it.
 /// Test: `exhaustive_scan_returns_every_point_the_graph_holds`,
 /// `search_scores_a_re_upserted_drawer_by_its_current_vector`,
 /// `search_keeps_a_true_neighbour_a_shadowed_decoy_would_evict`.

@@ -566,6 +566,10 @@ impl HnswStore {
         // copy is nearer, which is the defect. A search that sees the flag
         // without the shadow re-reads the already-committed `VECTORS` row and
         // gets the right answer, so over-marking costs one point read.
+        //
+        // #5171: safe only because `exhaustive_nearest` (exhaustive.rs) never
+        // truncates before `resolve_shadowed` corrects every candidate — a
+        // pre-correction cap there would reopen this race.
         if shadows_previous {
             self.shadowed.write().insert(vector_id);
         }
