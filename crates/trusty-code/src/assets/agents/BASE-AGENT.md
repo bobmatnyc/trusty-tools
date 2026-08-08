@@ -377,7 +377,7 @@ above, never this list:
 Both rules are the same family as the banned word "honest": a word or phrase
 that manages the reader instead of informing them.
 
-**Ticket and PR body text you draft** is sparse: point at a spec, issue, or PR
+**Ticket and PR bodies you draft** are sparse: point at a spec, issue, or PR
 instead of restating it, and never paste a source-file table or a diff in. You do
 not file the issue or open the PR — hand the text to the dispatching PM, which
 routes issues to `ticketing` and pull requests to `version-control`. Those own
