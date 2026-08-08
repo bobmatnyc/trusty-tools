@@ -59,6 +59,9 @@ test.beforeEach(async ({ page }) => {
 
     if (!path.startsWith('/api/')) {
       route.continue(); // HTML, JS bundle, CSS, fonts
+    } else if (path === '/api/events/ticket') {
+      // #5052: the app mints a stream ticket before opening EventSource.
+      json({ ticket: 'test-ticket', expires_in_secs: 300 });
     } else if (path.startsWith('/api/events')) {
       route.fulfill({
         status: 200,

@@ -429,6 +429,37 @@ Quick: VS Code needs `rust-analyzer` + `Even Better TOML` extensions; RustRover 
 
 Quick: `RUST_LOG=info cargo run -p trusty-search -- start` (daemon), `cargo run -p trusty-search -- serve` (MCP stdio mode).
 
+## Public Website (`website/`)
+
+SvelteKit + `adapter-vercel`, deployed to Vercel from `main`. Two page
+families with DIFFERENT update semantics:
+
+- **`/docs/**`** — generated at build time from files listed in
+  `docs/public-manifest.tsv`. Edit a listed `docs/` file, merge to main, and
+  the live site updates automatically. A `PAGE` row naming a missing file
+  FAILS the build; a `docs/` file absent from the manifest is simply never
+  public (an allowlist boundary, not a bug).
+- **`/tools/<crate>`** — six hand-authored flagship pages (search, memory,
+  mpm, analyze, review, tga). Their copy is static prose in
+  `website/src/lib/tools.ts` and `website/src/routes/tools/*/+page.svelte`,
+  verified against crate source when written. 🔴 **Editing a crate README does
+  NOT update its flagship page** — nothing in the build reads crate READMEs.
+  Update those files by hand.
+
+Vercel rebuilds only when a push touches `website/`, `docs/`, `Cargo.lock`, or
+`crates/*/Cargo.toml`. A `crates/*/README.md` or root `README.md` change
+triggers no rebuild — nor does a `CLAUDE.md` edit, which is expected.
+
+🔴 There is no `vercel.json`. Root Directory, "Include source files outside of
+the Root Directory", and the Ignored Build Step are configured in the Vercel
+dashboard only — dashboard drift leaves no trace in git. Setup and the full
+path table: [website/README.md](website/README.md).
+
+🔴 Website tests do not run in CI (#5200). Run them by hand: `pnpm test` from
+INSIDE `website/` — pnpm is pinned there (`packageManager` field); a shell at
+the repo root has no such pin and its resolved pnpm can require a Node version
+newer than what's installed.
+
 ## Common Pitfalls — Quick Checklist
 
 For extended explanations, see [docs/reference/common-pitfalls.md](docs/reference/common-pitfalls.md).

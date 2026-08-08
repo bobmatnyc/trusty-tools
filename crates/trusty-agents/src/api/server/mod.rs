@@ -51,6 +51,8 @@ mod auth;
 mod cancel;
 mod costs;
 mod ctrl_sessions;
+// #5052: short-lived tickets that authenticate the `/api/events` SSE stream.
+mod event_tickets;
 mod events_sse;
 mod handlers;
 mod listener_events;

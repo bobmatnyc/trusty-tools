@@ -38,7 +38,7 @@ Used with `--api` / `--serve`.
 | Flag | Description |
 |---|---|
 | `--port <N>` | TCP port (default `8080`) |
-| `--api-token <TOK>` | Require this bearer token on every `/api/*` request (except `/api/health` and `/api/config`). Falls back to `TAGENT_API_TOKEN` env var |
+| `--api-token <TOK>` | Require this bearer token on every `/api/*` request. Falls back to the `TAGENT_API_TOKEN` env var. `/api/health` and `/api/config` are exempt (liveness probe and pre-auth UI bootstrap). `/api/events` is NOT exempt — it accepts this bearer token **or** a short-lived ticket from `POST /api/events/ticket`, because a browser `EventSource` cannot send headers ([#5052](https://github.com/bobmatnyc/trusty-tools/issues/5052)). The stream requires one of the two whether or not a token is configured |
 
 ## Diagnostic / maintenance flags
 
