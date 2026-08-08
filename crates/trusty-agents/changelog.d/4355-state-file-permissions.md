@@ -16,10 +16,11 @@ Security
     (`interactions.jsonl`, `runs.jsonl`) created before this change keeps its
     mode until it is rotated — it cannot be recreated without discarding the
     log.
-  - `tasks.json` was writing itself through a private copy of the tmp+rename
-    logic and so was the one state file skipping this path entirely. It now
-    goes through the shared writer, which also gives it the cross-process
-    advisory lock the GUI, the API sidecar, and a source build need when they
-    share `.trusty-agents/`.
+  - `tasks.json` and the per-session recap files were each writing themselves
+    directly and so were the two state files skipping this path entirely. Both
+    now go through the shared writer, which also gives `tasks.json` the
+    cross-process advisory lock the GUI, the API sidecar, and a source build
+    need when they share `.trusty-agents/`. A recap summarises task
+    narratives, so it was exactly as sensitive as the file it derives from.
   - No behavior change on Windows, where these paths already sit inside a
     per-user profile directory.
