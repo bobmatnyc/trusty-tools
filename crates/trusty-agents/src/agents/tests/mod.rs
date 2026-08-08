@@ -1110,3 +1110,216 @@ fn agent_tier_explicit_declaration_overrides_the_derived_kind() {
         "an unrecognized declaration can only ever narrow"
     );
 }
+
+// ── Per-agent provider pinning (#3765) ───────────────────────────────────────
+//
+// `[agent].provider_id` was written by `PATCH /api/agents/:name` and read by
+// nothing: `AgentInfo` had no provider slot, so the loader dropped the key and
+// every turn re-probed the ambient environment instead. Each test below fails
+// on the pre-#3765 tree — the "pin honoured" cases because the model slug came
+// out unchanged and the adapter was chosen from it, and the fail-closed case
+// because loading simply succeeded.
+
+/// Build an agent TOML with an optional `provider_id` line.
+fn agent_toml_with_pin(model: &str, provider_line: &str) -> String {
+    format!(
+        r#"
+[agent]
+name = "pin-fixture"
+role = "assistant"
+model = "{model}"
+description = "x"
+{provider_line}
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#
+    )
+}
+
+fn load_pinned(model: &str, provider: Option<&str>) -> anyhow::Result<AgentConfig> {
+    let line = provider.map_or(String::new(), |p| format!("provider_id = \"{p}\""));
+    AgentConfig::from_toml_str(
+        &agent_toml_with_pin(model, &line),
+        std::path::Path::new("pin-fixture.toml"),
+    )
+}
+
+/// Why: THE regression for #3765's core defect. Bedrock is used because it has
+/// no resolver-managed credential (AWS chain), so the assertion is about
+/// routing alone and runs identically on a laptop and in CI.
+/// Test: itself.
+#[test]
+fn agent_config_honours_a_provider_pin() {
+    let cfg = load_pinned("anthropic.claude-3-5-haiku-20241022-v1:0", Some("bedrock"))
+        .expect("pinned agent loads");
+    assert_eq!(
+        cfg.agent.model, "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
+        "the pin must put the provider's routing marker on the slug"
+    );
+    assert_eq!(
+        cfg.adapter.provider(),
+        crate::llm::adapter::Provider::Bedrock,
+        "and the adapter must be derived from the pinned slug"
+    );
+    assert!(!cfg.llm.use_anthropic_direct);
+}
+
+/// Why: "pinning must take precedence over slug inference" is the behavioural
+/// contract. `claude-sonnet-4-6` resolves to the Anthropic adapter on its own;
+/// pinning Bedrock must override that, not lose to it.
+/// Test: itself.
+#[test]
+fn agent_config_pin_beats_the_model_slug_prefix() {
+    let unpinned = load_pinned("claude-sonnet-4-6", None).expect("loads");
+    assert_eq!(
+        unpinned.adapter.provider(),
+        crate::llm::adapter::Provider::Anthropic,
+        "precondition: the bare slug infers Anthropic"
+    );
+
+    let pinned = load_pinned("claude-sonnet-4-6", Some("bedrock")).expect("loads");
+    assert_eq!(pinned.agent.model, "bedrock/claude-sonnet-4-6");
+    assert_eq!(
+        pinned.adapter.provider(),
+        crate::llm::adapter::Provider::Bedrock
+    );
+}
+
+/// Why: #3765 is explicit that an agent with NO pin keeps today's ambient
+/// behaviour exactly — the model slug and `use_anthropic_direct` must come out
+/// of the loader byte-identical to what the TOML declared.
+/// Test: itself.
+#[test]
+fn agent_config_without_a_pin_is_unchanged() {
+    let cfg = load_pinned("anthropic/claude-sonnet-4-6", None).expect("loads");
+    assert_eq!(cfg.agent.provider_id, None);
+    assert_eq!(cfg.agent.model, "anthropic/claude-sonnet-4-6");
+    assert!(
+        !cfg.llm.use_anthropic_direct,
+        "an unpinned agent's use_anthropic_direct stays as declared"
+    );
+    assert_eq!(
+        cfg.adapter.provider(),
+        crate::llm::adapter::Provider::Anthropic
+    );
+}
+
+/// Why: the fail-closed guarantee, exercised through the real loader rather
+/// than only through `provider_pin::resolve`. A pinned provider with no
+/// credential must abort the load with a message naming the provider and its
+/// env var — never load "successfully" onto some other provider's key.
+/// What: sandboxes `$HOME` (secure store → tempdir) and clears every
+/// credential env var, so the assertion holds on a developer machine with real
+/// keys configured as well as on a bare CI runner.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn agent_config_rejects_a_pin_with_no_credential() {
+    let _env = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::test_env::force_env_local_loaded();
+    crate::test_env::clear_all_credential_env_vars();
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: HOME_LOCK held for the entire test body.
+    unsafe { std::env::set_var("HOME", tmp.path()) };
+
+    let err = load_pinned("accounts/fireworks/models/x", Some("fireworks"))
+        .expect_err("must fail closed");
+    let msg = format!("{err:#}");
+
+    // SAFETY: HOME_LOCK still held.
+    unsafe {
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    assert!(msg.contains("fireworks"), "must name the provider: {msg}");
+    assert!(
+        msg.contains("FIREWORKS_API_KEY"),
+        "must name the env var: {msg}"
+    );
+    assert!(
+        msg.contains("pin-fixture.toml"),
+        "must name the offending config: {msg}"
+    );
+}
+
+/// Why: AtlasCloud is the provider #3765 makes reachable; pinning it must
+/// produce the AtlasCloud adapter (not `GenericAdapter`/OpenRouter, which is
+/// where `atlascloud/openai/...` landed before). The key is a fake value set
+/// only to satisfy the fail-closed credential probe — this asserts routing,
+/// never a live call.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn agent_config_pin_routes_atlascloud() {
+    let _env = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::test_env::force_env_local_loaded();
+    let prev = std::env::var_os("ATLASCLOUD_API_KEY");
+    // SAFETY: ENV_LOCK held for the entire test body.
+    unsafe { std::env::set_var("ATLASCLOUD_API_KEY", "ac-FAKE-routing-test") };
+
+    let cfg = load_pinned("openai/gpt-5.6-sol", Some("atlascloud"));
+
+    // SAFETY: ENV_LOCK still held.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("ATLASCLOUD_API_KEY", v),
+            None => std::env::remove_var("ATLASCLOUD_API_KEY"),
+        }
+    }
+
+    let cfg = cfg.expect("pinned agent loads");
+    assert_eq!(cfg.agent.model, "atlascloud/openai/gpt-5.6-sol");
+    assert_eq!(
+        cfg.adapter.provider(),
+        crate::llm::adapter::Provider::AtlasCloud,
+        "before #3765 the `openai` substring routed this to OpenRouter"
+    );
+}
+
+/// Why: an anthropic pin must FORCE the direct path rather than depend on
+/// `pick_credentials` noticing an `ANTHROPIC_API_KEY` — and, symmetrically, a
+/// pin to anything else must leave `use_anthropic_direct` off even when that
+/// key is present (see `agent_config_honours_a_provider_pin`).
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn agent_config_anthropic_pin_forces_the_direct_path() {
+    let _env = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::test_env::force_env_local_loaded();
+    let prev = std::env::var_os("ANTHROPIC_API_KEY");
+    // SAFETY: ENV_LOCK held for the entire test body.
+    unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-api03-FAKE-routing-test") };
+
+    let cfg = load_pinned("claude-sonnet-4-6", Some("anthropic"));
+
+    // SAFETY: ENV_LOCK still held.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+    }
+
+    let cfg = cfg.expect("pinned agent loads");
+    assert_eq!(cfg.agent.model, "anthropic/claude-sonnet-4-6");
+    assert!(cfg.llm.use_anthropic_direct);
+}

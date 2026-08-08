@@ -475,6 +475,21 @@ pub(crate) fn apply_credential_routing(
     creds: &llm::credentials::LlmCredentials,
 ) -> bool {
     use llm::credentials::LlmCredentials;
+    // #3765: a pinned agent has already had its provider decided at load
+    // (`AgentConfig::apply_provider_pin` — validated, credential-checked, and
+    // written into the model slug and `use_anthropic_direct`). Ambient
+    // credential probing must not overwrite that: re-running it here is
+    // exactly the silent-fallback the pin exists to prevent — e.g. an agent
+    // pinned to `atlascloud` would be flipped to Anthropic-direct merely
+    // because an `ANTHROPIC_API_KEY` happens to be present.
+    if cfg.agent.provider_id.is_some() {
+        tracing::debug!(
+            agent = %cfg.agent.name,
+            provider_id = ?cfg.agent.provider_id,
+            "provider pin in effect; skipping ambient credential routing"
+        );
+        return false;
+    }
     match creds {
         LlmCredentials::AnthropicDirect => {
             cfg.llm.use_anthropic_direct = true;

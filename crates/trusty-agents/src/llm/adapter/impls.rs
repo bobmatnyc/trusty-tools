@@ -10,8 +10,8 @@
 use serde_json::{Value, json};
 
 use super::{
-    AnthropicAdapter, ApiEndpoint, AuthSource, BedrockAdapter, FireworksAdapter, GenericAdapter,
-    ModelAdapter, OllamaAdapter, OpenAiAdapter, Provider, openrouter_endpoint,
+    AnthropicAdapter, ApiEndpoint, AtlasCloudAdapter, AuthSource, BedrockAdapter, FireworksAdapter,
+    GenericAdapter, ModelAdapter, OllamaAdapter, OpenAiAdapter, Provider, openrouter_endpoint,
 };
 use crate::perf::TokenUsage;
 
@@ -20,6 +20,10 @@ use crate::perf::TokenUsage;
 /// established in this module, so an offline mock server can be targeted
 /// end-to-end without touching process-wide defaults.
 const FIREWORKS_BASE_URL_ENV: &str = "FIREWORKS_BASE_URL";
+
+/// Env var overriding the AtlasCloud API base URL (#3765) — same convention as
+/// [`FIREWORKS_BASE_URL_ENV`].
+const ATLASCLOUD_BASE_URL_ENV: &str = "ATLASCLOUD_BASE_URL";
 
 impl ModelAdapter for AnthropicAdapter {
     fn provider(&self) -> Provider {
@@ -241,6 +245,12 @@ impl ModelAdapter for OllamaAdapter {
     fn provider(&self) -> Provider {
         Provider::Generic
     }
+    fn wire_model_id<'a>(&self, model: &'a str) -> &'a str {
+        model.strip_prefix("ollama/").unwrap_or(model)
+    }
+    fn requires_raw_http(&self) -> bool {
+        true
+    }
     fn tool_choice_any(&self) -> Option<Value> {
         // ollama's OpenAI-compat layer accepts "auto"/"required" but not all
         // models honor it. Return None to keep the request payload minimal.
@@ -287,6 +297,12 @@ impl ModelAdapter for FireworksAdapter {
     fn provider(&self) -> Provider {
         Provider::Fireworks
     }
+    fn wire_model_id<'a>(&self, model: &'a str) -> &'a str {
+        model.strip_prefix("fireworks/").unwrap_or(model)
+    }
+    fn requires_raw_http(&self) -> bool {
+        true
+    }
     // Fireworks serves an OpenAI-compatible `/chat/completions` endpoint —
     // same tool_choice shapes as `OpenAiAdapter` ("required"/"auto" strings,
     // not Anthropic's `{"type": ...}` objects).
@@ -324,6 +340,55 @@ impl ModelAdapter for FireworksAdapter {
             auth_header_value: format!("Bearer {key}"),
             extra_headers: vec![],
             auth_source: AuthSource::Fireworks,
+        }
+    }
+}
+
+impl ModelAdapter for AtlasCloudAdapter {
+    fn provider(&self) -> Provider {
+        Provider::AtlasCloud
+    }
+    fn wire_model_id<'a>(&self, model: &'a str) -> &'a str {
+        model.strip_prefix("atlascloud/").unwrap_or(model)
+    }
+    fn requires_raw_http(&self) -> bool {
+        true
+    }
+    // AtlasCloud serves an OpenAI-compatible `/chat/completions` endpoint —
+    // same tool_choice shapes as `OpenAiAdapter`.
+    fn tool_choice_any(&self) -> Option<Value> {
+        Some(json!("required"))
+    }
+    fn tool_choice_auto(&self) -> Option<Value> {
+        Some(json!("auto"))
+    }
+    fn inject_cache_control(&self, _: &mut Value, _: bool) {
+        // No prompt-caching concept — matches this provider's registry seed
+        // (`prompt_caching = false`).
+    }
+    fn parse_usage(&self, response: &Value) -> TokenUsage {
+        let usage = &response["usage"];
+        let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+        let completion = usage["completion_tokens"].as_u64().unwrap_or(0) as u32;
+        TokenUsage::new(prompt, completion, 0, 0)
+    }
+    fn api_endpoint(&self, _use_direct: bool) -> ApiEndpoint {
+        // Always route to api.atlascloud.ai — an explicit `atlascloud/` prefix
+        // (or a `provider_id = "atlascloud"` pin, which the loader rewrites
+        // into that prefix) means the caller wants AtlasCloud specifically.
+        // Base URL comes from the trusty-common provider module rather than a
+        // second literal here, so the shared-inference adapter and this legacy
+        // one can never disagree about the endpoint.
+        let base_url = std::env::var(ATLASCLOUD_BASE_URL_ENV).unwrap_or_else(|_| {
+            trusty_common::inference::providers::atlascloud::ATLASCLOUD_BASE_URL.to_string()
+        });
+        let key = trusty_common::credentials::resolve_key("atlascloud").unwrap_or_default();
+        ApiEndpoint {
+            base_url,
+            auth_header_name: "Authorization".to_string(),
+            auth_header_value: format!("Bearer {key}"),
+            extra_headers: vec![],
+            auth_source: AuthSource::AtlasCloud,
         }
     }
 }

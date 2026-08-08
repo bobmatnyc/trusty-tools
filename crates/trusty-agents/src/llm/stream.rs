@@ -136,7 +136,14 @@ pub fn streaming_supported(model: &str, use_anthropic_direct: bool) -> bool {
     if use_anthropic_direct || !streaming_enabled() {
         return false;
     }
-    !matches!(adapter_for_model(model).provider(), Provider::Fireworks)
+    !matches!(
+        adapter_for_model(model).provider(),
+        // #3765: AtlasCloud joins Fireworks here for the same reason — its own
+        // base URL and credential, reached through the raw HTTP path, with no
+        // streaming provider behind `stream_reply`'s dispatch. Streaming such
+        // a model would silently send it to OpenRouter instead.
+        Provider::Fireworks | Provider::AtlasCloud
+    )
 }
 
 /// Read the `TAGENT_CHAT_STREAMING` kill switch (default ON).

@@ -421,12 +421,25 @@ fn resolve_extends_in_map(
     let mut errors: HashMap<String, String> = HashMap::new();
     for name in to_resolve {
         match crate::agents::extends::resolve(&name, &lookup) {
-            Ok(resolved) => {
-                let resolved = resolved.finalize_extends();
-                if let Some(entry) = agents.get_mut(&name) {
-                    entry.0 = resolved;
+            Ok(resolved) => match resolved.finalize_extends() {
+                Ok(resolved) => {
+                    if let Some(entry) = agents.get_mut(&name) {
+                        entry.0 = resolved;
+                    }
                 }
-            }
+                // #3765: a merged child whose provider pin cannot be honoured
+                // is recorded like any other resolution failure — the
+                // unresolved (and therefore unpinned) agent is NOT substituted
+                // silently into the roster under the resolved agent's name.
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %name,
+                        error = %e,
+                        "failed to finalize agent `extends` chain"
+                    );
+                    errors.insert(name.clone(), e.to_string());
+                }
+            },
             Err(e) => {
                 tracing::warn!(
                     agent = %name,
