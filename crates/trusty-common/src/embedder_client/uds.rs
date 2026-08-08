@@ -323,14 +323,22 @@ mod tests {
     /// Test: this test itself.
     #[test]
     fn embed_bounds_are_generous_but_finite() {
-        assert!(EMBED_TIMEOUT >= Duration::from_secs(120));
-        assert!(EMBED_TIMEOUT <= Duration::from_secs(3600));
+        let secs = EMBED_TIMEOUT.as_secs();
         assert!(
-            EMBED_MAX_FRAME_BYTES > crate::uds::MAX_FRAME_BYTES,
+            (120..=3600).contains(&secs),
+            "{secs}s is outside the band that makes an infinite hang finite \
+             without cutting a batch that would have completed"
+        );
+        let budget = EMBED_MAX_FRAME_BYTES;
+        assert!(
+            budget > crate::uds::MAX_FRAME_BYTES,
             "an embed reply is bulk data; the control-plane default is too small"
         );
         // ~12 bytes per JSON-encoded f32 x 768 dims x 10_000 drawers.
-        assert!(EMBED_MAX_FRAME_BYTES >= 92_160_000);
+        assert!(
+            budget >= 92_160_000,
+            "{budget} bytes will not hold a whole-palace dream-dedup batch"
+        );
     }
 
     #[tokio::test]

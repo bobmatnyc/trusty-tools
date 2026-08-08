@@ -287,62 +287,6 @@ async fn write_socket_line(
     trusty_common::uds::write_frame(&mut *g, value).await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::io::AsyncReadExt as _;
-
-    /// Why (#5180): this connection is multi-message, so a send that emitted
-    /// zero or two terminators would desynchronise the client's `read_line`
-    /// loop for every remaining envelope, not just one. The migration onto the
-    /// shared `write_frame` must not have changed those bytes.
-    /// What: writes two envelopes through `write_socket_line` over a real
-    /// socket pair and asserts the peer sees exactly two NDJSON lines.
-    /// Test: this test itself.
-    #[tokio::test]
-    async fn write_socket_line_emits_one_ndjson_frame_per_value() {
-        let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
-        let (_read_half, write_half) = server.into_split();
-        let writer = std::sync::Arc::new(tokio::sync::Mutex::new(write_half));
-
-        write_socket_line(&writer, &serde_json::json!({"type": "output", "text": "a"}))
-            .await
-            .expect("first frame");
-        write_socket_line(&writer, &serde_json::json!({"type": "done"}))
-            .await
-            .expect("second frame");
-        drop(writer);
-
-        let (mut client_read, _client_write) = client.into_split();
-        let mut raw = String::new();
-        client_read
-            .read_to_string(&mut raw)
-            .await
-            .expect("read to eof");
-
-        assert!(
-            raw.ends_with('\n'),
-            "every frame is newline-terminated: {raw:?}"
-        );
-        assert_eq!(
-            raw.matches('\n').count(),
-            2,
-            "exactly one terminator per value: {raw:?}"
-        );
-        let frames: Vec<serde_json::Value> = raw
-            .lines()
-            .map(|l| serde_json::from_str(l).expect("each line is a complete JSON value"))
-            .collect();
-        assert_eq!(
-            frames,
-            vec![
-                serde_json::json!({"type": "output", "text": "a"}),
-                serde_json::json!({"type": "done"}),
-            ]
-        );
-    }
-}
-
 /// CLI-side: forward this invocation to a running controller and stream
 /// its replies to stdout/stderr until `done` or `error` arrives.
 ///
@@ -446,5 +390,61 @@ pub async fn forward_to_controller(
                 tracing::debug!(kind = %kind, "unknown reply type from controller");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt as _;
+
+    /// Why (#5180): this connection is multi-message, so a send that emitted
+    /// zero or two terminators would desynchronise the client's `read_line`
+    /// loop for every remaining envelope, not just one. The migration onto the
+    /// shared `write_frame` must not have changed those bytes.
+    /// What: writes two envelopes through `write_socket_line` over a real
+    /// socket pair and asserts the peer sees exactly two NDJSON lines.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn write_socket_line_emits_one_ndjson_frame_per_value() {
+        let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (_read_half, write_half) = server.into_split();
+        let writer = std::sync::Arc::new(tokio::sync::Mutex::new(write_half));
+
+        write_socket_line(&writer, &serde_json::json!({"type": "output", "text": "a"}))
+            .await
+            .expect("first frame");
+        write_socket_line(&writer, &serde_json::json!({"type": "done"}))
+            .await
+            .expect("second frame");
+        drop(writer);
+
+        let (mut client_read, _client_write) = client.into_split();
+        let mut raw = String::new();
+        client_read
+            .read_to_string(&mut raw)
+            .await
+            .expect("read to eof");
+
+        assert!(
+            raw.ends_with('\n'),
+            "every frame is newline-terminated: {raw:?}"
+        );
+        assert_eq!(
+            raw.matches('\n').count(),
+            2,
+            "exactly one terminator per value: {raw:?}"
+        );
+        let frames: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("each line is a complete JSON value"))
+            .collect();
+        assert_eq!(
+            frames,
+            vec![
+                serde_json::json!({"type": "output", "text": "a"}),
+                serde_json::json!({"type": "done"}),
+            ]
+        );
     }
 }

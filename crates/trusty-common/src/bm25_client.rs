@@ -365,8 +365,8 @@ impl Bm25Client {
 
     /// Shared RPC helper — send one frame, read one frame, decode.
     ///
-    /// Why: #5180 — this used to hand-roll `write_all` + `BufReader::read_line`
-    /// + `serde_json::from_str`, a fourth private copy of a framing contract
+    /// Why: #5180 — this used to hand-roll `write_all`, `BufReader::read_line`
+    /// and `serde_json::from_str`: a fourth private copy of a framing contract
     /// ADR-0034 §4 says lives in exactly one place. It now routes through
     /// [`crate::uds::rpc::send_framed_request`], which owns the dial (with the
     /// #5099 permission check), the newline framing, the response size cap, and
@@ -601,8 +601,12 @@ mod tests {
     /// Test: this test itself.
     #[test]
     fn rpc_timeout_is_generous_but_finite() {
-        assert!(RPC_TIMEOUT >= Duration::from_secs(30));
-        assert!(RPC_TIMEOUT <= Duration::from_secs(300));
+        let secs = RPC_TIMEOUT.as_secs();
+        assert!(
+            (30..=300).contains(&secs),
+            "a BM25 exchange finishes in milliseconds; {secs}s is outside the \
+             band that is generous without being an effective hang"
+        );
     }
 
     #[test]
