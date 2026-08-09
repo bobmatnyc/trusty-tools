@@ -83,6 +83,7 @@ normative grammar — this note does not restate it.
 | DOC-64 | `SPEC-CREDPANEL-01~draft` … `-09~draft` | [The Credentials Panel: Per-Assistant Credential Sets, Transfer, and the User-Granted Copy](./DOC-64-credentials-panel.md) | trusty-agents — the assistant configuration surface (panel, backing route, audited actions); trusty-common — the authority it is a **client** of (`Principal`, `CredentialRef`, grants, revocation state, audit stream). Encodes the owner's 2026-08-03 #4040 answers (one store per instance; assistant asks, only the user grants; one audit stream at per-call grain) and finds that DOC-45 §9.1's landed record shape **requires amendment** to carry the panel's events (§10.3) |
 | DOC-65 | `SPEC-UNIVAGENT-01~draft` … `-06~draft` | [Universal Framework Agents: Catalog, Boundaries, and the Four-Category Model](./DOC-65-universal-framework-agents.md) | trusty-mpm — bundled agent catalog, delegation roster, language scoping; consumed identically by trusty-code and referenced by trusty-agents' sub-agent tier. Catalogs the universal (non-language-gated) agent roster, maps it onto ADR-0025's four-category model, and reports (not resolves) the deprecated-but-still-deployed `ops` agent, the unscoped platform-ops agents (`gcp-ops`/`vercel-ops`), and undocumented routing gaps |
 | DOC-66 | `SPEC-SESSWS-01~draft` … `-07~draft` | [Session and Workstream in trusty-mpm: the 1:N model, lifecycle, and slot semantics](./DOC-66-session-workstream-model.md) | trusty-mpm — session/workstream data model, launch and provisioning paths, worktree reclamation. Encodes [ADR-0030](../adr/0030-sessions-own-many-workstreams-from-the-tm-checkout.md): one session owns many workstreams, the session's home is the tm checkout (managed, shared with the user — not the user's own clone), refreshed non-destructively, and the ~5 workstream cap is an advisory attention limit. Re-scopes DOC-52 §1.5/§3.1 |
+| DOC-67 | `SPEC-TGAUDIT-01~draft` … `-13~draft` | [tga AUDIT Mode: Remote Codebase Analysis for Acquisition Due Diligence](./DOC-67-tga-audit-mode.md) | `trusty-git-analytics` (tga) — orchestration, new `audit` subcommand, DD-manifest adapter; `trusty-review` — existing DD report pipeline, consumed unmodified; `trusty-analyze` — existing HTTP analysis surface, consumed unmodified by trusty-review, not touched by tga |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -96,7 +97,13 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-67`** (updated 2026-08-05 — DOC-66 claimed by
+> **Next free `DOC-N` = `DOC-68`** (updated 2026-08-08 — DOC-67 claimed by
+> [tga AUDIT Mode: Remote Codebase Analysis for Acquisition Due Diligence](./DOC-67-tga-audit-mode.md),
+> verified free on `origin/main` (`70d795a7`): no filename or self-label claim
+> under `docs/specs/**`, no open pull request claiming a `DOC-N`,
+> `check_doc_numbers.sh` clean (106 docs / 100 claims, 4 grandfathered, 0
+> violations) before the file was added.
+> Previously — updated 2026-08-05 — DOC-66 claimed by
 > [Session and Workstream in trusty-mpm](./DOC-66-session-workstream-model.md),
 > verified free on `origin/main` (`184bc0d8`): no filename or self-label claim
 > under `docs/specs/**`, no open pull request claiming a `DOC-N`,
