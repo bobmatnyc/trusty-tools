@@ -220,6 +220,240 @@ fn pipeline_claude_md_left_byte_identical() {
     let _ = out;
 }
 
+// ── #5228: absent CLAUDE.md ≠ new project ───────────────────────────────────
+
+/// A REAL git repository whose `main` gained `CLAUDE.md` after a branch was cut
+/// from it — the exact shape #5228 reproduced in a live worktree.
+///
+/// Why a real repo and not a mocked filesystem: the bug is entirely about git
+/// history. What separates "new project" from "stale branch" is whether a
+/// remote-tracking ref carries the file, which only git can answer; a fake
+/// filesystem would assert against the test's own stub of that answer and would
+/// have passed against the pre-fix code.
+/// What: a bare `origin` whose `main` holds commit 1 (no `CLAUDE.md`) then
+/// commit 2 (adds it), plus a real `git worktree` checked out on a branch cut
+/// at commit 1 with its upstream pointed at `origin/main` — mirroring what
+/// `configure_session_branch_tracking` (#2189) sets up in production.
+/// Test: the four `#5228` tests below.
+struct StaleWorktreeFixture {
+    _tmp: TempDir,
+    /// The per-session worktree, on a branch that predates `CLAUDE.md`.
+    worktree: PathBuf,
+    /// The tracked `CLAUDE.md` content on `origin/main`.
+    upstream_content: &'static str,
+}
+
+/// The upstream `CLAUDE.md` body — deliberately unlike [`CLAUDE_MD_STUB`], so
+/// an assertion cannot pass on a stub that happens to share a heading.
+const UPSTREAM_CLAUDE_MD: &str = "# Real Project Instructions\n\nDo the real thing.\n";
+
+fn git_ok(dir: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_identity(dir: &Path) {
+    assert!(git_ok(dir, &["config", "user.email", "ci@test.invalid"]));
+    assert!(git_ok(dir, &["config", "user.name", "CI"]));
+    assert!(git_ok(dir, &["config", "commit.gpgsign", "false"]));
+}
+
+impl StaleWorktreeFixture {
+    /// Returns `None` when git is unavailable — callers skip rather than fail,
+    /// matching `session_launch::worktree_sync`'s fixture.
+    ///
+    /// `add_claude_md_upstream`: when false, `origin/main` never gains a
+    /// `CLAUDE.md`, which is the genuinely-new-project control.
+    fn build(add_claude_md_upstream: bool) -> Option<Self> {
+        let tmp = crate::test_support::hermetic_temp_dir();
+        let root = std::fs::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().into());
+        let origin = root.join("origin.git");
+        let seed = root.join("seed");
+        let base = root.join("base");
+        let worktree = root.join("worktree");
+        fs::create_dir_all(&origin).ok()?;
+        fs::create_dir_all(&seed).ok()?;
+
+        if !git_ok(&origin, &["init", "--bare", "--initial-branch=main"]) {
+            eprintln!("#5228 tests: git unavailable, skipping");
+            return None;
+        }
+        assert!(git_ok(&seed, &["init", "--initial-branch=main"]));
+        git_identity(&seed);
+        // Commit 1: the state the stale branch is cut from — no CLAUDE.md.
+        fs::write(seed.join("README.md"), "base\n").ok()?;
+        assert!(git_ok(&seed, &["add", "-A"]));
+        assert!(git_ok(&seed, &["commit", "-m", "base"]));
+        assert!(git_ok(
+            &seed,
+            &["remote", "add", "origin", origin.to_str()?]
+        ));
+        assert!(git_ok(&seed, &["push", "origin", "main"]));
+        assert!(git_ok(
+            &origin,
+            &["symbolic-ref", "HEAD", "refs/heads/main"]
+        ));
+
+        // The checkout the worktree is cut from, at commit 1.
+        // Cloned from the fixture's own root, never the test process's cwd —
+        // that cwd is this repository's checkout.
+        assert!(git_ok(&root, &["clone", origin.to_str()?, base.to_str()?]));
+        git_identity(&base);
+        assert!(git_ok(
+            &base,
+            &["worktree", "add", "-b", "stale-branch", worktree.to_str()?]
+        ));
+        git_identity(&worktree);
+        assert!(git_ok(
+            &worktree,
+            &["branch", "--set-upstream-to=origin/main", "stale-branch"]
+        ));
+
+        if add_claude_md_upstream {
+            // Commit 2 — CLAUDE.md becomes tracked upstream (#4660/#4661), out
+            // from under the already-cut branch.
+            fs::write(seed.join("CLAUDE.md"), UPSTREAM_CLAUDE_MD).ok()?;
+            assert!(git_ok(&seed, &["add", "-A"]));
+            assert!(git_ok(&seed, &["commit", "-m", "track CLAUDE.md"]));
+            assert!(git_ok(&seed, &["push", "origin", "main"]));
+            // The worktree learns about it the way a live one does: a fetch of
+            // the shared remote-tracking refs, with no merge.
+            assert!(git_ok(&worktree, &["fetch", "origin"]));
+        }
+
+        assert!(
+            !worktree.join("CLAUDE.md").exists(),
+            "fixture invariant: the stale worktree must not have CLAUDE.md on disk"
+        );
+        Some(Self {
+            _tmp: tmp,
+            worktree,
+            upstream_content: UPSTREAM_CLAUDE_MD,
+        })
+    }
+
+    fn claude_md(&self) -> PathBuf {
+        self.worktree.join("CLAUDE.md")
+    }
+}
+
+#[test]
+fn load_or_create_claude_md_refuses_to_stub_a_branch_predating_the_tracked_file() {
+    // FAILS BEFORE THIS CHANGE (#5228): the pre-fix writer read `NotFound`,
+    // wrote CLAUDE_MD_STUB, and returned `Ok((stub, true))` — handing the
+    // session boilerplate in place of the project's only non-dynamic
+    // instruction source, and leaving an untracked file that looks authored to
+    // every later run.
+    let Some(fx) = StaleWorktreeFixture::build(true) else {
+        return;
+    };
+    let path = fx.claude_md();
+
+    let err = load_or_create_claude_md(&path)
+        .expect_err("a branch that merely predates the tracked CLAUDE.md must not be stubbed");
+
+    assert!(
+        !path.exists(),
+        "the refusal must leave nothing behind: a stub on disk is the permanent half of the bug"
+    );
+    let PipelineError::Io { source, .. } = &err;
+    let msg = source.to_string();
+    assert!(msg.contains("stale-branch"), "must name the branch: {msg}");
+    assert!(msg.contains("origin/main"), "must name the ref: {msg}");
+    assert!(
+        msg.contains("merge --ff-only"),
+        "must carry a recovery command: {msg}"
+    );
+    let _ = fx.upstream_content;
+}
+
+#[test]
+fn build_instructions_refuses_a_stale_worktree_rather_than_seeding_a_stub() {
+    // The refusal has to reach the pipeline, because that is where it becomes
+    // fatal: `prepare_session` maps a `PipelineError` onto
+    // `PrepError::Instructions`, the one condition #4752 rules must stop a
+    // launch. A writer that refused while `build_instructions` still returned
+    // `Ok` would start the session anyway.
+    let Some(fx) = StaleWorktreeFixture::build(true) else {
+        return;
+    };
+    let input = PipelineInput {
+        project_dir: fx.worktree.clone(),
+        claude_md_path: fx.claude_md(),
+    };
+
+    let err = build_instructions(&input).expect_err("a stale worktree must refuse the pipeline");
+    assert!(
+        err.to_string().contains("CLAUDE.md"),
+        "the pipeline error must name the file: {err}"
+    );
+    assert!(!fx.claude_md().exists(), "no stub may be written");
+}
+
+#[test]
+fn load_or_create_claude_md_still_seeds_when_upstream_has_no_claude_md() {
+    // The ordinary path inside a real repository: `origin/main` never tracked a
+    // CLAUDE.md, so this project genuinely is new and the stub is correct. The
+    // #5228 probe must not turn "in a git repo" into "refuse".
+    let Some(fx) = StaleWorktreeFixture::build(false) else {
+        return;
+    };
+    let path = fx.claude_md();
+
+    let (content, created) =
+        load_or_create_claude_md(&path).expect("a genuinely new project is still seeded");
+    assert!(created);
+    assert_eq!(content, CLAUDE_MD_STUB);
+    assert_eq!(fs::read_to_string(&path).unwrap(), CLAUDE_MD_STUB);
+}
+
+#[test]
+fn load_or_create_claude_md_reads_a_present_file_in_a_git_worktree() {
+    // The ordinary path with the file present — the state a worktree reaches
+    // after the recovery command the refusal prints. It must read back
+    // byte-identical and report `created == false`, with no git probe involved.
+    let Some(fx) = StaleWorktreeFixture::build(true) else {
+        return;
+    };
+    assert!(git_ok(&fx.worktree, &["merge", "--ff-only", "origin/main"]));
+    let path = fx.claude_md();
+    assert_eq!(fs::read_to_string(&path).unwrap(), fx.upstream_content);
+
+    let (content, created) = load_or_create_claude_md(&path).expect("a present file loads");
+    assert!(!created, "an existing CLAUDE.md is never recreated");
+    assert_eq!(content, fx.upstream_content);
+    assert_eq!(fs::read_to_string(&path).unwrap(), fx.upstream_content);
+}
+
+#[test]
+fn stale_claude_md_refusal_names_the_branch_ref_and_recovery() {
+    // Why: the refusal stops a launch, so its message is the whole interface —
+    // a bare "file missing" would send the operator hunting the wrong problem.
+    let msg = stale_claude_md_message(
+        Path::new("/w/proj/CLAUDE.md"),
+        &UpstreamTracked {
+            reference: "origin/main".to_string(),
+            branch: "fix/4061-example".to_string(),
+        },
+    );
+    assert!(msg.contains("CLAUDE.md"), "{msg}");
+    assert!(msg.contains("fix/4061-example"), "{msg}");
+    assert!(msg.contains("origin/main"), "{msg}");
+    assert!(
+        msg.contains("git -C /w/proj merge --ff-only origin/main"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("git -C /w/proj checkout origin/main -- CLAUDE.md"),
+        "{msg}"
+    );
+}
+
 #[test]
 fn strip_delegation_block_removes_legacy_block() {
     // Why (#2170 cleanup helper): a workspace polluted by the old #2125
