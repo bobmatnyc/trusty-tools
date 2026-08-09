@@ -675,7 +675,14 @@ impl MemoryService {
                 recall_with_default_embedder(&handle, query, top_k).await
             }
         };
-        let bm25_fut = crate::tools::bm25::bm25_search_optional(&self.state, id, query, top_k);
+        // #5036: key the lexical lane off the RESOLVED palace, not the
+        // requested slug. `open_palace` follows aliases, so for an aliased slug
+        // the two lanes would otherwise address different palaces — and the
+        // alias directory has no `palace.json`, so `palace_ids_on_disk` never
+        // enumerates it and the backfill never writes the corpus this would
+        // read.
+        let bm25_fut =
+            crate::tools::bm25::bm25_search_optional(&self.state, handle.id.as_str(), query, top_k);
         let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
         let mut results =
             vector_res.map_err(|e| ServiceError::internal(format!("recall: {e:#}")))?;

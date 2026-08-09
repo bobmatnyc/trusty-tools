@@ -38,6 +38,10 @@ use trusty_memory::AppState;
 /// on the critical path.
 const PALACE: &str = "httpfuse";
 
+/// A second non-default palace, so the deep test cannot inherit state — or a
+/// daemon — from the shallow one.
+const DEEP_PALACE: &str = "httpfusedeep";
+
 /// The rare token that only the lexical lane can exploit.
 ///
 /// Why: BM25 scores by inverse document frequency, so a token appearing in
@@ -110,16 +114,22 @@ fn discover_daemon_binary() -> Option<PathBuf> {
 ///
 /// Why: `with_bm25_client_from_env` reads `TRUSTY_BM25_DAEMON` at construction
 /// time, so the variable has to be set before the `AppState` is built.
-/// What: sets both env vars, returns `false` when the daemon binary is absent.
+///
+/// Why this panics instead of returning early: an absent daemon binary used to
+/// make both tests `return`, and a test that returns is a PASS. "2 passed"
+/// while nothing was exercised is precisely the vacuous green this module's
+/// header spends its length warning about. Both tests are `#[ignore]`d, so
+/// failing loudly costs CI nothing and costs a human one clear message.
+/// What: sets the locator and the lane gate, or panics with the build command.
 /// Test: this is the test bootstrap.
-fn arm_lane() -> bool {
+fn arm_lane() {
     let Some(binary) = discover_daemon_binary() else {
-        eprintln!(
-            "skipping: trusty-bm25-daemon binary not found. Build it first \
+        panic!(
+            "trusty-bm25-daemon binary not found — this test cannot run and must \
+             not report success. Build it first \
              (`cargo build -p trusty-memory --bin trusty-bm25-daemon`) or set \
              TRUSTY_BM25_DAEMON_BIN=<path>."
         );
-        return false;
     };
     // SAFETY: test-only env mutation; this binary is the sole writer and does
     // it once, before any state is constructed.
@@ -128,7 +138,6 @@ fn arm_lane() -> bool {
         std::env::set_var("TRUSTY_BM25_DAEMON", "1");
         std::env::remove_var("TRUSTY_BM25_EXTERNAL");
     }
-    true
 }
 
 /// The drawer id of one recall row.
@@ -176,6 +185,161 @@ fn summarize(payload: &serde_json::Value) -> String {
         .unwrap_or_else(|| format!("{payload}"))
 }
 
+/// A seeded palace with every precondition already asserted.
+///
+/// Why: the two tests below differ only in the `deep` flag, and an earlier cut
+/// of this file spelled the setup out twice — the deep copy silently dropping
+/// four of the five preconditions, so it could have passed because dense
+/// retrieval found the target rather than because fusion did. One fixture makes
+/// that class of drift impossible: whatever the shallow test proves about its
+/// starting state, the deep test proves too.
+/// What: enables the lane, creates `palace`, writes the decoys and the target,
+/// backfills the palace's own BM25 daemon, and asserts all five preconditions —
+/// lane enabled, index verifiably complete, target stored, BM25 ranks it, and
+/// dense retrieval does NOT.
+/// Test: used by both tests below.
+struct Fixture {
+    _tmp: tempfile::TempDir,
+    state: AppState,
+    target_id: String,
+}
+
+impl Fixture {
+    async fn seeded(palace: &str) -> Self {
+        arm_lane();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(tmp.path().to_path_buf()).with_bm25_client_from_env();
+        state.set_ready();
+        assert!(
+            state.bm25_client.is_some(),
+            "precondition: the lexical lane must be enabled, or this test proves nothing"
+        );
+
+        let cwd = tmp.path().to_string_lossy().to_string();
+        dispatch_tool(
+            &state,
+            "palace_create",
+            json!({ "name": palace, "force": true, "cwd": cwd }),
+        )
+        .await
+        .expect("palace_create");
+
+        for text in DECOYS.iter().chain(std::iter::once(&TARGET)) {
+            dispatch_tool(
+                &state,
+                "memory_remember",
+                json!({ "palace": palace, "text": text, "force": true }),
+            )
+            .await
+            .expect("memory_remember");
+        }
+
+        let handle = state
+            .registry
+            .open_palace(&state.data_root, &PalaceId::new(palace.to_string()))
+            .expect("open palace");
+
+        let target_id = {
+            let drawers = handle.drawers.read();
+            drawers
+                .iter()
+                .find(|d| d.content.contains(RARE_TOKEN))
+                .map(|d| d.id.to_string())
+                .expect("the target drawer must be stored")
+        };
+
+        // The lexical index must actually hold the corpus. Fusing against an
+        // index nothing populated is the silent-no-op shape this assertion
+        // exists to rule out — every downstream assertion would still "pass"
+        // on an empty index if the expectation were merely "does not error".
+        let report = backfill_state_palace(&state, &handle, palace, false).await;
+        assert!(
+            report.fully_indexed(),
+            "precondition: the palace's BM25 index must be verifiably complete, \
+             or the fusion below has nothing to fuse: {report:?}"
+        );
+
+        // Give the daemon's coalescing window time to make the writes
+        // searchable, then confirm the lexical lane finds the target on its own.
+        let socket = trusty_common::bm25_client::socket_path_for_palace(palace);
+        let bm25 = trusty_common::bm25_client::Bm25Client::new(socket);
+        let mut lexical_hit = false;
+        for _ in 0..50 {
+            let hits = bm25.search(QUERY, TOP_K).await.expect("bm25 search");
+            if hits.iter().any(|h| h.doc_id == target_id) {
+                lexical_hit = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            lexical_hit,
+            "precondition: BM25 must rank the target for this query, or the corpus \
+             or the query is wrong and the tests below are meaningless"
+        );
+
+        // The pre-#5036 behaviour, computed rather than assumed: this is the
+        // exact call `MemoryService::recall` used to make, and nothing else.
+        let vector_only = recall_with_default_embedder(&handle, QUERY, TOP_K)
+            .await
+            .expect("vector-only recall");
+        let vector_ids: Vec<String> = vector_only
+            .iter()
+            .map(|r| r.drawer.id.to_string())
+            .collect();
+        assert!(
+            !vector_ids.contains(&target_id),
+            "precondition: dense retrieval must MISS the target, or these tests cannot \
+             distinguish a fused result from a vector one. Vector top-{TOP_K} was:\n{}",
+            vector_only
+                .iter()
+                .map(|r| format!(
+                    "  {:>6.3}  L{}  {}",
+                    r.score,
+                    r.layer,
+                    r.drawer.content.chars().take(64).collect::<String>()
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        Self {
+            _tmp: tmp,
+            state,
+            target_id,
+        }
+    }
+}
+
+/// Assert the fused payload returns `target_id` above the relevance floor.
+///
+/// Why: appearing in the payload is not enough. `prompt_context` drops every
+/// drawer under `DEFAULT_RELEVANCE_FLOOR`, so a promoted hit scored on a
+/// rank-only RRF scale (max ~0.033) would be in the response and out of the
+/// injection — a fix that changes the JSON and nothing a user sees.
+/// What: asserts presence, then that the target's score clears the floor.
+/// Test: used by both tests below.
+fn assert_fused_and_above_floor(fused: &serde_json::Value, target_id: &str, label: &str) {
+    assert!(
+        contains(fused, target_id),
+        "#5036: {label} must return the drawer only the lexical lane can find. \
+         Fused top-{TOP_K} was:\n{}",
+        summarize(fused)
+    );
+    let score = fused
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| row_id(r) == Some(target_id)))
+        .and_then(|r| r.get("score").and_then(|v| v.as_f64()))
+        .expect("the target row carries a score");
+    assert!(
+        score as f32 >= trusty_common::memory_core::retrieval::DEFAULT_RELEVANCE_FLOOR,
+        "a promoted lexical hit must clear the relevance floor ({}), or \
+         prompt_context discards it again; got {score}",
+        trusty_common::memory_core::retrieval::DEFAULT_RELEVANCE_FLOOR
+    );
+}
+
 /// Why: this is #5036 itself. Against the parent commit, `MemoryService::recall`
 /// calls `recall_with_default_embedder` and nothing else, so the fused payload
 /// is identical to the vector-only payload and the target drawer — the one a
@@ -191,211 +355,39 @@ fn summarize(payload: &serde_json::Value) -> String {
 #[ignore = "needs the trusty-bm25-daemon binary and the real ONNX embedder; run with --include-ignored"]
 #[tokio::test(flavor = "multi_thread")]
 async fn http_recall_returns_a_lexical_match_the_vector_lane_misses() {
-    if !arm_lane() {
-        return;
-    }
-
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = AppState::new(tmp.path().to_path_buf()).with_bm25_client_from_env();
-    state.set_ready();
-    assert!(
-        state.bm25_client.is_some(),
-        "precondition: the lexical lane must be enabled, or this test proves nothing"
-    );
-
-    let cwd = tmp.path().to_string_lossy().to_string();
-    dispatch_tool(
-        &state,
-        "palace_create",
-        json!({ "name": PALACE, "force": true, "cwd": cwd }),
-    )
-    .await
-    .expect("palace_create");
-
-    for text in DECOYS.iter().chain(std::iter::once(&TARGET)) {
-        dispatch_tool(
-            &state,
-            "memory_remember",
-            json!({ "palace": PALACE, "text": text, "force": true }),
-        )
-        .await
-        .expect("memory_remember");
-    }
-
-    let handle = state
-        .registry
-        .open_palace(&state.data_root, &PalaceId::new(PALACE.to_string()))
-        .expect("open palace");
-
-    let target_id = {
-        let drawers = handle.drawers.read();
-        drawers
-            .iter()
-            .find(|d| d.content.contains(RARE_TOKEN))
-            .map(|d| d.id.to_string())
-            .expect("the target drawer must be stored")
-    };
-
-    // The lexical index must actually hold the corpus. Fusing against an index
-    // nothing populated is the silent-no-op shape this assertion exists to
-    // rule out — every downstream assertion would still "pass" on an empty
-    // index if the expectation were merely "does not error".
-    let report = backfill_state_palace(&state, &handle, PALACE, false).await;
-    assert!(
-        report.fully_indexed(),
-        "precondition: the palace's BM25 index must be verifiably complete, \
-         or the fusion below has nothing to fuse: {report:?}"
-    );
-
-    // Give the daemon's coalescing window time to make the writes searchable,
-    // then confirm the lexical lane can find the target on its own.
-    let socket = trusty_common::bm25_client::socket_path_for_palace(PALACE);
-    let bm25 = trusty_common::bm25_client::Bm25Client::new(socket);
-    let mut lexical_hit = false;
-    for _ in 0..50 {
-        let hits = bm25.search(QUERY, TOP_K).await.expect("bm25 search");
-        if hits.iter().any(|h| h.doc_id == target_id) {
-            lexical_hit = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(
-        lexical_hit,
-        "precondition: BM25 must rank the target for this query, or the corpus \
-         or the query is wrong and the test below is meaningless"
-    );
-
-    // The pre-#5036 behaviour, computed here rather than assumed: this is the
-    // exact call `MemoryService::recall` used to make, and nothing else.
-    let vector_only = recall_with_default_embedder(&handle, QUERY, TOP_K)
-        .await
-        .expect("vector-only recall");
-    let vector_ids: Vec<String> = vector_only
-        .iter()
-        .map(|r| r.drawer.id.to_string())
-        .collect();
-    assert!(
-        !vector_ids.contains(&target_id),
-        "precondition: dense retrieval must MISS the target, or this test cannot \
-         distinguish a fused result from a vector one. Vector top-{TOP_K} was:\n{}",
-        vector_only
-            .iter()
-            .map(|r| format!(
-                "  {:>6.3}  L{}  {}",
-                r.score,
-                r.layer,
-                r.drawer.content.chars().take(64).collect::<String>()
-            ))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
+    let fixture = Fixture::seeded(PALACE).await;
+    let (state, target_id) = (fixture.state.clone(), fixture.target_id.clone());
 
     // The fix: the same query through the HTTP service path.
     let fused = MemoryService::new(state.clone())
         .recall(PALACE, QUERY, TOP_K, false)
         .await
         .expect("http recall");
-    assert!(
-        contains(&fused, &target_id),
-        "#5036: the HTTP recall path must return the drawer only the lexical \
-         lane can find. Fused top-{TOP_K} was:\n{}",
-        summarize(&fused)
-    );
-
-    // A promoted lexical hit has to survive the consumer, not merely appear in
-    // the payload: `prompt_context` drops everything under
-    // DEFAULT_RELEVANCE_FLOOR, so a rank-scaled RRF score (max ~0.033) would
-    // put it in the response and out of the injection.
-    let target_score = fused
-        .as_array()
-        .and_then(|rows| rows.iter().find(|r| row_id(r) == Some(target_id.as_str())))
-        .and_then(|r| r.get("score").and_then(|v| v.as_f64()))
-        .expect("the target row carries a score");
-    assert!(
-        target_score as f32 >= trusty_common::memory_core::retrieval::DEFAULT_RELEVANCE_FLOOR,
-        "a promoted lexical hit must clear the relevance floor \
-         ({}), or prompt_context discards it again; got {target_score}",
-        trusty_common::memory_core::retrieval::DEFAULT_RELEVANCE_FLOOR
-    );
+    assert_fused_and_above_floor(&fused, &target_id, "the HTTP recall path");
 
     if let Some(sup) = state.bm25_supervisor.as_ref() {
         sup.shutdown().await;
     }
 }
 
-/// Why: `deep` is a separate branch of the same function and the issue records
-/// `handle_memory_recall_deep` as having been left behind by #156 in exactly
-/// the same way. A fix that covers only the shallow branch reintroduces the
-/// defect for any caller that passes `deep=true`.
-/// What: the same corpus and query as above, through `recall(.., deep = true)`.
+/// Why: `deep` is a separate branch of the same function, and the issue records
+/// `handle_memory_recall_deep` as having been left behind by #156 in exactly the
+/// same way. A fix covering only the shallow branch reintroduces the defect for
+/// any caller passing `deep=true`.
+/// What: the same fixture — so the same five preconditions hold — through
+/// `recall(.., deep = true)`.
 /// Test: this test itself.
 #[ignore = "needs the trusty-bm25-daemon binary and the real ONNX embedder; run with --include-ignored"]
 #[tokio::test(flavor = "multi_thread")]
 async fn deep_http_recall_also_fuses_the_lexical_lane() {
-    if !arm_lane() {
-        return;
-    }
-
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let state = AppState::new(tmp.path().to_path_buf()).with_bm25_client_from_env();
-    state.set_ready();
-
-    let palace = format!("{PALACE}deep");
-    let cwd = tmp.path().to_string_lossy().to_string();
-    dispatch_tool(
-        &state,
-        "palace_create",
-        json!({ "name": palace, "force": true, "cwd": cwd }),
-    )
-    .await
-    .expect("palace_create");
-
-    for text in DECOYS.iter().chain(std::iter::once(&TARGET)) {
-        dispatch_tool(
-            &state,
-            "memory_remember",
-            json!({ "palace": palace, "text": text, "force": true }),
-        )
-        .await
-        .expect("memory_remember");
-    }
-
-    let handle = state
-        .registry
-        .open_palace(&state.data_root, &PalaceId::new(palace.clone()))
-        .expect("open palace");
-    let target_id = {
-        let drawers = handle.drawers.read();
-        drawers
-            .iter()
-            .find(|d| d.content.contains(RARE_TOKEN))
-            .map(|d| d.id.to_string())
-            .expect("target stored")
-    };
-
-    let report = backfill_state_palace(&state, &handle, &palace, false).await;
-    assert!(report.fully_indexed(), "index must be complete: {report:?}");
-
-    let socket = trusty_common::bm25_client::socket_path_for_palace(&palace);
-    let bm25 = trusty_common::bm25_client::Bm25Client::new(socket);
-    for _ in 0..50 {
-        let hits = bm25.search(QUERY, TOP_K).await.expect("bm25 search");
-        if hits.iter().any(|h| h.doc_id == target_id) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let fixture = Fixture::seeded(DEEP_PALACE).await;
+    let (state, target_id) = (fixture.state.clone(), fixture.target_id.clone());
 
     let fused = MemoryService::new(state.clone())
-        .recall(&palace, QUERY, TOP_K, true)
+        .recall(DEEP_PALACE, QUERY, TOP_K, true)
         .await
         .expect("deep http recall");
-    assert!(
-        contains(&fused, &target_id),
-        "#5036: deep recall must fuse the lexical lane too. Fused top-{TOP_K} was:\n{}",
-        summarize(&fused)
-    );
+    assert_fused_and_above_floor(&fused, &target_id, "deep recall");
 
     if let Some(sup) = state.bm25_supervisor.as_ref() {
         sup.shutdown().await;

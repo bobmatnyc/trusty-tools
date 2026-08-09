@@ -296,33 +296,48 @@ pub(crate) async fn bm25_search_optional(
 /// is precisely the case the lexical lane exists to cover, and why #5036 could
 /// not be closed by wiring the old helper into one more caller.
 ///
-/// Why the two lanes are scored differently, rather than by textbook RRF: the
-/// `score` this returns is consumed as a cosine-similarity-scaled relevance
-/// value, and `prompt_context` drops everything under
-/// `DEFAULT_RELEVANCE_FLOOR` (0.35, #5037). A rank-only RRF score tops out at
-/// `2/61 ≈ 0.033`, so re-scoring both lanes the textbook way would put every
-/// result under that floor and empty the injection entirely. Vector scores are
-/// therefore left on their own scale and a promoted lexical hit is normalised
-/// onto the same 0..1 band.
+/// Why the two lanes are not scored by textbook RRF: the `score` this returns
+/// is consumed as a cosine-similarity-scaled relevance value, and
+/// `prompt_context` drops everything under `DEFAULT_RELEVANCE_FLOOR` (0.35,
+/// #5037). A rank-only RRF score tops out at `2/61 ≈ 0.033`, so re-scoring
+/// both lanes the textbook way would put every result under that floor and
+/// empty the injection entirely.
 ///
-/// What: (1) adds the RRF bonus `1 / (k + rank + 1)` (`k = 60`, the
-/// IR-literature default) to any drawer both lanes returned; (2) hydrates
-/// BM25-only hits from `handle.drawers` — already in memory, so no disk walk —
-/// admits them through `admits`, and scores each at its share of the lexical
-/// lane's best hit, marking them `layer = 4` (L0/L1/L2/L3 are reserved);
-/// (3) re-sorts by score desc, tie-breaking on the lower layer, and truncates
-/// to `top_k`. An empty `bm25_hits` returns without touching `results`, so a
+/// Why a lexical score is scaled by the best VECTOR score rather than
+/// normalised to `1.0`: BM25 has no absolute scale — its scores are unbounded
+/// corpus-relative idf sums — so `hit.score / best` alone would put the top
+/// lexical hit at exactly `1.0`, above every possible cosine. That inverts the
+/// premise of hybrid retrieval by penalising agreement: a drawer BOTH lanes
+/// returned would score `cosine + 0.0164` at most and lose to a drawer only
+/// BM25 returned. Scaling by the vector lane's own ceiling keeps the two
+/// commensurate, and taking `max(cosine, lexical)` before the RRF bonus makes
+/// the score monotone in both lanes — a drawer can never score lower because
+/// an additional lane found it.
+///
+/// What: for each hit, in descending score order, `lexical = ceiling *
+/// (hit.score / best)` where `ceiling` is the highest vector score in
+/// `results`. A drawer already in `results` becomes
+/// `max(cosine, lexical) + 1/(k + rank + 1)` (`k = 60`, the IR-literature
+/// default); a drawer only BM25 found is hydrated from `handle.drawers` —
+/// already in memory, so no disk walk — admitted through `admits`, and pushed
+/// at `lexical` with `layer = 4` (L0/L1/L2/L3 are reserved). The list is then
+/// re-sorted by score desc, tie-broken on the lower layer, and truncated to
+/// `top_k`. An empty `bm25_hits` returns without touching `results`, so a
 /// deployment with the lane off is bit-for-bit unchanged.
 ///
-/// Known limitation: normalising against the lane's own best hit means the
-/// best lexical match scores 1.0 even when it is only the best of a weak
-/// field. The relevance floor cannot catch that, because normalisation is what
-/// puts it above the floor in the first place.
+/// Consequences worth knowing: a promoted hit can tie the best vector hit but
+/// never outrank it (the layer tie-break gives the vector hit the position), so
+/// a palace whose vector lane is uniformly weak suppresses its lexical hits in
+/// proportion. That is the price of a score the relevance floor can judge. With
+/// no vector results at all there is nothing to be commensurate with, so the
+/// normalised ratio stands on its own.
 ///
 /// Test: `recall_http_bm25_fusion.rs::http_recall_returns_a_lexical_match_the_vector_lane_misses`
 /// (promotion, end-to-end through the HTTP path against a real daemon and a
 /// real embedder); `fuse_bm25_lane_is_a_no_op_without_hits`,
-/// `fuse_bm25_lane_promotes_a_bm25_only_drawer`.
+/// `fuse_bm25_lane_promotes_a_bm25_only_drawer`,
+/// `fuse_bm25_lane_never_scores_agreement_below_a_lexical_only_hit`,
+/// `fuse_bm25_lane_drops_a_drawer_the_scope_excludes`.
 pub(crate) fn fuse_bm25_lane(
     results: &mut Vec<RecallResult>,
     handle: &PalaceHandle,
@@ -336,20 +351,33 @@ pub(crate) fn fuse_bm25_lane(
     if bm25_hits.is_empty() {
         return;
     }
-    // Normalisation denominator. Taken as an explicit max rather than assuming
-    // the daemon returned its hits in descending order.
-    let best = bm25_hits
-        .iter()
-        .map(|h| h.score)
-        .fold(f32::MIN_POSITIVE, f32::max);
+    // One descending copy, so `rank` and the normalisation denominator are
+    // read off the same ordering instead of trusting the daemon's.
+    let mut ranked: Vec<&BM25Hit> = bm25_hits.iter().collect();
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let best = ranked[0].score;
+    // A corpus that scores every hit at zero (or NaN) carries no signal to
+    // fuse, and dividing by it would manufacture one.
+    if !best.is_finite() || best <= 0.0 {
+        return;
+    }
+    // Scale lexical scores into the vector lane's band. See the doc comment
+    // for why this is not a normalisation to 1.0.
+    let ceiling = results.iter().map(|r| r.score).fold(0.0_f32, f32::max);
+    let ceiling = if ceiling > 0.0 { ceiling } else { 1.0 };
 
     let drawers = handle.drawers.read();
-    for (rank, hit) in bm25_hits.iter().enumerate() {
+    for (rank, hit) in ranked.iter().enumerate() {
+        let lexical = ceiling * (hit.score / best);
         if let Some(existing) = results
             .iter_mut()
             .find(|r| r.drawer.id.to_string() == hit.doc_id)
         {
-            existing.score += 1.0 / (RRF_K + rank as f32 + 1.0);
+            existing.score = existing.score.max(lexical) + 1.0 / (RRF_K + rank as f32 + 1.0);
             continue;
         }
         // BM25-only. `doc_id` is a stringified drawer UUID; a hit that no
@@ -365,7 +393,7 @@ pub(crate) fn fuse_bm25_lane(
         }
         results.push(RecallResult {
             drawer: drawer.clone(),
-            score: (hit.score / best).clamp(0.0, 1.0),
+            score: lexical,
             layer: 4,
         });
     }
@@ -417,6 +445,10 @@ pub(crate) fn bm25_hits_to_recall_results(
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "bm25_tests.rs"]
+mod tests;
 
 /// Serialize `recall` results into a JSON shape the MCP client can render.
 pub(crate) fn serialize_recall(

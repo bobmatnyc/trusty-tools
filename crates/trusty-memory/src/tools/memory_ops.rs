@@ -481,7 +481,7 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // holds. It filters on the same `allowed` set the warming path uses.
     let allowed = scope.allowed_room_ids(&handle.kg);
     let vector_fut = recall_scoped(&handle, embedder.as_ref(), query, &scope, top_k);
-    let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
+    let bm25_fut = bm25_search_optional(state, handle.id.as_str(), query, top_k);
     let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
     let mut results = vector_res.context("recall")?;
     if let Some(bm25_hits) = bm25_res {
@@ -519,7 +519,7 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     let embedder = state.embedder().await?;
     let allowed = scope.allowed_room_ids(&handle.kg);
     let vector_fut = recall_deep_scoped(&handle, embedder.as_ref(), query, &scope, top_k);
-    let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
+    let bm25_fut = bm25_search_optional(state, handle.id.as_str(), query, top_k);
     let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
     let mut results = vector_res.context("recall_deep")?;
     if let Some(bm25_hits) = bm25_res {
