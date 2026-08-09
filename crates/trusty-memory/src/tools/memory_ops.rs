@@ -359,16 +359,22 @@ fn vector_lane_available(state: &AppState) -> bool {
 /// scopes L2/L3 — a caller who narrowed to one room must never be handed
 /// another room's drawer just because the daemon happened to be warming. L0/L1
 /// are deliberately left unfiltered, matching `retrieval::recall_in_room`.
+/// #5036: the palace is read off `handle`, never passed in. This is the one
+/// path where the lexical lane is the ONLY lane, so keying it on a caller's
+/// slug — which `open_palace` may have redirected through an alias — searched a
+/// socket the backfill never writes and left the caller with L0/L1 alone.
+/// Taking no `palace` parameter makes that disagreement unrepresentable.
 /// Test: `recall_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`,
-/// `recall_deep_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`.
+/// `recall_deep_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold`,
+/// `bm25_alias_recall.rs::an_aliased_recall_reads_the_corpus_the_backfill_wrote`.
 async fn recall_without_embedder(
     state: &AppState,
     handle: &trusty_common::memory_core::retrieval::PalaceHandle,
-    palace: &str,
     query: &str,
     scope: &RecallScope,
     top_k: usize,
 ) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
+    let palace = handle.id.as_str();
     let mut results = trusty_common::memory_core::retrieval::retrieve_l0_l1(handle);
     // ADR-0027 T7 filtered this lane by room; T9 (#4809) widens it to the whole
     // scope so a WING-scoped recall issued while the embedder is warming is
@@ -464,7 +470,7 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // this fallback ignores the query, so entering it while the embedder is live
     // makes every query return the same drawers.
     if !vector_lane_available(state) {
-        let results = recall_without_embedder(state, &handle, &palace, query, &scope, top_k).await;
+        let results = recall_without_embedder(state, &handle, query, &scope, top_k).await;
         return Ok(serialize_recall(&palace, query, results));
     }
 
@@ -481,7 +487,10 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // lane. The warming path above is different: it hydrates BM25-only hits,
     // which is why it filters explicitly.
     let vector_fut = recall_scoped(&handle, embedder.as_ref(), query, &scope, top_k);
-    let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
+    // #5036: key the lexical lane on the RESOLVED palace id. `open_palace`
+    // follows aliases, so the requested slug can address a different palace
+    // than the vector lane just searched.
+    let bm25_fut = bm25_search_optional(state, handle.id.as_str(), query, top_k);
     let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
     let mut results = vector_res.context("recall")?;
     if let Some(bm25_hits) = bm25_res {
@@ -507,7 +516,7 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // Issue #1970: same warming-fallback posture as memory_recall.
     // #4836: and the same embedder-state gate, for the same reason.
     if !vector_lane_available(state) {
-        let results = recall_without_embedder(state, &handle, &palace, query, &scope, top_k).await;
+        let results = recall_without_embedder(state, &handle, query, &scope, top_k).await;
         return Ok(serialize_recall(&palace, query, results));
     }
 
@@ -596,9 +605,7 @@ async fn recall_all_without_embedder(
     let mut merged = Vec::new();
     for handle in handles {
         let palace_id = handle.id.as_str().to_string();
-        let hits =
-            recall_without_embedder(state, handle, &palace_id, query, &RecallScope::All, top_k)
-                .await;
+        let hits = recall_without_embedder(state, handle, query, &RecallScope::All, top_k).await;
         merged.extend(hits.into_iter().map(|result| {
             trusty_common::memory_core::retrieval::CrossPalaceResult {
                 palace_id: palace_id.clone(),
