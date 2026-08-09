@@ -2317,34 +2317,45 @@ fn rust_symbol_paths_are_not_flagged() {
 /// credential a human wrote in `::` path syntax — the ONLY way encoder output
 /// reaches the predicate at all, since `::` appears in no encoder alphabet.
 ///
-/// Measured against `origin/main` (`5a055380`) and this branch, 30k generated
-/// base64url tokens per row:
+/// Two shapes, both measured at this test's own seed against `origin/main`
+/// (`5a055380`). A credential wrapped in `::` labels, 30k tokens per row:
 ///
 /// ```text
 ///                                      origin/main   this branch
-///   secretKey::<base64url 20ch>            1004          2036
-///   secretKey::<base64url 27ch>             285           770
-///   Config::token::<base64url 20ch>        1004          2036
+///   secretKey::<base64url 20ch>            1017          2022
+///   secretKey::<base64url 27ch>             282           767
+///   Config::token::<base64url 20ch>        1017          2022
 /// ```
 ///
-/// The baseline is not zero: those are the pre-existing `is_segmented_identifier`
-/// misses documented on [`is_human_word_segment`], reached because a base64url
-/// token carries `-`/`_`. This change roughly doubles them on colon-wrapped
-/// shapes and leaves every non-colon shape byte-identical — see
-/// `generated_encoder_corpus_stays_flagged`, whose eight ceilings are unmoved.
+/// And a blob CHUNKED into `::`-joined groups, 20k tokens of 24 characters:
 ///
-/// The doubling is the price of the fix, pinned rather than hidden. The
-/// alternative measured during design — admitting CamelCase segments in
-/// `is_human_word_segment` generally, as #4967's PR body proposed — costs far
-/// more: base64url misses go 1012 -> 2165 at 15 input bytes and 291 -> 1973 at
-/// 20, on tokens carrying no colon at all, and it does not fix this issue.
-/// What: 30k generated tokens per configuration, asserting the miss count is at
-/// or below the pinned ceiling.
+/// ```text
+///                     origin/main   first cut   this branch
+///   chunk width 4         355          4629         366
+///   chunk width 6         355          3282         732
+///   chunk width 8         355          2521        1273
+/// ```
+///
+/// Why the second table exists (review round 1, HIGH): the first cut of this PR
+/// EXEMPTED a segment of at most `SYMBOL_SEGMENT_SHORT_LEN` bytes from the word
+/// requirement, so a blob chunked into short groups took the exemption whole —
+/// a 7-13x loss. Nothing alarmed: this ratchet's first table, the recurrence
+/// corpus and `generated_encoder_corpus_stays_flagged` all reported healthy
+/// while it happened, because none of them generates a chunked shape. A check
+/// reporting healthy over real loss is the finding; this row is the fix.
+///
+/// The first table's baseline is not zero — those are the pre-existing
+/// `is_segmented_identifier` misses documented on [`is_human_word_segment`],
+/// reached because a base64url token carries `-`/`_`. This change roughly doubles
+/// them on colon-wrapped shapes and leaves every non-colon shape byte-identical:
+/// `generated_encoder_corpus_stays_flagged`'s eight ceilings are unmoved.
+/// What: generated tokens per configuration, asserting the miss count is at or
+/// below the pinned ceiling.
 /// Test: itself.
 #[test]
 fn symbol_path_keyhole_does_not_shelter_credentials() {
-    const N: usize = 30_000;
     const SEED: u64 = 0x5043_1234_5678_9abc;
+    const N: usize = 30_000;
     for (label, prefix, input_len, ceiling) in [
         ("one label", "secretKey::", 15usize, 2100usize),
         ("one label, longer blob", "secretKey::", 20, 800),
@@ -2368,4 +2379,40 @@ fn symbol_path_keyhole_does_not_shelter_credentials() {
              — re-measure against origin/main before touching this number."
         );
     }
+
+    // Review round 1, HIGH: the chunked shape, which no other check generates.
+    const CHUNK_N: usize = 20_000;
+    for (chunk, ceiling) in [(4usize, 500usize), (6, 900), (8, 1400)] {
+        let mut rng = Xorshift(SEED);
+        let alphabet = b64_alphabet(true);
+        let mut buf = vec![0u8; 18];
+        let mut misses = 0usize;
+        for _ in 0..CHUNK_N {
+            rng.fill(&mut buf);
+            let blob = b64_encode(&buf, &alphabet, false);
+            let joined: Vec<String> = blob
+                .as_bytes()
+                .chunks(chunk)
+                .map(|c| String::from_utf8_lossy(c).into_owned())
+                .collect();
+            if find_secret_token(&joined.join("::")).is_none() {
+                misses += 1;
+            }
+        }
+        assert!(
+            misses <= ceiling,
+            "#5043 ratchet: a 24-char blob chunked into `::`-joined groups of \
+             {chunk} missed {misses} of {CHUNK_N}, above the pinned ceiling \
+             {ceiling}. A short segment must keep a word floor, never an \
+             exemption — see `SYMBOL_SEGMENT_SHORT_WORD_LEN`."
+        );
+    }
+
+    // The literal from the review finding: FLAG on origin/main, MISS on the
+    // first cut of this PR, FLAG again now.
+    assert!(
+        find_secret_token("Ab12cdEf::Gh34ijKl::Mn56opQr").is_some(),
+        "#5043 review round 1: a blob chunked into 8-char `::` groups must be \
+         flagged; the short-segment exemption let this through"
+    );
 }
