@@ -370,6 +370,11 @@ async fn patch_agent_claude_code_accepts_anthropic_provider() {
 
 /// Why: A caller that only wants to switch provider (without hand-typing a
 /// model slug) should get that provider's registry default model.
+///
+/// #3765 changed the provider used here from `openai` to `atlascloud`:
+/// `provider_id` is no longer an inert key, so the write gate now refuses a
+/// provider the agent loader would refuse to pin, and `openai` is one of
+/// those (see `patch_agent_rejects_a_provider_dispatch_cannot_reach`).
 #[tokio::test]
 async fn patch_agent_provider_only_uses_default_model() {
     let tmp = tempfile::tempdir().unwrap();
@@ -380,7 +385,7 @@ async fn patch_agent_provider_only_uses_default_model() {
         "engineer",
         PatchAgentRequest {
             model_id: None,
-            provider_id: Some("openai".to_string()),
+            provider_id: Some("atlascloud".to_string()),
             ..Default::default()
         },
     )
@@ -390,11 +395,49 @@ async fn patch_agent_provider_only_uses_default_model() {
         .await
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let expected_default = trusty_common::inference::registry::capabilities_for("openai")
+    let expected_default = trusty_common::inference::registry::capabilities_for("atlascloud")
         .unwrap()
         .default_model;
     assert_eq!(body["model"], expected_default);
-    assert_eq!(body["provider_id"], "openai");
+    assert_eq!(body["provider_id"], "atlascloud");
+}
+
+/// Why (#3765): `provider_id` used to be written verbatim and read by nothing,
+/// so persisting `openai` was harmless. Now the loader PINS the agent to it
+/// and fails closed, which would turn a successful-looking GUI write into an
+/// agent that cannot load. The write gate must refuse the same providers the
+/// loader refuses — `openai` and `together` still fall through to OpenRouter
+/// with a bare, unroutable slug.
+/// Test: itself.
+#[tokio::test]
+async fn patch_agent_rejects_a_provider_dispatch_cannot_reach() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture(tmp.path(), "engineer", SUBPROCESS_FIXTURE);
+
+    for provider in ["openai", "together"] {
+        let resp = patch_agent_at(
+            &[tmp.path().to_path_buf()],
+            "engineer",
+            PatchAgentRequest {
+                model_id: None,
+                provider_id: Some(provider.to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "{provider} must be refused"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let err = body["error"].as_str().unwrap_or_default();
+        assert!(err.contains(provider), "error must name it: {err}");
+        assert!(err.contains("cannot dispatch"), "{err}");
+    }
 }
 
 /// Why: `PATCH /api/agents/:name` must actually be registered on the router

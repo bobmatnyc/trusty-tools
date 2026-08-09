@@ -57,6 +57,11 @@ mod events_sse;
 mod handlers;
 mod listener_events;
 mod models;
+// #3765: the dispatch-reachability predicate is also the pin-eligibility
+// predicate — `llm::provider_pin` asserts the two sets are identical so the
+// GUI cannot offer a provider the agent loader refuses to pin.
+#[cfg(test)]
+pub(crate) use models::reachable_today;
 mod project_registration;
 mod projects;
 mod relay;

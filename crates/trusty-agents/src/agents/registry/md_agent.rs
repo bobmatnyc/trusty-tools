@@ -194,6 +194,10 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             prompt_label: None,
             extends: fm.extends,
             tier: fm.tier,
+            // #3765: `.md` overlay agents have no `provider_id` frontmatter
+            // key — pinning is a TOML/package-agent feature for now, and an
+            // absent pin is exactly today's ambient behaviour.
+            provider_id: None,
         },
         llm: LlmParams {
             temperature: llm_temperature,
