@@ -23,9 +23,14 @@ import { TOOLS, type Tool } from './tools';
 
 export const GITHUB_URL = 'https://github.com/bobmatnyc/trusty-tools';
 
+/**
+ * Rendered by both `SiteHeader.svelte` and `SiteFooter.svelte`, which is why
+ * the list lives here rather than in `+layout.svelte`.
+ */
 export const NAV_LINKS: { href: string; label: string }[] = [
 	{ href: '/', label: 'Home' },
-	{ href: '/docs', label: 'Docs' }
+	{ href: '/docs', label: 'Docs' },
+	{ href: '/whats-new', label: "What's new" }
 ];
 
 /**
@@ -56,8 +61,12 @@ export interface CrateGroup {
  * `trusty-agents` reads 0.38.6 in its manifest while having no tag and no
  * crates.io release at all.
  *
- * Deliberately omitted, like the crate COUNT above: any per-crate version
- * number. It would be stale the next time any of them ships.
+ * Deliberately omitted here, like the crate COUNT above: any per-crate version
+ * number. A number TYPED INTO THIS FILE is stale the next time that crate
+ * ships. The six flagship cards do now show one, and that is not a reversal of
+ * the same rule — `$lib/changelog` derives it from the crate's own
+ * `CHANGELOG.md` at build time, so it cannot disagree with the repository. The
+ * rule is "never hand-write a version", not "never show one".
  */
 export const CRATE_GROUPS: CrateGroup[] = [
 	{
