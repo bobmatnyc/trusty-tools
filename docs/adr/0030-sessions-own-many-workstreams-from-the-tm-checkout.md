@@ -43,7 +43,7 @@ We will make a session a container of workstreams, and give it a home that is no
 
 6. **Roughly five active workstreams per session, advisory and configurable.** The limit exists because each workstream's conversation surfaces to the user, and more than about five exceeds what one person can attend to. It is an **attention** limit. It is not WIP reduction — prior analysis in this repo refuted that framing, and re-justifying the cap as throughput control would be a regression to a rejected argument. Exceeding it nudges; it never blocks.
 
-7. **Agent worktrees are children of a workstream, not workstreams.** They are created under the workstream that dispatched them, reaped when the agent exits, and never consume a slot.
+7. **Agent worktrees are children of a workstream by record, not by location.** "Child" here names a recorded parent id — the dispatching workstream's id, carried in the agent worktree's sentinel as `parent_workstream_id` (DOC-66 §5) — and nothing about where the directory sits. The worktree itself is a flat sibling under `.claude/worktrees/`, never nested inside its parent's checkout, per [ADR-0036](0036-all-worktrees-are-siblings-under-claude-worktrees.md). What the parent id buys is reapability: a child is reaped when its agent exits, is reclaimed with its parent if that workstream reaches `Reclaimed` first, and never consumes a slot. Children are not workstreams.
 
 8. **Working directly on the default branch stays available.** The `worktree: false` override already exists and is not re-designed here; only its shape changes, from a per-project config key to a per-session-overridable flag targeting the tm checkout (DOC-66 §3.5).
 
