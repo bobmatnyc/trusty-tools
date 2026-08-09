@@ -162,13 +162,53 @@ describe('class 5 — links that stop the build', () => {
 });
 
 describe('external links', () => {
-	it('passes http(s) and mailto through untouched', () => {
+	it('passes https:// through untouched', () => {
 		expect(link('https://example.com/x')).toEqual({
 			class: 'external',
 			href: 'https://example.com/x',
 			external: true
 		});
-		expect(link('mailto:someone@example.com').class).toBe('external');
+	});
+
+	it('passes http:// through untouched', () => {
+		expect(link('http://example.com/x')).toEqual({
+			class: 'external',
+			href: 'http://example.com/x',
+			external: true
+		});
+	});
+
+	it('passes a protocol-relative URL through untouched — it carries no scheme of its own', () => {
+		expect(link('//example.com/x')).toEqual({
+			class: 'external',
+			href: '//example.com/x',
+			external: true
+		});
+	});
+});
+
+describe('class 6 — disallowed scheme', () => {
+	it('fails the build on a javascript: link', () => {
+		const found = failure('javascript:alert(1)');
+		expect(found.code).toBe('UNSAFE-SCHEME');
+		expect(found.problem).toContain('javascript:');
+		expect(found.remedy).toContain('https://');
+	});
+
+	it('fails the build on a file:// link', () => {
+		const found = failure('file:///etc/passwd');
+		expect(found.code).toBe('UNSAFE-SCHEME');
+		expect(found.problem).toContain('file:');
+	});
+
+	it('fails the build on mailto:, which this site does not allowlist', () => {
+		expect(failure('mailto:someone@example.com').code).toBe('UNSAFE-SCHEME');
+	});
+
+	it('fails the build on data: and vbscript: as well as any unrecognised scheme', () => {
+		for (const href of ['data:text/html,<script>1</script>', 'vbscript:msgbox(1)', 'ftp://x/y']) {
+			expect(failure(href).code, href).toBe('UNSAFE-SCHEME');
+		}
 	});
 });
 

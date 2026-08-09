@@ -22,6 +22,11 @@
  *   4. `other.md#fragment`          → case 1 or 2, and when case 1 the fragment
  *      is checked against the TARGET page's headings
  *   5. missing, or outside the repo → BROKEN-LINK / ESCAPES-REPO, build fails
+ *   6. absolute with a disallowed scheme (`javascript:`, `file:`, `data:`, …)
+ *      → UNSAFE-SCHEME, build fails. Committing to a published doc or changelog
+ *      is the only way to reach this site's readers with one, so the guard is
+ *      against a mistake or a compromised commit, not an untrusted visitor —
+ *      still worth stopping the way a broken relative link already does.
  *
  * Permalink rather than dropping the link: dropping keeps the sentence ("see
  * `docs/specs/foo.md`") while removing every way to act on it, so the reader is
@@ -32,9 +37,13 @@
  * What: `resolveLink`, a pure function from one raw href plus context to either
  * a resolved destination or a `DocFailure`. It performs no I/O; existence is a
  * caller-supplied probe, which is what makes every class testable from fixtures.
+ * `classifyAbsoluteHref` is the scheme allowlist behind class 6 — exported so
+ * the changelog reader (`../changelog/parse.ts`) applies the identical check
+ * rather than carrying its own copy.
  *
  * Test: `links.test.ts` — one case per class above, plus the anchor cases and
- * the two build-failing ones.
+ * the build-failing ones. `../changelog/parse.test.ts` covers the same check
+ * through the changelog reader.
  */
 
 import path from 'node:path';
@@ -71,8 +80,41 @@ export interface LinkContext {
 
 export type LinkOutcome = { link: ResolvedLink } | { failure: DocFailure };
 
-/** Anything with a scheme, or a protocol-relative URL, leaves the repository. */
-const ABSOLUTE = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
+/** Matches a leading `scheme:`, capturing the scheme (RFC 3986 `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`). */
+const SCHEME = /^([a-z][a-z0-9+.-]*):/i;
+
+/**
+ * Schemes this site will render as a live, followable href. Everything else —
+ * `javascript:`, `file:`, `data:`, `vbscript:`, `mailto:`, any unknown scheme —
+ * fails the build rather than being published. This is an ALLOWLIST, not a
+ * denylist: a scheme is safe only once someone decided it is, never by default.
+ */
+const ALLOWED_SCHEMES = new Set(['http:', 'https:']);
+
+export type AbsoluteHref =
+	| { kind: 'not-absolute' }
+	/** Protocol-relative (`//host/…`) or an allowlisted scheme. */
+	| { kind: 'allowed' }
+	| { kind: 'unsafe-scheme'; scheme: string };
+
+/**
+ * Why: see class 6 in the module header — the single scheme check both the
+ * doc reader and the changelog reader (`../changelog/parse.ts`) apply, so a
+ * scheme decision made here never drifts between the two.
+ * What: classifies a raw href as scheme-less/relative, absolute-and-safe, or
+ * absolute-with-a-scheme-this-site-refuses-to-publish. A protocol-relative URL
+ * has no scheme of its own — it inherits whatever scheme served the page,
+ * which this site only ever serves as https — so it is `allowed` without an
+ * allowlist lookup.
+ * Test: `links.test.ts`, `../changelog/parse.test.ts`.
+ */
+export function classifyAbsoluteHref(href: string): AbsoluteHref {
+	if (href.startsWith('//')) return { kind: 'allowed' };
+	const match = SCHEME.exec(href);
+	if (!match) return { kind: 'not-absolute' };
+	const scheme = `${match[1].toLowerCase()}:`;
+	return ALLOWED_SCHEMES.has(scheme) ? { kind: 'allowed' } : { kind: 'unsafe-scheme', scheme };
+}
 
 function fail(
 	ctx: LinkContext,
@@ -101,8 +143,17 @@ export function resolveLink(raw: string, ctx: LinkContext): LinkOutcome {
 		);
 	}
 
-	if (ABSOLUTE.test(href)) {
+	const absolute = classifyAbsoluteHref(href);
+	if (absolute.kind === 'allowed') {
 		return { link: { class: 'external', href, external: true } };
+	}
+	if (absolute.kind === 'unsafe-scheme') {
+		return fail(
+			ctx,
+			'UNSAFE-SCHEME',
+			`\`${href}\` uses the \`${absolute.scheme}\` scheme, which this site will not publish as a link`,
+			'use an https:// (or http://) URL, or a path relative to this file'
+		);
 	}
 
 	if (href.startsWith('#')) {

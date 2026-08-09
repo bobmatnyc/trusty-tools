@@ -46,6 +46,7 @@ import { toString as hastToString } from 'hast-util-to-string';
 import { visit } from 'unist-util-visit';
 import type { Element, Root, RootContent } from 'hast';
 
+import { classifyAbsoluteHref } from '../docs/links';
 import { ALLOWED_ELEMENTS, parsePage, stringifyHast } from '../docs/render';
 import { GITHUB_REPO } from '../docs/repo';
 import { CHANGELOG_CODES, type ChangelogFailure } from './errors';
@@ -127,8 +128,6 @@ const RELEASE_HEADING = /^\[([^\]]+)\](.*)$/s;
 /** A separator between the version and the rest: em dash, en dash, or hyphen. */
 const LEADING_SEPARATOR = /^[\s—–·-]+/;
 const TRAILING_SEPARATOR = /[\s—–·-]+$/;
-/** Anything with a scheme, or a protocol-relative URL, already leaves the repo. */
-const ABSOLUTE = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/i;
 
 /**
  * Why: see THE LINK-REFERENCE TRAP in the module header.
@@ -301,7 +300,7 @@ export function parseChangelog(
 }
 
 /**
- * Why: three problems in changelog prose would each ship a defect quietly.
+ * Why: four problems in changelog prose would each ship a defect quietly.
  *
  *   1. A RELATIVE link (`[spec](../../docs/specs/foo.md)`) is written to be
  *      followed on GitHub. Rendered verbatim on `/whats-new` it resolves
@@ -313,6 +312,10 @@ export function parseChangelog(
  *      renders as NOTHING — `run trusty-search index <path>` would publish as
  *      `run trusty-search index`. Eight of these are in the corpus right now.
  *   3. An image would be a third-party request from a site that makes none.
+ *   4. An absolute link using a scheme this site refuses to publish
+ *      (`javascript:`, `file:`, …) would render as a live href. Checked via
+ *      `classifyAbsoluteHref` — the same allowlist the doc reader applies, so
+ *      the two never drift (`../docs/links.ts`).
  *
  * What: rewrites every relative link into a `blob/main` link on the crate's
  * own path, and fails the build on anything it cannot resolve. Mutates the
@@ -366,7 +369,20 @@ function harden(
 
 		if (node.tagName !== 'a') return;
 		const href = node.properties?.href;
-		if (typeof href !== 'string' || href === '' || ABSOLUTE.test(href)) return;
+		if (typeof href !== 'string' || href === '') return;
+
+		const absolute = classifyAbsoluteHref(href);
+		if (absolute.kind === 'unsafe-scheme') {
+			failures.push({
+				code: CHANGELOG_CODES.BAD_LINK,
+				file,
+				line,
+				problem: `\`${href}\` uses the \`${absolute.scheme}\` scheme, which this site will not publish as a link`,
+				remedy: 'use an https:// (or http://) URL, or a path relative to the changelog'
+			});
+			return;
+		}
+		if (absolute.kind === 'allowed') return;
 
 		const hash = href.indexOf('#');
 		const rawTarget = hash === -1 ? href : href.slice(0, hash);
