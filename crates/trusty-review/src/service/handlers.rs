@@ -4,9 +4,8 @@
 //! test, and evolve independently without growing `service/mod.rs` past the
 //! 500-line cap.
 //!
-//! What: implements GET /health, GET /status, and POST /review.
-//! POST /pr/github/webhook is in `webhook.rs` to keep webhook-specific logic
-//! (HMAC, event parsing, spawn) isolated from the direct-call path.
+//! What: implements GET /health, GET /status, and POST /review — the whole
+//! HTTP surface since #5181 retired `POST /pr/github/webhook`.
 //!
 //! Test: each handler is exercised via `tower::ServiceExt::oneshot` in the
 //! `tests` module below.
@@ -57,12 +56,12 @@ pub struct AppState {
     pub analyze: Option<Arc<dyn AnalyzeClient>>,
     /// Count of reviews currently running in background spawned tasks.
     pub in_flight: Arc<AtomicU64>,
-    /// Last pipeline error, if any (populated by webhook background tasks).
+    /// Last pipeline error, if any (populated by background review tasks).
     pub last_error: Arc<std::sync::Mutex<Option<String>>>,
     /// SHA-keyed durable dedup store (Phase 1, #582).  `None` disables dedup.
     pub dedup: Option<Arc<DedupStore>>,
     /// In-process in-flight guard registry (Phase 1, #582) — drops duplicate
-    /// concurrent webhook deliveries for the same PR / head SHA.
+    /// concurrent reviews of the same PR / head SHA.
     pub in_flight_registry: InFlightRegistry,
     /// Short-TTL cache for the inference-reachability probe (#719).
     ///
@@ -71,16 +70,6 @@ pub struct AppState {
     /// process is alive.  The probe is cached so repeated health polls don't
     /// hammer the provider.
     pub inference_probe: InferenceProbe,
-    /// Shutdown signal sender for outcome-poll background tasks (issue #1421).
-    ///
-    /// Why: background outcome-poll tasks use `tokio::select!` on the corresponding
-    /// receiver so they are cancelled on daemon shutdown rather than becoming orphans.
-    /// What: an `Arc<Sender<bool>>` shared across clones; sending `true` cancels all
-    /// active poll tasks. Created fresh in every constructor; `serve()` sends `true`
-    /// after `axum::serve` returns.
-    /// Test: `webhook_closed_merged_schedules_outcome_poll` in `webhook_tests.rs`
-    /// verifies the task is registered; orphan-prevention is structural (select!).
-    pub shutdown_tx: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl AppState {
@@ -88,10 +77,10 @@ impl AppState {
     ///
     /// Why: the common constructor for tests and single-process deployments that
     /// do not need cross-process dedup; the in-flight registry is always created
-    /// so concurrent webhook deliveries are still de-duplicated in-process.
+    /// so concurrent reviews of one PR are still de-duplicated in-process.
     /// What: wraps the provided deps in `Arc` counters, an empty error cell, a
     /// `None` dedup store, and a fresh `InFlightRegistry`.
-    /// Test: used by handler/webhook unit tests that provide fake deps.
+    /// Test: used by handler unit tests that provide fake deps.
     pub fn new(
         config: ReviewConfig,
         llm: Arc<dyn LlmProvider>,
@@ -121,7 +110,7 @@ impl AppState {
     /// Construct `AppState` with an explicit verifier provider and dedup store.
     ///
     /// Why: the deployed `serve` daemon builds a verifier provider (Phase 2,
-    /// #583) so the verification round runs on webhook-driven reviews; this
+    /// #583) so the verification round runs on service-driven reviews; this
     /// constructor threads it in alongside the dedup store.  The simpler `new` /
     /// `with_dedup` constructors keep `verifier = None` for tests and callers
     /// that do not exercise verification.
@@ -135,7 +124,6 @@ impl AppState {
         analyze: Option<Arc<dyn AnalyzeClient>>,
         dedup: Option<Arc<DedupStore>>,
     ) -> Self {
-        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         Self {
             config,
             llm,
@@ -147,7 +135,6 @@ impl AppState {
             dedup,
             in_flight_registry: InFlightRegistry::new(),
             inference_probe: InferenceProbe::default(),
-            shutdown_tx: Arc::new(shutdown_tx),
         }
     }
 }
@@ -295,7 +282,7 @@ impl DepState {
 /// Why: operators and monitors need a richer view than /health — specifically
 /// how many reviews are in-flight and what the last error was.
 /// What: in_flight is read atomically from AppState; last_error is the most
-/// recent error string from a background webhook task.
+/// recent error string from a background review task.
 /// Test: `status_returns_json_with_in_flight`.
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
@@ -578,7 +565,7 @@ pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
 ///
 /// Why: operators need a lightweight operational view distinct from /health
 /// (which focuses on dep reachability) so they can monitor pipeline throughput
-/// and catch silent failures from background webhook tasks.
+/// and catch silent failures from background review tasks.
 /// What: reads `in_flight` atomically and acquires the `last_error` mutex.
 /// Test: `status_returns_json_with_in_flight`.
 pub async fn handle_status(State(state): State<AppState>) -> impl IntoResponse {

@@ -2,12 +2,13 @@
 //!
 //! Why: ADR-0032 removed every sibling daemon's HTTP listener, and ADR-0034
 //! rules that console terminates the GitHub request and relays inward over UDS.
-//! The two handlers this path replaces both acknowledge GitHub *before* the
-//! work runs and downgrade every later failure to a log line
-//! (`trusty-review/src/service/webhook.rs:305-309`,
-//! `trusty-analyze/src/service/handlers/review.rs:210-214`). GitHub never
-//! retries an acknowledged delivery, so each of those failures is permanent,
-//! silent loss with every health signal still green.
+//! The two handlers this path replaced both acknowledged GitHub *before* the
+//! work ran and downgraded every later failure to a log line. GitHub never
+//! retries an acknowledged delivery, so each of those failures was permanent,
+//! silent loss with every health signal still green. #5181 deleted them —
+//! `trusty-review`'s `POST /pr/github/webhook` and `trusty-analyze`'s
+//! `POST /webhooks/github` now 404 — so this route is the only HTTP webhook
+//! surface in the workspace, and the only holder of the shared secret.
 //!
 //! What: one route, multiplexed by `{source}` over both targets. The order of
 //! operations is the fix and is not negotiable:

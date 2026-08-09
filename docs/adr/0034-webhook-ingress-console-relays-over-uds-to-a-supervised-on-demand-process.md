@@ -313,12 +313,25 @@ the socket, under four rules.
    count, so without its own red state the signal would go **green** at the
    moment a delivery was confirmed never to be processed.
 
-**What this amendment does not cover.** `trusty-review`'s outcome poll on
-`closed` + `merged` (opt-in, default off) schedules a task that sleeps an hour.
-A console-supervised process that exits on SIGTERM cannot honour that, so the
-drain records those deliveries as deliberately ignored and the legacy HTTP
-route remains their only path. Giving them a durable equivalent is out of scope
-here and blocks nothing in criterion (c).
+**`closed` + `merged`: the outcome poll is RETIRED, not moved (#5181,
+2026-08-09).** The paragraph this replaces said the drain ignored those
+deliveries and "the legacy HTTP route remains their only path". That route is
+gone. `trusty-review`'s outcome poll — the opt-in, default-off task that slept
+an hour after a merge and then read reactions and follow-up commits — was
+deleted along with it, by owner ruling, because a console-supervised process
+that exits on SIGTERM cannot honour an hour-long sleep and no restart-durable
+replacement was in scope.
+
+**Do not go looking for where it went. Nothing acts on a `closed` or `merged`
+webhook event any more.** Such a delivery is classified `Ignored`, recorded in
+the drain's processed ledger, and its inbox entry removed — accounted for, and
+finished. `Ignored` here means "deliberately not acted on", not "pending a
+handler elsewhere". The deletion took `poll_review_outcomes`, `OutcomeStore`,
+and the `[outcome]` / `TRUSTY_REVIEW_OUTCOME_*` configuration with it; leaving a
+knob an operator could set and get silence from was the same defect one level
+down. Issue #1421's outcome-feedback loop is therefore unimplemented again, and
+reinstating it means designing durable scheduling first — see
+`crates/trusty-review/src/webhook_drain.rs`.
 
 ## Consequences
 
@@ -379,10 +392,11 @@ security-neutral.
 - **Idle-timeout tuning for the supervisor** is left to implementation.
   `Bm25Supervisor` uses an LRU cap plus an RSS ceiling rather than an idle
   timer; a webhook target probably wants the timer. Not decided here.
-- **Whether `trusty-analyze`'s webhook route survives at all.** Its
-  `POST /webhooks/github` overlaps substantially with `trusty-review`'s, and
-  #5028 measured zero deliveries to either. Retiring one is plausibly simpler
-  than relaying to both, but that is a product question, not a transport one.
+- ~~**Whether `trusty-analyze`'s webhook route survives at all.**~~
+  **CLOSED (owner ruling, #5181):** it does not. `trusty-analyze` is reached
+  over UDS like every other service, console owns the sole HTTP webhook route,
+  and both legacy routes retire with no survivor. Landed in #5181 — both paths
+  now 404.
 
 ## Prerequisites
 

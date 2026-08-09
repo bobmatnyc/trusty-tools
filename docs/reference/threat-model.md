@@ -80,8 +80,8 @@ the daemons' listener setup code moves independently of this doc.
 |---|---|---|---|---|---|
 | **trusty-search** | `127.0.0.1:7878` (`service/constants.rs::DEFAULT_PORT`) | **Yes** — router-wide `SelfOrigins` guard (`service/server/mod.rs`) | Yes (`search` → `trusty-search`) | Yes, embedded (`ui/`) | CLI (`trusty-search status`/`port`), native MCP stdio bridge (HTTP→`/rpc`), embedded UI, console proxy |
 | **trusty-memory** | `127.0.0.1:7070`–`7079` (auto-selects next free); `--http` accepts any explicit addr | **Yes** — router-wide `SelfOrigins` guard (`web/mod.rs`) | Yes (`memory` → `trusty-memory`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge — a pure HTTP proxy forwarding JSON-RPC to the daemon's own `/rpc` (no local tool logic), embedded UI, console proxy |
-| **trusty-analyze** | `127.0.0.1:7879` (`commands/port.rs::DEFAULT_PORT`) | **Yes** — router-wide `SelfOrigins` guard (`service/routes.rs`) | Yes (`analyze` → `trusty-analyze`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge, embedded UI, console proxy, **direct GitHub webhook** (`POST /webhooks/github` — see Known Gaps) |
-| **trusty-review** | `127.0.0.1:7891` | **Yes** — `SelfOrigins` guard wraps all routes (`service/routes.rs`) | Yes (`review` → `trusty-review`) | No embedded UI | CLI, console proxy, HMAC-verified GitHub webhook (signature check is independent of the origin guard) |
+| **trusty-analyze** | `127.0.0.1:7879` (`commands/port.rs::DEFAULT_PORT`) | **Yes** — router-wide `SelfOrigins` guard (`service/routes.rs`) | Yes (`analyze` → `trusty-analyze`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge, embedded UI, console proxy. **No webhook surface** — `POST /webhooks/github` was retired in #5181 and 404s |
+| **trusty-review** | `127.0.0.1:7891` | **Yes** — `SelfOrigins` guard wraps all routes (`service/routes.rs`) | Yes (`review` → `trusty-review`) | No embedded UI | CLI, console proxy. **No webhook surface** — `POST /pr/github/webhook` was retired in #5181 and 404s |
 | **trusty-agents** | `127.0.0.1:8080` (`--port`; 7654 is the conventional dev/UI port, passed explicitly). `--bind` is an explicit non-loopback opt-in that `serve_with_config` **refuses to start without `--api-token`** (`api/server/routes.rs`) | **Yes** — router-wide `SelfOrigins` guard via `with_guarded_middleware` (`api/server/routes.rs::build_router_with_origins`) | Yes (`agents` → `trusty-agents`, #3331) | Yes, separate `agents-ui` crate | CLI, native MCP stdio bridge, `agents-ui` (Tauri — writes go over Tauri IPC, not HTTP), console proxy |
 | **trusty-mpm** | `127.0.0.1:7880` | **Yes** — `guard_router` wraps the listener with the `SelfOrigins` guard (`daemon/api/origin_guard.rs`) | Yes (`mpm` → `trusty-mpm`, #1849 Phase 1) | No embedded UI (separate `trusty-mpm-gui` Tauri app) | CLI (`tm`), native MCP stdio bridge, `trusty-mpm-gui` (talks **directly** to the daemon, not gateway-first — migration tracked as [#3333](https://github.com/bobmatnyc/trusty-tools/issues/3333), #1849 Phase 2), console proxy |
 | **trusty-console** | `127.0.0.1:7788` by default; `--tailscale` widens to a dual listener (loopback + tailnet IP); Funnel mode (ADR-0017, Proposed) layers public HTTPS on top | Yes — the original router-wide guard this pattern was lifted from (`crates/trusty-common/src/server/origin_guard.rs` docs the provenance: #3268/#3269/#3280) | n/a — console is the proxy, not a proxied target (`full_id("console")` is explicitly `None`) | Yes, the dashboard SPA | Browsers (local or, in `--tailscale`/Funnel mode, remote), every CLI/UI above via the reverse proxy, and — the **sole off-loopback surface** per ADR-0018 |
@@ -135,16 +135,14 @@ firing a cross-origin write.
 
 ## Known gaps
 
-- **ADR-0017's webhook-ingress gap.** [ADR-0017](../adr/0017-shared-ingress-via-console-tailscale-funnel.md)
-  (Proposed) plans a single `/api/webhooks/{source}` endpoint mounted in
-  trusty-mpm and reverse-proxied by console — but it does not mention
-  retiring trusty-analyze's existing **direct** `POST /webhooks/github`
-  endpoint (`crates/trusty-analyze/src/service/routes.rs`). Today that route
-  is reachable only on trusty-analyze's own loopback bind (consistent with
-  the loopback-only doctrine), but it is a second, unproxied webhook path
-  that predates ADR-0017 and isn't addressed by it. Flagged here for whoever
-  lands ADR-0017: decide whether analyze's webhook route is retired in favor
-  of the new shared endpoint, or documented as a deliberate second path.
+- ~~**ADR-0017's webhook-ingress gap.**~~ **CLOSED (#5181).**
+  [ADR-0034](../adr/0034-webhook-ingress-console-relays-over-uds-to-a-supervised-on-demand-process.md)
+  settled it: `trusty-console`'s `POST /api/webhooks/{source}` is the only HTTP
+  webhook surface in the workspace and the only holder of the shared secret. It
+  verifies the HMAC once, spools the payload durably, and relays over UDS.
+  Both direct routes — trusty-analyze's `POST /webhooks/github` and
+  trusty-review's `POST /pr/github/webhook` — are deleted and now 404, so
+  neither crate verifies a signature or exposes a second, unproxied path.
 - **Console strips the `Upgrade` header.** The reverse proxy's hop-by-hop
   header list (`crates/trusty-console/src/proxy/routes.rs:37`,
   `HOP_BY_HOP`) includes `"upgrade"` alongside the standard RFC 7230 §6.1 set.

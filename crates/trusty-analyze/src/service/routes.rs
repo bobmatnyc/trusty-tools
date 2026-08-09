@@ -56,8 +56,8 @@ pub fn build_router(state: AnalyzerAppState) -> Router {
 /// self-origins for the router-wide same-origin write guard (#3304).
 ///
 /// Why: the analyzer exposes destructive write routes (`POST /indexes/{id}/scip`,
-/// `POST /review`, `POST /analyze/deep`, `POST /facts`, `DELETE /facts/{id}`,
-/// GitHub webhook) behind the permissive-CORS shared stack; without a
+/// `POST /review`, `POST /analyze/deep`, `POST /facts`, `DELETE /facts/{id}`)
+/// behind the permissive-CORS shared stack; without a
 /// same-origin guard a page the operator visits could drive them cross-origin
 /// (CSRF). This is the guarded entry point; `build_router` delegates here with a
 /// loopback-only allowlist so existing callers/tests are unchanged. `serve`
@@ -115,10 +115,11 @@ pub fn build_router_with_self_origins(
             post(handlers::review::review_github_pr_handler),
         )
         .route("/analyze/deep", post(handlers::deep::deep_analyze_handler))
-        .route(
-            "/webhooks/github",
-            post(handlers::review::github_webhook_handler),
-        )
+        // #5181: `POST /webhooks/github` is NOT registered here. GitHub reaches
+        // this crate through `trusty-console`'s `/api/webhooks/{source}` and the
+        // UDS listener in `webhook_listener`; the path 404s, so a delivery aimed
+        // at the retired route fails visibly at GitHub instead of being accepted
+        // and dropped.
         .route(
             "/facts",
             get(handlers::facts::list_facts).post(handlers::facts::upsert_fact),

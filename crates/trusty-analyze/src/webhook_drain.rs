@@ -10,11 +10,10 @@
 //! the hand-off had succeeded.
 //!
 //! What: [`AnalyzeProcessor`] is the [`DeliveryProcessor`] the listener drains
-//! into. It runs exactly what the legacy HTTP route runs — the same filter, the
-//! same [`run_pr_analysis`] — because two copies of "which actions are
-//! actionable" is how the UDS path and the HTTP path start disagreeing about
-//! what a webhook does. The HTTP handler in `service::handlers::review` calls
-//! into here too, so retiring it ([#5181]) deletes a route and not a pipeline.
+//! into. It owns the action filter and [`run_pr_analysis`] outright. Both used
+//! to be shared with the legacy `POST /webhooks/github` handler so the two
+//! transports could not disagree about what a webhook does; [#5181] retired
+//! that route, which deleted a transport and left this pipeline unchanged.
 //!
 //! 🔴 The retryable/permanent split is the load-bearing decision. A payload
 //! with no `pull_request.number` can never succeed, so retrying it holds a slot
@@ -73,8 +72,8 @@ pub enum PrEventVerdict {
 
 /// Decide what a `{event, body}` pair asks for.
 ///
-/// Why: the single copy of the filter, shared by the UDS drain and the legacy
-/// HTTP route so the two cannot drift on which actions trigger an analysis.
+/// Why: the single copy of the filter deciding which actions trigger an
+/// analysis. It was shared with the legacy HTTP route until #5181 retired it.
 /// Test: the four `classify_*` cases.
 pub fn classify_pr_event(event: &str, body: &[u8]) -> PrEventVerdict {
     if event != PR_EVENT {

@@ -46,8 +46,7 @@ pub use explain::{
 };
 pub use facts::FactStore;
 pub use github::{
-    fetch_pr_diff, format_review_as_markdown, post_pr_comment, verify_webhook_signature,
-    GithubError, GithubPrRequest,
+    fetch_pr_diff, format_review_as_markdown, post_pr_comment, GithubError, GithubPrRequest,
 };
 pub use linker::link;
 pub use ner::{extract_doc_comments, NerExtractor};
