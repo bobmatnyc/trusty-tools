@@ -35,6 +35,24 @@ use super::RelayDelivery;
 /// See [`Inbox::write_temp`] for why a collision here refuses a valid delivery.
 static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The temp name one `write_temp` attempt uses, given the clock reading it took.
+///
+/// Why: `stamp_nanos` is a parameter rather than read in here so a test can hold
+/// the clock still. The counter only earns its place when two names are drawn
+/// inside a single tick, so a test that lets the clock run proves nothing on a
+/// platform fine-grained enough to separate the two by stamp alone — and the
+/// platform that gates merges is not the one where this defect showed up.
+/// What: `<final path>.json.<pid>.<stamp>.<seq>.tmp`, with `seq` from
+/// [`TEMP_SEQ`].
+/// Test: `two_temp_names_within_one_clock_tick_differ`.
+fn temp_path_for(final_path: &Path, stamp_nanos: u128) -> PathBuf {
+    let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    final_path.with_extension(format!(
+        "json.{}.{stamp_nanos}.{seq}.tmp",
+        std::process::id()
+    ))
+}
+
 /// Mode the inbox directory is held at: owner-only, like every other socket and
 /// spool directory on this path.
 pub const INBOX_DIR_MODE: u32 = 0o700;
@@ -391,9 +409,7 @@ impl Inbox {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp_path =
-            final_path.with_extension(format!("json.{}.{stamp}.{seq}.tmp", std::process::id()));
+        let tmp_path = temp_path_for(final_path, stamp);
 
         let write = || -> std::io::Result<()> {
             let mut file = std::fs::OpenOptions::new()
@@ -487,4 +503,30 @@ fn id_digest(delivery_id: &str) -> String {
     use sha2::Digest as _;
     let digest = sha2::Sha256::digest(delivery_id.as_bytes());
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod temp_path_tests {
+    use super::*;
+
+    #[test]
+    fn two_temp_names_within_one_clock_tick_differ() {
+        // Two handlers for one delivery id, both reading the same clock value.
+        // Without the counter they build the same name, `create_new` fails
+        // EEXIST, and the second delivery is refused as undurable with nothing
+        // wrong with it. `serve_concurrent_deliveries_of_one_id_produce_one_
+        // stored_copy` catches that too, but only when the clock actually
+        // collides — reliably on macOS, unverified on the Linux that gates
+        // merges. Freezing the stamp is what makes the proof platform-neutral.
+        let final_path = Path::new("/inbox/delivery-1.json");
+        let frozen_stamp = 1_700_000_000_000_000_000u128;
+
+        let first = temp_path_for(final_path, frozen_stamp);
+        let second = temp_path_for(final_path, frozen_stamp);
+
+        assert_ne!(
+            first, second,
+            "two writers in one tick must not share a temp name"
+        );
+    }
 }
