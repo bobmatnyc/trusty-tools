@@ -90,7 +90,7 @@ place and returns typed JSON instead of scraped text:
 ```
 mcp__trusty-mpm__session_context_catchup(
   project_dir: <absolute path to the current project root>,
-  session_id: <the current session id, when known — narrows resolved_snapshot>,
+  session_id: <the current session id — required for a non-null resolved_snapshot>,
   all_projects: false,   # true also scans machine-wide registered projects
   full: false             # true ignores the watermark, returns full history
 )
@@ -121,6 +121,13 @@ knowledge of the repo state if anything looks stale.
 > legitimately disagree under a recent watermark: `sessions` is "what paused
 > since your last catch-up", `resolved_snapshot` is "what should I resume
 > from". Resume from `resolved_snapshot`; treat `sessions` as the digest.
+
+> **`resolved_snapshot` belongs to the `session_id` you passed, and only to
+> it.** Several sessions share one `.trusty-mpm/sessions/` store, so there is
+> no "latest overall" fallback: omit `session_id`, or pass one that has never
+> paused, and you get `null`. That is the correct answer, not a failure — pick
+> a snapshot out of `sessions[]` and resume from it deliberately. To read
+> another session's state on purpose, pass that session's id (#5272).
 
 > **Empty is not always empty.** An empty `sessions` array means "nothing
 > paused since last catch-up" only when `undatable_sessions_dropped` is `0`.
