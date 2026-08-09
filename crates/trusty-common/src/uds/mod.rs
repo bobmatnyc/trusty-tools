@@ -48,7 +48,9 @@ mod tests;
 
 pub mod dir;
 mod peer;
+pub mod probe;
 pub mod rpc;
+pub mod singleton;
 
 /// On-demand supervision of a UDS-serving child process (#5089 step 2).
 ///
@@ -68,11 +70,12 @@ pub mod supervisor;
 
 pub use dir::prepare_socket_dir;
 pub use peer::{ensure_peer_is_self, peer_uid, self_uid};
+pub use probe::{SocketVerdict, probe_socket_verdict, socket_is_serving};
 pub use rpc::{MAX_FRAME_BYTES, UdsRpcError, send_framed_request};
+pub use singleton::bind_singleton_hardened;
 #[cfg(feature = "uds-supervisor")]
 pub use supervisor::{
-    ServiceTimeouts, SocketVerdict, SpawnSpec, SupervisorConfig, SupervisorError,
-    UdsServiceSupervisor,
+    ServiceTimeouts, SpawnSpec, SupervisorConfig, SupervisorError, UdsServiceSupervisor,
 };
 
 use std::fs::Permissions;
@@ -184,6 +187,17 @@ pub enum UdsSecurityError {
         /// Underlying OS error.
         #[source]
         source: std::io::Error,
+    },
+
+    /// Another process is already serving the socket a singleton bind wanted.
+    ///
+    /// Not a takeover candidate: two listeners on one path means the kernel
+    /// picks which one each delivery reaches, so the second must fail rather
+    /// than unlink a live owner's socket (#5182).
+    #[error("another process is already serving {path}")]
+    AlreadyServing {
+        /// Socket that is already owned.
+        path: PathBuf,
     },
 
     /// `UnixListener::bind` failed.

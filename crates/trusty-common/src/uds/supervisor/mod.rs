@@ -35,13 +35,13 @@ mod probe;
 #[path = "tests.rs"]
 mod tests;
 
+pub use crate::uds::probe::{SocketVerdict, probe_socket_verdict, socket_is_serving};
 pub use child::over_rss_limit;
 pub use config::{
     DEFAULT_CONNECT_PROBE_TIMEOUT, DEFAULT_INITIAL_PROBE_INTERVAL, DEFAULT_MAX_PROBE_INTERVAL,
     ServiceTimeouts, SpawnSpec, SupervisorConfig,
 };
 pub use error::SupervisorError;
-pub use probe::{SocketVerdict, probe_socket_verdict, socket_is_serving};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

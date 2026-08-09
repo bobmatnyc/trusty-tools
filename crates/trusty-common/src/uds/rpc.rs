@@ -21,7 +21,8 @@
 //! Test: `tests.rs` — `send_framed_request_*` against a real listener bound
 //! through `bind_hardened`, covering the round trip, a server that closes
 //! without answering, an over-long frame, a malformed frame, an absent socket,
-//! and the timeout.
+//! and the timeout; plus `read_failure_*` over [`classify_read_failure`], which
+//! cover the platform split a socket test cannot reproduce on both platforms.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -94,6 +95,10 @@ pub enum UdsRpcError {
     /// Distinct from [`UdsRpcError::Read`] on purpose: "it hung up" and "the
     /// read syscall failed" have different causes, and a caller deciding
     /// whether to retry cares which one it got.
+    ///
+    /// Covers both ways a peer can hang up: a clean EOF, and an abortive close
+    /// that surfaces as `ECONNRESET`. See [`classify_read_failure`] for why
+    /// those must not be two different variants.
     #[error("{path} closed the connection without sending a response frame")]
     NoResponse {
         /// Socket whose peer hung up.
@@ -210,13 +215,10 @@ where
 
     let mut reader = BufReader::new(stream.take(MAX_FRAME_BYTES));
     let mut line: Vec<u8> = Vec::new();
-    let read = reader
-        .read_until(b'\n', &mut line)
-        .await
-        .map_err(|source| UdsRpcError::Read {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let read = match reader.read_until(b'\n', &mut line).await {
+        Ok(read) => read,
+        Err(source) => return Err(classify_read_failure(path, source, line.is_empty())),
+    };
 
     if read == 0 && line.is_empty() {
         return Err(UdsRpcError::NoResponse {
@@ -234,6 +236,51 @@ where
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Decide whether a failed response read means "the peer hung up" or "the read
+/// syscall failed".
+///
+/// Why (#5182): one physical event — a target dropping the connection without
+/// answering — reaches this client two different ways. If the peer's receive
+/// buffer still holds unread bytes when it closes, Linux resets the connection
+/// and our read fails with `ECONNRESET`; macOS hands us a clean EOF instead.
+/// `webhook_relay::serve` hits exactly that case when it refuses an over-long
+/// frame, having read only the first 64 bytes of it. Classifying by platform
+/// means a caller that branches on the variant behaves one way on a developer's
+/// machine and another way in CI and in production.
+///
+/// What: an abortive close with nothing buffered is reported as
+/// [`UdsRpcError::NoResponse`], the same as a clean EOF. Anything else stays
+/// [`UdsRpcError::Read`] — including a reset that arrives *after* some bytes
+/// landed, because a truncated frame is not the same claim as "sent no response
+/// frame", and `Read` keeps the errno in the message for diagnosis.
+///
+/// This renames a failure; it never converts one into a success. Both variants
+/// are `Err`, and [`send_framed_request`]'s contract that no error may be read
+/// as an acknowledgement covers them equally.
+///
+/// Test: `read_failure_from_an_abortive_close_reads_as_a_hang_up`,
+/// `read_failure_after_partial_bytes_stays_a_read_error`,
+/// `read_failure_from_an_unrelated_errno_stays_a_read_error`.
+fn classify_read_failure(
+    path: &Path,
+    source: std::io::Error,
+    nothing_buffered: bool,
+) -> UdsRpcError {
+    let hung_up = matches!(
+        source.kind(),
+        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+    );
+    if hung_up && nothing_buffered {
+        return UdsRpcError::NoResponse {
+            path: path.to_path_buf(),
+        };
+    }
+    UdsRpcError::Read {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 #[cfg(test)]
@@ -457,6 +504,61 @@ mod tests {
         assert!(
             matches!(err, UdsRpcError::Timeout { .. }),
             "expected Timeout, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_failure_from_an_abortive_close_reads_as_a_hang_up() {
+        // Linux resets the connection instead of sending EOF when the peer
+        // closes with unread bytes still buffered, which is what
+        // `webhook_relay::serve` does to an over-long frame. Same event as the
+        // clean hang-up above, so it must reach the caller as the same variant.
+        for kind in [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+        ] {
+            let err = classify_read_failure(
+                Path::new("/tmp/relay.sock"),
+                std::io::Error::new(kind, "peer went away"),
+                true,
+            );
+            assert!(
+                matches!(err, UdsRpcError::NoResponse { .. }),
+                "expected NoResponse for {kind:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_failure_after_partial_bytes_stays_a_read_error() {
+        // Bytes did arrive, so "closed without sending a response frame" would
+        // be false. A truncated frame keeps its errno.
+        let err = classify_read_failure(
+            Path::new("/tmp/relay.sock"),
+            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "peer went away"),
+            false,
+        );
+
+        assert!(
+            matches!(err, UdsRpcError::Read { .. }),
+            "expected Read, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_failure_from_an_unrelated_errno_stays_a_read_error() {
+        // Only an abortive close is a hang-up. Widening this would report a
+        // genuine syscall failure as a well-behaved peer that chose not to
+        // answer.
+        let err = classify_read_failure(
+            Path::new("/tmp/relay.sock"),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            true,
+        );
+
+        assert!(
+            matches!(err, UdsRpcError::Read { .. }),
+            "expected Read, got {err:?}"
         );
     }
 }

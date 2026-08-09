@@ -26,16 +26,18 @@
 //! `tracing::warn!` as the sole record of a failed relay, and any `202` issued
 //! before the spool write returns.
 //!
-//! Spawn-on-demand — console starting a target that is not resident — is
-//! #5089 step 4. Until then no target binds a listener and every relay lands in
-//! [`relay::RelayOutcome::Unreachable`], which is a durable pending state, not
-//! a dropped delivery.
+//! Spawn-on-demand — console starting a target that is not resident — landed in
+//! #5182 alongside the targets' listeners: [`spawn::TargetSupervisor`] runs
+//! `ensure_running` before each relay. A target that will not start is still
+//! [`relay::RelayOutcome::Unreachable`], which is a durable pending state, not a
+//! dropped delivery.
 //!
 //! Test: `tests.rs`.
 
 pub mod health;
 pub mod relay;
 pub mod schedule;
+pub mod spawn;
 pub mod spool;
 
 #[cfg(test)]
@@ -158,6 +160,10 @@ pub struct WebhookIngress {
     claims: ClaimSet,
     /// When a pending entry becomes eligible for another attempt.
     backoff: BackoffPolicy,
+    /// Each target's inbox, so an acknowledged-but-undrained delivery is
+    /// metered rather than disappearing from the signal. See
+    /// [`health::SpoolHealth::undrained`] and #5192.
+    inbox_roots: Arc<Vec<(String, PathBuf)>>,
 }
 
 impl WebhookIngress {
@@ -178,7 +184,22 @@ impl WebhookIngress {
             red_after: DEFAULT_RED_AFTER,
             claims: ClaimSet::new(),
             backoff: BackoffPolicy::default(),
+            // Deliberately empty rather than derived: deriving would make every
+            // unit test read the developer's real `~/…/webhook-inbox`. Production
+            // wiring is `from_env`, and `from_env_meters_every_targets_inbox`
+            // pins that it populates this.
+            inbox_roots: Arc::new(Vec::new()),
         }
+    }
+
+    /// Meter these inboxes when reporting health.
+    ///
+    /// Why: an acknowledged delivery leaves the spool, so without this the
+    /// status goes green while the work sits unprocessed in a target's inbox.
+    /// Test: `health_is_degraded_while_a_delivery_sits_undrained`.
+    pub fn with_inbox_roots(mut self, roots: Vec<(String, PathBuf)>) -> Self {
+        self.inbox_roots = Arc::new(roots);
+        self
     }
 
     /// Override the red-health threshold.
@@ -227,18 +248,34 @@ impl WebhookIngress {
     pub fn from_env() -> anyhow::Result<Self> {
         let spool = Spool::open(Spool::default_root()?)?;
         let secret = std::env::var(SECRET_ENV).unwrap_or_default();
-        let sockets = trusty_common::uds::scratch_socket_dir();
-        let targets = vec![
-            Target {
-                source: "review".to_string(),
-                relay: UdsRelay::new(sockets.join("trusty-review-webhook.sock")),
-            },
-            Target {
-                source: "analyze".to_string(),
-                relay: UdsRelay::new(sockets.join("trusty-analyze-webhook.sock")),
-            },
-        ];
-        Ok(Self::new(spool, secret, SECRET_ENV.to_string(), targets))
+        // #5182: the paths come from the shared contract rather than a literal
+        // here, so the sender and the two receivers cannot disagree about them.
+        let supervisor: spawn::SharedSupervisor = Arc::new(spawn::TargetSupervisor::new());
+        let mut targets = Vec::new();
+        for source in [
+            trusty_common::webhook_relay::REVIEW_SOURCE,
+            trusty_common::webhook_relay::ANALYZE_SOURCE,
+        ] {
+            let socket = trusty_common::webhook_relay::socket_path_for(source)
+                .ok_or_else(|| anyhow::anyhow!("no socket is defined for source {source}"))?;
+            targets.push(Target {
+                source: source.to_string(),
+                relay: UdsRelay::new(socket).with_supervisor(source, Arc::clone(&supervisor)),
+            });
+        }
+        // #5182 review: meter each target's inbox. Without it an acknowledged
+        // delivery leaves the spool and the signal goes green while the work
+        // sits unprocessed — see `health::SpoolHealth::undrained` and #5192.
+        let mut inbox_roots = Vec::new();
+        for source in [
+            trusty_common::webhook_relay::REVIEW_SOURCE,
+            trusty_common::webhook_relay::ANALYZE_SOURCE,
+        ] {
+            let root = trusty_common::webhook_relay::inbox_root_for(source)
+                .ok_or_else(|| anyhow::anyhow!("no inbox is defined for source {source}"))??;
+            inbox_roots.push((source.to_string(), root));
+        }
+        Ok(Self::new(spool, secret, SECRET_ENV.to_string(), targets).with_inbox_roots(inbox_roots))
     }
 
     /// The spool this ingress writes to.
@@ -280,7 +317,11 @@ impl WebhookIngress {
         let red_after = self.red_after;
         let now = now_unix_ms();
         let spool = (*self.spool).clone();
-        match tokio::task::spawn_blocking(move || health::scan_health(&spool, now, red_after)).await
+        let roots = Arc::clone(&self.inbox_roots);
+        match tokio::task::spawn_blocking(move || {
+            health::scan_health(&spool, now, red_after, &roots)
+        })
+        .await
         {
             Ok(health) => health,
             // A scan that could not run is not a healthy spool.

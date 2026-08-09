@@ -16,6 +16,7 @@ use super::peer::peer_uid_verdict;
 use super::*;
 
 use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
 
 /// Mode bits of `path`, masked to the permission nibbles. Uses `lstat` so a
 /// symlink's own mode is reported, never its target's.
@@ -555,4 +556,70 @@ async fn peer_uid_of_self_connection_is_self() {
         self_uid(),
         "a connection from this process must report this process's uid"
     );
+}
+
+// ── singleton bind (#5182) ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn bind_singleton_binds_a_fresh_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("fresh.sock");
+
+    let listener = bind_singleton_hardened(&sock).await.expect("bind fresh");
+
+    assert_eq!(mode_of(&sock), SOCKET_MODE, "a takeover must still harden");
+    drop(listener);
+}
+
+#[tokio::test]
+async fn bind_singleton_takes_over_a_stale_socket_file() {
+    // Why: a console-supervised child that is SIGKILLed leaves its socket file
+    // behind. Without the takeover the next spawn fails EADDRINUSE forever and
+    // every delivery stays pending — the state #5182 exists to leave.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("stale.sock");
+    let dead = bind_hardened(&sock).expect("bind first");
+    drop(dead); // tokio does not unlink on drop, so the file survives.
+    assert!(sock.exists(), "the corpse must still be on disk");
+
+    // Dropping the listener closes the fd; the kernel finishes tearing the
+    // socket down afterwards, and on macOS under a loaded test binary a connect
+    // lands in that window and succeeds. Waiting for the corpse to actually
+    // read dead establishes the precondition this test assumes — the subject is
+    // the takeover, not how fast the kernel reclaims a socket.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while probe_socket_verdict(&sock, Duration::from_millis(50)).await != SocketVerdict::NotServing
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped listener never stopped answering connects"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let listener = bind_singleton_hardened(&sock)
+        .await
+        .expect("a socket nobody serves must be taken over");
+
+    assert_eq!(mode_of(&sock), SOCKET_MODE);
+    drop(listener);
+}
+
+#[tokio::test]
+async fn bind_singleton_refuses_a_socket_someone_is_serving() {
+    // Two listeners on one path means the kernel picks which one a delivery
+    // reaches, so the second must fail rather than unlink a live owner.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let sock = tmp.path().join("sockets").join("live.sock");
+    let _live = bind_hardened(&sock).expect("bind the live owner");
+
+    let err = bind_singleton_hardened(&sock)
+        .await
+        .expect_err("a served socket must not be taken over");
+
+    assert!(
+        matches!(err, UdsSecurityError::AlreadyServing { .. }),
+        "expected AlreadyServing, got {err:?}"
+    );
+    assert!(sock.exists(), "the live owner's socket must survive");
 }

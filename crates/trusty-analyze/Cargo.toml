@@ -82,7 +82,10 @@ redb               = { workspace = true }
 dashmap            = { workspace = true }
 rust-embed         = { workspace = true }
 mime_guess         = { workspace = true }
-trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock", "mcp", "console-metrics", "config-cli"] }
+# `webhook-relay` (#5182): the console->target relay wire contract AND its
+# receive half — the durable inbox, the listener, and the hardened UDS bind
+# this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
+trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock", "mcp", "console-metrics", "config-cli", "webhook-relay"] }
 tree-sitter            = { workspace = true }
 tree-sitter-rust       = { workspace = true }
 tree-sitter-typescript = { workspace = true }

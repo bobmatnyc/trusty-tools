@@ -29,6 +29,7 @@
 //! aged-pending, exhausted-alongside-live, undecodable-entry, unreadable-spool,
 //! and a vanished spool directory.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -99,6 +100,32 @@ pub struct SpoolHealth {
     pub undecodable: Vec<String>,
     /// Why the scan itself failed, if it did.
     pub scan_error: Option<String>,
+    /// Deliveries a target acknowledged and has not yet processed, per source.
+    ///
+    /// 🔴 #5182 review: without this the signal INVERTS. An acknowledged
+    /// delivery is deleted from the spool, so `pending` drops to zero and the
+    /// status goes green — while the work sits in the target's inbox with
+    /// nothing consuming it (the drain step is
+    /// [#5192](https://github.com/bobmatnyc/trusty-tools/issues/5192)). Before
+    /// the listeners existed an undrained backlog was at least VISIBLE as a
+    /// pending spool entry; metering the inbox is what keeps it visible now.
+    pub undrained: Vec<UndrainedTarget>,
+    /// Total across [`SpoolHealth::undrained`]. Non-zero is never `Ok`.
+    pub undrained_total: usize,
+}
+
+/// How much acknowledged-but-unprocessed work one target is holding.
+///
+/// Test: `health_is_degraded_while_a_delivery_sits_undrained`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndrainedTarget {
+    /// Route segment the target serves (`review` / `analyze`).
+    pub source: String,
+    /// Deliveries held in its inbox.
+    pub held: usize,
+    /// Why the count could not be taken, if it could not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Scan the spool and classify its health, right now.
@@ -114,7 +141,13 @@ pub struct SpoolHealth {
 ///    operator);
 /// 4. the oldest **live** entry is at least `red_after` old → `Error`;
 /// 5. anything is live-pending → `Degraded`;
-/// 6. otherwise → `Ok`.
+/// 6. any target holds an acknowledged-but-undrained delivery → `Degraded`;
+/// 7. otherwise → `Ok`.
+///
+/// Rule 6 is the one that stops the signal inverting — see
+/// [`SpoolHealth::undrained`]. `inbox_roots` maps each configured source to the
+/// directory its receiver writes to; an empty slice means nothing is metered,
+/// which is only correct for an ingress with no targets.
 ///
 /// Cost: one `read_dir` per directory and at most one JSON decode — of the
 /// oldest live entry, for its attempt count and last error. If that decode
@@ -132,8 +165,15 @@ pub struct SpoolHealth {
 /// `health_reports_error_for_an_undecodable_entry`,
 /// `health_reports_error_when_the_spool_cannot_be_read`,
 /// `health_reports_error_when_the_spool_directory_is_gone`.
-pub fn scan_health(spool: &Spool, now_unix_ms: u64, red_after: Duration) -> SpoolHealth {
+pub fn scan_health(
+    spool: &Spool,
+    now_unix_ms: u64,
+    red_after: Duration,
+    inbox_roots: &[(String, PathBuf)],
+) -> SpoolHealth {
     let red_after_secs = red_after.as_secs();
+    let undrained = scan_undrained(inbox_roots);
+    let undrained_total = undrained.iter().map(|u| u.held).sum::<usize>();
     let age_of = |at: u64| now_unix_ms.saturating_sub(at).div_euclid(1000);
 
     let census = match spool.scan_metadata() {
@@ -146,6 +186,8 @@ pub fn scan_health(spool: &Spool, now_unix_ms: u64, red_after: Duration) -> Spoo
                 // it healthy is the fail-quiet shape this module exists to
                 // remove.
                 scan_error: Some(format!("{e}")),
+                undrained,
+                undrained_total,
                 ..SpoolHealth::empty(red_after_secs)
             };
         }
@@ -178,11 +220,17 @@ pub fn scan_health(spool: &Spool, now_unix_ms: u64, red_after: Duration) -> Spoo
         .map(|m| age_of(m.received_at_unix_ms));
     let aged_out = oldest_pending_age_secs.is_some_and(|age| age >= red_after_secs);
 
-    let status = if !undecodable.is_empty() || !census.exhausted.is_empty() || aged_out {
+    let status = if !undecodable.is_empty()
+        || !census.exhausted.is_empty()
+        || aged_out
+        || undrained.iter().any(|u| u.error.is_some())
+    {
         ServiceHealth::Error
-    } else if census.live.is_empty() {
+    } else if census.live.is_empty() && undrained_total == 0 {
         ServiceHealth::Ok
     } else {
+        // An empty spool with a full inbox is work that arrived and is not
+        // being done. Reporting that as Ok is the failure this rule removes.
         ServiceHealth::Degraded
     };
 
@@ -204,7 +252,37 @@ pub fn scan_health(spool: &Spool, now_unix_ms: u64, red_after: Duration) -> Spoo
         red_after_secs,
         undecodable,
         scan_error: None,
+        undrained,
+        undrained_total,
     }
+}
+
+/// Count what each target is holding, without creating or touching its inbox.
+///
+/// Why: console meters a directory another service owns, so asking must have no
+/// side effect. An unreadable inbox is reported as an error rather than a zero —
+/// "I could not count" and "there is nothing" are the two answers this whole
+/// module exists to keep apart.
+/// Test: `health_is_degraded_while_a_delivery_sits_undrained`,
+/// `health_is_error_when_a_targets_inbox_cannot_be_counted`.
+fn scan_undrained(inbox_roots: &[(String, PathBuf)]) -> Vec<UndrainedTarget> {
+    inbox_roots
+        .iter()
+        .map(
+            |(source, root)| match trusty_common::webhook_relay::held_count(root) {
+                Ok(held) => UndrainedTarget {
+                    source: source.clone(),
+                    held,
+                    error: None,
+                },
+                Err(e) => UndrainedTarget {
+                    source: source.clone(),
+                    held: 0,
+                    error: Some(format!("{e}")),
+                },
+            },
+        )
+        .collect()
 }
 
 /// A red report for a scan that could not run at all.
@@ -237,6 +315,8 @@ impl SpoolHealth {
             red_after_secs,
             undecodable: Vec::new(),
             scan_error: None,
+            undrained: Vec::new(),
+            undrained_total: 0,
         }
     }
 }

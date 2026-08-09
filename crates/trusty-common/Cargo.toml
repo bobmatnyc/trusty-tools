@@ -84,7 +84,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["net", "io-util", "io-std", "macros", "rt", "sync", "process", "time"] }
+tokio = { workspace = true, features = ["net", "io-util", "io-std", "macros", "rt", "sync", "process", "signal", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Process RSS / CPU sampling for the shared `sys_metrics` module; the
@@ -358,9 +358,12 @@ webhook-hmac = ["dep:hmac", "dep:sha2", "dep:hex"]
 # receivers are trusty-review / trusty-analyze, neither of which can depend on
 # the console — so the frame, its owned counterpart, and the ack-bearing
 # response live here where both halves read them. Implies `webhook-hmac`
-# because the frame's provenance record describes that verification. Adds no
-# new dependencies beyond `serde` / `serde_json`, already unconditional.
-webhook-relay = ["webhook-hmac"]
+# because the frame's provenance record describes that verification, and `uds`
+# because #5182 added the receive half — the listener binds through
+# `bind_hardened` and checks the peer uid on accept, and both halves resolve the
+# socket paths from `scratch_socket_dir`. Adds no new dependencies beyond
+# `serde` / `serde_json` / `thiserror`, already present.
+webhook-relay = ["webhook-hmac", "uds"]
 # Bundle the ONNX Runtime static libs via fastembed's
 # `ort-download-binaries-native-tls`. Right choice for macOS and modern
 # Linux (glibc ≥ 2.38). Mutually exclusive with `embedder-load-dynamic`

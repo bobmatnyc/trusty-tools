@@ -735,7 +735,7 @@ async fn connected_without_ack_never_deletes_the_entry() {
 fn health_reports_ok_on_an_empty_spool() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
-    let h = health::scan_health(&spool, 1_700_000_000_000, Duration::from_secs(600));
+    let h = health::scan_health(&spool, 1_700_000_000_000, Duration::from_secs(600), &[]);
     assert_eq!(h.status, ServiceHealth::Ok);
     assert_eq!(h.pending, 0);
     assert_eq!(h.oldest_pending_age_secs, None);
@@ -751,7 +751,7 @@ fn health_reports_degraded_for_a_young_pending_entry() {
         .persist_new(&sample_entry("d-young", now - 30_000))
         .expect("durable write");
 
-    let h = health::scan_health(&spool, now, Duration::from_secs(600));
+    let h = health::scan_health(&spool, now, Duration::from_secs(600), &[]);
     assert_eq!(h.status, ServiceHealth::Degraded);
     assert_eq!(h.pending, 1);
     assert_eq!(h.oldest_pending_age_secs, Some(30));
@@ -771,7 +771,7 @@ fn health_reports_error_once_the_oldest_entry_passes_the_threshold() {
         .persist_new(&sample_entry("d-young", now - 1_000))
         .expect("durable write");
 
-    let h = health::scan_health(&spool, now, Duration::from_secs(600));
+    let h = health::scan_health(&spool, now, Duration::from_secs(600), &[]);
     assert_eq!(h.status, ServiceHealth::Error);
     assert_eq!(h.pending, 2);
     assert_eq!(h.oldest_pending_age_secs, Some(900));
@@ -790,7 +790,7 @@ fn health_reports_error_for_an_undecodable_entry() {
     let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
     std::fs::write(spool.root().join("0000000000001-junk.json"), b"{not json").expect("write junk");
 
-    let h = health::scan_health(&spool, 1_700_000_000_000, Duration::from_secs(600));
+    let h = health::scan_health(&spool, 1_700_000_000_000, Duration::from_secs(600), &[]);
     assert_eq!(
         h.status,
         ServiceHealth::Error,
@@ -811,6 +811,7 @@ fn health_reports_error_when_the_spool_cannot_be_read() {
         &Spool::at(&blocked),
         1_700_000_000_000,
         Duration::from_secs(600),
+        &[],
     );
     assert_eq!(h.status, ServiceHealth::Error);
     assert!(h.scan_error.is_some(), "the scan failure must be reported");
@@ -1169,9 +1170,24 @@ async fn integration_from_env_delivery_survives_a_console_restart() {
         Some(&tmp.path().to_string_lossy()),
     );
     let prior_secret = swap_env(SECRET_ENV, Some(SECRET));
+    // #5182: `from_env` now attaches a supervisor that STARTS the target, so
+    // without this the test launches a real `trusty-review` from the developer's
+    // PATH, which promptly acks and clears the spool the test is asserting on.
+    // External mode is the operator-facing opt-out (ADR-0011): dial whatever is
+    // there, never spawn.
+    let prior_external = swap_env(spawn::ENV_EXTERNAL_TARGETS, Some("1"));
 
     let outcome = async {
-        // ── first boot: nothing is listening, as until #5089 step 4 ──────────
+        // The remaining nondeterminism is a webhook listener the operator is
+        // already running on this machine. Name it rather than flake on it.
+        let live_socket = trusty_common::webhook_relay::review_socket_path();
+        assert!(
+            tokio::net::UnixStream::connect(&live_socket).await.is_err(),
+            "a trusty-review webhook listener is already serving {};              stop it before running this test, which asserts on an unreachable target",
+            live_socket.display()
+        );
+
+        // ── first boot: nothing is listening ────────────────────────────────
         let ingress = WebhookIngress::from_env().expect("build ingress from env");
         assert!(
             ingress
@@ -1232,6 +1248,7 @@ async fn integration_from_env_delivery_survives_a_console_restart() {
         prior_data_dir.as_deref(),
     );
     swap_env(SECRET_ENV, prior_secret.as_deref());
+    swap_env(spawn::ENV_EXTERNAL_TARGETS, prior_external.as_deref());
     outcome
 }
 
@@ -1798,7 +1815,7 @@ fn health_reports_error_when_the_spool_directory_is_gone() {
 
     std::fs::remove_dir_all(&root).expect("simulate the directory going away");
 
-    let h = health::scan_health(&spool, 1_700_000_100_000, Duration::from_secs(600));
+    let h = health::scan_health(&spool, 1_700_000_100_000, Duration::from_secs(600), &[]);
     assert_eq!(
         h.status,
         ServiceHealth::Error,
@@ -1818,7 +1835,7 @@ fn a_never_opened_spool_directory_is_still_legitimately_empty() {
     let spool = Spool::at(tmp.path().join("never-created"));
     let listing = spool.list_pending().expect("an unopened spool lists empty");
     assert!(listing.pending.is_empty());
-    let h = health::scan_health(&spool, 1_700_000_000_000, Duration::from_secs(600));
+    let h = health::scan_health(&spool, 1_700_000_000_000, Duration::from_secs(600), &[]);
     assert_eq!(h.status, ServiceHealth::Ok);
     assert_eq!(h.scan_error, None);
 }
@@ -1909,7 +1926,7 @@ fn health_diagnostics_track_the_live_entry_not_the_exhausted_one() {
     live.last_attempt_at_unix_ms = Some(now - 60_000);
     spool.persist_new(&live).expect("durable write");
 
-    let h = health::scan_health(&spool, now, Duration::from_secs(600));
+    let h = health::scan_health(&spool, now, Duration::from_secs(600), &[]);
 
     assert_eq!(h.status, ServiceHealth::Error);
     assert_eq!(
@@ -1942,7 +1959,7 @@ fn health_is_red_for_an_exhausted_entry_even_with_nothing_live() {
         .expect("durable write");
     spool.quarantine(&path).expect("quarantine");
 
-    let h = health::scan_health(&spool, now, Duration::from_secs(600));
+    let h = health::scan_health(&spool, now, Duration::from_secs(600), &[]);
     assert_eq!(
         h.status,
         ServiceHealth::Error,
@@ -1974,4 +1991,373 @@ async fn metrics_route_surfaces_exhausted_separately_from_live() {
     assert_eq!(body["metrics"]["exhausted"], 1);
     assert_eq!(body["metrics"]["oldest_pending_delivery_id"], "d-live");
     assert_eq!(body["metrics"]["exhausted_delivery_ids"][0], "d-dead");
+}
+
+// ─── End to end against the real receiver (#5182) ───────────────────────────
+//
+// Every case above answers console with a hand-rolled stub. These drive the
+// production receiver — `trusty_common::webhook_relay`'s listener, the same one
+// `trusty-review webhook-listen` and `trusty-analyze webhook-listen` run — so
+// the two halves are proven against each other rather than against a fixture
+// that agrees with whichever half was edited last.
+
+/// Bind the real listener under `dir`, backed by `sink`, and return its socket.
+async fn spawn_real_listener(
+    dir: &StdPath,
+    sink: std::sync::Arc<dyn trusty_common::webhook_relay::DeliverySink>,
+) -> PathBuf {
+    let socket = dir.join("sockets").join("real-target.sock");
+    let listener = bind_hardened(&socket).expect("bind real listener");
+    tokio::spawn(async move {
+        trusty_common::webhook_relay::serve_until(
+            &listener,
+            sink,
+            trusty_common::webhook_relay::ServeOptions::default(),
+            std::future::pending::<()>(),
+        )
+        .await;
+    });
+    socket
+}
+
+/// A sink that always refuses, standing in for a receiver whose disk is gone.
+#[derive(Debug)]
+struct UndurableSink;
+
+impl trusty_common::webhook_relay::DeliverySink for UndurableSink {
+    fn take_ownership(
+        &self,
+        _delivery: &trusty_common::webhook_relay::RelayDelivery,
+    ) -> Result<(), trusty_common::webhook_relay::SinkRejection> {
+        Err(trusty_common::webhook_relay::SinkRejection::not_durable(
+            "inbox is unwritable",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn delivery_reaches_the_real_target_and_is_spooled_there_before_the_ack() {
+    // 🔴 The whole point of #5182. Against the pre-fix commit this fails at the
+    // first assertion: nothing bound the socket, so the outcome was
+    // `Unreachable` and the entry stayed pending forever.
+    //
+    // The ordering claim is checked the only way it can be from this side: the
+    // ack has already been received when the assertions run, and the receiver's
+    // inbox already holds the delivery. Were the ack sent first, the inbox could
+    // still be empty here — and console would have deleted its own copy, which
+    // the spool assertion below would then be unable to distinguish from
+    // success. The receiver-side ordering itself is pinned in trusty-common by
+    // `dispatch_acks_only_after_the_sink_has_taken_ownership`.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox = trusty_common::webhook_relay::Inbox::open(tmp.path().join("inbox"))
+        .expect("open receiver inbox");
+    let socket = spawn_real_listener(tmp.path(), std::sync::Arc::new(inbox.clone())).await;
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let ingress = ingress_for(spool.clone(), socket);
+
+    let outcome = ingress
+        .ingest("review", &signed_headers(BODY, "e2e-real-1"), BODY)
+        .await;
+
+    let IngestOutcome::Accepted { relay, .. } = outcome else {
+        panic!("expected Accepted, got {outcome:?}");
+    };
+    assert_eq!(
+        relay,
+        RelayOutcome::Acked,
+        "the real listener must acknowledge a verified delivery"
+    );
+
+    let held = inbox.list().expect("list the receiver inbox");
+    assert_eq!(held.len(), 1, "the receiver must hold the delivery");
+    assert_eq!(held[0].1.delivery_id, "e2e-real-1");
+    assert_eq!(
+        held[0].1.body_b64,
+        base64::engine::general_purpose::STANDARD.encode(BODY),
+        "the raw body must arrive byte-exact, so the HMAC stays re-checkable"
+    );
+    assert!(
+        held[0].1.provenance.verified,
+        "the receiver must be told what console verified"
+    );
+
+    assert!(
+        listing_of(&spool).pending.is_empty(),
+        "an acknowledged delivery is the one case that clears the spool"
+    );
+}
+
+#[tokio::test]
+async fn a_receiver_that_cannot_own_the_work_never_produces_an_ack() {
+    // 🔴 The failure this change must not introduce. A receiver that answers but
+    // cannot take durable responsibility must leave console's spool entry alone
+    // — that entry is the only remaining copy, because GitHub does not re-send
+    // an acknowledged delivery.
+    //
+    // Against the pre-fix commit there is no counterpart: no listener existed at
+    // all, so "reached the target and it could not own the work" was not a
+    // reachable state.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = spawn_real_listener(tmp.path(), std::sync::Arc::new(UndurableSink)).await;
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let ingress = ingress_for(spool.clone(), socket);
+
+    let outcome = ingress
+        .ingest("review", &signed_headers(BODY, "e2e-refuse-1"), BODY)
+        .await;
+
+    let IngestOutcome::Accepted { relay, .. } = outcome else {
+        panic!("expected Accepted, got {outcome:?}");
+    };
+    assert!(
+        !relay.is_acked(),
+        "a receiver that cannot own the work must not read as acknowledged, got {relay:?}"
+    );
+    assert!(
+        relay.reason().contains("inbox is unwritable"),
+        "the durable record must carry the receiver's own words, got {:?}",
+        relay.reason()
+    );
+
+    let pending = listing_of(&spool).pending;
+    assert_eq!(pending.len(), 1, "the only copy must survive");
+    assert_eq!(pending[0].entry.delivery_id, "e2e-refuse-1");
+    assert_eq!(
+        pending[0].entry.attempts, 1,
+        "the failed attempt must be recorded durably, not only logged"
+    );
+}
+
+#[tokio::test]
+async fn the_real_listener_rejects_a_method_that_is_not_webhook_deliver() {
+    // Console only ever sends `webhook.deliver`, so this drives the listener
+    // directly. A listener that served anything it was handed would take
+    // responsibility for payloads no sender in this workspace produces.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox = trusty_common::webhook_relay::Inbox::open(tmp.path().join("inbox"))
+        .expect("open receiver inbox");
+    let socket = spawn_real_listener(tmp.path(), std::sync::Arc::new(inbox.clone())).await;
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "webhook.execute",
+        "id": "bad-method-1",
+        "params": {
+            "delivery_id": "bad-method-1",
+            "source": "review",
+            "event": "pull_request",
+            "headers": {},
+            "body_b64": "e30=",
+            "provenance": {
+                "algorithm": "hmac-sha256",
+                "key_id": "GITHUB_WEBHOOK_SECRET",
+                "verified": true
+            },
+            "received_at_unix_ms": 1_700_000_000_000u64,
+            "attempts": 0
+        }
+    });
+    let response: trusty_common::webhook_relay::RelayResponse =
+        trusty_common::uds::send_framed_request(&socket, &request, Duration::from_secs(5))
+            .await
+            .expect("the listener must answer rather than hang up");
+
+    assert!(!response.is_ack(), "an unknown method must not be acked");
+    let err = response.error.expect("a refusal carries an error");
+    assert_eq!(err.code, -32601, "unknown method is method-not-found");
+    assert!(
+        err.message.contains("webhook.execute") && err.message.contains(RELAY_METHOD),
+        "the refusal must name both what arrived and what is served, got {:?}",
+        err.message
+    );
+    assert!(
+        inbox.list().expect("list").is_empty(),
+        "a refused method must leave nothing durably owned"
+    );
+}
+
+// ─── Supervised on-demand spawn (#5182) ─────────────────────────────────────
+
+#[test]
+fn spawn_maps_each_source_to_its_binary() {
+    assert_eq!(spawn::target_binary_name("review"), "trusty-review");
+    assert_eq!(spawn::target_binary_name("analyze"), "trusty-analyze");
+}
+
+#[tokio::test]
+async fn spawn_adopts_a_socket_that_is_already_served() {
+    // The path that keeps a supervised target cheap: something is already
+    // serving, so `ensure_running` neither locates a binary nor launches one.
+    // It also never resolves the binary, which is what keeps this test from
+    // starting a real trusty-review on the developer's machine.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox = trusty_common::webhook_relay::Inbox::open(tmp.path().join("inbox"))
+        .expect("open receiver inbox");
+    let socket = spawn_real_listener(tmp.path(), std::sync::Arc::new(inbox)).await;
+    let supervisor = spawn::TargetSupervisor::new();
+
+    let resolved = supervisor
+        .ensure_running("review", &socket)
+        .await
+        .expect("an already-served socket must be adopted");
+
+    assert_eq!(resolved, socket);
+    assert_eq!(
+        supervisor.spawned_count(),
+        0,
+        "adoption must not launch a child"
+    );
+}
+
+#[tokio::test]
+async fn relay_with_a_supervisor_still_acks_against_a_live_target() {
+    // The supervisor sits in front of the dial, so an attached one must not
+    // change the outcome when the target is already up.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox = trusty_common::webhook_relay::Inbox::open(tmp.path().join("inbox"))
+        .expect("open receiver inbox");
+    let socket = spawn_real_listener(tmp.path(), std::sync::Arc::new(inbox.clone())).await;
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+
+    let ingress = WebhookIngress::new(
+        spool.clone(),
+        SECRET.to_string(),
+        SECRET_ENV.to_string(),
+        vec![Target {
+            source: "review".to_string(),
+            relay: UdsRelay::new(socket)
+                .with_timeout(Duration::from_secs(2))
+                .with_supervisor(
+                    "review",
+                    std::sync::Arc::new(spawn::TargetSupervisor::new()),
+                ),
+        }],
+    )
+    .with_backoff(no_backoff());
+
+    let outcome = ingress
+        .ingest("review", &signed_headers(BODY, "supervised-1"), BODY)
+        .await;
+
+    let IngestOutcome::Accepted { relay, .. } = outcome else {
+        panic!("expected Accepted, got {outcome:?}");
+    };
+    assert_eq!(relay, RelayOutcome::Acked);
+    assert_eq!(inbox.list().expect("list").len(), 1);
+    assert!(listing_of(&spool).pending.is_empty());
+}
+
+// ─── The undrained-inbox signal (#5182 review, HIGH) ────────────────────────
+//
+// Acking deletes console's spool entry, so `pending` drops to zero and the
+// status would go green while the delivery sits unprocessed in the target's
+// inbox. These pin that it does not. Nothing drains the inbox yet — that is
+// https://github.com/bobmatnyc/trusty-tools/issues/5192 — so the interim
+// requirement is that an operator can tell "nothing to do" from "work arrived
+// and nothing is consuming it".
+
+#[tokio::test]
+async fn health_is_degraded_while_a_delivery_sits_undrained() {
+    // 🔴 Against this PR without the metering, the final assertion reads `Ok`:
+    // the delivery was acknowledged, console deleted its only copy, and the
+    // health signal reported a clean spool with the work still undone.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox_root = tmp.path().join("inbox");
+    let inbox = trusty_common::webhook_relay::Inbox::open(&inbox_root).expect("open inbox");
+    let socket = spawn_real_listener(tmp.path(), std::sync::Arc::new(inbox.clone())).await;
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let ingress = ingress_for(spool.clone(), socket)
+        .with_inbox_roots(vec![("review".to_string(), inbox_root.clone())]);
+
+    assert_eq!(
+        ingress.health().await.status,
+        ServiceHealth::Ok,
+        "an empty spool and an empty inbox is genuinely nothing to do"
+    );
+
+    let outcome = ingress
+        .ingest("review", &signed_headers(BODY, "undrained-1"), BODY)
+        .await;
+    let IngestOutcome::Accepted { relay, .. } = outcome else {
+        panic!("expected Accepted, got {outcome:?}");
+    };
+    assert_eq!(relay, RelayOutcome::Acked);
+    assert!(
+        listing_of(&spool).pending.is_empty(),
+        "the ack is what makes this test meaningful — console's copy is gone"
+    );
+
+    let health = ingress.health().await;
+    assert_eq!(
+        health.status,
+        ServiceHealth::Degraded,
+        "a delivery nothing has processed must not read as healthy"
+    );
+    assert_eq!(health.pending, 0, "the spool really is empty");
+    assert_eq!(health.undrained_total, 1);
+    assert_eq!(health.undrained.len(), 1);
+    assert_eq!(health.undrained[0].source, "review");
+    assert_eq!(health.undrained[0].held, 1);
+    assert_eq!(health.undrained[0].error, None);
+
+    // And it clears once the work is taken — the drain step #5192 will do this.
+    let held = inbox.list().expect("list");
+    std::fs::remove_file(&held[0].0).expect("drain the delivery");
+    assert_eq!(ingress.health().await.status, ServiceHealth::Ok);
+}
+
+#[tokio::test]
+async fn health_is_error_when_a_targets_inbox_cannot_be_counted() {
+    // "I could not count" is not "there is nothing". Reporting the second when
+    // the first is true is the fail-quiet shape this signal exists to remove.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let not_a_dir = tmp.path().join("inbox-is-a-file");
+    std::fs::write(&not_a_dir, b"not a directory").expect("write");
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let ingress = ingress_for(spool, tmp.path().join("sockets").join("absent.sock"))
+        .with_inbox_roots(vec![("review".to_string(), not_a_dir)]);
+
+    let health = ingress.health().await;
+    assert_eq!(health.status, ServiceHealth::Error);
+    assert!(
+        health.undrained[0].error.is_some(),
+        "an uncountable inbox must carry its reason, got {:?}",
+        health.undrained[0]
+    );
+}
+
+#[tokio::test]
+#[ignore = "mutates TRUSTY_DATA_DIR_OVERRIDE; run with --include-ignored"]
+async fn from_env_meters_every_targets_inbox() {
+    // `WebhookIngress::new` deliberately meters nothing, so that unit tests do
+    // not read the developer's real inbox. That makes `from_env` the only place
+    // the wiring can be forgotten, which is what this pins.
+    let _guard = ENV_LOCK.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let prior_data_dir = swap_env(
+        trusty_common::DATA_DIR_OVERRIDE_ENV,
+        Some(&tmp.path().to_string_lossy()),
+    );
+    let prior_secret = swap_env(SECRET_ENV, Some(SECRET));
+
+    let outcome = async {
+        let ingress = WebhookIngress::from_env().expect("build ingress from env");
+        let health = ingress.health().await;
+        let metered: Vec<&str> = health.undrained.iter().map(|u| u.source.as_str()).collect();
+        assert_eq!(
+            metered,
+            vec!["review", "analyze"],
+            "both targets must be metered, or an undrained backlog is invisible"
+        );
+        assert!(health.undrained.iter().all(|u| u.error.is_none()));
+        assert_eq!(health.undrained_total, 0);
+    }
+    .await;
+
+    swap_env(
+        trusty_common::DATA_DIR_OVERRIDE_ENV,
+        prior_data_dir.as_deref(),
+    );
+    swap_env(SECRET_ENV, prior_secret.as_deref());
+    outcome
 }
