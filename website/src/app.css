@@ -153,6 +153,27 @@
 		@apply bg-foundry-bg font-sans text-foundry-text antialiased;
 	}
 
+	/* Why: every wide-content case below is capped to its own scroll
+	   container (`.doc-table`, `.doc-prose pre`, `.doc-prose :not(pre) >
+	   code`), but a changelog section this size (225 inline `<code>` spans on
+	   trusty-review alone) can still land the PAGE a sub-pixel past its
+	   viewport on some routes — not any one element's doing (none of them
+	   measures past the viewport edge in DevTools; it takes removing whole
+	   sections of content to clear it, which is the signature of accumulated
+	   layout rounding across that many boxes, not a visible overflow).
+	   `overflow-x: hidden` on `#main` (`+layout.svelte`) is the backstop for
+	   exactly that residue (whats-new mobile overflow) — never a substitute
+	   for containing wide content locally, which is what actually keeps this
+	   page's content legible instead of clipped. Scoped to `main` rather than
+	   `html`/`body`: those sit in `<SiteHeader>`'s sticky-positioning ancestor
+	   chain, and giving either a non-`visible` overflow demotes `position:
+	   sticky` on the header to plain in-flow positioning (its containing
+	   block becomes that non-scrolling box instead of the viewport). `main`
+	   is `SiteHeader`'s sibling, not its ancestor, so it carries no such risk. */
+	main {
+		overflow-x: hidden;
+	}
+
 	/* Foundry: "machines talk mono" — ids, paths, counts, versions. */
 	code,
 	pre,
@@ -282,9 +303,21 @@
 
 	/* Inline code sets NO colour, deliberately: inside a link it must stay
 	   link-coloured (5.47:1 on this ground), and in body copy it inherits
-	   text-primary (16.18:1). Setting a colour here would break the first. */
+	   text-primary (16.18:1). Setting a colour here would break the first.
+	   Why: an identifier like `pipeline::citation_check::downgrade_uncitable_findings`
+	   has no space or hyphen for the browser to wrap at, so on a narrow
+	   viewport it pushed the PAGE itself into horizontal scroll (whats-new
+	   mobile overflow). `display: inline-block` + `max-width: 100%` lets a
+	   code span that DOES contain spaces still wrap normally onto several
+	   lines inside its own box — no scrollbar, no overflow, same as before.
+	   A span with no break opportunity at all (the identifiers above) instead
+	   overflows that now-constrained box, so `overflow-x: auto` scrolls the
+	   SPAN, never the page — one more wide-content-scrolls-in-its-own-container
+	   contract, alongside `.doc-table` and `.doc-prose pre` below. Breaking the
+	   token mid-character to avoid that scrollbar would be worse: it stops
+	   reading as one identifier. */
 	.doc-prose :not(pre) > code {
-		@apply rounded-sm border border-foundry-border bg-foundry-card px-1 py-px text-[0.9em];
+		@apply inline-block max-w-full overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card px-1 py-px align-bottom text-[0.9em];
 	}
 
 	.doc-prose pre {
