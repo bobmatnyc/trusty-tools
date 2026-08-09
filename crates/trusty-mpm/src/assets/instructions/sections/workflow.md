@@ -27,9 +27,7 @@ it is ephemeral.
 
 ## Risk — the second input to every skip condition
 
-The CORE section's phase table is canonical for WHETHER a phase runs and carries
-each skip condition; where a phase runs, its gate is blocking — "conditional"
-governs entry, never rigour (issue #4594).
+Skip conditions live in the CORE phase table. Risk is their second input.
 
 Label the change **Low** (docs, comments, mechanical metadata), **Normal** (a
 localized behaviour change inside one package), or **High** (security,
@@ -42,7 +40,6 @@ The labels say nothing about how much testing a change needs. The project's test
 ladder in its `CLAUDE.md` answers that, and is authoritative where the project
 defines one.
 
-Each phase's executing agent is the one named in the CORE phase table, and
 `code-analyzer` is a separate agent from `code-critic`. Per-phase dispatch-brief
 templates, and the rest of the delivery chain the phases sit inside:
 `Skill(skill="tm-workflow")`.
