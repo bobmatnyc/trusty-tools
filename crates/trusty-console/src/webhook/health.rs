@@ -46,7 +46,9 @@ pub const DEFAULT_RED_AFTER: Duration = Duration::from_secs(600);
 
 /// Bumped when [`SpoolHealth`]'s shape changes, per the `console_metrics`
 /// contract.
-pub const METRICS_SCHEMA_VERSION: u32 = 2;
+///
+/// 3 since #5192 added [`UndrainedTarget::quarantined`].
+pub const METRICS_SCHEMA_VERSION: u32 = 3;
 
 /// Service id this report is published under.
 pub const WEBHOOK_SERVICE_ID: &str = "trusty-console-webhooks";
@@ -105,24 +107,37 @@ pub struct SpoolHealth {
     /// 🔴 #5182 review: without this the signal INVERTS. An acknowledged
     /// delivery is deleted from the spool, so `pending` drops to zero and the
     /// status goes green — while the work sits in the target's inbox with
-    /// nothing consuming it (the drain step is
-    /// [#5192](https://github.com/bobmatnyc/trusty-tools/issues/5192)). Before
-    /// the listeners existed an undrained backlog was at least VISIBLE as a
-    /// pending spool entry; metering the inbox is what keeps it visible now.
+    /// nothing consuming it. #5192 gave the targets a drain, which shortens how
+    /// long a delivery legitimately sits here but does not make the meter
+    /// optional: a drain whose pipeline is failing holds its entries for
+    /// exactly as long as the failure lasts, and this is what says so.
     pub undrained: Vec<UndrainedTarget>,
     /// Total across [`SpoolHealth::undrained`]. Non-zero is never `Ok`.
     pub undrained_total: usize,
+    /// Total quarantined across [`SpoolHealth::undrained`]. Non-zero is `Error`.
+    pub quarantined_total: usize,
 }
 
 /// How much acknowledged-but-unprocessed work one target is holding.
 ///
-/// Test: `health_is_degraded_while_a_delivery_sits_undrained`.
+/// Test: `health_is_degraded_while_a_delivery_sits_undrained`,
+/// `health_is_error_while_a_target_holds_a_quarantined_delivery`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UndrainedTarget {
     /// Route segment the target serves (`review` / `analyze`).
     pub source: String,
-    /// Deliveries held in its inbox.
+    /// Deliveries held in its inbox and still drainable.
     pub held: usize,
+    /// Deliveries the target's drain gave up on (#5192).
+    ///
+    /// 🔴 Kept apart from `held` because they mean opposite things about time.
+    /// A held delivery is work in progress and will clear itself; a quarantined
+    /// one will not clear without a human, so it can never be allowed to read
+    /// as merely busy — and it drops OUT of `held` when it is quarantined, so
+    /// without this field a poisoned delivery would take the whole signal back
+    /// to green on its way out.
+    #[serde(default)]
+    pub quarantined: usize,
     /// Why the count could not be taken, if it could not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -140,9 +155,11 @@ pub struct UndrainedTarget {
 /// 3. any entry is exhausted → `Error` (nothing clears those without an
 ///    operator);
 /// 4. the oldest **live** entry is at least `red_after` old → `Error`;
-/// 5. anything is live-pending → `Degraded`;
-/// 6. any target holds an acknowledged-but-undrained delivery → `Degraded`;
-/// 7. otherwise → `Ok`.
+/// 5. any target has quarantined a delivery its drain gave up on → `Error`,
+///    for the same reason as rule 3 (#5192);
+/// 6. anything is live-pending → `Degraded`;
+/// 7. any target holds an acknowledged-but-undrained delivery → `Degraded`;
+/// 8. otherwise → `Ok`.
 ///
 /// Rule 6 is the one that stops the signal inverting — see
 /// [`SpoolHealth::undrained`]. `inbox_roots` maps each configured source to the
@@ -174,6 +191,7 @@ pub fn scan_health(
     let red_after_secs = red_after.as_secs();
     let undrained = scan_undrained(inbox_roots);
     let undrained_total = undrained.iter().map(|u| u.held).sum::<usize>();
+    let quarantined_total = undrained.iter().map(|u| u.quarantined).sum::<usize>();
     let age_of = |at: u64| now_unix_ms.saturating_sub(at).div_euclid(1000);
 
     let census = match spool.scan_metadata() {
@@ -188,6 +206,7 @@ pub fn scan_health(
                 scan_error: Some(format!("{e}")),
                 undrained,
                 undrained_total,
+                quarantined_total,
                 ..SpoolHealth::empty(red_after_secs)
             };
         }
@@ -223,6 +242,7 @@ pub fn scan_health(
     let status = if !undecodable.is_empty()
         || !census.exhausted.is_empty()
         || aged_out
+        || quarantined_total > 0
         || undrained.iter().any(|u| u.error.is_some())
     {
         ServiceHealth::Error
@@ -254,6 +274,7 @@ pub fn scan_health(
         scan_error: None,
         undrained,
         undrained_total,
+        quarantined_total,
     }
 }
 
@@ -264,24 +285,27 @@ pub fn scan_health(
 /// "I could not count" and "there is nothing" are the two answers this whole
 /// module exists to keep apart.
 /// Test: `health_is_degraded_while_a_delivery_sits_undrained`,
-/// `health_is_error_when_a_targets_inbox_cannot_be_counted`.
+/// `health_is_error_when_a_targets_inbox_cannot_be_counted`,
+/// `health_is_error_while_a_target_holds_a_quarantined_delivery`.
 fn scan_undrained(inbox_roots: &[(String, PathBuf)]) -> Vec<UndrainedTarget> {
     inbox_roots
         .iter()
-        .map(
-            |(source, root)| match trusty_common::webhook_relay::held_count(root) {
-                Ok(held) => UndrainedTarget {
-                    source: source.clone(),
-                    held,
-                    error: None,
-                },
-                Err(e) => UndrainedTarget {
-                    source: source.clone(),
-                    held: 0,
-                    error: Some(format!("{e}")),
-                },
-            },
-        )
+        .map(|(source, root)| {
+            let held = trusty_common::webhook_relay::held_count(root);
+            let quarantined = trusty_common::webhook_relay::quarantined_count(root);
+            let error = held.as_ref().err().map(|e| format!("{e}")).or_else(|| {
+                quarantined
+                    .as_ref()
+                    .err()
+                    .map(|e| format!("quarantine: {e}"))
+            });
+            UndrainedTarget {
+                source: source.clone(),
+                held: held.unwrap_or(0),
+                quarantined: quarantined.unwrap_or(0),
+                error,
+            }
+        })
         .collect()
 }
 
@@ -317,6 +341,7 @@ impl SpoolHealth {
             scan_error: None,
             undrained: Vec::new(),
             undrained_total: 0,
+            quarantined_total: 0,
         }
     }
 }

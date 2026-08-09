@@ -72,4 +72,5 @@ pub mod mcp;
 // #5182: the console->target webhook UDS listener. No feature gate — it pulls
 // in no HTTP stack, and the whole point is that the socket exists without the
 // service running resident (ADR-0034 §1, milestone criterion (c)).
+pub mod webhook_drain;
 pub mod webhook_listener;

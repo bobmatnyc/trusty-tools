@@ -30,8 +30,11 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod claim;
+pub mod drain;
 pub mod inbox;
 pub mod listener;
+pub mod retry;
 pub mod serve;
 
 /// The receive half's tests (#5182), kept out of this file so the wire contract
@@ -40,8 +43,25 @@ pub mod serve;
 #[path = "tests.rs"]
 mod receive_tests;
 
+/// The drain half's tests (#5192), in their own file for the same reason.
+#[cfg(test)]
+#[path = "drain_tests.rs"]
+mod drain_tests;
+
+pub use claim::{Claim, ClaimError, ClaimOutcome, entry_is_still_linked};
+pub use drain::{
+    DeliveryProcessor, Disposition, DrainFailure, DrainPolicy, DrainReport, FailureOutcome,
+    ProcessFailure, drain_once,
+};
 pub use inbox::{Inbox, InboxError, Ownership, held_count};
-pub use listener::{ListenerError, WebhookListener, run_until_signal};
+pub use listener::{
+    DEFAULT_DRAIN_INTERVAL, ListenerError, WebhookListener, run_until_signal,
+    run_until_signal_with_processor,
+};
+pub use retry::{
+    AttemptRecord, DEFAULT_MAX_ATTEMPTS, PROCESSED_DIR_NAME, PROCESSED_RETENTION,
+    QUARANTINE_DIR_NAME, is_processed, mark_processed, quarantine_dir, quarantined_count,
+};
 pub use serve::{
     DeliverySink, LISTENER_SHUTDOWN_FLUSH, ServeOptions, Served, SinkRejection, dispatch_frame,
     serve_until,

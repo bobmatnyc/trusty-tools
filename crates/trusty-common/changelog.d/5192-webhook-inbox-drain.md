@@ -1,0 +1,5 @@
+Added
+- `webhook_relay::drain_once` reads a receiver's inbox back out and drives a `DeliveryProcessor`, removing an entry only after the pipeline accepted it. Exclusive per-entry claims use an `flock` the kernel releases on process death, so a drainer killed mid-processing leaves the delivery claimable rather than stranded.
+- A delivery is recorded in a `<inbox>/processed/` ledger before its entry is removed, and the ledger is consulted before any processor runs — so a drainer that dies between accepting a delivery and unlinking it cannot cause the work to be repeated. The `delivery_id` deduplication the relay contract requires now lives in the drain rather than in each receiver. Markers are pruned after 30 days.
+- Processing failures are counted in a durable sidecar, bounded, and quarantined under `<inbox>/quarantine/` rather than deleted; `quarantined_count` exposes that to `trusty-console`.
+- `WebhookListener::with_processor` and `run_until_signal_with_processor` run the drain at startup, on every accepted delivery, and on a 30-second backstop (#5192).

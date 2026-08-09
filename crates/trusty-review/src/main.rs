@@ -245,7 +245,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         #[cfg(feature = "report")]
         Commands::Report(args) => cli_report::cmd_report(config, args).await,
         Commands::Calibrate(args) => cmd_calibrate(config, args).await,
-        Commands::WebhookListen => trusty_review::webhook_listener::run().await,
+        Commands::WebhookListen => trusty_review::webhook_listener::run(config).await,
         Commands::Config(cmd) => cmd.run().await,
         // Port is handled synchronously in `main` before this function is
         // called; this arm is unreachable at runtime but required for

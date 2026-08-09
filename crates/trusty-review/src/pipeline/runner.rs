@@ -132,6 +132,7 @@ pub struct ReviewInput {
 /// so tests can inject fakes without a running daemon.
 /// What: all fields are `Arc<dyn Trait>` for cheap cloning in `compare` mode.
 /// Test: `run_review_with_fake_provider_approves`.
+#[derive(Clone)]
 pub struct ReviewDeps {
     /// LLM provider for the reviewer role.
     pub llm: Arc<dyn LlmProvider>,

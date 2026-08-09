@@ -14,8 +14,12 @@
 //! 🔴 The delivery is fsync'd to [`inbox_root`] BEFORE the ack is written, and
 //! the ack is the only thing that lets console delete its own copy. This process
 //! is short-lived and console-supervised: it binds on demand, takes durable
-//! ownership, and exits on SIGTERM. Draining the inbox into the analysis pipeline
-//! is a separate step; what matters here is that nothing is lost while it waits.
+//! ownership, and exits on SIGTERM.
+//!
+//! #5192 added the drain: the same process reads the inbox back out through
+//! [`crate::webhook_drain::AnalyzeProcessor`] and runs the analysis. The ack is
+//! deliberately NOT waiting on that — it still rests on durability alone, so a
+//! slow or failing pipeline can never turn into a refused delivery.
 //!
 //! The legacy HTTP route (`POST /webhooks/github`, `service::handlers::review`) is
 //! untouched and still live. Retiring it is
@@ -26,9 +30,14 @@
 
 use std::path::PathBuf;
 
+use std::sync::Arc;
+
 use trusty_common::webhook_relay::{
-    analyze_socket_path, inbox_root_for, WebhookListener, ANALYZE_SOURCE,
+    analyze_socket_path, inbox_root_for, DeliveryProcessor, WebhookListener, ANALYZE_SOURCE,
 };
+
+use crate::core::TrustySearchClient;
+use crate::webhook_drain::AnalyzeProcessor;
 
 /// The socket console dials for this service.
 ///
@@ -86,7 +95,7 @@ pub fn listener() -> anyhow::Result<WebhookListener> {
 /// Test: the serving behaviour is covered in `trusty-common`
 /// (`listener_serves_a_delivery_and_cleans_up_its_socket`); this wrapper carries
 /// only the two path resolutions, which have their own tests.
-pub async fn run() -> anyhow::Result<()> {
+pub async fn run(search: TrustySearchClient) -> anyhow::Result<()> {
     let socket = socket_path();
     let inbox = inbox_root()?;
     tracing::info!(
@@ -94,7 +103,8 @@ pub async fn run() -> anyhow::Result<()> {
         inbox = %inbox.display(),
         "starting the trusty-analyze webhook listener"
     );
-    trusty_common::webhook_relay::run_until_signal(socket, inbox).await?;
+    let processor: Arc<dyn DeliveryProcessor> = Arc::new(AnalyzeProcessor::new(search));
+    trusty_common::webhook_relay::run_until_signal_with_processor(socket, inbox, processor).await?;
     Ok(())
 }
 

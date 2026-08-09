@@ -24,7 +24,6 @@ use axum::{
 };
 use serde::Deserialize;
 
-use crate::core::TrustySearchClient;
 use crate::service::events::{AnalyzerAppState, ApiError};
 
 #[derive(Deserialize)]
@@ -163,99 +162,34 @@ pub async fn github_webhook_handler(
         });
     }
 
-    // 2. Only handle pull_request events.
+    // 2-4. Event filter, action filter and PR coordinates all come from the
+    // shared classifier so this route and the UDS drain cannot disagree about
+    // what a webhook means (#5192).
     let event = headers
         .get("X-GitHub-Event")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if event != "pull_request" {
+    let target = match crate::webhook_drain::classify_pr_event(event, &body) {
+        crate::webhook_drain::PrEventVerdict::Actionable(target) => target,
         // Acknowledge so GitHub stops retrying, but do no work.
-        return Ok(StatusCode::ACCEPTED);
-    }
-
-    // 3. Parse the payload and filter to actionable actions.
-    let payload: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|e| ApiError::bad_request(format!("webhook body is not valid JSON: {e}")))?;
-    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
-    if !matches!(action, "opened" | "synchronize" | "reopened") {
-        return Ok(StatusCode::ACCEPTED);
-    }
-
-    // 4. Extract PR coordinates.
-    let pr = payload
-        .get("pull_request")
-        .and_then(|p| p.get("number"))
-        .and_then(|n| n.as_u64());
-    let owner = payload
-        .get("repository")
-        .and_then(|r| r.get("owner"))
-        .and_then(|o| o.get("login"))
-        .and_then(|l| l.as_str())
-        .map(str::to_owned);
-    let repo = payload
-        .get("repository")
-        .and_then(|r| r.get("name"))
-        .and_then(|n| n.as_str())
-        .map(str::to_owned);
-    let head_sha = payload
-        .get("pull_request")
-        .and_then(|p| p.get("head"))
-        .and_then(|h| h.get("sha"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let (Some(pr), Some(owner), Some(repo)) = (pr, owner, repo) else {
-        return Err(ApiError::bad_request(
-            "webhook payload missing pull_request.number or repository owner/name",
-        ));
+        crate::webhook_drain::PrEventVerdict::Ignored(_) => return Ok(StatusCode::ACCEPTED),
+        crate::webhook_drain::PrEventVerdict::Malformed(reason) => {
+            return Err(ApiError::bad_request(reason));
+        }
     };
 
     // 5. Spawn the analysis off the request path so GitHub gets a fast 202.
     let search = state.search.clone();
     tokio::spawn(async move {
-        if let Err(e) = process_pr_webhook(search, &owner, &repo, pr, &head_sha).await {
-            tracing::warn!("github webhook PR {owner}/{repo}#{pr} processing failed: {e:#}");
+        if let Err(e) = crate::webhook_drain::run_pr_analysis(&search, &target).await {
+            tracing::warn!(
+                "github webhook PR {}/{}#{} processing failed: {e:#}",
+                target.owner,
+                target.repo,
+                target.pr
+            );
         }
     });
 
     Ok(StatusCode::ACCEPTED)
-}
-
-/// Background worker for an accepted PR webhook: fetch the diff, run the
-/// review, and post a comment.
-///
-/// Why: keeps the webhook handler's response path fast — all the slow I/O
-/// (GitHub API, trusty-search) happens here in a spawned task.
-/// What: requires `GITHUB_TOKEN`; uses `repo` itself as the trusty-search
-/// index ID (the conventional 1:1 mapping). The `head_sha` is logged as a
-/// cache/correlation key.
-/// Test: covered indirectly — the webhook handler tests exercise the guard
-/// rails; this function is only reached with a valid token + reachable search.
-async fn process_pr_webhook(
-    search: TrustySearchClient,
-    owner: &str,
-    repo: &str,
-    pr: u64,
-    head_sha: &str,
-) -> Result<()> {
-    let token = std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
-        .map_err(|_| anyhow::anyhow!("GITHUB_TOKEN not set; cannot process webhook PR"))?;
-    tracing::info!("processing webhook PR {owner}/{repo}#{pr} (head {head_sha})");
-    // Why: this background task fetches a potentially large diff and posts a
-    // comment — without timeouts it hangs indefinitely on a slow GitHub API,
-    // leaking the spawned task for the lifetime of the process.
-    // What: 30 s per-request + 5 s connect timeout, matching the pattern in
-    // `review_github_pr_handler` and `TrustySearchClient`.
-    let client = reqwest::ClientBuilder::new()
-        .timeout(std::time::Duration::from_secs(30))
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .build()
-        .expect("reqwest ClientBuilder is infallible with valid config");
-    let diff = crate::core::fetch_pr_diff(&client, owner, repo, pr, &token).await?;
-    let report = crate::core::analyze_diff_with_client(&diff, &search, repo).await?;
-    let markdown = crate::core::format_review_as_markdown(&report);
-    crate::core::post_pr_comment(&client, owner, repo, pr, &markdown, &token).await?;
-    tracing::info!("posted webhook review comment to {owner}/{repo}#{pr}");
-    Ok(())
 }

@@ -651,7 +651,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Setup { target } => run_setup(target).await,
-        Cmd::WebhookListen => trusty_analyze::webhook_listener::run().await,
+        Cmd::WebhookListen => trusty_analyze::webhook_listener::run(search).await,
         Cmd::ReviewPr {
             repo,
             pr,

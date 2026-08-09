@@ -191,19 +191,28 @@ pub async fn handle_github_webhook(
         return (StatusCode::OK, "ignored").into_response();
     }
 
-    let pr_number = event.pull_request.number;
-    let owner = event.repository.owner.login.clone();
-    let repo = event.repository.name.clone();
-    let head_sha = event
-        .pull_request
-        .head
-        .as_ref()
-        .map(|h| h.sha.clone())
-        .unwrap_or_default();
+    // #5192: the coordinates and the trigger input come from the shared
+    // classifier so this route and the UDS drain cannot disagree about what a
+    // `review_requested` delivery means.
+    let target = match crate::webhook_drain::classify_review_event(event_type, &body) {
+        crate::webhook_drain::ReviewEventVerdict::Actionable(target) => target,
+        crate::webhook_drain::ReviewEventVerdict::Ignored(reason) => {
+            debug!(%reason, "pull_request event ignored");
+            return (StatusCode::OK, "ignored").into_response();
+        }
+        crate::webhook_drain::ReviewEventVerdict::Malformed(reason) => {
+            warn!(%reason, "pull_request webhook payload could not be used");
+            return (StatusCode::BAD_REQUEST, "invalid JSON payload").into_response();
+        }
+    };
+    let pr_number = target.pr;
+    let owner = target.owner.clone();
+    let repo = target.repo.clone();
+    let head_sha = target.head_sha.clone();
 
     // ── Step 5: trigger classification (REV-703) ──────────────────────────
     // The requested reviewer decides force-live vs force-dry-run.
-    let requested_login = event.requested_reviewer.as_ref().map(|r| r.login.as_str());
+    let requested_login = target.requested_reviewer.as_deref();
     let trigger = classify_review_request(&state.config, requested_login);
 
     info!(
