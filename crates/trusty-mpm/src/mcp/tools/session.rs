@@ -279,7 +279,10 @@ pub(super) fn session_tools() -> Vec<Value> {
              withheld; re-call with `full: true` to see them. `sessions` and \
              `resolved_snapshot` answer different questions (\"what paused \
              since last catch-up\" vs \"what should I resume from\") and \
-             legitimately disagree under a recent watermark.",
+             legitimately disagree under a recent watermark. \
+             `resolved_snapshot` is null unless you pass `session_id`, and it \
+             only ever names a snapshot belonging to THAT id — several sessions \
+             share one store, so there is no \"latest overall\" fallback.",
             json!({
                 "type": "object",
                 "properties": {
@@ -289,7 +292,7 @@ pub(super) fn session_tools() -> Vec<Value> {
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Optional session id used only to resolve `resolved_snapshot` (the snapshot this specific session would resume from)."
+                        "description": "Session id that `resolved_snapshot` is resolved FOR. Omit it and `resolved_snapshot` is null: an unidentified caller owns nothing in a shared store. Naming another session's id is the explicit opt-in that reads that session's state (#5272)."
                     },
                     "all_projects": {
                         "type": "boolean",
@@ -307,11 +310,13 @@ pub(super) fn session_tools() -> Vec<Value> {
         tool(
             "session_context_pause",
             "Write a session-pause snapshot for `project_dir`: a \
-             `session-YYYYMMDD-HHMMSS.md` file in the SAME section format the \
+             `<session-id>/session-YYYYMMDD-HHMMSS.md` file in the SAME section \
+             format the \
              catch-up reader already parses (`## Summary` / `## Completed` / \
              `## In Progress` / `## Next Steps` / `## Git Context` / \
              `## Tmux Window`), plus an appended `pause` line in the \
-             append-only `sessions-log.jsonl`. Also prunes orphaned managed-session \
+             append-only `sessions-log.jsonl` naming it. Only that session can \
+             resume from it (#5272). Also prunes orphaned managed-session \
              git worktrees in-process (same engine as `tm session prune-worktrees`) \
              unless `prune_worktrees` is set to `false`. That prune NEVER removes a \
              worktree holding uncommitted or unpushed work (#4091) — any such \

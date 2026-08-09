@@ -69,14 +69,20 @@ fn catchup_payload(
 /// calls [`generate_catchup_json`] per project — which NEVER persists a
 /// watermark, so `watermark_advanced` in the result is unconditionally
 /// `false`. `resolved_snapshot` is resolved against the primary `project_dir`
-/// only (not every scanned project), using `session_id` when given; it answers
+/// only (not every scanned project) and strictly FOR `session_id`; it answers
 /// "what should I resume from", while `sessions` answers "what paused since
 /// your last catch-up", so the two legitimately disagree under a recent
 /// watermark. `undatable_sessions_dropped` sums each project's withheld count
 /// so an empty `sessions` array can be told apart from sessions that exist but
 /// could not be dated (#5072).
+///
+/// #5272: with no `session_id` — or with one that owns no snapshot —
+/// `resolved_snapshot` is `null`. It is never another session's file, which is
+/// what the shared-store PM model turned the old "newest pause overall"
+/// fallback into.
 /// Test: `session_context_catchup_missing_project_dir_errors`,
-/// `session_context_catchup_returns_expected_shape`.
+/// `session_context_catchup_returns_expected_shape`,
+/// `session_context_catchup_never_resolves_another_sessions_snapshot`.
 pub async fn session_context_catchup(
     project_dir: &str,
     session_id: Option<&str>,
@@ -311,6 +317,58 @@ mod tests {
         );
         assert_eq!(body["resolved_snapshot"], "/tmp/snap.md");
         assert_eq!(body["watermark_advanced"], false);
+    }
+
+    /// Why: #5272, end to end through the MCP tool the report came from.
+    /// Session `7bd5c27a…` called `session_context_catchup` and the response's
+    /// `resolved_snapshot` was `session-20260809-010155.md`, which
+    /// `sessions-log.jsonl` attributes to `2eb72dca…`. The resolver-level tests
+    /// in `trusty-common` pin the behavior; this pins that the tool actually
+    /// returns it, since `resolved_snapshot` is assembled here.
+    /// What: pause as session A, then catch up as session B — B's
+    /// `resolved_snapshot` is null while A's names A's own file.
+    /// Test: itself.
+    #[tokio::test]
+    async fn session_context_catchup_never_resolves_another_sessions_snapshot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        let state = DaemonState::shared();
+        let session_a = "2eb72dca-de08-481b-8dfa-22ab7f81b1f9";
+        let session_b = "7bd5c27a-475b-41df-9e9f-a6f630801717";
+
+        let paused = session_context_pause(
+            &state,
+            dir,
+            session_a,
+            "Session A's work.",
+            vec![],
+            vec![],
+            vec![],
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let a_snapshot = paused["snapshot_path"].as_str().unwrap().to_string();
+
+        let for_b = session_context_catchup(dir, Some(session_b), false, true)
+            .await
+            .unwrap();
+        assert!(
+            for_b["resolved_snapshot"].is_null(),
+            "B must not be handed A's snapshot: {}",
+            for_b["resolved_snapshot"]
+        );
+
+        let for_a = session_context_catchup(dir, Some(session_a), false, true)
+            .await
+            .unwrap();
+        assert_eq!(for_a["resolved_snapshot"], a_snapshot);
+
+        let anonymous = session_context_catchup(dir, None, false, true)
+            .await
+            .unwrap();
+        assert!(anonymous["resolved_snapshot"].is_null());
     }
 
     #[tokio::test]

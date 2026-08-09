@@ -48,24 +48,31 @@ so pausing in project A and opening project B never loads project A's state:
 
 ```
 <project-root>/.trusty-mpm/sessions/
-├── sessions-log.jsonl          # append-only per-session pause/resume log
-└── session-YYYYMMDD-HHMMSS.md  # human-readable snapshot
+├── sessions-log.jsonl              # append-only per-session pause/resume log
+├── <session-id>/
+│   └── session-YYYYMMDD-HHMMSS.md  # human-readable snapshot
+└── session-YYYYMMDD-HHMMSS.md      # pre-#5272 snapshot, still resolvable
 ```
 
 `sessions-log.jsonl` holds one JSON object per line — one per pause/resume
-event:
+event. `snapshot` is the path relative to `sessions/`:
 
 ```json
-{"session_id":"<id>","event":"pause","snapshot":"session-20260715-101500.md","timestamp":"2026-07-15T10:15:00Z"}
+{"session_id":"<id>","event":"pause","snapshot":"<id>/session-20260715-101500.md","timestamp":"2026-07-15T10:15:00Z"}
 ```
 
 Because it is **append-only**, two `tm` sessions pausing in the same project
-each keep their own history: resume resolves the latest snapshot for the
-*current* session id, and "latest overall" is simply the last `pause` line. The
-legacy global `LATEST-SESSION.txt` pointer is **no longer written** (a single
-overwritten pointer let concurrent sessions clobber each other's resume target);
-resume still reads it, and an mtime scan of `session-*.md`, as back-compat
-fallbacks when no log is present.
+each keep their own history, and the log is what says which snapshot is whose.
+The legacy global `LATEST-SESSION.txt` pointer is **no longer written** — a
+single overwritten pointer let concurrent sessions clobber each other's resume
+target.
+
+🔴 **Resume resolves only your own session's snapshots (#5272).** The
+latest-overall, `LATEST-SESSION.txt`, and mtime fallbacks are gone: with the PM
+on the project's main checkout, several sessions share this store, and each of
+those steps turns "no snapshot for me" into "someone else's snapshot". A flat
+pre-#5272 file at the store root still resolves through its log line; one with
+no log line resolves for nobody.
 
 Add `.trusty-mpm/sessions/` to `.gitignore` — this is machine-local state, not
 a deliverable. No git commit is created by pausing.
@@ -149,7 +156,7 @@ mcp__trusty-mpm__session_context_pause(
 
 The tool returns
 `{ snapshot_path, timestamp, pruned_worktrees, skipped_dirty_worktrees }`. It writes
-`.trusty-mpm/sessions/session-YYYYMMDD-HHMMSS.md` in the same section format
+`.trusty-mpm/sessions/<session-id>/session-YYYYMMDD-HHMMSS.md` in the same section format
 `/tm-session-resume` already parses (`## Summary` / `## Completed` /
 `## In Progress` / `## Next Steps` / `## Git Context` / `## Tmux Window`,
 each omitted when empty), appends the matching `pause` line to the
