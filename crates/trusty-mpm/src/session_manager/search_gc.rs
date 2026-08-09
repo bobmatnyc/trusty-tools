@@ -455,6 +455,50 @@ mod tests {
         assert_eq!(disposable_workspace_index_id(Some(path), false), None);
     }
 
+    /// A PM session launched ON the project's main checkout must never have
+    /// that checkout's trusty-search index reclaimed (ADR-0036).
+    ///
+    /// Why: ADR-0036 made the main checkout the DEFAULT workspace for a PM
+    /// session rather than a rarely-taken opt-out, so the population reaching
+    /// this predicate with a real, long-lived directory went from a handful of
+    /// projects to all of them. The index rooted at a main checkout is the
+    /// PROJECT's index — the one every search in that repo resolves to — not a
+    /// disposable per-session index, and decommissioning a session must not
+    /// reclaim it. The existing guard covers this by construction
+    /// (`spawn_managed_on_main` records `workspace_owned = false` and a path
+    /// that is not a `.worktrees/` leaf), but nothing asserted it for a real
+    /// git checkout: `disposable_index_id_none_for_unowned_non_worktree` uses a
+    /// bare non-existent path, so it would pass even if the predicate returned
+    /// early on "no `.git` here" rather than on the ownership rule.
+    /// What: builds a real checkout — a `.git` DIRECTORY at its root, which is
+    /// what `resolve_project_root` looks for and what would otherwise yield a
+    /// derivable index id — and asserts the predicate still returns `None`.
+    /// Deleting either half of the `workspace_owned || is_session_worktree`
+    /// guard turns this red.
+    /// Test: itself.
+    #[test]
+    fn disposable_index_id_none_for_a_main_checkout_pm_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main_checkout = tmp.path().join("bobmatnyc").join("trusty-tools");
+        std::fs::create_dir_all(main_checkout.join(".git")).unwrap();
+
+        // Precondition: this path IS resolvable to an index id — so a `None`
+        // below is the ownership guard firing, not a failure to resolve.
+        assert_eq!(
+            disposable_workspace_index_id(Some(&main_checkout), true).as_deref(),
+            Some("trusty-tools"),
+            "fixture precondition: the path must be index-id-resolvable, or the \
+             assertion below would pass for the wrong reason"
+        );
+
+        assert_eq!(
+            disposable_workspace_index_id(Some(&main_checkout), false),
+            None,
+            "a PM session on the project's main checkout must never have the \
+             project's own search index reclaimed (ADR-0036)"
+        );
+    }
+
     #[test]
     fn disposable_index_id_derives_from_worktree_path() {
         // In-project worktree (workspace_owned = false, but IS a `.worktrees/`

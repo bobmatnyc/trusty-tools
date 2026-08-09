@@ -11,12 +11,20 @@
 //! (`write_task_md`/`prepare_inproject_session`/`front_gate_or_escalate`/
 //! `resolve_gh_env`) stay owned by `lifecycle` and are called back into.
 //! What: [`has_concurrent_main_checkout_session`] (pure collision detector)
-//! and [`spawn_managed_on_main`] (the no-worktree spawn flow). The registry
-//! lookup that DECIDES whether isolation is on used to live here too, as a
-//! `pub(super)` `worktree_enabled_for_origin`; #4300 moved it to
-//! [`crate::project::worktree_policy`] because the `tm` CLI provisions
-//! worktrees in its OWN process and could not reach a `daemon::`-scoped
-//! function — the daemon now calls the shared one.
+//! and [`spawn_managed_on_main`] (the no-worktree spawn flow).
+//!
+//! #5274 made this the DEFAULT placement for a session rather than a
+//! per-project opt-out, and with that the registry lookup that used to gate it
+//! left this module for good. It was `worktree_enabled_for_origin` here, then
+//! `worktree_isolated` (a thin `DaemonState` → [`crate::project::worktree_policy`]
+//! adapter) after #4300 hoisted the policy out of `daemon::` so the `tm` CLI
+//! could reach it. `spawn_managed_routed` now branches on
+//! `SpawnParams::worktree` — an explicit launch-time request — because the
+//! project's `worktree` flag answers a DIFFERENT question: whether the agents a
+//! session dispatches get isolated. That flag and its resolver family
+//! ([`crate::project::worktree_enabled_for_project`] and friends) are untouched
+//! and still authoritative for agent isolation; they simply have no say in where
+//! the session itself runs.
 //! Test: `spawn_managed_on_main_creates_record_without_worktree` and
 //! `spawn_managed_on_main_warns_on_concurrent_main_checkout_session` in
 //! `lifecycle_tests.rs` (this module's tests live with `lifecycle`'s, since
@@ -33,31 +41,6 @@ use super::lifecycle::{
 use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
 use crate::session_manager::{ManagedSessionId, ManagedSessionState, SessionRecord};
-
-/// Does this project's next managed session get its own git worktree? (#5207)
-///
-/// Why: the decision needs a live [`ProjectRegistry`] from [`DaemonState`], and
-/// [`crate::project::worktree_policy`] must not depend on `daemon::` to get one
-/// — that coupling is exactly what #4300 unpicked. This is the daemon-side
-/// adapter: it supplies the registry, the shared policy decides. Keeping it
-/// here rather than inline in `lifecycle::spawn_managed_routed` also honours
-/// this module's reason for existing (see the module doc — `lifecycle.rs` is
-/// frozen at its allowlisted SLOC budget).
-/// What: delegates to [`crate::project::worktree_enabled_for_project`], which
-/// resolves the project's committed `.trusty-mpm.toml` ABOVE the machine-global
-/// registry, and the built-in `true` below both. Only the in-project spawn
-/// branch can call this — the clone-based branch has no project directory yet
-/// and uses [`crate::project::worktree_enabled_for_origin`] instead.
-/// Test: `worktree_project_config_overrides_registry` and the rest of the
-/// project-layer cases in `project::worktree_policy_tests`.
-pub(super) async fn worktree_isolated(
-    state: &Arc<DaemonState>,
-    local_path: &std::path::Path,
-    origin_url: &str,
-) -> bool {
-    let registry = state.project_registry().await;
-    crate::project::worktree_enabled_for_project(local_path, &registry, origin_url).await
-}
 
 /// Return the FIRST already-`Active` session whose cwd is EXACTLY
 /// `local_path`, if any (#3455 collision detector).

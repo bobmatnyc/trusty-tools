@@ -599,6 +599,17 @@ pub(crate) enum Command {
         /// to the default.
         #[arg(long)]
         style: Option<String>,
+        /// Run this session in its own git worktree instead of the project's
+        /// main checkout (#5274).
+        ///
+        /// By default a session launches in the project's own checkout: the PM
+        /// works where you work, and only the agents it dispatches are isolated
+        /// (governed separately by the project's `worktree` setting). Pass
+        /// `--worktree` when you want THIS session provisioned into a protected
+        /// managed clone plus a per-session worktree, leaving the live checkout
+        /// untouched.
+        #[arg(long)]
+        worktree: bool,
     },
     /// Start or attach to a session without running the deployment sequence.
     ///

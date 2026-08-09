@@ -196,6 +196,10 @@ impl SessionLauncher for DaemonLauncher {
             deliverable_id: None,
             // A confirmed "launch" is an explicit new-session intent.
             force_new: true,
+            // #5274: a confirmed manager launch says NEW session, not ISOLATED
+            // session — the two are separate requests. It runs in the project's
+            // main checkout like every other unrequested placement.
+            worktree: false,
         };
         let record = spawn_managed(&self.state, ManagedSessionId::new(), params).await?;
         Ok(LaunchOutcome {
