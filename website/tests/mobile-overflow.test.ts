@@ -28,22 +28,36 @@ import { chromium, type Browser } from 'playwright';
  * cannot pass by luck.
  *
  * TWO assertions per route/width, not one, and the second exists because the
- * first is not enough: `app.css` gives `main` an `overflow-x: hidden`
- * backstop (see its comment — a residue from ~225 inline `<code>` spans'
- * layout rounding, not any one element). That backstop CLIPS overflow at
- * `main`'s own boundary, so `document.documentElement.scrollWidth` reads
- * clean even when something overflows `main` and renders cut off and
- * unreadable — confirmed empirically: a long unbroken run of plain prose
- * (no `<code>` wrapper, so none of `.doc-prose :not(pre) > code`'s own
- * containment applies) injected into a changelog item left
- * `document.documentElement.scrollWidth` at exactly `clientWidth` while
- * `main.scrollWidth` read 1697 against a 375 `clientWidth`, and the text
- * was visibly sliced off mid-run in a screenshot. The document-level
- * assertion alone is decorative against that failure mode — it would stay
- * green while a future changelog entry rendered clipped. `main.scrollWidth
- * <= main.clientWidth` measures INSIDE the clipping boundary, so it still
- * catches that case; the document-level assertion stays because it is what
- * would catch overflow OUTSIDE `main` (the sticky header, the footer).
+ * first is not enough: `app.css` gives `main` an `overflow: clip` backstop
+ * (see its comment — a residue from ~225 inline `<code>` spans' layout
+ * rounding, not any one element; `clip` rather than `hidden` specifically so
+ * `main` never becomes a `position: sticky` scroll-container boundary — see
+ * that comment for the docs-sidebar breakage `hidden` caused and the desktop
+ * test below that catches it). The backstop clips overflow at `main`'s own
+ * boundary, so `document.documentElement.scrollWidth` reads clean even when
+ * something overflows `main` and renders cut off and unreadable — confirmed
+ * empirically: a long unbroken run of plain prose (no `<code>` wrapper, so
+ * none of `.doc-prose :not(pre) > code`'s own containment applies) injected
+ * into a changelog item left `document.documentElement.scrollWidth` at
+ * exactly `clientWidth` while `main.scrollWidth` read 1697 against a 375
+ * `clientWidth`, and the text was visibly sliced off mid-run in a
+ * screenshot. The document-level assertion alone is decorative against that
+ * failure mode — it would stay green while a future changelog entry
+ * rendered clipped. `main.scrollWidth <= main.clientWidth` measures INSIDE
+ * the clipping boundary, so it still catches that case; the document-level
+ * assertion stays because it is what would catch overflow OUTSIDE `main`
+ * (the sticky header, the footer).
+ *
+ * Known limitation, left as a limitation rather than solved speculatively
+ * (code-critic MEDIUM on #5254): these two assertions cover overflow
+ * escaping `document` and overflow escaping `main`. A THIRD element clipping
+ * overflow somewhere between `main` and the content — none exists in this
+ * codebase today — could in principle contain something that overflows IT
+ * while both current checks stay green, the same way `main` alone
+ * previously hid content from the document-level check. No such ancestor
+ * exists to test against, so no synthetic one is added here; a future
+ * intermediate clipping container would need its own scrollWidth-vs-
+ * clientWidth measurement, following this same pattern.
  *
  * `MAIN_TOLERANCE_PX` exists because turning that measurement on surfaced a
  * second, pre-existing thing at 320px: `/whats-new` sits 1px over even on
@@ -227,6 +241,46 @@ describe('no page scrolls horizontally on mobile', () => {
 				return code?.textContent ?? null;
 			});
 			expect(text).toContain('pipeline::citation_check::downgrade_uncitable_findings');
+		} finally {
+			await page.close();
+		}
+	});
+
+	// The regression the mobile-only matrix above cannot see: the `/docs`
+	// sidebar (`routes/docs/+layout.svelte`) is `hidden` below `lg`, so a
+	// 320/375px viewport never renders it — the desktop-only breakage
+	// `overflow-x: hidden` caused on `main` (code-critic HIGH on #5254) is
+	// invisible to every case above by construction. `overflow: clip` on
+	// `main` does not create a scroll container the way `hidden` did, so
+	// `position: sticky` inside `main` keeps computing against the viewport
+	// instead of `main` itself. Proved this both ways, the same way the
+	// `main`-vs-`document` measurement above was proved: reverting `app.css`
+	// to `overflow-x: hidden` and re-running this test fails —
+	// `sidebarTop after scroll: -667` — before failing it back to `clip`.
+	it('keeps the /docs sidebar sticky at desktop width', async () => {
+		const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+		try {
+			await page.goto(baseUrl + '/docs/getting-started/install', { waitUntil: 'networkidle' });
+			const before = await page.evaluate(() => {
+				const nav = document.querySelector('nav[aria-label="Documentation"].sticky');
+				return nav?.getBoundingClientRect().top ?? null;
+			});
+			expect(
+				before,
+				'sidebar nav not found before scroll — is it still `lg:block`?'
+			).not.toBeNull();
+
+			await page.evaluate(() => window.scrollTo(0, 800));
+			await page.waitForTimeout(100);
+			const after = await page.evaluate(
+				() =>
+					document.querySelector('nav[aria-label="Documentation"].sticky')?.getBoundingClientRect()
+						.top
+			);
+			expect(
+				after,
+				`sidebar top drifted from ${before} to ${after} after scrolling — main became a scroll container`
+			).toBe(before);
 		} finally {
 			await page.close();
 		}
