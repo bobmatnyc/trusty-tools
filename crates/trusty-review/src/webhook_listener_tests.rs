@@ -26,10 +26,26 @@ fn socket_path_matches_the_shared_contract() {
 }
 
 #[test]
+fn inbox_root_matches_the_shared_contract() {
+    // The console meters THIS directory to decide whether a backlog is stuck.
+    // Asserting only the literal shape (below) leaves a hand-rolled path free to
+    // drift from the shared one: the receiver writes to its own spelling, the
+    // console counts the shared spelling, finds it empty, and reports healthy
+    // while deliveries pile up. This is the assertion that fails on that drift.
+    assert_eq!(
+        inbox_root().expect("resolve inbox root"),
+        trusty_common::webhook_relay::inbox_root_for(trusty_common::webhook_relay::REVIEW_SOURCE)
+            .expect("review is a configured source")
+            .expect("resolve the shared inbox root"),
+        "the receiver's inbox and the path console meters must be one path"
+    );
+}
+
+#[test]
 fn inbox_root_lives_under_the_review_data_dir() {
     let root = inbox_root().expect("resolve inbox root");
     assert!(
-        root.ends_with("webhook-inbox"),
+        root.ends_with(trusty_common::webhook_relay::INBOX_DIR_NAME),
         "unexpected inbox root: {root:?}"
     );
     assert!(

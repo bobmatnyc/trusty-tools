@@ -26,10 +26,9 @@
 
 use std::path::PathBuf;
 
-use trusty_common::webhook_relay::{analyze_socket_path, WebhookListener};
-
-/// Directory name the inbox occupies under the crate's data directory.
-const INBOX_DIR_NAME: &str = "webhook-inbox";
+use trusty_common::webhook_relay::{
+    analyze_socket_path, inbox_root_for, WebhookListener, ANALYZE_SOURCE,
+};
 
 /// The socket console dials for this service.
 ///
@@ -41,15 +40,23 @@ pub fn socket_path() -> PathBuf {
     analyze_socket_path()
 }
 
-/// Where durably-owned deliveries are held until they are reviewed.
+/// Where durably-owned deliveries are held until they are analyzed.
+///
+/// Why: resolved from the shared contract for the same reason [`socket_path`]
+/// is, and with a worse failure mode. `trusty-console` meters this directory to
+/// decide whether an undrained backlog is stuck (#5192); a second spelling here
+/// would leave the console counting a directory nobody writes to and reporting
+/// healthy while deliveries pile up in the real one.
 ///
 /// # Errors
 ///
 /// When the platform data directory cannot be resolved or created.
 ///
-/// Test: `inbox_root_lives_under_the_review_data_dir`.
+/// Test: `inbox_root_matches_the_shared_contract`,
+/// `inbox_root_lives_under_the_review_data_dir`.
 pub fn inbox_root() -> anyhow::Result<PathBuf> {
-    Ok(trusty_common::resolve_data_dir("trusty-analyze")?.join(INBOX_DIR_NAME))
+    inbox_root_for(ANALYZE_SOURCE)
+        .ok_or_else(|| anyhow::anyhow!("`{ANALYZE_SOURCE}` is not a configured relay source"))?
 }
 
 /// Build the listener without binding, so a caller can inspect it first.
