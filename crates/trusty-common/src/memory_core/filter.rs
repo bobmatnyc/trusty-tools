@@ -882,9 +882,18 @@ const SYMBOL_SEGMENT_SHORT_LEN: usize = 8;
 /// is 3–4) while a chunked encoder group does not: same shapes rescued,
 /// chunked misses back to 366/732/1273.
 ///
-/// Note this is a floor, not an exemption — every segment now answers the same
+/// Note this is a floor, not an exemption — every segment answers the same
 /// question, at a length-dependent threshold. Nothing waives the word check.
-/// What: inclusive minimum longest-CamelCase-word length for a short segment.
+///
+/// It doubles as the boundary below which a segment is too short to hold a word
+/// at all (review round 2): `io`, `rc`, `rt` and `os` are ordinary Rust module
+/// names whose longest word is 2, so the floor flagged every symbol path through
+/// one. Those are decided on case uniformity instead — see
+/// [`is_symbol_path_segment`]. Measured cost of that arm: 37 additional misses
+/// per 20k at chunk width 11, the only width whose 24-character chunking leaves a
+/// 2-character remainder, and zero at every other width from 2 to 12.
+/// What: inclusive minimum longest-CamelCase-word length for a short segment,
+/// and the exclusive length below which case uniformity decides instead.
 /// Test: `symbol_path_keyhole_does_not_shelter_credentials`,
 /// `rust_symbol_paths_are_not_flagged`.
 const SYMBOL_SEGMENT_SHORT_WORD_LEN: usize = 3;
@@ -986,6 +995,15 @@ fn is_symbol_path_segment(seg: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || IDENTIFIER_DELIMITERS.contains(&c))
     {
         return false;
+    }
+    // #5043 review round 2: a segment too short to hold a word is decided on
+    // case uniformity instead. Two-letter module names — `io`, `rc`, `rt`, `os`
+    // — cannot reach the word floor, and the round-1 fix flagged every path
+    // through one. Requiring single-case ALPHABETIC is what keeps a two-character
+    // encoder group out: `aB` mixes case, `9x` is not all alphabetic.
+    if seg.len() < SYMBOL_SEGMENT_SHORT_WORD_LEN {
+        return seg.chars().all(|c| c.is_ascii_lowercase())
+            || seg.chars().all(|c| c.is_ascii_uppercase());
     }
     let mut saw_word = false;
     let mut longest_overall = 0usize;

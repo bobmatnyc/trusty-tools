@@ -2141,6 +2141,14 @@ const RECURRENCE_FALSE_POSITIVES: &[(&str, &str)] = &[
     ("#5043", "trusty_common::memory_core::Sha1Hash::as_ref"),
     ("#5043", "Base64Decoder::decodeInto2Buffers"),
     ("#5043", "Http2Client::sendRequestV3"),
+    // #5043 review round 2: two-letter module names cannot reach the word floor
+    // the round-1 HIGH fix introduced, so every path through one was flagged.
+    // `is_symbol_path_segment` decides a sub-word-length segment on case
+    // uniformity instead.
+    ("#5043", "std::io::BufReader::read_u32"),
+    ("#5043", "tokio::io::AsyncReadExt::read_u64"),
+    ("#5043", "trusty_common::io::Sha256Hasher::finalizeInto"),
+    ("#5043", "hyper::rt::Executor::execute2"),
 ];
 
 /// Every credential shape the detector must still catch, in one table.
@@ -2330,11 +2338,20 @@ fn rust_symbol_paths_are_not_flagged() {
 /// And a blob CHUNKED into `::`-joined groups, 20k tokens of 24 characters:
 ///
 /// ```text
-///                     origin/main   first cut   this branch
-///   chunk width 4         355          4629         366
-///   chunk width 6         355          3282         732
-///   chunk width 8         355          2521        1273
+///                     origin/main   first cut   round-1 fix   now
+///   chunk width 4         355          4629          366       366
+///   chunk width 6         355          3282          732       732
+///   chunk width 8         355          2521         1273      1273
+///   chunk width 11        355           ————          355       392
 /// ```
+///
+/// Width 8 is the worst case, confirmed by sweeping widths 2-12. Width 11 is the
+/// one place review round 2's sub-word-length arm costs anything: 24 characters
+/// chunk to 11/11/2, and a 2-character segment is exactly what that arm decides
+/// on case uniformity rather than word length. Widths 10 and 12 leave no 2-char
+/// remainder and are unchanged, which is what identifies the arm as the cause.
+/// 37 misses per 20k buys back `io`, `rt` and every other two-letter module
+/// name; the round-1 fix flagged every symbol path through one.
 ///
 /// Why the second table exists (review round 1, HIGH): the first cut of this PR
 /// EXEMPTED a segment of at most `SYMBOL_SEGMENT_SHORT_LEN` bytes from the word
@@ -2381,8 +2398,13 @@ fn symbol_path_keyhole_does_not_shelter_credentials() {
     }
 
     // Review round 1, HIGH: the chunked shape, which no other check generates.
+    // Width 8 is the measured worst case (swept 2-12). Width 11 is here for a
+    // different reason: at 24 characters it chunks to 11/11/2, and that 2-char
+    // remainder is the only place the sub-word-length arm added by review round 2
+    // costs anything — 355 -> 392. Widths 10 and 12 leave no 2-char remainder and
+    // are unchanged, which is what identifies the arm as the cause.
     const CHUNK_N: usize = 20_000;
-    for (chunk, ceiling) in [(4usize, 500usize), (6, 900), (8, 1400)] {
+    for (chunk, ceiling) in [(4usize, 500usize), (6, 900), (8, 1400), (11, 450)] {
         let mut rng = Xorshift(SEED);
         let alphabet = b64_alphabet(true);
         let mut buf = vec![0u8; 18];
@@ -2414,5 +2436,18 @@ fn symbol_path_keyhole_does_not_shelter_credentials() {
         find_secret_token("Ab12cdEf::Gh34ijKl::Mn56opQr").is_some(),
         "#5043 review round 1: a blob chunked into 8-char `::` groups must be \
          flagged; the short-segment exemption let this through"
+    );
+
+    // Review round 2, the accepted residue of the sub-word-length arm. A
+    // two-character segment must be single-case ALPHABETIC, so `Rc` —
+    // Capitalized — does not qualify and `std::rc::Rc::downgrade2` stays
+    // flagged. Admitting Capitalized here would admit `Ab`/`Cd`, which is the
+    // chunk-width-2 encoder shape the row above measures. Pinned so the trade is
+    // visible rather than rediscovered.
+    assert!(
+        find_secret_token("std::rc::Rc::downgrade2").is_some(),
+        "#5043: this is a KNOWN ACCEPTED BOUND, not a target. If it now stores \
+         clean, the two-character arm was widened to Capitalized — re-measure \
+         the chunk-width-2 row before accepting that."
     );
 }
