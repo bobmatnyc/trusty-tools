@@ -482,7 +482,10 @@ pub(crate) async fn write_drawer(state: &AppState, params: WriteDrawerParams<'_>
     // a full queue is dropped + logged rather than allowed to grow
     // unbounded behind a slow daemon (#231). Daemon errors observed
     // by the worker are logged but never block the MCP response.
-    bm25_index_enqueue(state, palace_id, drawer_id, &content_for_kg);
+    // #5036: index under the RESOLVED palace id. `open_palace` follows
+    // aliases, so writing under the requested slug files the drawer into a
+    // palace the reader never searches.
+    bm25_index_enqueue(state, handle.id.as_str(), drawer_id, &content_for_kg);
     // Issue #96: emit a DrawerAdded so the activity feed shows
     // MCP-origin writes with `source = Mcp`.
     let palace_name = lookup_palace_name(state, palace_id);
