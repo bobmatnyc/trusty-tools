@@ -17,11 +17,24 @@
 //! neither; the re-run's `EEXIST` is treated as success, which makes the whole
 //! move idempotent.
 //!
-//! 🔴 Nothing here deletes a delivery. `remove_processed` is the only path in
-//! the drain that unlinks one, and it runs only after a processor said it
-//! accepted the work.
+//! 🔴 **Two functions here unlink an entry, and the difference between them is
+//! the whole safety argument.** [`remove_processed`] destroys the delivery, and
+//! runs only after a processor said it accepted the work. [`quarantine`]
+//! unlinks the original only after `hard_link` has put the same inode under
+//! `<inbox>/quarantine/`, so the bytes survive the call — it MOVES a delivery
+//! and never destroys one. Nothing else in this module or in [`super::drain`]
+//! may unlink an entry, and a third caller has to justify itself against that
+//! distinction rather than against a count.
 //!
-//! Test: `tests.rs` — `attempt_*` and `quarantine_*`.
+//! [`mark_processed`] is what makes re-processing safe (#5192 critic round 1).
+//! The drain's crash-safety design deliberately leaves an entry claimable when a
+//! drainer dies mid-pass, so a delivery whose pipeline SUCCEEDED and whose entry
+//! was not yet unlinked is picked up again — and a receiver with a side effect
+//! (`trusty-analyze` posts a PR comment) would perform it twice, unbounded on
+//! repeated crashes. The ledger closes that window for every receiver at once,
+//! rather than each crate re-earning it.
+//!
+//! Test: `tests.rs` — `attempt_*`, `quarantine_*` and `processed_*`.
 
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -40,6 +53,28 @@ pub const QUARANTINE_DIR_NAME: &str = "quarantine";
 
 /// Extension of the per-entry attempt sidecar.
 pub const ATTEMPT_EXTENSION: &str = "attempt";
+
+/// Subdirectory holding the ledger of deliveries already processed.
+///
+/// A directory rather than a sidecar beside the entry, because the marker has
+/// to OUTLIVE the entry: the window it closes is "the work happened and the
+/// entry is still there", and the redelivery it also stops arrives after the
+/// entry is gone.
+pub const PROCESSED_DIR_NAME: &str = "processed";
+
+/// Extension of one ledger marker.
+pub const PROCESSED_EXTENSION: &str = "done";
+
+/// How long a ledger marker is kept before it is pruned.
+///
+/// Why bounded: the ledger would otherwise grow without limit for the life of
+/// the installation. Why 30 days: it has to exceed the longest window in which
+/// the same `delivery_id` can legitimately arrive again — GitHub's manual
+/// redelivery is available for 30 days, and console's own spool is retried far
+/// sooner than that. A marker pruned early costs at most one duplicate for a
+/// delivery nobody has touched in a month.
+pub const PROCESSED_RETENTION: std::time::Duration =
+    std::time::Duration::from_secs(30 * 24 * 60 * 60);
 
 /// How many times one entry may fail before it is quarantined.
 ///
@@ -125,9 +160,10 @@ pub fn record_failure(
 
 /// Delete an entry the pipeline accepted, and its sidecar.
 ///
-/// 🔴 The only unlink of a live delivery in the whole drain. Called after a
-/// processor returned success and never before it — see
-/// [`super::drain::drain_once`].
+/// 🔴 The only call in the drain that DESTROYS a delivery — [`quarantine`]
+/// also unlinks, but only after the same inode is linked elsewhere. Reached
+/// only after a processor returned success and after [`mark_processed`] has
+/// recorded it; see [`super::drain::drain_once`].
 ///
 /// # Errors
 ///
@@ -145,7 +181,112 @@ pub fn remove_processed(entry: &Path) -> Result<(), InboxError> {
     Ok(())
 }
 
+/// Where the processed-delivery ledger for `inbox_root` lives.
+pub fn processed_dir(inbox_root: &Path) -> PathBuf {
+    inbox_root.join(PROCESSED_DIR_NAME)
+}
+
+/// Ledger marker for `entry`.
+///
+/// The entry's filename is a pure function of its `delivery_id` (see
+/// [`super::Inbox::entry_path`]), so the marker is keyed by delivery id too —
+/// which is exactly what the relay contract says receivers must deduplicate on.
+pub fn processed_marker_path(inbox_root: &Path, entry: &Path) -> PathBuf {
+    let stem = entry.file_stem().unwrap_or_default();
+    processed_dir(inbox_root).join(format!("{}.{PROCESSED_EXTENSION}", stem.to_string_lossy()))
+}
+
+/// Has this delivery already been through the pipeline?
+///
+/// Why: the drain consults this BEFORE calling a processor, which is what
+/// makes re-processing after a crash safe for a receiver with a side effect.
+/// What: the marker's presence, nothing more — an unreadable marker directory
+/// reads as "not processed", which risks a duplicate rather than a permanent
+/// skip. That is the safe direction: the at-least-once contract already
+/// obliges receivers to tolerate a repeat, and a false "already done" would
+/// silently drop a review nobody ran.
+/// Test: `drain_does_not_reprocess_a_delivery_marked_done`.
+pub fn is_processed(inbox_root: &Path, entry: &Path) -> bool {
+    processed_marker_path(inbox_root, entry).exists()
+}
+
+/// Record that `delivery_id`'s work is done, durably, before the entry goes.
+///
+/// 🔴 Ordering: this must complete before [`remove_processed`]. Reversed, a
+/// crash between the unlink and the marker leaves no evidence the work happened
+/// — which is the state this ledger exists to make impossible.
+///
+/// # Errors
+///
+/// [`InboxError`] when the ledger directory or the marker cannot be written.
+/// The caller must NOT remove the entry in that case: an unrecorded success is
+/// a duplicate waiting to happen, and keeping the entry turns it into a
+/// visible, retried one instead.
+///
+/// Test: `drain_marks_a_processed_delivery_before_removing_it`.
+pub fn mark_processed(
+    inbox_root: &Path,
+    entry: &Path,
+    delivery_id: &str,
+    now_unix_ms: u64,
+) -> Result<PathBuf, InboxError> {
+    let dir = processed_dir(inbox_root);
+    std::fs::create_dir_all(&dir).map_err(|source| InboxError::PrepareDir {
+        path: dir.clone(),
+        source,
+    })?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(INBOX_DIR_MODE)).map_err(
+        |source| InboxError::PrepareDir {
+            path: dir.clone(),
+            source,
+        },
+    )?;
+
+    let marker = processed_marker_path(inbox_root, entry);
+    let record = serde_json::json!({
+        "delivery_id": delivery_id,
+        "processed_at_unix_ms": now_unix_ms,
+    });
+    let bytes = serde_json::to_vec(&record).map_err(|source| InboxError::Encode {
+        delivery_id: delivery_id.to_string(),
+        source,
+    })?;
+    write_replace(&marker, &bytes)?;
+    sync_dir(&dir)?;
+    Ok(marker)
+}
+
+/// Drop ledger markers older than [`PROCESSED_RETENTION`].
+///
+/// Best-effort and infallible by design: this is hygiene, and a pruning failure
+/// must never stop a drain pass. Called once per pass.
+///
+/// Test: `processed_markers_older_than_the_retention_window_are_pruned`.
+pub fn prune_processed(inbox_root: &Path, retention: std::time::Duration) {
+    let Ok(read) = std::fs::read_dir(processed_dir(inbox_root)) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now() - retention;
+    for path in read
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == PROCESSED_EXTENSION))
+    {
+        let stale = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .is_ok_and(|m| m < cutoff);
+        if stale {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// Move an entry out of the drain's way without destroying it.
+///
+/// 🔴 This unlinks the original, and that is safe only because of the ORDER:
+/// the `hard_link` below puts the same inode under `<inbox>/quarantine/` first,
+/// so the delivery exists in two places before it exists in one. See the module
+/// docs on why that distinction, not a count of unlink calls, is the invariant.
 ///
 /// What, in order: create `<inbox>/quarantine/` at [`INBOX_DIR_MODE`]; copy the
 /// sidecar across so the failure history travels with the delivery;

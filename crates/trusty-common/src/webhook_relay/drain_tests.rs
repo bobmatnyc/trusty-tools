@@ -233,26 +233,45 @@ fn claim_of_a_vanished_entry_reports_vanished() {
 }
 
 #[test]
-fn claim_refuses_an_entry_unlinked_while_the_lock_was_contended() {
-    // The `nlink` check. Without it, the loser of a contended lock processes an
-    // inode the winner already removed — a delivery reviewed and commented on
-    // twice, from one webhook.
+fn claim_of_a_removed_entry_reports_vanished() {
+    // Covers the `File::open` -> NotFound bail-out, which is the ordinary way a
+    // drained entry is observed. The TOCTOU branch is a different condition and
+    // is proven by the two `entry_is_still_linked_*` cases below — this test
+    // used to claim that coverage and never reached it.
     let (_tmp, inbox) = inbox_with(&["d-1"]);
     let path = entry_of(&inbox, "d-1");
-
-    // Stand in for "the winner has an fd open and has already unlinked":
-    // holding an open fd across the unlink is exactly that state.
-    let held = std::fs::File::open(&path).expect("open");
     std::fs::remove_file(&path).expect("unlink");
 
-    // Re-create the *name* pointing at nothing is not possible; instead assert
-    // the claim of the still-open inode's path reports Vanished, which is the
-    // observable the drain acts on.
     assert!(matches!(
         Claim::try_acquire(&path).expect("claim"),
         ClaimOutcome::Vanished
     ));
-    drop(held);
+}
+
+#[test]
+fn entry_is_still_linked_is_false_for_an_unlinked_fd() {
+    // 🔴 The predicate behind the `nlink() == 0` arm, which is what stops the
+    // loser of a contended lock processing an inode the winner already removed.
+    // Driven directly because the race it guards cannot be scheduled from
+    // outside `try_acquire` — the unlink has to land inside its own
+    // open-to-stat window.
+    let (_tmp, inbox) = inbox_with(&["d-1"]);
+    let path = entry_of(&inbox, "d-1");
+
+    let held = std::fs::File::open(&path).expect("open");
+    std::fs::remove_file(&path).expect("unlink while the fd is open");
+
+    assert!(
+        !super::claim::entry_is_still_linked(&held).expect("stat"),
+        "an fd whose file has been unlinked must report no remaining link"
+    );
+}
+
+#[test]
+fn entry_is_still_linked_is_true_for_a_live_entry() {
+    let (_tmp, inbox) = inbox_with(&["d-1"]);
+    let held = std::fs::File::open(entry_of(&inbox, "d-1")).expect("open");
+    assert!(super::claim::entry_is_still_linked(&held).expect("stat"));
 }
 
 #[test]
@@ -397,6 +416,127 @@ async fn drain_of_an_empty_inbox_does_nothing_and_says_so() {
 
     assert_eq!(report, DrainReport::default());
     assert_eq!(processor.calls(), 0);
+}
+
+// ─── Drain: the processed ledger (critic round 1) ────────────────────────────
+
+#[tokio::test]
+async fn drain_marks_a_processed_delivery_before_removing_it() {
+    let (_tmp, inbox) = inbox_with(&["d-1"]);
+    let path = entry_of(&inbox, "d-1");
+    let processor = ScriptedProcessor::always(Verdict::Accept);
+
+    let report = drain_once(&inbox, processor.as_ref(), DrainPolicy::default()).await;
+
+    assert_eq!(report.processed, 1);
+    assert!(!path.exists());
+    assert!(
+        retry::is_processed(inbox.root(), &path),
+        "the ledger must outlive the entry it records"
+    );
+}
+
+#[tokio::test]
+async fn drain_does_not_reprocess_a_delivery_marked_done() {
+    // 🔴 The exact window the drain's own crash-safety design creates, and the
+    // double-post the critic found: the pipeline returned Ok, the ledger was
+    // written, and the process died BEFORE the unlink. The entry is claimable
+    // by design. Without the `is_processed` gate the next pass runs the
+    // pipeline again — `trusty-analyze` posts a second identical PR comment,
+    // unbounded on repeated crashes.
+    //
+    // Simulated exactly: mark the delivery processed, leave the entry in place,
+    // then drain. Against this change with the gate removed, `calls()` is 1 and
+    // `deduplicated` is 0.
+    let (_tmp, inbox) = inbox_with(&["d-1"]);
+    let path = entry_of(&inbox, "d-1");
+    retry::mark_processed(inbox.root(), &path, "d-1", 1_000).expect("mark");
+    let processor = ScriptedProcessor::always(Verdict::Accept);
+
+    let report = drain_once(&inbox, processor.as_ref(), DrainPolicy::default()).await;
+
+    assert_eq!(
+        processor.calls(),
+        0,
+        "an already-processed delivery must never reach the pipeline again"
+    );
+    assert_eq!(report.deduplicated, 1);
+    assert_eq!(report.processed, 0, "and it is not a fresh success either");
+    assert_eq!(report.accounted(), report.scanned);
+    assert!(!path.exists(), "the stale entry is retired");
+    assert!(held_ids(&inbox).is_empty());
+}
+
+#[tokio::test]
+async fn drain_does_not_reprocess_a_console_redelivery_of_a_drained_id() {
+    // The second window the ledger closes: console re-sends a delivery whose
+    // ack it never saw. `take_ownership` re-creates the entry — the inbox has
+    // no memory of it — so only the ledger can tell this is finished work.
+    let (_tmp, inbox) = inbox_with(&["d-1"]);
+    let processor = ScriptedProcessor::always(Verdict::Accept);
+
+    let first = drain_once(&inbox, processor.as_ref(), DrainPolicy::default()).await;
+    assert_eq!(first.processed, 1);
+
+    inbox.take_ownership(&delivery("d-1")).expect("redelivery");
+    let second = drain_once(&inbox, processor.as_ref(), DrainPolicy::default()).await;
+
+    assert_eq!(processor.calls(), 1, "the pipeline ran exactly once");
+    assert_eq!(second.deduplicated, 1);
+    assert!(held_ids(&inbox).is_empty());
+}
+
+#[tokio::test]
+async fn drain_keeps_an_entry_whose_processed_marker_could_not_be_written() {
+    // An unrecorded success is a duplicate waiting to happen. The drain must
+    // keep the entry — visible and retried — rather than remove it unrecorded.
+    let (_tmp, inbox) = inbox_with(&["d-1"]);
+    let path = entry_of(&inbox, "d-1");
+    // A regular file where the ledger directory belongs: `create_dir_all` fails.
+    std::fs::write(retry::processed_dir(inbox.root()), b"not a directory").expect("write");
+    let processor = ScriptedProcessor::always(Verdict::Accept);
+
+    let report = drain_once(&inbox, processor.as_ref(), DrainPolicy::default()).await;
+
+    assert_eq!(processor.calls(), 1);
+    assert_eq!(report.processed, 0, "{report:?}");
+    assert!(
+        path.exists(),
+        "the entry must be kept, not removed unrecorded"
+    );
+    let failure = report.failures.first().expect("reported");
+    assert_eq!(failure.outcome, FailureOutcome::Stuck);
+    assert!(
+        failure.reason.contains("recorded as processed"),
+        "{}",
+        failure.reason
+    );
+}
+
+#[test]
+fn processed_markers_older_than_the_retention_window_are_pruned() {
+    // The ledger is unbounded without this, and a ledger that grows forever is
+    // a slow leak in a directory an operator never looks at.
+    let (_tmp, inbox) = inbox_with(&["d-1"]);
+    let path = entry_of(&inbox, "d-1");
+    let marker = retry::mark_processed(inbox.root(), &path, "d-1", 1_000).expect("mark");
+
+    retry::prune_processed(inbox.root(), std::time::Duration::from_secs(3600));
+    assert!(marker.exists(), "a fresh marker survives");
+
+    // Zero retention makes every marker older than the cutoff.
+    retry::prune_processed(inbox.root(), std::time::Duration::ZERO);
+    assert!(!marker.exists(), "a marker past its retention is dropped");
+}
+
+#[test]
+fn processed_ledger_is_not_counted_as_held_or_quarantined_work() {
+    let (_tmp, inbox) = inbox_with(&[]);
+    let path = inbox.entry_path("d-1");
+    retry::mark_processed(inbox.root(), &path, "d-1", 1_000).expect("mark");
+
+    assert_eq!(super::inbox::held_count(inbox.root()).expect("held"), 0);
+    assert_eq!(quarantined(&inbox), 0);
 }
 
 // ─── Drain: failure ──────────────────────────────────────────────────────────
@@ -624,8 +764,10 @@ async fn drain_report_accounts_for_every_scanned_entry() {
     // One pass with every outcome in it at once. The identity
     // `accounted() == scanned` is what stops a future arm quietly dropping an
     // entry from the totals while still deleting it.
-    let (_tmp, inbox) = inbox_with(&["ok-1", "skip-1", "retry-1", "poison-1"]);
+    let (_tmp, inbox) = inbox_with(&["ok-1", "skip-1", "retry-1", "poison-1", "done-1"]);
     std::fs::write(inbox.root().join("garbage.json"), b"nope").expect("write");
+    retry::mark_processed(inbox.root(), &entry_of(&inbox, "done-1"), "done-1", 1)
+        .expect("mark done-1 as already processed");
     let processor = ScriptedProcessor::with(&[
         ("ok-1", Verdict::Accept),
         ("skip-1", Verdict::Ignore),
@@ -635,7 +777,8 @@ async fn drain_report_accounts_for_every_scanned_entry() {
 
     let report = drain_once(&inbox, processor.as_ref(), DrainPolicy::default()).await;
 
-    assert_eq!(report.scanned, 5);
+    assert_eq!(report.scanned, 6);
+    assert_eq!(report.deduplicated, 1);
     assert_eq!(report.processed, 1);
     assert_eq!(report.ignored, 1);
     assert_eq!(report.retry_pending, 1);
@@ -661,6 +804,11 @@ async fn drain_processed_count_excludes_an_acceptance_whose_entry_could_not_be_r
     let path = entry_of(&inbox, "d-1");
     let processor = ScriptedProcessor::always(Verdict::Accept);
 
+    // The ledger write must SUCCEED and only the unlink fail, or this asserts
+    // the wrong arm — so the ledger directory is created (with its own, still
+    // writable, permissions) before the inbox root is frozen.
+    std::fs::create_dir_all(retry::processed_dir(inbox.root())).expect("mkdir ledger");
+
     // Make the unlink fail without making the entry unreadable: a read-only
     // parent directory refuses the unlink, and the claim still opens the file.
     let mut perms = std::fs::metadata(inbox.root()).expect("meta").permissions();
@@ -684,9 +832,13 @@ async fn drain_processed_count_excludes_an_acceptance_whose_entry_could_not_be_r
     let failure = report.failures.first().expect("reported");
     assert_eq!(failure.outcome, FailureOutcome::Stuck);
     assert!(
-        failure.reason.contains("processed again"),
-        "the report must say what happens next: {}",
+        failure.reason.contains("could not be removed"),
+        "the report must say what happened: {}",
         failure.reason
+    );
+    assert!(
+        retry::is_processed(inbox.root(), &path),
+        "and the ledger must already hold it, so the next pass does not re-run it"
     );
     assert_eq!(report.accounted(), report.scanned);
     assert!(path.exists(), "and the delivery is not lost");

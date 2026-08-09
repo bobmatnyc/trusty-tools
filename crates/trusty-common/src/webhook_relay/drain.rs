@@ -16,9 +16,14 @@
 //!
 //! 🔴 **The four rules this module exists to hold, and where each one lives.**
 //!
-//! 1. *Nothing is removed before the pipeline accepted it.* The only unlink of
-//!    a live delivery is [`super::retry::remove_processed`], reachable from one
-//!    arm of [`drain_once`]'s match — the arm behind `Ok(_)` from the processor.
+//! 1. *Nothing is DESTROYED before the pipeline accepted it.*
+//!    [`super::retry::remove_processed`] is the only call that destroys a
+//!    delivery, and it sits behind one arm of [`drain_once`]'s match — the arm
+//!    reached on `Ok(_)` from the processor.
+//!    [`super::retry::quarantine`] also unlinks, but only after `hard_link` has
+//!    put the same inode under `<inbox>/quarantine/`, so it moves a delivery and
+//!    never destroys one. Those are the two, and the distinction between them is
+//!    the invariant — not the count.
 //! 2. *A failure is visible.* Every non-success lands in
 //!    [`DrainReport::failures`] with the delivery id and the processor's own
 //!    words, and [`DrainReport::log_summary`] raises it at `error!`. There is no
@@ -34,9 +39,20 @@
 //!
 //! An interrupted pass is safe by construction: the claim is an `flock` the
 //! kernel releases on process death, so a delivery a SIGKILLed drainer was
-//! mid-way through is claimable by the next one. It may therefore be processed
-//! twice, which is the at-least-once contract [`super::RelayParams::attempts`]
-//! already states — processors deduplicate on `delivery_id`.
+//! mid-way through is claimable by the next one.
+//!
+//! 🔴 **That crash-safety design is itself what makes a duplicate possible, and
+//! the drain — not each receiver — closes it (#5192 critic round 1).** A
+//! drainer can return `Ok` from the pipeline and die before the entry is
+//! unlinked; the entry is then claimable *by design*, and a receiver with a
+//! side effect (`trusty-analyze` posts a PR comment) would perform it a second
+//! time, unbounded on repeated crashes. So [`drain_once`] records the delivery
+//! in [`super::retry::mark_processed`] BEFORE removing it, and consults
+//! [`super::retry::is_processed`] before ever calling a processor. Every
+//! receiver gets the `delivery_id` deduplication the relay contract
+//! ([`super::RelayParams::attempts`]) requires, from one implementation — a
+//! per-crate copy is how one target ends up with the guarantee and its sibling
+//! silently does not.
 //!
 //! Test: `tests.rs` — `drain_*`.
 
@@ -189,6 +205,10 @@ pub struct DrainReport {
     pub skipped_in_flight: usize,
     /// Gone before this pass could claim them — drained by a concurrent pass.
     pub vanished: usize,
+    /// Already in the processed ledger, so removed without running the pipeline
+    /// again. Non-zero means a previous pass died between accepting a delivery
+    /// and unlinking it — see the module docs.
+    pub deduplicated: usize,
     /// Every non-success, with the delivery id and the reason.
     pub failures: Vec<DrainFailure>,
     /// Why the inbox itself could not be listed, if it could not.
@@ -204,6 +224,7 @@ impl DrainReport {
             + self.quarantined
             + self.skipped_in_flight
             + self.vanished
+            + self.deduplicated
             + self
                 .failures
                 .iter()
@@ -287,8 +308,27 @@ impl DrainReport {
         }
     }
 
-    /// Record an accepted delivery, or the failure to remove it afterwards.
-    fn accept(&mut self, path: &Path, id: &str, disposition: &Disposition) {
+    /// Record an accepted delivery, or the failure to retire it afterwards.
+    ///
+    /// 🔴 Ledger first, unlink second. Reversed, a crash in between erases the
+    /// only evidence the work happened and the next redelivery repeats it.
+    fn accept(&mut self, root: &Path, path: &Path, id: &str, disposition: &Disposition) {
+        if let Err(e) = retry::mark_processed(root, path, id, now_unix_ms()) {
+            // Deliberately NOT followed by a removal. An unrecorded success is
+            // a duplicate waiting to happen; keeping the entry turns it into a
+            // visible, retried one, which the ledger will then suppress.
+            self.failures.push(DrainFailure {
+                delivery_id: id.to_string(),
+                path: path.to_path_buf(),
+                attempts: 0,
+                reason: format!(
+                    "the pipeline accepted this delivery but it could not be recorded as \
+                     processed, so the entry is kept rather than removed unrecorded: {e}"
+                ),
+                outcome: FailureOutcome::Stuck,
+            });
+            return;
+        }
         match retry::remove_processed(path) {
             Ok(()) => match disposition {
                 Disposition::Processed => self.processed += 1,
@@ -306,7 +346,7 @@ impl DrainReport {
                 attempts: 0,
                 reason: format!(
                     "the pipeline accepted this delivery but its inbox entry could not be \
-                     removed, so it will be processed again: {e}"
+                     removed; the processed ledger stops it running again: {e}"
                 ),
                 outcome: FailureOutcome::Stuck,
             }),
@@ -334,6 +374,8 @@ impl DrainReport {
 /// error and no report is a drain whose failure has no counts attached to it.
 ///
 /// Test: `drain_removes_an_entry_the_processor_accepted`,
+/// `drain_does_not_reprocess_a_delivery_marked_done`,
+/// `drain_marks_a_processed_delivery_before_removing_it`,
 /// `drain_keeps_an_entry_whose_processor_failed`,
 /// `drain_quarantines_an_entry_that_is_out_of_retries`,
 /// `drain_quarantines_a_permanent_failure_immediately`,
@@ -356,6 +398,7 @@ pub async fn drain_once(
         }
     };
     report.scanned = entries.len();
+    retry::prune_processed(&root, retry::PROCESSED_RETENTION);
 
     for path in entries {
         let claim = match Claim::try_acquire(&path) {
@@ -393,6 +436,30 @@ pub async fn drain_once(
         };
 
         let id = claim.delivery().delivery_id.clone();
+
+        // 🔴 Before the pipeline, never after: a delivery already in the ledger
+        // has had its work done, and the only reason its entry survives is that
+        // the drainer which did it died before the unlink. Running the pipeline
+        // again here is the double-post this check exists to stop.
+        if retry::is_processed(&root, &path) {
+            tracing::warn!(
+                delivery_id = %id,
+                "webhook delivery was already processed; removing its entry without re-running \
+                 the pipeline (a previous drainer died between accepting it and removing it)"
+            );
+            match retry::remove_processed(&path) {
+                Ok(()) => report.deduplicated += 1,
+                Err(e) => report.failures.push(DrainFailure {
+                    delivery_id: id,
+                    path: path.clone(),
+                    attempts: 0,
+                    reason: format!("already processed, but its entry could not be removed: {e}"),
+                    outcome: FailureOutcome::Stuck,
+                }),
+            }
+            continue;
+        }
+
         let already = retry::load_attempts(&path);
         if already.attempts >= policy.max_attempts {
             report.quarantine(
@@ -409,7 +476,7 @@ pub async fn drain_once(
         }
 
         match processor.process(claim.delivery()).await {
-            Ok(disposition) => report.accept(&path, &id, &disposition),
+            Ok(disposition) => report.accept(&root, &path, &id, &disposition),
             Err(failure) => {
                 let record = match retry::record_failure(&path, &failure.reason, now_unix_ms()) {
                     Ok(record) => record,

@@ -276,16 +276,34 @@ the socket, under four rules.
    fsync (§2). A drain that ran before the ack would make a slow review look
    like a refused delivery, and one that acked on the review's success would
    hold console's socket open for 37 seconds.
-2. **Remove only after the pipeline accepted.** The single unlink of a live
-   delivery is reachable from one arm of the drain, behind a processor that
-   returned success. A pipeline failure keeps the entry.
+2. **Destroy only after the pipeline accepted.** Two calls unlink an entry and
+   the difference between them is the invariant, not the count: `remove_processed`
+   destroys the delivery and is reachable from one arm of the drain, behind a
+   processor that returned success; `quarantine` unlinks only after `hard_link`
+   has put the same inode under `<inbox>/quarantine/`, so it moves a delivery
+   and never destroys one. A pipeline failure keeps the entry.
 3. **Claim with a lock the kernel releases, not a marker on disk.** Exclusive
    ownership of one entry is an `flock` on the entry file. A drainer that is
    SIGKILLed mid-review is indistinguishable from one that finished, and that
    state is *claimable* — a claim marker would instead strand the delivery
    forever, which is §2's silent loss arriving one hop later. Redelivery of a
    delivery already processed is therefore possible, which is the at-least-once
-   contract §4's frame already states; receivers deduplicate on `delivery_id`.
+   contract §4's frame already states.
+
+   > **Amendment (#5192 critic round 1).** "Receivers deduplicate on
+   > `delivery_id`" as a rule addressed to each receiver was the wrong place to
+   > put it. `trusty-review` satisfied it through its dedup store; `trusty-analyze`
+   > has no dedup infrastructure at all and would post a second identical PR
+   > comment every time a drainer died between the pipeline returning `Ok` and
+   > the unlink — a window this very design creates on purpose. **The drain owns
+   > the deduplication, not the receiver.** It records the delivery in a ledger
+   > under `<inbox>/processed/` *before* removing the entry, and consults that
+   > ledger before ever invoking a processor, so every receiver gets the
+   > guarantee from one implementation. Markers are pruned after 30 days, which
+   > exceeds the longest window in which the same `delivery_id` can legitimately
+   > arrive again. A per-receiver rule is how one target ends up with a safety
+   > property and its sibling silently does not — the third instance of that
+   > shape on this epic.
 4. **Bound the retries, quarantine the poison, and never delete either.** A
    failure is counted in a sidecar beside the entry, so the bound survives the
    process. An entry out of retries — or one that can never succeed, such as an

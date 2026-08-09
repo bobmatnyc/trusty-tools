@@ -48,7 +48,7 @@ mod receive_tests;
 #[path = "drain_tests.rs"]
 mod drain_tests;
 
-pub use claim::{Claim, ClaimError, ClaimOutcome};
+pub use claim::{Claim, ClaimError, ClaimOutcome, entry_is_still_linked};
 pub use drain::{
     DeliveryProcessor, Disposition, DrainFailure, DrainPolicy, DrainReport, FailureOutcome,
     ProcessFailure, drain_once,
@@ -59,7 +59,8 @@ pub use listener::{
     run_until_signal_with_processor,
 };
 pub use retry::{
-    AttemptRecord, DEFAULT_MAX_ATTEMPTS, QUARANTINE_DIR_NAME, quarantine_dir, quarantined_count,
+    AttemptRecord, DEFAULT_MAX_ATTEMPTS, PROCESSED_DIR_NAME, PROCESSED_RETENTION,
+    QUARANTINE_DIR_NAME, is_processed, mark_processed, quarantine_dir, quarantined_count,
 };
 pub use serve::{
     DeliverySink, LISTENER_SHUTDOWN_FLUSH, ServeOptions, Served, SinkRejection, dispatch_frame,

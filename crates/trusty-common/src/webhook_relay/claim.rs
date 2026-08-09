@@ -147,7 +147,8 @@ impl Claim {
     /// Test: `claim_is_exclusive_between_two_holders`,
     /// `claim_of_a_vanished_entry_reports_vanished`,
     /// `claim_of_an_undecodable_entry_reports_undecodable`,
-    /// `claim_refuses_an_entry_unlinked_while_the_lock_was_contended`.
+    /// `claim_of_a_removed_entry_reports_vanished`. The `nlink` branch itself
+    /// is proven through [`entry_is_still_linked`].
     pub fn try_acquire(path: &Path) -> Result<ClaimOutcome, ClaimError> {
         let mut file = match File::open(path) {
             Ok(f) => f,
@@ -178,13 +179,16 @@ impl Claim {
 
         // 🔴 See the module docs: the winner of a contended lock may be holding
         // an inode the previous winner already unlinked.
+        if !entry_is_still_linked(&file).map_err(|source| ClaimError::Stat {
+            path: path.to_path_buf(),
+            source,
+        })? {
+            return Ok(ClaimOutcome::Vanished);
+        }
         let meta = file.metadata().map_err(|source| ClaimError::Stat {
             path: path.to_path_buf(),
             source,
         })?;
-        if meta.nlink() == 0 {
-            return Ok(ClaimOutcome::Vanished);
-        }
 
         // Read through the held fd, not the path: by now the path could name a
         // different inode, and the one we locked is the one we own.
@@ -217,4 +221,27 @@ impl Claim {
     pub fn delivery(&self) -> &RelayDelivery {
         &self.delivery
     }
+}
+
+/// Does the file behind this fd still have a name?
+///
+/// Why: the TOCTOU check the whole once-only claim rests on. Two drainers can
+/// both `open` one path; the first locks, processes, unlinks and releases, and
+/// the second then wins a lock on an inode with no name. `st_nlink == 0` is how
+/// the holder of an fd learns that happened.
+///
+/// It is a free function rather than three inline lines because the branch is
+/// otherwise unreachable from a test — the unlink has to land inside
+/// [`Claim::try_acquire`]'s own open-to-stat window, which no caller can
+/// schedule. Calling the predicate directly against a deliberately unlinked fd
+/// proves the same condition without pretending to reproduce the race.
+///
+/// # Errors
+///
+/// When the fd cannot be stat'd.
+///
+/// Test: `entry_is_still_linked_is_false_for_an_unlinked_fd`,
+/// `entry_is_still_linked_is_true_for_a_live_entry`.
+pub fn entry_is_still_linked(file: &File) -> std::io::Result<bool> {
+    Ok(file.metadata()?.nlink() > 0)
 }

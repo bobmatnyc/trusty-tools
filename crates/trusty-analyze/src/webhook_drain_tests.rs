@@ -200,3 +200,71 @@ async fn processor_reports_a_failed_pipeline_as_retryable() {
     );
     assert!(failure.reason.contains("503"), "{}", failure.reason);
 }
+
+// ─── The double-post window (critic round 1) ─────────────────────────────────
+
+/// A pipeline that counts the PR comments it would post.
+///
+/// Why not assert on `post_pr_comment` itself: it is one HTTP call inside
+/// `run_pr_analysis`, and reaching it needs GitHub. The count of pipeline runs
+/// IS the count of comments — `run_pr_analysis` posts exactly one per call.
+struct CountingPipeline {
+    posts: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl PrPipeline for CountingPipeline {
+    async fn analyse(&self, _target: &PrTarget) -> anyhow::Result<()> {
+        self.posts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn drain_posts_exactly_one_comment_when_a_drainer_dies_before_the_unlink() {
+    // 🔴 #5192 critic round 1. `trusty-analyze` posts a PR comment and has no
+    // dedup store of its own — unlike `trusty-review`, which opens the dedup
+    // redb as `Required`. The drain's crash-safety design deliberately leaves
+    // an entry claimable when a drainer dies mid-pass, so a delivery whose
+    // pipeline already SUCCEEDED gets picked up again and commented on twice,
+    // unbounded on repeated crashes.
+    //
+    // Driven through the real drain over a real inbox, in the exact
+    // configuration the defect occurs in: the pipeline runs, the delivery is
+    // recorded, and the unlink does NOT happen — which is what a SIGKILL
+    // between those two steps leaves behind. Against this change without
+    // `trusty_common::webhook_relay::retry`'s processed ledger, `posts` is 2.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox = trusty_common::webhook_relay::Inbox::open(tmp.path().join("webhook-inbox"))
+        .expect("open inbox");
+    let pipeline = std::sync::Arc::new(CountingPipeline {
+        posts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let processor = AnalyzeProcessor::with_pipeline(pipeline.clone());
+    let policy = trusty_common::webhook_relay::DrainPolicy::default();
+
+    let held = delivery_with(PR_EVENT, &body("opened"));
+    inbox.take_ownership(&held).expect("take ownership");
+    let entry = inbox.entry_path(&held.delivery_id);
+
+    let first = trusty_common::webhook_relay::drain_once(&inbox, &processor, policy).await;
+    assert_eq!(first.processed, 1);
+    assert_eq!(pipeline.posts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // The crash: the same delivery is durably received again, exactly as it
+    // would be by a drainer that died before its unlink, or by a console
+    // redelivery whose ack was lost.
+    inbox.take_ownership(&held).expect("re-take ownership");
+    assert!(entry.exists(), "the entry is claimable again, by design");
+
+    let second = trusty_common::webhook_relay::drain_once(&inbox, &processor, policy).await;
+
+    assert_eq!(
+        pipeline.posts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one comment must be posted for one delivery id"
+    );
+    assert_eq!(second.deduplicated, 1);
+    assert_eq!(second.processed, 0);
+    assert!(!entry.exists(), "and the stale entry is retired");
+}
