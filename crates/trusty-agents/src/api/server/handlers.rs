@@ -17,9 +17,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::state::{AppState, state_dir};
+use super::state::{AppState, MAX_RETAINED_TOTAL, state_dir};
 use super::task_runner::{maybe_emit_recap, run_task};
-use crate::api::types::{PmResponse, PmStatus};
+use crate::api::types::{DEFAULT_ADDRESSED_AGENT, PmResponse, PmStatus};
 use crate::events::{self, Event};
 use crate::recap;
 
@@ -205,6 +205,24 @@ fn agent_override(req: &TaskRequest) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Resolve which assistant's stream a submission belongs to (#4355).
+///
+/// Why: `agent_override` answers a routing question and legitimately returns
+/// `None`; a task stream cannot. Every task belongs to exactly one assistant,
+/// and a submission with no roster selection belongs to the Concierge —
+/// `ui/src/lib/roster.ts` renders Concierge for a `null` selection, so `null`
+/// already MEANS `ctrl` to the user. This differs from
+/// `resolve_agent_for_chat` on purpose: a CTRL management command typed while
+/// a roster entry is selected is dispatched through the session path
+/// (`resolve_agent_for_chat` → `None`) but still belongs in the stream the
+/// user was looking at when they typed it.
+/// What: `agent_override(req)`, or `DEFAULT_ADDRESSED_AGENT`.
+/// Test: `addressed_agent_records_the_selected_roster_entry`,
+/// `addressed_agent_for_defaults_to_ctrl`.
+fn addressed_agent_for(req: &TaskRequest) -> String {
+    agent_override(req).unwrap_or_else(|| DEFAULT_ADDRESSED_AGENT.to_string())
+}
+
 /// Resolve which Conversational/Research dispatch path a request should
 /// take (#3223; extracted as a pure function during the PR #3279
 /// code-critic regression fix).
@@ -317,7 +335,12 @@ pub(super) async fn submit_task(
     Json(req): Json<TaskRequest>,
 ) -> impl IntoResponse {
     let id = uuid::Uuid::new_v4().to_string();
-    let placeholder = PmResponse::running(&id);
+    // #4355: stamp the stream on the placeholder, not just on the final
+    // result — a task is listed and polled from the moment it is accepted, so
+    // an unstamped placeholder would show up in the Concierge stream and then
+    // jump to another assistant's when it finished.
+    let addressed_agent = addressed_agent_for(&req);
+    let placeholder = PmResponse::running(&id).addressed_to(&addressed_agent);
     state.upsert(id.clone(), placeholder).await;
 
     // #4652: this request is a person typing in the GUI/WebUI, which is the
@@ -330,7 +353,9 @@ pub(super) async fn submit_task(
     // to assert on without writing into the developer's real home.
     crate::attendance::note_command_turn_in(
         state.attendance_root.as_deref(),
-        agent_override(&req).as_deref().unwrap_or("ctrl"),
+        // #4355: the same resolution the stream uses — one answer to "which
+        // assistant did the human address", not two that can drift.
+        &addressed_agent,
         crate::attendance::TurnOrigin::Human,
         // The API sidecar's "sender is entitled to assert presence" check: a
         // request that reached this handler is already past the server's auth
@@ -418,6 +443,7 @@ pub(super) async fn submit_task(
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             let agent_bg = agent_for_chat.clone();
+            let addressed_bg = addressed_agent.clone();
             let overrides_bg = overrides.clone();
             let intent_label = match intent {
                 IntentClass::Conversational => "conversational",
@@ -463,9 +489,12 @@ pub(super) async fn submit_task(
                 // GUI keeps its request-time speaker stamp.
                 let responder = drain_last_responder(&mut ev_rx, &id_bg);
 
+                // #4355: both terminal shapes re-stamp the stream — these are
+                // fresh envelopes, not edits to the stored placeholder, so an
+                // unstamped one would land in the Concierge stream on finalize.
                 let resp = match result {
                     Ok(content) => {
-                        let mut r = PmResponse::running(&id_bg);
+                        let mut r = PmResponse::running(&id_bg).addressed_to(&addressed_bg);
                         r.response_type = crate::api::types::PmResponseType::AgentResponse;
                         r.status = PmStatus::Success;
                         r.narrative = content;
@@ -474,6 +503,7 @@ pub(super) async fn submit_task(
                     }
                     Err(e) => {
                         PmResponse::error(&id_bg, format!("{intent_label} handler failed: {e:#}"))
+                            .addressed_to(&addressed_bg)
                     }
                 };
 
@@ -497,12 +527,17 @@ pub(super) async fn submit_task(
             // the child inherits full env/init (build counter, tracing, run_id).
             let state_bg = state.clone();
             let id_bg = id.clone();
+            let addressed_bg = addressed_agent.clone();
             let join = tokio::spawn(async move {
+                // #4355: `run_task` builds its envelope from the subprocess's
+                // own JSON and knows nothing about the roster, so the stream is
+                // stamped here, on the way to the store.
                 let resp = run_task(&id_bg, req, state_bg.clone())
                     .await
                     .unwrap_or_else(|e| {
                         PmResponse::error(&id_bg, format!("server failed to run task: {e:#}"))
-                    });
+                    })
+                    .addressed_to(&addressed_bg);
                 let status_str = resp.status.as_str().to_string();
                 // #3063: see the Conversational/Research branch above for why
                 // finalize_task (not upsert) is used here.
@@ -573,9 +608,52 @@ pub(super) async fn get_session_recap(
     }
 }
 
-/// `GET /api/tasks` — list up to `MAX_RETAINED` recent responses, newest first.
-pub(super) async fn list_tasks(State(state): State<AppState>) -> Json<Vec<PmResponse>> {
-    Json(state.list().await)
+/// Query string for `GET /api/tasks` (#4355).
+///
+/// Why: the per-assistant stream extends this route rather than minting a
+/// parallel one — the response element type is unchanged (`PmResponse`), the
+/// ordering contract is unchanged (newest first), and only the row set
+/// narrows, so a second route would duplicate the auth, envelope, and client
+/// plumbing to return the same thing. Both parameters are optional and
+/// omitting them reproduces the pre-#4355 response byte for byte.
+/// What: `agent` selects one assistant's stream (blank/whitespace is treated
+/// as absent, matching `agent_override`'s normalization of the same value on
+/// the submit side); `limit` caps the row count, clamped to
+/// `MAX_RETAINED_TOTAL` so a client cannot ask for more than the store holds.
+/// Test: `tasks_filtered_by_agent_returns_only_that_stream_newest_first`,
+/// `tasks_query_defaults_match_the_unfiltered_listing`.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ListTasksQuery {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /api/tasks[?agent=<name>][&limit=<n>]` — recent responses, newest
+/// first; one assistant's stream when `agent` is given (#4355).
+///
+/// Why: "the most recent task stream for assistant X" must be answerable in a
+/// single call, server-side — see `AppState::list_stream` for why the server
+/// rather than the client owns that association.
+/// What: normalizes the query (see `ListTasksQuery`) and delegates to
+/// `list_stream`. An unknown agent name is not an error: it returns `[]`,
+/// which is the truthful answer for an assistant that has no history yet and
+/// the shape a freshly-added roster entry needs.
+/// Test: `tasks_filtered_by_agent_returns_only_that_stream_newest_first`,
+/// `list_tasks_empty_store_returns_empty_array`.
+pub(super) async fn list_tasks(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ListTasksQuery>,
+) -> Json<Vec<PmResponse>> {
+    let agent = q
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let limit = q.limit.map(|n| n.min(MAX_RETAINED_TOTAL));
+    Json(state.list_stream(agent.as_deref(), limit).await)
 }
 
 /// Response body for `DELETE /api/tasks`.
@@ -737,6 +815,39 @@ mod tests {
             text: "thinking".to_string(),
         });
         assert_eq!(drain_last_responder(&mut rx2, sid), None);
+    }
+
+    /// #4355: an explicit roster selection is the stream the task belongs to,
+    /// trimmed the same way `agent_override` trims it on the routing side.
+    #[test]
+    fn addressed_agent_records_the_selected_roster_entry() {
+        assert_eq!(addressed_agent_for(&base_request(Some("izzie"))), "izzie");
+        assert_eq!(
+            addressed_agent_for(&base_request(Some("  cto-assistant  "))),
+            "cto-assistant"
+        );
+    }
+
+    /// #4355: no selection, or a cleared one, is not "unattributed" — a null
+    /// roster selection MEANS the Concierge (`ui/src/lib/roster.ts`), so those
+    /// tasks belong to the `ctrl` stream and are retrievable there.
+    #[test]
+    fn addressed_agent_for_defaults_to_ctrl() {
+        assert_eq!(addressed_agent_for(&base_request(None)), "ctrl");
+        assert_eq!(addressed_agent_for(&base_request(Some(""))), "ctrl");
+        assert_eq!(addressed_agent_for(&base_request(Some("   "))), "ctrl");
+    }
+
+    /// #4355: "who was asked" and "which dispatch path" are different
+    /// questions. A CTRL management command typed with a roster entry selected
+    /// runs through the session path (`resolve_agent_for_chat` → `None`, the
+    /// only path wired to CTRL's project tools) but still belongs in the
+    /// stream the user was looking at when they typed it.
+    #[test]
+    fn ctrl_command_keeps_its_stream_while_changing_dispatch_path() {
+        let req = base_request(Some("cto-assistant"));
+        assert_eq!(resolve_agent_for_chat(&req, true), None);
+        assert_eq!(addressed_agent_for(&req), "cto-assistant");
     }
 
     #[test]

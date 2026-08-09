@@ -11,6 +11,24 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The assistant a task belongs to when the client selected no roster entry.
+///
+/// Why (#4355): a null roster selection is not "unattributed" — in the GUI it
+/// MEANS the Concierge (`ui/src/lib/roster.ts` defaults `activeAgentId` to
+/// `null` and renders Concierge for it). Naming that default once here keeps
+/// the server, the attendance hook, and the per-assistant task query from
+/// each inventing their own idea of what "no agent" resolves to.
+/// What: the `ctrl` agent id.
+/// Test: `addressed_agent_defaults_to_ctrl_when_no_selection`.
+pub const DEFAULT_ADDRESSED_AGENT: &str = "ctrl";
+
+/// serde default for [`PmResponse::addressed_agent`] — see
+/// [`DEFAULT_ADDRESSED_AGENT`]. Also the value an older `tasks.json` (written
+/// before #4355) deserializes to.
+fn default_addressed_agent() -> String {
+    DEFAULT_ADDRESSED_AGENT.to_string()
+}
+
 /// Canonical response envelope returned by every PM/workflow invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PmResponse {
@@ -64,6 +82,30 @@ pub struct PmResponse {
     /// Test: `responder_agent_defaults_to_none_and_omits_when_absent`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub responder_agent: Option<String>,
+    /// #4355: the assistant this task was ADDRESSED to — the roster entry the
+    /// user had selected when they submitted it, or [`DEFAULT_ADDRESSED_AGENT`]
+    /// when they had selected none.
+    ///
+    /// Why: switching assistants must load that assistant's own task stream,
+    /// and the server owns that association (owner decision: "per assistant
+    /// loading should be at the server level"). Before this field the routing
+    /// choice made from `TaskRequest.agent` was consumed at dispatch and thrown
+    /// away, so nothing downstream could say which stream a task belonged to.
+    /// Distinct from [`PmResponse::responder_agent`], which records who
+    /// ANSWERED: `responder_agent` is populated post-hoc only when the turn
+    /// delegated and is `None` in the common case, so it cannot key a stream.
+    /// A turn addressed to `assistant` that delegates to `izzie` has
+    /// `addressed_agent = "assistant"` and `responder_agent = Some("izzie")` —
+    /// it stays in the stream the user was looking at, while the bubble is
+    /// still labelled with who really replied.
+    /// What: a non-optional `String` (every task belongs to exactly one
+    /// stream), always serialized, and `#[serde(default = …)]` so a
+    /// `tasks.json` written before this field existed still loads, with its
+    /// rows landing in the Concierge stream.
+    /// Test: `addressed_agent_defaults_to_ctrl_when_no_selection`,
+    /// `legacy_tasks_json_without_addressed_agent_loads_as_ctrl`.
+    #[serde(default = "default_addressed_agent")]
+    pub addressed_agent: String,
 }
 
 /// One entry in the live progress stream returned by `GET /api/task/:id`.
@@ -180,6 +222,7 @@ impl PmResponse {
             errors: Vec::new(),
             phases_completed: Vec::new(),
             responder_agent: None,
+            addressed_agent: default_addressed_agent(),
         }
     }
 
@@ -199,6 +242,7 @@ impl PmResponse {
             errors: vec![m],
             phases_completed: Vec::new(),
             responder_agent: None,
+            addressed_agent: default_addressed_agent(),
         }
     }
 
@@ -227,7 +271,24 @@ impl PmResponse {
             errors: Vec::new(),
             phases_completed: Vec::new(),
             responder_agent: None,
+            addressed_agent: default_addressed_agent(),
         }
+    }
+
+    /// Attribute this response to the assistant it was addressed to (#4355).
+    ///
+    /// Why: every constructor above defaults to the Concierge, but the three
+    /// producers in `api::server::handlers` know the real roster selection and
+    /// must stamp it before the response reaches the store — a task that lands
+    /// in the wrong stream is invisible in the UI it belongs to. A builder
+    /// keeps that stamp a single expression at each of those sites rather than
+    /// a `let mut` dance around `PmResponse::error(…)`.
+    /// What: sets `addressed_agent` and returns `self`.
+    /// Test: `addressed_to_overrides_the_default_stream`.
+    #[must_use]
+    pub fn addressed_to(mut self, agent: impl Into<String>) -> Self {
+        self.addressed_agent = agent.into();
+        self
     }
 }
 
@@ -323,6 +384,55 @@ mod tests {
         let legacy = r#"{"id":"x","timestamp":"t","type":"task_submitted","status":"running","narrative":"","metadata":{"processing_time_ms":0,"total_tokens_in":0,"total_tokens_out":0,"cache_read_tokens":0,"cache_creation_tokens":0,"total_cost_usd":0.0,"model":null,"workflow":null,"build_number":null},"phases":[],"files_modified":[],"out_dir":null,"errors":[]}"#;
         let parsed: PmResponse = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.responder_agent, None);
+    }
+
+    /// #4355: with no roster selection the response belongs to the Concierge
+    /// stream, and — unlike `responder_agent` — the field is always on the
+    /// wire, because a client keying a stream off it must never see it absent.
+    #[test]
+    fn addressed_agent_defaults_to_ctrl_when_no_selection() {
+        for r in [
+            PmResponse::running("a"),
+            PmResponse::error("b", "boom"),
+            PmResponse::cancelled("c"),
+        ] {
+            assert_eq!(r.addressed_agent, DEFAULT_ADDRESSED_AGENT);
+            let j = serde_json::to_string(&r).unwrap();
+            assert!(j.contains("\"addressed_agent\":\"ctrl\""), "got: {j}");
+        }
+    }
+
+    /// #4355: "who was asked" and "who answered" are independent facts. A turn
+    /// addressed to `assistant` that delegates to `izzie` stays in the
+    /// `assistant` stream while the bubble is labelled `izzie`.
+    #[test]
+    fn addressed_to_overrides_the_default_stream() {
+        let r = PmResponse::running("x").addressed_to("assistant");
+        assert_eq!(r.addressed_agent, "assistant");
+        assert_eq!(r.responder_agent, None);
+
+        let mut delegated = r.clone();
+        delegated.responder_agent = Some("izzie".to_string());
+        let back: PmResponse =
+            serde_json::from_str(&serde_json::to_string(&delegated).unwrap()).unwrap();
+        assert_eq!(back.addressed_agent, "assistant");
+        assert_eq!(back.responder_agent.as_deref(), Some("izzie"));
+    }
+
+    /// #4355 upgrade safety: a `tasks.json` written by the pre-#4355 server has
+    /// no `addressed_agent` key at all. It must still deserialize — a hard
+    /// error here would drop the user's whole task history on upgrade — and its
+    /// rows land in the Concierge stream, which is where an unattributed task
+    /// belonged all along.
+    #[test]
+    fn legacy_tasks_json_without_addressed_agent_loads_as_ctrl() {
+        let legacy = r#"{"t1":{"id":"t1","timestamp":"2026-08-08T00:00:00Z","type":"agent_response","status":"success","narrative":"hello","metadata":{"processing_time_ms":0,"total_tokens_in":0,"total_tokens_out":0,"cache_read_tokens":0,"cache_creation_tokens":0,"total_cost_usd":0.0,"model":null,"workflow":null,"build_number":null},"phases":[],"files_modified":[],"out_dir":null,"errors":[],"phases_completed":[],"responder_agent":"izzie"}}"#;
+        let map: std::collections::HashMap<String, PmResponse> =
+            serde_json::from_str(legacy).expect("pre-#4355 tasks.json must still load");
+        let r = &map["t1"];
+        assert_eq!(r.addressed_agent, DEFAULT_ADDRESSED_AGENT);
+        assert_eq!(r.responder_agent.as_deref(), Some("izzie"));
+        assert_eq!(r.narrative, "hello");
     }
 
     #[test]
