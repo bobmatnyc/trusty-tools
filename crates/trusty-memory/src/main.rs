@@ -1,9 +1,9 @@
 //! CLI entry point for the `trusty-memory` binary.
 //!
 //! Why: ship a thin clap-to-handler shim so users can `cargo install
-//! trusty-memory` and invoke `trusty-memory serve --stdio` (the direct
-//! MCP stdio server, PR1 #919 of the #914 stdio-cutover epic), `trusty-memory
-//! serve` (the HTTP/SSE daemon), or `trusty-memory migrate kuzu-memory`
+//! trusty-memory` and invoke `trusty-memory serve` (MCP stdio — bare `serve`
+//! and `serve --stdio` are the same thing since #5267), `trusty-memory start`
+//! (the HTTP/SSE daemon), or `trusty-memory migrate kuzu-memory`
 //! (which rewrites Claude settings files that still reference the legacy
 //! kuzu-memory MCP server). All real logic lives in the library and the
 //! `commands::` modules — this file does CLI parsing and dispatch only.
@@ -11,8 +11,9 @@
 //! removed in PR3 of the #914 epic; `serve --stdio` is the canonical
 //! stdio integration.
 //! What: defines a `clap::Parser` with `serve`, `migrate`, and other
-//! subcommands. `serve --stdio` defers to `commands::serve_stdio_bridge`;
-//! `serve` (HTTP) defers to `trusty_memory::run_http` / `run_http_dynamic`.
+//! subcommands. `serve` and `serve --stdio` defer to
+//! `commands::serve_stdio_bridge`; `serve --http` / `--foreground` defer to
+//! `trusty_memory::run_http` / `run_http_dynamic`.
 //! Test: `cargo run -p trusty-memory -- --help` lists all subcommands.
 //! `cargo run -p trusty-memory -- migrate kuzu-memory --dry-run` exercises
 //! the migrate path end-to-end without modifying any files.
@@ -74,32 +75,31 @@ enum Command {
     /// way to take it down that does not depend on launchd / systemd.
     Stop,
 
-    /// Run the daemon.  Mode matrix (#914 PR4):
-    ///   serve                  → HTTP daemon (default, dynamic port, background)
-    ///   serve --http[=ADDR]    → explicit HTTP; optional bind address
+    /// Run the server.  Mode matrix (#5267; supersedes #914 PR4):
+    ///   serve                  → MCP stdio (same as `--stdio`)
+    ///   serve --stdio          → MCP stdio JSON-RPC server (Claude Code)
+    ///   serve --http[=ADDR]    → HTTP daemon; optional bind address
     ///   serve --foreground     → HTTP in foreground (launchd / systemd)
-    ///   serve --stdio          → direct stdio JSON-RPC MCP server (Claude Code)
     ///
-    /// Default mode is HTTP/SSE with dynamic port selection (7070..=7079, OS
-    /// fallback). Without `--foreground`, `serve` self-spawns a detached
-    /// background daemon (alias for `start`) and returns immediately so the
-    /// parent shell gets its prompt back. Pass `--foreground` to keep the
-    /// daemon in the foreground (used internally by `start` to host the
-    /// actual HTTP server, and by launchd / systemd). Pass `--http <ADDR>`
-    /// to bind a specific address.
+    /// Bare `serve` speaks MCP over stdio, matching `trusty-search serve`. Use
+    /// `trusty-memory start` for the background HTTP daemon — that is the
+    /// daemon-launching verb. Before #5267 bare `serve` detached an HTTP daemon,
+    /// which made the same word mean opposite things in two sibling crates.
     ///
-    /// Claude Code integration (recommended): use `serve --stdio` for a
-    /// direct stdio JSON-RPC MCP server (PR1 #919, #914).  This mode binds
-    /// no HTTP port; stdout is the JSON-RPC channel.  Palaces are opened
-    /// read-only via the snapshot fallback when a write lock is held by
-    /// another process.  Every request resolves within a deadline — success
-    /// or an explicit JSON-RPC error — so the MCP client never hangs.
+    /// The stdio path is a pure proxy to the HTTP daemon and will START that
+    /// daemon if it is not already running, under an exclusive lock so N
+    /// concurrent bridges produce exactly one daemon (#5267, #1152).
+    ///
+    /// `--http` selects the HTTP/SSE daemon with dynamic port selection
+    /// (7070..=7079, OS fallback); without `--foreground` it self-spawns a
+    /// detached background daemon and returns immediately. Pass `--foreground`
+    /// to keep it in the foreground (used by `start`, launchd, and systemd).
     Serve {
         /// Select HTTP mode explicitly with an optional bind address.
         ///
-        /// `--http` (bare): dynamic port (same as bare `serve`).
+        /// `--http` (bare): dynamic port, self-spawning detached daemon.
         /// `--http 127.0.0.1:7070`: bind that exact address.
-        /// Absent: default HTTP mode — bare `serve` behaviour unchanged.
+        /// Absent: MCP stdio mode (#5267) — this flag is what selects HTTP.
         #[arg(
             long,
             value_name = "ADDR",
@@ -649,17 +649,20 @@ async fn main() -> Result<()> {
             foreground,
             stdio,
             palace,
-        } => {
-            if stdio {
+        } => match serve_mode(&http, foreground, stdio) {
+            ServeMode::Stdio { notify } => {
+                if notify {
+                    warn_bare_serve_is_stdio();
+                }
                 run_serve_stdio(palace).await
-            } else {
-                // Flatten Option<Option<SocketAddr>> → Option<SocketAddr>.
-                // --http (bare) → Some(None) → flatten → None → dynamic port.
-                // --http ADDR   → Some(Some(addr)) → flatten → Some(addr).
-                // absent        → None → flatten → None → dynamic port.
+            }
+            // Flatten Option<Option<SocketAddr>> → Option<SocketAddr>.
+            // --http (bare) → Some(None) → flatten → None → dynamic port.
+            // --http ADDR   → Some(Some(addr)) → flatten → Some(addr).
+            ServeMode::Http => {
                 run_serve(http.flatten(), foreground, palace, log_buffer, error_store).await
             }
-        }
+        },
         Command::Migrate {
             target,
             dry_run,
@@ -778,6 +781,69 @@ async fn run_monitor(target: MonitorTarget) -> Result<()> {
 /// `commands/serve_stdio_bridge.rs`.
 async fn run_serve_stdio(palace: Option<String>) -> Result<()> {
     trusty_memory::commands::serve_stdio_bridge::run_stdio_bridge(palace).await
+}
+
+/// Which server `serve` runs, decided from its transport flags.
+///
+/// Why: the bare-vs-flagged decision is the whole of #5267's behavior change, so
+/// it is a value a test can assert on rather than a branch buried in `main`'s
+/// dispatch. A test that only proved `serve` PARSES would have passed just as
+/// well before the change.
+/// Test: `serve_mode_*` in `cli_tests.rs`.
+#[derive(Debug, PartialEq, Eq)]
+enum ServeMode {
+    /// MCP stdio JSON-RPC. `notify` is set only for the bare form, whose
+    /// meaning changed and whose user may therefore be surprised.
+    Stdio { notify: bool },
+    /// The axum HTTP/SSE daemon.
+    Http,
+}
+
+/// Decide the `serve` transport from its flags (#5267).
+///
+/// Why: bare `serve` used to mean "detach an HTTP daemon" and now means "speak
+/// MCP stdio", aligning with `trusty-search serve`. Only the no-flag case moved;
+/// every flagged form resolves exactly as it did before, which is what keeps the
+/// launchd plist, `handle_start`, and the existing integration tests working
+/// untouched.
+/// What: `--stdio` → stdio. `--http` (with or without an address) or
+/// `--foreground` → HTTP. Nothing → stdio, with the notice flag set. `--palace`
+/// is not a transport flag and does not affect the choice.
+/// Test: `serve_mode_bare_is_stdio` (fails before #5267),
+/// `serve_mode_explicit_stdio`, `serve_mode_http_bare`, `serve_mode_http_addr`,
+/// `serve_mode_foreground_is_http`, `serve_mode_palace_only_is_stdio`.
+fn serve_mode(http: &Option<Option<SocketAddr>>, foreground: bool, stdio: bool) -> ServeMode {
+    if stdio {
+        return ServeMode::Stdio { notify: false };
+    }
+    if http.is_some() || foreground {
+        return ServeMode::Http;
+    }
+    ServeMode::Stdio { notify: true }
+}
+
+/// Tell an interactive human that bare `serve` now speaks MCP stdio (#5267).
+///
+/// Why: bare `serve` used to detach an HTTP daemon and return the prompt. It now
+/// blocks reading JSON-RPC from stdin, which to someone who typed it at a shell
+/// looks exactly like a hang. The notice names the new verb so they are not left
+/// guessing.
+///
+/// What: writes one line to **stderr** — never stdout, which is the JSON-RPC
+/// channel — and only when stdin is a TTY, so an MCP client (whose stdin is a
+/// pipe) sees nothing. The TTY check gates ONLY the notice: bare `serve` speaks
+/// stdio identically either way. Behavior that varied by TTY would make the
+/// tests lie about what a real client gets.
+/// Test: `bare_serve_notice_on_tty_absent_when_piped` in
+/// `tests/serve_cli_surface.rs`.
+fn warn_bare_serve_is_stdio() {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        eprintln!(
+            "trusty-memory: `serve` speaks MCP over stdio and is waiting on stdin. \
+             To run the HTTP daemon, use `trusty-memory start`."
+        );
+    }
 }
 
 /// Dispatch `serve` (HTTP path) to the HTTP server.

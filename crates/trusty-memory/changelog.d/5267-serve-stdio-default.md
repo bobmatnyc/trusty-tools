@@ -1,0 +1,2 @@
+Breaking
+Bare `trusty-memory serve` now speaks MCP over stdio instead of detaching an HTTP daemon, matching `trusty-search serve`. Use `trusty-memory start` for the background daemon. Every flagged form is unchanged: `serve --stdio`, `serve --http <ADDR>`, `serve --foreground`, and `start`. A human running bare `serve` at a terminal gets a one-line stderr notice explaining the move; MCP clients (piped stdin) see nothing.

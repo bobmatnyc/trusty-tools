@@ -1,8 +1,12 @@
-//! Unit tests for `serve` subcommand argument parsing (#914 PR4).
+//! Unit tests for `serve` argument parsing and transport selection
+//! (#914 PR4; transport matrix rewritten by #5267).
 //!
-//! Why: the `--http` flag was changed from `Option<SocketAddr>` to
-//! `Option<Option<SocketAddr>>` so bare `--http` (explicit HTTP mode, dynamic
-//! port) is valid in addition to `--http 127.0.0.1:7070` (specific address).
+//! Why: two separate contracts live here. Parsing — the `--http` flag is
+//! `Option<Option<SocketAddr>>` so bare `--http` and `--http ADDR` are both
+//! valid, and `--stdio` conflicts with both HTTP flags. Selection (#5267) —
+//! which server bare `serve` actually runs, asserted via [`super::serve_mode`]
+//! rather than by parsing alone, because a parse-only test passes identically
+//! before and after the behavior change.
 //! These tests guard against clap-level regressions in:
 //!
 //!   - bare `serve` (no flags)
@@ -19,11 +23,13 @@
 use super::{Cli, Command};
 use clap::Parser;
 
-/// Why: bare `serve` must keep HTTP as default (no flags set).
-/// What: parses `["trusty-memory", "serve"]` and asserts http=None, stdio=false.
+/// Why: bare `serve` sets no transport flag — that is what #5267 reinterprets.
+/// What: parses `["trusty-memory", "serve"]` and asserts all three transport
+/// flags are unset. This is the PARSING contract only; which server that
+/// selects is `serve_mode_bare_is_stdio`'s job.
 /// Test: this function.
 #[test]
-fn serve_bare_is_http_default() {
+fn serve_bare_sets_no_transport_flag() {
     let cli = Cli::try_parse_from(["trusty-memory", "serve"]).expect("parse ok");
     let Command::Serve {
         http,
@@ -93,5 +99,122 @@ fn serve_http_and_stdio_together_is_error() {
     assert!(
         result.is_err(),
         "--http and --stdio together must be rejected by clap"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Transport selection (#5267) — the behavior change, not just the parse.
+// ---------------------------------------------------------------------------
+
+use super::{serve_mode, ServeMode};
+
+/// Parse an argv and return the transport it selects.
+///
+/// Why: every selection test below needs the same parse-then-decide pipeline;
+/// routing them through one helper keeps each test one assertion long.
+fn mode_of(args: &[&str]) -> ServeMode {
+    let cli = Cli::try_parse_from(args).expect("parse ok");
+    let Command::Serve {
+        http,
+        stdio,
+        foreground,
+        ..
+    } = cli.command
+    else {
+        panic!("expected Serve");
+    };
+    serve_mode(&http, foreground, stdio)
+}
+
+/// Why: THE #5267 regression test. Before the change bare `serve` selected the
+/// HTTP daemon; it now speaks MCP stdio, matching `trusty-search serve`. This
+/// assertion fails against the pre-fix binary — a parse-only test would not.
+/// What: asserts bare `serve` selects stdio AND requests the human notice.
+/// Test: itself.
+#[test]
+fn serve_mode_bare_is_stdio() {
+    assert_eq!(
+        mode_of(&["trusty-memory", "serve"]),
+        ServeMode::Stdio { notify: true },
+        "bare `serve` must speak MCP stdio (#5267)"
+    );
+}
+
+/// Why: `serve --stdio` was already stdio and must be byte-identical in
+/// behavior — but it must NOT emit the notice, because its meaning did not
+/// change and its caller is an MCP client.
+/// Test: itself.
+#[test]
+fn serve_mode_explicit_stdio() {
+    assert_eq!(
+        mode_of(&["trusty-memory", "serve", "--stdio"]),
+        ServeMode::Stdio { notify: false },
+        "`serve --stdio` must stay stdio and stay silent"
+    );
+}
+
+/// Why: `serve --http` (bare) selected HTTP before and must still.
+/// Test: itself.
+#[test]
+fn serve_mode_http_bare() {
+    assert_eq!(
+        mode_of(&["trusty-memory", "serve", "--http"]),
+        ServeMode::Http
+    );
+}
+
+/// Why: `serve --http ADDR` is how callers bind a specific port; unchanged.
+/// Test: itself.
+#[test]
+fn serve_mode_http_addr() {
+    assert_eq!(
+        mode_of(&["trusty-memory", "serve", "--http", "127.0.0.1:7070"]),
+        ServeMode::Http
+    );
+}
+
+/// Why: the launchd plist and `handle_start` both spawn `serve --foreground`.
+/// If this regressed, the daemon on every installed machine would come up as a
+/// stdio process blocking on a null stdin instead of an HTTP server.
+/// Test: itself.
+#[test]
+fn serve_mode_foreground_is_http() {
+    assert_eq!(
+        mode_of(&["trusty-memory", "serve", "--foreground"]),
+        ServeMode::Http,
+        "`serve --foreground` is the launchd/`start` daemon path"
+    );
+}
+
+/// Why: `--palace` is a scoping flag, not a transport flag, so it must not
+/// change the selection — `serve --palace X` is still the bare form.
+/// Test: itself.
+#[test]
+fn serve_mode_palace_only_is_stdio() {
+    assert_eq!(
+        mode_of(&["trusty-memory", "serve", "--palace", "demo"]),
+        ServeMode::Stdio { notify: true }
+    );
+}
+
+/// Why: the parser must stay strict. Making bare `serve` permissive must not
+/// have loosened anything else — an unknown flag is still an error.
+/// Test: itself.
+#[test]
+fn serve_rejects_unknown_flag() {
+    assert!(
+        Cli::try_parse_from(["trusty-memory", "serve", "--not-a-real-flag"]).is_err(),
+        "unknown flags must still be rejected"
+    );
+}
+
+/// Why: `--foreground` and `--stdio` are mutually exclusive (`conflicts_with`),
+/// and that relationship must survive the #5267 dispatch rewrite.
+/// Test: itself.
+#[test]
+fn serve_foreground_conflicts_with_stdio() {
+    assert!(
+        Cli::try_parse_from(["trusty-memory", "serve", "--foreground", "--stdio"]).is_err(),
+        "--foreground and --stdio must remain mutually exclusive"
     );
 }
