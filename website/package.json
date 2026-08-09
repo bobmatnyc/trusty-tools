@@ -30,6 +30,7 @@
 		"globals": "^15.14.0",
 		"hast-util-to-string": "^3.0.1",
 		"jsdom": "^25.0.1",
+		"playwright": "^1.62.1",
 		"postcss": "^8.4.47",
 		"prettier": "^3.4.2",
 		"prettier-plugin-svelte": "^3.3.3",
