@@ -35,7 +35,7 @@ import remarkRehype from 'remark-rehype';
 import { unified } from 'unified';
 import { visit } from 'unist-util-visit';
 import { toString as hastToString } from 'hast-util-to-string';
-import type { Element, Root } from 'hast';
+import type { Element, Root, RootContent } from 'hast';
 
 import type { DocFailure } from './errors';
 import { resolveLink, type LinkClass, type LinkContext } from './links';
@@ -68,11 +68,13 @@ const HEADINGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
  * from the published page. This corpus uses angle-bracket metavariables
  * constantly, so that is a live content-loss hazard, not a hypothetical.
  * What: every element name a markdown page may legitimately produce or embed.
- * Anything else fails the build.
+ * Anything else fails the build. Exported because the changelog reader
+ * (`$lib/changelog`) renders markdown from the same repository and carries the
+ * same hazard — a second list would drift from this one.
  * Test: `render.test.ts` (`rejects an angle-bracket metavariable written
  * outside a code span`).
  */
-const ALLOWED_ELEMENTS = new Set([
+export const ALLOWED_ELEMENTS = new Set([
 	'a',
 	'abbr',
 	'b',
@@ -140,6 +142,19 @@ const parser = unified()
 	.use(rehypeSlug);
 
 const stringifier = unified().use(rehypeStringify);
+
+/**
+ * Why: the changelog reader (`$lib/changelog`) renders FRAGMENTS — one list
+ * item, one release preamble — rather than whole pages, so it needs the
+ * serialiser without the page-level link rewriting `renderPage` performs. A
+ * second `unified().use(rehypeStringify)` in that module would be a second
+ * markdown pipeline to keep in step with this one.
+ * What: serialises a run of hast nodes as an HTML fragment.
+ * Test: `../changelog/parse.test.ts` asserts on the fragments this produces.
+ */
+export function stringifyHast(nodes: readonly RootContent[]): string {
+	return stringifier.stringify({ type: 'root', children: [...nodes] });
+}
 
 /**
  * Why: phase one — see the module header.

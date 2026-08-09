@@ -70,6 +70,54 @@ function docPages(): Set<string> {
 	return found;
 }
 
+/**
+ * Text a reader would actually see, with markup removed. Tags collapse to
+ * NOTHING rather than a space, so `` `a`b `` in markdown and
+ * `<code>a</code>b` in HTML normalise to the same string.
+ */
+function visibleText(html: string): string {
+	return html
+		.replace(/<script[\s\S]*?<\/script>/g, ' ')
+		.replace(/<[^>]+>/g, '')
+		.replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+		.replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)))
+		.replace(/&quot;/g, '"')
+		.replace(/&lt;/g, '<')
+		.replace(/&gt;/g, '>')
+		.replace(/&amp;/g, '&')
+		.replace(/\s+/g, ' ');
+}
+
+/**
+ * Why: asserting that `/whats-new` merely renders would pass on an empty
+ * frame, which is the exact failure the changelog gate exists to prevent. The
+ * expected strings are therefore re-derived from the crate's `CHANGELOG.md`
+ * here, by an independent reader — not imported from `$lib/changelog`, which
+ * would only prove the parser agrees with itself.
+ * What: the newest release's version, and the opening words of its first item.
+ */
+function newestRelease(crate: string): { version: string; phrase: string } {
+	const lines = readFileSync(path.join(REPO_ROOT, 'crates', crate, 'CHANGELOG.md'), 'utf8').split(
+		'\n'
+	);
+
+	const releaseAt = lines.findIndex((line) => line.startsWith('## ['));
+	const version = /^## \[([^\]]+)\]/.exec(lines[releaseAt])![1];
+
+	const categoryAt = lines.findIndex((line, i) => i > releaseAt && line.startsWith('### '));
+	const bulletAt = lines.findIndex((line, i) => i > categoryAt && line.startsWith('- '));
+	// First LINE of the bullet only: a phrase spanning the wrap would not match
+	// the rendered HTML, where the newline is preserved inside the text node.
+	const phrase = lines[bulletAt]
+		.replace(/^- /, '')
+		.replace(/[*`]/g, '')
+		.split(/\s+/)
+		.slice(0, 5)
+		.join(' ');
+
+	return { version, phrase };
+}
+
 /** Every built client-side JS chunk, concatenated. */
 function clientBundle(): string {
 	const chunks: string[] = [];
@@ -108,9 +156,40 @@ describe('production build', () => {
 		expect(existsSync(STATIC)).toBe(true);
 	});
 
-	it('prerenders the landing page and the docs root to static HTML', () => {
+	it('prerenders the landing page, the docs root, and What’s new to static HTML', () => {
 		expect(existsSync(path.join(STATIC, 'index.html'))).toBe(true);
 		expect(existsSync(path.join(STATIC, 'docs.html'))).toBe(true);
+		expect(existsSync(path.join(STATIC, 'whats-new.html'))).toBe(true);
+	});
+
+	// A page that renders its frame with no data is the failure the changelog
+	// gate exists to prevent, and it would satisfy any "the file exists" check.
+	// Both assertions below name content that can only come from a real
+	// CHANGELOG.md, re-derived independently by `newestRelease`.
+	it('renders real changelog content on /whats-new, not an empty frame', () => {
+		const html = readFileSync(path.join(STATIC, 'whats-new.html'), 'utf8');
+		const text = visibleText(html);
+		for (const tool of TOOLS) {
+			const { version, phrase } = newestRelease(tool.name);
+			expect(html, `${tool.name} has no section anchor`).toContain(`id="${tool.name}"`);
+			expect(text, `${tool.name} is missing version ${version}`).toContain(version);
+			expect(text, `${tool.name} is missing its newest item`).toContain(phrase);
+			expect(html, `${tool.name} does not link its changelog`).toContain(
+				`/blob/main/crates/${tool.name}/CHANGELOG.md`
+			);
+		}
+	});
+
+	it('renders the What’s new strip on every landing-page card, with real items', () => {
+		const text = visibleText(landingPage);
+		for (const tool of TOOLS) {
+			const { version, phrase } = newestRelease(tool.name);
+			expect(landingPage, `${tool.name} card has no All-changes link`).toContain(
+				`href="/whats-new#${tool.name}"`
+			);
+			expect(text, `${tool.name} strip is missing version ${version}`).toContain(version);
+			expect(text, `${tool.name} strip is missing its newest item`).toContain(phrase);
+		}
 	});
 
 	it('prerenders exactly the manifest, one file per PAGE row', () => {

@@ -8,6 +8,16 @@
 		STABLE_SET
 	} from '$lib/site';
 
+	let { data } = $props();
+
+	/**
+	 * The strip is keyed by crate name rather than zipped by index so the card
+	 * loop cannot silently pair a crate with another crate's release. Every
+	 * flagship always has one: `$lib/changelog/site` fails the build otherwise,
+	 * so the `{#if}` below satisfies the type, it is not a fallback.
+	 */
+	const strips = $derived(new Map(data.strips.map((strip) => [strip.name, strip])));
+
 	const description =
 		'trusty-tools is one Cargo workspace for the trusty-* ecosystem: hybrid code search, a memory palace, and a code-analysis sidecar, each with an MCP server.';
 </script>
@@ -96,7 +106,10 @@
 						</li>
 					{/each}
 				</ul>
-				<p class="mt-6 pt-2">
+				<!-- `mt-auto`: the pitch bullets vary in length, so the link and the
+				     strip below it are pinned to the card's foot and stay aligned
+				     across the grid row. -->
+				<p class="mt-auto pt-6">
 					<a
 						href="/tools/{flagship.slug}"
 						class="font-mono text-xs uppercase tracking-wider text-foundry-primary"
@@ -104,6 +117,49 @@
 						{flagship.name} →
 					</a>
 				</p>
+
+				{#if strips.get(flagship.name)}
+					{@const strip = strips.get(flagship.name)!}
+					<!-- What's new: build-time derived from the crate's own CHANGELOG.md,
+					     newest release only. -->
+					<div class="mt-4 border-t border-foundry-border pt-4">
+						<p
+							class="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.18em] text-foundry-secondary"
+						>
+							<span>What’s new</span>
+							<span aria-hidden="true" class="h-px flex-1 bg-foundry-border"></span>
+						</p>
+						<p class="mt-2 font-mono text-xs text-foundry-text">
+							{strip.version}{#if strip.date && strip.date !== strip.version}<span
+									class="text-foundry-secondary"
+								>
+									· {strip.date}</span
+								>{/if}
+						</p>
+						<ul class="mt-2 space-y-1.5">
+							{#each strip.items as item, index (index)}
+								<li class="flex gap-2 text-xs leading-snug text-foundry-secondary">
+									<span
+										class="mt-px shrink-0 font-mono text-[10px] uppercase tracking-wider text-foundry-primary"
+									>
+										{item.category}
+									</span>
+									<!-- Two-line clamp, not a substring: cutting the string would
+									     land mid-word and mid-markup. -->
+									<span class="line-clamp-2 min-w-0">{item.text}</span>
+								</li>
+							{/each}
+						</ul>
+						<p class="mt-3">
+							<a
+								href="/whats-new#{flagship.name}"
+								class="font-mono text-xs uppercase tracking-wider text-foundry-primary"
+							>
+								All changes →
+							</a>
+						</p>
+					</div>
+				{/if}
 			</article>
 		{/each}
 	</div>
