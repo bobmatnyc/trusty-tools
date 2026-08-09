@@ -2339,11 +2339,36 @@ fn rust_symbol_paths_are_not_flagged() {
 ///
 /// ```text
 ///                     origin/main   first cut   round-1 fix   now
+///   chunk width 2         355          ~355          355       355
 ///   chunk width 4         355          4629          366       366
 ///   chunk width 6         355          3282          732       732
 ///   chunk width 8         355          2521         1273      1273
 ///   chunk width 11        355           ————          355       392
 /// ```
+///
+/// Width 2 reads flat across every column, which is the point of carrying it:
+/// it is not a measurement of this PR, it is an alarm for the two-character arm
+/// [`is_symbol_path_segment`] applies below [`SYMBOL_SEGMENT_SHORT_WORD_LEN`].
+///
+/// The two rows catch DIFFERENT widenings of that arm, which is why both are
+/// here. Measured by mutating the arm and re-running this test:
+///
+/// ```text
+///   arm widened to...          width 2 misses   width 11 misses
+///   any-alphabetic (`Ab`)         under 500           417
+///   accept unconditionally         20000             (n/a)
+/// ```
+///
+/// Relaxing single-case to any-alphabetic does NOT blow up width 2 — every one
+/// of the twelve 2-character segments must still be alphabetic, and a base64url
+/// character is alphabetic only 52/64 of the time, so the token still usually
+/// fails. Width 11 is what catches that widening, at 417 over its 400 ceiling.
+/// Dropping the charset check entirely is what width 2 catches, and it catches
+/// it total: 20000 of 20000.
+///
+/// A third tripwire covers the same ground from another direction — the
+/// `std::rc::Rc::downgrade2` assertion at the end of this test, which names the
+/// cause in its message.
 ///
 /// Width 8 is the worst case, confirmed by sweeping widths 2-12. Width 11 is the
 /// one place review round 2's sub-word-length arm costs anything: 24 characters
@@ -2404,7 +2429,22 @@ fn symbol_path_keyhole_does_not_shelter_credentials() {
     // costs anything — 355 -> 392. Widths 10 and 12 leave no 2-char remainder and
     // are unchanged, which is what identifies the arm as the cause.
     const CHUNK_N: usize = 20_000;
-    for (chunk, ceiling) in [(4usize, 500usize), (6, 900), (8, 1400), (11, 450)] {
+    for (chunk, ceiling) in [
+        // Width 2 catches the two-character arm losing its charset check
+        // entirely: every segment is 2 chars, so an unconditional accept takes
+        // this row to 20000 of 20000. A milder widening (any-alphabetic) leaves
+        // it under 500 — width 11 is what catches that one. See the doc above.
+        (2usize, 500usize),
+        (4, 500),
+        (6, 900),
+        // Width 8 is the swept worst case across widths 2-12.
+        (8, 1400),
+        // Width 11 chunks to 11/11/2 — the only width whose remainder reaches
+        // the two-character arm. Ceiling 400 sits between the arm's current cost
+        // (392) and its unconditional-accept maximum (448), so this row can
+        // actually fire. The 450 it replaces was above that maximum: inert.
+        (11, 400),
+    ] {
         let mut rng = Xorshift(SEED);
         let alphabet = b64_alphabet(true);
         let mut buf = vec![0u8; 18];
@@ -2441,13 +2481,16 @@ fn symbol_path_keyhole_does_not_shelter_credentials() {
     // Review round 2, the accepted residue of the sub-word-length arm. A
     // two-character segment must be single-case ALPHABETIC, so `Rc` —
     // Capitalized — does not qualify and `std::rc::Rc::downgrade2` stays
-    // flagged. Admitting Capitalized here would admit `Ab`/`Cd`, which is the
-    // chunk-width-2 encoder shape the row above measures. Pinned so the trade is
-    // visible rather than rediscovered.
+    // flagged. This is the tripwire for the mildest widening of that arm, the
+    // one the chunk rows are least sensitive to: relaxing single-case to
+    // any-alphabetic moves width 11 by 25 and width 2 not at all, but flips this
+    // assertion outright. Pinned so the trade is visible rather than
+    // rediscovered.
     assert!(
         find_secret_token("std::rc::Rc::downgrade2").is_some(),
         "#5043: this is a KNOWN ACCEPTED BOUND, not a target. If it now stores \
-         clean, the two-character arm was widened to Capitalized — re-measure \
-         the chunk-width-2 row before accepting that."
+         clean, the two-character arm was widened to admit Capitalized — check \
+         the chunk-width-11 row above for what that costs, and note the \
+         chunk-width-2 row will NOT have caught it."
     );
 }
