@@ -1,0 +1,75 @@
+# 0037. A session's placement is decided by explicit request, never by project config — the PM defaults to the main checkout
+
+- **Status:** Accepted
+- **Date:** 2026-08-09
+- **Scope:** crate `trusty-mpm` (`spawn_managed_routed`, `provision_for_launch`/`provision`, `spawn_managed_on_main`), with the narrowed meaning of the per-project `worktree` flag propagating to its resolver family (`project::worktree_enabled_for_project` and friends) and `tm-workflow`/`tm-delegation-patterns` guidance for agent dispatch
+- **Reversibility Cost:** Medium — the branch point is a single boolean read (`SpawnParams::worktree`) at one call site, but every registered project's operator expectations, the `tm launch` CLI help text, and this workspace's own `worktree: true` registration are all written against the current precedence
+- **Decision Drivers:** owner ruling of 2026-08-09 (verbatim below); the wasted-disk-space complaint in #3455; the silent-relocation defect a machine-global config setting produced when it decided session placement; PR #5274
+- **Supersedes / Superseded by:** none. Fills a gap ADR-0036 left open — see "Related Decisions" below.
+
+## Context
+
+**ADR-0036 decided worktree topology, not session placement, and says so explicitly.** ADR-0036 answers where worktrees LIVE — flat siblings under `.claude/worktrees/` — and nothing about which agent gets one. Before this decision, one commit (`adf4faf7`, superseded by PR #5274) attributed a change in default PM placement to ADR-0036 anyway. It does not decide that question; the attribution was wrong, and PR #5274 dropped it. The four-case placement contract below existed only in that PR's body until now.
+
+**The prior default silently relocated sessions via project config.** Before #5274, whether a PM session ran on the main checkout or in a per-session worktree was decided by the SAME `worktree` flag that governs agent isolation (`.trusty-mpm.toml`, falling back to the daemon's project registry). A registered `worktree: true` project — the common case, 31 of 33 registered projects at the time — meant every session on that project provisioned a worktree, whether or not the operator asked for one. This is what made the flag double duty: a value chosen for agent isolation reached into a completely different decision, session placement, and could not be overridden per-launch.
+
+**Owner ruling, verbatim:** "`worktree: false` means that the entire project works on the main checkout, more typical for writing projects." The ruling reframes what the `worktree` flag is for going forward: it narrows to agent isolation only, and session placement stops consulting it.
+
+## Decision
+
+We will decide a session's placement by exactly one branch, consulted in this order:
+
+1. **An explicit user request wins.** `tm launch --worktree` (CLI) or `"worktree": true` on the launch request (`SpawnRequest.worktree`, threaded to `SpawnParams.worktree`) provisions a per-session worktree. Absent that request, `SpawnRequest.worktree` defaults to `false` via `#[serde(default)]` — an absent key means the main checkout, and `"worktree": null` is a 400, the same rule `deliverable_id`, `force_new`, and `background` already follow.
+2. **Otherwise, the PM runs on the project's main checkout — full stop.** No project config layer is consulted. `spawn_managed_routed` (`crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs:386`) gates the main-checkout branch behind `is_local_workdir(&params.repo_url)` alone, then reads `params.worktree` alone (line 413) — never the project registry's `worktree` flag. `provision_for_launch` (the `tm launch` CLI's in-process equivalent) carries no registry-directory parameter at all, so it cannot reach the registry even in principle; it takes the launch-time request as a parameter instead.
+
+**The per-project `worktree` flag survives, narrowed.** It still governs exactly one thing: whether the AGENTS a session dispatches get their own isolated worktree (`project::worktree_enabled_for_project` and its resolver family, untouched from `origin/main`). It has no vote in where the session itself runs.
+
+**The four-case contract this produces:**
+
+| Session/agent | Project `worktree` flag | Launch-time request | Placement |
+|---|---|---|---|
+| PM session | `true` | none | main checkout |
+| PM session | `false` | none | main checkout |
+| PM session | (any) | explicit `--worktree` / `"worktree": true` | worktree |
+| Dispatched agent | `true` | — | its own worktree (unaffected by this decision) |
+
+Rows 1 and 2 resolving identically is the substance of the decision: placement does not consult the project at all, rather than consulting it and usually agreeing with the no-request default anyway.
+
+`trusty-tools` itself stays registered `worktree: true`. The 2026-08-08 ruling that set it is not superseded by this decision — it was always an agent-isolation setting, and this decision is the first time that scope is made explicit rather than assumed.
+
+## Consequences
+
+### Positive
+
+- **The prior silent-relocation defect cannot recur.** A project's registry entry can no longer move a session an operator did not ask to isolate. The one place placement is decided (`SpawnParams::worktree`) has exactly one input: the launch-time request.
+- **The wasted-disk-space complaint (#3455) is closed by default, not by opt-out.** Before this decision, a registered `worktree: true` project (the common case) created a worktree at unused-space cost on every session. After it, no worktree is created unless requested — #3455's complaint is now the default behavior, not something a project has to opt out of.
+- **One rule, two callers.** `spawn_managed_routed` (daemon path) and `provision_for_launch` (CLI path, used when `tm launch` runs the whole flow in-process without asking the daemon) reach the identical answer because both take the request as an explicit parameter rather than reading the registry independently — they cannot drift into disagreeing about placement the way two independent registry reads could.
+
+### Negative / Trade-offs
+
+- **A remote repo URL looks like a regression to a future reader, and is not one.** `is_local_workdir` (`lifecycle.rs:837`) requires `params.repo_url` to be an absolute, existing, on-host directory. Passing a REMOTE repo URL (`https://…`, `git@…`, or any relative/non-existent path) never reaches the main-checkout branch at all — it falls through to the existing clone-based provisioning and returns a `.worktrees/<uuid>` path exactly as before this decision. A reader who sees a worktree path returned despite this ADR's "PM defaults to the main checkout" rule should check whether `params.repo_url` was local before concluding the rule was violated; it was not — the rule only ever applied to local-workdir spawns.
+- **Spawning onto the main checkout deploys framework state into it.** `spawn_managed_on_main` is "a normal managed session in every other respect — agents/skills deployed, project hooks written, tracked in the session manager, front-gated, reconnectable" (`launch_on_main.rs`); `ensure_deployment_complete` runs `validate_and_repair` against the workspace exactly as it would against a worktree. On the default (no-request) path, "the workspace" is now the operator's own live checkout: a session's first launch there writes the full bundled-skill catalog, refreshes `.claude/`, and writes `TASK.md` into a directory the operator edits directly. This is the intended behavior — the same deployment a worktree session gets, just landing in the main checkout instead — but it is a real operational consequence for anyone who did not expect `tm launch`, with no flags, to touch their working tree's `.claude/` directory.
+- **`launch_on_main::worktree_isolated`, the resolver that used to feed this decision, is deleted.** Its only caller was the old registry-consulting branch. The resolver family it wrapped (`project::worktree_enabled_for_project` and friends) is untouched — it still answers the agent-isolation question — but nothing in the session-placement path calls it anymore.
+- **#1724 needed a specific composition to survive, not a blanket exemption.** Bare `tm`, with the daemon down, must still never write framework files into a checkout it was not told it could. `provision_for_fallback` is unchanged and still reads `worktree_enabled_for_origin_at` — deliberately, because it answers a different question than this decision does: may the daemon-unreachable guided fallback deploy `CLAUDE.md`/`.mcp.json`/`.claude/` into whatever checkout the operator is standing in? A registered `worktree: false` project is the project telling the fallback yes; nothing else is. The two paths compose rather than conflict: the fallback provisions its own protected worktree first and then calls `launch()` with THAT worktree as `cwd`, so `find_git_root` resolves inside it and `provision_for_launch`'s `MainCheckout` names the already-protected directory — never the operator's live checkout by accident. `provision_for_launch_from_subdirectory_targets_repo_root` and the `tests_behavior_b` cases pin this composition.
+
+### Neutral / Follow-up work
+
+- `docs/reference/worktree-discipline.md`, `CLAUDE.md`'s "Parallel Worktree Discipline" section, and the bundled `tm-workflow`/`tm-delegation-patterns` skills describe worktree provisioning; none was updated by this ADR. Same deliberate deferral ADR-0036 records for the same files — they are under concurrent edit elsewhere and should change when their prose is next touched, not preemptively.
+- Whether a first main-checkout deployment should warn the operator before writing framework files into a live checkout (as opposed to a `--worktree`-requested, throwaway one) is not decided here.
+
+## Alternatives Considered
+
+- **Keep the project registry as the placement authority, add a per-launch override on top.** Rejected. This is closer to the pre-#5274 shape with an escape hatch bolted on; it keeps two authorities (registry AND launch request) that can disagree, and the disagreeing case — a `worktree: true` project with no launch request — is exactly the silent-relocation defect this decision exists to remove. A single input with no secondary authority is what makes rows 1 and 2 of the contract provably identical rather than usually identical.
+- **Default to a worktree, require an explicit opt-out for the main checkout.** Rejected by the owner ruling itself. The ruling states the main checkout is the default for "writing projects," not an exception; defaulting to a worktree would restore #3455's wasted-disk-space complaint as the common case rather than closing it.
+- **Extend `SpawnRequest.worktree` to the MCP `session_new` / `sm.sessions.launch` surfaces.** Rejected, following `deliverable_id`'s precedent: both are automated callers, not a person choosing isolation for a specific launch, so both keep passing `worktree: false` and the CLI (`tm launch --worktree`) stays the one human-facing entry point for the override.
+
+## Related Decisions
+
+Vetted against prior ADRs (`docs/adr/INDEX.md`) on 2026-08-09:
+
+- **ADR-0036 (All worktrees are siblings under `.claude/worktrees/`; ownership tracking is unchanged):** **Consistent, and fills a gap it left open.** ADR-0036 decides worktree TOPOLOGY — where a worktree lives once one is created — and explicitly does not decide where a PM session runs; a prior commit's attribution of session-placement default to ADR-0036 was incorrect and was dropped by PR #5274. This ADR is the record ADR-0036 never claimed to be. No overlap in subject matter: this decision governs a Rust `bool` branch upstream of worktree creation; ADR-0036 governs the path a worktree gets once that branch chooses "worktree."
+- **ADR-0030 (A session owns many workstreams and lives in the tm checkout, Proposed):** **Consistent, and this decision is the concrete mechanism for one of its points.** ADR-0030 point 8 already states "the `worktree: false` override already exists and is not re-designed here; only its shape changes, from a per-project config key to a per-session-overridable flag targeting the tm checkout (DOC-66 §3.5)" — this ADR is that shape change, landed and recorded. ADR-0030 point 7 (agent worktrees are children of a workstream "by record, not by location," via `parent_workstream_id`, never by directory containment) is untouched by this decision: this ADR governs PM session placement, not agent-worktree parentage, and the two are orthogonal — an agent dispatched from a main-checkout PM session is still a recorded child of that session's workstream, wherever its own worktree lands.
+- **ADR-0020 (Session-owned worktrees: ownership registry + owner-gated reclamation) / ADR-0023 (Worktree authority split):** **Consistent, no interaction.** Both govern how an EXISTING worktree is owned and reclaimed once created. This decision governs whether one is created at all for a given session. A main-checkout session under this decision creates no sentinel and enters neither ADR's bookkeeping, which is correct: `spawn_managed_on_main` sets `workspace_owned = false` specifically so decommission never treats the operator's own checkout as a worktree to reclaim (verified in `launch_on_main.rs`'s doc comment: `decommission_with_root` only removes a `workspace_owned = false` path when `is_session_worktree` recognises it as living under `.worktrees/`, which a main checkout never does).
+- **DOC-66 (Session/workstream model) §5:** **Consistent, no interaction.** §5 encodes agent-worktree parentage as a recorded `parent_workstream_id`, never path containment — the same point ADR-0030's point 7 makes. This decision does not touch §5's mechanism; a workstream anchored in a main-checkout session still records parentage for any agent worktree it dispatches, by the same field.
+
+No conflict with any Accepted or Proposed ADR.
