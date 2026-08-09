@@ -1329,3 +1329,44 @@ async fn stale_assets_for_many_keeps_per_session_verdicts_correct_under_concurre
         );
     }
 }
+
+/// The `worktree` spawn request survives the wire in all three shapes (#5274).
+///
+/// Why: `SpawnRequest::worktree` is the ONLY way a person's "give this session
+/// its own worktree" reaches the daemon — `tm launch --worktree` posts it and
+/// nothing else does. A dropped `#[serde(default)]`, a rename, or an
+/// `Option<bool>` would each fail silently in a different direction: the first
+/// makes every existing client's body a 400, the second makes the flag a no-op,
+/// the third makes `"worktree": null` mean main-checkout instead of rejecting a
+/// malformed body. None of those is visible from a behaviour test, so the wire
+/// shape is pinned here directly.
+/// What: deserializes three bodies — key absent, `true`, and `null` — and
+/// asserts `false` / `true` / a parse error respectively. The `null` case is the
+/// deliberate consequence of a plain `bool` over `Option<bool>`, the same choice
+/// `force_new` and `background` make and for the same reason.
+/// Test: itself.
+#[test]
+fn spawn_request_worktree_wire_shape() {
+    let base = r#"{"repo_url":"https://github.invalid/o/r","ref":"main","task":"t""#;
+
+    let absent: super::SpawnRequest = serde_json::from_str(&format!("{base}}}")).expect("absent");
+    assert!(
+        !absent.worktree,
+        "#5274: a body with no `worktree` key must mean the main checkout, so \
+         every pre-existing client keeps working unchanged"
+    );
+
+    let asked: super::SpawnRequest =
+        serde_json::from_str(&format!(r#"{base},"worktree":true}}"#)).expect("true");
+    assert!(
+        asked.worktree,
+        "#5274: `\"worktree\": true` must arrive as an explicit worktree request"
+    );
+
+    assert!(
+        serde_json::from_str::<super::SpawnRequest>(&format!(r#"{base},"worktree":null}}"#))
+            .is_err(),
+        "an explicit null is a malformed body, not a tolerated `false` — same \
+         rule as `force_new` and `background`"
+    );
+}

@@ -465,3 +465,68 @@ async fn worktree_clone_branch_resolves_without_a_project_dir() {
         "a non-existent project dir must fall through to the registry"
     );
 }
+
+/// Contract row 4 — AGENT isolation survives #5274 intact on a `worktree: true`
+/// project, whether that `true` is explicit or the built-in default.
+///
+/// Why: #5274 took PM SESSION PLACEMENT away from this resolver family, and the
+/// first attempt at that change took agent isolation with it — it flipped
+/// `Project::worktree_enabled` and `worktree_enabled_in` from `unwrap_or(true)`
+/// to `unwrap_or(false)`, which silently disabled agent worktrees on every one
+/// of the 31-of-33 registered projects carrying no explicit key. CI caught one
+/// consequence (`patch_round_trips_worktree_opt_out`); nothing asserted the
+/// rule itself. The owner ruling keeps the flag with a specific meaning —
+/// "`worktree: false` means that the entire project works on the main
+/// checkout" — so `true`, however it is reached, must still mean the agents
+/// this project dispatches are isolated.
+/// What: drives [`worktree_enabled_for_project`], the resolver an
+/// agent-isolation consumer reads, across both routes to `true` — an explicit
+/// `worktree: true` registration, and a project the registry has never heard of
+/// — and asserts both resolve isolation ON. The third assertion pins that
+/// `false` is still reachable, so a resolver hard-wired to `true` fails here
+/// too rather than passing the first two by accident.
+/// Test: itself. RED on the reverted `adf4faf76` default flip: assertions 1 and
+/// 2 both fail.
+#[tokio::test]
+async fn agent_isolation_stays_enabled_for_a_worktree_true_project() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry
+        .register(project(
+            "isolated",
+            "https://github.com/acme/isolated",
+            Some(true),
+        ))
+        .await
+        .expect("register");
+    registry
+        .register(project(
+            "on-main",
+            "https://github.com/acme/on-main",
+            Some(false),
+        ))
+        .await
+        .expect("register");
+
+    // No `.trusty-mpm.toml` anywhere here: this asserts the registry + built-in
+    // layers, which are the two the flip broke.
+    let proj = tempfile::TempDir::new().expect("tempdir");
+
+    assert!(
+        worktree_enabled_for_project(proj.path(), &registry, "https://github.com/acme/isolated")
+            .await,
+        "#5274 row 4: an explicit `worktree: true` must keep agent isolation ON"
+    );
+    assert!(
+        worktree_enabled_for_project(proj.path(), &registry, "https://github.com/acme/unheard-of")
+            .await,
+        "#5274 row 4: a project with no registry entry must default to agent \
+         isolation ON — flipping this default is the defect this test guards"
+    );
+    assert!(
+        !worktree_enabled_for_project(proj.path(), &registry, "https://github.com/acme/on-main")
+            .await,
+        "`worktree: false` must still reach the main-checkout answer, or the two \
+         assertions above would pass for a resolver hard-wired to `true`"
+    );
+}

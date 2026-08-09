@@ -148,6 +148,32 @@ pub struct SpawnParams {
     /// `session_new`, the SM-STDIO adapter, the chat surfaces — keep
     /// reconnecting) preserves #1707.
     pub force_new: bool,
+    /// Whether the CALLER EXPLICITLY ASKED for a per-session git worktree (#5274).
+    ///
+    /// Why: a PM session runs on the project's main checkout, and the project's
+    /// `worktree` flag cannot change that — that flag governs whether the AGENTS
+    /// a PM dispatches get isolated, which is a different question with a
+    /// different answer (owner ruling, 2026-08-09: "`worktree: false` means that
+    /// the entire project works on the main checkout"). Placement therefore needs
+    /// an input that only a person can supply, and this is it: a launch-time
+    /// request carried from `tm launch --worktree` / a `"worktree": true` HTTP
+    /// spawn body down to [`spawn_managed_routed`]'s branch point. Reading the
+    /// registry there instead is the defect this field exists to prevent — it
+    /// would let a machine-global config decide where a human's session runs.
+    /// What: `true` provisions the per-session worktree (the pre-#5274 in-project
+    /// behaviour); `false` — the default for every programmatic caller — spawns
+    /// on the main checkout via
+    /// [`super::launch_on_main::spawn_managed_on_main`]. Only the in-project
+    /// branch reads it; a remote `repo_url` has no main checkout to sit on and
+    /// still clones.
+    /// Test: `super::tests::spawn_request_worktree_wire_shape` pins the wire
+    /// shape this field is fed from; the placement behaviour it selects is
+    /// covered on the CLI twin of the same rule by
+    /// `provision_for_launch_ignores_a_registered_worktree_true_project`,
+    /// `provision_for_launch_without_a_request_uses_the_main_checkout`, and
+    /// `provision_for_launch_explicit_request_creates_worktree` in
+    /// `bin/tm/commands/managed_workspace_tests.rs`.
+    pub worktree: bool,
 }
 
 /// Spawn a managed session, shared by the HTTP handler and the MCP tool.
@@ -365,26 +391,31 @@ async fn spawn_managed_routed(
         // through to the existing local-path spawn.
         let local_path = std::path::Path::new(&params.repo_url);
 
-        // #3455 "launch on main" opt-out: checked BEFORE `try_inproject_spawn`
-        // (which would otherwise establish a base clone as a side effect even
-        // when it's never going to be used) so a project with worktree
-        // isolation disabled never gets a base clone OR a worktree at all —
-        // the exact wasted-disk-space complaint the issue raises. Only a
-        // GitHub-remote-having local checkout can match a registered project
-        // (mirrors `try_inproject_spawn`'s own detection).
+        // #5274: a PM session runs on the project's main checkout. Decided
+        // BEFORE `try_inproject_spawn` (which would otherwise establish a base
+        // clone as a side effect even when it's never going to be used) so the
+        // default placement creates neither a base clone NOR a worktree — the
+        // wasted-disk-space complaint #3455 raised, now the common case rather
+        // than an opt-out. Only a GitHub-remote-having local checkout can reach
+        // `spawn_managed_on_main` (it needs `owner`/`repo` for the source id),
+        // which mirrors `try_inproject_spawn`'s own detection.
         if let Some(origin_url) = super::inproject::get_origin_url(local_path)
             && let Some(gh) = trusty_common::github_path::parse_github_path(&origin_url)
         {
-            // #5207: the project dir is already resolved here, so this branch
-            // consults the project's own committed `.trusty-mpm.toml` ABOVE the
-            // machine-global registry. The clone-based branch below has no
-            // project dir yet and keeps using the registry-only entry point.
-            if !super::launch_on_main::worktree_isolated(state, local_path, &origin_url).await {
+            // #5274: `params.worktree` is the ONLY input here, and that is the
+            // point. The project's `worktree` flag (`.trusty-mpm.toml`, then the
+            // registry — `project::worktree_enabled_for_project`) governs whether
+            // the AGENTS this session dispatches get isolated; it does not decide
+            // where the session itself runs. Consulting it here is what let a
+            // machine-global config silently relocate a human's session, so the
+            // branch reads the launch-time request instead — see
+            // `SpawnParams::worktree`.
+            if !params.worktree {
                 info!(
                     id = %session_id,
                     path = %local_path.display(),
-                    "spawn_managed: project has worktree isolation disabled (#3455); \
-                     launching directly in the main checkout"
+                    "spawn_managed: no explicit worktree request (#5274); \
+                     launching the session in the main checkout"
                 );
                 // Same reconnect pre-flight the worktree branch runs below
                 // (#1707 + `force_new` opt-out, #2450): a live session for

@@ -78,6 +78,9 @@ fn base_params(repo_url: &str, mcp_initiated: bool) -> SpawnParams {
         inject_task: None,
         deliverable_id: None,
         force_new: false,
+        // #5274: the gate runs before any placement decision, so these cases
+        // are indifferent to it; `false` is the default every caller gets.
+        worktree: false,
     }
 }
 

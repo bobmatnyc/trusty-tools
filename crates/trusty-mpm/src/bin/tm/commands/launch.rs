@@ -92,13 +92,19 @@ impl Drop for LaunchSessionGuard {
 /// session with the daemon, prints the banner, creates a detached tmux session
 /// running `claude` in the managed clone, and `attach`es to it. Errors with a
 /// `tm connect` hint when the directory has no parseable GitHub remote.
+///
+/// #5274: `worktree` is the operator's explicit request for isolation
+/// (`tm launch --worktree`). Without it the session runs in the project's own
+/// checkout and no clone is made — the sentence above about the live checkout
+/// never being touched describes the `--worktree` branch only.
 /// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`,
-/// `cli_parses_launch_with_style`.
+/// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`.
 pub(crate) async fn launch(
     client: &reqwest::Client,
     url: &str,
     dir: Option<String>,
     style: Option<String>,
+    worktree: bool,
 ) -> anyhow::Result<()> {
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
@@ -166,20 +172,22 @@ pub(crate) async fn launch(
     //    via the daemon's `spawn_managed_inproject` path — both converge on the
     //    SAME base clone at `~/trusty-mpm-projects/<owner>/<repo>/` and the SAME
     //    per-session worktree at `<base>/.worktrees/<session-id>/`.
-    //    #4300: `provision_for_launch` consults the per-project `worktree`
-    //    opt-out (#3455) FIRST — a project registered with `worktree: false`
-    //    gets neither a base clone nor a worktree here, exactly as the daemon's
-    //    `spawn_managed_on_main` gives it neither. It also resolves the repo
-    //    ROOT of `live_path` (so `tm launch` from a subdirectory of an
-    //    opted-out project deploys to the project, not the subdirectory) and
-    //    owns the uncommitted-changes notice, which only applies when there
-    //    IS a clone.
+    //    #5274: the base clone and worktree are provisioned ONLY when the
+    //    operator passed `--worktree`. Without it the session runs in the
+    //    project's main checkout, matching what the daemon's
+    //    `spawn_managed_routed` does for a spawn carrying no worktree request —
+    //    the project's `worktree` flag is deliberately not consulted here, since
+    //    it governs agent isolation rather than session placement.
+    //    `provision_for_launch` also resolves the repo ROOT of `live_path` (so
+    //    `tm launch` from a subdirectory deploys to the project, not the
+    //    subdirectory) and owns the uncommitted-changes notice, which only
+    //    applies when there IS a clone.
     let session_uuid = trusty_mpm::session_manager::ManagedSessionId::new();
     let workspace = super::managed_workspace::provision_for_launch(
-        &trusty_mpm::project::registry_data_dir(),
         &origin_url,
         &project_dir,
         &live_path,
+        worktree,
         &session_uuid,
     )
     .await?;

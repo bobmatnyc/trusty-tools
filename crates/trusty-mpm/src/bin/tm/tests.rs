@@ -610,9 +610,14 @@ fn cli_meta_requires_action() {
 fn cli_parses_launch() {
     let cli = Cli::try_parse_from(["trusty-mpm", "launch"]).unwrap();
     match cli.command.unwrap() {
-        Command::Launch { dir, style } => {
+        Command::Launch {
+            dir,
+            style,
+            worktree,
+        } => {
             assert_eq!(dir, None);
             assert_eq!(style, None);
+            assert!(!worktree, "#5274: a bare `tm launch` requests no worktree");
         }
         other => panic!("expected launch, got {other:?}"),
     }
@@ -622,9 +627,14 @@ fn cli_parses_launch() {
 fn cli_parses_launch_with_dir() {
     let cli = Cli::try_parse_from(["trusty-mpm", "launch", "/work/p"]).unwrap();
     match cli.command.unwrap() {
-        Command::Launch { dir, style } => {
+        Command::Launch {
+            dir,
+            style,
+            worktree,
+        } => {
             assert_eq!(dir.as_deref(), Some("/work/p"));
             assert_eq!(style, None);
+            assert!(!worktree);
         }
         other => panic!("expected launch, got {other:?}"),
     }
@@ -636,9 +646,46 @@ fn cli_parses_launch_with_style() {
     let cli =
         Cli::try_parse_from(["trusty-mpm", "launch", "--style", "trusty-mpm-teacher"]).unwrap();
     match cli.command.unwrap() {
-        Command::Launch { dir, style } => {
+        Command::Launch {
+            dir,
+            style,
+            worktree,
+        } => {
             assert_eq!(dir, None);
             assert_eq!(style.as_deref(), Some("trusty-mpm-teacher"));
+            assert!(!worktree);
+        }
+        other => panic!("expected launch, got {other:?}"),
+    }
+}
+
+/// `tm launch --worktree` must reach the parser as a real, distinct request
+/// (#5274 — contract row 3).
+///
+/// Why: rule 2 of the #5274 placement contract says an EXPLICIT user request
+/// can put a session in a worktree, and rule 1 says nothing else can. That only
+/// holds if such a request is expressible at launch time. Without this flag the
+/// contract's third row has no way to be entered at all, and the earlier attempt
+/// at this change reached for a `const fn` that no user could override.
+/// What: parses `tm launch --worktree` and asserts the flag arrives `true`,
+/// while `cli_parses_launch` above pins the bare form at `false`. The pair is
+/// what makes "explicit" mean explicit rather than "always on".
+/// Test: itself.
+#[test]
+fn cli_parses_launch_with_worktree() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "launch", "--worktree"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Launch {
+            dir,
+            style,
+            worktree,
+        } => {
+            assert_eq!(dir, None);
+            assert_eq!(style, None);
+            assert!(
+                worktree,
+                "`--worktree` must surface as an explicit worktree request (#5274)"
+            );
         }
         other => panic!("expected launch, got {other:?}"),
     }

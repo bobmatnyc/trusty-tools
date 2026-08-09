@@ -88,6 +88,12 @@ pub async fn session_new(
         // duplicate — idempotent reconnect is the safe default for automated
         // callers (prevents LLM-driven session proliferation).
         force_new: false,
+        // #5274: the MCP tool surface does not expose the worktree request, the
+        // same boundary `deliverable_id` above draws — an explicit request for
+        // isolation is a person's decision, and this is the surface an LLM
+        // caller drives. An MCP-spawned session runs in the main checkout;
+        // `tm launch --worktree` is how a human asks for the other placement.
+        worktree: false,
     };
     let record = spawn_managed(
         state,
