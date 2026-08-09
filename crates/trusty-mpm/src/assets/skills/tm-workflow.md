@@ -174,12 +174,34 @@ git worktree add -b <feature-or-fix-branch> \
 cd .claude/worktrees/<dirname>
 ```
 
+Always `git fetch origin main` first and branch off `origin/main`, never local
+`main` — local `main` can be stale and branching from it has caused lost commits.
+
+**Experiments stay session-local.** Promote an experiment to a branch and
+worktree only once its result is accepted for implementation.
+
 Every subagent dispatch must name the exact worktree path it is confined to, and
 must forbid leaving it into the main checkout, `git reset --hard`,
-`git checkout .`, and `git stash` against main. Clean up after merge with
-`git worktree remove --force <path>` then `git branch -D <branch>` — the branch
-goes last, because until the squash-merge lands it is the only durable copy of
-the workstream.
+`git checkout .`, and `git stash` against main. QA agents get their own worktree
+(e.g. `.claude/worktrees/qa-<ticket-or-pass>`), same as engineering agents.
+
+Clean up after merge with `git worktree remove --force <path>` (which deletes the
+worktree directory and never the main checkout), then `git branch -D <branch>`
+and, when the squash-merge did not already do it, `git push origin --delete
+<branch>` — the branch goes last, because until the squash-merge lands it is the
+only durable copy of the workstream.
+
+**Escape hatch — stash first.** If you genuinely must run one command from the
+main checkout, stash, operate, restore:
+
+```bash
+git -C /path/to/main-checkout stash push -u -m "pre-op-safety $(date +%s)"
+# … do the op …
+git -C /path/to/main-checkout stash pop
+```
+
+Surface the stash name in your report if popping fails, so a human can restore
+it manually.
 
 ## Git Security Review (Mandatory Before Push)
 

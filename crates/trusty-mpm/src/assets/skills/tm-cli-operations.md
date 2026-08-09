@@ -300,6 +300,12 @@ tm session decommission-ephemeral               # tear down all test/throwaway s
 tm session prune-worktrees [--force]            # remove orphaned .worktrees/ dirs (default dry-run)
 ```
 
+The `.worktrees/` path above is what `tm`'s own session provisioning writes
+today; it is NOT the canonical worktree home. Hand-provisioned and
+harness-provisioned worktrees live under `.claude/worktrees/` (see
+`tm-workflow`). Migrating tm's provisioning path is pending — until it lands,
+`prune-worktrees` only sees `.worktrees/`.
+
 `prune-worktrees` defaults to a safe preview (pass `--force` to act);
 `prune`/`prune-idle` act immediately unless you pass `--dry-run` yourself.
 `prune --include-active` is the only explicit override to also touch RUNNING
