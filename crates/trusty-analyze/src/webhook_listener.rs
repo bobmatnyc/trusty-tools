@@ -80,17 +80,6 @@ pub fn listener() -> anyhow::Result<WebhookListener> {
     Ok(WebhookListener::open(socket_path(), inbox_root()?)?)
 }
 
-/// Build the listener with the drain wired in.
-///
-/// # Errors
-///
-/// As [`listener`].
-///
-/// Test: `listener_with_a_processor_opens_against_a_temp_inbox`.
-pub fn draining_listener(search: TrustySearchClient) -> anyhow::Result<WebhookListener> {
-    Ok(listener()?.with_processor(Arc::new(AnalyzeProcessor::new(search))))
-}
-
 /// Bind the socket and serve until SIGTERM or SIGINT.
 ///
 /// Why: the whole body of `trusty-analyze webhook-listen`, which is what console

@@ -310,6 +310,26 @@ fn attempt_record_survives_a_reopen() {
 }
 
 #[test]
+fn attempt_record_is_removed_with_its_entry() {
+    // The sidecar outliving its entry would charge a *later* delivery that
+    // happens to reuse the path with failures it never had, and could
+    // quarantine it on its first attempt. `remove_processed` clears both.
+    let (_tmp, inbox) = inbox_with(&["d-1"]);
+    let path = entry_of(&inbox, "d-1");
+    retry::record_failure(&path, "boom", 1_000).expect("record");
+    assert!(retry::attempt_path(&path).exists(), "sidecar written");
+
+    retry::remove_processed(&path).expect("remove");
+
+    assert!(!path.exists(), "the entry is gone");
+    assert!(
+        !retry::attempt_path(&path).exists(),
+        "and its failure history goes with it"
+    );
+    assert_eq!(retry::load_attempts(&path).attempts, 0);
+}
+
+#[test]
 fn attempt_sidecar_is_not_counted_as_held_work() {
     // If the sidecar counted, one failing delivery would inflate the undrained
     // number console renders and every retry would make the backlog look worse

@@ -86,7 +86,7 @@ pub enum Disposition {
 /// defect — a permanent error retried forever pins the drain, and a transient
 /// error quarantined on the first failure needs a human for something that
 /// would have healed itself.
-/// Test: `drain_retries_a_retryable_failure`,
+/// Test: `drain_retries_a_retryable_failure_until_the_bound_then_quarantines`,
 /// `drain_quarantines_a_permanent_failure_immediately`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessFailure {
@@ -377,7 +377,8 @@ impl DrainReport {
 /// `drain_does_not_reprocess_a_delivery_marked_done`,
 /// `drain_marks_a_processed_delivery_before_removing_it`,
 /// `drain_keeps_an_entry_whose_processor_failed`,
-/// `drain_quarantines_an_entry_that_is_out_of_retries`,
+/// `drain_retries_a_retryable_failure_until_the_bound_then_quarantines`,
+/// `drain_quarantines_an_entry_whose_attempt_budget_was_already_spent`,
 /// `drain_quarantines_a_permanent_failure_immediately`,
 /// `drain_does_not_double_process_a_claimed_entry`,
 /// `drain_report_accounts_for_every_scanned_entry`,
