@@ -291,6 +291,26 @@ describe('links and metavariables inside an item', () => {
 		);
 	});
 
+	it('leaves an http:// URL alone', () => {
+		const { releases, failures } = withProbe(item('see [x](http://example.com/a)'), []);
+		expect(failures).toEqual([]);
+		expect(releases[0].categories[0].items[0].html).toContain('href="http://example.com/a"');
+	});
+
+	it('fails the build on a javascript: link, the same as any other bad link', () => {
+		const { failures } = withProbe(item('[click me](javascript:alert(1))'), []);
+		expect(failures).toHaveLength(1);
+		expect(failures[0].code).toBe('CHANGELOG-BAD-LINK');
+		expect(failures[0].problem).toContain('javascript:');
+	});
+
+	it('fails the build on a file:// link', () => {
+		const { failures } = withProbe(item('[passwd](file:///etc/passwd)'), []);
+		expect(failures).toHaveLength(1);
+		expect(failures[0].code).toBe('CHANGELOG-BAD-LINK');
+		expect(failures[0].problem).toContain('file:');
+	});
+
 	// `<path>` outside backticks parses as an unknown element and renders as
 	// NOTHING. Eight of these sit in the corpus, and a changelog is history
 	// this site must not edit — so the text is recovered, never dropped.

@@ -44,14 +44,16 @@ A relative link resolves to a **site route** when its target is on the manifest,
 to a **commit-pinned GitHub permalink** when its target exists anywhere else in
 the repository, and **fails the build** otherwise.
 
-| Target                                    | Becomes                                          |
-| ----------------------------------------- | ------------------------------------------------ |
-| on the manifest                           | `/docs<route>`, fragment preserved               |
-| elsewhere in the repository — file        | `…/blob/<sha>/<path>`                            |
-| elsewhere in the repository — directory   | `…/tree/<sha>/<path>`                            |
-| `#fragment`                               | unchanged, checked against this page's headings  |
-| `other.md#fragment`                       | as above, fragment checked against `other.md`    |
-| does not exist, or outside the repository | `BROKEN-LINK` / `ESCAPES-REPO` — the build fails |
+| Target                                       | Becomes                                          |
+| -------------------------------------------- | ------------------------------------------------ |
+| on the manifest                              | `/docs<route>`, fragment preserved               |
+| elsewhere in the repository — file           | `…/blob/<sha>/<path>`                            |
+| elsewhere in the repository — directory      | `…/tree/<sha>/<path>`                            |
+| `#fragment`                                  | unchanged, checked against this page's headings  |
+| `other.md#fragment`                          | as above, fragment checked against `other.md`    |
+| does not exist, or outside the repository    | `BROKEN-LINK` / `ESCAPES-REPO` — the build fails |
+| absolute, `http:`/`https:`/protocol-relative | unchanged, `external: true`                      |
+| absolute, any other scheme                   | `UNSAFE-SCHEME` — the build fails                |
 
 Both "elsewhere in the repository" rows cover unpublished `docs/` pages **and**
 targets outside `docs/` (`../../README.md`, `../../crates/…`) — neither can be a
@@ -72,26 +74,27 @@ Every code stops the build and prints one line:
 `scripts/check_public_docs.sh`. Findings accumulate, so one build reports all of
 them.
 
-| Code                 | Meaning                                                      |
-| -------------------- | ------------------------------------------------------------ |
-| `MISSING-SOURCE`     | A `PAGE` row names a file that does not exist                |
-| `DUP-ROUTE`          | Two rows claim the same URL                                  |
-| `DUP-SOURCE`         | One source published twice                                   |
-| `BAD-ROUTE`          | A route not starting with `/`                                |
-| `ESCAPES-DOCS`       | A source outside `docs/`                                     |
-| `ORPHAN-PAGE`        | A `PAGE` row before any `SECTION`                            |
-| `SECTION-MISMATCH`   | A `PAGE` naming a section it does not follow                 |
-| `DUP-SECTION`        | Two `SECTION` rows with one id                               |
-| `BAD-RECORD`         | Unknown record type, or wrong field count                    |
-| `BROKEN-LINK`        | A relative link resolving to nothing                         |
-| `BROKEN-ANCHOR`      | An anchor naming no heading on the target page               |
-| `ESCAPES-REPO`       | A link resolving outside the repository                      |
-| `ABSOLUTE-PATH-LINK` | A root-relative link, which means different things on GitHub |
-| `EMPTY-LINK`         | A link with no destination                                   |
-| `RAW-HTML`           | An unknown element — see below                               |
-| `OFF-SITE-IMAGE`     | An image this site does not serve                            |
-| `NO-COMMIT-SHA`      | No commit to pin permalinks to                               |
-| `NO-REPO-ROOT`       | No `docs/public-manifest.tsv` above the build directory      |
+| Code                 | Meaning                                                                                                                     |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `MISSING-SOURCE`     | A `PAGE` row names a file that does not exist                                                                               |
+| `DUP-ROUTE`          | Two rows claim the same URL                                                                                                 |
+| `DUP-SOURCE`         | One source published twice                                                                                                  |
+| `BAD-ROUTE`          | A route not starting with `/`                                                                                               |
+| `ESCAPES-DOCS`       | A source outside `docs/`                                                                                                    |
+| `ORPHAN-PAGE`        | A `PAGE` row before any `SECTION`                                                                                           |
+| `SECTION-MISMATCH`   | A `PAGE` naming a section it does not follow                                                                                |
+| `DUP-SECTION`        | Two `SECTION` rows with one id                                                                                              |
+| `BAD-RECORD`         | Unknown record type, or wrong field count                                                                                   |
+| `BROKEN-LINK`        | A relative link resolving to nothing                                                                                        |
+| `BROKEN-ANCHOR`      | An anchor naming no heading on the target page                                                                              |
+| `ESCAPES-REPO`       | A link resolving outside the repository                                                                                     |
+| `ABSOLUTE-PATH-LINK` | A root-relative link, which means different things on GitHub                                                                |
+| `EMPTY-LINK`         | A link with no destination                                                                                                  |
+| `UNSAFE-SCHEME`      | An absolute link using a scheme this site won't publish (`javascript:`, `file:`, …) — only `http:`/`https:` are allowlisted |
+| `RAW-HTML`           | An unknown element — see below                                                                                              |
+| `OFF-SITE-IMAGE`     | An image this site does not serve                                                                                           |
+| `NO-COMMIT-SHA`      | No commit to pin permalinks to                                                                                              |
+| `NO-REPO-ROOT`       | No `docs/public-manifest.tsv` above the build directory                                                                     |
 
 `RAW-HTML` exists because `<crate>` written in prose instead of `` `<crate>` ``
 parses as an unknown HTML element and renders as **nothing** — the text
