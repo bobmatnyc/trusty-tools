@@ -16,6 +16,7 @@ use super::peer::peer_uid_verdict;
 use super::*;
 
 use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
 
 /// Mode bits of `path`, masked to the permission nibbles. Uses `lstat` so a
 /// symlink's own mode is reported, never its target's.
@@ -580,6 +581,21 @@ async fn bind_singleton_takes_over_a_stale_socket_file() {
     let dead = bind_hardened(&sock).expect("bind first");
     drop(dead); // tokio does not unlink on drop, so the file survives.
     assert!(sock.exists(), "the corpse must still be on disk");
+
+    // Dropping the listener closes the fd; the kernel finishes tearing the
+    // socket down afterwards, and on macOS under a loaded test binary a connect
+    // lands in that window and succeeds. Waiting for the corpse to actually
+    // read dead establishes the precondition this test assumes — the subject is
+    // the takeover, not how fast the kernel reclaims a socket.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while probe_socket_verdict(&sock, Duration::from_millis(50)).await != SocketVerdict::NotServing
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the dropped listener never stopped answering connects"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     let listener = bind_singleton_hardened(&sock)
         .await
