@@ -638,13 +638,28 @@ impl MemoryService {
     // Recall
     // -----------------------------------------------------------------
 
-    /// Per-palace recall (semantic search), optionally with deep retrieval.
+    /// Per-palace hybrid recall — vector search fused with the BM25 lexical
+    /// lane — optionally with deep retrieval.
     ///
-    /// Why: HTTP and chat tools both perform the same fan-out logic.
-    /// What: opens the palace handle and dispatches to the shallow or deep
-    /// recall helper. Returns a JSON array of flattened drawer rows (the
+    /// Why: this is the route the `UserPromptSubmit` hook calls for every
+    /// prompt (`fetch.rs` → `GET /api/v1/palaces/{slug}/recall` →
+    /// `recall_routes.rs` → here), and until #5036 it was vector-only. The
+    /// lexical lane had existed since #156 but was wired into the MCP tool
+    /// handler alone, so the highest-traffic recall path in the product had no
+    /// lexical counterweight to the vector centroid — short, keyword-bearing
+    /// curated facts, dense retrieval's known weak spot, retrieved poorly.
+    /// What: opens the palace handle, runs the vector lane and the lexical
+    /// lane concurrently (`tokio::join!`, so the daemon round trip stays off
+    /// the critical path), and fuses via `fuse_bm25_lane`. No room/wing scope
+    /// applies to this route — it is palace-scoped, and the BM25 daemon is
+    /// per-palace — so every hydrated drawer is admissible. With the lane off
+    /// (`TRUSTY_BM25_DAEMON` unset, which is every shipped deployment today)
+    /// the lexical future resolves to `None` and the response is byte-identical
+    /// to the pre-#5036 one. Returns a JSON array of flattened drawer rows (the
     /// `recall_entry_json` shape from issue #69).
-    /// Test: `recall_entry_json_hoists_drawer_fields`.
+    /// Test: `recall_entry_json_hoists_drawer_fields`;
+    /// `recall_http_bm25_fusion.rs::http_recall_returns_a_lexical_match_the_vector_lane_misses`
+    /// covers the fused path end to end.
     pub async fn recall(
         &self,
         id: &str,
@@ -653,12 +668,20 @@ impl MemoryService {
         deep: bool,
     ) -> ServiceResult<Value> {
         let handle = self.open_handle(id)?;
-        let results = if deep {
-            recall_deep_with_default_embedder(&handle, query, top_k).await
-        } else {
-            recall_with_default_embedder(&handle, query, top_k).await
+        let vector_fut = async {
+            if deep {
+                recall_deep_with_default_embedder(&handle, query, top_k).await
+            } else {
+                recall_with_default_embedder(&handle, query, top_k).await
+            }
+        };
+        let bm25_fut = crate::tools::bm25::bm25_search_optional(&self.state, id, query, top_k);
+        let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
+        let mut results =
+            vector_res.map_err(|e| ServiceError::internal(format!("recall: {e:#}")))?;
+        if let Some(bm25_hits) = bm25_res {
+            crate::tools::bm25::fuse_bm25_lane(&mut results, &handle, &bm25_hits, top_k, |_| true);
         }
-        .map_err(|e| ServiceError::internal(format!("recall: {e:#}")))?;
         let payload: Vec<Value> = results.into_iter().map(recall_entry_json).collect();
         Ok(json!(payload))
     }

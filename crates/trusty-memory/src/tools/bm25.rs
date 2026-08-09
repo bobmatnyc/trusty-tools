@@ -11,6 +11,9 @@
 
 use crate::AppState;
 use serde_json::{json, Value};
+use trusty_common::bm25_client::{BM25Hit, Bm25Client};
+use trusty_common::memory_core::palace::Drawer;
+use trusty_common::memory_core::retrieval::{PalaceHandle, RecallResult};
 use uuid::Uuid;
 
 /// Per-palace BM25 data directory derived from the daemon's data root.
@@ -29,37 +32,47 @@ pub(crate) fn bm25_data_dir_for_palace(state: &AppState, palace: &str) -> std::p
     state.data_root.join(palace).join("bm25")
 }
 
-/// Try to ensure the BM25 daemon for `palace` is running. Returns `true`
-/// when the daemon is (now) reachable.
+/// Resolve a BM25 client bound to **this palace's** socket, starting the
+/// daemon if necessary. `None` means "do not use the lexical lane".
 ///
-/// Why (issue #193): callers want a single yes/no — should I send a BM25
-/// op to this palace right now? — without each having to thread the
-/// supervisor's `Result` through every code path. When the supervisor
-/// returns an error (binary not found, spawn rejected, socket never
-/// appeared) we log and return `false` so the caller degrades to
-/// vector-only behaviour, exactly as it did before #193 when the daemon
-/// simply wasn't running.
-/// What: when `state.bm25_supervisor` is `None`, returns `true` (the
-/// caller falls back to the original "use the env-var-only socket path"
-/// behaviour). When `Some`, delegates to `ensure_running` and treats any
-/// error as a soft failure — the supervisor's logs explain why.
-/// Test: covered indirectly by the spawn supervisor's unit tests and the
-/// `bm25_supervisor_e2e` integration test.
-pub(crate) async fn ensure_bm25_running_for_palace(state: &AppState, palace: &str) -> bool {
+/// Why (#5036): the lane is per-palace everywhere except the client. Each
+/// palace gets its own daemon, its own snapshot, and its own socket
+/// (`socket_path_for_palace`), and `bm25_backfill` indexes each palace through
+/// the socket the supervisor hands back. `AppState::bm25_client`, though, is
+/// built exactly once — `Bm25Client::for_palace(default_palace)` — so every
+/// search and every live index op went to the DEFAULT palace's socket no
+/// matter which palace was being queried. The predecessor of this function
+/// returned a bare `bool` and threw the supervisor's socket away, which is how
+/// the two drifted apart. The consequence is worse than a miss: a search for
+/// palace X reads a corpus the backfill never wrote to (silently empty), while
+/// a write for palace X lands in the default palace's corpus (silently
+/// cross-indexed). Handing back the socket the supervisor actually resolved is
+/// what keeps read, write, and backfill pointed at one index.
+/// What: `None` when the lane is off (`bm25_client` is `None` — the
+/// `TRUSTY_BM25_DAEMON=1` gate) or when the supervisor could not start the
+/// daemon, in which case the caller degrades to vector-only exactly as before.
+/// With no supervisor (`TRUSTY_BM25_EXTERNAL=1`), falls back to the canonical
+/// per-palace socket path, which is the convention an out-of-band operator
+/// follows anyway.
+/// Test: `recall_http_bm25_fusion.rs::http_recall_returns_a_lexical_match_the_vector_lane_misses`
+/// exercises it against a non-default palace, which is the case the old code
+/// got wrong.
+pub(crate) async fn bm25_client_for_palace(state: &AppState, palace: &str) -> Option<Bm25Client> {
+    // The lane gate. The client's own socket is deliberately unused — it is
+    // pinned to the default palace and is only a proxy for "lane enabled".
+    state.bm25_client.as_ref()?;
     let Some(supervisor) = state.bm25_supervisor.as_ref() else {
-        // No supervisor — the client (if present) connects to whatever
-        // socket happens to be live. This matches pre-#193 behaviour.
-        return true;
+        return Some(Bm25Client::for_palace(palace));
     };
     let data_dir = bm25_data_dir_for_palace(state, palace);
     match supervisor.ensure_running(palace, &data_dir).await {
-        Ok(_socket) => true,
+        Ok(socket) => Some(Bm25Client::new(socket)),
         Err(e) => {
             tracing::warn!(
                 palace = %palace,
                 "bm25 supervisor could not start daemon (degrading to vector-only): {e:#}"
             );
-            false
+            None
         }
     }
 }
@@ -141,26 +154,34 @@ pub fn spawn_bm25_index_worker(
         while let Some(req) = rx.recv().await {
             // No client means the BM25 lane is disabled — drain the queue
             // (so senders never block) and silently drop every request.
-            let Some(client) = client.as_ref() else {
+            if client.is_none() {
                 continue;
             };
             // Issue #193: try to start the daemon before the first index
             // call. If the supervisor returns an error we skip this op;
             // the daemon will be retried on the next request.
-            if let Some(sup) = supervisor.as_ref() {
-                if let Err(e) = sup.ensure_running(&req.palace, &req.data_dir).await {
-                    // The write did not land. Same reasoning as the dropped
-                    // enqueue: queue the palace so a repair pass re-runs the
-                    // backfill rather than leaving the gap until restart.
-                    dirty.insert(req.palace.clone());
-                    tracing::warn!(
-                        palace = %req.palace,
-                        "bm25 supervisor failed to start daemon for index (non-fatal): {e:#}"
-                    );
-                    continue;
+            // #5036: index through the socket the supervisor resolved for THIS
+            // palace. The captured `client` is pinned to the default palace, so
+            // using it here filed every palace's drawers into one corpus.
+            let per_palace = if let Some(sup) = supervisor.as_ref() {
+                match sup.ensure_running(&req.palace, &req.data_dir).await {
+                    Ok(socket) => Bm25Client::new(socket),
+                    Err(e) => {
+                        // The write did not land. Same reasoning as the dropped
+                        // enqueue: queue the palace so a repair pass re-runs the
+                        // backfill rather than leaving the gap until restart.
+                        dirty.insert(req.palace.clone());
+                        tracing::warn!(
+                            palace = %req.palace,
+                            "bm25 supervisor failed to start daemon for index (non-fatal): {e:#}"
+                        );
+                        continue;
+                    }
                 }
-            }
-            if let Err(e) = client.index(&req.drawer_id, &req.content).await {
+            } else {
+                Bm25Client::for_palace(&req.palace)
+            };
+            if let Err(e) = per_palace.index(&req.drawer_id, &req.content).await {
                 dirty.insert(req.palace.clone());
                 tracing::warn!(
                     palace = %req.palace,
@@ -247,14 +268,12 @@ pub(crate) async fn bm25_search_optional(
     palace: &str,
     query: &str,
     top_k: usize,
-) -> Option<Vec<trusty_common::bm25_client::BM25Hit>> {
-    let client = state.bm25_client.as_ref()?;
+) -> Option<Vec<BM25Hit>> {
     // Issue #193: spawn the daemon if it isn't already running. On error
     // we fall through to vector-only behaviour exactly as we did before
     // #193 when the operator forgot to start the daemon manually.
-    if !ensure_bm25_running_for_palace(state, palace).await {
-        return None;
-    }
+    // #5036: and search the socket belonging to `palace`, not the default one.
+    let client = bm25_client_for_palace(state, palace).await?;
     match client.search(query, top_k).await {
         Ok(hits) => Some(hits),
         Err(e) => {
@@ -267,24 +286,49 @@ pub(crate) async fn bm25_search_optional(
     }
 }
 
-/// Reciprocal Rank Fusion (RRF) blender for BM25 hits + vector recall hits.
+/// Fuse the BM25 lexical lane into a vector recall list: boost what both
+/// lanes found, and promote what only BM25 found.
 ///
 /// Why: BM25 wins on identifier-heavy queries ("cargo test", "PalaceHandle"),
-/// the vector lane wins on conceptual queries. RRF is the canonical fusion
-/// because it is parameter-light, rank-only, and robust to scale differences
-/// between the two lanes.
-/// What: walks the BM25 ranked list once and adds `1 / (k + rank)` to the
-/// matching drawer's vector score (RRF with `k = 60`, the IR-literature
-/// default). Drawers that appear in BM25 but not in the vector list are
-/// appended with `layer = 4` so the caller knows they came from the lexical
-/// lane (L0/L1/L2/L3 are reserved). The combined list is re-sorted by score
-/// desc and truncated to `top_k`.
-/// Test: integration coverage via the daemon's `tests/bm25_daemon.rs` plus
-/// downstream RRF behaviour observed end-to-end.
-pub(crate) fn fuse_bm25_into_recall(
-    results: &mut Vec<trusty_common::memory_core::retrieval::RecallResult>,
-    bm25_hits: &[trusty_common::bm25_client::BM25Hit],
+/// the vector lane wins on conceptual queries. The predecessor of this
+/// function (#156) only ever *boosted* drawers the vector lane had already
+/// returned, so a drawer the vector lane missed entirely stayed missed — which
+/// is precisely the case the lexical lane exists to cover, and why #5036 could
+/// not be closed by wiring the old helper into one more caller.
+///
+/// Why the two lanes are scored differently, rather than by textbook RRF: the
+/// `score` this returns is consumed as a cosine-similarity-scaled relevance
+/// value, and `prompt_context` drops everything under
+/// `DEFAULT_RELEVANCE_FLOOR` (0.35, #5037). A rank-only RRF score tops out at
+/// `2/61 ≈ 0.033`, so re-scoring both lanes the textbook way would put every
+/// result under that floor and empty the injection entirely. Vector scores are
+/// therefore left on their own scale and a promoted lexical hit is normalised
+/// onto the same 0..1 band.
+///
+/// What: (1) adds the RRF bonus `1 / (k + rank + 1)` (`k = 60`, the
+/// IR-literature default) to any drawer both lanes returned; (2) hydrates
+/// BM25-only hits from `handle.drawers` — already in memory, so no disk walk —
+/// admits them through `admits`, and scores each at its share of the lexical
+/// lane's best hit, marking them `layer = 4` (L0/L1/L2/L3 are reserved);
+/// (3) re-sorts by score desc, tie-breaking on the lower layer, and truncates
+/// to `top_k`. An empty `bm25_hits` returns without touching `results`, so a
+/// deployment with the lane off is bit-for-bit unchanged.
+///
+/// Known limitation: normalising against the lane's own best hit means the
+/// best lexical match scores 1.0 even when it is only the best of a weak
+/// field. The relevance floor cannot catch that, because normalisation is what
+/// puts it above the floor in the first place.
+///
+/// Test: `recall_http_bm25_fusion.rs::http_recall_returns_a_lexical_match_the_vector_lane_misses`
+/// (promotion, end-to-end through the HTTP path against a real daemon and a
+/// real embedder); `fuse_bm25_lane_is_a_no_op_without_hits`,
+/// `fuse_bm25_lane_promotes_a_bm25_only_drawer`.
+pub(crate) fn fuse_bm25_lane(
+    results: &mut Vec<RecallResult>,
+    handle: &PalaceHandle,
+    bm25_hits: &[BM25Hit],
     top_k: usize,
+    admits: impl Fn(&Drawer) -> bool,
 ) {
     /// RRF damping constant (Cormack et al. 2009). 60 is the literature
     /// default and what trusty-search uses in its hybrid pipeline.
@@ -292,23 +336,41 @@ pub(crate) fn fuse_bm25_into_recall(
     if bm25_hits.is_empty() {
         return;
     }
-    // Boost existing vector hits whose drawer id appears in BM25.
+    // Normalisation denominator. Taken as an explicit max rather than assuming
+    // the daemon returned its hits in descending order.
+    let best = bm25_hits
+        .iter()
+        .map(|h| h.score)
+        .fold(f32::MIN_POSITIVE, f32::max);
+
+    let drawers = handle.drawers.read();
     for (rank, hit) in bm25_hits.iter().enumerate() {
-        let bonus = 1.0 / (RRF_K + rank as f32 + 1.0);
         if let Some(existing) = results
             .iter_mut()
             .find(|r| r.drawer.id.to_string() == hit.doc_id)
         {
-            existing.score += bonus;
+            existing.score += 1.0 / (RRF_K + rank as f32 + 1.0);
+            continue;
         }
-        // BM25-only hits (those that don't appear in the vector list) are
-        // intentionally NOT appended here — without hydrating the drawer
-        // payload (content, tags, importance) from disk we cannot construct
-        // a `RecallResult`, and the per-call disk walk would defeat the
-        // whole purpose of the daemon. The hits that already appear in the
-        // vector list still benefit from the RRF boost, which is enough to
-        // improve identifier-heavy queries.
+        // BM25-only. `doc_id` is a stringified drawer UUID; a hit that no
+        // longer resolves (forgotten since the snapshot was built) is skipped.
+        let Ok(drawer_id) = Uuid::parse_str(&hit.doc_id) else {
+            continue;
+        };
+        let Some(drawer) = drawers.iter().find(|d| d.id == drawer_id) else {
+            continue;
+        };
+        if !admits(drawer) {
+            continue;
+        }
+        results.push(RecallResult {
+            drawer: drawer.clone(),
+            score: (hit.score / best).clamp(0.0, 1.0),
+            layer: 4,
+        });
     }
+    drop(drawers);
+
     // Re-sort by score desc; preserve layer for tie-breaking (lower layer
     // wins because L0/L1 are pinned identity/essentials).
     results.sort_by(|a, b| {
@@ -323,17 +385,17 @@ pub(crate) fn fuse_bm25_into_recall(
 /// Hydrate BM25 hits directly into `RecallResult`s from a palace's
 /// in-memory drawer table (issue #1970 embedder-warming fallback).
 ///
-/// Why: `fuse_bm25_into_recall` only *boosts* vector hits already present in
-/// `results` — it never appends BM25-only matches because (per its own
-/// comment) it has no drawer payload to hydrate them with. During embedder
-/// warm-up there are no vector hits at all, so that boost-only behaviour
-/// would silently drop every BM25 match. `PalaceHandle::drawers` already
-/// holds every drawer's metadata in memory (no disk I/O needed), so each
-/// BM25 `doc_id` (a stringified drawer UUID) can be resolved into a full
-/// `RecallResult` directly.
+/// Why: during embedder warm-up there are no vector results to fuse into, so
+/// [`fuse_bm25_lane`] has nothing to attach the lexical lane to. This is the
+/// standalone hydration the warming path needs. `PalaceHandle::drawers`
+/// already holds every drawer's metadata in memory (no disk I/O needed), so
+/// each BM25 `doc_id` (a stringified drawer UUID) can be resolved into a full
+/// `RecallResult` directly. Unlike [`fuse_bm25_lane`] it emits the raw BM25
+/// score, which is safe here only because nothing else is in the list to
+/// compare against.
 /// What: parses each hit's `doc_id` as a `Uuid`, looks it up in
 /// `handle.drawers`, and emits a `RecallResult` carrying the BM25 score and
-/// `layer: 4` (the same lexical-lane marker `fuse_bm25_into_recall` uses).
+/// `layer: 4` (the same lexical-lane marker [`fuse_bm25_lane`] uses).
 /// Hits whose `doc_id` doesn't parse or no longer resolves to a drawer
 /// (e.g. forgotten since the BM25 snapshot was built) are skipped.
 /// Test: `bm25_hits_hydrate_from_handle_during_warmup`.

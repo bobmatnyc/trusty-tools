@@ -24,7 +24,7 @@ use uuid::Uuid;
 use super::wing_ops::resolve_wing_arg;
 
 use super::bm25::{
-    bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_into_recall, serialize_recall,
+    bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_lane, serialize_recall,
 };
 use super::helpers::{
     apply_tier_c, attach_mcp_attribution, blocklist_gate, content_gate, dedup_gate,
@@ -474,18 +474,20 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // When the daemon is unavailable or the env var is unset, the
     // helper returns `None` and we return the vector-only results
     // verbatim — zero behavioural change for existing deployments.
-    // ADR-0027 T7: the BM25 lane needs no scope filter of its own here —
-    // `fuse_bm25_into_recall` only *boosts* drawers already present in the
-    // vector list (it never appends BM25-only hits), and that list is already
-    // scoped, so no out-of-scope drawer can enter through the lexical
-    // lane. The warming path above is different: it hydrates BM25-only hits,
-    // which is why it filters explicitly.
+    // ADR-0027 T7: the lexical lane now needs a scope filter of its own.
+    // #5036 gave `fuse_bm25_lane` the ability to promote BM25-only hits, so
+    // the old justification for leaving it unfiltered — that fusion could only
+    // boost drawers the already-scoped vector list contained — no longer
+    // holds. It filters on the same `allowed` set the warming path uses.
+    let allowed = scope.allowed_room_ids(&handle.kg);
     let vector_fut = recall_scoped(&handle, embedder.as_ref(), query, &scope, top_k);
     let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
     let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
     let mut results = vector_res.context("recall")?;
     if let Some(bm25_hits) = bm25_res {
-        fuse_bm25_into_recall(&mut results, &bm25_hits, top_k);
+        fuse_bm25_lane(&mut results, &handle, &bm25_hits, top_k, |d| {
+            scope_admits(&allowed, d.room_id)
+        });
     }
     Ok(serialize_recall(&palace, query, results))
 }
@@ -511,10 +513,20 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         return Ok(serialize_recall(&palace, query, results));
     }
 
+    // #5036: deep recall ran the vector lane alone while its shallow sibling
+    // had fused since #156, so the same query answered differently depending
+    // only on `deep`. Same lane, same scope filter, same fusion.
     let embedder = state.embedder().await?;
-    let results = recall_deep_scoped(&handle, embedder.as_ref(), query, &scope, top_k)
-        .await
-        .context("recall_deep")?;
+    let allowed = scope.allowed_room_ids(&handle.kg);
+    let vector_fut = recall_deep_scoped(&handle, embedder.as_ref(), query, &scope, top_k);
+    let bm25_fut = bm25_search_optional(state, &palace, query, top_k);
+    let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
+    let mut results = vector_res.context("recall_deep")?;
+    if let Some(bm25_hits) = bm25_res {
+        fuse_bm25_lane(&mut results, &handle, &bm25_hits, top_k, |d| {
+            scope_admits(&allowed, d.room_id)
+        });
+    }
     Ok(serialize_recall(&palace, query, results))
 }
 
