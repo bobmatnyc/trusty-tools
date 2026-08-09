@@ -27,6 +27,9 @@ commands:
         description: Default palace for MCP tool calls when caller omits palace
     examples:
       - cmd: trusty-memory serve
+        note: MCP stdio (starts the daemon if it is not already running)
+      - cmd: trusty-memory start
+        note: the background HTTP daemon
       - cmd: trusty-memory serve --foreground --http 127.0.0.1:7070
   migrate:
     description: Migrate from another memory MCP server to trusty-memory

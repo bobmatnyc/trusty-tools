@@ -1,0 +1,8 @@
+Changed
+
+- The `serve --stdio` bridge now starts the HTTP daemon when it is not running
+  instead of hard-erroring with "run `trusty-memory start`". The start is
+  single-flight: it takes an exclusive `flock` covering probe, spawn, and
+  readiness wait, so N concurrent bridges produce exactly one daemon (#1152).
+  `trusty-memory start` now waits for the daemon to answer `/health` before
+  returning, which is what keeps that exclusion honest.

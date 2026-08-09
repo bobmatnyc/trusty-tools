@@ -203,7 +203,25 @@ pub async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<String> {
         ));
     }
 
-    // Slow path: spawn the daemon detached.
+    // Slow path: spawn the daemon detached, then wait for it to bind.
+    spawn_daemon_detached(config)?;
+    poll_until_ready(config, startup_timeout, poll_interval).await
+}
+
+/// Spawn `current_exe() + config.spawn_args` as a detached background daemon.
+///
+/// Why: extracted from [`ensure_daemon_up`] so the single-flight start path
+/// ([`super::single_flight::ensure_daemon_up_single_flight`]) launches the
+/// daemon through the SAME code rather than a parallel lifecycle — this repo's
+/// common-entry-point rule. A second spawn implementation is how the two paths
+/// would drift on stdio hygiene or cwd handling.
+/// What: resolves `current_exe()`, sets a stable cwd so the daemon never
+/// inherits a deleted worktree directory, nulls all three stdio fds so the
+/// child outlives the bridge process, and spawns. Does NOT wait for readiness —
+/// that is [`poll_until_ready`]'s job.
+/// Test: the spawn path is exercised end-to-end by
+/// `crates/trusty-common/tests/single_flight_exclusion.rs`.
+pub(crate) fn spawn_daemon_detached(config: &DaemonBridgeConfig) -> Result<()> {
     eprintln!("\u{25cf} Starting {} daemon\u{2026}", config.service_name);
 
     let exe = std::env::current_exe().map_err(|e| anyhow!("could not resolve current_exe: {e}"))?;
@@ -223,9 +241,27 @@ pub async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<String> {
                 config.spawn_args.join(" "),
             )
         })?;
+    Ok(())
+}
 
-    // Poll until ready, re-reading the base URL each iteration so dynamic ports
-    // are discovered as soon as the daemon writes its address file.
+/// Poll the daemon's health endpoint until it responds or the budget expires.
+///
+/// Why: shared by [`ensure_daemon_up`] and the single-flight start path so both
+/// enforce the same bounded wait and the same fail-closed timeout. Returning
+/// `Ok` on a daemon that never bound is the defect this function exists to make
+/// impossible — a caller that proceeded anyway would surface the failure
+/// downstream as an empty result instead of an error.
+/// What: sleeps `poll_interval`, re-evaluates `base_url_fn` each iteration so a
+/// dynamic-port daemon is discovered as soon as it writes its address file, and
+/// probes `/health`. Hard-errors once `startup_timeout` is exceeded. There is no
+/// success path that does not include a live 2xx health response.
+/// Test: `daemon_that_never_becomes_ready_is_a_hard_error` in
+/// `crates/trusty-common/tests/single_flight_exclusion.rs`.
+pub(crate) async fn poll_until_ready(
+    config: &DaemonBridgeConfig,
+    startup_timeout: Duration,
+    poll_interval: Duration,
+) -> Result<String> {
     let deadline = Instant::now() + startup_timeout;
     loop {
         tokio::time::sleep(poll_interval).await;

@@ -127,12 +127,13 @@ Expected output: the semantic version of the installed binary (e.g., `trusty-mem
 ### Start the daemon
 
 ```bash
-trusty-memory serve
+trusty-memory start
 ```
 
-By default, `serve` self-spawns a detached background daemon (alias for
-`trusty-memory start`) and returns control to the shell so you keep your
-prompt. The daemon binds HTTP/SSE on a dynamic port in the `7070..=7079`
+`start` is the daemon verb: it spawns a detached background daemon and returns
+once the daemon answers `/health`. Bare `trusty-memory serve` speaks MCP over
+stdio (matching `trusty-search serve`), so use `start` — not `serve` — when you
+want a background daemon. The daemon binds HTTP/SSE on a dynamic port in the `7070..=7079`
 range (with OS fallback) and writes the resolved address to its
 discovery file. Pass `--foreground` to keep the daemon inline (used by
 launchd / systemd / Docker), or `--http <ADDR>` to pin a specific address.
@@ -153,7 +154,7 @@ substitution fails cleanly.
 
 ### Browser dashboard + REST API
 
-The same `trusty-memory serve` daemon serves the embedded Svelte admin UI
+The same `trusty-memory start` daemon serves the embedded Svelte admin UI
 at the bound address (printed by `trusty-memory monitor web` once the
 daemon is running) and a REST API under `/api/v1/`.
 
@@ -168,7 +169,8 @@ Key REST API field names (verified against `src/web.rs` and `src/service.rs`):
 When all tool calls should default to one palace namespace, use `--palace`:
 
 ```bash
-trusty-memory serve --palace my-project
+trusty-memory start          # daemon
+trusty-memory serve --palace my-project   # MCP stdio bound to one palace
 ```
 
 With a default set, the `palace` argument becomes optional in every MCP tool
@@ -232,7 +234,7 @@ minor version.
 
 Claude Code auto-discovers `.mcp.json` on project open. The daemon must be
 running (started either by `trusty-memory setup`'s LaunchAgent or by
-`trusty-memory start` / `trusty-memory serve`).
+`trusty-memory start`).
 
 ## Available MCP Tools
 

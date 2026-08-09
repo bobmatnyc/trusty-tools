@@ -285,7 +285,6 @@ crates/trusty-memory/src/commands/doctor/mod.rs	doctor_fix_palaces_lists_orphane
 crates/trusty-memory/src/commands/kuzu_migrate.rs	read_entities_returns_expected_count
 crates/trusty-memory/src/commands/kuzu_migrate.rs	read_relations_returns_expected_count
 crates/trusty-memory/src/commands/kuzu_migrate.rs	schema_table_names_are_defined
-crates/trusty-memory/src/commands/serve_stdio_bridge.rs	ensure_daemon_up
 crates/trusty-memory/src/commands/serve_stdio_bridge.rs	value_to_mcp_response_err
 crates/trusty-memory/src/commands/serve_stdio_bridge.rs	value_to_mcp_response_malformed
 crates/trusty-memory/src/commands/serve_stdio_bridge.rs	value_to_mcp_response_ok
