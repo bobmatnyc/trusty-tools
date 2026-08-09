@@ -383,13 +383,23 @@ function harden(
 			return;
 		}
 
-		let target = path.posix.normalize(path.posix.join(dir, rawTarget));
+		const target = path.posix.normalize(path.posix.join(dir, rawTarget));
+
+		// A target outside the repository is a dead stop, never a guess. An
+		// earlier revision stripped the leading `../` and accepted whatever it
+		// landed on if that path existed — which turned
+		// `[the README](../../../README.md)` in a trusty-search changelog into a
+		// confident link to the repo-root README, with zero failures reported.
+		// A green build has to mean every link resolved as written.
 		if (target.startsWith('..')) {
-			// One `../` too many — `crates/trusty-mpm/CHANGELOG.md` line 1982 has
-			// exactly this. Re-reading it as repo-relative recovers the intent,
-			// but only when that path really exists; otherwise it still fails.
-			const recovered = target.replace(/^(?:\.\.\/)+/, '');
-			if (probe(recovered)) target = recovered;
+			failures.push({
+				code: CHANGELOG_CODES.BAD_LINK,
+				file,
+				line,
+				problem: `\`${href}\` resolves to \`${target}\`, outside the repository`,
+				remedy: `count the \`../\` from \`${dir}/\`, or write it as an absolute https:// URL`
+			});
+			return;
 		}
 
 		if (!probe(target)) {

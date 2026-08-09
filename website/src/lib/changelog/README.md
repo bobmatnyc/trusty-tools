@@ -58,9 +58,19 @@ does not have. SvelteKit's prerenderer refuses to build with one, which is how
 the three in `crates/trusty-mpm/CHANGELOG.md` surfaced.
 
 Each is resolved against the crate's own directory and rewritten to
-`blob/main/<target>`. Line 1982 of that file has one `../` too many; a target
-that escapes the repository is re-read as repo-relative, but only when that path
-actually exists. Anything still unresolved is `CHANGELOG-BAD-LINK`.
+`blob/main/<target>`. A target that lands outside the repository, or on a path
+that does not exist, is `CHANGELOG-BAD-LINK` — a build failure, with no second
+chance.
+
+**No second chance, specifically.** An earlier revision of this PR tried to
+absorb an off-by-one `../` by stripping the leading `../` and accepting the
+result whenever that path existed. It stripped ANY depth, so
+`[the README](../../../README.md)` written in `crates/trusty-search/CHANGELOG.md`
+resolved to the repo-root `README.md` and shipped a confident, wrong link with
+zero failures reported. That falsifies the only guarantee this gate offers — a
+green build means every link resolved AS WRITTEN. The one real off-by-one in the
+corpus (`crates/trusty-mpm/CHANGELOG.md` line 1982) was corrected at the source
+instead, which is what a typo deserves.
 
 ## The one thing that recovers instead of failing
 

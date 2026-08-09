@@ -243,13 +243,34 @@ describe('links and metavariables inside an item', () => {
 		);
 	});
 
-	it('recovers a relative link written with one `../` too many', () => {
-		// crates/trusty-mpm/CHANGELOG.md line 1982 has exactly this typo.
-		const { releases, failures } = withProbe(item('[skills](../../../docs/specs/foo.md)'), [
-			'docs/specs/foo.md'
+	/**
+	 * The regression this pins: an earlier revision stripped the leading `../`
+	 * and accepted the result whenever that path existed, so a link escaping
+	 * the repository became a confident link to whatever it happened to land
+	 * on. The probe says the target EXISTS at the repo root, which is exactly
+	 * the condition that made the old code fail open — the build must still
+	 * reject it, because the link as written does not resolve there.
+	 */
+	it('fails the build on a link that escapes the repository, even when the stripped path exists', () => {
+		const { releases, failures } = withProbe(item('[the README](../../../README.md)'), [
+			'README.md',
+			'crates/README.md'
 		]);
-		expect(failures).toEqual([]);
-		expect(releases[0].categories[0].items[0].html).toContain('blob/main/docs/specs/foo.md');
+		expect(failures).toHaveLength(1);
+		expect(failures[0].code).toBe('CHANGELOG-BAD-LINK');
+		expect(failures[0].problem).toContain('outside the repository');
+		// And nothing was emitted: no guessed href reached the rendered item.
+		expect(releases[0].categories[0].items[0].html).not.toContain('blob/main');
+	});
+
+	it('fails on any depth of escape, not just one level too many', () => {
+		for (const href of ['../../../x.md', '../../../../../../x.md', '../../../a/../x.md']) {
+			const { failures } = withProbe(item(`[x](${href})`), ['x.md', 'a/x.md']);
+			expect(
+				failures.map((f) => f.code),
+				href
+			).toEqual(['CHANGELOG-BAD-LINK']);
+		}
 	});
 
 	it('fails the build on a relative link whose target is not in the repository', () => {

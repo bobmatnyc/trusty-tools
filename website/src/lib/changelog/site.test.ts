@@ -109,6 +109,29 @@ describe('the real six-crate corpus', () => {
 		expect(site.cratesDirUrl).toBe('https://github.com/bobmatnyc/trusty-tools/tree/main/crates');
 	});
 
+	/**
+	 * `beforeAll` already throws if any link in the corpus fails to resolve, so
+	 * this states what a green build means rather than adding new coverage: no
+	 * relative link in the six changelogs escapes the repository or points at a
+	 * missing path, and every one that survived is a `blob/main` link.
+	 */
+	it('resolves every relative link in the corpus, none escaping the repository', () => {
+		const hrefs = site.crates.flatMap((crate) =>
+			crate.releases.flatMap((release) =>
+				[
+					release.preambleHtml ?? '',
+					...release.categories.flatMap((category) => [
+						...category.items.map((entry) => entry.html),
+						...category.blocks.map((block) => (block.kind === 'html' ? block.html : ''))
+					])
+				].flatMap((html) => [...html.matchAll(/href="([^"]*)"/g)].map((match) => match[1]))
+			)
+		);
+		expect(hrefs.length).toBeGreaterThan(500);
+		for (const href of hrefs) expect(href, href).toMatch(/^https?:\/\//);
+		expect(hrefs.some((href) => href.includes('/blob/main/docs/specs/'))).toBe(true);
+	});
+
 	it('keeps the other 21 crates out of both surfaces', () => {
 		expect(site.crates.map((c) => c.name)).not.toContain('trusty-common');
 		expect(site.crates).toHaveLength(6);
