@@ -2300,10 +2300,50 @@ async fn health_is_degraded_while_a_delivery_sits_undrained() {
     assert_eq!(health.undrained[0].held, 1);
     assert_eq!(health.undrained[0].error, None);
 
-    // And it clears once the work is taken — the drain step #5192 will do this.
+    // And it clears once the target's drain (#5192) has processed the delivery.
     let held = inbox.list().expect("list");
     std::fs::remove_file(&held[0].0).expect("drain the delivery");
     assert_eq!(ingress.health().await.status, ServiceHealth::Ok);
+}
+
+#[tokio::test]
+async fn health_is_error_while_a_target_holds_a_quarantined_delivery() {
+    // 🔴 #5192: quarantining a poisoned delivery takes it OUT of the held
+    // count, so without a separate quarantine meter the signal goes GREEN at
+    // the exact moment a delivery is confirmed never to be processed. Against
+    // this change with `quarantined_total` removed, the final status is `Ok`.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let inbox_root = tmp.path().join("inbox");
+    let inbox = trusty_common::webhook_relay::Inbox::open(&inbox_root).expect("open inbox");
+    let socket = spawn_real_listener(tmp.path(), std::sync::Arc::new(inbox.clone())).await;
+    let spool = Spool::open(tmp.path().join("spool")).expect("open spool");
+    let ingress = ingress_for(spool, socket)
+        .with_inbox_roots(vec![("review".to_string(), inbox_root.clone())]);
+
+    let outcome = ingress
+        .ingest("review", &signed_headers(BODY, "poison-1"), BODY)
+        .await;
+    let IngestOutcome::Accepted { relay, .. } = outcome else {
+        panic!("expected Accepted, got {outcome:?}");
+    };
+    assert_eq!(relay, RelayOutcome::Acked);
+
+    // The target's drain gives up on it.
+    let held = inbox.list().expect("list");
+    trusty_common::webhook_relay::retry::quarantine(&inbox_root, &held[0].0).expect("quarantine");
+
+    let health = ingress.health().await;
+    assert_eq!(
+        health.undrained_total, 0,
+        "a quarantined delivery is no longer drainable work"
+    );
+    assert_eq!(health.quarantined_total, 1);
+    assert_eq!(health.undrained[0].quarantined, 1);
+    assert_eq!(
+        health.status,
+        ServiceHealth::Error,
+        "a delivery that will never be processed without a human is not Degraded"
+    );
 }
 
 #[tokio::test]

@@ -1,0 +1,2 @@
+Fixed
+`trusty-review webhook-listen` now drains its webhook inbox into the review pipeline instead of holding acknowledged deliveries forever. Dependencies build lazily on the first actionable delivery and open the dedup store as `Required`, so a redelivery cannot post a second review comment. The `review_requested` filter moved to `webhook_drain` and is shared with the legacy `POST /pr/github/webhook` route; `ReviewDeps` now derives `Clone` (#5192).

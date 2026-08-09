@@ -259,6 +259,49 @@ migrated onto it rather than a fourth being added.
 > the shared module — but the migration is one crate wider than this sentence
 > states. Decision text left unedited per DOC-46 §4.
 
+### 5. The drain: how a held delivery becomes work
+
+> **Amendment (#5192, 2026-08-09).** Decisions 1–4 carry a delivery as far as
+> the receiver's durable inbox and stop there. That is not an oversight the
+> implementation can paper over: an ack is what licenses `trusty-console` to
+> delete its only copy, so once §2's rule is satisfied the delivery exists in
+> exactly one place and nothing in the four decisions above ever reads it back.
+> #5182 shipped precisely that state — every delivery durably received, none
+> processed, and a spool that reported empty because the hand-off succeeded.
+
+The receiver drains its own inbox, in the same short-lived process that binds
+the socket, under four rules.
+
+1. **Ack on durability, act afterwards.** The ack still rests only on the
+   fsync (§2). A drain that ran before the ack would make a slow review look
+   like a refused delivery, and one that acked on the review's success would
+   hold console's socket open for 37 seconds.
+2. **Remove only after the pipeline accepted.** The single unlink of a live
+   delivery is reachable from one arm of the drain, behind a processor that
+   returned success. A pipeline failure keeps the entry.
+3. **Claim with a lock the kernel releases, not a marker on disk.** Exclusive
+   ownership of one entry is an `flock` on the entry file. A drainer that is
+   SIGKILLed mid-review is indistinguishable from one that finished, and that
+   state is *claimable* — a claim marker would instead strand the delivery
+   forever, which is §2's silent loss arriving one hop later. Redelivery of a
+   delivery already processed is therefore possible, which is the at-least-once
+   contract §4's frame already states; receivers deduplicate on `delivery_id`.
+4. **Bound the retries, quarantine the poison, and never delete either.** A
+   failure is counted in a sidecar beside the entry, so the bound survives the
+   process. An entry out of retries — or one that can never succeed, such as an
+   undecodable payload — moves to `<inbox>/quarantine/` and is reported. It is
+   never deleted, and it is metered separately from held work in
+   `/api/console/metrics/*`: quarantining takes a delivery out of the held
+   count, so without its own red state the signal would go **green** at the
+   moment a delivery was confirmed never to be processed.
+
+**What this amendment does not cover.** `trusty-review`'s outcome poll on
+`closed` + `merged` (opt-in, default off) schedules a task that sleeps an hour.
+A console-supervised process that exits on SIGTERM cannot honour that, so the
+drain records those deliveries as deliberately ignored and the legacy HTTP
+route remains their only path. Giving them a durable equivalent is out of scope
+here and blocks nothing in criterion (c).
+
 ## Consequences
 
 **Easier / positive:**
