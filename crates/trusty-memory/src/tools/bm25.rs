@@ -315,8 +315,10 @@ pub(crate) async fn bm25_search_optional(
 /// an additional lane found it.
 ///
 /// What: for each hit, in descending score order, `lexical = ceiling *
-/// (hit.score / best)` where `ceiling` is the highest vector score in
-/// `results`. A drawer already in `results` becomes
+/// (hit.score / best)` where `ceiling` is the highest L2/L3 score in `results`
+/// — the layers that actually carry a cosine, excluding the synthetic L0
+/// identity row `retrieve_l0_l1` pins at `1.0`. A drawer already in `results`
+/// becomes
 /// `max(cosine, lexical) + 1/(k + rank + 1)` (`k = 60`, the IR-literature
 /// default); a drawer only BM25 found is hydrated from `handle.drawers` —
 /// already in memory, so no disk walk — admitted through `admits`, and pushed
@@ -325,18 +327,19 @@ pub(crate) async fn bm25_search_optional(
 /// `top_k`. An empty `bm25_hits` returns without touching `results`, so a
 /// deployment with the lane off is bit-for-bit unchanged.
 ///
-/// Consequences worth knowing: a promoted hit can tie the best vector hit but
+/// Consequences worth knowing: a promoted hit can tie the best L2/L3 hit but
 /// never outrank it (the layer tie-break gives the vector hit the position), so
 /// a palace whose vector lane is uniformly weak suppresses its lexical hits in
-/// proportion. That is the price of a score the relevance floor can judge. With
-/// no vector results at all there is nothing to be commensurate with, so the
-/// normalised ratio stands on its own.
+/// proportion. That is the price of a score the relevance floor can judge. When
+/// no L2/L3 row is present at all — an empty vector lane — there is nothing to
+/// be commensurate with, so the normalised ratio stands on its own.
 ///
 /// Test: `recall_http_bm25_fusion.rs::http_recall_returns_a_lexical_match_the_vector_lane_misses`
 /// (promotion, end-to-end through the HTTP path against a real daemon and a
 /// real embedder); `fuse_bm25_lane_is_a_no_op_without_hits`,
 /// `fuse_bm25_lane_promotes_a_bm25_only_drawer`,
 /// `fuse_bm25_lane_never_scores_agreement_below_a_lexical_only_hit`,
+/// `fuse_bm25_lane_ignores_the_synthetic_l0_row_when_scaling`,
 /// `fuse_bm25_lane_drops_a_drawer_the_scope_excludes`.
 pub(crate) fn fuse_bm25_lane(
     results: &mut Vec<RecallResult>,
@@ -367,7 +370,18 @@ pub(crate) fn fuse_bm25_lane(
     }
     // Scale lexical scores into the vector lane's band. See the doc comment
     // for why this is not a normalisation to 1.0.
-    let ceiling = results.iter().map(|r| r.score).fold(0.0_f32, f32::max);
+    //
+    // Only L2/L3 carry a cosine. `retrieve_l0_l1` prepends a synthetic identity
+    // row at a hardcoded `score: 1.0` on any palace with an identity, and an L1
+    // drawer the vector search never matched carries an importance-derived
+    // penalty score — neither is a similarity. Taking the max over all rows
+    // therefore pinned `ceiling` at 1.0 in production and made this scaling the
+    // normalise-to-1.0 formula it exists to avoid.
+    let ceiling = results
+        .iter()
+        .filter(|r| matches!(r.layer, 2 | 3))
+        .map(|r| r.score)
+        .fold(0.0_f32, f32::max);
     let ceiling = if ceiling > 0.0 { ceiling } else { 1.0 };
 
     let drawers = handle.drawers.read();

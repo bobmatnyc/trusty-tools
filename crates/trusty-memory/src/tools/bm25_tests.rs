@@ -55,6 +55,75 @@ fn vector_result(handle: &PalaceHandle, id: Uuid, score: f32) -> RecallResult {
     }
 }
 
+/// The synthetic L0 identity row, exactly as `retrieve_l0_l1` emits it.
+///
+/// Why: every fixture here omitted it, and that omission is what let the
+/// scaling bug through — `retrieve_l0_l1` prepends this row at a hardcoded
+/// `1.0` on any palace with an identity, so a `ceiling` taken over all layers
+/// is 1.0 in production no matter what the vector lane returned.
+/// What: a layer-0 result at score 1.0 over an arbitrary drawer.
+/// Test: `fuse_bm25_lane_ignores_the_synthetic_l0_row_when_scaling`.
+fn identity_row(handle: &PalaceHandle, id: Uuid) -> RecallResult {
+    RecallResult {
+        layer: 0,
+        score: 1.0,
+        ..vector_result(handle, id, 1.0)
+    }
+}
+
+/// Why: this is the production shape every other test in this file misses. With
+/// `ceiling` taken over all layers it is pinned at 1.0 by the identity row, so
+/// `lexical = 1.0 * (hit.score / best)` — the normalise-to-1.0 formula the
+/// scaling exists to avoid — and a lexical-only hit lands above every genuine
+/// cosine. The fix is inert without this fixture row.
+/// What: results carry an L0 row at 1.0 and a genuine L2 hit at 0.6; asserts the
+/// promoted hit is scaled to the L2 ceiling, not to 1.0, and that it does not
+/// outrank the genuine vector hit.
+/// Test: this test.
+#[test]
+fn fuse_bm25_lane_ignores_the_synthetic_l0_row_when_scaling() {
+    let (_dir, handle, ids) = handle_with_drawers(&["identity", "genuine vector hit", "bm25 only"]);
+    let mut results = vec![
+        identity_row(&handle, ids[0]),
+        vector_result(&handle, ids[1], 0.6),
+    ];
+    let hits = vec![BM25Hit {
+        doc_id: ids[2].to_string(),
+        score: 5.0,
+    }];
+
+    fuse_bm25_lane(&mut results, &handle, &hits, 10, |_| true);
+
+    let promoted = results
+        .iter()
+        .find(|r| r.drawer.id == ids[2])
+        .expect("the BM25-only drawer is promoted");
+    assert!(
+        promoted.score < 1.0,
+        "the identity row's synthetic 1.0 must not become the scaling ceiling; \
+         got {}",
+        promoted.score
+    );
+    assert!(
+        (promoted.score - 0.6).abs() <= 1e-5,
+        "the ceiling is the best L2/L3 cosine (0.6), got {}",
+        promoted.score
+    );
+
+    let genuine = results
+        .iter()
+        .position(|r| r.drawer.id == ids[1])
+        .expect("the genuine vector hit survives");
+    let promoted_pos = results
+        .iter()
+        .position(|r| r.drawer.id == ids[2])
+        .expect("the promoted hit is present");
+    assert!(
+        genuine < promoted_pos,
+        "a lexical-only hit must not outrank a genuine vector hit it ties"
+    );
+}
+
 /// Why: "with the lane off, recall is byte-identical" is what makes #5036 safe
 /// to merge ahead of `TRUSTY_BM25_DAEMON=1`, and this early return is its
 /// entire basis. The branch is not only reachable when the lane is disabled —
