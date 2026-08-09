@@ -1,13 +1,14 @@
 //! HTTP service layer for trusty-review — axum router and shared state.
 //!
 //! Why: wraps the existing review pipeline in a long-lived HTTP daemon so
-//! trusty-review can receive GitHub webhooks and respond to on-demand review
-//! requests without requiring the caller to spawn a CLI process.
+//! callers can request a review without spawning a CLI process.
 //!
-//! What: exports `AppState`, `build_router`, and the `serve` entry-point.
-//! All axum handler logic lives in focused sibling files:
-//!   - `handlers.rs`  — route handler functions
-//!   - `webhook.rs`   — GitHub webhook event parsing + dispatch
+//! What: exports `AppState`, `build_router`, and the `serve` entry-point. All
+//! axum handler logic lives in `handlers.rs`.
+//!
+//! GitHub webhooks do NOT arrive here. #5181 retired `POST /pr/github/webhook`;
+//! `trusty-console` terminates the GitHub request and relays it over UDS to
+//! `webhook_listener` (ADR-0034).
 //!
 //! Test: `cargo test -p trusty-review --features http-server` exercises the
 //! router via `tower::ServiceExt::oneshot` without a bound socket.
@@ -16,13 +17,11 @@
 
 pub mod handlers;
 pub mod inference_probe;
-pub mod webhook;
 
 pub use handlers::AppState;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
@@ -32,7 +31,6 @@ use axum::{
 use tracing::{info, warn};
 
 use crate::service::handlers::{handle_health, handle_review, handle_status};
-use crate::service::webhook::handle_github_webhook;
 
 /// Default listen port for the trusty-review daemon.
 ///
@@ -95,8 +93,7 @@ pub(crate) fn write_addr_to_path(path: &std::path::Path, addr: &str) -> std::io:
 /// `build_router(state).oneshot(request)` without binding a socket. Delegates
 /// to [`build_router_with_self_origins`] with a loopback-only allowlist so
 /// existing callers/tests are unchanged.
-/// What: registers GET /health, GET /status, POST /review, and
-/// POST /pr/github/webhook.
+/// What: registers GET /health, GET /status, and POST /review.
 /// Test: `router_builds_without_panic`, `health_returns_ok_json`.
 pub fn build_router(state: AppState) -> Router {
     build_router_with_self_origins(state, trusty_common::server::SelfOrigins::default())
@@ -112,16 +109,13 @@ pub fn build_router(state: AppState) -> Router {
 /// bind address so a non-loopback bind trusts itself (#3269), mirroring the
 /// `trusty-analyze` adoption pattern (`service/routes.rs::build_router_with_self_origins`).
 ///
-/// The GitHub webhook route (`POST /pr/github/webhook`) is HMAC-verified
-/// (`X-Hub-Signature-256`), not browser-driven — GitHub sends no `Origin`
-/// header, so the guard's fail-open-on-missing-Origin behaviour keeps webhook
-/// delivery working unchanged.
 /// What: identical router to `build_router`, except the final middleware is
 /// `trusty_common::server::with_guarded_middleware` (guard + standard
 /// CORS/trace/compression stack), applied AFTER every route registration so
 /// no route is left unguarded (the #3268 `route_layer` lesson).
 /// Test: `service::guard_tests` (cross-origin `POST /review` → 403; loopback /
-/// missing-Origin → allowed; webhook-no-Origin → allowed; GET read unaffected).
+/// missing-Origin → allowed; GET read unaffected; the retired webhook path
+/// → 404).
 pub fn build_router_with_self_origins(
     state: AppState,
     self_origins: trusty_common::server::SelfOrigins,
@@ -130,7 +124,11 @@ pub fn build_router_with_self_origins(
         .route("/health", get(handle_health))
         .route("/status", get(handle_status))
         .route("/review", post(handle_review))
-        .route("/pr/github/webhook", post(handle_github_webhook))
+        // #5181: `POST /pr/github/webhook` is NOT registered here. GitHub
+        // reaches this crate through `trusty-console`'s `/api/webhooks/{source}`
+        // and the UDS listener in `webhook_listener`; the path 404s, so a
+        // delivery aimed at the retired route fails visibly at GitHub instead
+        // of being accepted and dropped.
         .with_state(state);
     trusty_common::server::with_guarded_middleware(router, self_origins)
 }
@@ -202,9 +200,6 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
         }
     };
 
-    // Clone the shutdown sender before consuming `state` into the router.
-    // After axum::serve returns (shutdown), we broadcast to all outcome-poll tasks.
-    let shutdown_tx = Arc::clone(&state.shutdown_tx);
     // #3332: trust the resolved bind address as a self-origin (non-loopback
     // binds only; `from_bind_addrs` drops loopback) for the write guard.
     let self_origins = trusty_common::server::SelfOrigins::from_bind_addrs(&[actual]);
@@ -212,8 +207,6 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(trusty_common::shutdown_signal())
         .await?;
-    // Signal all sleeping outcome-poll background tasks to exit gracefully.
-    let _ = shutdown_tx.send(true);
 
     // Best-effort cleanup: remove discovery files so stale clients fail fast
     // instead of timing out against a dead port.

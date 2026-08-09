@@ -21,10 +21,8 @@
 //! deliberately NOT waiting on that — it still rests on durability alone, so a
 //! slow or failing review can never turn into a refused delivery.
 //!
-//! The legacy HTTP route (`POST /pr/github/webhook`, `service::webhook`) is
-//! untouched and still live. Retiring it is
-//! [#5181](https://github.com/bobmatnyc/trusty-tools/issues/5181); both paths
-//! coexist until then.
+//! #5181 retired the legacy HTTP route (`POST /pr/github/webhook`). This is now
+//! the only way a GitHub delivery reaches this crate; the old path 404s.
 //!
 //! Test: `webhook_listener_tests.rs`.
 

@@ -192,7 +192,7 @@ shipped code.
 - **FR-7.3 (✅)** GitHub PR review: fetch a PR diff via the REST API, run the
   review pipeline, optionally post the report back as a comment; HMAC webhook
   signature verification. *(`core/github.rs`, CLI `review-pr`, `/review/github-pr`,
-  `/webhooks/github`, MCP `review_github_pr`)*
+  MCP `review_github_pr`; `/webhooks/github` retired in #5181)*
 - **FR-7.4 (✅)** LLM-augmented deep analysis: a `DeepAnalysisReport`
   (narrative + frameworks + recommendations + model) layered on top of the
   deterministic `ReviewReport` via a `ChatProvider`. Two routing paths:

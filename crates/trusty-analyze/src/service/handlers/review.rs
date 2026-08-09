@@ -1,17 +1,23 @@
-//! Route handlers for diff review, GitHub PR review, and webhook delivery.
+//! Route handlers for diff review and GitHub PR review.
 //!
-//! Why: Extracted from `service/mod.rs` to keep the "review + webhook"
-//! surface isolated. These handlers share a common theme: they accept external
-//! content (a diff or a PR number), run deterministic analysis against it, and
-//! optionally post results back to GitHub. The LLM narrative pass lives in
-//! `handlers/deep.rs` to keep this file under the 500-line cap.
+//! Why: Extracted from `service/mod.rs` to keep the review surface isolated.
+//! These handlers share a common theme: they accept external content (a diff or
+//! a PR number), run deterministic analysis against it, and optionally post
+//! results back to GitHub. The LLM narrative pass lives in `handlers/deep.rs` to
+//! keep this file under the 500-line cap.
 //!
-//! What: Three public handlers (`review_diff_handler`, `review_github_pr_handler`,
-//! `github_webhook_handler`) plus their private helper (`process_pr_webhook`).
+//! What: two public handlers, `review_diff_handler` and
+//! `review_github_pr_handler`.
+//!
+//! #5181 removed `github_webhook_handler` and its `POST /webhooks/github` route.
+//! GitHub now reaches this crate only through `trusty-console`'s
+//! `/api/webhooks/{source}` and the UDS listener in `webhook_listener`; the
+//! pipeline those deliveries run is `webhook_drain::run_pr_analysis`, which this
+//! module used to call.
 //!
 //! Test: `review_endpoint_requires_index_id`, `review_endpoint_surfaces_search_failure_as_502`,
-//! `review_endpoint_rejects_malformed_diff`, and all `webhook_*` tests in
-//! `service/tests_review.rs`.
+//! `review_endpoint_rejects_malformed_diff`, and
+//! `retired_webhook_route_is_not_registered` in `service/tests_review.rs`.
 
 use std::sync::Arc;
 
@@ -19,7 +25,6 @@ use anyhow::Result;
 use axum::{
     body::Bytes,
     extract::{Query, State},
-    http::StatusCode,
     response::Json,
 };
 use serde::Deserialize;
@@ -113,83 +118,4 @@ pub async fn review_github_pr_handler(
             .map_err(|e| ApiError::bad_gateway(format!("post PR comment: {e}")))?;
     }
     Ok(Json(report))
-}
-
-/// Why: GitHub can push `pull_request` events to this endpoint so PRs are
-/// reviewed automatically the moment they open or update — no CI step needed.
-/// The HMAC is the only thing proving a delivery came from GitHub, so an
-/// unset secret rejects every delivery rather than trusting the payload
-/// (#5173; matches `trusty-review`'s `handle_github_webhook`).
-/// What: requires a non-empty secret from app state or `GITHUB_WEBHOOK_SECRET`
-/// and verifies `X-Hub-Signature-256` against it (401 on either failure),
-/// checks the event is a `pull_request` with an actionable `action`, extracts
-/// the PR coordinates, spawns a background task to fetch+analyze+comment, and
-/// returns 202 Accepted immediately so GitHub's delivery doesn't time out.
-/// Test: `webhook_rejects_when_no_secret_configured` (unset-secret 401),
-/// `webhook_rejects_bad_signature` (bad-HMAC 401), and
-/// `webhook_ignores_non_pr_event` (202 + no work) cover the guard rails.
-pub async fn github_webhook_handler(
-    State(state): State<Arc<AnalyzerAppState>>,
-    headers: axum::http::HeaderMap,
-    body: Bytes,
-) -> Result<StatusCode, ApiError> {
-    // 1. Signature verification. The secret comes from app state if set,
-    //    otherwise from GITHUB_WEBHOOK_SECRET.
-    let secret = state
-        .webhook_secret
-        .clone()
-        .or_else(|| std::env::var("GITHUB_WEBHOOK_SECRET").ok())
-        .filter(|s| !s.is_empty());
-    // #5173: an unset secret rejects — skipping verification let any network
-    // peer inject PR coordinates into the analyze pipeline.
-    let Some(secret) = secret else {
-        tracing::warn!(
-            "GITHUB_WEBHOOK_SECRET is not configured — rejecting webhook delivery with 401"
-        );
-        return Err(ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            message: "webhook secret not configured".to_string(),
-        });
-    };
-    let sig = headers
-        .get("X-Hub-Signature-256")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !crate::core::verify_webhook_signature(&secret, &body, sig) {
-        return Err(ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            message: "X-Hub-Signature-256 verification failed".to_string(),
-        });
-    }
-
-    // 2-4. Event filter, action filter and PR coordinates all come from the
-    // shared classifier so this route and the UDS drain cannot disagree about
-    // what a webhook means (#5192).
-    let event = headers
-        .get("X-GitHub-Event")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let target = match crate::webhook_drain::classify_pr_event(event, &body) {
-        crate::webhook_drain::PrEventVerdict::Actionable(target) => target,
-        // Acknowledge so GitHub stops retrying, but do no work.
-        crate::webhook_drain::PrEventVerdict::Ignored(_) => return Ok(StatusCode::ACCEPTED),
-        crate::webhook_drain::PrEventVerdict::Malformed(reason) => {
-            return Err(ApiError::bad_request(reason));
-        }
-    };
-
-    // 5. Spawn the analysis off the request path so GitHub gets a fast 202.
-    let search = state.search.clone();
-    tokio::spawn(async move {
-        if let Err(e) = crate::webhook_drain::run_pr_analysis(&search, &target).await {
-            tracing::warn!(
-                "github webhook PR {}/{}#{} processing failed: {e:#}",
-                target.owner,
-                target.repo,
-                target.pr
-            );
-        }
-    });
-
-    Ok(StatusCode::ACCEPTED)
 }

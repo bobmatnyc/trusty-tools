@@ -92,11 +92,11 @@ trusty-common = { workspace = true, features = ["intent-source", "config-cli", "
 # no longer bundled into trusty-review (single-owner-per-binary); the standalone
 # `trusty-console` crate is its sole producer.
 
-# ── JWT / HMAC / crypto (GitHub App auth) ─────────────────────────────────
+# ── JWT / crypto (GitHub App auth) ────────────────────────────────────────
+# Why (#5181): `hmac`/`sha2`/`hex` were REMOVED with `verify_webhook_signature`.
+#      `trusty-console` verifies a GitHub delivery's HMAC once, before relaying
+#      (ADR-0034 §3); this crate has no signature to check any more.
 jsonwebtoken = { workspace = true }
-hmac         = { workspace = true }
-sha2         = { workspace = true }
-hex          = { workspace = true }
 base64       = { workspace = true }
 chrono       = { workspace = true }
 

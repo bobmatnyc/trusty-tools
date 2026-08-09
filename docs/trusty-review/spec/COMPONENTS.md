@@ -458,7 +458,7 @@ Compiled only under the `http-server` feature (default ON).
 | `/health` | GET | Liveness; version, dry-run flag, dependency reachability, configured role models |
 | `/status` | GET | In-flight review count, last `verification_model_error` |
 | `/review` | POST | Synchronous on-demand review (dry-run) |
-| `/pr/github/webhook` | POST | GitHub PR webhook; HMAC-validated; event-filtered |
+| ~~`/pr/github/webhook`~~ | — | **Retired (#5181)** — 404. GitHub deliveries arrive over UDS via `trusty-console` (ADR-0034); see `webhook_listener` / `webhook_drain` |
 
 **Default port:** 7880 (distinct from trusty-search :7878 and trusty-analyze :7879).
 

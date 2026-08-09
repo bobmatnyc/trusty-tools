@@ -164,7 +164,11 @@ Endpoints:
 | GET | `/health` | Liveness, dependency + inference status (see MCP `review_health` for schema) |
 | GET | `/status` | In-flight count + last error |
 | POST | `/review` | Synchronous on-demand review |
-| POST | `/pr/github/webhook` | GitHub PR webhook (HMAC-validated) |
+
+`POST /pr/github/webhook` was retired in #5181 and now answers 404. GitHub
+deliveries reach `trusty-review` through `trusty-console`'s
+`POST /api/webhooks/{source}`, which verifies the HMAC once and relays over UDS
+to `trusty-review webhook-listen` (ADR-0034).
 
 ## MCP stdio service (Claude Code integration)
 

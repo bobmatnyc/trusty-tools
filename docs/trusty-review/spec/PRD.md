@@ -96,7 +96,7 @@ Status tags:
 | `GET /health` | ✅ | Version, dry-run flag, dep reachability |
 | `GET /status` | ✅ | In-flight count, last error |
 | `POST /review` (on-demand synchronous) | ✅ | |
-| `POST /pr/github/webhook` (HMAC-validated) | ✅ | |
+| ~~`POST /pr/github/webhook`~~ | ❌ | Retired #5181 — console verifies the HMAC and relays over UDS (ADR-0034) |
 | `review_requested`-only event filter | ✅ | |
 | Trigger classification (manual/auto/force-live) | ✅ | |
 | Async dispatch + 200 ack | ✅ | `tokio::spawn` |

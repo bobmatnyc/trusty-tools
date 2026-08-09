@@ -8,8 +8,10 @@
 //! Stage-1 delivered config + LLM provider abstraction; Stage-2 adds the
 //! integration clients (GitHub App auth, trusty-search/analyze HTTP clients);
 //! Stage-3 adds the MVP review pipeline and the `run`/`compare` CLI commands;
-//! Stage-4 adds the `service` module — axum HTTP server with /health, /status,
-//! /review, and /pr/github/webhook (gated behind the `http-server` feature).
+//! Stage-4 adds the `service` module — axum HTTP server with /health, /status
+//! and /review (gated behind the `http-server` feature). GitHub webhooks are
+//! not part of it: #5181 retired `/pr/github/webhook`, and deliveries now
+//! arrive over UDS through `webhook_listener` (ADR-0034).
 //!
 //! Test: each public module carries its own unit tests; see each submodule.
 

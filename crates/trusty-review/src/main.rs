@@ -102,13 +102,15 @@ enum Commands {
         json: bool,
     },
 
-    /// Start the long-lived HTTP webhook server (port 7891 by default).
+    /// Start the long-lived HTTP server (port 7891 by default).
     ///
     /// Exposes:
     ///   GET  /health                  — liveness + dep status
     ///   GET  /status                  — in-flight count + last error
     ///   POST /review                  — synchronous on-demand review
-    ///   POST /pr/github/webhook       — GitHub PR webhook (HMAC-validated)
+    ///
+    /// GitHub webhooks do not arrive here. Run `webhook-listen` for those:
+    /// `trusty-console` verifies the delivery and relays it over UDS (#5181).
     ///
     /// Pass --stdio to run as a MCP JSON-RPC stdio service instead.
     ///

@@ -9,9 +9,9 @@
 //! console health signal that read green because the hand-off had succeeded.
 //!
 //! What: [`ReviewProcessor`] is the [`DeliveryProcessor`] the listener drains
-//! into. [`classify_review_event`] is the single copy of the action filter,
-//! shared with the legacy HTTP route so the two paths cannot disagree about
-//! which deliveries cause a review. [`ConfiguredReviewPipeline`] builds the LLM,
+//! into. [`classify_review_event`] is the only copy of the action filter — it
+//! was shared with the legacy HTTP route until #5181 retired that route, and it
+//! now decides for the one remaining path. [`ConfiguredReviewPipeline`] builds the LLM,
 //! verifier, search, analyze and dedup dependencies **lazily**, on the first
 //! actionable delivery — a listener that is spawned and never given work must
 //! not pay for a Bedrock liveness probe.
@@ -29,12 +29,19 @@
 //!   provider, GitHub, trusty-search — is retryable, so a delivery is kept while
 //!   the world is temporarily broken.
 //!
-//! Outcome polling on `closed` + `merged` (opt-in, default off) is deliberately
-//! NOT run here: it schedules a task that sleeps for an hour, which a
-//! console-supervised short-lived process cannot honour. Those deliveries are
-//! [`Disposition::Ignored`] with the reason recorded. The legacy HTTP route
-//! still schedules them; giving the drain a durable equivalent is separate work
-//! and is called out in ADR-0034 §5.
+//! 🔴 **`closed` and `merged` deliveries are not acted on by anything, on
+//! purpose (#5181).** They reach [`classify_review_event`], come back
+//! [`ReviewEventVerdict::Ignored`], and are recorded as
+//! [`Disposition::Ignored`] with the reason — the drain writes them to its
+//! processed ledger before unlinking the entry, so the delivery is accounted
+//! for rather than dropped. Nothing runs afterwards.
+//!
+//! That is a deletion, not a relocation. The outcome poll those deliveries used
+//! to schedule slept for an hour, which a console-supervised process that exits
+//! on SIGTERM cannot honour; the owner ruled it deleted along with the legacy
+//! HTTP route that was its only trigger. Do not read `Ignored` here as "ignored
+//! pending a handler elsewhere" — there is no handler, here or elsewhere, and
+//! reinstating one is new work with a durable design of its own. ADR-0034 §5.
 //!
 //! Test: `webhook_drain_tests.rs`.
 
@@ -92,12 +99,18 @@ pub enum ReviewEventVerdict {
 
 /// Decide what a `{event, body}` pair asks for.
 ///
-/// Why: the single copy of the filter. `service::webhook` calls it too, so
-/// retiring that route ([#5181]) removes a transport and not a policy.
+/// Why: the single copy of the filter. `service::webhook` called it too until
+/// [#5181] retired that route, which removed a transport and not a policy.
+///
+/// A `closed` (merged or not) delivery lands in
+/// [`ReviewEventVerdict::Ignored`] here and nothing acts on it afterwards —
+/// see the module docs for why that is a deletion rather than a gap.
 ///
 /// [#5181]: https://github.com/bobmatnyc/trusty-tools/issues/5181
 ///
-/// Test: the four `classify_*` cases.
+/// Test: the four `classify_*` cases, plus
+/// `classify_ignores_a_merged_pull_request` and
+/// `drain_records_a_merged_delivery_as_ignored_rather_than_dropping_it`.
 pub fn classify_review_event(event: &str, body: &[u8]) -> ReviewEventVerdict {
     if event != PR_EVENT {
         return ReviewEventVerdict::Ignored(format!("event {event:?} is not {PR_EVENT:?}"));
