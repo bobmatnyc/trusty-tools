@@ -1,23 +1,29 @@
-//! Write methods for `KgStoreRedb` plus in-transaction batch helpers.
+//! Write methods for `KgStoreRedb` plus the in-transaction helpers they and
+//! `apply_batch` share.
 //!
 //! Why: Separating write operations from the struct definition and read
 //! operations keeps each file under the 500-SLOC cap.
 //! What: `impl KgStoreRedb` for `assert`, `retract`, `upsert_drawer`,
-//! `delete_drawer`, `delete_by_subject`, plus free-function helpers used
-//! by `apply_batch` in `import.rs`. The drawer-side helpers those two methods
-//! delegate to live in the sibling `drawer_ops` module.
+//! `delete_drawer`, `delete_by_subject`, plus the free-function helpers
+//! `batch_assert` / `batch_retract` that both the single-op methods and
+//! `apply_batch` in `import.rs` route through. The drawer-side helpers live in
+//! the sibling `drawer_ops` module.
 //! Test: `assert_then_query_returns_triple`, `retract_closes_active_interval`,
-//! `delete_drawer_removes_row`, `cascade_delete_removes_triples_for_subject`.
+//! `assert_multiple_objects_for_multivalued_predicate_all_survive`,
+//! `assert_functional_predicate_still_supersedes`,
+//! `cascade_delete_removes_triples_for_subject`.
 
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TRIPLES_BY_OBJECT,
     TRIPLES_BY_PREDICATE, TripleValue, decode_triple_key, decode_u64, decode_value,
     encode_object_index_key, encode_predicate_index_key, encode_triple_key, encode_u64,
-    encode_value, subject_prefix,
+    encode_value, is_functional_predicate, prefix_range_end, subject_predicate_prefix,
+    subject_prefix,
 };
 use anyhow::{Context, Result};
 use redb::{ReadableDatabase, ReadableTable};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use super::super::kg::Triple;
@@ -26,27 +32,23 @@ use super::store::KgStoreRedb;
 use super::types::{Tbl, now_ms};
 
 impl KgStoreRedb {
-    /// Assert a triple. If an active row exists for `(subject, predicate)` it
-    /// is closed (valid_to = now) and removed from secondary indexes; then the
-    /// new triple is inserted and indexed.
+    /// Assert a triple.
     ///
-    /// Why: Temporal model — facts have intervals. New assertion supersedes
-    /// the prior active row instead of overwriting it, preserving history.
+    /// Why: Temporal model — facts have intervals, so a new assertion closes
+    /// what it supersedes instead of overwriting it. #4810 made *what* it
+    /// supersedes depend on the predicate: a functional predicate (see
+    /// `FUNCTIONAL_PREDICATES`) still allows one active object per subject, but
+    /// every other predicate is multi-valued and a second object joins the
+    /// first rather than replacing it. Before that split, three
+    /// `room:General --contains--> drawer:N` asserts left one row.
     /// What: Single write transaction over TRIPLES + secondary indexes +
-    /// ACTIVE_SUBJECT_COUNTS so the invariant "at most one active row per
-    /// (subject, predicate)" can never be observed broken.
-    /// Test: `assert_then_query_returns_triple`, `assert_supersedes_prior`.
+    /// ACTIVE_SUBJECT_COUNTS, delegating to [`batch_assert`] so the single-op
+    /// and batched paths cannot drift.
+    /// Test: `assert_then_query_returns_triple`,
+    /// `assert_functional_predicate_still_supersedes`,
+    /// `assert_multiple_objects_for_multivalued_predicate_all_survive`.
     pub fn assert(&self, triple: &Triple) -> Result<()> {
         self.check_writable()?;
-        let close_ms = triple.valid_from.timestamp_millis();
-        let new_value = TripleValue {
-            object: triple.object.clone(),
-            valid_from_ms: triple.valid_from.timestamp_millis(),
-            valid_to_ms: triple.valid_to.map(|dt| dt.timestamp_millis()),
-            confidence: triple.confidence,
-            provenance: triple.provenance.clone(),
-        };
-
         let wtx = self.db().begin_write().context("begin assert txn")?;
         {
             let mut triples = wtx.open_table(TRIPLES).context("open triples table")?;
@@ -59,129 +61,34 @@ impl KgStoreRedb {
             let mut counts = wtx
                 .open_table(ACTIVE_SUBJECT_COUNTS)
                 .context("open active_subject_counts table")?;
-
-            let key = encode_triple_key(&triple.subject, &triple.predicate);
-
-            // Look up existing active row at this (subject, predicate). Because
-            // we only ever store one row per (subject, predicate) key (the most
-            // recent), checking by direct key is sufficient.
-            let mut closed_any = false;
-            let prior_opt: Option<TripleValue> = {
-                let existing = triples
-                    .get(key.as_slice())
-                    .context("read existing triple")?;
-                match existing {
-                    Some(g) => Some(decode_value(g.value()).context("decode prior triple")?),
-                    None => None,
-                }
-            };
-            if let Some(prior) = prior_opt {
-                if prior.valid_to_ms.is_none() {
-                    // Active — close it by setting valid_to and writing back.
-                    // But since we're about to overwrite with the new row, we
-                    // only need to drop the secondary index entries and
-                    // decrement the active counter.
-                    let obj_key =
-                        encode_object_index_key(&prior.object, &triple.subject, &triple.predicate);
-                    by_object
-                        .remove(obj_key.as_slice())
-                        .context("remove prior object index")?;
-                    let pred_key = encode_predicate_index_key(&triple.predicate, &triple.subject);
-                    by_predicate
-                        .remove(pred_key.as_slice())
-                        .context("remove prior predicate index")?;
-                    closed_any = true;
-                }
-                // History preservation: write the closed prior row into a
-                // history key. We use a synthetic key suffix so it does not
-                // collide with the active row. Format: `[hist:][orig key]
-                // [valid_from_ms BE]`. This keeps dump_all_triples honest.
-                if prior.valid_to_ms.is_none() {
-                    let mut hist_key = Vec::with_capacity(5 + key.len() + 8);
-                    hist_key.extend_from_slice(b"hist:");
-                    hist_key.extend_from_slice(&key);
-                    hist_key.extend_from_slice(&prior.valid_from_ms.to_be_bytes());
-                    let closed = TripleValue {
-                        valid_to_ms: Some(close_ms),
-                        ..prior
-                    };
-                    let closed_bytes = encode_value(&closed).context("encode closed prior")?;
-                    triples
-                        .insert(hist_key.as_slice(), closed_bytes.as_slice())
-                        .context("insert closed history row")?;
-                }
-            }
-
-            // Insert / overwrite active row.
-            let new_bytes = encode_value(&new_value).context("encode new triple")?;
-            triples
-                .insert(key.as_slice(), new_bytes.as_slice())
-                .context("insert new triple")?;
-
-            // Insert secondary indexes for the new active row (only when it
-            // is itself active — `assert` with `valid_to = Some(_)` would be
-            // a closed-on-arrival row that should not appear in indexes).
-            if new_value.valid_to_ms.is_none() {
-                let obj_key =
-                    encode_object_index_key(&new_value.object, &triple.subject, &triple.predicate);
-                by_object
-                    .insert(obj_key.as_slice(), [].as_slice())
-                    .context("insert new object index")?;
-                let pred_key = encode_predicate_index_key(&triple.predicate, &triple.subject);
-                by_predicate
-                    .insert(pred_key.as_slice(), [].as_slice())
-                    .context("insert new predicate index")?;
-
-                // Maintain count: net change is 0 if we just closed one and
-                // opened one; +1 if there was no prior active row.
-                if !closed_any {
-                    let subj_key = triple.subject.as_bytes();
-                    let prev = counts
-                        .get(subj_key)
-                        .context("read prior count")?
-                        .map(|v| decode_u64(v.value()))
-                        .unwrap_or(0);
-                    let next = prev.saturating_add(1);
-                    counts
-                        .insert(subj_key, encode_u64(next).as_slice())
-                        .context("update active count")?;
-                }
-            } else if closed_any {
-                // Closed-on-arrival row replacing an active one — decrement.
-                let subj_key = triple.subject.as_bytes();
-                let prev = counts
-                    .get(subj_key)
-                    .context("read prior count")?
-                    .map(|v| decode_u64(v.value()))
-                    .unwrap_or(0);
-                let next = prev.saturating_sub(1);
-                if next == 0 {
-                    counts.remove(subj_key).context("remove zero count")?;
-                } else {
-                    counts
-                        .insert(subj_key, encode_u64(next).as_slice())
-                        .context("update active count")?;
-                }
-            }
+            batch_assert(
+                &mut triples,
+                &mut by_object,
+                &mut by_predicate,
+                &mut counts,
+                triple,
+            )?;
         }
         wtx.commit().context("commit assert txn")?;
         Ok(())
     }
 
-    /// Close the active triple for `(subject, predicate)` without inserting a
-    /// replacement. Returns the number of rows closed (0 or 1).
+    /// Close every active triple at `(subject, predicate)` without inserting a
+    /// replacement. Returns how many rows were closed.
     ///
-    /// Why: `assert` always closes-and-replaces; retract is the way to say
-    /// "this fact is no longer true and has no successor" — used by
-    /// `remove_prompt_fact`.
-    /// What: Reads the row at `(subject, predicate)`. If active, writes a
-    /// history copy with `valid_to = now`, drops the active row from the
-    /// primary table, removes secondary indexes, and decrements the count.
-    /// Test: `retract_closes_active_interval`.
+    /// Why: `assert` closes-and-replaces; retract is the way to say "this is no
+    /// longer true and has no successor" — used by `remove_prompt_fact`.
+    /// #4810 kept the two-argument signature and widened its meaning from "the
+    /// active row" to "every active row", which is behaviour-preserving for
+    /// every existing caller: before the object joined the key there could
+    /// only ever be one. A three-argument `retract_triple` is a deliberate
+    /// non-goal — no caller wants to retract one object of a set today, and
+    /// adding the surface unused would fix a shape nothing has exercised.
+    /// What: Delegates to [`batch_retract`] inside one write transaction.
+    /// Test: `retract_closes_active_interval`,
+    /// `retract_closes_every_object_at_the_pair`.
     pub fn retract(&self, subject: &str, predicate: &str) -> Result<usize> {
         self.check_writable()?;
-        let key = encode_triple_key(subject, predicate);
-        let close_ms = now_ms();
         let wtx = self.db().begin_write().context("begin retract txn")?;
         let closed;
         {
@@ -195,69 +102,14 @@ impl KgStoreRedb {
             let mut counts = wtx
                 .open_table(ACTIVE_SUBJECT_COUNTS)
                 .context("open active_subject_counts table")?;
-
-            let prior_opt: Option<TripleValue> = {
-                let existing = triples
-                    .get(key.as_slice())
-                    .context("lookup active triple for retract")?;
-                match existing {
-                    Some(g) => Some(decode_value(g.value()).context("decode prior for retract")?),
-                    None => None,
-                }
-            };
-            match prior_opt {
-                Some(prior) => {
-                    if prior.valid_to_ms.is_none() {
-                        // Move to history.
-                        let mut hist_key = Vec::with_capacity(5 + key.len() + 8);
-                        hist_key.extend_from_slice(b"hist:");
-                        hist_key.extend_from_slice(&key);
-                        hist_key.extend_from_slice(&prior.valid_from_ms.to_be_bytes());
-                        let closed_v = TripleValue {
-                            valid_to_ms: Some(close_ms),
-                            ..prior.clone()
-                        };
-                        let bytes = encode_value(&closed_v).context("encode retract history")?;
-                        triples
-                            .insert(hist_key.as_slice(), bytes.as_slice())
-                            .context("insert retract history row")?;
-                        // Remove active row + indexes.
-                        triples
-                            .remove(key.as_slice())
-                            .context("remove active row for retract")?;
-                        let obj_key = encode_object_index_key(&prior.object, subject, predicate);
-                        by_object
-                            .remove(obj_key.as_slice())
-                            .context("remove object index for retract")?;
-                        let pred_key = encode_predicate_index_key(predicate, subject);
-                        by_predicate
-                            .remove(pred_key.as_slice())
-                            .context("remove predicate index for retract")?;
-                        // Decrement count.
-                        let subj_key = subject.as_bytes();
-                        let prev = counts
-                            .get(subj_key)
-                            .context("read prior count for retract")?
-                            .map(|v| decode_u64(v.value()))
-                            .unwrap_or(0);
-                        let next = prev.saturating_sub(1);
-                        if next == 0 {
-                            counts.remove(subj_key).context("remove zero count")?;
-                        } else {
-                            counts
-                                .insert(subj_key, encode_u64(next).as_slice())
-                                .context("update count after retract")?;
-                        }
-                        closed = 1;
-                    } else {
-                        // Row exists but is already closed — nothing to do.
-                        closed = 0;
-                    }
-                }
-                None => {
-                    closed = 0;
-                }
-            }
+            closed = batch_retract(
+                &mut triples,
+                &mut by_object,
+                &mut by_predicate,
+                &mut counts,
+                subject,
+                predicate,
+            )?;
         }
         wtx.commit().context("commit retract txn")?;
         Ok(closed)
@@ -317,17 +169,18 @@ impl KgStoreRedb {
     /// forgotten, every triple extracted from it (identified by the
     /// `drawer:<uuid>` subject prefix) must be removed so the KG does not
     /// accumulate orphaned edges.
-    /// What: Performs a prefix scan over TRIPLES using `subject_prefix(subject)`,
-    /// collects every active (non-history, non-closed) `(subject, predicate)`
-    /// pair, and retracts each via the existing `retract` path so secondary
-    /// indexes and the active count table are kept consistent. Returns the
-    /// number of active rows closed.
-    /// Test: `cascade_delete_removes_triples_for_subject` in this module's
-    /// test section.
+    /// What: Prefix-scans TRIPLES with `subject_prefix(subject)`, collects the
+    /// DISTINCT active `(subject, predicate)` pairs — #4810 put the object in
+    /// the key, so one pair can now span several rows and retracting per row
+    /// would call `retract` N times for the N objects its first call already
+    /// closed — and retracts each pair. Returns the number of rows closed.
+    /// Test: `cascade_delete_removes_triples_for_subject`,
+    /// `cascade_delete_closes_every_object_of_a_multivalued_pair`.
     pub fn delete_by_subject(&self, subject: &str) -> Result<usize> {
         self.check_writable()?;
         let prefix = subject_prefix(subject);
-        let mut to_retract: Vec<(String, String)> = Vec::new();
+        let end = prefix_range_end(&prefix);
+        let mut to_retract: BTreeSet<(String, String)> = BTreeSet::new();
         {
             let rtx = self
                 .db()
@@ -336,8 +189,6 @@ impl KgStoreRedb {
             let triples = rtx
                 .open_table(TRIPLES)
                 .context("open triples for delete_by_subject scan")?;
-            let mut end = prefix.clone();
-            end.push(0xFF);
             let range = triples
                 .range::<&[u8]>(prefix.as_slice()..end.as_slice())
                 .context("range scan for delete_by_subject")?;
@@ -352,8 +203,8 @@ impl KgStoreRedb {
                     // Already closed — skip.
                     continue;
                 }
-                if let Some((s, p)) = decode_triple_key(k.value()) {
-                    to_retract.push((s, p));
+                if let Some((s, p, _o)) = decode_triple_key(k.value()) {
+                    to_retract.insert((s, p));
                 }
             }
         }
@@ -372,25 +223,169 @@ impl KgStoreRedb {
 
 // ----- in-transaction helpers shared by the single-op and batch paths -----
 //
-// Why: The single-op `assert` / `retract` / drawer methods already
-// implement the correct semantics inside their own `begin_write` block.
-// To share that logic with `apply_batch` without duplicating it, we lift
-// the per-op body into a free function that takes already-opened tables.
-// This keeps the txn boundary explicit (one `begin_write` per batch) and
-// avoids logic drift between the two paths. The single-op methods could
-// be migrated to call these helpers in a follow-up; for now we accept
-// the duplication to keep the diff minimal.
+// Why: `assert` and `retract` need identical semantics whether they arrive
+// one at a time or inside an `apply_batch` transaction. Both entry points call
+// the same free function over already-opened tables, so the txn boundary stays
+// explicit (one `begin_write` per call or per batch) and the two paths cannot
+// drift. #4810 collapsed the last of a copy-paste duplication here: the
+// single-op methods used to carry their own copy of this logic.
 
-/// In-transaction assert helper; mirrors `KgStoreRedb::assert`.
+/// Every ACTIVE row at `(subject, predicate)`, whatever the object (#4810).
 ///
-/// Why: Lets `apply_batch` perform N asserts inside one write txn.
-/// What: Same close-prior + insert-new + index-maintenance logic that
-/// the single-op `assert` runs, but takes already-opened tables.
-/// Test: `apply_batch_groups_asserts_into_single_commit`.
-pub(super) fn batch_assert(
-    triples: &mut Tbl<'_>,
-    by_object: &mut Tbl<'_>,
-    by_predicate: &mut Tbl<'_>,
+/// Why: with the object in the key, "what is currently asserted here?" is a
+/// range question, not a point read. Both `batch_assert` and `batch_retract`
+/// ask it, and neither may assume the answer has exactly one element — that
+/// assumption is what the ticket is about.
+/// What: prefix range scan over TRIPLES bounded by
+/// [`subject_predicate_prefix`], skipping `hist:` rows and rows already closed.
+/// Returns owned keys so the caller can mutate the table afterwards.
+/// Test: `assert_multiple_objects_for_multivalued_predicate_all_survive`.
+fn active_rows_for_pair(
+    triples: &Tbl<'_>,
+    subject: &str,
+    predicate: &str,
+) -> Result<Vec<(Vec<u8>, TripleValue)>> {
+    let prefix = subject_predicate_prefix(subject, predicate);
+    let end = prefix_range_end(&prefix);
+    let mut out = Vec::new();
+    let range = triples
+        .range::<&[u8]>(prefix.as_slice()..end.as_slice())
+        .context("range scan for (subject, predicate)")?;
+    for entry in range {
+        let (k, v) = entry.context("read row in (subject, predicate) scan")?;
+        let key = k.value().to_vec();
+        if key.starts_with(b"hist:") {
+            continue;
+        }
+        let value: TripleValue =
+            decode_value(v.value()).context("decode triple in (subject, predicate) scan")?;
+        if value.valid_to_ms.is_some() {
+            continue;
+        }
+        out.push((key, value));
+    }
+    Ok(out)
+}
+
+/// The three tables a triple write mutates together.
+///
+/// Why: `close_active_row` needs all three, and threading them as separate
+/// parameters alongside the row's own identity pushed it past clippy's
+/// argument ceiling. Grouping them also names the real unit — a triple's
+/// primary row and its two indexes move as one or the invariant breaks.
+/// What: borrowed handles into the caller's open write transaction.
+struct TripleTables<'a, 'txn> {
+    triples: &'a mut Tbl<'txn>,
+    by_object: &'a mut Tbl<'txn>,
+    by_predicate: &'a mut Tbl<'txn>,
+}
+
+/// Close one active row: copy it to history, drop it, drop its index entries.
+///
+/// Why: the close half of both `assert` (supersede) and `retract` (no
+/// successor). Keeping it in one place is what makes "closing a row" mean the
+/// same three mutations everywhere.
+/// What: writes `hist:<key><valid_from_ms BE>` carrying the row with
+/// `valid_to = close_ms`, removes the active row, and removes its
+/// `TRIPLES_BY_OBJECT` / `TRIPLES_BY_PREDICATE` entries. The caller owns the
+/// `ACTIVE_SUBJECT_COUNTS` adjustment because it batches several closes into
+/// one net delta.
+/// Test: `assert_supersedes_prior`, `retract_closes_active_interval`.
+fn close_active_row(
+    tables: &mut TripleTables<'_, '_>,
+    key: &[u8],
+    prior: &TripleValue,
+    subject: &str,
+    predicate: &str,
+    close_ms: i64,
+) -> Result<()> {
+    let mut hist_key = Vec::with_capacity(5 + key.len() + 8);
+    hist_key.extend_from_slice(b"hist:");
+    hist_key.extend_from_slice(key);
+    hist_key.extend_from_slice(&prior.valid_from_ms.to_be_bytes());
+    let closed = TripleValue {
+        valid_to_ms: Some(close_ms),
+        ..prior.clone()
+    };
+    let closed_bytes = encode_value(&closed).context("encode closed prior row")?;
+    tables
+        .triples
+        .insert(hist_key.as_slice(), closed_bytes.as_slice())
+        .context("insert closed history row")?;
+    tables
+        .triples
+        .remove(key)
+        .context("remove closed active row")?;
+
+    let obj_key = encode_object_index_key(&prior.object, subject, predicate);
+    tables
+        .by_object
+        .remove(obj_key.as_slice())
+        .context("remove object index for closed row")?;
+    let pred_key = encode_predicate_index_key(predicate, subject, &prior.object);
+    tables
+        .by_predicate
+        .remove(pred_key.as_slice())
+        .context("remove predicate index for closed row")?;
+    Ok(())
+}
+
+/// Apply a net change to `subject`'s active-triple counter.
+///
+/// Why: an assert can close several rows and open one in the same call, so the
+/// counter moves by a net delta rather than a fixed ±1. Doing the arithmetic
+/// once here also keeps the "drop the row at zero" rule in one place.
+/// What: reads the current count, applies `delta` saturating, and either
+/// removes the row (at zero) or writes the new value. `delta == 0` is a no-op.
+/// Test: `count_active_triples_returns_live_only`,
+/// `assert_multiple_objects_for_multivalued_predicate_all_survive`.
+fn adjust_active_count(counts: &mut Tbl<'_>, subject: &str, delta: i64) -> Result<()> {
+    if delta == 0 {
+        return Ok(());
+    }
+    let subj_key = subject.as_bytes();
+    let prev = counts
+        .get(subj_key)
+        .context("read active count")?
+        .map(|v| decode_u64(v.value()))
+        .unwrap_or(0);
+    let next = if delta > 0 {
+        prev.saturating_add(delta.unsigned_abs())
+    } else {
+        prev.saturating_sub(delta.unsigned_abs())
+    };
+    if next == 0 {
+        counts.remove(subj_key).context("remove zero count")?;
+    } else {
+        counts
+            .insert(subj_key, encode_u64(next).as_slice())
+            .context("update active count")?;
+    }
+    Ok(())
+}
+
+/// In-transaction assert; the single implementation behind `KgStoreRedb::assert`
+/// and `apply_batch`'s `Assert` op.
+///
+/// Why: see [`KgStoreRedb::assert`]. #4810: which prior rows a new assertion
+/// closes is a property of the predicate, not a fixed "the one row at this
+/// key".
+/// What: scans the `(subject, predicate)` prefix for active rows. For a
+/// functional predicate it closes EVERY one it finds — plural, because a
+/// palace migrated from the old key, or one whose predicate only just joined
+/// the functional list, can legitimately hold more than one. For a
+/// multi-valued predicate it closes only the row at this exact
+/// `(subject, predicate, object)`, which makes a repeat assertion a
+/// re-affirmation (new interval, same fact) and a different object an addition.
+/// Then it inserts the new row, indexes it when it is itself active, and moves
+/// the active counter by the net delta.
+/// Test: `apply_batch_groups_asserts_into_single_commit`,
+/// `assert_functional_predicate_still_supersedes`,
+/// `assert_multiple_objects_for_multivalued_predicate_all_survive`.
+pub(super) fn batch_assert<'txn>(
+    triples: &mut Tbl<'txn>,
+    by_object: &mut Tbl<'txn>,
+    by_predicate: &mut Tbl<'txn>,
     counts: &mut Tbl<'_>,
     triple: &Triple,
 ) -> Result<()> {
@@ -402,163 +397,89 @@ pub(super) fn batch_assert(
         confidence: triple.confidence,
         provenance: triple.provenance.clone(),
     };
-    let key = encode_triple_key(&triple.subject, &triple.predicate);
+    let key = encode_triple_key(&triple.subject, &triple.predicate, &triple.object);
+    let functional = is_functional_predicate(&triple.predicate);
 
-    let mut closed_any = false;
-    let prior_opt: Option<TripleValue> = {
-        let existing = triples
-            .get(key.as_slice())
-            .context("read existing triple (batch)")?;
-        match existing {
-            Some(g) => Some(decode_value(g.value()).context("decode prior triple (batch)")?),
-            None => None,
-        }
+    let prior_rows = active_rows_for_pair(triples, &triple.subject, &triple.predicate)?;
+    let mut tables = TripleTables {
+        triples,
+        by_object,
+        by_predicate,
     };
-    if let Some(prior) = prior_opt
-        && prior.valid_to_ms.is_none()
-    {
-        let obj_key = encode_object_index_key(&prior.object, &triple.subject, &triple.predicate);
-        by_object
-            .remove(obj_key.as_slice())
-            .context("remove prior object index (batch)")?;
-        let pred_key = encode_predicate_index_key(&triple.predicate, &triple.subject);
-        by_predicate
-            .remove(pred_key.as_slice())
-            .context("remove prior predicate index (batch)")?;
-        closed_any = true;
-
-        let mut hist_key = Vec::with_capacity(5 + key.len() + 8);
-        hist_key.extend_from_slice(b"hist:");
-        hist_key.extend_from_slice(&key);
-        hist_key.extend_from_slice(&prior.valid_from_ms.to_be_bytes());
-        let closed = TripleValue {
-            valid_to_ms: Some(close_ms),
-            ..prior
-        };
-        let closed_bytes = encode_value(&closed).context("encode closed prior (batch)")?;
-        triples
-            .insert(hist_key.as_slice(), closed_bytes.as_slice())
-            .context("insert closed history row (batch)")?;
+    let mut closed: i64 = 0;
+    for (prior_key, prior) in prior_rows {
+        // #4810: a functional predicate supersedes every object; a
+        // multi-valued one supersedes only its own object's prior interval.
+        if !functional && prior_key != key {
+            continue;
+        }
+        close_active_row(
+            &mut tables,
+            &prior_key,
+            &prior,
+            &triple.subject,
+            &triple.predicate,
+            close_ms,
+        )?;
+        closed += 1;
     }
 
-    let new_bytes = encode_value(&new_value).context("encode new triple (batch)")?;
-    triples
+    let new_bytes = encode_value(&new_value).context("encode new triple")?;
+    tables
+        .triples
         .insert(key.as_slice(), new_bytes.as_slice())
-        .context("insert new triple (batch)")?;
+        .context("insert new triple")?;
 
+    // Index the new row only when it is itself active — an assert carrying
+    // `valid_to = Some(_)` is closed on arrival and must not appear in an index
+    // that means "currently true".
+    let mut opened: i64 = 0;
     if new_value.valid_to_ms.is_none() {
         let obj_key =
             encode_object_index_key(&new_value.object, &triple.subject, &triple.predicate);
-        by_object
+        tables
+            .by_object
             .insert(obj_key.as_slice(), [].as_slice())
-            .context("insert new object index (batch)")?;
-        let pred_key = encode_predicate_index_key(&triple.predicate, &triple.subject);
-        by_predicate
+            .context("insert new object index")?;
+        let pred_key =
+            encode_predicate_index_key(&triple.predicate, &triple.subject, &new_value.object);
+        tables
+            .by_predicate
             .insert(pred_key.as_slice(), [].as_slice())
-            .context("insert new predicate index (batch)")?;
-        if !closed_any {
-            let subj_key = triple.subject.as_bytes();
-            let prev = counts
-                .get(subj_key)
-                .context("read prior count (batch)")?
-                .map(|v| decode_u64(v.value()))
-                .unwrap_or(0);
-            let next = prev.saturating_add(1);
-            counts
-                .insert(subj_key, encode_u64(next).as_slice())
-                .context("update active count (batch)")?;
-        }
-    } else if closed_any {
-        let subj_key = triple.subject.as_bytes();
-        let prev = counts
-            .get(subj_key)
-            .context("read prior count for closed-on-arrival (batch)")?
-            .map(|v| decode_u64(v.value()))
-            .unwrap_or(0);
-        let next = prev.saturating_sub(1);
-        if next == 0 {
-            counts
-                .remove(subj_key)
-                .context("remove zero count (batch)")?;
-        } else {
-            counts
-                .insert(subj_key, encode_u64(next).as_slice())
-                .context("update active count (batch)")?;
-        }
+            .context("insert new predicate index")?;
+        opened = 1;
     }
-    Ok(())
+    adjust_active_count(counts, &triple.subject, opened - closed)
 }
 
-/// In-transaction retract helper; mirrors `KgStoreRedb::retract`.
+/// In-transaction retract; the single implementation behind
+/// `KgStoreRedb::retract` and `apply_batch`'s `Retract` op.
 ///
-/// Why: Lets `apply_batch` perform a retract inside one write txn.
-/// What: Same move-to-history + index-removal logic as the single-op
-/// `retract`, but takes already-opened tables.
-/// Test: `apply_batch_groups_asserts_into_single_commit` (Retract variant).
-pub(super) fn batch_retract(
-    triples: &mut Tbl<'_>,
-    by_object: &mut Tbl<'_>,
-    by_predicate: &mut Tbl<'_>,
+/// Why: see [`KgStoreRedb::retract`].
+/// What: closes every active row at `(subject, predicate)` and decrements the
+/// active counter by that many. Returns the number closed; `0` when the pair
+/// has no active row.
+/// Test: `apply_batch_groups_asserts_into_single_commit` (Retract variant),
+/// `retract_closes_every_object_at_the_pair`.
+pub(super) fn batch_retract<'txn>(
+    triples: &mut Tbl<'txn>,
+    by_object: &mut Tbl<'txn>,
+    by_predicate: &mut Tbl<'txn>,
     counts: &mut Tbl<'_>,
     subject: &str,
     predicate: &str,
 ) -> Result<usize> {
-    let key = encode_triple_key(subject, predicate);
     let close_ms = now_ms();
-    let prior_opt: Option<TripleValue> = {
-        let existing = triples
-            .get(key.as_slice())
-            .context("lookup active triple for retract (batch)")?;
-        match existing {
-            Some(g) => Some(decode_value(g.value()).context("decode prior for retract (batch)")?),
-            None => None,
-        }
+    let active = active_rows_for_pair(triples, subject, predicate)?;
+    let mut tables = TripleTables {
+        triples,
+        by_object,
+        by_predicate,
     };
-    let Some(prior) = prior_opt else {
-        return Ok(0);
-    };
-    if prior.valid_to_ms.is_some() {
-        return Ok(0);
+    for (key, prior) in &active {
+        close_active_row(&mut tables, key, prior, subject, predicate, close_ms)?;
     }
-
-    let mut hist_key = Vec::with_capacity(5 + key.len() + 8);
-    hist_key.extend_from_slice(b"hist:");
-    hist_key.extend_from_slice(&key);
-    hist_key.extend_from_slice(&prior.valid_from_ms.to_be_bytes());
-    let closed_v = TripleValue {
-        valid_to_ms: Some(close_ms),
-        ..prior.clone()
-    };
-    let bytes = encode_value(&closed_v).context("encode retract history (batch)")?;
-    triples
-        .insert(hist_key.as_slice(), bytes.as_slice())
-        .context("insert retract history row (batch)")?;
-    triples
-        .remove(key.as_slice())
-        .context("remove active row for retract (batch)")?;
-    let obj_key = encode_object_index_key(&prior.object, subject, predicate);
-    by_object
-        .remove(obj_key.as_slice())
-        .context("remove object index for retract (batch)")?;
-    let pred_key = encode_predicate_index_key(predicate, subject);
-    by_predicate
-        .remove(pred_key.as_slice())
-        .context("remove predicate index for retract (batch)")?;
-    let subj_key = subject.as_bytes();
-    let prev = counts
-        .get(subj_key)
-        .context("read prior count for retract (batch)")?
-        .map(|v| decode_u64(v.value()))
-        .unwrap_or(0);
-    let next = prev.saturating_sub(1);
-    if next == 0 {
-        counts
-            .remove(subj_key)
-            .context("remove zero count (batch)")?;
-    } else {
-        counts
-            .insert(subj_key, encode_u64(next).as_slice())
-            .context("update count after retract (batch)")?;
-    }
-    Ok(1)
+    let closed = active.len();
+    adjust_active_count(counts, subject, -(closed as i64))?;
+    Ok(closed)
 }

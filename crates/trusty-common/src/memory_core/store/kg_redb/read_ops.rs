@@ -11,7 +11,7 @@
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, DrawerRecord, TRIPLES, TripleValue,
-    decode_triple_key, decode_u64, decode_value, subject_prefix,
+    decode_triple_key, decode_u64, decode_value, prefix_range_end, subject_prefix,
 };
 use anyhow::{Context, Result};
 use chrono::DateTime;
@@ -27,12 +27,16 @@ use super::types::{decode_drawer_record, parse_drawer_type, triple_from_parts};
 impl KgStoreRedb {
     /// Return all currently active triples for `subject`.
     ///
-    /// Why: Most queries want "what is true *now*". The primary TRIPLES table
-    /// holds at most one active row per (subject, predicate), so a prefix scan
-    /// on `subject_prefix(subject)` returns at most one row per predicate.
+    /// Why: Most queries want "what is true *now*". Since #4810 the primary
+    /// TRIPLES table holds one active row per `(subject, predicate, object)`,
+    /// so a multi-valued predicate contributes one row per object rather than
+    /// the single row the old `(subject, predicate)` key could hold.
     /// What: Range scan over `[subject_prefix..end_of_prefix]`, filter rows
-    /// whose `valid_to_ms.is_none()`, and map to `Triple`.
-    /// Test: `assert_then_query_returns_triple`.
+    /// whose `valid_to_ms.is_none()`, and map to `Triple`. The object comes
+    /// from the stored value, not the key — the key copy exists only to keep
+    /// rows distinct.
+    /// Test: `assert_then_query_returns_triple`,
+    /// `assert_multiple_objects_for_multivalued_predicate_all_survive`.
     pub fn query_active(&self, subject: &str) -> Result<Vec<Triple>> {
         let prefix = subject_prefix(subject);
         let rtx = self.db().begin_read().context("begin query_active txn")?;
@@ -40,10 +44,7 @@ impl KgStoreRedb {
             .open_table(TRIPLES)
             .context("open triples table for query_active")?;
         let mut out = Vec::new();
-        let mut end = prefix.clone();
-        // Build exclusive end key by appending 0xFF — every valid key with this
-        // subject prefix sorts before it.
-        end.push(0xFF);
+        let end = prefix_range_end(&prefix);
         let range = triples
             .range::<&[u8]>(prefix.as_slice()..end.as_slice())
             .context("range scan for query_active")?;
@@ -59,7 +60,7 @@ impl KgStoreRedb {
             if value.valid_to_ms.is_some() {
                 continue;
             }
-            let (s, p) = match decode_triple_key(k.value()) {
+            let (s, p, _o) = match decode_triple_key(k.value()) {
                 Some(parts) => parts,
                 None => continue,
             };
@@ -159,7 +160,7 @@ impl KgStoreRedb {
             if value.valid_to_ms.is_some() {
                 continue;
             }
-            let (s, p) = match decode_triple_key(k.value()) {
+            let (s, p, _o) = match decode_triple_key(k.value()) {
                 Some(parts) => parts,
                 None => continue,
             };
@@ -392,7 +393,7 @@ impl KgStoreRedb {
                     continue;
                 }
             };
-            let (s, p) = if let Some(stripped) = key_bytes.strip_prefix(b"hist:") {
+            let (s, p, _o) = if let Some(stripped) = key_bytes.strip_prefix(b"hist:") {
                 // History key = `hist:` + original encoded key + 8 byte suffix.
                 if stripped.len() < 8 {
                     continue;
