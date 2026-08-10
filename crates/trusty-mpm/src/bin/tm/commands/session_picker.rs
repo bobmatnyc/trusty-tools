@@ -10,20 +10,19 @@
 //! What: [`parse_picker_choice`] is the pure input→decision seam; [`run_tty_picker`]
 //! is the I/O driver that renders the menu, reads stdin, and dispatches to
 //! resume/launch; [`fetch_live_sessions`] is the single GET+filter path shared by
-//! the static `tm session ls` renderer and the picker; [`run_ls_connector`] is the
-//! `tm ls` orchestrator that decides between the interactive picker and static
-//! output based on the TTY/`--json`/`--all`/session-count gate
-//! ([`should_show_picker`]). [`next_launch_slot`] is the shared "launch new
-//! session" number computation (issue #3723) both `run_tty_picker`'s render
-//! and `parse_picker_choice` use, kept in one place so they cannot drift.
+//! the static `tm session ls` renderer and the picker. [`next_launch_slot`] is
+//! the shared "launch new session" number computation (issue #3723) both
+//! `run_tty_picker`'s render and `parse_picker_choice` use, kept in one place
+//! so they cannot drift.
 //! Row TEXT/color rendering lives in the sibling `session_picker_render`
 //! module (verbless, color-coded — #3723); the picker's rename action lives
-//! in `session_picker_rename` (#3724) — both extracted to keep this file
-//! under the 500-SLOC production cap.
+//! in `session_picker_rename` (#3724); the `tm ls` orchestrator that decides
+//! between this picker and static output lives in `session_ls_connector`
+//! (#4965) — all three extracted to keep this file under the 500-SLOC
+//! production cap.
 //!
 //! Test: `parse_picker_choice` unit tests live in `tests_behavior_c_tests.rs`
-//! (re-exported through `guided`); the TTY gate is unit-tested by
-//! `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`;
+//! (re-exported through `guided`);
 //! `next_launch_slot`, `PickerDecision::Rename` parsing, and the row
 //! rendering/color logic are unit-tested in `session_picker_tests.rs`; the
 //! I/O path is exercised by the e2e suite and manual smoke tests.
@@ -67,12 +66,32 @@ use super::managed::filter_live_sessions;
 pub(crate) enum PickerDecision {
     /// Resume the session at this 0-based index into the sessions slice.
     Resume(usize),
-    /// Launch a brand-new session.
-    LaunchNew,
+    /// Launch a brand-new session, optionally with an operator-supplied name
+    /// hint (#4965). `None` — the bare-Enter, `[N]` and bare-`n` paths — lets
+    /// the daemon derive the name from the repo as it always has. `Some(leaf)`
+    /// — typed as `n <name>` — carries the name ALREADY sanitized to the
+    /// daemon's own kebab-case leaf form via
+    /// [`trusty_common::session_naming::leaf_slug_from_hint`], never the raw
+    /// typed string: the daemon's `name_hint` path runs the hint through
+    /// `Path::file_name()`, which would silently collapse `feature/auth` and
+    /// `hotfix/auth` to the same `auth`. Sanitizing here makes that step a
+    /// no-op. Never empty — an unusable name resolves to
+    /// [`Self::UnusableName`] instead.
+    LaunchNew(Option<String>),
     /// User chose to quit without action.
     Quit,
     /// Input was not recognised; the caller quits cleanly.
     Unrecognised,
+    /// `n <name>` was typed with a name that sanitizes to nothing — `n !!!`,
+    /// `n ---` (#4965). Carries the raw text so the driver can quote it back.
+    ///
+    /// Why this is NOT `LaunchNew(None)`: falling back to the unnamed path
+    /// would spawn a session in the daemon's shared `local` leaf namespace —
+    /// a name LESS identifiable than the repo-derived default, produced by a
+    /// command the operator typed specifically to make it MORE identifiable.
+    /// A spawn is not undoable enough to guess at; the driver reprints the
+    /// menu instead.
+    UnusableName(String),
     /// Bare Enter was pressed but the 0-based-indexed session at this slot is
     /// stopped/errored — resuming it would KILL and recreate its tmux pane
     /// (or, if the pane already happened to be dead, spawn a fresh one). #2148:
@@ -684,6 +703,34 @@ pub(crate) fn decide_for_index(
     }
 }
 
+/// Recognise the `n` launch-new command and return its raw argument (#4965).
+///
+/// Why the token is matched EXACTLY rather than stripped like `d<N>`/`r<N>`:
+/// those prefixes are safe only because their remainder must still parse as a
+/// live slot number, so `d2` is unambiguous while `delete` falls through to
+/// `Unrecognised`. `n` has no such gate — an unbounded `strip_prefix(['n','N'])`
+/// makes EVERY n-initial word a spawn with no confirmation, and the menu line
+/// itself reads "launch new session", so an operator typing `new` gets a real
+/// cloned, spawned, attached session named `tm-ew-NN`. `n` is also already the
+/// "no" answer in this tool's own `[y/N]` delete confirm. So: the token before
+/// the first whitespace must be exactly `n`/`N`, and a name requires a
+/// separator — the no-space `nauth` form is deliberately NOT accepted.
+///
+/// What: `None` when `choice` is not the `n` command at all (`new`, `no`,
+/// `nn`, `n1`, `nauth`). `Some("")` for a bare `n`/`N`, or one whose remainder
+/// is only whitespace. `Some(name)` — trimmed, possibly multi-word, NOT yet
+/// sanitized — for `n <name>`. `choice` must already be trimmed.
+/// Test: `guided_picker_n_grammar_is_bounded`,
+/// `guided_picker_n_launches_new_unnamed`,
+/// `guided_picker_n_with_argument_carries_name_hint`.
+fn launch_new_argument(choice: &str) -> Option<&str> {
+    let (token, rest) = match choice.split_once(char::is_whitespace) {
+        Some((token, rest)) => (token, rest.trim()),
+        None => (choice, ""),
+    };
+    token.eq_ignore_ascii_case("n").then_some(rest)
+}
+
 /// Parse one line of picker input into a [`PickerDecision`].
 ///
 /// Why: separating parse-and-decide from the I/O driver makes the dispatch
@@ -708,14 +755,22 @@ pub(crate) fn decide_for_index(
 ///   • `"q"` / `"Q"` → `Quit`
 ///   • `"ls"` / `"list"` (case-insensitive, #3863) → `ListSessions` — re-print
 ///     the current list in place, never a selection
-///   • empty / whitespace, `sessions` empty → `LaunchNew`
+///   • empty / whitespace, `sessions` empty → `LaunchNew(None)`
 ///   • empty / whitespace, `sessions` non-empty → [`decide_for_index`] on
 ///     position 0, gated by `first_needs_restart`
 ///   • `N` matching some `sessions[i].slot` → [`decide_for_index`] on `i`
 ///     (an EXPLICIT numeric choice never applies the restart-confirm gate —
 ///     it always dispatches directly, confirm or not, per #2148)
 ///   • `N` == `(highest displayed slot) + 1` (or `1` when `sessions` is
-///     empty) → `LaunchNew`
+///     empty) → `LaunchNew(None)`
+///   • exactly `n` / `N` (or one whose remainder is only whitespace) →
+///     `LaunchNew(None)` — a slot-independent alias for the numeric
+///     launch-new choice (#4965)
+///   • `n <name>` — whitespace separator REQUIRED — → `LaunchNew(Some(leaf))`,
+///     where `leaf` is the name already kebab-cased by
+///     [`trusty_common::session_naming::leaf_slug_from_hint`], or
+///     `UnusableName(raw)` when nothing alphanumeric survives. `new`, `no`,
+///     `nn`, `n1`, `nauth` are `Unrecognised` — see [`launch_new_argument`]
 ///   • `d<N>` / `d <N>` matching a LIVE `sessions[i].slot` → `Delete(i)`
 ///     (#2304); the driver still runs a confirm/force-confirm prompt before
 ///     deleting. Matching a TOMBSTONED slot → `SlotDeleted(i)` (#3034 — no
@@ -738,7 +793,12 @@ pub(crate) fn decide_for_index(
 /// `guided_picker_delete_prefix_on_deleted_slot_blocked`,
 /// `guided_picker_launch_new_uses_highest_slot_with_gaps`,
 /// `guided_picker_ls_returns_list_sessions`,
-/// `guided_picker_list_returns_list_sessions`.
+/// `guided_picker_list_returns_list_sessions`,
+/// `guided_picker_n_launches_new_unnamed`,
+/// `guided_picker_n_with_argument_carries_name_hint`,
+/// `guided_picker_n_grammar_is_bounded`,
+/// `guided_picker_n_sanitizes_the_name_cli_side`,
+/// `guided_picker_n_does_not_shadow_other_commands`.
 pub(crate) fn parse_picker_choice(
     line: &str,
     sessions: &[ManagedSessionSummary],
@@ -803,9 +863,28 @@ pub(crate) fn parse_picker_choice(
             None => PickerDecision::Unrecognised,
         };
     }
+    // #4965: `n` / `n <name>` launches a new session — see
+    // [`launch_new_argument`] for the grammar and why it is exact-match rather
+    // than a `d<N>`/`r<N>`-style prefix strip.
+    if let Some(name) = launch_new_argument(choice) {
+        if name.is_empty() {
+            return PickerDecision::LaunchNew(None);
+        }
+        // Sanitize HERE, not daemon-side. `resolve_session_name` feeds a
+        // `name_hint` to `leaf_slug_from_dir`, whose `Path::file_name()` step
+        // drops everything before the last `/` — `n feature/auth` and
+        // `n hotfix/auth` would both become `tm-auth-NN`. Slugifying with the
+        // same function and the same cap makes the daemon's pass a no-op, so
+        // what the operator sees here is the leaf the session actually gets.
+        let slug = trusty_common::session_naming::leaf_slug_from_hint(name);
+        return match slug.is_empty() {
+            true => PickerDecision::UnusableName(name.to_string()),
+            false => PickerDecision::LaunchNew(Some(slug)),
+        };
+    }
     if choice.is_empty() {
         if sessions.is_empty() {
-            return PickerDecision::LaunchNew;
+            return PickerDecision::LaunchNew(None);
         }
         return decide_for_index(sessions, 0, first_needs_restart);
     }
@@ -816,7 +895,7 @@ pub(crate) fn parse_picker_choice(
             return decide_for_index(sessions, idx, false);
         }
         if n == next_slot {
-            return PickerDecision::LaunchNew;
+            return PickerDecision::LaunchNew(None);
         }
     }
     PickerDecision::Unrecognised
@@ -834,9 +913,14 @@ pub(crate) fn parse_picker_choice(
 /// input; propagates attach/launch errors.
 ///   • `Resume(i)` → [`super::guided_resume::resume_guided_session`] which
 ///     handles daemon restart when needed and then attaches internally;
-///   • `LaunchNew` → [`super::guided_launch::launch_new_session_and_attach`] when
-///     the scope carries a `repo_url`; otherwise prints an actionable hint and
-///     redisplays the menu (fleet-wide `tm ls` has no single launch target);
+///   • `LaunchNew(name_hint)` → [`super::guided_launch::launch_new_session_and_attach`]
+///     when the scope carries a `repo_url`, forwarding the already-sanitized
+///     `n <name>` leaf (#4965) when one was typed — and printing a one-line
+///     note first when that leaf differs from the typed text; otherwise prints
+///     an actionable hint and redisplays the menu (fleet-wide `tm ls` has no
+///     single launch target);
+///   • `UnusableName(typed)` (#4965) → print "no usable name characters" and
+///     redisplay the SAME menu — never a spawn under a fallback name;
 ///   • `ConfirmRestart(i)` (#2148) → print a one-line "type the number to
 ///     confirm" notice and redisplay the SAME menu — no daemon round-trip;
 ///   • `Unresumable(i)` (#2595) → print the dead-session notice pointing at
@@ -917,10 +1001,14 @@ pub(crate) async fn run_tty_picker(
             .first()
             .map(|s| !s.deleted && super::guided_resume::needs_restart(&s.state))
             .unwrap_or(false);
+        // #4965: the `[key] description` legend is built by
+        // `session_picker_render::command_legend` — column-aligned in BOTH
+        // menus (the populated one used to be ragged), and pure so its wording
+        // is testable without driving this loop.
         if sessions.is_empty() {
-            eprintln!("[Enter] launch new session");
-            eprintln!("[ls]    re-print this list");
-            eprintln!("[q]     quit");
+            for l in super::session_picker_render::command_legend(None) {
+                eprintln!("{l}");
+            }
         } else {
             if stale_slots {
                 // #4230: `tm restart` is a hard error where launchd owns the
@@ -946,11 +1034,13 @@ pub(crate) async fn run_tty_picker(
                     super::session_picker_render::format_session_row(num, s, use_color)
                 );
             }
-            eprintln!("[{new_idx}] launch new session");
-            eprintln!("[d<N>] delete session N (e.g. d1)");
-            eprintln!("[r<N> <new-name>] rename session N (e.g. r1 tm-my-new-name)");
-            eprintln!("[ls] re-print this list");
-            eprintln!("[q] quit");
+            // #4965: `n` is the slot-independent alias for the `[{new_idx}]`
+            // launch-new row — that number shifts as sessions come and go, so
+            // it is nothing an operator can memorize, and it cannot carry a
+            // name.
+            for l in super::session_picker_render::command_legend(Some(new_idx)) {
+                eprintln!("{l}");
+            }
             let first = &sessions[0];
             let first_num = shown_slot(&sessions, 0);
             if first.deleted {
@@ -961,8 +1051,10 @@ pub(crate) async fn run_tty_picker(
                 );
             } else if first_needs_restart {
                 // #2148: no implicit destructive default — an explicit number is required.
+                // #4965: the hint also disowns `n` as "no"; it is the launch-new alias.
                 eprintln!(
-                    "tm: [Enter] does NOT restart — type [{first_num}] to confirm the restart"
+                    "tm: [Enter] does NOT restart — {}",
+                    super::session_picker_render::restart_confirm_hint(first_num)
                 );
             } else {
                 eprintln!("tm: default: [{first_num}] resume most recent");
@@ -995,11 +1087,30 @@ pub(crate) async fn run_tty_picker(
                     break;
                 }
             }
-            PickerDecision::LaunchNew => match scope.repo_url.as_deref() {
+            PickerDecision::LaunchNew(name_hint) => match scope.repo_url.as_deref() {
                 Some(repo) => {
-                    let outcome =
-                        super::guided_launch::launch_new_session_and_attach(client, url, repo)
-                            .await?;
+                    // #4965: the name is kebab-cased before it is sent, so
+                    // `n My Auth Fix!` produces `tm-my-auth-fix-NN`. Say so
+                    // when the result differs from what was typed — a spawn
+                    // is not cheap to undo, and a silently rewritten name is
+                    // exactly the surprise this command exists to remove.
+                    // `launch_new_argument` is the SAME parser
+                    // `parse_picker_choice` used, so the raw text cannot drift
+                    // from the grammar; it returns `None` for the bare-Enter
+                    // and numeric launch paths, which have nothing to compare.
+                    if let (Some(raw), Some(slug)) =
+                        (launch_new_argument(line.trim()), name_hint.as_deref())
+                        && raw != slug
+                    {
+                        eprintln!("tm: naming it '{slug}' (from '{raw}').");
+                    }
+                    let outcome = super::guided_launch::launch_new_session_and_attach(
+                        client,
+                        url,
+                        repo,
+                        name_hint.as_deref(),
+                    )
+                    .await?;
                     if outcome.ends_interactive_loop() {
                         break;
                     }
@@ -1024,8 +1135,8 @@ pub(crate) async fn run_tty_picker(
                     sessions[i].name
                 );
                 eprintln!(
-                    "tm: type [{}] to confirm the restart, or [q] to quit.",
-                    shown_slot(&sessions, i)
+                    "tm: {}",
+                    super::session_picker_render::restart_confirm_hint(shown_slot(&sessions, i))
                 );
                 continue;
             }
@@ -1085,9 +1196,21 @@ pub(crate) async fn run_tty_picker(
             // instead — no daemon round-trip.
             PickerDecision::Unrecognised => {
                 eprintln!(
-                    "tm: unrecognised choice '{}' — accepted: 1..{new_idx}, ls, d<N>, \
-                     r<N> <name>, q",
+                    "tm: unrecognised choice '{}' — accepted: 1..{new_idx}, n [<name>], \
+                     ls, d<N>, r<N> <name>, q",
                     line.trim()
+                );
+                continue;
+            }
+            // #4965: `n <name>` whose name sanitizes to nothing. Spawning
+            // anyway would put the session in the daemon's shared `local`
+            // leaf namespace — less identifiable than the default the
+            // operator was trying to improve on. No daemon round-trip;
+            // redisplay the SAME menu.
+            PickerDecision::UnusableName(typed) => {
+                eprintln!(
+                    "tm: '{typed}' has no usable name characters — try `n <letters>` \
+                     (e.g. n auth-refactor)."
                 );
                 continue;
             }
@@ -1102,118 +1225,6 @@ pub(crate) async fn run_tty_picker(
         sort_sessions(&mut sessions, scope.sort);
     }
     Ok(())
-}
-
-/// Decide whether `tm ls` should open the interactive picker or print statically.
-///
-/// Why: a testable seam that folds every gate into one pure decision so the
-/// non-TTY / `--json` / `--all` / empty-list branches are unit-testable without a
-/// live terminal or daemon. Requiring BOTH stdin and stdout to be TTYs is the
-/// anti-hang guarantee: a piped input (would EOF) or a piped output (must stay a
-/// clean pipeable table) both fall through to static output.
-/// What: returns `true` only when stdin AND stdout are TTYs, neither `--json` nor
-/// `--all` was requested, and at least one session exists. `--all` forces static
-/// output because its purpose is the forensic full list (including
-/// decommissioned tombstones), not connecting.
-/// Test: `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`.
-pub(crate) fn should_show_picker(
-    stdin_tty: bool,
-    stdout_tty: bool,
-    json: bool,
-    all: bool,
-    session_count: usize,
-) -> bool {
-    stdin_tty && stdout_tty && !json && !all && session_count > 0
-}
-
-/// `tm ls` — the interactive managed-session connector (top-level).
-///
-/// Why: bare `tm ls` should do the most useful thing for connecting to the
-/// managed fleet: on a real terminal it opens the session picker; piped or
-/// scripted it degrades to the same static, pipeable list as `tm session ls`.
-/// What: resolves the scope (`--current` derives `owner/repo` from the cwd git
-/// remote, mirroring `tm session ls`); routes `--json`, `--all`, or any non-TTY
-/// invocation straight to the static [`super::managed::session_ls`] renderer
-/// (preserving its raw `--json` passthrough byte-for-byte); otherwise fetches the
-/// live sessions once and either renders the static table (0 sessions) or opens
-/// [`run_tty_picker`] (≥1 session). Launch-new inside the picker targets the cwd
-/// project only when it is a GitHub-backed git checkout.
-/// Test: parse tests `cli_parses_ls_*` and the gate tests
-/// `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_ls_connector(
-    client: &reqwest::Client,
-    url: &str,
-    json: bool,
-    source_id: Option<String>,
-    current: bool,
-    all: bool,
-    sort: SessionSortArg,
-    term: Option<SessionFilter>,
-) -> anyhow::Result<()> {
-    // `--current` derives the source_id from the cwd git remote, exactly like
-    // `tm session ls --current`. `--source-id` and `--current` are mutually
-    // exclusive at the clap layer, so at most one branch supplies a filter.
-    let sid: Option<String> = if current {
-        super::session::derive_source_id_from_cwd()
-    } else {
-        source_id
-    };
-
-    let stdin_tty = std::io::stdin().is_terminal();
-    let stdout_tty = std::io::stdout().is_terminal();
-
-    // Cheap pre-gate: `--json`, `--all`, or any non-interactive stream never
-    // fetches for the picker — delegate straight to the static renderer, which
-    // owns the raw `--json` passthrough and the `--all` tombstone sort. `sort`/
-    // `term` ride along (the static renderer applies them; `--json` ignores
-    // them, matching `--all`'s existing "no effect on --json" precedent).
-    if json || all || !stdin_tty || !stdout_tty {
-        return super::managed::session_ls(client, url, json, sid.as_deref(), all, sort, term)
-            .await;
-    }
-
-    // Interactive stream: fetch the live sessions once. On any fetch error
-    // (daemon unreachable, HTTP failure) fall back to the static renderer so the
-    // operator sees the same actionable error rather than a bare picker crash.
-    let sessions = match fetch_live_sessions(client, url, sid.as_deref(), false).await {
-        Ok(s) => s,
-        Err(_) => {
-            return super::managed::session_ls(
-                client,
-                url,
-                false,
-                sid.as_deref(),
-                false,
-                sort,
-                term,
-            )
-            .await;
-        }
-    };
-    let mut sessions = filter_sessions_by_term(sessions, term.as_ref());
-    sort_sessions(&mut sessions, sort);
-
-    if !should_show_picker(stdin_tty, stdout_tty, json, all, sessions.len()) {
-        // 0 sessions on a TTY: print the static "no managed sessions" line rather
-        // than an empty picker.
-        super::managed_render::render_session_table(&sessions, sid.as_deref());
-        return Ok(());
-    }
-
-    // ≥1 session on a real terminal → the interactive picker. Launch-new targets
-    // the cwd project only when it is a GitHub-backed git checkout.
-    let repo_url = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| super::guided::derive_project(&cwd))
-        .map(|(_sid, _workspace, git_root)| git_root.to_string_lossy().to_string());
-    let scope = PickerScope {
-        source_id: sid,
-        repo_url,
-        sort,
-        term,
-    };
-    run_tty_picker(client, url, &scope, sessions).await
 }
 
 #[cfg(test)]
