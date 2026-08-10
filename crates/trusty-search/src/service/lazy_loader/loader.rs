@@ -155,10 +155,47 @@ where
         return Err(LazyLoadError::RestoreFailed);
     }
 
-    // 6. Mark loaded and return handle.
-    cold_store.mark_loaded(id);
-
-    registry.get(id).ok_or(LazyLoadError::NotFound)
+    // 6. Mark loaded ONLY when the restore actually registered a handle.
+    //
+    // #4253: `mark_loaded` used to run unconditionally, and the handle lookup
+    // that followed mapped its own miss to `NotFound`. `restore_index_on_demand`
+    // has several arms that return WITHOUT registering anything and without
+    // reporting failure — the loudest being a corpus open that lost a race
+    // (`DatabaseAlreadyOpen`) during a ~20 s cold-start open. Those arms leave
+    // `restore_fn` reporting `Completed`, so the old code evicted the cold entry
+    // for an index that was never loaded. `contains()` then returned false, the
+    // search handler answered 404, and nothing ever put the entry back: one
+    // client retry against a slow cold open permanently deregistered a live
+    // index with no self-heal. Registration is the only evidence a restore
+    // succeeded; consult it before consuming the entry.
+    //
+    // Failing to `Loading` (not `NotFound`) is what makes this recoverable: the
+    // cold entry survives, the caller gets a retryable 503, and the next query
+    // re-enters the restore path once the competing open has released the file.
+    match registry.get(id) {
+        Some(handle) => {
+            cold_store.mark_loaded(id);
+            Ok(handle)
+        }
+        // #4253 review HIGH-2: a restore arm that judged the failure PERMANENT
+        // marks the entry failed on its way out (deleted root, indexer build
+        // failure). Honour that verdict — reporting `Loading` for it would
+        // promise a retry that can never succeed and would re-enter the
+        // expensive restore path on every query.
+        None if cold_store.is_failed(id) => Err(LazyLoadError::RestoreFailed),
+        None => {
+            tracing::warn!(
+                "lazy-load: index '{}' restore reported success but registered no \
+                 handle and did not mark the entry failed — treating as transient \
+                 (corpus-open contention); keeping the cold entry so a retry can \
+                 recover it, and returning 503 (issue #4253)",
+                id.0
+            );
+            Err(LazyLoadError::Loading {
+                retry_after_secs: timeout.as_secs(),
+            })
+        }
+    }
 }
 
 /// Error returned by [`get_or_load_index`].

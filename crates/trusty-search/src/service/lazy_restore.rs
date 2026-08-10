@@ -98,11 +98,19 @@ pub(crate) async fn restore_index_on_demand(
     // they were parked; if it disappeared we skip gracefully (non-colocated path
     // used here — the relocation scan from issue #484 is a warm-boot-only flow).
     if !entry.root_path.exists() {
+        // #4253 review HIGH-2: this arm MUST mark the entry failed. Before
+        // #4253 it was terminated only by `get_or_load_index`'s unconditional
+        // `mark_loaded`; now that keeping the entry is the transient policy, a
+        // deleted root would otherwise return `503 index_loading` forever,
+        // re-entering restore on every query and staying counted in
+        // `/health`'s `indexes_lazy` for the daemon's life. A root that no
+        // longer exists is exactly the permanent case #1106 named.
         tracing::warn!(
-            "lazy-load: skipping index '{}' — root_path {} no longer exists",
+            "lazy-load: index '{}' permanently failed — root_path {} no longer exists",
             entry.id,
             entry.root_path.display(),
         );
+        state.cold_store.mark_failed(&id);
         return;
     }
 
@@ -121,10 +129,17 @@ pub(crate) async fn restore_index_on_demand(
     let mut indexer = match build_indexer_from_entry(&entry, embedder).await {
         Ok(idx) => idx,
         Err(e) => {
+            // #4253 review HIGH-2: same reasoning as the missing-root arm
+            // above. Left retryable, this re-opens the redb corpus and
+            // re-allocates the HNSW arena on EVERY query — the unbounded
+            // restore storm `ColdIndexStore::mark_failed`'s policy exists to
+            // prevent. The operator's remedy (restart or re-register) is the
+            // one `search_handler`'s 503 already names.
             tracing::error!(
-                "lazy-load: index '{}' HNSW allocator failed: {e} — skipping",
+                "lazy-load: index '{}' permanently failed — indexer build failed: {e}",
                 entry.id
             );
+            state.cold_store.mark_failed(&id);
             return;
         }
     };
@@ -150,6 +165,29 @@ pub(crate) async fn restore_index_on_demand(
     // treatment exactly, and reuses the existing #1106 `mark_failed` outcome
     // so a repeat query fails fast instead of retrying a doomed restore.
     if indexer.corpus_open_failed {
+        // #4253: a corpus open that lost a race (`DatabaseAlreadyOpen`) or ran
+        // past its deadline is CONTENTION, not breakage — the file was never
+        // read, so the corpus is presumed intact. Marking those permanently
+        // failed is how a ~20 s cold-start open plus one client retry turned a
+        // healthy 200k-chunk index into an unreachable one for the rest of the
+        // daemon's life. Reuse #4333's classification, which already draws
+        // exactly this line, instead of treating every open failure as fatal.
+        let transient = indexer
+            .corpus_open_failure
+            .map(|kind| kind.is_transient())
+            .unwrap_or(false);
+        if transient {
+            tracing::warn!(
+                "lazy-load: corpus open for cold index '{}' at {} failed transiently \
+                 ({:?}) — NOT registering a handle, but keeping the cold entry so the \
+                 next query retries once the competing opener releases the file \
+                 (issue #4253)",
+                entry.id,
+                entry.root_path.display(),
+                indexer.corpus_open_failure,
+            );
+            return;
+        }
         tracing::error!(
             "lazy-load: corpus open failed for cold index '{}' at {} — refusing to \
              register a broken index handle (issue #3993); marking permanently failed",

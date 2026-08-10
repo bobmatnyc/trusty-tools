@@ -92,6 +92,28 @@ fn pre_tool_use_creates_running_delegation() {
 }
 
 #[test]
+fn pre_tool_use_records_declared_isolation() {
+    // #4480: the record has to answer "did this subagent get a tree of its
+    // own?". Absent is the DEFAULT and the hazardous case, so both spellings
+    // are pinned — an absent field must stay `None` rather than acquire a
+    // convenience default that would read as isolated.
+    let (state, sid) = state_with_session();
+    let mut p = pre("Agent", "rust-engineer", "edit files", "toolu_iso");
+    p["input"]["isolation"] = serde_json::json!("worktree");
+    observe(&state, sid, HookEvent::PreToolUse, &p);
+    assert_eq!(only(&state, sid).isolation.as_deref(), Some("worktree"));
+
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "rust-engineer", "edit files", "toolu_bare"),
+    );
+    assert_eq!(only(&state, sid).isolation, None);
+}
+
+#[test]
 fn legacy_task_tool_name_is_tracked() {
     // Older Claude Code names the dispatch tool `Task`, not `Agent`.
     let (state, sid) = state_with_session();

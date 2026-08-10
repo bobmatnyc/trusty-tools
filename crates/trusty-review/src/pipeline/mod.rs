@@ -33,6 +33,11 @@ pub mod claim_grounding;
 pub mod context_gate;
 pub mod diff;
 pub mod diff_analyzer;
+// Why: the general form of #4081's rule — a claim may be marked `confirmed`
+// only when something actually checked it — keyed on the finding's own
+// epistemic admission rather than on `claim_grounding`'s registry vocabulary,
+// which is what let the same defect recur on an in-repo signature claim (#5309).
+pub mod evidence_admission;
 // Why: output-hygiene filters (self-negation / chain-of-thought-leak drop,
 // diff-absent-speculation demotion) closing #4043/#4044 — kept separate from
 // `citation_check` (path/content verification, #4042) since the two concerns
@@ -57,6 +62,11 @@ pub mod trigger;
 pub mod verify;
 pub mod verify_liveness;
 pub mod verify_prompt;
+// Why: the narrative summary is written before the verification round on both
+// pipeline paths and nothing revisits it, so a refuted finding kept being cited
+// as a merge blocker (#4044).  Kept separate from `grade_reconcile` (which
+// rewrites an embedded JSON grade) — different signal, different test surface.
+pub mod verification_notice;
 // Why: voice-config resolution is extracted from runner.rs to keep runner.rs
 // under the 500-line cap (#610).  Exposes `build_voice_config` for use by the
 // runner and for direct testing.

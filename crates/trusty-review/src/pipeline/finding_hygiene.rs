@@ -52,6 +52,17 @@
 //!     (registry vocabulary, not self-admission), so it lives in its own module
 //!     with its own marker sets and test surface, exactly as `citation_check`
 //!     does. See `claim_grounding` for the full rationale.
+//!  4. [`evidence_admission::demote_self_admitted_unverifiable`] (#5309) —
+//!     DEMOTES (does not drop) any finding whose text admits the evidence it
+//!     needed was absent from what it was shown ("cannot be confirmed from the
+//!     diff alone"), and pre-stamps it `Unverifiable` for the same reason pass 3
+//!     does. Pass 3 keys on the claim's SUBJECT (registry vocabulary), which is
+//!     why the same unearned-`confirmed` defect recurred on an in-repo
+//!     function-signature claim; this one keys on the admission itself and is
+//!     therefore subject-agnostic.
+//!
+//! [`evidence_admission::demote_self_admitted_unverifiable`]:
+//!     crate::pipeline::evidence_admission::demote_self_admitted_unverifiable
 //!
 //! [`claim_grounding::demote_ungrounded_registry_claims`]:
 //!     crate::pipeline::claim_grounding::demote_ungrounded_registry_claims
@@ -133,10 +144,19 @@ const DIFF_ABSENT_SPECULATION_MARKERS: &[&str] = &[
 /// Why: a bare tuple stopped reading clearly once a third pass (#4081) joined
 /// the two original ones — `(usize, usize, usize)` at a call site says nothing
 /// about which count is which.
+///
+/// `#[non_exhaustive]` because this struct grows a field every time a hygiene
+/// pass is added, and each addition was otherwise a breaking change for any
+/// external exhaustive literal — the #4088 class of break, and the fix
+/// `scripts/check_semver.sh` itself recommends. It is applied in the same
+/// unpublished 0.13.0 as #5309's fourth counter so the FIFTH pass costs
+/// nothing. Construct one with `..Default::default()` from outside the crate;
+/// in-crate literals are unaffected.
 /// What: plain public counters; every field is "how many findings this pass
 /// acted on".
 /// Test: `sanitize_findings_runs_every_pass`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct HygieneCounts {
     /// Findings dropped as self-negated / chain-of-thought-leaking (#4044).
     pub dropped_self_negated: usize,
@@ -144,23 +164,29 @@ pub struct HygieneCounts {
     pub demoted_diff_absent: usize,
     /// Findings demoted as unverified package-registry claims (#4081).
     pub demoted_ungrounded_registry: usize,
+    /// Findings demoted because their own text admits they could not be
+    /// checked (#5309).
+    pub demoted_self_admitted_unverifiable: usize,
 }
 
 /// Run every output-hygiene pass over `findings`, in place.
 ///
-/// Why: a single call site for #4043, #4044 and #4081's fixes keeps `runner.rs`
-/// and `mapreduce/mod.rs` from having to know the internal pass ordering.
+/// Why: a single call site for #4043, #4044, #4081 and #5309's fixes keeps
+/// `runner.rs` and `mapreduce/mod.rs` from having to know the pass ordering.
 /// What: drops self-negated/leaked findings FIRST (so they never participate
 /// in downstream checks — e.g. `citation_check`'s mutual-contradiction pass),
-/// then demotes any surviving diff-absent-speculation High finding, then demotes
-/// any surviving unverified package-registry claim (`claim_grounding`, #4081 —
-/// last, because the advisory note it appends contains registry vocabulary the
-/// earlier marker passes have no business re-reading).
+/// then demotes any surviving diff-absent-speculation High finding, then any
+/// surviving self-admitted-unverifiable claim (`evidence_admission`, #5309),
+/// then any surviving unverified package-registry claim (`claim_grounding`,
+/// #4081 — last, because the advisory note it appends contains registry
+/// vocabulary the earlier marker passes have no business re-reading).
 /// Test: `sanitize_findings_runs_every_pass`.
 pub fn sanitize_findings(findings: &mut Vec<Finding>) -> HygieneCounts {
     HygieneCounts {
         dropped_self_negated: drop_self_negated_or_leaked_findings(findings),
         demoted_diff_absent: demote_diff_absent_speculation(findings),
+        demoted_self_admitted_unverifiable:
+            crate::pipeline::evidence_admission::demote_self_admitted_unverifiable(findings),
         demoted_ungrounded_registry:
             crate::pipeline::claim_grounding::demote_ungrounded_registry_claims(findings),
     }

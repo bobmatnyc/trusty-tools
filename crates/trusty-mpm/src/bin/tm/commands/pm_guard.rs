@@ -120,6 +120,7 @@ use crate::commands::pm_guard_bash::{
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_cost;
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
+use crate::commands::pm_guard_dispatch;
 use crate::commands::pm_guard_fanout;
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
 use trusty_mpm::core::agent_cost::{self, AgentCostConfig, BudgetStatus};
@@ -313,6 +314,25 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(tool_name, caller_is_subagent) {
         audit_denied_tool(url, session_id, tool_name, reason).await;
         println!("{}", build_pretooluse_deny_response(reason));
+        return Ok(());
+    }
+
+    // #4480: the PM must not put a SECOND file-mutating subagent into a working
+    // directory that already has one — they race over a single git HEAD and git
+    // does not refuse the collision. Placed here, after the fan-out guard,
+    // because it fires only on the PM's own dispatch: Guards 1 and 4 below
+    // early-return ALLOW precisely when the caller IS a subagent, and such a
+    // caller's dispatch has already been denied above. The `caller_is_subagent`
+    // gate keeps a subagent from paying for a check that can never apply to it.
+    // Fails OPEN throughout (see `pm_guard_dispatch`): a read-only or isolated
+    // dispatch never reaches the daemon at all, and a down daemon answers
+    // "nobody else is here".
+    if !caller_is_subagent
+        && let Some(reason) =
+            pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id).await
+    {
+        audit_denied_tool(url, session_id, tool_name, &reason).await;
+        println!("{}", build_pretooluse_deny_response(&reason));
         return Ok(());
     }
 

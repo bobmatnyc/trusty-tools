@@ -101,6 +101,14 @@ pub(super) async fn delete_index_handler(
 /// root from `roots.toml` so the colocated rescan cannot rediscover it (issue
 /// #1090), emits `IndexRemoved`, and re-syncs the index-count gauge (issue #41).
 /// Returns whether an index was actually removed.
+///
+/// #5075: also purges this id's cold-store records (`entries`,
+/// `failed_entries`). Without that the id stayed "registered but not resident"
+/// to the #5057 guards forever, so `GET /indexes/:id/status`, `/chunks`, and
+/// `grep` answered 503 for an index that no longer exists — and a
+/// cold-parked-only index was never removed from `indexes.toml` at all, so the
+/// next warm boot resurrected it. A cold record now counts as "an index was
+/// removed" for the durable-cleanup half below.
 /// Test: delete-path handler tests; reaper behaviour covered by `orphan_reaper`
 /// unit tests plus the `spawn_orphan_reaper_ticker` wiring.
 pub(super) async fn unregister_index(
@@ -111,6 +119,19 @@ pub(super) async fn unregister_index(
     let index_id = IndexId::new(id.to_string());
     let (removed, removed_handle) = state.registry.remove_and_get(&index_id);
     let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
+    // #5075: drop the cold-store records too, or the #5057 guards answer 503
+    // forever for an id that is now absent from every store. Sampled BEFORE the
+    // purge because a cold-parked or restore-failed index is not in the hot
+    // registry — `removed` is false for exactly the ids this is meant to reap,
+    // and the durable cleanup below must still run for them.
+    let was_cold = state.cold_store.contains(&index_id) || state.cold_store.is_failed(&index_id);
+    let cold_root = state
+        .cold_store
+        .get_persisted(&index_id)
+        .map(|e| e.root_path);
+    state.cold_store.purge(&index_id);
+    let root_path_for_cleanup = root_path_for_cleanup.or(cold_root);
+    let removed = removed || was_cold;
     state.reindex_progress.remove(&index_id);
     state.watcher_manager.stop_for_index(&index_id).await;
     // Issue #2984 Phase 1 delta-review MEDIUM finding: `INDEX_LOCKS` (the
@@ -325,7 +346,12 @@ pub(super) async fn search_handler(
             state
                 .last_queried_write_cache
                 .insert(index_id.clone(), now_unix);
-            tokio::spawn(async move {
+            // Review MEDIUM: `spawn_blocking`, not `spawn`. This body takes the
+            // process-wide registry `std::sync::Mutex` (#4871) and then does
+            // synchronous file I/O — parking an async worker thread on a lock
+            // another blocking writer holds. On the blocking pool that is what
+            // the pool is for; on a worker it starves the runtime.
+            tokio::task::spawn_blocking(move || {
                 if let Err(e) =
                     crate::service::persistence::update_last_queried_unix(&id_str, now_unix)
                 {

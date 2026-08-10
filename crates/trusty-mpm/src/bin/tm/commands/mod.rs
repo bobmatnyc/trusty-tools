@@ -64,6 +64,7 @@ pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
 pub(crate) mod pm_guard_cost;
 pub(crate) mod pm_guard_deny_by_default;
+pub(crate) mod pm_guard_dispatch;
 pub(crate) mod pm_guard_fanout;
 pub(crate) mod pm_guard_routing;
 pub(crate) mod project;
