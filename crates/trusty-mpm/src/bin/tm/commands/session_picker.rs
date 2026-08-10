@@ -1051,8 +1051,10 @@ pub(crate) async fn run_tty_picker(
                 );
             } else if first_needs_restart {
                 // #2148: no implicit destructive default — an explicit number is required.
+                // #4965: the hint also disowns `n` as "no"; it is the launch-new alias.
                 eprintln!(
-                    "tm: [Enter] does NOT restart — type [{first_num}] to confirm the restart"
+                    "tm: [Enter] does NOT restart — {}",
+                    super::session_picker_render::restart_confirm_hint(first_num)
                 );
             } else {
                 eprintln!("tm: default: [{first_num}] resume most recent");
@@ -1133,8 +1135,8 @@ pub(crate) async fn run_tty_picker(
                     sessions[i].name
                 );
                 eprintln!(
-                    "tm: type [{}] to confirm the restart, or [q] to quit.",
-                    shown_slot(&sessions, i)
+                    "tm: {}",
+                    super::session_picker_render::restart_confirm_hint(shown_slot(&sessions, i))
                 );
                 continue;
             }

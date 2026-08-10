@@ -249,3 +249,21 @@ pub(crate) fn command_legend(launch_slot: Option<u32>) -> Vec<String> {
     lines.push(row("[q]".to_string(), "quit"));
     lines
 }
+
+/// Build the restart-confirmation hint shared by both #2148 restart prompts.
+///
+/// Why: those two prompts read as a yes/no question ("[Enter] does NOT restart
+/// — type [1] to confirm the restart") while naming no refusal key. `n` is the
+/// universal "no", and since #4965 it is also the launch-new alias — so an
+/// operator declining a restart with `n` got a real cloned, spawned, attached
+/// session instead of a decline. The grammar is correct and stays; the prompts
+/// were the defect, inviting a token they never mentioned whose meaning is the
+/// opposite of the intent. Naming the confirm key, the actual refusal key, and
+/// what `n` really does leaves no reading that invites `n` as "no".
+/// What: returns one line, no `tm: ` prefix and no trailing period, so each
+/// call site can prepend its own context clause.
+/// Test: `restart_confirm_hint_names_the_refusal_key`,
+/// `restart_confirm_hint_disowns_n_as_no`.
+pub(crate) fn restart_confirm_hint(slot: u32) -> String {
+    format!("[{slot}] confirms the restart, [q] quits; [n] is not \"no\", it starts a NEW session")
+}

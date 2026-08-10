@@ -15,8 +15,8 @@ use trusty_mpm::client::ManagedSessionSummary;
 
 use super::{PickerDecision, next_launch_slot, parse_picker_choice};
 use crate::commands::session_picker_render::{
-    StateColor, colorize, command_legend, format_session_row, picker_use_color, state_color,
-    table_use_color,
+    StateColor, colorize, command_legend, format_session_row, picker_use_color,
+    restart_confirm_hint, state_color, table_use_color,
 };
 
 /// Minimal `ManagedSessionSummary` fixture with a given `slot`.
@@ -461,4 +461,34 @@ fn command_legend_columns_are_aligned() {
             "descriptions must all start in the same column: {lines:#?}"
         );
     }
+}
+
+/// #4965: both #2148 restart prompts must name the key that actually declines.
+///
+/// Why: they used to read as a yes/no question while naming no refusal key at
+/// all, so the operator had to invent one. `q` is the only key that leaves the
+/// prompt without acting.
+#[test]
+fn restart_confirm_hint_names_the_refusal_key() {
+    let hint = restart_confirm_hint(3);
+    assert!(hint.contains("[3] confirms"), "confirm key missing: {hint}");
+    assert!(hint.contains("[q] quits"), "refusal key missing: {hint}");
+}
+
+/// #4965: the hint must say what `n` does, because `n` spawns a session.
+///
+/// Why: this is the whole point of the wording fix. `n` is the universal "no"
+/// AND the launch-new alias, so a prompt that reads as yes/no and stays silent
+/// about `n` invites an operator to spawn a session while declining one. The
+/// grammar is deliberately unchanged (`guided_picker_n_launches_new_unnamed`
+/// still pins `n` -> `LaunchNew(None)`); only the prompt disowns the reading.
+#[test]
+fn restart_confirm_hint_disowns_n_as_no() {
+    let hint = restart_confirm_hint(1);
+    assert!(hint.contains("[n]"), "`n` unmentioned: {hint}");
+    assert!(hint.contains("not \"no\""), "`n` not disowned: {hint}");
+    assert!(
+        hint.contains("NEW session"),
+        "`n`'s real effect unstated: {hint}"
+    );
 }
