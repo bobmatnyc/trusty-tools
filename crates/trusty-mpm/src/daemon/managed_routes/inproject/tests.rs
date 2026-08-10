@@ -352,6 +352,49 @@ fn base_clone_path_resolves_to_canonical_root() {
     );
 }
 
+/// Why (#5204): `worktree_path_for` is the CREATION site — the one place that
+/// decides where a new worktree lands. Before this change it joined the
+/// `".worktrees"` literal, so a configured base was honoured nowhere and
+/// creation silently disagreed with every detection site. This pins that it now
+/// builds its path from the resolved base.
+/// What: with `TRUSTY_MPM_WORKTREES_DIRNAME` set, the returned path nests under
+/// the CONFIGURED segment and no longer under `.worktrees`; with it cleared, the
+/// default is unchanged.
+///
+/// Non-tautology proof: both expectations are spelled out as literals here
+/// (`base/.sessions/<name>` and `base/.worktrees/<name>`), not derived from the
+/// production resolver. A `worktree_path_for` that ignored config would produce
+/// `base/.worktrees/<name>` in the first case and fail the inequality.
+/// Test: itself.
+#[test]
+fn worktree_path_for_honours_configured_base() {
+    let _g = crate::core::trusty_tools_config::env_test_lock();
+    let base = std::path::Path::new("/tmp/some-checkout");
+
+    // SAFETY: serialised by the crate-wide env lock; cleared below.
+    unsafe { std::env::set_var("TRUSTY_MPM_WORKTREES_DIRNAME", ".sessions") };
+    let configured = super::worktree_path_for(base, "tm-widget-01");
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("TRUSTY_MPM_WORKTREES_DIRNAME") };
+    let defaulted = super::worktree_path_for(base, "tm-widget-01");
+
+    assert_eq!(
+        configured,
+        std::path::PathBuf::from("/tmp/some-checkout/.sessions/tm-widget-01"),
+        "creation must nest under the configured base"
+    );
+    assert!(
+        !configured.starts_with("/tmp/some-checkout/.worktrees"),
+        "a configured base must actually replace `.worktrees`, got {}",
+        configured.display()
+    );
+    assert_eq!(
+        defaulted,
+        std::path::PathBuf::from("/tmp/some-checkout/.worktrees/tm-widget-01"),
+        "with nothing configured the default must be unchanged"
+    );
+}
+
 #[test]
 fn session_worktree_path_uses_dot_prefix() {
     // create_session_worktree must place the worktree at

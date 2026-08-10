@@ -42,20 +42,46 @@ use super::worktree_safety::{DirtyWorktree, inspect_dirt};
 /// Test: `sentinel_gates_worktree_removal` in the sibling `decommission_tests`.
 pub(crate) const WORKTREE_SENTINEL_FILE: &str = ".trusty-mpm-worktree";
 
-/// Directory name (relative to a base git checkout) holding all SM-created
-/// per-session git worktrees.
+/// Directory name (relative to a base git checkout) under which NEW SM-created
+/// per-session git worktrees are created.
 ///
 /// Why: both the in-project spawn path (`daemon::managed_routes::inproject`)
 /// and the clone-based shared-base-checkout path (#1935,
 /// `provisioner::workspace`) nest per-session worktrees one level under a
-/// shared base checkout; naming the segment once here (rather than repeating
-/// the `".worktrees"` string literal at each call site) keeps the convention
-/// singular and greppable.
-/// What: `".worktrees"`.
-/// Test: exercised transitively by every test that builds a `.worktrees/<id>`
-/// path — `is_session_worktree_detects_dot_worktrees_component` pins the
-/// literal value via [`is_session_worktree`].
-pub(crate) const WORKTREES_DIRNAME: &str = ".worktrees";
+/// shared base checkout; naming the segment once (rather than repeating the
+/// `".worktrees"` string literal at each call site) keeps the convention
+/// singular and greppable. #5204 turned that constant into a resolver so the
+/// name is configurable — and so `trusty-search`'s indexing exclusion and
+/// `trusty-memory`'s workstream attribution resolve the SAME value.
+/// What: [`crate::core::trusty_tools_config::worktrees_dirname`] over the
+/// loaded host config — **env > config > `.worktrees`**. Use this ONLY where a
+/// worktree is being created or a path is being built; every "is this a
+/// worktree base?" question goes to [`worktree_dir_names`] instead.
+/// Test: `is_session_worktree_detects_dot_worktrees_component`,
+/// `worktrees_dirname_delegates_to_the_shared_resolver`.
+pub(crate) fn worktrees_dirname() -> String {
+    crate::core::trusty_tools_config::worktrees_dirname(
+        &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
+    )
+}
+
+/// The resolved worktree-base names for DETECTION — configured plus built-in.
+///
+/// Why: detection is deliberately a superset of creation (#5204). An operator
+/// who retargets the base still has worktrees on disk under `.worktrees`; if
+/// detection narrowed to the configured name alone, those would stop being
+/// recognised as session worktrees — decommission would refuse to remove them,
+/// prune would skip them, and trusty-search would start indexing every one.
+/// What: a [`trusty_common::workspace_layout::WorktreeDirNames`] whose `matches`
+/// accepts the configured name OR `.worktrees`.
+/// Test: `is_session_worktree_detects_dot_worktrees_component`.
+pub(crate) fn worktree_dir_names() -> trusty_common::workspace_layout::WorktreeDirNames {
+    trusty_common::workspace_layout::WorktreeDirNames::from_configured(
+        crate::core::trusty_tools_config::TrustyToolsConfig::load()
+            .worktrees_dirname
+            .as_deref(),
+    )
+}
 
 /// Timeout for the blocking `git worktree remove` subprocess (#1845 item 4).
 ///
@@ -95,9 +121,13 @@ pub(crate) const GIT_WORKTREE_REMOVE_TIMEOUT: std::time::Duration =
 /// place means the filesystem-removal guard, the search-index GC guard, and
 /// the agent-reset guard can never diverge.
 pub(crate) fn is_session_worktree(path: &Path) -> bool {
+    // #5204: detection matches the configured base OR the built-in `.worktrees`,
+    // so retargeting never orphans worktrees already on disk.
+    let names = worktree_dir_names();
     path.parent()
         .and_then(|p| p.file_name())
-        .map(|n| n == WORKTREES_DIRNAME)
+        .and_then(|n| n.to_str())
+        .map(|n| names.matches(n))
         .unwrap_or(false)
 }
 
@@ -221,9 +251,11 @@ pub(super) fn remove_session_worktree(path: &Path) -> WorktreeRemoval {
                 "decommission: refusing worktree removal — no SM ownership sentinel \
                  and path is not under .worktrees/; skipping conservatively"
             );
+            // #5204: name the configured base in the message the operator reads.
             return WorktreeRemoval::Kept(format!(
                 "no trusty-mpm ownership sentinel ({WORKTREE_SENTINEL_FILE}) and the path \
-                 is not under {WORKTREES_DIRNAME}/"
+                 is not under {}/",
+                worktrees_dirname()
             ));
         }
         warn!(

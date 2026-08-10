@@ -86,10 +86,71 @@ fn config_template_used_when_no_env() {
     assert_eq!(root, PathBuf::from("/custom/projects"));
 }
 
+/// Why (#5204): making the worktree base configurable must not move it for the
+/// operators who configure nothing — an unconfigured resolve has to stay
+/// `.worktrees`, byte for byte, or every existing checkout's worktrees become
+/// invisible to the remover, the pruner, and the indexer at once.
+/// Test: itself.
+#[test]
+fn worktrees_dirname_defaults_to_dot_worktrees() {
+    let _g = env_lock();
+    // SAFETY: serialised by the crate-wide env lock.
+    unsafe { std::env::remove_var(WORKTREES_DIRNAME_ENV) };
+    let cfg = TrustyToolsConfig::default();
+    assert_eq!(worktrees_dirname(&cfg), DEFAULT_WORKTREES_DIRNAME);
+    assert_eq!(worktrees_dirname(&cfg), ".worktrees");
+}
+
+/// Why (#5204): the whole point of the feature — a base named in
+/// `~/.trusty-tools/trusty-mpm/config.yaml` must be the one creation uses, and
+/// the env var must still outrank it.
+/// What: a configured value is returned as-is; the env var beats it; and a
+/// reserved name is refused back to the default even when configured (the
+/// `.claude/worktrees` guard, proven end to end in
+/// `configured_base_can_never_claim_a_claude_agent_worktree`).
+/// Test: itself.
+#[test]
+fn worktrees_dirname_honours_config() {
+    let _g = env_lock();
+    // SAFETY: serialised by the crate-wide env lock; cleared before returning.
+    unsafe { std::env::remove_var(WORKTREES_DIRNAME_ENV) };
+
+    // This file is compiled INTO the defining crate, so `#[non_exhaustive]`
+    // does not forbid a struct literal here.
+    let cfg = TrustyToolsConfig {
+        worktrees_dirname: Some(".sessions".into()),
+        ..Default::default()
+    };
+    assert_eq!(worktrees_dirname(&cfg), ".sessions");
+
+    // SAFETY: as above.
+    unsafe { std::env::set_var(WORKTREES_DIRNAME_ENV, ".from-env") };
+    let observed_env = worktrees_dirname(&cfg);
+    // SAFETY: as above.
+    unsafe { std::env::remove_var(WORKTREES_DIRNAME_ENV) };
+    assert_eq!(
+        observed_env, ".from-env",
+        "env must outrank the config value"
+    );
+
+    let reserved = TrustyToolsConfig {
+        worktrees_dirname: Some("worktrees".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        worktrees_dirname(&reserved),
+        DEFAULT_WORKTREES_DIRNAME,
+        "a reserved name must be refused even when explicitly configured"
+    );
+}
+
 /// Why: a leading `~` in a template must expand to the home directory.
 /// Test: itself.
 #[test]
 fn tilde_expansion() {
+    // #5203: expansion moved to the shared resolver in trusty-common; this
+    // asserts the behaviour trusty-mpm still depends on.
+    use trusty_common::workspace_layout::expand_tilde;
     let home = PathBuf::from("/home/bob");
     assert_eq!(
         expand_tilde("~/trusty-mpm-projects", &home),

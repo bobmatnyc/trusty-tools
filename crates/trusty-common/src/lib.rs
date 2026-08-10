@@ -649,6 +649,22 @@ pub mod palace_alias;
 /// Test: `cargo test -p trusty-common -- github_path::tests`.
 pub mod github_path;
 
+/// The one resolver for trusty-mpm's managed workspace layout (#5203, #5204).
+///
+/// Why: the managed workspace root and the session-worktree base name are shared
+/// by four crates, three of which cannot depend on `trusty-mpm`. Each had
+/// hardcoded `~/trusty-mpm-projects` / `.worktrees` independently, so retargeting
+/// either silently broke `trusty-code`'s project picker, `trusty-search`'s
+/// ephemeral-dir exclusion, and `trusty-memory`'s workstream attribution.
+/// Centralising here — the crate all four already depend on — is CLAUDE.md's
+/// "Common entry point" rule applied to a capability that had four copies.
+/// What: exposes [`workspace_layout::workspace_root`],
+/// [`workspace_layout::worktrees_dirname`], their `resolve_*` cores (which take
+/// an already-loaded config value), [`workspace_layout::WorktreeDirNames`] for
+/// scan paths, and [`workspace_layout::WorkspaceLayoutConfig`].
+/// Test: `cargo test -p trusty-common -- workspace_layout::tests`.
+pub mod workspace_layout;
+
 /// Canonical repository identity (DOC-37) — the path-independent join key that
 /// relates the live checkout, `.base` clone, and session worktrees of one repo.
 ///

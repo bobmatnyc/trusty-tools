@@ -17,7 +17,9 @@
 //! `SessionManager` API via `decommission_with_root`.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
-use super::decommission::{WORKTREE_SENTINEL_FILE, is_session_worktree, remove_session_worktree};
+use super::decommission::{
+    WORKTREE_SENTINEL_FILE, is_session_worktree, remove_session_worktree, worktrees_dirname,
+};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
@@ -45,6 +47,72 @@ fn is_session_worktree_detects_dot_worktrees_component() {
     assert!(!is_session_worktree(std::path::Path::new(
         "/base/worktrees/session"
     )));
+}
+
+/// Why (#5204): this module's `worktrees_dirname()` is NOT the same function as
+/// `core::trusty_tools_config::worktrees_dirname(&cfg)` — that one is a pure
+/// function of a config the caller already holds, while this one LOADS the host
+/// config itself. The loading step is the part with nothing else covering it,
+/// so it gets its own test rather than borrowing the other's name.
+/// What: with the env override set the delegation returns it; with the override
+/// cleared it returns `.worktrees`. Driving the env leg (rather than asserting a
+/// bare default) keeps the test deterministic on a developer machine that has
+/// `worktrees_dirname` set in its own `config.yaml`.
+/// Test: itself.
+#[test]
+fn worktrees_dirname_delegates_to_the_shared_resolver() {
+    let _guard = crate::core::trusty_tools_config::env_test_lock();
+    // SAFETY: serialised by the crate-wide env lock; cleared below.
+    unsafe { std::env::set_var("TRUSTY_MPM_WORKTREES_DIRNAME", ".sessions") };
+    let configured = worktrees_dirname();
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("TRUSTY_MPM_WORKTREES_DIRNAME") };
+
+    assert_eq!(
+        configured, ".sessions",
+        "the loaded-config delegation must carry the resolved base through"
+    );
+}
+
+/// #5204 REGRESSION: no configured worktree base may make a Claude Code agent
+/// worktree look tm-owned.
+///
+/// Why: making the base configurable put `.claude/worktrees/<agent>` one config
+/// value away from deletion. `is_session_worktree` asks only whether the
+/// immediate parent is a worktree base, and `worktree_reclaim::tm_provisioned`
+/// applies "exactly the predicate the remover applies" (#2919 removed the
+/// classifier/remover asymmetry on purpose, so there is no second opinion left).
+/// A dotless `worktrees` would therefore have both the survey and the remover
+/// classify an agent worktree — out of scope per ADR-0020 — as reclaimable.
+/// What: sets `TRUSTY_MPM_WORKTREES_DIRNAME=worktrees`, the adversarial value,
+/// and asserts both predicates still refuse `.claude/worktrees/<agent>`. The
+/// reserved-name guard in `trusty_common::workspace_layout` is what holds here.
+/// Test: this test.
+#[test]
+fn configured_base_can_never_claim_a_claude_agent_worktree() {
+    let _guard = crate::core::trusty_tools_config::env_test_lock();
+    // SAFETY: serialised by the crate-wide env lock; cleared before returning.
+    unsafe { std::env::set_var("TRUSTY_MPM_WORKTREES_DIRNAME", "worktrees") };
+
+    let agent_wt = std::path::Path::new(
+        "/Users/dev/trusty-mpm-projects/owner/repo/.claude/worktrees/agent-abc123",
+    );
+    let observed_session = is_session_worktree(agent_wt);
+    let observed_provisioned = crate::session_manager::worktree_reclaim::tm_provisioned(agent_wt);
+
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("TRUSTY_MPM_WORKTREES_DIRNAME") };
+
+    assert!(
+        !observed_session,
+        "`.claude/worktrees/<agent>` must never be a tm session worktree, whatever \
+         TRUSTY_MPM_WORKTREES_DIRNAME says"
+    );
+    assert!(
+        !observed_provisioned,
+        "the remover's own predicate must refuse a Claude Code agent worktree \
+         (ADR-0020 puts that store out of scope)"
+    );
 }
 
 #[test]

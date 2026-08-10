@@ -249,6 +249,8 @@ fn scan_dir_recursive(
         }
     };
 
+    // #5204: resolve the ephemeral-dir matcher once per directory, not per entry.
+    let ephemeral = crate::service::constants::ephemeral_dir_names();
     for entry in read_dir.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -262,7 +264,7 @@ fn scan_dir_recursive(
         if name == COLOCATED_DIR_NAME
             || name == ".git"
             || name == "node_modules"
-            || crate::service::constants::is_ephemeral_dir_name(name)
+            || ephemeral.matches(name)
         {
             continue;
         }
