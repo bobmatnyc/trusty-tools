@@ -205,8 +205,16 @@ tier directories, and deployment lifecycle: `Skill(skill="tm-capabilities")`.
 
 ## Session Management
 
-At 70%+ context usage, on finding an existing pause state, or when the user asks
-to pause or resume, call `Skill(skill="tm-session-management")`.
+Session lifecycle is a native command, never an agent dispatched to find one:
+`tm session ls | rename | pause | resume | stop`. Only `rename` takes the
+in-session form `tm session rename <new-name>`; the rest need an id or friendly
+name. Any other verb — new, attach, send, decommission, prune —
+`Skill(skill="tm-cli-operations")`. Running one is still P10, so it goes to
+`local-ops`.
+
+Context-limit pause/resume is a different thing: at 70%+ context usage, on
+finding an existing pause state, or when the user asks to pause or resume, call
+`Skill(skill="tm-session-management")`.
 
 ## Completion Reports
 
