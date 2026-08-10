@@ -141,7 +141,7 @@ async fn sweep_runs_every_stage_in_order_and_survives_failures() {
     assert_eq!(
         &stages[jira_index + 1..],
         &EXPECTED_ORDER[jira_index + 1..],
-        "stages after the failing one were skipped"
+        "stages after the failing jira-sync stage should still have run, but were missing"
     );
 }
 
@@ -175,6 +175,37 @@ async fn sweep_writes_reports_into_the_requested_directory() {
         "report stage did not create {}",
         out.display()
     );
+
+    // `is_dir()` alone would pass for a sweep that creates the directory and
+    // writes nothing, so assert the artifacts themselves. `summary.csv` and
+    // `report.json` are fixed names from the CSV and JSON formatters, and
+    // `pr-metrics.csv` is the name the sweep hands `pr-metrics --output`.
+    let written: Vec<String> = std::fs::read_dir(&out)
+        .expect("read report dir")
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        written.len() > 1,
+        "report stage wrote {} file(s) into {}: {written:?}",
+        written.len(),
+        out.display()
+    );
+    for expected in [
+        crate::report::formatters::csv::SUMMARY_CSV,
+        crate::report::formatters::json::REPORT_JSON,
+        "pr-metrics.csv",
+    ] {
+        assert!(
+            out.join(expected).is_file(),
+            "expected artifact {expected} missing from {}: {written:?}",
+            out.display()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -231,9 +262,17 @@ fn audit_runs_with_no_flags_at_all() {
 #[test]
 fn audit_takes_no_positional_arguments() {
     // A positional would be a place for an operator to be asked for something.
+    // Which `ErrorKind` clap picks for an unexpected positional depends on the
+    // command shape and the clap version, so assert the observable contract —
+    // the parse fails and the message names the rejected argument — instead of
+    // pinning the discriminant.
     let err = AuditOnly::try_parse_from(["tga-audit", "acme"])
         .expect_err("a positional argument must be rejected");
-    assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("acme"),
+        "rejection must name the offending argument, got: {rendered}"
+    );
 }
 
 #[test]
