@@ -20,7 +20,7 @@
 //! fails.
 //! Test: `migration_stamps_schema_and_is_idempotent`,
 //! `migration_rewrites_legacy_keys_and_preserves_history`,
-//! `migration_failure_leaves_the_palace_openable_under_old_semantics`.
+//! `migration_failure_leaves_the_palace_openable_and_retries`.
 
 use crate::memory_core::store::kg_store::{
     KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KG_TRIPLE_KEY_SCHEMA_VERSION, KgSchemaMarker, TRIPLES,
@@ -318,7 +318,7 @@ fn stamp_only(db: &Database) -> Result<()> {
 /// matches the current file is left alone: a previous attempt failed, rolled
 /// back, and left the source unchanged, so that copy is still a good one and
 /// re-copying only risks replacing it with a worse one.
-/// Test: `migration_failure_leaves_the_palace_openable_under_old_semantics`.
+/// Test: `migration_failure_leaves_the_palace_openable_and_retries`.
 fn ensure_verified_backup(path: &Path) -> Result<PathBuf> {
     let backup = PathBuf::from(format!("{}{BACKUP_SUFFIX}", path.display()));
     let src_len = std::fs::metadata(path)
