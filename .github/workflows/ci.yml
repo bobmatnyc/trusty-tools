@@ -880,6 +880,14 @@ jobs:
           cargo test -p trusty-common --lib --features update-check \
             update::tests::cache_fresh_returns_some_when_newer -- --exact
 
+      # `codex-config` is enabled by no crate in the workspace, so neither
+      # `cargo test --workspace` nor `cargo clippy --workspace` ever compiles
+      # `codex_config` or runs its tests — the module could rot undetected
+      # (#5264). This is the only step that exercises it.
+      - name: cargo test -p trusty-common --features codex-config
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo test -p trusty-common --lib --features codex-config codex_config
+
   # --------------------------------------------------------------------------
   # msrv: verify the workspace compiles on the effective MSRV.
   # cargo check is used (not test) to keep this job fast: the MSRV guarantee

@@ -41,6 +41,17 @@ pub mod banner;
 pub mod chat;
 pub mod claude_config;
 
+/// Codex CLI MCP-server registration (`~/.codex/config.toml`).
+///
+/// Why: a Codex stdio registration with no argument vector launches the bare
+/// binary, which prints help and exits before MCP initialization while the
+/// connection still reads as enabled (#5264 / #5265).
+/// What: [`codex_config::codex_config_path`] and
+/// [`codex_config::patch_mcp_server`] — see the module docs.
+/// Test: `cargo test -p trusty-common --features codex-config`.
+#[cfg(feature = "codex-config")]
+pub mod codex_config;
+
 /// Canonical environment-variable name constants shared across the workspace.
 ///
 /// Why: the same credential env-var names were spelled as bare literals at ~40
@@ -725,8 +736,9 @@ pub use test_harness::running_under_test_harness;
 /// cross-process serialisation those writers lose each other's updates, and a
 /// shared scratch path lets them publish a corrupt document. This module is the
 /// single implementation of that critical section.
-/// What: Exposes [`json_rmw::update`], [`json_rmw::lock_path`], and
-/// [`json_rmw::JsonRmwError`].
+/// What: Exposes [`json_rmw::update`], [`json_rmw::update_with`],
+/// [`json_rmw::update_with_decision`], [`json_rmw::DocumentCodec`],
+/// [`json_rmw::lock_path`], and [`json_rmw::JsonRmwError`].
 /// Test: `cargo test -p trusty-common -- json_rmw::tests`.
 pub mod json_rmw;
 

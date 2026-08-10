@@ -197,3 +197,276 @@ fn update_write_failure_leaves_original_intact() {
         "a failed publish must leave the previous document intact"
     );
 }
+
+/// #5264: an idempotent caller that finds the document already correct must be
+/// able to skip the publish. Republishing identical bytes still churns the mtime
+/// and burns an `fsync` on every re-run of a setup command.
+#[test]
+fn update_with_decision_false_does_not_write() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("doc.json");
+    std::fs::write(&path, b"{\"a\":1}").expect("seed");
+    let before = std::fs::read(&path).expect("read");
+
+    let seen: i64 = super::update_with_decision::<
+        super::JsonCodec<serde_json::Value>,
+        _,
+        super::JsonRmwError,
+        _,
+    >(&path, |doc| {
+        let a = doc["a"].as_i64().unwrap_or_default();
+        doc["a"] = serde_json::json!(999);
+        Ok((a, false))
+    })
+    .expect("update");
+
+    assert_eq!(seen, 1, "the closure still sees the document");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "publish=false must leave the file byte-for-byte untouched"
+    );
+}
+
+/// #5264: `File::create` applies 0644 minus umask, so publishing over a
+/// `chmod 600` document silently widens it. These files hold OAuth tokens and
+/// MCP provider credentials.
+#[cfg(unix)]
+#[test]
+fn publish_preserves_the_original_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("secret.json");
+    std::fs::write(&path, b"{}").expect("seed");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    super::update::<serde_json::Value, _, super::JsonRmwError, _>(&path, |doc| {
+        *doc = serde_json::json!({"token": "sk-secret"});
+        Ok(())
+    })
+    .expect("update");
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "publish widened the document to {mode:o}");
+}
+
+/// #5264: renaming over a SYMLINK replaces the link, detaching a document the
+/// operator symlinked into a dotfiles repo and leaving the real file stale.
+#[cfg(unix)]
+#[test]
+fn publish_writes_through_a_symlink() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("real.json");
+    std::fs::write(&real, b"{}").expect("seed");
+    let link = tmp.path().join("link.json");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    super::update::<serde_json::Value, _, super::JsonRmwError, _>(&link, |doc| {
+        *doc = serde_json::json!({"v": 1});
+        Ok(())
+    })
+    .expect("update");
+
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the symlink was replaced by a regular file"
+    );
+    assert!(
+        String::from_utf8_lossy(&std::fs::read(&real).unwrap()).contains("\"v\""),
+        "the link target was not updated"
+    );
+}
+
+/// A text codec that declares a restricted mode, standing in for `codex_config`.
+///
+/// Why: `TextCodec` deliberately takes the platform default — `daemon.env` is not
+/// a secret. Proving the create-path mode needs a codec that asks for one, and
+/// `DocumentCodec` is sealed, so it has to live inside this crate.
+struct PrivateTextCodec;
+
+impl super::sealed::Sealed for PrivateTextCodec {}
+
+impl super::DocumentCodec for PrivateTextCodec {
+    type Document = String;
+
+    fn decode(path: &std::path::Path, bytes: Option<&[u8]>) -> Result<String, super::JsonRmwError> {
+        super::TextCodec::decode(path, bytes)
+    }
+
+    fn encode(path: &std::path::Path, doc: &String) -> Result<Vec<u8>, super::JsonRmwError> {
+        super::TextCodec::encode(path, doc)
+    }
+
+    fn new_file_mode() -> Option<u32> {
+        Some(0o600)
+    }
+}
+
+/// #5264 HIGH: mode PRESERVATION cannot protect a file that does not exist yet,
+/// and the call that creates a credential-bearing config is exactly the one that
+/// matters. A codec declaring `new_file_mode` must have it applied.
+#[cfg(unix)]
+#[test]
+fn publish_uses_the_codec_mode_for_a_new_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // A directory this call creates must be narrowed too.
+    let path = tmp.path().join("fresh").join("secret.txt");
+
+    super::update_with::<PrivateTextCodec, _, super::JsonRmwError, _>(&path, |doc| {
+        doc.push_str("token = \"sk-live\"\n");
+        Ok(())
+    })
+    .expect("update");
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "a newly created document must not be born world-readable; got {mode:o}"
+    );
+    let dir_mode = std::fs::metadata(path.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(dir_mode, 0o700, "the created directory is {dir_mode:o}");
+}
+
+/// #5264 HIGH: resolving ONE symlink hop is worse than resolving none. With
+/// `outer -> mid -> real`, a one-hop write lands on `mid`, turning it into a
+/// regular file while `real` — the copy in the operator's dotfiles repo — keeps
+/// the stale content, and `outer` still looks healthy in `ls -l`.
+#[cfg(unix)]
+#[test]
+fn publish_follows_a_symlink_chain() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("real.txt");
+    std::fs::write(&real, b"stale").expect("seed");
+    let mid = tmp.path().join("mid.txt");
+    std::os::unix::fs::symlink(&real, &mid).unwrap();
+    let outer = tmp.path().join("outer.txt");
+    std::os::unix::fs::symlink(&mid, &outer).unwrap();
+
+    super::update_with::<super::TextCodec, _, super::JsonRmwError, _>(&outer, |doc| {
+        *doc = "fresh".to_string();
+        Ok(())
+    })
+    .expect("update");
+
+    assert_eq!(
+        std::fs::read_to_string(&real).unwrap(),
+        "fresh",
+        "the end of the chain was not updated"
+    );
+    for link in [&mid, &outer] {
+        assert!(
+            std::fs::symlink_metadata(link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{} was replaced by a regular file",
+            link.display()
+        );
+    }
+}
+
+/// #5264: a symlink cycle must not hang the resolver. The hop cap returns a
+/// path whose open then fails with the platform's own `ELOOP`.
+#[cfg(unix)]
+#[test]
+fn publish_survives_a_symlink_cycle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    std::os::unix::fs::symlink(&b, &a).unwrap();
+    std::os::unix::fs::symlink(&a, &b).unwrap();
+
+    let result = super::update_with::<super::TextCodec, _, super::JsonRmwError, _>(&a, |doc| {
+        *doc = "x".to_string();
+        Ok(())
+    });
+    assert!(result.is_err(), "a cycle must error, not hang or succeed");
+}
+
+/// #5264 HIGH: the lock and the publish target must be the same file. Locking
+/// the CALLER's path while writing the RESOLVED one lets two writers reaching
+/// one document by different names take different `.lock` sidecars and lose each
+/// other's updates — the lost update this module exists to prevent, made newly
+/// reachable by following links at all.
+#[cfg(unix)]
+#[test]
+fn the_lock_is_keyed_on_the_resolved_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("real.txt");
+    std::fs::write(&real, b"").expect("seed");
+    let link = tmp.path().join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    super::update_with::<super::TextCodec, _, super::JsonRmwError, _>(&link, |doc| {
+        doc.push('x');
+        Ok(())
+    })
+    .expect("update via link");
+
+    assert!(
+        super::lock_path(&real).exists(),
+        "the lock must be the resolved file's sidecar"
+    );
+    assert!(
+        !super::lock_path(&link).exists(),
+        "a lock on the link's own name lets a second writer past the gate"
+    );
+}
+
+/// #5264: the codec seam has to be exercised by a NON-JSON document, or the
+/// generalisation is only ever proved against the case it started from. This is
+/// the test the `update_with` doc used to name but that did not exist.
+#[test]
+fn update_with_a_text_codec_round_trips() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("notes.txt");
+    std::fs::write(&path, "# head\nA=1\n").expect("seed");
+
+    let seen = super::update_with::<super::TextCodec, _, super::JsonRmwError, _>(&path, |doc| {
+        let before = doc.clone();
+        doc.push_str("B=2\n");
+        Ok(before)
+    })
+    .expect("update");
+
+    assert_eq!(
+        seen, "# head\nA=1\n",
+        "the closure sees the decoded document"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# head\nA=1\nB=2\n",
+        "text must round-trip byte-for-byte, comments included"
+    );
+}
+
+/// #5264: a lossy decode would let a caller's merge-and-republish destroy a file
+/// it could not read. Invalid UTF-8 is an error, never an empty document.
+#[test]
+fn text_codec_rejects_invalid_utf8() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("broken.txt");
+    let raw: &[u8] = b"A=1\n\xffB=2\n";
+    std::fs::write(&path, raw).expect("seed");
+
+    let result = super::update_with::<super::TextCodec, _, super::JsonRmwError, _>(&path, |doc| {
+        *doc = String::new();
+        Ok(())
+    });
+    assert!(result.is_err(), "invalid UTF-8 must not decode to empty");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        raw,
+        "a failed decode must leave the file byte-for-byte intact"
+    );
+}

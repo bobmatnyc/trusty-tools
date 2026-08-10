@@ -25,7 +25,10 @@
 //!
 //! 1. **Serialisation.** The read, the mutation and the write happen while one
 //!    writer holds an exclusive advisory lock, so no other [`update`] on the
-//!    same path can observe or overwrite the intermediate state. The lock is
+//!    same FILE can observe or overwrite the intermediate state. The unit is
+//!    the file, not the spelling: symlinks are resolved before the lock is
+//!    taken, so two callers reaching one document by different paths still
+//!    serialise against each other (#5264). The lock is
 //!    `flock(2)`-style: it is held by the open file description, so it
 //!    serialises separate processes AND separate threads that each call
 //!    [`update`], on Unix and Windows alike.
@@ -147,11 +150,14 @@ impl JsonRmwError {
         }
     }
 
-    /// Wrap a serde error against `path`.
-    fn serialize(path: &Path, e: serde_json::Error) -> Self {
+    /// Wrap a (de)serialisation failure against `path`.
+    ///
+    /// Takes the rendered message rather than a `serde_json::Error` so a
+    /// non-JSON [`DocumentCodec`] can report through the same variant (#5264).
+    pub fn serialize(path: &Path, message: impl std::fmt::Display) -> Self {
         Self::Serialize {
             path: path.to_path_buf(),
-            message: e.to_string(),
+            message: message.to_string(),
         }
     }
 }
@@ -189,18 +195,18 @@ fn temp_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Read and parse `path`, treating only genuine absence as an empty document.
+/// Read `path`, treating only genuine absence as "no document yet".
 ///
 /// Why: this is the "never fail open" hinge. If any I/O error were treated as
 /// "file absent", a transient permission or hardware fault would hand the caller
 /// an empty `T`, and the publish at the end of [`update`] would overwrite a
 /// perfectly good document with nothing — a total data loss dressed up as
 /// success.
-/// What: `NotFound` yields `T::default()`; every other error propagates.
-fn read_or_default<T: DeserializeOwned + Default>(path: &Path) -> Result<T, JsonRmwError> {
+/// What: `NotFound` yields `Ok(None)`; every other error propagates.
+fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, JsonRmwError> {
     match std::fs::read(path) {
-        Ok(raw) => serde_json::from_slice(&raw).map_err(|e| JsonRmwError::serialize(path, e)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(JsonRmwError::io(path, e)),
     }
 }
@@ -217,13 +223,36 @@ fn read_or_default<T: DeserializeOwned + Default>(path: &Path) -> Result<T, Json
 /// with `path` untouched.
 /// Test: `update_publishes_atomically_leaving_no_temp`,
 /// `update_write_failure_leaves_original_intact`.
-fn publish_atomic(path: &Path, bytes: &[u8]) -> Result<(), JsonRmwError> {
+fn publish_atomic(
+    path: &Path,
+    bytes: &[u8],
+    new_file_mode: Option<u32>,
+) -> Result<(), JsonRmwError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|e| JsonRmwError::io(path, e))?;
+    ensure_parent_dir(path, new_file_mode)?;
+
+    // #5264: `File::create` applies 0644 minus umask. Two cases, both wrong by
+    // default: republishing over a `chmod 600` document silently widens it, and
+    // CREATING a document that holds MCP provider credentials leaves it
+    // world-readable from birth. The existing file's mode wins when there is
+    // one; otherwise the codec's declared mode for a fresh file applies.
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o777)
+            .or(new_file_mode)
+    };
 
     let tmp = temp_path(path);
     let write_result = (|| -> std::io::Result<()> {
         let mut file = File::create(&tmp)?;
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
         file.write_all(bytes)?;
         // Durability of the CONTENT must precede the rename that publishes it.
         file.sync_all()?;
@@ -249,6 +278,67 @@ fn publish_atomic(path: &Path, bytes: &[u8]) -> Result<(), JsonRmwError> {
     Ok(())
 }
 
+/// Create `path`'s parent directory, narrowing it when the codec asks for a
+/// restricted file mode.
+///
+/// Why (#5264): this has to run where the directory is FIRST created, and that
+/// is the lock setup in [`update_with_decision`], not [`publish_atomic`] — by
+/// the time the publish runs, the lock sidecar has already brought the
+/// directory into existence at 0755 and the "did we create it?" test is dead.
+/// Only a directory this call creates is narrowed; an operator's existing
+/// `~/.codex` is theirs to set.
+/// What: `create_dir_all`, then on Unix `chmod` the directory to the file mode
+/// plus owner traverse (0o600 → 0o700) when it did not already exist.
+/// Test: `publish_uses_the_codec_mode_for_a_new_file`,
+/// `codex_config::tests::patch_mcp_server_creates_a_private_file`.
+fn ensure_parent_dir(path: &Path, new_file_mode: Option<u32>) -> Result<(), JsonRmwError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let existed = parent.exists();
+    std::fs::create_dir_all(parent).map_err(|e| JsonRmwError::io(path, e))?;
+    #[cfg(unix)]
+    if let (false, Some(mode)) = (existed, new_file_mode) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir_mode = mode | ((mode & 0o444) >> 2);
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(dir_mode));
+    }
+    Ok(())
+}
+
+/// Follow `path` through every symlink hop to the file that will be written.
+///
+/// Why (#5264): renaming over a symlink replaces the LINK, detaching a document
+/// an operator symlinked into a dotfiles repo. Resolving only one hop is worse
+/// than not resolving at all in one respect: with
+/// `config.toml -> mid.toml -> real.toml` the write lands on `mid.toml`,
+/// converting it to a regular file while `real.toml` — the file under version
+/// control — keeps the stale content, and the outer link still looks healthy in
+/// `ls -l`, so the break is invisible one level down.
+/// What: follows `read_link` until it stops being a symlink, resolving relative
+/// targets against the link's own directory. A cycle is bounded by
+/// [`MAX_LINK_HOPS`] and yields the last hop, whose open then fails with the
+/// platform's own `ELOOP` rather than this function hanging.
+/// Test: `publish_follows_a_symlink_chain`, `publish_survives_a_symlink_cycle`.
+fn resolve_link(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_LINK_HOPS {
+        let Ok(target) = std::fs::read_link(&current) else {
+            return current;
+        };
+        current = if target.is_absolute() {
+            target
+        } else {
+            current
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(target)
+        };
+    }
+    current
+}
+
+/// Hop limit for [`resolve_link`], matching the usual kernel `SYMLOOP_MAX`.
+const MAX_LINK_HOPS: usize = 32;
+
 /// Run a read-modify-write on the JSON document at `path` under an exclusive
 /// cross-process lock.
 ///
@@ -272,19 +362,51 @@ fn publish_atomic(path: &Path, bytes: &[u8]) -> Result<(), JsonRmwError> {
 /// Test: `update_serialises_concurrent_threads`,
 /// `update_creates_file_when_absent`, `update_closure_error_does_not_write`,
 /// `update_lock_path_unopenable_errors`.
-pub fn update<T, R, E, F>(path: &Path, f: F) -> Result<R, E>
+pub fn update_with<C, R, E, F>(path: &Path, f: F) -> Result<R, E>
 where
-    T: DeserializeOwned + Serialize + Default,
+    C: DocumentCodec,
     E: From<JsonRmwError>,
-    F: FnOnce(&mut T) -> Result<R, E>,
+    F: FnOnce(&mut C::Document) -> Result<R, E>,
 {
+    update_with_decision::<C, R, E, _>(path, |doc| f(doc).map(|r| (r, true)))
+}
+
+/// [`update_with`], but the closure also decides whether to publish.
+///
+/// Why (#5264): an idempotent upsert that finds the document already correct
+/// must not rewrite it — republishing byte-identical content still churns the
+/// mtime and burns an `fsync` on every re-run of a setup command. `update_with`
+/// always publishes, so the no-op case needs a way to say so from INSIDE the
+/// lock, where the decision can be trusted. Deciding before taking the lock
+/// would race a concurrent writer in the dangerous direction: the check could
+/// pass, another process could then break the entry, and this call would skip
+/// the write it now owed.
+/// What: the closure returns `(value, publish)`. `publish == false` leaves the
+/// file byte-for-byte untouched and still returns `value`. Everything else —
+/// lock, re-read, atomic publish — is [`update_with`]'s.
+/// Test: `update_with_decision_false_does_not_write`.
+pub fn update_with_decision<C, R, E, F>(path: &Path, f: F) -> Result<R, E>
+where
+    C: DocumentCodec,
+    E: From<JsonRmwError>,
+    F: FnOnce(&mut C::Document) -> Result<(R, bool), E>,
+{
+    // #5264: resolve the symlink ONCE, here, and use the result for the lock,
+    // the read and the publish alike. Locking the caller's path while writing
+    // the resolved one means two writers reaching the same file by different
+    // names take different `.lock` sidecars and lose each other's updates —
+    // the exact defect this module exists to prevent, made newly reachable by
+    // following links at all.
+    let resolved = resolve_link(path);
+    let path = resolved.as_path();
+
+    // The guard borrows the lock, so both must stay on this frame; a helper
+    // returning the guard would need a self-referential struct. Acquiring here
+    // keeps it plain RAII — released on every exit path, including panics.
+    // Creates the directory (with the codec's mode) BEFORE the lock sidecar
+    // lands in it, so a credential-bearing config is never briefly world-listable.
+    ensure_parent_dir(path, C::new_file_mode())?;
     let lock = lock_path(path);
-    if let Some(parent) = lock.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| JsonRmwError::Lock {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-    }
     let lock_file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -304,11 +426,134 @@ where
         source: e,
     })?;
 
-    let mut value: T = read_or_default(path)?;
-    let result = f(&mut value)?;
-    let bytes = serde_json::to_vec_pretty(&value).map_err(|e| JsonRmwError::serialize(path, e))?;
-    publish_atomic(path, &bytes)?;
+    let mut value = C::decode(path, read_bytes(path)?.as_deref())?;
+    let (result, publish) = f(&mut value)?;
+    if publish {
+        let bytes = C::encode(path, &value)?;
+        publish_atomic(path, &bytes, C::new_file_mode())?;
+    }
     Ok(result)
+}
+
+/// How one document format is read back and written out inside [`update_with`].
+///
+/// Why (#5264): the locking, atomic publish, permission and symlink handling in
+/// this module are format-independent, but [`update`] hard-wires `serde_json`.
+/// Codex's `~/.codex/config.toml` needs the same critical section and must be
+/// edited with `toml_edit` to preserve the operator's comments — a fourth
+/// hand-rolled atomic writer to get there would be exactly the duplication this
+/// module exists to end. This trait is the seam; the safety properties stay in
+/// one place.
+/// What: `decode` turns the on-disk bytes (or `None`, meaning absent) into the
+/// working document; `encode` renders it back. Both take `path` so failures name
+/// the file.
+/// Test: `update_with_a_text_codec_round_trips`, `text_codec_rejects_invalid_utf8`,
+/// plus every existing `update` test — [`update`] is a specialisation of
+/// [`update_with`] over [`JsonCodec`].
+///
+/// Sealed: the seam exists to serve the documents in this workspace, and an
+/// unsealed public trait with no provided methods cannot gain one — such as
+/// [`DocumentCodec::new_file_mode`] below — without breaking every downstream
+/// implementor. Adding a codec means adding it here.
+pub trait DocumentCodec: sealed::Sealed {
+    /// The in-memory document the caller mutates.
+    type Document;
+
+    /// Parse `bytes` (`None` when the file does not exist) into a document.
+    fn decode(path: &Path, bytes: Option<&[u8]>) -> Result<Self::Document, JsonRmwError>;
+
+    /// Render `doc` to the bytes that will be published.
+    fn encode(path: &Path, doc: &Self::Document) -> Result<Vec<u8>, JsonRmwError>;
+
+    /// Mode to give the document when this call CREATES it, if it should not be
+    /// the platform default.
+    ///
+    /// Why (#5264): mode PRESERVATION only helps a file that already exists, and
+    /// the call that creates `~/.codex/config.toml` is the one that puts an MCP
+    /// provider credential in it. `File::create` would leave that at 0644.
+    /// What: `None` (the default) means 0644 minus umask, which is right for a
+    /// registry or a ledger. A codec whose document can hold a secret returns
+    /// `Some(0o600)`.
+    /// Test: `publish_uses_the_codec_mode_for_a_new_file`,
+    /// `codex_config::tests::patch_mcp_server_creates_a_private_file`.
+    fn new_file_mode() -> Option<u32> {
+        None
+    }
+}
+
+/// Seals [`DocumentCodec`] against out-of-workspace implementors.
+pub(crate) mod sealed {
+    /// Implemented only by the codecs in this module and `codex_config`.
+    pub trait Sealed {}
+}
+
+/// [`DocumentCodec`] for pretty-printed JSON — the behaviour [`update`] has
+/// always had, now expressed through the seam.
+pub struct JsonCodec<T>(std::marker::PhantomData<T>);
+
+impl<T> sealed::Sealed for JsonCodec<T> {}
+
+impl<T> DocumentCodec for JsonCodec<T>
+where
+    T: DeserializeOwned + Serialize + Default,
+{
+    type Document = T;
+
+    fn decode(path: &Path, bytes: Option<&[u8]>) -> Result<T, JsonRmwError> {
+        match bytes {
+            Some(raw) => serde_json::from_slice(raw).map_err(|e| JsonRmwError::serialize(path, e)),
+            None => Ok(T::default()),
+        }
+    }
+
+    fn encode(path: &Path, doc: &T) -> Result<Vec<u8>, JsonRmwError> {
+        serde_json::to_vec_pretty(doc).map_err(|e| JsonRmwError::serialize(path, e))
+    }
+}
+
+/// [`DocumentCodec`] for a whole-file UTF-8 text document.
+///
+/// Why (#4827): `trusty-search`'s `daemon.env` is an operator-owned dotenv file
+/// that needs exactly this module's lock, atomic publish and symlink handling —
+/// but it is not JSON, and [`DocumentCodec`] is sealed, so the codec has to live
+/// here rather than in the consuming crate.
+/// What: an absent file decodes to an empty `String`. Invalid UTF-8 is an
+/// ERROR, never an empty document — a lossy decode would let a caller's
+/// merge-and-republish silently destroy a file it could not read.
+/// Test: `update_with_a_text_codec_round_trips`,
+/// `text_codec_rejects_invalid_utf8`.
+pub struct TextCodec;
+
+impl sealed::Sealed for TextCodec {}
+
+impl DocumentCodec for TextCodec {
+    type Document = String;
+
+    fn decode(path: &Path, bytes: Option<&[u8]>) -> Result<String, JsonRmwError> {
+        match bytes {
+            None => Ok(String::new()),
+            Some(raw) => std::str::from_utf8(raw)
+                .map(str::to_owned)
+                .map_err(|e| JsonRmwError::serialize(path, e)),
+        }
+    }
+
+    fn encode(_path: &Path, doc: &String) -> Result<Vec<u8>, JsonRmwError> {
+        Ok(doc.as_bytes().to_vec())
+    }
+}
+
+/// Run a locked read-modify-write on the JSON document at `path`.
+///
+/// Why/What/Test: see [`update_with`] — this is that function specialised to
+/// [`JsonCodec`], and is the entry point every existing caller uses.
+pub fn update<T, R, E, F>(path: &Path, f: F) -> Result<R, E>
+where
+    T: DeserializeOwned + Serialize + Default,
+    E: From<JsonRmwError>,
+    F: FnOnce(&mut T) -> Result<R, E>,
+{
+    update_with::<JsonCodec<T>, R, E, F>(path, f)
 }
 
 #[cfg(test)]
