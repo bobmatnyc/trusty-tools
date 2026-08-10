@@ -22,6 +22,7 @@ use trusty_mpm::core::doctor_repair::{
     repair_push_guard,
 };
 use trusty_mpm::core::skill_repair::RepairAction;
+use trusty_mpm::core::stray_mcp::{quarantine_explicit, quarantine_strays};
 
 use crate::cli::DoctorFlags;
 
@@ -47,51 +48,63 @@ pub(crate) fn run_post_report_actions(flags: &DoctorFlags) {
     if flags.fix {
         run_repairs(flags.yes, flags.include_frozen);
     }
-}
-
-/// Hidden `--prune-stale-skills` action — force-remove pre-rename
-/// `~/.claude/skills/mpm-*` directories.
-///
-/// Why: the mpm-*→tm-* skill rename (#1905) never deletes a skill's old
-/// directory when it is renamed (`skill_deployer::deploy_skills` only writes,
-/// never removes). In normal operation this is handled automatically and
-/// silently by the one-time startup migration
-/// (`core::stale_skills::run_stale_mpm_skills_migration_once`); this hidden
-/// flag exists only as a manual escape hatch for troubleshooting (e.g. the
-/// migration marker file was lost or hand-edited).
-///
-/// It is the ONE action here that deletes, which is why it is hidden, narrowly
-/// scoped to trusty-mpm's own frozen pre-rename skill names, and deliberately
-/// NOT part of `--fix`: `--fix` never deletes.
-/// What: resolves `~/.claude/skills/` via `FrameworkPaths::default`, lists only
-/// trusty-mpm's own pre-rename skill names (never an unrelated `mpm-*` skill
-/// from another tool), prints what it found, then removes them.
-/// Test: `core::stale_skills::tests` covers the detection/removal logic this
-/// wraps; this function itself is thin I/O + printing.
-fn prune_stale_skills_locally() {
-    use trusty_mpm::core::paths::FrameworkPaths;
-    use trusty_mpm::core::stale_skills::{find_stale_mpm_skills, remove_stale_mpm_skills};
-
-    let paths = FrameworkPaths::default();
-    let dir = paths.claude_skills_dir();
-    let stale = find_stale_mpm_skills(&dir);
-    if stale.is_empty() {
-        println!(
-            "\nno stale pre-rename mpm-* skills found in {}",
-            dir.display()
-        );
-        return;
-    }
-
-    println!("\nremoving {} stale pre-rename skill(s):", stale.len());
-    for skill in &stale {
-        println!("  - {}", skill.name);
-    }
-    match remove_stale_mpm_skills(&stale) {
-        Ok(n) => println!("removed {n} stale skill directory(ies)"),
-        Err(e) => eprintln!("failed to remove stale skills: {e}"),
+    if let Some(target) = &flags.quarantine_mcp {
+        quarantine_one_mcp(target, flags.yes);
     }
 }
+
+/// `--quarantine-mcp <PATH>` action — rename ONE named stray `.mcp.json` aside.
+///
+/// Why: the `--fix` sweep acts only on strays tm's provenance ledger proves it
+/// wrote, so it refuses every file that predates the ledger — which is all of
+/// them at the moment the ledger ships. The alternative to this flag is
+/// loosening the sweep's evidence rule, and that rule is the only thing
+/// standing between the repair and a `.mcp.json` the operator wrote by hand.
+/// Naming the path moves the judgement to the operator, where it belongs.
+/// What: resolves the workspace (so the current project's own `.mcp.json` can
+/// be refused), runs [`quarantine_explicit`], and prints the one step. Dry run
+/// unless `--yes`.
+/// Test: `core::stray_mcp`'s tests cover the refusals and the rename; this
+/// function is path resolution and printing.
+fn quarantine_one_mcp(target: &std::path::Path, apply: bool) {
+    let mode = RepairMode::from_apply_flag(apply);
+    println!(
+        "\nquarantine-mcp ({})",
+        if apply {
+            "applying".to_string()
+        } else {
+            "dry run — nothing will be written".to_string()
+        }
+    );
+    let workspace = std::env::current_dir().ok();
+    let step = quarantine_explicit(
+        &trusty_mpm::core::mcp_provenance::default_framework_root(),
+        workspace.as_deref(),
+        target,
+        mode,
+    );
+    print_steps(&[step], apply, &quarantine_apply_hint(target));
+}
+
+/// The command that applies a `--quarantine-mcp` preview.
+///
+/// Why (#5371 critic MEDIUM): the shared step printer originally hardcoded
+/// `tm doctor --fix --yes`, so a `--quarantine-mcp` dry run told the operator
+/// to run a command that would not touch their file. The fix was a one-line
+/// string and had no test, which is exactly how it comes back. Naming the
+/// string makes it assertable without capturing stdout.
+/// What: `tm doctor --quarantine-mcp <path> --yes`.
+/// Test: `quarantine_hint_names_the_quarantine_command_and_path`.
+fn quarantine_apply_hint(target: &std::path::Path) -> String {
+    format!("tm doctor --quarantine-mcp {} --yes", target.display())
+}
+
+/// The command that applies a `--fix` preview.
+///
+/// Why: the counterpart to [`quarantine_apply_hint`] — pinned so the two
+/// cannot collapse back into one shared literal.
+/// Test: `fix_hint_names_the_fix_command`.
+const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 
 /// `--fix` action — preview, or apply, every safe repair.
 ///
@@ -100,11 +113,13 @@ fn prune_stale_skills_locally() {
 /// deliberate act that lets one write.
 /// What: runs, in order, the skill redeploy (`skill_staleness`), the project
 /// hook cleanup (`hooks_contamination`), the push-guard retrofit
-/// (`push_guard`), and the `legacy_sources` refusals — printing each item's
-/// path, what would change, and the outcome. In dry run it closes by naming
-/// the flag that applies. It never deletes, and every `legacy_sources` finding
-/// is reported as refused rather than acted on.
-/// Test: `core::doctor_repair`'s tests; this function is printing.
+/// (`push_guard`), the `legacy_sources` refusals, and the stray-`.mcp.json`
+/// sweep (`stray_mcp_json`) — printing each item's path, what would change,
+/// and the outcome. In dry run it closes by naming the flag that applies. It
+/// never deletes: `legacy_sources` findings are reported as refused, and a
+/// stray `.mcp.json` is RENAMED aside rather than removed.
+/// Test: `core::doctor_repair`'s and `core::stray_mcp`'s tests; this function
+/// is printing.
 pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     let mode = RepairMode::from_apply_flag(apply);
     println!(
@@ -128,8 +143,37 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
 
     if let Some(home) = dirs::home_dir() {
         steps.extend(refuse_legacy_sources(&home));
+        // A `.mcp.json` above the workspace configures every session started
+        // beneath it. This quarantines ONLY the ones the provenance ledger
+        // proves tm wrote and nobody has edited since; everything else is
+        // reported as refused, with the reason and the `--quarantine-mcp`
+        // escape hatch. Like every other repair here, it deletes nothing — the
+        // file is renamed aside.
+        steps.extend(quarantine_strays(
+            &trusty_mpm::core::mcp_provenance::default_framework_root(),
+            project_dir.as_deref(),
+            &home,
+            mode,
+        ));
     }
 
+    print_steps(&steps, apply, FIX_APPLY_HINT);
+}
+
+/// Print one repair's worth of steps, with the per-outcome tallies.
+///
+/// Why: `--fix` and `--quarantine-mcp` produce the same [`RepairStep`] shape
+/// and must render it identically — an operator should not have to learn two
+/// formats, and a refusal in particular must read the same way in both (it is
+/// the safety rule working, not an error).
+/// What: one line per step, then the counts, the dry-run hint when anything is
+/// merely planned, and the refusal note when anything was refused. `apply_hint`
+/// is the exact command that applies THIS run — a shared printer that always
+/// named `--fix --yes` told a `--quarantine-mcp` operator to run a command that
+/// would not touch their file.
+/// Test: `core::doctor_repair` and `core::stray_mcp` cover the step values;
+/// this is printing.
+fn print_steps(steps: &[RepairStep], apply: bool, apply_hint: &str) {
     if steps.is_empty() {
         println!("  nothing to repair");
         return;
@@ -139,7 +183,7 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     let mut applied = 0usize;
     let mut refused = 0usize;
     let mut failed = 0usize;
-    for step in &steps {
+    for step in steps {
         let (icon, detail) = match &step.status {
             StepStatus::Planned => {
                 planned += 1;
@@ -173,7 +217,7 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
 
     println!("\n  {applied} applied, {planned} planned, {refused} refused, {failed} failed");
     if !apply && planned > 0 {
-        println!("  dry run — re-run with `tm doctor --fix --yes` to apply.");
+        println!("  dry run — re-run with `{apply_hint}` to apply.");
     }
     if refused > 0 {
         println!(
@@ -222,4 +266,73 @@ fn skill_steps(include_frozen: bool, mode: RepairMode) -> Vec<RepairStep> {
             }
         })
         .collect()
+}
+
+/// Hidden `--prune-stale-skills` action — force-remove pre-rename
+/// `~/.claude/skills/mpm-*` directories.
+///
+/// Why: the mpm-*→tm-* skill rename (#1905) never deletes a skill's old
+/// directory when it is renamed (`skill_deployer::deploy_skills` only writes,
+/// never removes). In normal operation this is handled automatically and
+/// silently by the one-time startup migration
+/// (`core::stale_skills::run_stale_mpm_skills_migration_once`); this hidden
+/// flag exists only as a manual escape hatch for troubleshooting (e.g. the
+/// migration marker file was lost or hand-edited).
+///
+/// It is the ONE action here that deletes, which is why it is hidden, narrowly
+/// scoped to trusty-mpm's own frozen pre-rename skill names, and deliberately
+/// NOT part of `--fix`: `--fix` never deletes.
+/// What: resolves `~/.claude/skills/` via `FrameworkPaths::default`, lists only
+/// trusty-mpm's own pre-rename skill names (never an unrelated `mpm-*` skill
+/// from another tool), prints what it found, then removes them.
+/// Test: `core::stale_skills::tests` covers the detection/removal logic this
+/// wraps; this function itself is thin I/O + printing.
+fn prune_stale_skills_locally() {
+    use trusty_mpm::core::paths::FrameworkPaths;
+    use trusty_mpm::core::stale_skills::{find_stale_mpm_skills, remove_stale_mpm_skills};
+
+    let paths = FrameworkPaths::default();
+    let dir = paths.claude_skills_dir();
+    let stale = find_stale_mpm_skills(&dir);
+    if stale.is_empty() {
+        println!(
+            "\nno stale pre-rename mpm-* skills found in {}",
+            dir.display()
+        );
+        return;
+    }
+
+    println!("\nremoving {} stale pre-rename skill(s):", stale.len());
+    for skill in &stale {
+        println!("  - {}", skill.name);
+    }
+    match remove_stale_mpm_skills(&stale) {
+        Ok(n) => println!("removed {n} stale skill directory(ies)"),
+        Err(e) => eprintln!("failed to remove stale skills: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quarantine_hint_names_the_quarantine_command_and_path() {
+        let hint = quarantine_apply_hint(std::path::Path::new("/private/tmp/.mcp.json"));
+        assert_eq!(
+            hint,
+            "tm doctor --quarantine-mcp /private/tmp/.mcp.json --yes"
+        );
+        assert!(
+            !hint.contains("--fix"),
+            "a quarantine preview must never point at --fix, which would not touch the \
+             named file: {hint}"
+        );
+    }
+
+    #[test]
+    fn fix_hint_names_the_fix_command() {
+        assert_eq!(FIX_APPLY_HINT, "tm doctor --fix --yes");
+        assert!(!FIX_APPLY_HINT.contains("--quarantine-mcp"));
+    }
 }
