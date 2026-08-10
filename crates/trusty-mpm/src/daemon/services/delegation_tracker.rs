@@ -100,6 +100,7 @@ use crate::core::agent::{
     Delegation, DelegationId, DelegationSource, DelegationStatus, ModelTier, TOOL_RESPONSE_KEYS,
     is_subagent_dispatch_tool,
 };
+use crate::core::dispatch_isolation::dispatch_isolation;
 use crate::core::hook::HookEvent;
 use crate::core::session::SessionId;
 use crate::daemon::state::DaemonState;
@@ -202,9 +203,10 @@ fn usable_agent_id(response: &Value) -> Option<&str> {
 /// [`dedup`] first so a matching `agent_delegate` record is promoted in place to
 /// `Running`; otherwise inserts a fresh
 /// [`Delegation::observed`](crate::core::agent::Delegation::observed). Records
-/// `cwd` and `transcript_path` when present.
+/// `cwd`, `isolation` (#4480) and `transcript_path` when present.
 /// Test: `pre_tool_use_creates_running_delegation`,
-/// `dedups_declaration_and_observation`, `duplicate_pre_tool_use_is_idempotent`.
+/// `dedups_declaration_and_observation`, `duplicate_pre_tool_use_is_idempotent`,
+/// `pre_tool_use_records_declared_isolation`.
 fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
     let input = payload.get("input");
     let agent = input
@@ -228,6 +230,9 @@ fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
 
     let cwd = field(payload, "cwd").map(std::path::PathBuf::from);
     let transcript = field(payload, "transcript_path").map(std::path::PathBuf::from);
+    // #4480: what the dispatch declared, recorded verbatim. Absent is the
+    // default and the hazardous case — the subagent inherits `cwd`.
+    let isolation = dispatch_isolation(input).map(str::to_string);
 
     // Merge with a matching `agent_delegate` declaration when one is pending.
     if let Some(existing) = dedup(state, session, agent, task) {
@@ -236,6 +241,7 @@ fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
             d.started_at = Some(Utc::now());
             d.tool_use_id = tool_use_id.clone();
             d.cwd = cwd.clone();
+            d.isolation = isolation.clone();
             d.transcript_path = transcript.clone();
             if d.task.is_empty() && !task.is_empty() {
                 d.task = task.to_string();
@@ -246,6 +252,7 @@ fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
 
     let mut delegation = Delegation::observed(session, agent, task, tool_use_id);
     delegation.cwd = cwd;
+    delegation.isolation = isolation;
     delegation.transcript_path = transcript;
     state.upsert_delegation(delegation);
 }

@@ -829,3 +829,130 @@ fn pm_guard_subagent_keeps_its_working_tool_surface() {
     let read = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Read","tool_input":{"file_path":"/x/a.rs"}}"#;
     assert_eq!(run_pm_guard(read, &[]).trim(), "");
 }
+
+// ---------------------------------------------------------------------------
+// #4480 — concurrent shared-working-tree dispatch denial
+// ---------------------------------------------------------------------------
+
+/// Spawn `tm hook --pm-guard` against a chosen daemon URL, from a chosen cwd.
+///
+/// Why: the #4480 guard's verdict depends on two things
+/// [`run_pm_guard`] fixes by design — the daemon URL (it pins an unreachable
+/// one, which is the fail-open case) and the process working directory (the
+/// guard compares it against what the daemon recorded). Both have to be
+/// controllable to exercise the DENY arm end to end.
+/// What: as [`run_pm_guard`], plus an explicit `--url` and `current_dir`.
+fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String {
+    let bin = env!("CARGO_BIN_EXE_tm");
+    let mut child = Command::new(bin)
+        .args(["--url", url, "hook", "--pm-guard"])
+        .current_dir(cwd)
+        .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
+        .env_remove("CLAUDE_MPM_SUB_AGENT")
+        .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
+        .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT")
+        .env_remove("TM_MANAGED_SESSION_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn `tm hook --pm-guard`");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin_json.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        output.status.success(),
+        "tm hook --pm-guard must always exit 0 (fail-open): stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout is utf8")
+}
+
+/// A one-shot HTTP stand-in for the daemon's shared-tree-writers route.
+///
+/// Why: the DENY arm cannot be reached without a daemon that answers, and a
+/// real daemon is far too much machinery for one route's wire contract. A raw
+/// [`std::net::TcpListener`] is the lightest dependency-free mock and mirrors
+/// the technique `pm_guard_deny_by_default`'s tests already use.
+/// What: binds an ephemeral port, serves ONE request with the given JSON body,
+/// and returns the `http://127.0.0.1:PORT` base URL. The accept loop runs on a
+/// detached thread; the process exits with the test binary.
+fn spawn_writers_mock(body: &'static str) -> String {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+#[test]
+fn pm_guard_denies_a_second_unisolated_engineer_dispatch() {
+    // Causality (#4480): against PRE-FIX code this payload is allowed with no
+    // output at all — `evaluate_tool` allows `Agent` unconditionally and no
+    // branch ever consults the daemon. The deny below can only come from the
+    // new guard.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"python-engineer","count":1}],"total":1}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_second","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
+
+    let stdout = run_pm_guard_at(payload, &url, cwd.path());
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    assert_eq!(
+        parsed["hookSpecificOutput"]["permissionDecision"].as_str(),
+        Some("deny")
+    );
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(
+        reason.contains("#4480") && reason.contains("python-engineer"),
+        "the deny must name the rule and the agent already in the tree, got: {reason}"
+    );
+}
+
+#[test]
+fn pm_guard_allows_an_isolated_engineer_dispatch() {
+    // The remedy the deny asks for must work even with a sibling in the tree,
+    // and it must not even reach the daemon — the mock is deliberately never
+    // consumed here.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"python-engineer","count":1}],"total":1}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_iso","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","isolation":"worktree","prompt":"go"}}"#;
+    assert_eq!(run_pm_guard_at(payload, &url, cwd.path()).trim(), "");
+}
+
+#[test]
+fn pm_guard_allows_a_read_only_dispatch_beside_a_running_engineer() {
+    // Research/review fan-out beside a running engineer is the ordinary
+    // workflow; denying it would be a far worse regression than the race.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_res","tool_name":"Agent","tool_input":{"subagent_type":"research","prompt":"go"}}"#;
+    assert_eq!(run_pm_guard_at(payload, &url, cwd.path()).trim(), "");
+}
+
+#[test]
+fn pm_guard_allows_an_engineer_dispatch_into_an_empty_tree() {
+    // The first dispatch of a session — the overwhelmingly common case.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_first","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
+    assert_eq!(run_pm_guard_at(payload, &url, cwd.path()).trim(), "");
+}

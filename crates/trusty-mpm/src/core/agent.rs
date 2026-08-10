@@ -258,6 +258,21 @@ pub struct Delegation {
     /// Working directory the dispatch was issued from, when known.
     #[serde(default)]
     pub cwd: Option<std::path::PathBuf>,
+    /// The `isolation` mode the dispatch declared, when it declared one (#4480).
+    ///
+    /// Why: without this, a delegation record cannot answer the one question
+    /// that separates a safe concurrent dispatch from a dangerous one — whether
+    /// the subagent got a working tree of its own or inherited the dispatcher's.
+    /// `None` is the DEFAULT and the hazardous case, not missing data: the Agent
+    /// tool's `isolation` parameter is opt-in, so an absent field means the
+    /// subagent is running in [`Self::cwd`] alongside every sibling.
+    /// What: the raw declared value (`"worktree"`, `"remote"`, …), interpreted
+    /// through
+    /// [`isolation_separates_working_tree`](crate::core::dispatch_isolation::isolation_separates_working_tree)
+    /// rather than compared here — storing the literal keeps the record a
+    /// faithful account of what was dispatched even as the policy evolves.
+    #[serde(default)]
+    pub isolation: Option<String>,
     /// When the subagent actually started running (UTC), when known.
     #[serde(default)]
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -298,6 +313,7 @@ impl Delegation {
             agent_id: None,
             transcript_path: None,
             cwd: None,
+            isolation: None,
             started_at: None,
             ended_at: None,
         }
@@ -336,6 +352,7 @@ impl Delegation {
             agent_id: None,
             transcript_path: None,
             cwd: None,
+            isolation: None,
             started_at: Some(now),
             ended_at: None,
         }
