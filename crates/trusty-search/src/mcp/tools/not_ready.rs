@@ -109,9 +109,13 @@ fn index_not_ready_message(index_id: &str) -> String {
         "Index '{index_id}' has not been built yet, so there is nothing to search. \
          This is a transient state, not an unknown index: the daemon advertised \
          this id as the session default and it will exist once indexing runs. \
-         Retry later; in the meantime use filesystem tools ({fallback}) to find \
-         what you need. Note that trusty-search's own `grep` tool is index-backed \
-         in a pinned session and reports this same state.",
+         Retry later, and meanwhile take one of three ways forward, in order of \
+         usefulness: (1) call `list_indexes` and pass an `index_id` that exists — \
+         search works normally against any built index; (2) build this one with \
+         `create_index` + `reindex`; (3) use your OWN filesystem tools \
+         ({fallback}). Do NOT reach for \
+         trusty-search's `grep` tool as the fallback — it is index-backed and in a \
+         pinned session reports this same state, so it sends you in a circle.",
         fallback = SUGGESTED_FALLBACK.join(" or "),
     )
 }
@@ -122,8 +126,18 @@ fn index_not_ready_message(index_id: &str) -> String {
 /// the suggested fallback as data — an agent must not have to pattern-match a
 /// message string to know it may retry.
 /// What: a flat JSON object with `error_code`, `state`, `index_id`,
-/// `retryable`, `reason`, and `suggested_fallback`.
-/// Test: `not_ready_payload_carries_state_reason_and_fallback`.
+/// `retryable`, `reason`, `suggested_fallback`, and `next_steps` (#5213).
+///
+/// #5213: `suggested_fallback` alone made this a fail-open dressed as an error.
+/// It named `grep`, an agent read that as trusty-search's `grep` TOOL, that tool
+/// is index-backed under the same pin, and it reported the same failure — the
+/// loss of search capability round-tripped into advice that could not work. The
+/// prose warned about it; the machine-readable field did not, and the field is
+/// what an agent branches on. `next_steps.discover` is the fix the owner ruling
+/// asked for: point at `list_indexes` so the caller can reach a real index
+/// instead of only being told to give up on this one.
+/// Test: `not_ready_payload_carries_state_reason_and_fallback`,
+/// `not_ready_payload_points_at_list_indexes_not_only_a_fallback`.
 fn index_not_ready_payload(index_id: &str) -> Value {
     serde_json::json!({
         "error_code": INDEX_NOT_READY,
@@ -133,6 +147,13 @@ fn index_not_ready_payload(index_id: &str) -> Value {
         "reason": "the daemon advertised this index as the session default, but no \
                    index has been built for it yet",
         "suggested_fallback": SUGGESTED_FALLBACK,
+        "fallback_scope": "caller's own filesystem tools — NOT trusty-search's \
+                           index-backed `grep` tool, which reports this same state",
+        "next_steps": {
+            "discover": "list_indexes — enumerate the index ids that DO exist on this \
+                         daemon, then retry with an explicit index_id",
+            "build": "create_index then reindex — build this id",
+        },
     })
 }
 

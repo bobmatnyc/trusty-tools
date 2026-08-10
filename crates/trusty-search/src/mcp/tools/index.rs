@@ -25,12 +25,16 @@ use super::{
 /// project's index id, exactly as the search tools do. Centralising the
 /// precedence here keeps every index arm consistent with `search`.
 /// What: returns the caller's non-empty `index_id` argument, else the session's
-/// pinned index, else an `InvalidParams` error naming the missing field.
-/// Test: `pinned_index_status_defaults_to_pin` in `tests.rs`.
+/// pinned index, else an `InvalidParams` error naming the missing field AND the
+/// tool that lists valid values for it (#5213 — an error that says only "field
+/// missing" leaves the caller guessing an id, which is the failure #1373 pinned
+/// the session to avoid in the first place).
+/// Test: `pinned_index_status_defaults_to_pin` in `tests.rs`;
+/// `missing_index_id_error_names_list_indexes` in `tests_not_ready.rs`.
 fn required_index_id(server: &McpServer, args: &Value) -> Result<String, DispatchError> {
-    server.resolve_index_id(args).ok_or_else(|| {
-        DispatchError::InvalidParams("missing required string field: index_id".into())
-    })
+    server
+        .resolve_index_id(args)
+        .ok_or_else(|| DispatchError::InvalidParams(super::types::MISSING_INDEX_ID.into()))
 }
 
 /// Route one of the eight index-management tool names to the correct daemon
