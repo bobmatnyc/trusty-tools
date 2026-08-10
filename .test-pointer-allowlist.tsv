@@ -525,7 +525,6 @@ crates/trusty-mpm/src/daemon/managed_routes/mod.rs	adopt_existing_missing_is_404
 crates/trusty-mpm/src/daemon/managed_routes/mod.rs	adopt_existing_registers_record
 crates/trusty-mpm/src/daemon/managed_routes/proxy/backend.rs	resolve_direct_backend_matches_id_name_prefix
 crates/trusty-mpm/src/daemon/managed_routes/prune.rs	prune_worktrees_route_dry_run
-crates/trusty-mpm/src/daemon/mcp_console.rs	auto_resume_set_persists_desired
 crates/trusty-mpm/src/daemon/mcp_session.rs	session_activity_unknown_id_errors
 crates/trusty-mpm/src/daemon/mcp_session.rs	session_decommission_unknown_id_errors
 crates/trusty-mpm/src/daemon/mcp_session.rs	session_delete_force_bypasses_guard

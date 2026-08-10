@@ -48,16 +48,27 @@ const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// object: `{ fleet, auto_resume: { desired, env, pending_restart } }`.
 ///
 /// Auto-resume control fields:
-/// - `desired`: the operator's persisted choice (console-mutable).
-/// - `env`: the flag the supervisor process booted with (`TRUSTY_MPM_AUTO_RESUME`).
-/// - `effective`: what the supervisor's next sweep will actually do — the
-///   persisted file when it exists, otherwise `env`.
+/// - `desired`: the operator's persisted choice (console-mutable), or `null` when
+///   the file could not be read.
+/// - `env`: the flag the DAEMON's environment carries. The supervisor is a
+///   separate process (`bin/tm/commands/supervisor.rs`) and `--auto-resume` sets
+///   its config without touching the env, so this is an inference about another
+///   process, not an observation of it. It is only consulted when no override
+///   file exists — i.e. before the operator has ever used the toggle. Closing
+///   that gap needs the supervisor to publish its resolved flag on the `/metrics`
+///   endpoint it already serves; tracked separately.
+/// - `effective`: what the supervisor's next sweep will do — the persisted file
+///   when it exists, otherwise `env`, or `null` when the file could not be read.
+/// - `read_error`: `null` normally; the I/O error string when the desired-state
+///   file exists but could not be read. #5208: this used to be swallowed into a
+///   fabricated `desired: false`, which reported a confident "off" while the
+///   supervisor was holding its last known value — the two surfaces diverging
+///   exactly when the file is broken.
 /// - `pending_restart`: always `false` since #5208. It used to be `desired != env`
 ///   because the supervisor read only its boot env, so a console toggle really did
 ///   need a restart. The supervisor now re-reads the file every sweep, so the
-///   "restart pending" hint would be a false claim; the key is kept so the
-///   console's existing `autoResumeLabel()` keeps parsing and simply falls through
-///   to plain on/off.
+///   "restart pending" hint would be a false claim; the key is kept for wire
+///   compatibility until the console drops it.
 ///
 /// Test: `supervisor_status_reports_fleet_and_auto_resume`.
 async fn fleet_snapshot(state: &Arc<DaemonState>) -> Value {
@@ -66,16 +77,22 @@ async fn fleet_snapshot(state: &Arc<DaemonState>) -> Value {
     let fleet = FleetMetrics::from_records(&records);
 
     // #5208: read the tri-state override so `effective` can say "no file → the
-    // supervisor's boot env stands" rather than flattening absence into `false`.
-    let over = auto_resume::read_override().unwrap_or(None);
+    // supervisor's boot env stands" rather than flattening absence into `false`,
+    // and report an unreadable file as unknown rather than as a confident `false`.
+    let (over, read_error) = match auto_resume::read_override() {
+        Ok(v) => (v, None),
+        Err(e) => (None, Some(e.to_string())),
+    };
     let env = auto_resume::effective_from_env();
+    let unknown = read_error.is_some();
 
     json!({
         "fleet": fleet,
         "auto_resume": {
-            "desired": over.unwrap_or(false),
+            "desired": if unknown { Value::Null } else { json!(over.unwrap_or(false)) },
             "env": env,
-            "effective": over.unwrap_or(env),
+            "effective": if unknown { Value::Null } else { json!(over.unwrap_or(env)) },
+            "read_error": read_error,
             "pending_restart": false,
         },
     })
@@ -148,8 +165,10 @@ pub async fn auto_resume_set(enabled: bool) -> Result<Value, String> {
     Ok(json!({
         "desired": enabled,
         "env": auto_resume::effective_from_env(),
-        // #5208: the file outranks the boot env and is re-read every sweep.
+        // #5208: the file outranks the boot env and is re-read every sweep. The
+        // write above succeeded, so there is nothing unknown to report here.
         "effective": enabled,
+        "read_error": Value::Null,
         "pending_restart": false,
     }))
 }
