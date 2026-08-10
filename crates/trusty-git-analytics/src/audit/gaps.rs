@@ -59,42 +59,62 @@ pull-request, and ticket metadata; it stores no file content, diffs, patches, hu
 Free-text fields it does store — commit messages, pull-request and ticket titles — are retained \
 verbatim and carry whatever their authors wrote into them.";
 
-/// One Gaps & Caveats line per stage that did not complete.
+/// One Gaps & Caveats line per stage that did not complete, then one per
+/// repository collected from stale local refs.
 ///
 /// Why: a stage that failed took a whole class of data with it — no `dora` run
 /// means no delivery-health figures, no `jira sync` means no ticket
 /// correlation — and DOC-67 §9 requires that absence be stated, not inferred
 /// from an empty table. The sweep deliberately does not abort on a stage
 /// failure (§2, one shot), which is exactly why the failure has to reappear
-/// here.
+/// here. A stale-refs fallback (#5321) is the same obligation one step
+/// further in: the stage SUCCEEDED, so nothing about the data's age is visible
+/// anywhere on the page unless it is stated here.
 /// What: for each failure in execution order, a line naming the stage, a
 /// redacted excerpt of the reason, and the fact that the affected area is
-/// unassessed. Returns an empty vec when every stage succeeded — a clean run
-/// adds no line.
+/// unassessed; then, for each unreachable remote, a line naming the repository,
+/// the remote, and that its figures may be behind the true remote state.
+/// Returns an empty vec when every stage succeeded and every remote was
+/// reached — a clean run adds no line.
 ///
 /// `secrets` are the credential values to remove from each stage message —
 /// [`crate::report::dd_manifest::configured_secrets`] derives the set the same
 /// audit run's manifest uses. It is a required argument, not a convenience: see
 /// the module docs for why truncating before scrubbing leaks a prefix fragment.
+/// A fetch error is scrubbed on the same path, and needs it just as much: git2
+/// quotes the remote URL back, which for an HTTPS remote carries whatever
+/// credential was embedded in it.
 /// Test: `super::tests::{sweep_gap_lines_name_each_failed_stage,
-/// sweep_gap_lines_are_empty_for_a_clean_run}`, and
+/// sweep_gap_lines_are_empty_for_a_clean_run,
+/// a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines}`, and
 /// `crate::report::dd_manifest_tests::a_token_straddling_the_excerpt_boundary_leaves_no_fragment`.
 pub fn sweep_gap_lines<S: AsRef<str>>(stats: &AuditSweepStats, secrets: &[S]) -> Vec<String> {
-    stats
-        .failures()
-        .map(|outcome| {
-            let reason = match &outcome.status {
-                StageStatus::Failed(msg) => redacted_excerpt(msg, secrets),
-                _ => String::new(),
-            };
-            format!(
-                "Collection stage `{}` did not complete ({reason}) — the data it produces is \
-                 not assessed in this report. Read the affected sections as unassessed, not as \
-                 a clean result.",
-                outcome.stage
-            )
-        })
-        .collect()
+    let failed_stages = stats.failures().map(|outcome| {
+        let reason = match &outcome.status {
+            StageStatus::Failed(msg) => redacted_excerpt(msg, secrets),
+            _ => String::new(),
+        };
+        format!(
+            "Collection stage `{}` did not complete ({reason}) — the data it produces is \
+             not assessed in this report. Read the affected sections as unassessed, not as \
+             a clean result.",
+            outcome.stage
+        )
+    });
+
+    // #5321: worded from the collector's own log line, because an operator who
+    // has the run log needs to match the two up without translating.
+    let stale = stats.stale_fetches.iter().map(|fetch| {
+        let reason = redacted_excerpt(&fetch.error, secrets);
+        format!(
+            "Repository `{}` could not be fetched from remote `{}` ({reason}) — collection \
+             continued on stale local refs, so its data may be behind the true remote state. \
+             Read its figures as a snapshot of the local clone, not of the remote.",
+            fetch.repo, fetch.remote
+        )
+    });
+
+    failed_stages.chain(stale).collect()
 }
 
 /// A single-line, credential-free excerpt of `msg`, capped at

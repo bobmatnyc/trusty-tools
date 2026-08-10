@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::collect::collector::{FetchOutcome, PerRepoFetch};
 use crate::commands::args::{ClassifyArgs, CollectArgs, ReportArgs};
 use crate::commands::deployments::DeploymentsCollectArgs;
 use crate::commands::incidents::IncidentsCollectArgs;
@@ -23,7 +24,7 @@ use crate::core::config::Config;
 use crate::core::db::Database;
 use crate::core::progress::{ProgressBus, ProgressEvent, Stage};
 
-use super::stage::{AuditSweepStats, SweepStage};
+use super::stage::{AuditSweepStats, StaleFetch, SweepStage};
 
 /// How many stages [`run_full_sweep`] drives.
 ///
@@ -124,7 +125,10 @@ pub async fn run_full_sweep(
         allow_stale: true,
         ..CollectArgs::default()
     };
-    let result = collect::run_with_progress(config.clone(), db, args, &collect_bus).await;
+    let result = collect::run_reporting_fetch(config.clone(), db, args, &collect_bus).await;
+    // #5321: do this BEFORE `finish` — the stage is about to be recorded as
+    // succeeded, and a succeeded stage produces no gap line of its own.
+    let result = record_stale_fetches(&mut stats, result);
     finish(progress, &mut stats, SweepStage::Collect, t, result);
 
     let t = begin(progress, &stats, SweepStage::Classify);
@@ -177,6 +181,35 @@ pub async fn run_full_sweep(
 
     tracing::info!(summary = %stats.summary(), "audit sweep finished");
     Ok(stats)
+}
+
+/// Keep every unreachable remote from collection, and hand back the bare result.
+///
+/// Why: `--allow-stale` is fixed on for the sweep (DOC-67 §9), so a repository
+/// whose remote is unreachable is walked on whatever its local clone already
+/// held and collection still returns `Ok`. That is the right behaviour for a
+/// one-shot org sweep and the wrong thing to keep to ourselves: without this
+/// step the only trace is a stderr line, and the report reads as if every
+/// repository were current (#5321).
+/// What: records one [`StaleFetch`] per [`FetchOutcome::Failed`] outcome, then
+/// discards the outcome list so the caller has the `Result<()>` that
+/// [`finish`] takes. An `Err` passes straight through with nothing recorded —
+/// a stage that failed already reaches the report through its own gap line.
+/// Test: `super::tests::a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines`.
+fn record_stale_fetches(
+    stats: &mut AuditSweepStats,
+    result: anyhow::Result<Vec<PerRepoFetch>>,
+) -> anyhow::Result<()> {
+    for fetch in result? {
+        if let FetchOutcome::Failed { remote, error } = fetch.outcome {
+            stats.record_stale_fetch(StaleFetch {
+                repo: fetch.repo,
+                remote,
+                error,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Announce that `stage` is starting, and return the instant to time it from.
