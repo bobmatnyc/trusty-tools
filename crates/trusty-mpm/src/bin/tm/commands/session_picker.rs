@@ -10,20 +10,19 @@
 //! What: [`parse_picker_choice`] is the pure input→decision seam; [`run_tty_picker`]
 //! is the I/O driver that renders the menu, reads stdin, and dispatches to
 //! resume/launch; [`fetch_live_sessions`] is the single GET+filter path shared by
-//! the static `tm session ls` renderer and the picker; [`run_ls_connector`] is the
-//! `tm ls` orchestrator that decides between the interactive picker and static
-//! output based on the TTY/`--json`/`--all`/session-count gate
-//! ([`should_show_picker`]). [`next_launch_slot`] is the shared "launch new
-//! session" number computation (issue #3723) both `run_tty_picker`'s render
-//! and `parse_picker_choice` use, kept in one place so they cannot drift.
+//! the static `tm session ls` renderer and the picker. [`next_launch_slot`] is
+//! the shared "launch new session" number computation (issue #3723) both
+//! `run_tty_picker`'s render and `parse_picker_choice` use, kept in one place
+//! so they cannot drift.
 //! Row TEXT/color rendering lives in the sibling `session_picker_render`
 //! module (verbless, color-coded — #3723); the picker's rename action lives
-//! in `session_picker_rename` (#3724) — both extracted to keep this file
-//! under the 500-SLOC production cap.
+//! in `session_picker_rename` (#3724); the `tm ls` orchestrator that decides
+//! between this picker and static output lives in `session_ls_connector`
+//! (#4965) — all three extracted to keep this file under the 500-SLOC
+//! production cap.
 //!
 //! Test: `parse_picker_choice` unit tests live in `tests_behavior_c_tests.rs`
-//! (re-exported through `guided`); the TTY gate is unit-tested by
-//! `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`;
+//! (re-exported through `guided`);
 //! `next_launch_slot`, `PickerDecision::Rename` parsing, and the row
 //! rendering/color logic are unit-tested in `session_picker_tests.rs`; the
 //! I/O path is exercised by the e2e suite and manual smoke tests.
@@ -1224,118 +1223,6 @@ pub(crate) async fn run_tty_picker(
         sort_sessions(&mut sessions, scope.sort);
     }
     Ok(())
-}
-
-/// Decide whether `tm ls` should open the interactive picker or print statically.
-///
-/// Why: a testable seam that folds every gate into one pure decision so the
-/// non-TTY / `--json` / `--all` / empty-list branches are unit-testable without a
-/// live terminal or daemon. Requiring BOTH stdin and stdout to be TTYs is the
-/// anti-hang guarantee: a piped input (would EOF) or a piped output (must stay a
-/// clean pipeable table) both fall through to static output.
-/// What: returns `true` only when stdin AND stdout are TTYs, neither `--json` nor
-/// `--all` was requested, and at least one session exists. `--all` forces static
-/// output because its purpose is the forensic full list (including
-/// decommissioned tombstones), not connecting.
-/// Test: `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`.
-pub(crate) fn should_show_picker(
-    stdin_tty: bool,
-    stdout_tty: bool,
-    json: bool,
-    all: bool,
-    session_count: usize,
-) -> bool {
-    stdin_tty && stdout_tty && !json && !all && session_count > 0
-}
-
-/// `tm ls` — the interactive managed-session connector (top-level).
-///
-/// Why: bare `tm ls` should do the most useful thing for connecting to the
-/// managed fleet: on a real terminal it opens the session picker; piped or
-/// scripted it degrades to the same static, pipeable list as `tm session ls`.
-/// What: resolves the scope (`--current` derives `owner/repo` from the cwd git
-/// remote, mirroring `tm session ls`); routes `--json`, `--all`, or any non-TTY
-/// invocation straight to the static [`super::managed::session_ls`] renderer
-/// (preserving its raw `--json` passthrough byte-for-byte); otherwise fetches the
-/// live sessions once and either renders the static table (0 sessions) or opens
-/// [`run_tty_picker`] (≥1 session). Launch-new inside the picker targets the cwd
-/// project only when it is a GitHub-backed git checkout.
-/// Test: parse tests `cli_parses_ls_*` and the gate tests
-/// `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_ls_connector(
-    client: &reqwest::Client,
-    url: &str,
-    json: bool,
-    source_id: Option<String>,
-    current: bool,
-    all: bool,
-    sort: SessionSortArg,
-    term: Option<SessionFilter>,
-) -> anyhow::Result<()> {
-    // `--current` derives the source_id from the cwd git remote, exactly like
-    // `tm session ls --current`. `--source-id` and `--current` are mutually
-    // exclusive at the clap layer, so at most one branch supplies a filter.
-    let sid: Option<String> = if current {
-        super::session::derive_source_id_from_cwd()
-    } else {
-        source_id
-    };
-
-    let stdin_tty = std::io::stdin().is_terminal();
-    let stdout_tty = std::io::stdout().is_terminal();
-
-    // Cheap pre-gate: `--json`, `--all`, or any non-interactive stream never
-    // fetches for the picker — delegate straight to the static renderer, which
-    // owns the raw `--json` passthrough and the `--all` tombstone sort. `sort`/
-    // `term` ride along (the static renderer applies them; `--json` ignores
-    // them, matching `--all`'s existing "no effect on --json" precedent).
-    if json || all || !stdin_tty || !stdout_tty {
-        return super::managed::session_ls(client, url, json, sid.as_deref(), all, sort, term)
-            .await;
-    }
-
-    // Interactive stream: fetch the live sessions once. On any fetch error
-    // (daemon unreachable, HTTP failure) fall back to the static renderer so the
-    // operator sees the same actionable error rather than a bare picker crash.
-    let sessions = match fetch_live_sessions(client, url, sid.as_deref(), false).await {
-        Ok(s) => s,
-        Err(_) => {
-            return super::managed::session_ls(
-                client,
-                url,
-                false,
-                sid.as_deref(),
-                false,
-                sort,
-                term,
-            )
-            .await;
-        }
-    };
-    let mut sessions = filter_sessions_by_term(sessions, term.as_ref());
-    sort_sessions(&mut sessions, sort);
-
-    if !should_show_picker(stdin_tty, stdout_tty, json, all, sessions.len()) {
-        // 0 sessions on a TTY: print the static "no managed sessions" line rather
-        // than an empty picker.
-        super::managed_render::render_session_table(&sessions, sid.as_deref());
-        return Ok(());
-    }
-
-    // ≥1 session on a real terminal → the interactive picker. Launch-new targets
-    // the cwd project only when it is a GitHub-backed git checkout.
-    let repo_url = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| super::guided::derive_project(&cwd))
-        .map(|(_sid, _workspace, git_root)| git_root.to_string_lossy().to_string());
-    let scope = PickerScope {
-        source_id: sid,
-        repo_url,
-        sort,
-        term,
-    };
-    run_tty_picker(client, url, &scope, sessions).await
 }
 
 #[cfg(test)]

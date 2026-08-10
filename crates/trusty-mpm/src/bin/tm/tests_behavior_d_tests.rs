@@ -874,7 +874,7 @@ fn cli_ls_source_id_and_current_conflict() {
 
 // ── `tm ls` picker/static gate (#2311) ──────────────────────────────────────
 
-use crate::commands::session_picker::should_show_picker;
+use crate::commands::session_ls_connector::should_show_picker;
 
 /// The picker opens only on a fully-interactive terminal with ≥1 session.
 #[test]

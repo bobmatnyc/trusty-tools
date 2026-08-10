@@ -127,7 +127,8 @@ pub(crate) fn state_color(state: &str, attached: bool) -> StateColor {
 ///
 /// Why: the picker writes its menu via `eprintln!` (stderr), not `println!`
 /// — probing `stdout`'s TTY-ness (as `colored`'s own env-based default does)
-/// would be the WRONG stream. `should_show_picker` already requires stdin
+/// would be the WRONG stream. `session_ls_connector::should_show_picker`
+/// already requires stdin
 /// AND stdout to be TTYs before the interactive picker ever runs, so a
 /// non-TTY stderr here is the narrow remaining case (e.g. `2>file`) this
 /// still needs to catch on its own.
