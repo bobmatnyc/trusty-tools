@@ -90,23 +90,31 @@ pub(super) fn first_existing_mtime_rfc3339(
 /// not resident — and `search_handler` has always distinguished the two. #4715
 /// makes a 404 here mean what it means there, because the MCP layer now reads
 /// this endpoint's 404 as "never indexed" and would otherwise report a built
-/// index as one that was never built.
-/// What: 404 only when the id is absent from the hot registry, the cold store,
-/// AND the failed set; 503 when it is cold-parked or permanently failed.
-/// Test: `status_404_only_when_absent_from_every_store` and
-/// `cold_parked_index_status_is_503_not_404`.
+/// index as one that was never built. #5061 then gave the 503 a body: it used
+/// to be a bare `StatusCode`, so an MCP caller saw `returned 503 Service
+/// Unavailable: ` with empty text and could neither tell cold-parked from
+/// restore-failed nor learn that a plain `search` reloads the former.
+/// What: delegates the miss to [`super::degraded::residency_miss_response`], the
+/// single builder `chunks` and `grep` share, so all three report a given daemon
+/// state identically.
+/// Test: `status_404_only_when_absent_from_every_store`,
+/// `cold_parked_index_status_is_503_not_404`, and
+/// `cold_parked_status_503_body_names_search_as_the_restore_path`.
 pub(super) async fn index_status_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let index_id = IndexId::new(id);
     let handle = match state.registry.get(&index_id) {
         Some(h) => h,
-        // #4715: registered but not resident — exists, cannot be served yet.
-        None if state.cold_store.contains(&index_id) || state.cold_store.is_failed(&index_id) => {
-            return Err(StatusCode::SERVICE_UNAVAILABLE)
+        // #5061: registered-but-not-resident, permanently failed, and genuinely
+        // unknown are three different answers; the builder renders each.
+        None => {
+            return Err(super::degraded::residency_miss_response(
+                &state.cold_store,
+                &index_id,
+            ))
         }
-        None => return Err(StatusCode::NOT_FOUND),
     };
     let indexer = handle.indexer.read().await;
     // Issue #111: surface `path_filter` so callers can see which glob filter
@@ -226,6 +234,25 @@ pub(super) async fn index_status_handler(
         .watcher_manager
         .network_degraded_reason(&index_id)
         .await;
+    // #4787: `stages.semantic.embedded` counts embeddings computed during THIS
+    // boot's pass, so a fully-working index whose HNSW snapshot was already
+    // current at boot reports `0` — indistinguishable from a dead semantic
+    // lane, which is the #2178 degradation signature. An estate audit flagged
+    // three healthy indexes on it. `vectors_present` is the cumulative ground
+    // truth: `Index::size()` on the store that actually answers queries (the
+    // same accessor #4707 made the reindex gate check), so it is never a
+    // bookkeeping figure that can drift from reality. `null` when no vector
+    // store is wired (BM25-only / `skip_vector` / test indexers) — an absent
+    // measurement, deliberately not reported as zero.
+    let vectors_present = indexer.vector_count().await;
+    let semantic_coverage = serde_json::json!({
+        "vectors_present": vectors_present,
+        "chunk_count": chunk_count,
+        // The same number `stages.semantic.embedded` carries, restated here
+        // under a name that says what it measures. The field over in `stages`
+        // keeps its name for wire compatibility.
+        "embedded_this_boot": stages_snapshot.semantic.embedded,
+    });
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,
@@ -233,6 +260,8 @@ pub(super) async fn index_status_handler(
         "corpus_open_failure": corpus_open_failure,
         "status": legacy_status,
         "stages": stages_snapshot,
+        // #4787: cumulative semantic coverage, beside the per-boot delta.
+        "semantic_coverage": semantic_coverage,
         "search_capabilities": search_capabilities,
         "lexical_only": handle.lexical_only,
         "skip_kg": handle.skip_kg,

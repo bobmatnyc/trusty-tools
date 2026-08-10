@@ -68,7 +68,7 @@ async fn cold_parked_index_status_is_503_not_404() {
     )
     .await
     .expect_err("a non-resident index cannot be reported");
-    assert_eq!(err, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 /// A permanently restore-failed index is also 503 — it exists, it just cannot
@@ -89,7 +89,7 @@ async fn restore_failed_index_status_is_503_not_404() {
     )
     .await
     .expect_err("a failed index cannot be reported");
-    assert_eq!(err, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 /// The 404 survives for an id that is in NO store — the case the MCP layer is
@@ -103,7 +103,7 @@ async fn status_404_only_when_absent_from_every_store() {
     )
     .await
     .expect_err("genuinely unknown");
-    assert_eq!(err, StatusCode::NOT_FOUND);
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
 }
 
 /// `list_chunks` follows the same rule as `index_status` — it is routed
@@ -118,7 +118,7 @@ async fn cold_parked_index_chunks_is_503_not_404() {
     )
     .await
     .expect_err("a non-resident index has no enumerable chunks");
-    assert_eq!(err, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
 
     let absent = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let err = super::files::get_index_chunks_handler(
@@ -128,7 +128,7 @@ async fn cold_parked_index_chunks_is_503_not_404() {
     )
     .await
     .expect_err("genuinely unknown");
-    assert_eq!(err, StatusCode::NOT_FOUND);
+    assert_eq!(err.0, StatusCode::NOT_FOUND);
 }
 
 /// Per-index `grep` follows the same rule, and says why in the body.

@@ -134,6 +134,48 @@ pub(super) struct HealthResponse {
     /// `health_does_not_flag_a_walked_index_as_stuck` in
     /// `tests_health_degraded`.
     pub(super) indexes_stuck_empty: usize,
+    /// Issue #4839: registered indexes that actually hold chunks
+    /// (`chunk_count > 0`), as opposed to `indexes` /
+    /// `warmboot_summary.indexes_loaded`, which count registration SLOTS.
+    ///
+    /// Why: a production deployment reported `indexes_loaded: 222/222`,
+    /// `indexes_failed: 0`, `status: ok` while only 2 of those 222 held any
+    /// data. Every counter on this response was structurally incapable of
+    /// showing it, so a consuming application returned empty context on 913
+    /// consecutive operations across 44 days with no signal. Registration and
+    /// population are different facts and this response now reports both.
+    /// What: computed live in the same single registry scan as
+    /// `indexes_kg_disabled`, from the DURABLE corpus count (the in-memory map
+    /// reads 0 after idle eviction, so it cannot be the source). Indexes whose
+    /// corpus failed to open are excluded from both this and `indexes_empty` —
+    /// their count is unknown, not zero, and `indexes_corpus_failed` already
+    /// owns that state.
+    /// Test: `health_reports_populated_and_empty_index_counts`.
+    pub(super) indexes_populated: usize,
+    /// Issue #4839: registered indexes holding zero chunks whose corpus opened
+    /// fine — see `indexes_populated`.
+    ///
+    /// Why: NOT automatically a fault. Some indexes are legitimately empty
+    /// (their walk completed and matched no indexable file). What made #4839 a
+    /// defect was that nothing distinguished those from indexes that never
+    /// walked at all; `indexes_stuck_empty` (#4680) names that subset, and this
+    /// counter is the denominator it sits inside. `indexes_empty >
+    /// indexes_stuck_empty` is the legitimately-empty cohort.
+    /// What: the same scan's zero-chunk count. Deliberately does NOT force
+    /// `status: "degraded"` — an empty-but-walked index is honest, and #4680's
+    /// stuck predicate already degrades the genuinely broken case.
+    /// Test: `health_reports_populated_and_empty_index_counts`.
+    pub(super) indexes_empty: usize,
+    /// Issue #4839: total chunks across every registered, corpus-healthy index.
+    ///
+    /// Why: the reporter's suggested at-a-glance signal — a near-zero corpus on
+    /// a fleet of hundreds of indexes is visible in one number without diffing
+    /// per-index `chunk_count` values by hand, which is how the 44-day outage
+    /// was eventually found.
+    /// What: summed in the same scan; excludes corpus-failed indexes for the
+    /// reason given on `indexes_populated`.
+    /// Test: `health_reports_populated_and_empty_index_counts`.
+    pub(super) total_chunks: u64,
     /// Boot-time reconcile summary (issue #1672).
     ///
     /// Why: boot-reconcile catches stale indexes (git-delta path since #1670,
@@ -548,6 +590,12 @@ pub(super) async fn health_handler(
     // #4680: count indexes whose lexical stage still owes work but that no walk
     // has ever touched — the state every other health signal was blind to.
     let mut indexes_stuck_empty = 0usize;
+    // #4839: registration is not population. Folded into the SAME scan, from
+    // the durable corpus rather than the in-memory map (which reads 0 after
+    // idle eviction and would report a healthy index as empty).
+    let mut indexes_populated = 0usize;
+    let mut indexes_empty = 0usize;
+    let mut total_chunks = 0u64;
     let indexes_corpus_failed = state
         .registry
         .list_handles()
@@ -562,6 +610,23 @@ pub(super) async fn health_handler(
             if let Ok(indexer) = handle.indexer.try_read() {
                 if !indexer.has_embed_pool() {
                     indexes_embed_pool_missing += 1;
+                }
+                // #4839: same fail-open discipline as every other counter in
+                // this scan — a contended handle is skipped for this poll and
+                // re-counted on the next one. A corpus-failed index is counted
+                // as NEITHER populated nor empty: its real chunk count is
+                // unknown (#4333), and calling it empty would invent a fact.
+                if !indexer.corpus_open_failed {
+                    let chunks = indexer
+                        .corpus_arc()
+                        .and_then(|c| c.chunk_count().ok())
+                        .unwrap_or_else(|| indexer.chunk_count());
+                    total_chunks = total_chunks.saturating_add(chunks as u64);
+                    if chunks > 0 {
+                        indexes_populated += 1;
+                    } else {
+                        indexes_empty += 1;
+                    }
                 }
             }
             match handle.stages.try_read() {
@@ -705,6 +770,10 @@ pub(super) async fn health_handler(
         indexes_component_catch_up_in_progress,
         indexes_embed_pool_missing,
         indexes_stuck_empty,
+        // #4839: registered vs. populated, plus the fleet-wide corpus size.
+        indexes_populated,
+        indexes_empty,
+        total_chunks,
         warmboot_summary,
         boot_reconcile,
         indexes_watcher_network_degraded,

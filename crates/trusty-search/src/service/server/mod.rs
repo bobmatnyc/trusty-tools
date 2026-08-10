@@ -84,6 +84,9 @@ mod tests_health_switchable;
 mod tests_index;
 #[cfg(test)]
 mod tests_index_config;
+// #5068 / #5061 / #4787 / #4839: the index-routing + status-reporting cluster.
+#[cfg(test)]
+mod tests_index_routing;
 #[cfg(test)]
 mod tests_list;
 #[cfg(test)]

@@ -345,8 +345,21 @@ pub(super) async fn search_handler(
     // when either (a) the caller explicitly asked for it, or (b) the
     // semantic stage is not yet ready. Doing this here keeps the indexer
     // unaware of the index-handle-level capability surface.
-    let caps = { handle.stages.read().await.search_capabilities() };
+    let stages_snapshot = { handle.stages.read().await.clone() };
+    let caps = stages_snapshot.search_capabilities();
     let semantic_ready = caps.contains(&"vector");
+    // #5068: a caller that PINNED the semantic lane asked a question this index
+    // cannot answer. Serving BM25 rows under a 200 answers a different question
+    // silently, so refuse with the same shape `search_kg` uses for `skip_kg`.
+    if query.stage == Some(crate::core::indexer::SearchStage::Semantic) {
+        if let Some(resp) = super::degraded::vector_lane_unavailable(
+            &index_id.0,
+            handle.skip_vector,
+            &stages_snapshot,
+        ) {
+            return Err(resp);
+        }
+    }
     if query.stage.is_none() && !semantic_ready {
         // Force lexical lane until the embedder catches up. The caller's
         // request is preserved if they explicitly asked for `mode = all`
@@ -466,6 +479,19 @@ pub(super) async fn search_handler(
             // provisional and may retry shortly; the background rehydrate
             // keeps running regardless and the next query is warm.
             "bm25_lane_degraded": bm25_lane_degraded,
+            // #5068: the counterpart flag to `bm25_lane_degraded` for the OTHER
+            // lane. `true` means this hybrid query ran with no vector
+            // contribution at all — the results are lexical, however
+            // conceptual the query was. A pinned `stage: semantic` gets a 503
+            // instead (see `degraded::vector_lane_unavailable`); this flag is
+            // for the unpinned caller, who legitimately gets whatever lanes are
+            // ready but must be able to tell which ones those were without
+            // diffing `search_capabilities` against a schema it does not have.
+            "vector_unavailable": !semantic_ready,
+            // #5068: separates "off for this index" from "not built yet" — the
+            // same split `vector_unavailable`'s 503 body carries, so a caller
+            // handles one contract, not two.
+            "vector_disabled_by_config": handle.skip_vector,
         },
     })))
 }
