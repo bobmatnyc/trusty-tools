@@ -55,6 +55,30 @@
 #   rustdoc trees to be told nothing applies. This is a cost cut, not a coverage
 #   cut: the skipped run had no coverage to give.
 #
+# A BUILD FAILURE IS NOT A VERDICT (issue #5289). cargo-semver-checks has to
+#   build rustdoc for both sides before it can compare anything, and that build
+#   can fail on its own — a broken dependency graph, an MSRV floor a dependency
+#   raised, a baseline the registry would not hand over. Until #5289 every one of
+#   those exited non-zero and fell straight into the "a public API change
+#   requires a matching version bump" remediation below, so a rustdoc error was
+#   presented as a SemVer verdict and the two were indistinguishable from the
+#   output. The gate now classifies on POSITIVE EVIDENCE instead: a verdict
+#   exists only when the tool printed its own per-crate `N checks:` summary line.
+#   No summary line means no comparison happened, whatever the exit status was —
+#   including exit 0 — and that is reported as NO VERDICT on its own exit code.
+#   Absence of evidence is never a pass; same rule as the scan floor below.
+#
+# Toolchain (issue #5289): cargo-semver-checks re-resolves the dependency graph
+#   in a scratch project that IGNORES this workspace's Cargo.lock, so it can pick
+#   a newer transitive dependency than the lockfile pins and inherit that
+#   dependency's MSRV. Observed: the scratch resolution took `takecell` 0.1.2
+#   (rust-version 1.96) where Cargo.lock pins 0.1.1 via teloxide-core, and
+#   rustdoc then refused to build under this repo's MSRV 1.94. `takecell` reaches
+#   every default build of trusty-mpm through `cli` -> `telegram`, so this is the
+#   normal case and not an edge one. The gate therefore runs under the NEWEST
+#   rustc it can find rather than the pinned one — see select_toolchain below for
+#   why that costs no coverage and cannot manufacture a pass.
+#
 # Features: cargo-semver-checks' default heuristic enables every feature, which
 #   here means building CUDA and CoreML backends that no CI runner can build
 #   (`cudarc` panics with "nvcc --version failed"). Passing --default-features
@@ -77,13 +101,24 @@
 #   directory name (`trusty-git-analytics`), so a release tag's prefix can be
 #   handed straight to it in either accepted form (#1128).
 #
-# Exit: 0 when every checked crate is SemVer-clean (or is a recorded skip);
-#   1 when a crate needs a bump it does not have, or when the gate itself could
-#   not do its job.
+#   SEMVER_GATE_TOOLCHAIN_BIN=<dir>  pin the rustc/cargo the check runs under.
+#   SEMVER_GATE_TOOLCHAIN_BIN=       (set but empty) keep the ambient toolchain.
 #
-# Test: `scripts/check_semver_selftest.sh` proves the two ways this gate could
-#   lie — a vacuous scan and an unreachable registry — both exit non-zero. The
-#   catch itself is demonstrated in PR #5051 against #4088's real shape.
+# Exit (#5289 split 1 from 3 — a verdict and a non-verdict are different facts):
+#   0  every checked crate is SemVer-clean, or is a recorded skip.
+#   1  A VERDICT WAS COMPUTED AND IT SAYS BREAK — a crate needs a bump it does
+#      not have. This is the only status that means "the API changed".
+#   2  usage error.
+#   3  NO VERDICT — the gate could not do its job: cargo-semver-checks never
+#      completed a check run (rustdoc build failure, baseline retrieval
+#      failure), the diff scanned nothing, the registry was unreachable, or the
+#      tool is missing. Nothing was compared, so nothing may be concluded.
+#
+# Test: `scripts/check_semver_selftest.sh` proves every way this gate could lie
+#   — a vacuous scan, an unreachable registry, and (since #5289) a rustdoc build
+#   failure or a silent no-op rendered as a SemVer verdict — all exit non-zero,
+#   and that a real break is still reported as a break. The catch itself is
+#   demonstrated in PR #5051 against #4088's real shape.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   plus `git`, `curl`, `cargo`, `python3` (JSON parsing only).
@@ -98,6 +133,13 @@ EXPLICIT_CRATES=""
 PROBE_ONLY=""
 INDEX_BASE="${SEMVER_GATE_INDEX_BASE:-https://index.crates.io}"
 EXCLUSIONS_FILE="${REPO_ROOT}/scripts/semver-checks-feature-exclusions.tsv"
+
+# Exit statuses. `1` is reserved for a COMPUTED verdict that says break; every
+# way the gate can fail to compute one is `3` (#5289). Callers that only test
+# for zero keep working; callers that want to tell "your API changed" from "the
+# gate is broken" now can — see preflight-publish.sh CHECK 5.
+EXIT_SEMVER_BREAK=1
+EXIT_NO_VERDICT=3
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -126,7 +168,9 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h | --help)
-      sed -n '2,89p' "$0" >&2
+      # Prints the contiguous comment block after the shebang, so editing the
+      # header above never silently truncates --help against a stale line range.
+      awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0" >&2
       exit 0
       ;;
     *)
@@ -166,7 +210,7 @@ registry_latest() {
     echo "      ${INDEX_BASE}/${path} — curl failed." >&2
     echo "      Whether a baseline exists is UNKNOWN, so no skip may be granted." >&2
     echo "      This is NOT a pass (issue #5050)." >&2
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   }
 
   if [[ "$code" == "404" ]]; then
@@ -182,7 +226,7 @@ registry_latest() {
     echo "      Whether a baseline exists is UNKNOWN, so no skip may be granted." >&2
     echo "      This is NOT a pass (issue #5050)." >&2
     rm -f "$body"
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   fi
 
   local latest rc=0
@@ -218,7 +262,7 @@ PY
     echo "FAIL: TOOL ERROR — the crates.io index entry for '${crate}' did not parse." >&2
     echo "      Whether a baseline exists is UNKNOWN, so no skip may be granted." >&2
     echo "      This is NOT a pass (issue #5050)." >&2
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   fi
   echo "$latest"
 }
@@ -267,7 +311,7 @@ feature_args() {
   fi
   python3 "$PY_HELPER" features "$META_FILE" "$crate" "$excluded" || {
     echo "FAIL: TOOL ERROR — could not resolve the feature set for '${crate}'." >&2
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   }
 }
 
@@ -350,7 +394,7 @@ PY
 if ! cargo metadata --no-deps --format-version 1 > "$META_FILE" 2> "${SCRATCH}/meta-err.txt"; then
   echo "FAIL: TOOL ERROR — 'cargo metadata --no-deps' failed:" >&2
   sed 's/^/       /' "${SCRATCH}/meta-err.txt" >&2
-  exit 1
+  exit "$EXIT_NO_VERDICT"
 fi
 
 # pkg_field <crate> <field> — one line of package metadata. A crate the metadata
@@ -358,7 +402,7 @@ fi
 pkg_field() {
   python3 "$PY_HELPER" field "$META_FILE" "$1" "$2" || {
     echo "FAIL: TOOL ERROR — no workspace metadata for package '${1}' (field '${2}')." >&2
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   }
 }
 
@@ -388,7 +432,7 @@ resolve_crate() {
     return 0
   fi
   echo "FAIL: '${want}' is neither a workspace package name nor a crates/ directory." >&2
-  return 1
+  return "$EXIT_NO_VERDICT"
 }
 
 # require_tool — cargo-semver-checks must be installed, and its absence is a
@@ -404,7 +448,123 @@ require_tool() {
   echo "      Install it before publishing:" >&2
   echo "        cargo install cargo-semver-checks@0.50.0 --locked" >&2
   echo "      A missing tool is NOT a pass (issue #5050)." >&2
-  return 1
+  return "$EXIT_NO_VERDICT"
+}
+
+# ---------------------------------------------------------------------------
+# select_toolchain — put the newest installed rustc/cargo on PATH for the
+# duration of this run, and report which one the check will use.
+#
+# Why: cargo-semver-checks builds rustdoc in a scratch project that ignores this
+#   workspace's Cargo.lock (see "Toolchain" in the header). The re-resolved graph
+#   can therefore demand a HIGHER rustc than the repo's MSRV, and did: `takecell`
+#   0.1.2 requires 1.96, which killed the whole gate under the pinned 1.94.1.
+#   Pinning the offending transitive dependency instead would fix one name until
+#   the next dependency raises its floor — a treadmill, not a fix.
+#
+#   This costs no coverage. The gate compares the PUBLIC API of our source
+#   against the registry; which rustc renders the rustdoc JSON does not change
+#   what that API is. MSRV compliance is a different question answered by a
+#   different CI job (dtolnay/rust-toolchain@1.94), and nothing here weakens it.
+#
+#   It also cannot manufacture a pass, which is the property that matters. The
+#   only thing a wrong toolchain choice can do is fail the rustdoc build, and
+#   since #5289 that is NO VERDICT and exits non-zero. A machine with no newer
+#   toolchain installed keeps the ambient one and degrades to exactly that
+#   honest path — never to a silent green.
+#
+# What: honours SEMVER_GATE_TOOLCHAIN_BIN when it is set (empty disables the
+#   search and keeps the ambient toolchain); otherwise scans
+#   $RUSTUP_HOME/toolchains/*/bin for the highest `rustc -V` and prepends it when
+#   it beats the active one. RUSTUP_TOOLCHAIN is deliberately NOT used: where
+#   rustc/cargo resolve through mise shims, the shim execs a pinned toolchain
+#   directly and never consults rustup, so the variable is silently ignored.
+#   Prepending the toolchain's own bin directory is the mechanism that works
+#   under both mise shims and a plain rustup install.
+# ---------------------------------------------------------------------------
+select_toolchain() {
+  local active best_dir
+
+  active="$(rustc -V 2>/dev/null | awk '{print $2}')"
+  active="${active:-unknown}"
+
+  if [[ -n "${SEMVER_GATE_TOOLCHAIN_BIN+x}" ]]; then
+    if [[ -z "$SEMVER_GATE_TOOLCHAIN_BIN" ]]; then
+      echo "toolchain: ambient rustc ${active} (selection disabled by SEMVER_GATE_TOOLCHAIN_BIN=)"
+      return 0
+    fi
+    PATH="${SEMVER_GATE_TOOLCHAIN_BIN}:${PATH}"
+    export PATH
+    echo "toolchain: rustc $(rustc -V 2>/dev/null | awk '{print $2}') (pinned by SEMVER_GATE_TOOLCHAIN_BIN)"
+    return 0
+  fi
+
+  best_dir="$(python3 - "${RUSTUP_HOME:-${HOME}/.rustup}/toolchains" "$active" <<'PY'
+import os, sys, subprocess
+
+root, active = sys.argv[1], sys.argv[2]
+
+def key(v):
+    parts = (v.split("-")[0].split(".") + ["0", "0", "0"])[:3]
+    try:
+        return tuple(int(p) for p in parts)
+    except ValueError:
+        return (0, 0, 0)
+
+best, best_dir = key(active), ""
+try:
+    names = sorted(os.listdir(root))
+except OSError:
+    names = []
+for name in names:
+    binp = os.path.join(root, name, "bin")
+    rustc = os.path.join(binp, "rustc")
+    if not (os.path.isfile(rustc) and os.access(rustc, os.X_OK)):
+        continue
+    if not os.path.isfile(os.path.join(binp, "cargo")):
+        continue  # rustdoc builds need cargo from the same directory
+    try:
+        out = subprocess.run([rustc, "-V"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        continue
+    if out.returncode != 0 or len(out.stdout.split()) < 2:
+        continue
+    v = key(out.stdout.split()[1])
+    if v > best:
+        best, best_dir = v, binp
+print(best_dir)
+PY
+  )" || best_dir=""
+
+  if [[ -n "$best_dir" ]]; then
+    PATH="${best_dir}:${PATH}"
+    export PATH
+    echo "toolchain: rustc $(rustc -V 2>/dev/null | awk '{print $2}') (selected over ambient ${active}; the scratch resolution ignores Cargo.lock)"
+  else
+    echo "toolchain: ambient rustc ${active} (no newer toolchain installed)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# verdict_computed <output-file> — succeed only when cargo-semver-checks printed
+# its own per-crate check summary, e.g.
+#     Checked [   0.388s] 223 checks: 214 pass, 9 fail, 0 warn, 31 skip
+#     Checked [   0.000s] 0 checks: 0 pass, 254 skip
+#
+# Why a MARKER and not the exit status: the tool's statuses are not a contract
+#   the gate can lean on, and observation shows they collide. 101 is a rustdoc
+#   build failure AND a "crate not found in registry" baseline failure; 100 is a
+#   real break; 0 is clean. Keying on the status alone would still mix a
+#   non-verdict in with a verdict. The summary line is the tool's own statement
+#   that it finished comparing, so requiring it means the gate concludes only
+#   from evidence that the comparison happened.
+#
+# Fails CLOSED by construction: if a future cargo-semver-checks renames this
+#   line, every run becomes NO VERDICT — loud and non-zero — rather than a
+#   silent green. That is the correct direction for the failure to point.
+# ---------------------------------------------------------------------------
+verdict_computed() {
+  grep -Eq '(^|[[:space:]])Checked[[:space:]].*[0-9]+ checks:' "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -418,7 +578,7 @@ if [[ -n "$PROBE_ONLY" ]]; then
   # Every caller must re-raise it explicitly. Leaving that to `set -e` is exactly
   # the fail-open shape this gate exists to avoid.
   if ! latest="$(registry_latest "$PROBE_ONLY")"; then
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   fi
   echo "probe ${PROBE_ONLY}: baseline=${latest}"
   exit 0
@@ -433,7 +593,7 @@ if [[ -n "$EXPLICIT_CRATES" ]]; then
   while IFS= read -r want; do
     [[ -z "$want" ]] && continue
     if ! name="$(resolve_crate "$want")"; then
-      exit 1
+      exit "$EXIT_NO_VERDICT"
     fi
     CANDIDATES="${CANDIDATES}${name}"$'\n'
   done <<<"$(printf '%s' "$EXPLICIT_CRATES" | grep -v '^$')"
@@ -444,7 +604,7 @@ else
     echo "FAIL: TOOL ERROR — cannot find a merge base between '${BASE}' and HEAD." >&2
     echo "      Fetch the base ref first (CI must check out with fetch-depth: 0):" >&2
     echo "        git fetch origin main" >&2
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   fi
 
   CHANGED="$(git diff --name-only --no-renames "$MERGE_BASE" HEAD)"
@@ -457,7 +617,7 @@ else
     echo "FAIL: SCAN FLOOR — the diff ${MERGE_BASE}..HEAD lists 0 changed path(s)." >&2
     echo "      Nothing was examined, so this gate could not have failed. Check that" >&2
     echo "      '${BASE}' is the right base and that CI checked out with fetch-depth: 0." >&2
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   fi
   SCANNED="${CHANGED_COUNT} changed path(s)"
 
@@ -499,6 +659,11 @@ fi
 checked=0
 skipped=0
 fail=0
+noverdict=0
+
+# Selected once, not per crate: the PATH edit is process-wide and re-running the
+# scan for every candidate would just re-answer the same question.
+select_toolchain
 
 while IFS= read -r crate; do
   [[ -z "$crate" ]] && continue
@@ -515,12 +680,12 @@ while IFS= read -r crate; do
     continue
   fi
 
-  current="$(pkg_field "$crate" version)" || exit 1
+  current="$(pkg_field "$crate" version)" || exit "$EXIT_NO_VERDICT"
 
   # Subshell re-raise, as at --probe above: a helper's `exit 1` dies with the
   # command substitution unless the caller checks for it.
   if ! baseline="$(registry_latest "$crate")"; then
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   fi
 
   if [[ "$baseline" == "NONE" ]]; then
@@ -531,7 +696,7 @@ while IFS= read -r crate; do
 
   if ! rtype="$(release_type "$baseline" "$current")"; then
     echo "FAIL: TOOL ERROR — could not compare '${baseline}' and '${current}' for ${crate}." >&2
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   fi
   if [[ "$rtype" == "major" ]]; then
     echo "SKIP ${crate}: ${baseline} -> ${current} is already a major release — every lint is inapplicable"
@@ -542,23 +707,38 @@ while IFS= read -r crate; do
   # Checked lazily — a run whose every candidate skipped never needed the tool,
   # and demanding it there would be friction with no coverage behind it.
   if [[ -z "${TOOL_OK:-}" ]]; then
-    require_tool || exit 1
+    require_tool || exit "$EXIT_NO_VERDICT"
     TOOL_OK=1
   fi
 
   if ! feature_args "$crate" > "${SCRATCH}/features.txt"; then
-    exit 1
+    exit "$EXIT_NO_VERDICT"
   fi
 
   # shellcheck disable=SC2046
   set -- $(cat "${SCRATCH}/features.txt")
   echo "CHECK ${crate}: ${baseline} -> ${current} (${rtype} release), $(($# / 2)) feature(s)"
 
+  # Captured rather than streamed so the run can be CLASSIFIED afterwards
+  # (#5289); echoed straight back so a human still sees every lint the tool
+  # printed, and so preflight-publish.sh's captured log is unchanged in content.
   rc=0
+  RUN_LOG="${SCRATCH}/run-${crate}.txt"
   SKIP_UI_BUILD=1 cargo semver-checks \
     --package "$crate" \
     --baseline-version "$baseline" \
-    --only-explicit-features "$@" || rc=$?
+    --only-explicit-features "$@" > "$RUN_LOG" 2>&1 || rc=$?
+  cat "$RUN_LOG"
+
+  # Order matters: "did it compare anything?" is asked BEFORE "what did it say?".
+  # An exit 0 with no summary line is a no-op, not a pass, and must not reach the
+  # clean branch — that is the fail-closed half of this check.
+  if ! verdict_computed "$RUN_LOG"; then
+    echo "NO VERDICT ${crate}: cargo semver-checks exited ${rc} without completing a check run." >&2
+    echo "           No public API comparison against baseline ${baseline} was performed." >&2
+    noverdict=$((noverdict + 1))
+    continue
+  fi
 
   if [[ "$rc" -ne 0 ]]; then
     echo "FAIL ${crate}: cargo semver-checks exited ${rc} against baseline ${baseline}" >&2
@@ -570,7 +750,7 @@ done <<<"$CANDIDATES"
 if [[ "$fail" -ne 0 ]]; then
   cat >&2 <<'EOF'
 
-A public API change requires a matching version bump.
+VERDICT: BREAK. A public API change requires a matching version bump.
 
   0.x crates: a break needs the MINOR position (0.28.1 -> 0.29.0).
   1.x+ crates: a break needs the MAJOR position (1.3.4 -> 2.0.0).
@@ -585,7 +765,34 @@ This is not advisory. #4088: trusty-common 0.22.5 shipped exactly this class of
 break as a patch bump and bricked `cargo install` for every dependent on a
 ^0.22 floor, costing trusty-analyze 0.7.3 a yank.
 EOF
-  exit 1
+  exit "$EXIT_SEMVER_BREAK"
+fi
+
+# Reported AFTER the break block so a run that hit both says both, and exits on
+# the non-verdict — an incomplete run is the one result that must never be read
+# as a conclusion about the API.
+if [[ "$noverdict" -ne 0 ]]; then
+  cat >&2 <<'EOF'
+
+NO SEMVER VERDICT WAS COMPUTED. This is NOT a pass, and it is NOT a report that
+the API changed — cargo-semver-checks never finished comparing, so nothing is
+known either way about this crate's public API.
+
+The tool's own output is above. The usual causes:
+
+  * rustdoc failed to build. cargo-semver-checks resolves dependencies in a
+    scratch project that IGNORES this workspace's Cargo.lock, so it can pick a
+    newer transitive dependency whose `rust-version` exceeds the rustc running
+    the gate. The `toolchain:` line above says which rustc that was. Install a
+    newer one (`rustup toolchain install stable`), or point the gate at one:
+        SEMVER_GATE_TOOLCHAIN_BIN=<dir> bash scripts/check_semver.sh --crate <c>
+  * the baseline could not be fetched from crates.io.
+  * a genuine compile error in the crate — build it directly to see it.
+
+Fix the gate, then re-run it. Do not publish on the strength of this output:
+"the check could not run" is not "the check passed" (issue #5289).
+EOF
+  exit "$EXIT_NO_VERDICT"
 fi
 
 echo "semver gate: scanned ${SCANNED}; ${checked} crate(s) checked, ${skipped} skipped — OK."

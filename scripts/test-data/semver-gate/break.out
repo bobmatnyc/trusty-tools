@@ -1,0 +1,128 @@
+     Parsing trusty-mpm v1.3.5 (current)
+      Parsed [   0.161s] (current)
+    Building trusty-mpm v1.3.4 (baseline)
+       Built [  46.973s] (baseline)
+     Parsing trusty-mpm v1.3.4 (baseline)
+      Parsed [   0.150s] (baseline)
+    Checking trusty-mpm v1.3.4 -> v1.3.5 (patch change)
+     Checked [   0.388s] 223 checks: 214 pass, 9 fail, 0 warn, 31 skip
+
+--- failure constructible_struct_adds_field: struct exhaustively constructible through public API adds field ---
+
+Description:
+A pub struct that could be exhaustively constructed with a literal using only public API has a new pub field, breaking existing exhaustive literals.
+        ref: https://doc.rust-lang.org/reference/expressions/struct-expr.html
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/constructible_struct_adds_field.ron
+
+Failed in:
+  field SpawnParams.worktree in /REPO/crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs:176
+  field MpmConfig.hooks in /REPO/crates/trusty-mpm/src/core/config.rs:353
+  field MpmConfig.agent_cost in /REPO/crates/trusty-mpm/src/core/config.rs:406
+  field HarnessManifest.agent_categories in /REPO/crates/trusty-mpm/src/core/manifest/schema.rs:59
+  field HarnessManifest.skill_categories in /REPO/crates/trusty-mpm/src/core/manifest/schema.rs:67
+  field SyncAssetsReport.quarantine_summary in /REPO/crates/trusty-mpm/src/core/session_launch/sync_assets.rs:104
+  field SpawnRequest.worktree in /REPO/crates/trusty-mpm/src/daemon/managed_routes/mod.rs:173
+  field ManifestSources.framework_scope in /REPO/crates/trusty-mpm/src/core/manifest/resolve.rs:72
+  field RepairOutcome.path in /REPO/crates/trusty-mpm/src/core/skill_repair.rs:96
+  field CollectionRow.room_count in /REPO/crates/trusty-mpm/src/tui/health/types.rs:160
+  field CollectionRow.room_count in /REPO/crates/trusty-mpm/src/tui/health/types.rs:160
+  field SessionRecord.terminal_at in /REPO/crates/trusty-mpm/src/session_manager/record.rs:438
+  field SessionRecord.terminal_at in /REPO/crates/trusty-mpm/src/session_manager/record.rs:438
+  field ApplyReport.agents_prune_kept in /REPO/crates/trusty-mpm/src/core/update_check/apply.rs:100
+  field ApplyReport.skills_prune_kept in /REPO/crates/trusty-mpm/src/core/update_check/apply.rs:102
+  field ApplyReport.prune_backup_dir in /REPO/crates/trusty-mpm/src/core/update_check/apply.rs:105
+  field PrepReport.compiled_prompt in /REPO/crates/trusty-mpm/src/core/session_launch/mod.rs:261
+
+--- failure enum_tuple_variant_changed_kind: An enum tuple variant changed kind ---
+
+Description:
+A public enum's exhaustive tuple variant has changed to a different kind of enum variant, breaking possible instantiations and patterns.
+        ref: https://doc.rust-lang.org/reference/items/enumerations.html
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/enum_tuple_variant_changed_kind.ron
+
+Failed in:
+  variant PrepError::Instructions in /REPO/crates/trusty-mpm/src/core/session_launch/mod.rs:376
+
+--- failure enum_variant_added: enum variant added on exhaustive enum ---
+
+Description:
+A publicly-visible enum without #[non_exhaustive] has a new variant.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#enum-variant-new
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/enum_variant_added.ron
+
+Failed in:
+  variant RepairAction:WouldRepair in /REPO/crates/trusty-mpm/src/core/skill_repair.rs:71
+
+--- failure function_missing: pub fn removed or renamed ---
+
+Description:
+A publicly-visible function cannot be imported by its prior path. A `pub use` may have been removed, or the function itself may have been renamed or removed entirely.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#item-remove
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/function_missing.ron
+
+Failed in:
+  function trusty_mpm::core::instruction_pipeline::install_system_prompt, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/instruction_pipeline.rs:313
+  function trusty_mpm::core::instruction_pipeline::install_system_prompt_to, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/instruction_pipeline.rs:297
+
+--- failure function_parameter_count_changed: pub fn parameter count changed ---
+
+Description:
+A publicly-visible function now takes a different number of parameters.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#fn-change-arity
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/function_parameter_count_changed.ron
+
+Failed in:
+  trusty_mpm::core::managed_config::ensure_managed_config_dir_with_root now takes 3 parameters instead of 2, in /REPO/crates/trusty-mpm/src/core/managed_config.rs:188
+  trusty_mpm::core::managed_config::ensure_managed_config_dir now takes 2 parameters instead of 1, in /REPO/crates/trusty-mpm/src/core/managed_config.rs:142
+
+--- failure method_parameter_count_changed: pub method parameter count changed ---
+
+Description:
+A publicly-visible method now takes a different number of parameters, not counting the receiver (self) parameter.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#fn-change-arity
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/method_parameter_count_changed.ron
+
+Failed in:
+  trusty_mpm::core::manifest::ManifestSources::resolve takes 3 parameters in /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/manifest/resolve.rs:77, but now takes 2 parameters in /REPO/crates/trusty-mpm/src/core/manifest/resolve.rs:94
+
+--- failure pub_module_level_const_missing: pub module-level const is missing ---
+
+Description:
+A public const is missing or renamed
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#item-remove
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/pub_module_level_const_missing.ron
+
+Failed in:
+  TM_SLACK_CANVAS_DELIVERY in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/bundle_tm_skills.rs:236
+  TM_PR_WORKFLOW in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/bundle_tm_skills.rs:127
+  OPS_AGENT in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/bundle.rs:57
+
+--- failure struct_marked_non_exhaustive: struct marked #[non_exhaustive] ---
+
+Description:
+A public struct has been marked #[non_exhaustive], which will prevent it from being constructed using a struct literal outside of its crate. It previously had no private fields, so a struct literal could be used to construct it outside its crate.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#attr-adding-non-exhaustive
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/struct_marked_non_exhaustive.ron
+
+Failed in:
+  struct ResolvedTmuxOptions in /REPO/crates/trusty-mpm/src/core/trusty_tools_config.rs:305
+  struct TmuxConfig in /REPO/crates/trusty-mpm/src/core/trusty_tools_config.rs:245
+
+--- failure struct_pub_field_missing: pub struct's pub field removed or renamed ---
+
+Description:
+A publicly-visible struct has at least one public field that is no longer available under its prior name. It may have been renamed or removed entirely.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#item-remove
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/struct_pub_field_missing.ron
+
+Failed in:
+  field merged of struct PipelineOutput, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/instruction_pipeline.rs:502
+  field instructions_loaded of struct PipelineOutput, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/instruction_pipeline.rs:504
+  field wing_count of struct CollectionRow, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/tui/health/types.rs:156
+  field wing_count of struct CollectionRow, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/tui/health/types.rs:156
+  field user of struct ManifestSources, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/manifest/resolve.rs:45
+  field language_scope of struct ManifestSources, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/manifest/resolve.rs:56
+  field framework_instructions_path of struct PipelineInput, previously in file /Users/masa/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-mpm-1.3.4/src/core/instruction_pipeline.rs:472
+
+     Summary semver requires new major version: 9 major and 0 minor checks failed
+    Finished [ 105.882s] trusty-mpm
