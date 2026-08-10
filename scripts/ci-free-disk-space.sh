@@ -45,13 +45,26 @@ fi
 
 # Available GiB on /. CI_DISK_AVAIL_GB is the selftest's injection point; unset
 # in CI, where the real `df` is what decides.
+#
+# The `^[0-9]+$` guard is the whole safety argument for this function, and it is
+# deliberate rather than emergent. Without it an unparseable `df` (missing
+# --output on a non-GNU coreutils, a header-only read, a mount that vanished)
+# yields an empty string, bash coerces it to 0 inside $(( )), 0 is below both
+# floors, and the script reclaims — which is the safe direction, but only by
+# accident of two coercions nothing tests. Stating it makes the fallback a
+# decision: an unreadable disk reads as FULL, so the reclamation still fires.
+# Test: `scripts/check-ci-helpers-selftest.sh`, "df output is not a number".
 measure_avail_gb() {
   if [ -n "${CI_DISK_AVAIL_GB:-}" ]; then
     echo "${CI_DISK_AVAIL_GB}"
     return
   fi
   local kb
-  kb=$(df -k --output=avail / | tail -1 | tr -d ' ')
+  kb=$(df -k --output=avail / 2>/dev/null | tail -1 | tr -d ' ')
+  if ! [[ "${kb}" =~ ^[0-9]+$ ]]; then
+    echo "::warning::could not read available disk from df (got '${kb}') — treating as 0G, which reclaims" >&2
+    kb=0
+  fi
   echo $(( kb / 1024 / 1024 ))
 }
 

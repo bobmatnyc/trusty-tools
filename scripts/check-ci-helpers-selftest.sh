@@ -330,6 +330,33 @@ assert_eq "purge leaves under the prune floor"          "purge+prune" "$(disk_de
 assert_eq "at the prune floor exactly"                  "purge"    "$(disk_decision 30 25)"
 assert_eq "empty disk takes both tiers"                 "purge+prune" "$(disk_decision 1 2)"
 
+# The CI_DISK_AVAIL_GB override short-circuits the `df` call, so every case
+# above leaves the real measurement path untested. These drive it, by putting a
+# stub `df` ahead of the real one on PATH. Without this the numeric guard in
+# measure_avail_gb could be deleted and nothing here would go red.
+# CI_DISK_AVAIL_AFTER_GB is pinned so only the FIRST measurement varies.
+disk_decision_real_df() { # disk_decision_real_df <what df prints>
+  local tmp
+  tmp="$(mktemp -d)"
+  { printf '#!/bin/sh\ncat <<"STUB_EOF"\n%s\nSTUB_EOF\n' "$1" > "${tmp}/df"; } 2>/dev/null
+  chmod +x "${tmp}/df"
+  PATH="${tmp}:${PATH}" CI_DISK_AVAIL_GB="" CI_DISK_AVAIL_AFTER_GB=999 \
+    bash scripts/ci-free-disk-space.sh --dry-run 2>/dev/null |
+    sed -n 's/^decision=//p'
+  rm -rf "${tmp}"
+}
+
+# 125829120 KiB = 120G, 31457280 KiB = 30G — the real arithmetic, not an override.
+assert_eq "real df, 120G free"          "skip-all" "$(disk_decision_real_df 'Avail
+125829120')"
+assert_eq "real df, 30G free"           "purge"    "$(disk_decision_real_df 'Avail
+31457280')"
+# An unreadable disk must read as FULL and reclaim, never as roomy and skip.
+assert_eq "df prints a non-number"      "purge"    "$(disk_decision_real_df 'Avail
+not-a-number')"
+assert_eq "df prints nothing at all"    "purge"    "$(disk_decision_real_df '')"
+assert_eq "df prints only a header"     "purge"    "$(disk_decision_real_df 'Avail')"
+
 # Wiring: the script being correct proves nothing if a job still inlines the
 # ungated `rm -rf`. All four jobs that reclaim disk must route through it.
 assert_eq "ci.yml has no inlined SDK purge left" "0" \
