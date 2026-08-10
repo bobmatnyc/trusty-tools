@@ -17,9 +17,10 @@ use anyhow::{Context, Result};
 use redb::ReadableTable;
 
 use super::super::kg::Triple;
+use super::drawer_ops::{batch_delete_drawer, batch_upsert_drawer};
 use super::store::KgStoreRedb;
 use super::types::{BatchOpResult, BatchWriteOp};
-use super::write_ops::{batch_assert, batch_delete_drawer, batch_retract, batch_upsert_drawer};
+use super::write_ops::{batch_assert, batch_retract};
 
 impl KgStoreRedb {
     /// Import a batch of historical triples and drawers without disturbing

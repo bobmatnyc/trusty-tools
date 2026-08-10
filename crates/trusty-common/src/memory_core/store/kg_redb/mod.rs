@@ -12,6 +12,8 @@
 //! Test: See `tests` module — round-trips, retract semantics, persistence
 //! across reopen, drawer CRUD, count_active.
 
+// #4884 slot-index maintenance; split out of `write_ops` for the SLOC cap.
+mod drawer_ops;
 mod import;
 mod read_ops;
 // ADR-0027 T1: ROOMS / ROOM_KEYS accessors (insert-only writes).
