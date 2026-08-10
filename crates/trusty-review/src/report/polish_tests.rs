@@ -160,7 +160,7 @@ fn drops_marker_rows() {
     let out = polish(&input);
     assert!(out.contains("| Vendor | trusty-review |"));
     assert!(!out.contains(&format!("Client | {HONESTY_MARKER}")));
-    assert!(out.contains("Data gaps: Client."));
+    assert!(out.contains("Data gaps: 1 unpopulated field/section — Client."));
 }
 
 /// Why: a section left with no data after row/block dropping must collapse to a
@@ -173,7 +173,8 @@ fn collapses_empty_section() {
     let input = "## 6. Risk Registers\n\n## 7. Appendix\n\ncontent\n\n## 8. Gaps & Caveats\n\nplaceholder\n";
     let out = polish(input);
     assert!(out.contains("_No data available"));
-    assert!(out.contains("Data gaps: 6. Risk Registers"));
+    // One gap, so the line counts it in the singular (#5319).
+    assert!(out.contains("Data gaps: 1 unpopulated field/section — 6. Risk Registers."));
     // Section 7 has content and is preserved.
     assert!(out.contains("content"));
 }
@@ -198,6 +199,60 @@ fn gaps_section_lists_dropped_fields() {
     assert!(gaps_line.contains("Client"));
     assert!(gaps_line.contains("Analyst"));
     assert!(!out.contains(HONESTY_MARKER));
+}
+
+/// Parse the `Data gaps:` line into its declared count and its listed items.
+///
+/// Why: #5319's whole point is that those two must agree, so the regression test
+/// reads them back out of the rendered line exactly as a reader would.
+/// What: returns `(declared_count, items)` from the single `Data gaps:` line.
+fn parse_gaps_line(out: &str) -> (usize, Vec<&str>) {
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("Data gaps:"))
+        .expect("gaps line");
+    let (count_part, list_part) = line
+        .trim_start_matches("Data gaps:")
+        .split_once('—')
+        .expect("count and list are separated by an em dash");
+    let count = count_part
+        .split_whitespace()
+        .next()
+        .expect("count token")
+        .parse::<usize>()
+        .expect("count token parses as a number");
+    let items: Vec<&str> = list_part
+        .trim()
+        .trim_end_matches('.')
+        .split(';')
+        .map(str::trim)
+        .collect();
+    (count, items)
+}
+
+/// Why: #5319 — the line rendered as `Data gaps: 2. Executive Summary, …`, whose
+/// leading section number a diligence reader parses as a count of two ahead of a
+/// sixteen-name list. Nothing counted anything; the "2" was the first label's own
+/// template numbering, and comma-joining it behind a colon manufactured a number
+/// that contradicted the list.
+/// What: collapses three numbered template sections, then asserts the declared
+/// count equals the number of items the same line goes on to list.
+/// Test: this test itself.
+#[test]
+fn gaps_line_count_matches_its_own_list() {
+    let input = "## 2. Executive Summary\n\n## 6.2 Open-Source / CVE Exposure\n\n\
+                 ## 6.3 License / IP Risk\n\n## 7. Graph-Ready Data Appendix\n\ncontent\n\n\
+                 ## 8. Gaps & Caveats\n\nplaceholder\n";
+    let out = polish(input);
+    let (count, items) = parse_gaps_line(&out);
+    assert_eq!(
+        count,
+        items.len(),
+        "declared count must equal the listed items: {out}"
+    );
+    assert_eq!(count, 3, "three sections collapsed: {out}");
+    // The section that supplied the misread "2." is still named in full.
+    assert!(items.contains(&"2. Executive Summary"), "{out}");
 }
 
 /// Why: with no gaps at all, the section states so rather than an empty list.

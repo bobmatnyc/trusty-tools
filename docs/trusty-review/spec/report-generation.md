@@ -647,8 +647,12 @@ deterministic fill and before the appended status notes):
    collapses instead of rendering with nothing beneath it (live-QA wave-2 defect
    #4).
 4. **Gaps list** — every dropped field/section is collected into a compact
-   `Data gaps: client, native scale, …` line in the Gaps & Caveats section,
-   replacing the wall of `not stated` rows.
+   `Data gaps: 2 unpopulated fields/sections — client; native scale.` line in the
+   Gaps & Caveats section, replacing the wall of `not stated` rows. The count is
+   the length of the same slice the line goes on to join, so the two can never
+   disagree; items are `;`-separated because a label may itself contain a comma
+   or open with its template section number ("2. Executive Summary"), which
+   comma-joining rendered as a bogus leading count (#5319).
 
 This **deliberately changes default rendering** — the M2/M3 byte-identical-when-off
 guarantees apply to *their* flags (`--synthesize`, `--benchmark`), not to this
