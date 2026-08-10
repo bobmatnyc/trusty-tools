@@ -1794,3 +1794,68 @@ fn reporter_prefers_synthesis_over_deterministic_summary() {
         "deterministic rows must not stack under synthesized rows:\n{section}"
     );
 }
+
+/// Why: the Top Risks table is capped at five rows, and an acquirer who skims
+/// the table without the paragraph above it would otherwise read those five as
+/// the entire risk picture. A silently capped top-risks table has shipped as a
+/// defect once already (#2373).
+/// What: renders seven RED/AMBER findings and asserts the rendered table carries
+/// the "Top 5 of 7" caption row; then renders a fixture with two findings and
+/// asserts no caption appears.
+/// Test: this test itself.
+#[test]
+fn reporter_captions_a_truncated_top_risks_table() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let metrics = r#"{
+      "findings": [
+        { "title": "A1", "severity": "amber", "category": "x", "component": "a1.rs" },
+        { "title": "A2", "severity": "amber", "category": "x", "component": "a2.rs" },
+        { "title": "A3", "severity": "amber", "category": "x", "component": "a3.rs" },
+        { "title": "A4", "severity": "amber", "category": "x", "component": "a4.rs" },
+        { "title": "A5", "severity": "amber", "category": "x", "component": "a5.rs" },
+        { "title": "R1", "severity": "red", "category": "security", "component": "r1.rs" },
+        { "title": "R2", "severity": "red", "category": "security", "component": "r2.rs" }
+      ]
+    }"#;
+    std::fs::write(tmp.path().join("acme.json"), metrics).expect("write metrics");
+    let toml = r#"
+        [report]
+        title = "Acme Due Diligence"
+
+        [[repositories]]
+        name = "Acme Web"
+        path = "/nonexistent/acme-web"
+        metrics = "acme.json"
+    "#;
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("model builds");
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let section = executive_summary_section(&Reporter::new(tmp.path()).render(&model, &template));
+
+    assert!(
+        section.contains("**Top 5 of 7**"),
+        "truncated table must caption itself:\n{section}"
+    );
+    assert!(
+        section.contains("2 further RED/AMBER finding(s) are not listed here"),
+        "caption must name what is missing:\n{section}"
+    );
+    assert!(
+        !section.contains("| 6 |"),
+        "the caption row must not be numbered as a sixth risk:\n{section}"
+    );
+
+    // A fixture the cap never touches must carry no caption.
+    let untruncated = fixture_model_with_findings(tmp.path());
+    let plain =
+        executive_summary_section(&Reporter::new(tmp.path()).render(&untruncated, &template));
+    assert!(
+        !plain.contains("Top 5 of"),
+        "an untruncated table must not claim truncation:\n{plain}"
+    );
+}

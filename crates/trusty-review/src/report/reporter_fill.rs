@@ -57,12 +57,15 @@ pub(super) fn instructions_block(model: &ReportModel) -> String {
 /// [`super::exec_summary::compose`] — tagged with the provenance of the figures
 /// when composed, untagged when it is instead a statement naming which inputs
 /// were missing (a statement about the report, not a report value). When
-/// `with_risks` is set, also pushes one `top_risk_row` per deterministic risk;
-/// the caller clears it when synthesis has rows of its own, so the two never
-/// stack into one table.
+/// `with_risks` is set, also pushes one `top_risk_row` per deterministic risk,
+/// plus a final caption row when the cap dropped any — a reader who reads the
+/// table and not the paragraph must still see that it is a top-N view. The
+/// caller clears `with_risks` when synthesis has rows of its own, so the two
+/// never stack into one table.
 /// Test: `reporter_tests.rs::{reporter_fills_executive_summary_without_synthesis,
 /// reporter_names_missing_inputs_when_nothing_measured,
-/// reporter_prefers_synthesis_over_deterministic_summary}`.
+/// reporter_prefers_synthesis_over_deterministic_summary,
+/// reporter_captions_a_truncated_top_risks_table}`.
 pub(super) fn set_executive_summary(root: &mut Scope, model: &ReportModel, with_risks: bool) {
     match super::exec_summary::compose(model) {
         super::exec_summary::ExecSummary::Composed { text, provenance } => {
@@ -76,20 +79,31 @@ pub(super) fn set_executive_summary(root: &mut Scope, model: &ReportModel, with_
     if !with_risks {
         return;
     }
-    for (i, risk) in super::exec_summary::top_risks(model)
-        .into_iter()
-        .enumerate()
-    {
+    let risks = super::exec_summary::top_risks(model);
+    for (i, risk) in risks.rows.iter().enumerate() {
         let mut row = Scope::new();
         row.set("risk_rank", (i + 1).to_string());
         row.set(
             "risk_description",
-            tag(risk.description, Provenance::Declared),
+            tag(risk.description.clone(), Provenance::Declared),
         );
-        row.set("risk_severity", risk.severity);
-        row.set("risk_apps", risk.apps);
+        row.set("risk_severity", risk.severity.clone());
+        row.set("risk_apps", risk.apps.clone());
         // `risk_cost` is deliberately unset: nothing deterministic states a
         // remediation cost, so it falls through to the honesty marker.
+        root.push_block("top_risk_row", row);
+    }
+    if let Some(note) = risks.truncation_note() {
+        // A caption row rather than a note beneath the table: the table is what
+        // an acquirer skims, and the polish pass only keeps a row when some
+        // value cell is real, so the three em-dashes also keep it from being
+        // dropped as empty scaffolding.
+        let mut row = Scope::new();
+        row.set("risk_rank", "—");
+        row.set("risk_description", note);
+        row.set("risk_severity", "—");
+        row.set("risk_cost", "—");
+        row.set("risk_apps", "—");
         root.push_block("top_risk_row", row);
     }
 }

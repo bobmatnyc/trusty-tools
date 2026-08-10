@@ -136,16 +136,59 @@ pub struct DeterministicRisk {
     pub apps: String,
 }
 
+/// The capped Top Risks rows plus how many were eligible before the cap.
+///
+/// Why: the table shows at most [`MAX_RISK_ROWS`], and a reader who reads the
+/// table without the paragraph above it would otherwise take five rows as the
+/// whole risk picture. Carrying the pre-cap count is what lets the renderer say
+/// so in the table itself. A capped top-risks table has already shipped as a
+/// defect once (#2373); this time the truncation is stated.
+/// What: `rows` is what renders; `eligible` counts every non-GREEN finding that
+/// qualified for a row, so `eligible - rows.len()` is exactly what was dropped.
+/// Test: `exec_summary_tests.rs::{top_risks_are_red_first_and_capped,
+/// truncation_note_absent_when_nothing_was_dropped}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TopRisks {
+    /// The rows to render, RED first, at most [`MAX_RISK_ROWS`].
+    pub rows: Vec<DeterministicRisk>,
+    /// How many findings qualified for a row before the cap was applied.
+    pub eligible: usize,
+}
+
+impl TopRisks {
+    /// The table's truncation caption, or `None` when nothing was dropped.
+    ///
+    /// Why: it must be legible to someone reading only the table, so it leads
+    /// with the ratio and points at the section that carries every finding.
+    /// What: `Some` only when the cap actually dropped rows.
+    /// Test: `exec_summary_tests.rs::{top_risks_are_red_first_and_capped,
+    /// truncation_note_absent_when_nothing_was_dropped}`.
+    pub fn truncation_note(&self) -> Option<String> {
+        let hidden = self.eligible.saturating_sub(self.rows.len());
+        (hidden > 0).then(|| {
+            format!(
+                "**Top {} of {}** — {hidden} further RED/AMBER finding(s) are not listed here; \
+                 section 5, Findings by Severity, lists all {} unabridged.",
+                self.rows.len(),
+                self.eligible,
+                self.eligible,
+            )
+        })
+    }
+}
+
 /// Derive the Top Risks rows from the report's own RED/AMBER findings.
 ///
 /// Why: same defect as the paragraph — an empty table in the first section
 /// reads as "no risks found" when the report lists findings two sections down.
 /// What: every non-GREEN finding across all repositories, RED before AMBER
 /// (stable within a band, so manifest and analyzer order are preserved), capped
-/// at [`MAX_RISK_ROWS`]. Empty when no repository carries findings.
+/// at [`MAX_RISK_ROWS`] with the pre-cap count retained for
+/// [`TopRisks::truncation_note`]. Empty when no repository carries findings.
 /// Test: `exec_summary_tests.rs::top_risks_are_red_first_and_capped`.
-pub fn top_risks(model: &ReportModel) -> Vec<DeterministicRisk> {
-    let mut rows: Vec<(u8, DeterministicRisk)> = Vec::new();
+pub fn top_risks(model: &ReportModel) -> TopRisks {
+    let mut ranked: Vec<(u8, DeterministicRisk)> = Vec::new();
     for repo in &model.repositories {
         let Some(metrics) = &repo.metrics else {
             continue;
@@ -156,7 +199,7 @@ pub fn top_risks(model: &ReportModel) -> Vec<DeterministicRisk> {
                 Severity::Amber => 1,
                 Severity::Green => continue,
             };
-            rows.push((
+            ranked.push((
                 rank,
                 DeterministicRisk {
                     description: risk_description(f),
@@ -166,11 +209,16 @@ pub fn top_risks(model: &ReportModel) -> Vec<DeterministicRisk> {
             ));
         }
     }
-    rows.sort_by_key(|(rank, _)| *rank);
-    rows.into_iter()
-        .take(MAX_RISK_ROWS)
-        .map(|(_, risk)| risk)
-        .collect()
+    ranked.sort_by_key(|(rank, _)| *rank);
+    let eligible = ranked.len();
+    TopRisks {
+        rows: ranked
+            .into_iter()
+            .take(MAX_RISK_ROWS)
+            .map(|(_, risk)| risk)
+            .collect(),
+        eligible,
+    }
 }
 
 /// The risk statement for one finding: title, the tool's observation, and the

@@ -49,7 +49,7 @@ pub use benchmark::{
     RepositoryBenchmark, build_benchmark_report, corpus_dir, load_corpus, write_snapshot,
 };
 pub use error::{ManifestError, ReportError, Result};
-pub use exec_summary::{DeterministicRisk, ExecSummary, compose as compose_exec_summary};
+pub use exec_summary::{DeterministicRisk, ExecSummary, TopRisks, compose as compose_exec_summary};
 pub use fill::{HONESTY_MARKER, Scope, render, strip_leading_comment};
 pub use git_info::{GitInfo, gather_git_info};
 pub use instructions::{Instructions, load_instructions};

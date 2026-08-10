@@ -11,3 +11,7 @@ Fixed
   - When nothing measurable was supplied, §2 now names the specific missing
     inputs (no `metrics` file, no `--analyze` fetch, no scannable checkout)
     instead of collapsing to the generic Gaps & Caveats pointer.
+  - The Top Risks table caps at five rows and now says so in the table itself
+    ("**Top 5 of 7** — 2 further RED/AMBER finding(s) are not listed here…"), so
+    a reader who skims the table without the paragraph above it cannot mistake
+    five rows for the whole risk picture.

@@ -239,11 +239,25 @@ fn names_the_application_carrying_the_most_red_findings() {
     );
 }
 
+/// The single-application risks manifest used by the cap tests.
+const RISKS_MANIFEST: &str = r#"
+    [report]
+    title = "Risks"
+
+    [[repositories]]
+    name = "Acme Web"
+    path = "/nonexistent/acme-web"
+    metrics = "risks.json"
+"#;
+
 /// Why: the Top Risks table sits inside §2 and collapsed for the same reason
-/// the paragraph did; its rows come from the same findings, worst first.
-/// What: six RED + AMBER findings across one application; asserts RED-first
-/// ordering, the five-row cap, that GREENs never appear, and that the row text
-/// carries the finding's observation and component.
+/// the paragraph did; its rows come from the same findings, worst first, and a
+/// truncated table must say so.
+/// What: SEVEN non-GREEN findings (2 RED + 5 AMBER) against a cap of five, so
+/// two are provably dropped — a fixture sized exactly at the cap could not tell
+/// a working cap from no cap at all. Asserts RED-first ordering, the dropped
+/// findings' absence by title, the pre-cap `eligible` count, the truncation
+/// caption, that GREENs never appear, and the row text.
 /// Test: this test itself.
 #[test]
 fn top_risks_are_red_first_and_capped() {
@@ -253,32 +267,73 @@ fn top_risks_are_red_first_and_capped() {
         { "title": "A1", "severity": "amber", "category": "x", "component": "a1.rs" },
         { "title": "A2", "severity": "amber", "category": "x", "component": "a2.rs" },
         { "title": "A3", "severity": "amber", "category": "x", "component": "a3.rs" },
+        { "title": "A4", "severity": "amber", "category": "x", "component": "a4.rs" },
+        { "title": "A5", "severity": "amber", "category": "x", "component": "a5.rs" },
         { "title": "R1", "severity": "red", "category": "security", "component": "r1.rs",
           "description": "leaks a key" },
         { "title": "R2", "severity": "red", "category": "security", "component": "r2.rs" },
         { "title": "G1", "severity": "green", "category": "quality", "component": "" }
       ]
     }"#;
-    let toml = r#"
-        [report]
-        title = "Risks"
-
-        [[repositories]]
-        name = "Acme Web"
-        path = "/nonexistent/acme-web"
-        metrics = "risks.json"
-    "#;
-    let m = model(tmp.path(), &[("risks.json", metrics)], toml);
+    let m = model(tmp.path(), &[("risks.json", metrics)], RISKS_MANIFEST);
 
     let risks = top_risks(&m);
-    assert_eq!(risks.len(), 5, "cap not applied: {risks:?}");
-    assert_eq!(risks[0].severity, "RED");
-    assert_eq!(risks[1].severity, "RED");
-    assert!(risks[2..].iter().all(|r| r.severity == "AMBER"));
-    assert_eq!(risks[0].description, "R1 — leaks a key (r1.rs)");
-    assert_eq!(risks[0].apps, "Acme Web");
+    assert_eq!(risks.eligible, 7, "pre-cap count wrong: {risks:?}");
+    assert_eq!(risks.rows.len(), 5, "cap not applied: {risks:?}");
+
+    // The cap actually dropped rows: the two lowest-priority AMBERs are gone.
+    let titles: Vec<&str> = risks
+        .rows
+        .iter()
+        .map(|r| r.description.split(' ').next().unwrap_or(""))
+        .collect();
     assert!(
-        !risks.iter().any(|r| r.description.starts_with("G1")),
-        "a GREEN finding must never become a top risk: {risks:?}"
+        !titles.contains(&"A4") && !titles.contains(&"A5"),
+        "the cap kept findings it should have dropped: {titles:?}"
     );
+    assert_eq!(titles, vec!["R1", "R2", "A1", "A2", "A3"]);
+
+    assert_eq!(risks.rows[0].severity, "RED");
+    assert_eq!(risks.rows[1].severity, "RED");
+    assert!(risks.rows[2..].iter().all(|r| r.severity == "AMBER"));
+    assert_eq!(risks.rows[0].description, "R1 — leaks a key (r1.rs)");
+    assert_eq!(risks.rows[0].apps, "Acme Web");
+    assert!(
+        !titles.contains(&"G1"),
+        "a GREEN finding must never become a top risk: {titles:?}"
+    );
+
+    let note = risks
+        .truncation_note()
+        .expect("truncated table needs a note");
+    assert!(note.contains("Top 5 of 7"), "note wording: {note}");
+    assert!(note.contains("2 further"), "hidden count wrong: {note}");
+}
+
+/// Why: the truncation caption must appear only when something was actually
+/// dropped — a caption on a complete table would misinform in the other
+/// direction.
+/// What: exactly five non-GREEN findings, so nothing is cut; asserts every row
+/// survives and no note is produced. The GREEN finding proves `eligible` counts
+/// eligible ROWS, not total findings.
+/// Test: this test itself.
+#[test]
+fn truncation_note_absent_when_nothing_was_dropped() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let metrics = r#"{
+      "findings": [
+        { "title": "A1", "severity": "amber", "category": "x", "component": "a1.rs" },
+        { "title": "A2", "severity": "amber", "category": "x", "component": "a2.rs" },
+        { "title": "A3", "severity": "amber", "category": "x", "component": "a3.rs" },
+        { "title": "R1", "severity": "red", "category": "security", "component": "r1.rs" },
+        { "title": "R2", "severity": "red", "category": "security", "component": "r2.rs" },
+        { "title": "G1", "severity": "green", "category": "quality", "component": "" }
+      ]
+    }"#;
+    let m = model(tmp.path(), &[("risks.json", metrics)], RISKS_MANIFEST);
+
+    let risks = top_risks(&m);
+    assert_eq!(risks.eligible, 5, "the GREEN must not count as eligible");
+    assert_eq!(risks.rows.len(), 5);
+    assert_eq!(risks.truncation_note(), None);
 }
