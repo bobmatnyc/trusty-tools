@@ -595,8 +595,14 @@ fn render_gaps_line(gaps: &[String]) -> String {
 
 // ─── Line/cell helpers ──────────────────────────────────────────────────────
 
-/// Return the heading text (after the `#`s and any leading section number) for a
-/// markdown heading line, or `None` when the line is not a heading.
+/// Return the heading text (after the leading `#`s only) for a markdown heading
+/// line, or `None` when the line is not a heading.
+///
+/// A template section number is part of the returned text: `## 2. Executive
+/// Summary` yields `2. Executive Summary`, not `Executive Summary`. Callers that
+/// render the result into prose must not let that number read as a value of
+/// their own — see #5319, where joining it behind `Data gaps:` produced a count
+/// the report never computed.
 fn heading_text(trimmed: &str) -> Option<&str> {
     let rest = trimmed.trim_start_matches('#');
     if rest.len() == trimmed.len() {
