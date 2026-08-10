@@ -40,8 +40,8 @@ pub mod template;
 // ── Re-exports for convenience ─────────────────────────────────────────────
 
 pub use analyze_adapter::{
-    AnalyzeAdapterError, AnalyzeMetricsSource, HttpAnalyzeMetricsSource, derive_index_id,
-    enrich_with_analyze,
+    AnalyzeAdapterError, AnalyzeCaveat, AnalyzeFetch, AnalyzeGap, AnalyzeMetricsSource,
+    HttpAnalyzeMetricsSource, derive_index_id, enrich_with_analyze, enrich_with_analyze_gaps,
 };
 pub use benchmark::{
     BenchmarkReport, BenchmarkStatus, CorpusSnapshot, LoadedCorpus, MetricPlacement,
@@ -61,7 +61,7 @@ pub use manifest::{
 pub use mermaid::inject as inject_mermaid;
 pub use metrics::{AnalyzeMetrics, MetricFinding, Severity, load_metrics};
 pub use model::{ReportModel, RepositoryReport};
-pub use polish::{polish, strip_template_comments};
+pub use polish::{polish, polish_with_gaps, strip_template_comments};
 pub use provenance::{Provenance, tag};
 pub use reporter::Reporter;
 pub use scan::{Framework, RepoScan, scan_repo};

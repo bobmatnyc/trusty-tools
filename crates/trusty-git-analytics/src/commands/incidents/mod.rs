@@ -33,7 +33,8 @@ mod file_source;
 use file_source::ingest_file;
 
 /// Arguments for `tga incidents collect`.
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Ingest production incidents into fact_incidents.",
     long_about = "Walk configured incident sources and persist incident records into\n\

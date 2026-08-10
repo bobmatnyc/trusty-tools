@@ -408,7 +408,7 @@ GET  /indexes/:id/clusters?k=N&method=bow
 Parity rule: every HTTP endpoint has an MCP tool equivalent.
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **19 tools** with default features, **22 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
+The MCP server registers **20 tools** with default features, **23 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Available | Arguments | Summary |
@@ -416,6 +416,7 @@ this table is generated from it, not maintained by hand.
 | `analyze_quality` | always | `index?`, `index_id?` | Aggregate quality stats: avg cyclomatic, %A, smell count |
 | `analyzer_health` | always | — | Probe analyzer daemon liveness and version |
 | `cluster_concepts` | always | `index?`, `index_id?`, `k?`, `method?` | Group chunks into concept clusters using k-means over hashed bag-of-words embeddings |
+| `complexity_distribution` | always | `index?`, `index_id?` | Full A-F cyclomatic-complexity histogram over the whole index corpus, with the counted total. |
 | `complexity_hotspots` | always | `index?`, `index_id?`, `top_n?` | Top-N chunks ranked by cyclomatic complexity |
 | `console_metrics` | always | — | Return health and operational metrics for trusty-console polling. |
 | `deep_analysis` | always | `index_id`, `model?` | Run an LLM-augmented deep analysis pass over an index: synthesises a deterministic review report from the indexed corpus, looks up detected… |

@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.13.0] — 2026-08-10
+
+### Added
+
+- `report --analyze` now names every repository it could not enrich, in the report's Gaps & Caveats section, instead of only warning on stderr. A findings table that renders empty because the analyze daemon was unreachable no longer looks like a codebase with no findings (#5239, DOC-67 §9). The fetch contract is unchanged — still fail-open, still never aborts the report.
+- `AnalyzeMetricsSource::fetch_named` returns the reason a fetch yielded nothing (`AnalyzeGap::NotIndexed`, `Unreachable`, or `Unavailable`) rather than a bare `None`. It has a default implementation, so existing implementors are unaffected; `HttpAnalyzeMetricsSource` distinguishes the two conditions it can tell apart. The raw transport error stays on stderr — the report gets the category only, so a URL or a response body never reaches an artifact handed to a third party.
+- `enrich_with_analyze_gaps` is the enrichment entry point that returns those lines; `enrich_with_analyze` is unchanged and now delegates to it.
+- A manifest may declare `[report] gaps = [...]` — Gaps & Caveats lines from whoever produced the manifest. `tga audit` uses this to carry the stages its sweep could not complete into the report (#5236).
+- `polish_with_gaps` renders declared gaps as their own bullets ahead of the auto-collected `Data gaps:` list. A template with no Gaps & Caveats heading gets one appended rather than dropping the lines.
+
 ## [0.12.0] — 2026-08-10
 
 ### Breaking

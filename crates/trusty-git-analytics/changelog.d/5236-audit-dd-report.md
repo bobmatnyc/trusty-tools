@@ -1,0 +1,7 @@
+Added
+
+- `tga audit` now produces the report, not just the data. After the sweep it writes a `manifest.toml` into the output directory and invokes `trusty-review report --manifest <path> --analyze --out <dir>`, then prints the rendered artifact paths (#5236, #5238, DOC-67 §6).
+- `tga::report::dd_manifest::build_dd_manifest` — the DD-manifest adapter, a pure function mapping the resolved config onto trusty-review's manifest schema per DOC-67 §6's field table. Writing the file is the caller's job, so the mapping, its determinism (the same config yields byte-identical TOML), and its credential handling are all unit-testable. Every string it emits is scrubbed of the credentials the config holds, so a token that reached a repository name, a report title, or a stage's error message cannot reach the artifact.
+- A collection stage that did not complete is now named in the report's Gaps & Caveats section instead of only on stderr, so a missing dimension reads as unassessed rather than clean (#5239, DOC-67 §9).
+- The report carries a placeholder data-handling statement recording that a formal data-retention attestation is pending (#5244, #5218, DOC-67 §10).
+- A missing `trusty-review` binary is reported as a named, actionable error naming `TRUSTY_REVIEW_BIN`, the install command, and the manifest that was already written — never a panic or a silent skip. `TRUSTY_REVIEW_BIN` overrides the PATH lookup.

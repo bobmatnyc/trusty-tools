@@ -1,6 +1,6 @@
 [package]
 name = "tga"
-version = "2.12.0"
+version = "2.13.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
@@ -52,6 +52,9 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+# #5236: the DD manifest handed to trusty-review is a TOML file (DOC-67 §6);
+# the file IS the seam, so tga serializes it rather than taking a Cargo edge.
+toml = { workspace = true }
 # Database
 # Bumped from 0.31 to align with trusty-memory-core / trusty-cto-db
 # (rusqlite 0.39, libsqlite3-sys 0.37). Cargo's `links = "sqlite3"`

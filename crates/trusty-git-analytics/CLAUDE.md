@@ -38,7 +38,8 @@ integration tests, external code, and the binary itself.
 | `tga::collect` | `src/collect/` | Stage 1: git extraction (git2), GitHub/JIRA HTTP clients (reqwest+tokio) |
 | `tga::classify` | `src/classify/` | Stage 2: four-tier classification cascade (rules + LLM) |
 | `tga::report` | `src/report/` | Stage 3: CSV/JSON/Markdown generation |
-| `commands` (bin-private) | `src/commands/` | Subcommand handlers wired into `main.rs` |
+| `tga::commands` | `src/commands/` | Subcommand handlers wired into `main.rs`. A library module since #5217 so `tga::audit` can reuse each `run` function instead of duplicating it |
+| `tga::audit` | `src/audit/` | DOC-67 AUDIT mode: `run_full_sweep`, the one-shot, no-TTY sweep over the eight data-collection subcommands |
 
 ### Module Dependency Order
 

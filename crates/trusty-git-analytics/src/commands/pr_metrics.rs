@@ -32,7 +32,8 @@ use tga::core::db::Database;
 /// revision-count data is not yet tracked, so those columns currently
 /// always report `0.0`. The CLI shape is stable, so populating them later
 /// is a non-breaking change.
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Aggregate pull-request metrics per engineer.",
     long_about = "Read the pull_requests table (populated during `tga collect`) and emit\n\

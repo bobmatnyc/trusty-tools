@@ -90,6 +90,22 @@ pub struct ReportSection {
     /// report is byte-identical to the pre-wave-4 output.
     #[serde(default)]
     pub mermaid: Option<bool>,
+    /// Gaps & Caveats lines declared by whoever produced this manifest (#5239).
+    ///
+    /// Why: an orchestrator that ran BEFORE this process knows about areas it
+    /// could not assess and nothing inside trusty-review can observe — `tga
+    /// audit`'s collection stages fail individually without aborting the run
+    /// (DOC-67 §9), so a dimension missing because a stage failed would
+    /// otherwise be indistinguishable, on the page, from a dimension that is
+    /// genuinely clean. Carrying the lines in the manifest keeps that knowledge
+    /// attached to the report instead of stranded in the orchestrator's stderr.
+    /// What: zero or more prose lines rendered as bullets at the top of the
+    /// Gaps & Caveats section, ahead of the auto-collected `Data gaps:` summary.
+    /// Absent (the default) leaves output byte-identical to a manifest without
+    /// the key.
+    /// Test: `manifest_tests.rs::parse_declared_gaps`.
+    #[serde(default)]
+    pub gaps: Vec<String>,
     /// Optional base URL of the trusty-analyze daemon for the `--analyze` live
     /// deterministic-metrics fetch (epic #2445).
     ///
