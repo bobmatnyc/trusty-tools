@@ -210,6 +210,21 @@ impl ProgressAggregate {
         self.rows.get(&stage).map_or(&[], Vec::as_slice)
     }
 
+    /// Every stage that has produced at least one row, in [`Stage`] order.
+    ///
+    /// Why: a renderer driven by [`Stage::all`] can only ever show the three
+    /// pipeline stages, so #5361's audit-sweep rows would be folded into the
+    /// aggregate and never drawn. Iterating what actually arrived keeps the
+    /// display honest for any stage, including ones added later.
+    /// What: the keys of the row map that hold rows, ascending.
+    /// Test: `super::tests::aggregate_lists_only_stages_that_produced_rows`.
+    pub fn stages(&self) -> impl Iterator<Item = Stage> + '_ {
+        self.rows
+            .iter()
+            .filter(|(_, rows)| !rows.is_empty())
+            .map(|(stage, _)| *stage)
+    }
+
     /// Roll-up for one stage.
     ///
     /// Why/What/Test: see [`StageSummary`] and

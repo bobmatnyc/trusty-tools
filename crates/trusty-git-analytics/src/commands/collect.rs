@@ -4,6 +4,7 @@ use tga::collect::collector::FetchOutcome;
 use tga::collect::CollectionPipeline;
 use tga::core::config::Config;
 use tga::core::db::Database;
+use tga::core::progress::ProgressBus;
 
 use crate::commands::args::CollectArgs;
 use crate::commands::date_range::resolve_date_range;
@@ -17,10 +18,32 @@ use crate::commands::date_range::resolve_date_range;
 /// of the loaded YAML config, runs [`CollectionPipeline::run`], then prints
 /// the fetch summary and collection totals to stderr/stdout.  Since tga
 /// 2.6.0, fetch failures are fatal by default (exit non-zero) unless
-/// `--allow-stale` or `--no-fetch` is passed.
+/// `--allow-stale` or `--no-fetch` is passed. Collects with progress
+/// reporting off; see [`run_with_progress`] for the bus-carrying form.
 /// Test: integration test in `tests/integration_test.rs`; fetch summary paths
 /// are unit-tested in `commands::collect::tests`.
 pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow::Result<()> {
+    run_with_progress(config, db, args, &ProgressBus::disabled()).await
+}
+
+/// Run the collection stage, publishing pipeline progress onto `progress`.
+///
+/// Why: #5361 — `audit::run_full_sweep` accepts a [`ProgressBus`] but had no
+/// way to hand it to collection, because [`run`] built the pipeline with a
+/// disabled bus of its own. A caller that supplies a bus at the sweep entry
+/// point must get the pipeline's per-repository events on THAT bus, not on one
+/// the command wrapper constructed and threw away.
+/// What: identical to [`run`] in every other respect; `progress` is attached to
+/// the [`CollectionPipeline`] via `with_progress`. Passing
+/// [`ProgressBus::disabled`] makes every emit a no-op, which is what [`run`]
+/// does, so the CLI path is byte-identical.
+/// Test: `crate::audit::tests::sweep_emits_progress_for_non_collection_stages`.
+pub async fn run_with_progress(
+    config: Config,
+    db: &mut Database,
+    args: CollectArgs,
+    progress: &ProgressBus,
+) -> anyhow::Result<()> {
     let mut cfg = config;
 
     // Filter repositories by name when --repos is supplied.
@@ -86,6 +109,7 @@ pub async fn run(config: Config, db: &mut Database, args: CollectArgs) -> anyhow
     let effective_strict = !args.allow_stale && !args.no_fetch;
 
     let pipeline = CollectionPipeline::new(cfg)
+        .with_progress(progress.clone())
         .with_force(args.force)
         .with_no_fetch(args.no_fetch)
         .with_force_refresh_prs(args.force_refresh_prs)
