@@ -169,8 +169,9 @@ pub struct TrustyToolsConfig {
     /// #2398).
     ///
     /// `None` → the built-in defaults apply: a 100,000-line `history-limit`,
-    /// `mouse on`, and `alternate-screen on`. See [`resolve_tmux_options`] for
-    /// the full precedence and [`TmuxConfig`] for the field-level docs.
+    /// `mouse on`, and `alternate-screen off` (#5364). See
+    /// [`resolve_tmux_options`] for the full precedence and [`TmuxConfig`] for
+    /// the field-level docs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxConfig>,
 }
@@ -275,26 +276,29 @@ pub struct TmuxConfig {
 
     /// Whether programs in a pane may use the terminal alternate screen
     /// buffer (tmux `alternate-screen`). `None` →
-    /// [`DEFAULT_TMUX_ALTERNATE_SCREEN`] (`true`), which is tmux's own
-    /// factory default — set `alternate_screen: false` to turn it off (#5151).
+    /// [`DEFAULT_TMUX_ALTERNATE_SCREEN`], which is `false` since #5364 — set
+    /// `alternate_screen: true` to restore tmux's factory behaviour.
     ///
-    /// **Why you would set this to `false`.** A full-screen TUI (Claude Code
+    /// **Why the default is `false`.** A full-screen TUI (Claude Code
     /// included) draws into the alternate screen, and tmux discards that
     /// buffer instead of appending it to the pane's scrollback. That is why a
     /// `tm` session can hold tens of thousands of lines of `history-limit` and
     /// still show you nothing to scroll back through: the history is not
     /// missing, it was never written to the pane. `false` makes the TUI draw
-    /// into the normal buffer, so its output lands in scrollback.
+    /// into the normal buffer, so its output lands in scrollback. #5151 added
+    /// this knob but defaulted it to `true`, leaving the bug in place for
+    /// anyone who never found it; #5364 flipped the default so a managed
+    /// session scrolls out of the box.
     ///
-    /// **What that costs — read before setting it.** The effect is
+    /// **What that costs — the accepted tradeoff.** The effect is
     /// server-wide, and every trusty-* managed session shares ONE tmux server,
     /// so this changes every pane on it, not just the ones running an agent.
     /// `vim`, `less`, `htop` and `man` all stop restoring the screen they
     /// covered: each leaves its final frame behind, smeared into the
     /// scrollback on exit, sometimes with redraw garbage from partial
-    /// repaints. It is also not retroactive — anything already written while
-    /// the alternate screen was up stays unrecoverable, and only panes created
-    /// after the option lands are affected at all.
+    /// repaints. The repo owner accepted that in exchange for working
+    /// scrollback (#5364). It is also not retroactive — anything already
+    /// written while the alternate screen was up stays unrecoverable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alternate_screen: Option<bool>,
 }
@@ -337,12 +341,14 @@ pub struct ResolvedTmuxOptions {
 /// clamps `history_limit` up to [`MIN_TMUX_HISTORY_LIMIT`] — a configured `0`
 /// (or any other near-zero value) does NOT mean "unlimited" in tmux, so it is
 /// corrected rather than honoured verbatim (#2398 QA finding).
-/// `alternate_screen` is NOT clamped or corrected: both values are legitimate
-/// and the default matches tmux's own, so an absent config leaves the
-/// operator's terminal behaving exactly as it does today (#5151).
+/// `alternate_screen` is NOT clamped or corrected: both values are legitimate,
+/// so a configured value is honoured verbatim. Its default is `false` (#5364),
+/// which is deliberately NOT tmux's factory value — see
+/// [`TmuxConfig::alternate_screen`] for the scrollback it buys and the
+/// screen-restore behaviour it gives up server-wide.
 /// Test: `tmux_options_default_when_no_config`, `tmux_options_config_override`,
 /// `tmux_options_clamps_zero_history_limit`, `tmux_options_clamps_below_minimum`,
-/// `tmux_options_alternate_screen_defaults_on`,
+/// `tmux_options_alternate_screen_defaults_off`,
 /// `tmux_options_alternate_screen_config_override`.
 pub fn resolve_tmux_options(config: &TrustyToolsConfig) -> ResolvedTmuxOptions {
     let section = config.tmux.as_ref();
@@ -353,7 +359,8 @@ pub fn resolve_tmux_options(config: &TrustyToolsConfig) -> ResolvedTmuxOptions {
     ResolvedTmuxOptions {
         history_limit,
         mouse: section.and_then(|t| t.mouse).unwrap_or(DEFAULT_TMUX_MOUSE),
-        // #5151: opt-in knob — absent config keeps tmux's factory `on`.
+        // #5364: absent config now resolves to `off` so scrollback works
+        // without the operator opting in; `true` restores tmux's factory value.
         alternate_screen: section
             .and_then(|t| t.alternate_screen)
             .unwrap_or(DEFAULT_TMUX_ALTERNATE_SCREEN),

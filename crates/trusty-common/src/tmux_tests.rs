@@ -255,16 +255,17 @@ fn scrollback_option_commands_mouse_off() {
 }
 
 #[test]
-fn scrollback_option_commands_alternate_screen_defaults_on() {
-    // #5151: `on` is tmux's factory default and today's behaviour — the
-    // knob is opt-IN, so the default must never alter an operator's
-    // terminal.
+fn scrollback_option_commands_alternate_screen_defaults_off() {
+    // #5364: the default is `off` so a managed session gets working
+    // scrollback without the operator finding the knob first. #5151 shipped
+    // it as `on` (tmux's factory value), which left the original bug in
+    // place for everyone who never opted in.
     // Compile-time tripwire: flipping the default is a deliberate act.
-    const { assert!(DEFAULT_TMUX_ALTERNATE_SCREEN) };
+    const { assert!(!DEFAULT_TMUX_ALTERNATE_SCREEN) };
     let cmds = scrollback_option_commands(100_000, true, DEFAULT_TMUX_ALTERNATE_SCREEN);
     assert_eq!(
         tmux_argv(&cmds[2]),
-        ["set-option", "-wg", "alternate-screen", "on"]
+        ["set-option", "-wg", "alternate-screen", "off"]
     );
 }
 
