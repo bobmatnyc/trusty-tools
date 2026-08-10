@@ -216,3 +216,147 @@ fn error_display() {
     };
     assert!(e.to_string().contains("503"));
 }
+
+// ─── Named gaps (#5239) ──────────────────────────────────────────────────────
+
+/// A source that answers with a fixed outcome, so the enrichment walk can be
+/// driven without a daemon.
+struct StubSource(fn() -> AnalyzeFetch);
+
+#[async_trait::async_trait]
+impl AnalyzeMetricsSource for StubSource {
+    async fn fetch(&self, _index_id: &str) -> Option<AnalyzeMetrics> {
+        match (self.0)() {
+            AnalyzeFetch::Fetched(m) => Some(*m),
+            AnalyzeFetch::Missing(_) => None,
+        }
+    }
+
+    async fn fetch_named(&self, _index_id: &str) -> AnalyzeFetch {
+        (self.0)()
+    }
+}
+
+/// A source that implements ONLY `fetch`, exercising the trait's default
+/// `fetch_named` — the shape an out-of-crate implementor keeps compiling with.
+struct MinimalSource;
+
+#[async_trait::async_trait]
+impl AnalyzeMetricsSource for MinimalSource {
+    async fn fetch(&self, _index_id: &str) -> Option<AnalyzeMetrics> {
+        None
+    }
+}
+
+/// Build a one-repository model whose single entry is an unpopulated local
+/// checkout — the only shape the enrichment walk acts on.
+fn model_with_local_repo(name: &str) -> crate::report::model::ReportModel {
+    let manifest = crate::report::manifest::parse_manifest(
+        &format!("[report]\ntitle = \"T\"\n\n[[repositories]]\nname = \"{name}\"\npath = \".\"\n"),
+        std::path::Path::new("m.toml"),
+    )
+    .expect("fixture manifest parses");
+    let mut model = crate::report::model::ReportModel::build(
+        &manifest,
+        std::path::Path::new("m.toml"),
+        "report-technical-dd",
+        None,
+    )
+    .expect("model builds");
+    // `.` always resolves to a directory, so `local_path` is populated; pin it
+    // to a stable name so the derived index id does not depend on the CWD.
+    model.repositories[0].local_path = Some(std::path::PathBuf::from("/tmp/northwind-web"));
+    model
+}
+
+/// Why: the gap phrasing reaches a third party's desk; it must be fixed prose,
+/// never a variant name and never run-specific detail.
+/// Test: itself.
+#[test]
+fn gap_labels_are_stable() {
+    assert_eq!(
+        AnalyzeGap::NotIndexed.as_str(),
+        "trusty-analyze index not built"
+    );
+    assert_eq!(
+        AnalyzeGap::Unreachable.as_str(),
+        "trusty-analyze unreachable"
+    );
+    assert_eq!(
+        AnalyzeGap::Unavailable.as_str(),
+        "trusty-analyze data unavailable"
+    );
+}
+
+/// Why: the trait's default `fetch_named` is what keeps every existing
+/// implementor compiling; it must still produce a NAMED outcome rather than
+/// silently dropping the fact that nothing was fetched.
+/// Test: itself.
+#[tokio::test]
+async fn default_fetch_named_reports_unavailable() {
+    match MinimalSource.fetch_named("demo").await {
+        AnalyzeFetch::Missing(gap) => assert_eq!(gap, AnalyzeGap::Unavailable),
+        AnalyzeFetch::Fetched(_) => panic!("MinimalSource never fetches"),
+    }
+}
+
+/// Why: #5239's core claim — a repository the daemon could not serve is named
+/// in the report, and the line says "not assessed", not nothing at all.
+/// Test: itself.
+#[tokio::test]
+async fn enrich_names_unreachable_repositories() {
+    let mut model = model_with_local_repo("Northwind Web");
+    let source = StubSource(|| AnalyzeFetch::Missing(AnalyzeGap::Unreachable));
+
+    let gaps = enrich_with_analyze_gaps(&mut model, &source).await;
+
+    assert_eq!(gaps.len(), 1, "one line per gap kind: {gaps:?}");
+    assert!(
+        gaps[0].starts_with("trusty-analyze unreachable"),
+        "{}",
+        gaps[0]
+    );
+    assert!(gaps[0].contains("Northwind Web"), "{}", gaps[0]);
+    assert!(
+        gaps[0].contains("not assessed, not clean"),
+        "the line must refuse to read as a clean pass: {}",
+        gaps[0]
+    );
+    assert!(model.repositories[0].metrics.is_none());
+}
+
+/// Why: the fail-open contract is unchanged — a populated repo yields metrics
+/// and NO gap line, so a clean report stays clean.
+/// Test: itself.
+#[tokio::test]
+async fn enrich_reports_no_gaps_when_every_repo_is_populated() {
+    let mut model = model_with_local_repo("Northwind Web");
+    let source = StubSource(|| {
+        AnalyzeFetch::Fetched(Box::new(map_metrics(
+            &[WireHotspot { cyclomatic: 3 }],
+            &[],
+            &[],
+        )))
+    });
+
+    let gaps = enrich_with_analyze_gaps(&mut model, &source).await;
+
+    assert!(gaps.is_empty(), "populated repo is not a gap: {gaps:?}");
+    assert!(model.repositories[0].metrics.is_some());
+}
+
+/// Why: a remote entry was never eligible for a local index, so calling it an
+/// unassessed gap would be a false alarm in every report with a remote repo.
+/// Test: itself.
+#[tokio::test]
+async fn enrich_ignores_repositories_with_no_local_checkout() {
+    let mut model = model_with_local_repo("Northwind Web");
+    model.repositories[0].local_path = None;
+    let source = StubSource(|| AnalyzeFetch::Missing(AnalyzeGap::Unreachable));
+
+    assert!(
+        enrich_with_analyze_gaps(&mut model, &source)
+            .await
+            .is_empty()
+    );
+}

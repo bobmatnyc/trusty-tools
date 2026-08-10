@@ -293,3 +293,166 @@ fn audit_args_expose_a_complete_clap_command() {
     let args = AuditArgs::from_arg_matches(&matches).expect("from_arg_matches");
     assert_eq!(args.analyst.as_deref(), Some("me"));
 }
+
+// ---------------------------------------------------------------------------
+// Gaps & Caveats lines from the sweep's own record (#5239, #5244)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sweep_gap_lines_name_each_failed_stage() {
+    let mut stats = AuditSweepStats::default();
+    stats.record(SweepStage::Collect, Instant::now(), Ok(()));
+    stats.record(
+        SweepStage::JiraSync,
+        Instant::now(),
+        Err(anyhow::anyhow!("no JIRA project configured")),
+    );
+    stats.record(
+        SweepStage::Dora,
+        Instant::now(),
+        Err(anyhow::anyhow!("fact_deployments is empty")),
+    );
+
+    let lines = crate::audit::sweep_gap_lines(&stats);
+
+    assert_eq!(lines.len(), 2, "one line per failure, none for success");
+    assert!(lines[0].contains("`jira sync`"), "{}", lines[0]);
+    assert!(
+        lines[0].contains("no JIRA project configured"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[1].contains("`dora`"), "{}", lines[1]);
+    // DOC-67 §9: the line must refuse to read as a clean result.
+    for line in &lines {
+        assert!(line.contains("not assessed"), "{line}");
+    }
+    // Execution order, so two runs over the same failures read identically.
+    assert_eq!(lines, crate::audit::sweep_gap_lines(&stats));
+}
+
+#[test]
+fn sweep_gap_lines_are_empty_for_a_clean_run() {
+    let mut stats = AuditSweepStats::default();
+    for stage in EXPECTED_ORDER {
+        stats.record(stage, Instant::now(), Ok(()));
+    }
+    assert!(crate::audit::sweep_gap_lines(&stats).is_empty());
+}
+
+#[test]
+fn long_stage_reasons_are_truncated() {
+    let mut stats = AuditSweepStats::default();
+    stats.record(
+        SweepStage::Collect,
+        Instant::now(),
+        Err(anyhow::anyhow!("x".repeat(4000))),
+    );
+
+    let line = crate::audit::sweep_gap_lines(&stats).remove(0);
+
+    assert!(line.contains('…'), "a long reason is excerpted: {line}");
+    assert!(
+        line.chars().count() < 400,
+        "one verbose error must not dominate the Gaps section ({} chars)",
+        line.chars().count()
+    );
+}
+
+#[test]
+fn data_handling_note_is_a_pending_claim() {
+    let note = crate::audit::DATA_HANDLING_NOTE;
+    // DOC-67 §10: pending, never asserted — and #5218 is where the real one comes from.
+    assert!(note.contains("pending"), "{note}");
+    assert!(note.contains("#5218"), "{note}");
+    // §10's exact scope claim; the broader "no code" claim is wrong and must
+    // not appear, because free-text columns can carry pasted snippets.
+    assert!(note.contains("no file content, diffs, patches, hunks, or blobs"));
+    assert!(!note.contains("no code"), "{note}");
+}
+
+// ---------------------------------------------------------------------------
+// Invoking trusty-review as a subprocess (#5238)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn artifact_paths_are_parsed_from_stdout() {
+    // trusty-review prints one written path per line on stdout; blank lines and
+    // trailing whitespace must not become phantom artifacts.
+    let stdout = "  /out/acme.md\n\n/out/acme.json\n";
+    let paths = crate::audit::artifact_paths(stdout);
+    assert_eq!(
+        paths,
+        vec![
+            std::path::PathBuf::from("/out/acme.md"),
+            std::path::PathBuf::from("/out/acme.json")
+        ]
+    );
+    assert!(crate::audit::artifact_paths("").is_empty());
+}
+
+#[tokio::test]
+async fn missing_binary_is_a_named_actionable_error() {
+    // A renderer that is not installed must produce a message an operator can
+    // act on — never a panic, and never a silent skip that leaves the run
+    // looking successful with no report.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest = dir.path().join("manifest.toml");
+    std::fs::write(&manifest, "[report]\ntitle = \"T\"\n").expect("write");
+
+    // SAFETY: single-threaded test process mutating its own env before use.
+    unsafe {
+        std::env::set_var(
+            crate::audit::ENV_REVIEW_BIN,
+            dir.path().join("definitely-not-installed"),
+        );
+    }
+    let err = crate::audit::run_review_report(&manifest, dir.path())
+        .await
+        .expect_err("a missing binary must be an error");
+    unsafe {
+        std::env::remove_var(crate::audit::ENV_REVIEW_BIN);
+    }
+
+    let msg = err.to_string();
+    assert!(
+        matches!(err, crate::audit::ReviewRunError::BinaryNotFound { .. }),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("TRUSTY_REVIEW_BIN"),
+        "names the override: {msg}"
+    );
+    assert!(msg.contains("cargo install"), "names the fix: {msg}");
+    assert!(
+        msg.contains(&manifest.display().to_string()),
+        "the written manifest is still usable and must be named: {msg}"
+    );
+}
+
+#[test]
+fn binary_resolution_prefers_the_env_override() {
+    // SAFETY: single-threaded test process mutating its own env before use.
+    unsafe {
+        std::env::set_var(crate::audit::ENV_REVIEW_BIN, "/opt/bin/trusty-review");
+    }
+    assert_eq!(
+        crate::audit::resolve_review_binary(),
+        "/opt/bin/trusty-review"
+    );
+    unsafe {
+        std::env::set_var(crate::audit::ENV_REVIEW_BIN, "");
+    }
+    assert_eq!(
+        crate::audit::resolve_review_binary(),
+        crate::audit::DEFAULT_REVIEW_BIN,
+        "an empty override falls back to the PATH lookup"
+    );
+    unsafe {
+        std::env::remove_var(crate::audit::ENV_REVIEW_BIN);
+    }
+    assert_eq!(
+        crate::audit::resolve_review_binary(),
+        crate::audit::DEFAULT_REVIEW_BIN
+    );
+}

@@ -21,11 +21,18 @@
 //! running it third would render a mostly empty report. The executed order is
 //! therefore data-flow order — see [`SweepStage`].
 
+mod gaps;
+mod review;
 mod stage;
 mod sweep;
 
 #[cfg(test)]
 mod tests;
 
+pub use gaps::{sweep_gap_lines, DATA_HANDLING_NOTE};
+pub use review::{
+    artifact_paths, resolve_review_binary, run_review_report, ReviewRun, ReviewRunError,
+    DEFAULT_REVIEW_BIN, ENV_REVIEW_BIN,
+};
 pub use stage::{AuditSweepStats, StageOutcome, StageStatus, SweepStage};
 pub use sweep::{run_full_sweep, SweepOptions};

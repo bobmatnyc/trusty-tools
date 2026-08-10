@@ -33,9 +33,28 @@ const GAPS_HEADING_NEEDLE: &str = "Gaps & Caveats";
 /// the Gaps & Caveats section body with the compact gap list.
 /// Test: `polish_tests.rs::polish_end_to_end`.
 pub fn polish(rendered: &str) -> String {
+    polish_with_gaps(rendered, &[])
+}
+
+/// Run the polish pass and lead the Gaps & Caveats section with `declared`.
+///
+/// Why: some unassessed areas are known only to the caller — an upstream
+/// orchestrator whose collection stage failed, or a live analyze fetch that
+/// came back empty because the daemon was unreachable (#5239, DOC-67 §9).
+/// Those are substantive statements about what the report does NOT cover, so
+/// they render as their own bullets rather than being folded into the
+/// auto-collected `Data gaps:` field list.
+/// What: identical to [`polish`], plus one bullet per `declared` line at the
+/// top of the Gaps & Caveats section. An empty `declared` produces byte-
+/// identical output to [`polish`]. When the template has no Gaps & Caveats
+/// heading at all, a section is appended so a named gap is never dropped.
+/// Test: `polish_tests.rs::{declared_gaps_render_as_bullets,
+/// declared_gaps_appended_when_template_has_no_section,
+/// empty_declared_gaps_are_byte_identical}`.
+pub fn polish_with_gaps(rendered: &str, declared: &[String]) -> String {
     let stripped = strip_template_comments(rendered);
     let (body, gaps) = omit_empty(&stripped);
-    let out = render_gaps_section(&body, &gaps);
+    let out = render_gaps_section(&body, &gaps, declared);
     // The line-based passes join with `\n` and drop the trailing newline; restore
     // it when the input had one so exact-output expectations hold.
     if rendered.ends_with('\n') && !out.ends_with('\n') {
@@ -498,13 +517,24 @@ fn collapse_recursive(lines: &[String], gaps: &mut Vec<String>) -> (Vec<String>,
 /// "no material gaps" note when the list is empty).  When the section is absent
 /// (a custom template), the body is returned unchanged.
 /// Test: `polish_tests.rs::gaps_section_lists_dropped_fields`.
-fn render_gaps_section(text: &str, gaps: &[String]) -> String {
+fn render_gaps_section(text: &str, gaps: &[String], declared: &[String]) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let Some(head_idx) = lines
         .iter()
         .position(|l| heading_text(l.trim()).is_some_and(|h| h.contains(GAPS_HEADING_NEEDLE)))
     else {
-        return text.to_string();
+        // #5239: a custom template with no Gaps & Caveats heading must still
+        // carry a named gap — dropping it is exactly the silent omission the
+        // caller passed it in to prevent.
+        if declared.is_empty() {
+            return text.to_string();
+        }
+        let mut out = text.trim_end().to_string();
+        out.push_str(&format!("\n\n## {GAPS_HEADING_NEEDLE}\n\n"));
+        for line in declared {
+            out.push_str(&format!("- {line}\n"));
+        }
+        return out;
     };
 
     // Find the end of the section body (next `---` or heading, else EOF).
@@ -519,6 +549,12 @@ fn render_gaps_section(text: &str, gaps: &[String]) -> String {
 
     let mut out: Vec<String> = lines[..=head_idx].iter().map(|s| s.to_string()).collect();
     out.push(String::new());
+    // #5239: named gaps lead — they say what was not assessed, which outranks
+    // the field-level list of what was merely not stated.
+    if !declared.is_empty() {
+        out.extend(declared.iter().map(|line| format!("- {line}")));
+        out.push(String::new());
+    }
     if gaps.is_empty() {
         out.push("No material data gaps: every templated field was populated from measured, declared, or inferred data.".to_string());
     } else {

@@ -69,6 +69,22 @@ pub struct ReportModel {
     pub manifest_path: String,
     /// One report per repository, in manifest order.
     pub repositories: Vec<RepositoryReport>,
+    /// Named Gaps & Caveats lines for areas this report did not assess (#5239).
+    ///
+    /// Why: fail-open enrichment must not be fail-silent. A repository whose
+    /// metrics are absent because the analyze daemon was unreachable, and a
+    /// repository that is genuinely clean, must not look the same to a reader
+    /// (DOC-67 §9). Recording the lines on the model — not only in the rendered
+    /// markdown — also keeps the JSON twin a faithful record of what was NOT
+    /// assessed.
+    /// What: seeded from the manifest's `[report].gaps` (an upstream
+    /// orchestrator's own unassessed areas) and appended to at run time by
+    /// [`super::analyze_adapter::enrich_with_analyze_gaps`]. Empty is the
+    /// common case and renders exactly as before.
+    /// Test: `analyze_adapter_tests.rs::enrich_names_unreachable_repositories`,
+    /// `polish_tests.rs::declared_gaps_render_as_bullets`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<String>,
     /// Optional M2 LLM synthesis result (present only under `--synthesize`).
     ///
     /// Why: recording the synthesis outcome on the model keeps the JSON twin a
@@ -188,6 +204,9 @@ impl ReportModel {
             generated_date: today,
             manifest_path: manifest_path.display().to_string(),
             repositories,
+            // #5239: the manifest author's own unassessed areas travel with the
+            // report; the analyze pass appends its named gaps to the same list.
+            gaps: manifest.report.gaps.clone(),
             synthesis: None,
             benchmark: None,
             investigation: None,

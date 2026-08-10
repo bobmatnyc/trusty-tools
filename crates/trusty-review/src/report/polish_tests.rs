@@ -6,7 +6,7 @@
 //! What: exercises `strip_template_comments` and `polish` on crafted markdown.
 //! Test: included as `#[cfg(test)] mod tests` from `polish.rs`.
 
-use super::{polish, strip_template_comments};
+use super::{polish, polish_with_gaps, strip_template_comments};
 use crate::report::fill::HONESTY_MARKER;
 
 /// Why: inline instructional comments must never reach the output.
@@ -285,4 +285,60 @@ fn heading_with_only_pseudo_heading_content_not_collapsed() {
         .expect("region under the ### heading");
     assert!(!between.contains("No data available"));
     assert!(between.contains("Rust"));
+}
+
+// ─── Declared (named) gaps — #5239 ──────────────────────────────────────────
+
+/// A minimal document carrying the Gaps & Caveats heading the polish pass
+/// rewrites.
+fn doc_with_gaps_section() -> &'static str {
+    "# R\n\n## 1. Metadata\n\n| Field | Value |\n|---|---|\n| Client | Acme |\n\n\
+     ## 8. Gaps & Caveats\n\n- {{gap_1}}\n\n---\n*footer*\n"
+}
+
+/// Why: a stage that did not run must appear in the report as its own
+/// statement, not be folded into the field-level `Data gaps:` list where it
+/// would read as a missing table cell.
+/// Test: itself.
+#[test]
+fn declared_gaps_render_as_bullets() {
+    let declared = vec![
+        "Stage `jira sync` did not complete — ticket correlation is not assessed.".to_string(),
+        "trusty-analyze unreachable — no analysis pass ran for: Northwind Web.".to_string(),
+    ];
+    let out = polish_with_gaps(doc_with_gaps_section(), &declared);
+
+    for line in &declared {
+        assert!(out.contains(&format!("- {line}")), "missing {line}: {out}");
+    }
+    // The auto-collected list still renders, after the named bullets.
+    let bullet_at = out.find("- Stage `jira sync`").expect("bullet present");
+    if let Some(list_at) = out.find("Data gaps:") {
+        assert!(bullet_at < list_at, "named gaps lead the section: {out}");
+    }
+}
+
+/// Why: every existing caller passes no declared gaps; their output must not
+/// move by a single byte.
+/// Test: itself.
+#[test]
+fn empty_declared_gaps_are_byte_identical() {
+    let doc = doc_with_gaps_section();
+    assert_eq!(polish(doc), polish_with_gaps(doc, &[]));
+}
+
+/// Why: a custom template with no Gaps & Caveats heading must not silently
+/// swallow a named gap — that is the exact failure mode #5239 exists to close.
+/// Test: itself.
+#[test]
+fn declared_gaps_appended_when_template_has_no_section() {
+    let doc = "# R\n\n## 1. Metadata\n\nnothing here\n";
+    let declared = vec!["Stage `collect` did not complete.".to_string()];
+
+    let out = polish_with_gaps(doc, &declared);
+
+    assert!(out.contains("## Gaps & Caveats"), "{out}");
+    assert!(out.contains("- Stage `collect` did not complete."), "{out}");
+    // Unchanged when nothing was declared.
+    assert_eq!(polish_with_gaps(doc, &[]), polish(doc));
 }

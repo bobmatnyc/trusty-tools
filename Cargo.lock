@@ -10316,6 +10316,7 @@ dependencies = [
  "tera",
  "thiserror 1.0.69",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "tracing-test",
