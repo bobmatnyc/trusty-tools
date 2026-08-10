@@ -512,6 +512,58 @@ impl DaemonState {
             .collect()
     }
 
+    /// Agents of this session's live delegations that are writing into `cwd`
+    /// without a working tree of their own (#4480).
+    ///
+    /// Why: this is the exact population a new file-mutating dispatch would be
+    /// joining. Answering it here — over the tracker's own records, which are
+    /// the only place a delegation's liveness is resolved from real
+    /// `SubagentStop` signals — is what keeps the guard from having to
+    /// re-derive liveness from a timer and guess.
+    /// What: this session's delegations that are [`DelegationStatus::is_live`],
+    /// whose `cwd` equals `cwd`, whose agent
+    /// [`shares_the_callers_tree`](crate::core::dispatch_isolation::shares_the_callers_tree),
+    /// and whose `tool_use_id` is not `exclude_tool_use_id`; returned as agent
+    /// names for the deny message.
+    ///
+    /// `exclude_tool_use_id` is load-bearing, not a convenience. The daemon's
+    /// `matcher: "*"` `PreToolUse` hook and `tm hook --pm-guard` fire on the
+    /// SAME dispatch and race; if the tracker records the dispatch first, the
+    /// caller would find ITSELF here and deny the very first dispatch of a
+    /// session. Excluding the caller's own `tool_use_id` makes the answer
+    /// independent of that ordering.
+    ///
+    /// A delegation with no recorded `cwd` is skipped rather than assumed to
+    /// share one: it is indeterminate, and this whole guard fails toward ALLOW.
+    /// `Stale` is deliberately not live — a record tracking has given up on
+    /// must not block a dispatch for the remaining hours of its retention.
+    /// Test: `shared_tree_writers_route_reports_live_unisolated_writers` and
+    /// siblings in [`crate::daemon::delegation_routes`], which drive every
+    /// filter here through the route that is this method's only caller.
+    pub fn live_shared_tree_writers(
+        &self,
+        session: SessionId,
+        cwd: &std::path::Path,
+        exclude_tool_use_id: Option<&str>,
+    ) -> Vec<String> {
+        self.delegations
+            .iter()
+            .filter(|e| {
+                let d = e.value();
+                d.session == session
+                    && d.status.is_live()
+                    && d.cwd.as_deref() == Some(cwd)
+                    && !(exclude_tool_use_id.is_some()
+                        && d.tool_use_id.as_deref() == exclude_tool_use_id)
+                    && crate::core::dispatch_isolation::shares_the_callers_tree(
+                        &d.agent,
+                        d.isolation.as_deref(),
+                    )
+            })
+            .map(|e| e.value().agent.clone())
+            .collect()
+    }
+
     /// Find one session's delegation matching `pred`, returning its id (#2864).
     ///
     /// Why: the hook delegation tracker resolves a record by correlation key

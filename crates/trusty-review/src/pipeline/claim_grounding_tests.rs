@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::config::constants::{BLOCK_ISSUE_MIN_CONFIDENCE, FIX_ISSUE_MIN_CONFIDENCE};
-use crate::models::Finding;
+use crate::models::{Effort, Finding};
 
 /// The finding #4081 reports, field for field.
 fn ruff_finding() -> Finding {

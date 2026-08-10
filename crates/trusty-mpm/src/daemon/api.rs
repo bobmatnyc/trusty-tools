@@ -256,10 +256,11 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/claude-config/restore", post(restore_checkpoint))
         .route("/claude-config/profiles", get(list_profiles))
         .route("/claude-config/deploy", post(deploy_profile))
-        .route("/pair/request", post(pair_request))
-        .route("/pair/confirm", post(pair_confirm))
-        .route("/pair/status", get(pair_status))
-        .route("/pair/reset", post(pair_reset))
+        // The four `/pair/*` verbs and the #4480 delegation query live in
+        // sibling sub-routers: this file is grandfathered over the SLOC cap at a
+        // frozen budget, so a new route may not simply be appended here.
+        .merge(super::pairing_routes::router())
+        .merge(super::delegation_routes::router())
         .route("/api/v1/doctor", get(doctor))
         .route("/api/v1/errors", get(list_errors))
         .route("/api/v1/report-bug", post(report_bug_http))

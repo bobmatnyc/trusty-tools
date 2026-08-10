@@ -27,7 +27,7 @@ use crate::{
     models::{ReviewResult, ReviewStatus},
     pipeline::{
         diff_analyzer::models::FilteredDiff,
-        letter_grade::{Grade, clamp_grade_to_verdict, default_grade_for_verdict},
+        letter_grade::{Grade, default_grade_for_verdict, reconcile_grade_with_verdict},
         mapreduce::{MapContext, ReducedReview, run_map_reduce},
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
@@ -329,11 +329,14 @@ async fn fold_reduced_into_result(
     .await;
     result.findings = findings;
 
-    // Envelope grade: clamp the original (pre-floor) grade to the post-
+    // Envelope grade: reconcile the original (pre-floor) grade with the post-
     // verification verdict (closes #1486 parity with the unified path).
     // None when UNKNOWN (#1474 parity) — never emits "F" for un-reviewable diffs.
+    // #4044: `reconcile_grade_with_verdict`, not `clamp_grade_to_verdict` — the
+    // clamp leaves a too-SEVERE grade untouched, so a refuted blocking finding
+    // relaxed the verdict while the model's "F" stood. Same fix as `runner.rs`.
     result.grade =
-        original_llm_grade.map(|g| clamp_grade_to_verdict(g, &result.verdict).to_string());
+        original_llm_grade.map(|g| reconcile_grade_with_verdict(g, &result.verdict).to_string());
 
     // Grade reconciliation (#1886 parity with the unified path): mirror the final
     // top-level grade into any JSON `"grade"` embedded in `review_body` so the two

@@ -63,9 +63,18 @@ pub const VERIFY_SCHEMA_NAME: &str = "verification_judgment";
 /// truncation/hallucination hard rule (REFUTE anything referencing a file/line
 /// absent from the diff) is preserved verbatim — that guard is legitimate.
 /// What: returns a static string instructing the model to emit exactly one of
-/// CONFIRMED / REFUTED with a one-line reason, weighing the evidence in the diff
-/// symmetrically.
-/// Test: `verify_system_prompt_mentions_refuted_guard`.
+/// CONFIRMED / REFUTED / UNVERIFIABLE with a one-line reason, weighing the
+/// evidence in the diff symmetrically.
+///
+/// #5309 added the third judgment. With only CONFIRMED and REFUTED available the
+/// verifier had to pick one even for a claim the diff cannot settle — and it
+/// picked CONFIRMED on a finding whose own text said "the diff does not show
+/// their signatures, so this cannot be confirmed from the diff alone", producing
+/// a false BLOCK. UNVERIFIABLE lets it record "the evidence needed is not here",
+/// which `verify_one` maps to `VerifyOutcome::Unverifiable` — visible to the
+/// author, never a confirmation, never a blocker.
+/// Test: `verify_system_prompt_mentions_refuted_guard`,
+/// `verify_system_prompt_offers_unverifiable_judgment`.
 pub fn verifier_system_prompt() -> &'static str {
     r#"You are a strict code-review fact-checker. You are given the unified diff of a
 pull request and ONE finding another reviewer raised about that diff. Your only
@@ -78,6 +87,13 @@ diff shown.
   needs attention.
 - REFUTED — the finding is NOT defensible: it is speculative, incorrect,
   contradicted by the diff, or cannot be located in the diff at all.
+- UNVERIFIABLE — the finding may or may not be real, but the evidence needed to
+  settle it is NOT in the diff you were given: it rests on a declaration,
+  signature, caller, or configuration outside the diff, or the finding's own text
+  says it could not be confirmed from the diff. Answer UNVERIFIABLE rather than
+  guessing CONFIRMED. Confirming a claim you could not check is the worst
+  outcome available to you — it tells the reader something checked it when
+  nothing did.
 
 ## Hard rule (truncation / hallucination guard)
 If the finding references a file or line that does NOT appear in the diff shown
@@ -104,8 +120,8 @@ from the diff, and a finding that rests solely on such speculation is not
 defensible. This does NOT relax the diff-grounding rules above: a problem the
 diff itself demonstrates remains CONFIRMED regardless of any rationale.
 
-Populate the structured response fields: `judgment` (CONFIRMED or REFUTED) and
-`reason` (one short sentence)."#
+Populate the structured response fields: `judgment` (CONFIRMED, REFUTED, or
+UNVERIFIABLE) and `reason` (one short sentence)."#
 }
 
 // ─── Output schema ───────────────────────────────────────────────────────────────
@@ -116,7 +132,10 @@ Populate the structured response fields: `judgment` (CONFIRMED or REFUTED) and
 /// guessed" failure mode — the provider guarantees `LlmResponse.text` is a clean
 /// JSON object with a `judgment` enum, so a parse can never silently default.
 /// What: returns a `ResponseSchema` whose object requires `judgment` ∈
-/// {CONFIRMED, REFUTED} plus a one-line `reason`.  The schema is declared in
+/// {CONFIRMED, REFUTED, UNVERIFIABLE} plus a one-line `reason`.  The third
+/// value was added by #5309 so the verifier can decline to confirm a claim the
+/// diff cannot settle instead of being forced into a binary choice.  The schema
+/// is declared in
 /// its natural shape and then made OpenAI strict-mode compliant in one pass by
 /// [`enforce_strict_mode`] (every object node gets `additionalProperties:false`
 /// and all properties listed in `required`).  `reason` thus becomes required
@@ -130,8 +149,8 @@ pub fn verify_response_schema() -> ResponseSchema {
         "properties": {
             "judgment": {
                 "type": "string",
-                "enum": ["CONFIRMED", "REFUTED"],
-                "description": "Binary verification judgment for the finding"
+                "enum": ["CONFIRMED", "REFUTED", "UNVERIFIABLE"],
+                "description": "Verification judgment for the finding"
             },
             "reason": {
                 "type": "string",
@@ -196,8 +215,10 @@ pub fn build_verify_request(
          - kind: {kind}\n\
          - description: {description}\n\
          - proposed fix: {suggestion}\n\n\
-         Decide CONFIRMED or REFUTED per the rules in the system prompt. \
-         If `{file}` or line {line} does not appear in the diff above, answer REFUTED.",
+         Decide CONFIRMED, REFUTED, or UNVERIFIABLE per the rules in the system prompt. \
+         If `{file}` or line {line} does not appear in the diff above, answer REFUTED. \
+         If the evidence this finding rests on is outside the diff above — a signature, \
+         a declaration, a caller, a configuration file — answer UNVERIFIABLE, not CONFIRMED.",
         diff = diff,
         rationale_block = rationale_block,
         file = finding.file,

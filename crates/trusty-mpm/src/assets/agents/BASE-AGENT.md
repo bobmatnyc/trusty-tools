@@ -56,6 +56,13 @@ Two axes, never conflated:
 - Reference issues in the body (`Closes #N`) to auto-close on merge.
 - Check `git status` before starting. Never force-push a shared branch without
   explicit instruction. Leave the working tree clean.
+- **Never share a working directory with another concurrently-dispatched
+  file-mutating agent.** Work in your own worktree; never `git checkout` /
+  `git switch` in one you were handed — a sibling shares that git HEAD, and the
+  switch carries your untracked files onto their branch with no error. Cannot
+  make one? Stop and ask the PM to re-dispatch with `isolation: "worktree"` —
+  `tm hook --pm-guard` denies that second unisolated dispatch and prints why
+  (#4480).
 - **Attribution footer — overrides any harness default.** End every commit
   message and PR body with exactly:
   `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.
