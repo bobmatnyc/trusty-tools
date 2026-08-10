@@ -444,8 +444,11 @@ async fn console_metrics_report_has_expected_shape() {
 }
 
 /// Why: the supervisor widget reads `fleet` counts and the auto-resume control
-/// state from this object; both must be present and well-typed.
-/// Test: this test.
+/// state from this object; both must be present and well-typed. #5208 added
+/// `effective` — the field the Sessions tab actually renders — and `read_error`,
+/// which makes an unreadable desired-state file report as unknown instead of as
+/// a fabricated `false`.
+/// Test: this test; the console-side mapping is `ui/src/autoResume.test.js`.
 #[tokio::test]
 async fn supervisor_status_reports_fleet_and_auto_resume() {
     let status = supervisor_status(&state()).await.expect("status");
@@ -454,8 +457,42 @@ async fn supervisor_status_reports_fleet_and_auto_resume() {
     assert!(status["fleet"]["active"].is_u64());
     assert!(status["fleet"]["stopped"].is_u64());
     assert!(status["fleet"]["total"].is_u64());
-    // Auto-resume control block must carry the three flags.
-    assert!(status["auto_resume"]["desired"].is_boolean());
-    assert!(status["auto_resume"]["env"].is_boolean());
-    assert!(status["auto_resume"]["pending_restart"].is_boolean());
+
+    let ar = &status["auto_resume"];
+    assert!(ar["env"].is_boolean());
+    assert!(ar["pending_restart"].is_boolean());
+    assert_eq!(
+        ar["pending_restart"], false,
+        "#5208: the supervisor re-reads the file every sweep, so no toggle is \
+         ever waiting on a restart"
+    );
+
+    // #5208: `desired` / `effective` are booleans when the file is readable and
+    // BOTH null when it is not. They must never disagree about which it is —
+    // that pairing is what lets the console show "unknown" rather than "off".
+    assert!(
+        ar.get("effective").is_some(),
+        "effective must be on the wire"
+    );
+    assert!(
+        ar.get("read_error").is_some(),
+        "read_error must be on the wire"
+    );
+    if ar["read_error"].is_null() {
+        assert!(
+            ar["desired"].is_boolean(),
+            "readable file → boolean desired"
+        );
+        assert!(
+            ar["effective"].is_boolean(),
+            "readable file → boolean effective"
+        );
+    } else {
+        assert!(ar["read_error"].is_string());
+        assert!(
+            ar["desired"].is_null(),
+            "unreadable file must not report false"
+        );
+        assert!(ar["effective"].is_null());
+    }
 }
