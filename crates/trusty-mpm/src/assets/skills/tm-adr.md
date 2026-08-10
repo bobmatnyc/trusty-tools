@@ -60,7 +60,7 @@ If unsure, ask: "Would a new contributor in six months need to understand
 
 `docs/adr/` already exists in this repo (see `docs/adr/README.md` and
 `docs/adr/template.md`) with decisions numbered through the 0013 range as of
-this writing — always check the actual latest file before picking a number.
+this writing — see "Numbering Convention" below before picking a number.
 
 ---
 
