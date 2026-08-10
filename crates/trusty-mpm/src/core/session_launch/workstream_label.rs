@@ -757,7 +757,10 @@ mod tests {
         assert_eq!(name, "ws/tm-tcode-01");
         assert_eq!(color.len(), 6);
         assert_eq!(description, "trusty-mpm workstream tm-tcode-01");
-        assert!(force, "the ws/ label is trusty-mpm's own — force is correct");
+        assert!(
+            force,
+            "the ws/ label is trusty-mpm's own — force is correct"
+        );
     }
 
     #[test]
