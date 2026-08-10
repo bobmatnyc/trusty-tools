@@ -14,6 +14,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `tga::audit::run_full_sweep` — a library entry point that drives the eight data-collection subcommands (collect, classify, jira sync, deployments, incidents, dora, pr-metrics, report) end to end with no TTY and no clap. It returns per-stage outcomes, so a failed stage is named rather than aborting the run or reading as a clean pass (#5217, DOC-67 §9). `tga audit` calls it instead of re-sequencing the subcommands itself (#5237).
 - `tga::commands` is now part of the library rather than private to the binary, so the sweep reuses each subcommand's existing `run` function instead of a second copy of its logic.
 
+### Fixed
+
+- `tga deployments collect` no longer fails with `unknown deployment_source ''` when `config.yaml` has no `dora:` block (#5304). `DoraConfig`'s derived `Default` zeroed `deployment_source`, and the `#[serde(default = "…")]` fallbacks only fire when a `dora:` mapping is actually present — so the `unwrap_or_default()` path bypassed them. `Default` is now hand-written through the same `default_*` functions, and an audit of a repo set without DORA configured no longer reports a failed stage.
+
 ## [2.12.0] — 2026-08-10
 
 ### Breaking

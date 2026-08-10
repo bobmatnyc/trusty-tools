@@ -20,6 +20,38 @@ fn bad_deployment_tag_pattern_returns_clear_error() {
     );
 }
 
+/// Why: #5304 — `run` resolves its source through
+/// `config.dora.unwrap_or_default()`, so a config with no `dora:` block at all
+/// must land on `git_tags` exactly like a config that has one. It did not: the
+/// derived `Default` left `deployment_source` empty and every such run died
+/// with `unknown deployment_source ''`, which showed up in an audit as a failed
+/// stage and a "not assessed" DORA gap.
+/// What: drive the real dispatch with `Config::default()` (no `dora:` key) and
+/// with an explicit `DoraConfig::default()` (the `dora:`-present, field-omitted
+/// case), asserting both reach the git-tags path over an empty repo list.
+/// Test: this test — it fails on the derived-`Default` tree with the
+/// `unknown deployment_source ''` bail.
+#[tokio::test]
+async fn missing_dora_block_defaults_to_git_tags() {
+    // No `dora:` key at all.
+    let mut db = Database::open_in_memory().expect("db");
+    let config = Config::default();
+    assert!(config.dora.is_none(), "fixture must have no dora block");
+    run(config, &mut db, DeploymentsCollectArgs::default())
+        .await
+        .expect("a config with no dora block must default to git_tags");
+
+    // `dora:` present, `deployment_source` omitted.
+    let mut db = Database::open_in_memory().expect("db");
+    let config = Config {
+        dora: Some(DoraConfig::default()),
+        ..Config::default()
+    };
+    run(config, &mut db, DeploymentsCollectArgs::default())
+        .await
+        .expect("an empty dora block must default to git_tags");
+}
+
 /// Why: idempotency is the contract for `fact_deployments.deploy_id`
 /// (issue #212) — re-running `tga deployments collect` must not
 /// duplicate rows.
