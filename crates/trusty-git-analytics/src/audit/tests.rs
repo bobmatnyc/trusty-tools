@@ -437,6 +437,135 @@ fn sweep_gap_lines_name_each_failed_stage() {
     assert_eq!(lines, crate::audit::sweep_gap_lines(&stats, NO_SECRETS));
 }
 
+/// #5321: a `collect` stage that fell back to stale local refs used to reach
+/// the report as nothing at all.
+///
+/// The sweep hard-codes `--allow-stale` (DOC-67 §9), so an unreachable remote
+/// is not an error: the pipeline walks whatever the local clone already had and
+/// the stage records `Succeeded`. `sweep_gap_lines` only reads
+/// [`AuditSweepStats::failures`], so a succeeded stage contributed no line and
+/// the manifest carried no note — the reader could not tell "no stale refs" from
+/// "the data may be months behind". Before the fix this test fails on the final
+/// assertion: the gap lines name the failed `jira sync` stage and nothing else.
+#[tokio::test]
+async fn a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_path = dir.path().join("acme-service");
+    // An `origin` whose scheme has no transport: the fetch fails without
+    // touching the network, exactly as the reported run's SSH remote did
+    // ("unsupported URL protocol"), so the test is offline and deterministic.
+    init_repo_with_dead_origin(
+        &repo_path,
+        "sshx://git@example.invalid/acme/acme-service.git",
+    );
+
+    let mut config = Config::default();
+    config
+        .repositories
+        .push(crate::core::config::RepositoryConfig {
+            name: Some("acme-service".to_string()),
+            path: repo_path,
+            branch: None,
+            since_date: None,
+            until_date: None,
+            org: None,
+            head_only: false,
+            fetch_timeout_secs: None,
+        });
+
+    let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
+    let options = SweepOptions {
+        output: Some(dir.path().join("out")),
+        weeks: Some(1),
+    };
+    let stats = run_full_sweep(&config, &mut db, &options, None)
+        .await
+        .expect("sweep");
+
+    // The defect's own shape: the stage reports `ok`. That is correct — the
+    // sweep must not abort — which is exactly why the degradation needs its own
+    // channel to the report.
+    let collect = stats
+        .outcomes
+        .iter()
+        .find(|o| o.stage == SweepStage::Collect)
+        .expect("collect stage ran");
+    assert_eq!(
+        collect.status,
+        StageStatus::Succeeded,
+        "collect should still report ok under --allow-stale: {:?}",
+        collect.status
+    );
+
+    let lines = crate::audit::sweep_gap_lines(&stats, NO_SECRETS);
+    let stale = lines
+        .iter()
+        .find(|l| l.contains("acme-service"))
+        .unwrap_or_else(|| {
+            panic!("no Gaps & Caveats line names the repo that fell back to stale refs: {lines:#?}")
+        });
+    assert!(
+        stale.contains("origin"),
+        "the line must name the affected remote: {stale}"
+    );
+    assert!(
+        stale.contains("behind the true remote state"),
+        "the line must say the data may be out of date: {stale}"
+    );
+}
+
+/// A git repository with one commit and an `origin` that cannot be fetched.
+fn init_repo_with_dead_origin(path: &std::path::Path, remote_url: &str) {
+    std::fs::create_dir_all(path).expect("mkdir");
+    let repo = git2::Repository::init(path).expect("git init");
+    repo.remote("origin", remote_url).expect("add origin");
+
+    std::fs::write(path.join("README.md"), "acme").expect("write file");
+    let mut index = repo.index().expect("index");
+    index
+        .add_path(std::path::Path::new("README.md"))
+        .expect("index add");
+    index.write().expect("index write");
+    let tree = repo
+        .find_tree(index.write_tree().expect("write_tree"))
+        .expect("find_tree");
+    let sig = git2::Signature::now("Test", "t@example.com").expect("signature");
+    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .expect("commit");
+}
+
+/// The stale-refs line travels the same redaction path a stage message does,
+/// and it needs to: git2 quotes the remote URL back in the error, so an HTTPS
+/// remote with an embedded token puts that token in the manifest and the
+/// delivered report. Also pins the ordering — failed stages first, then the
+/// repositories that were collected anyway.
+#[test]
+fn a_credential_in_a_fetch_error_never_reaches_the_gap_line() {
+    let mut stats = AuditSweepStats::default();
+    stats.record(
+        SweepStage::Dora,
+        Instant::now(),
+        Err(anyhow::anyhow!("fact_deployments is empty")),
+    );
+    stats.record_stale_fetch(crate::audit::StaleFetch {
+        repo: "acme-service".to_string(),
+        remote: "origin".to_string(),
+        error: "failed to connect to https://x-access-token:ghp_SECRETVALUE@github.com/acme/svc"
+            .to_string(),
+    });
+
+    let lines = crate::audit::sweep_gap_lines(&stats, &["ghp_SECRETVALUE"]);
+
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(lines[0].contains("`dora`"), "{}", lines[0]);
+    assert!(lines[1].contains("acme-service"), "{}", lines[1]);
+    assert!(
+        !lines[1].contains("ghp_SECRETVALUE"),
+        "the token survived into the report: {}",
+        lines[1]
+    );
+}
+
 #[test]
 fn sweep_gap_lines_are_empty_for_a_clean_run() {
     let mut stats = AuditSweepStats::default();

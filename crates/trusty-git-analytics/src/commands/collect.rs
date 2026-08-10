@@ -1,6 +1,6 @@
 //! `tga collect` — stage 1 (git extraction) entry point.
 
-use tga::collect::collector::FetchOutcome;
+use tga::collect::collector::{FetchOutcome, PerRepoFetch};
 use tga::collect::CollectionPipeline;
 use tga::core::config::Config;
 use tga::core::db::Database;
@@ -44,6 +44,36 @@ pub async fn run_with_progress(
     args: CollectArgs,
     progress: &ProgressBus,
 ) -> anyhow::Result<()> {
+    run_reporting_fetch(config, db, args, progress)
+        .await
+        .map(|_| ())
+}
+
+/// Run the collection stage and hand back what happened to each remote.
+///
+/// Why: #5321 — under `--allow-stale` a repository whose remote is unreachable
+/// is walked on its stale local refs and collection returns `Ok`, so a caller
+/// that only sees the `Result` cannot tell fresh data from data that may be
+/// months behind. The per-repo outcomes exist already; they were printed to
+/// stderr and dropped. `tga audit` needs them as values, because DOC-67 §9's
+/// obligation is to say so in the report, not on a terminal nobody keeps.
+/// What: identical to [`run_with_progress`] — same overrides, same warnings,
+/// same stderr summary, same strict-fetch bail — except that the successful
+/// return carries [`tga::collect::collector::CollectionStats::fetch_outcomes`]
+/// instead of `()`. An `Err`
+/// return carries no outcomes: a stage that failed is already a named gap.
+/// Test: `crate::audit::tests::a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines`.
+///
+/// # Errors
+///
+/// Propagates date-range resolution and pipeline errors, and — unless
+/// `--allow-stale` or `--no-fetch` was passed — a fetch failure on any repo.
+pub async fn run_reporting_fetch(
+    config: Config,
+    db: &mut Database,
+    args: CollectArgs,
+    progress: &ProgressBus,
+) -> anyhow::Result<Vec<PerRepoFetch>> {
     let mut cfg = config;
 
     // Filter repositories by name when --repos is supplied.
@@ -192,7 +222,7 @@ pub async fn run_with_progress(
         }
     }
 
-    Ok(())
+    Ok(stats.fetch_outcomes)
 }
 
 /// Print the end-of-collect fetch summary to stderr.
