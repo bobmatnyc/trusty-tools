@@ -1,6 +1,6 @@
 # 0038. The knowledge graph stays additive in recall; a KG-primary lane is gated on three extraction-quality preconditions
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-10
 - **Scope:** crates `trusty-common` (`memory_core`), `trusty-memory`
 - **Reversibility Cost:** Low for the decision itself — it changes nothing in
