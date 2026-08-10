@@ -33,22 +33,27 @@
 //! liveness from real `SubagentStop` signals, so it is asked rather than
 //! guessed at.
 //!
-//! **Known gap — this is check-then-decide, with no reservation step.** The
-//! daemon is queried and the verdict computed from the answer; nothing claims
-//! the directory in between. Two dispatches that both query before either's
-//! `on_dispatch` recording lands both see an empty set and are both ALLOWED.
-//! `pm_guard_admits_both_dispatches_that_query_before_either_is_recorded`
-//! (`tests/tm_hook_pm_guard.rs`) pins that behaviour deterministically, by
-//! blocking the mock daemon's replies until both queries have arrived.
+//! **The question and the claim are one daemon operation (#5324).** This used
+//! to be check-then-decide: the daemon was queried and the verdict computed
+//! from the answer, with nothing claiming the directory in between, so two
+//! dispatches issued in one PM turn could both query before either's
+//! `on_dispatch` recording landed, both see an empty set, and both be ALLOWED —
+//! and a PM dispatching several agents in one message is the framework's own
+//! documented pattern for parallel work, so that was the common shape, not an
+//! edge case. [`claim_shared_tree`] now POSTs the dispatch instead of asking
+//! about it: the daemon answers and, when the answer is empty, records this
+//! dispatch inside the same critical section. The second of two simultaneous
+//! dispatches therefore sees the first and is denied.
 //!
-//! Whether the harness ever produces that interleaving is NOT established here.
-//! Claude Code's hooks reference states that multiple handlers matching ONE
-//! event run in parallel, and says nothing about `PreToolUse` across
-//! simultaneous `tool_use` blocks; nothing in this repo can observe it. So the
-//! guard is reliable for a dispatch issued after a sibling is already recorded,
-//! and indeterminate for two issued in the same turn. Closing that needs a
-//! reservation step — a record-and-answer that is atomic in the daemon — which
-//! is a design change, deliberately not made here (#4480).
+//! What the daemon records is not a new kind of state — it is the delegation
+//! record its own `matcher: "*"` PreToolUse hook would have written for the
+//! same dispatch a moment later, and that hook is idempotent on `tool_use_id`,
+//! so exactly one record exists either way and its lifecycle is unchanged.
+//!
+//! Residual, unchanged from #4480: if the daemon's tracker records BOTH
+//! dispatches before either guard's claim arrives, each guard sees the other and
+//! both are denied. That ordering predates this module and is not made more
+//! likely by it; the remedy the deny prints (declare isolation) resolves it.
 //!
 //! **This guard FAILS OPEN at every step.** A down, slow, or unreachable daemon
 //! answers "nobody else is here" and the dispatch proceeds; so does an
@@ -67,7 +72,7 @@
 //! `allows_a_read_only_agent`, `allows_when_the_agent_is_unknown`,
 //! `allows_every_non_dispatch_tool` below. The six declared fail-open branches
 //! each have an error-arm test: unreachable daemon
-//! (`live_shared_tree_writers_is_empty_when_the_daemon_is_unreachable`),
+//! (`claim_shared_tree_is_empty_when_the_daemon_is_unreachable`),
 //! malformed response (`pm_guard_allows_when_the_daemon_answer_is_malformed`),
 //! unresolvable cwd (`evaluate_allows_when_the_cwd_cannot_be_resolved`),
 //! unknown agent (`allows_when_the_agent_is_unknown`), untyped dispatch (same),
@@ -80,6 +85,8 @@ use trusty_mpm::core::agent::is_subagent_dispatch_tool;
 use trusty_mpm::core::dispatch_isolation::{
     dispatch_agent, dispatch_isolation, shares_the_callers_tree,
 };
+
+use crate::commands::hook_payload::build_hook_payload;
 
 /// Build the deny message for a blocked concurrent dispatch.
 ///
@@ -116,7 +123,7 @@ fn deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
 ///
 /// Why: kept pure — it takes the daemon's answer as a slice rather than fetching
 /// it — so the whole policy is exhaustively unit-testable with no network, and
-/// the I/O lives in [`live_shared_tree_writers`] next door.
+/// the I/O lives in [`claim_shared_tree`] next door.
 /// What: `Some(reason)` (DENY) when `tool_name` is a dispatch tool, the dispatch
 /// [`shares_the_callers_tree`], and `live` is non-empty. `None` (ALLOW) in every
 /// other case, including every non-dispatch tool.
@@ -195,22 +202,29 @@ pub(crate) fn resolve_dispatch_cwd(
     })
 }
 
-/// Ask the daemon which agents are already writing unisolated in `cwd`.
+/// Claim `cwd` for this dispatch, and learn who already holds it (#5324).
 ///
 /// Why: see the module doc — liveness is the daemon's to answer, and it is the
-/// only process that resolves it from real terminal signals.
-/// What: `GET <url>/api/v1/sessions/{session}/delegations/shared-tree-writers`
-/// with the caller's own `tool_use_id` excluded, under the same tight
-/// connect/total bounds `pm_guard`'s audit POSTs use (500 ms / 2 s) — this call
-/// sits inside a `PreToolUse` budget, so a slow daemon must cost a bounded wait
-/// and nothing more. EVERY failure — client build, transport, non-2xx, malformed
-/// body — returns an empty vec, which the pure policy above reads as ALLOW.
-/// Test: `live_shared_tree_writers_is_empty_when_the_daemon_is_unreachable`.
-pub(crate) async fn live_shared_tree_writers(
+/// only process that resolves it from real terminal signals. It is also the only
+/// place the answer and the claim can be made indivisible: a hook process that
+/// asked and then acted would leave the window two same-turn dispatches slip
+/// through.
+/// What: `POST <url>/api/v1/sessions/{session}/delegations/shared-tree-dispatch`
+/// carrying this dispatch in the daemon's own forwarded hook shape (built by the
+/// one [`build_hook_payload`], so the record the daemon writes is the record its
+/// own `matcher: "*"` hook would write) with `cwd` stamped to the directory the
+/// guard resolved. Sent under the same tight connect/total bounds `pm_guard`'s
+/// audit POSTs use (500 ms / 2 s) — this call sits inside a `PreToolUse` budget,
+/// so a slow daemon must cost a bounded wait and nothing more. EVERY failure —
+/// client build, transport, non-2xx, malformed body — returns an empty vec,
+/// which the pure policy above reads as ALLOW; nothing is claimed, and the
+/// verdict degrades to exactly the behaviour that shipped before #4480.
+/// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`.
+pub(crate) async fn claim_shared_tree(
     url: &str,
     session_id: &str,
     cwd: &Path,
-    exclude_tool_use_id: Option<&str>,
+    payload: &Value,
 ) -> Vec<String> {
     if session_id.is_empty() {
         return Vec::new();
@@ -222,12 +236,11 @@ pub(crate) async fn live_shared_tree_writers(
     else {
         return Vec::new();
     };
-    let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/shared-tree-writers");
-    let mut query: Vec<(&str, String)> = vec![("cwd", cwd.display().to_string())];
-    if let Some(id) = exclude_tool_use_id {
-        query.push(("exclude_tool_use_id", id.to_string()));
-    }
-    let Ok(response) = client.get(&endpoint).query(&query).send().await else {
+    let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/shared-tree-dispatch");
+    let body = serde_json::json!({
+        "payload": build_hook_payload(&cwd.display().to_string(), Some(payload), None),
+    });
+    let Ok(response) = client.post(&endpoint).json(&body).send().await else {
         return Vec::new();
     };
     let Ok(response) = response.error_for_status() else {
@@ -253,10 +266,10 @@ pub(crate) async fn live_shared_tree_writers(
 /// daemon off the hot path — classify first, ask second — lives here rather
 /// than being re-derived at the call site.
 /// What: returns `None` immediately unless [`dispatch_shares_the_tree`] and a
-/// resolvable [`dispatch_cwd`]; only then queries the daemon and runs
-/// [`evaluate_shared_tree_dispatch`].
+/// resolvable [`dispatch_cwd`]; only then claims the tree through the daemon and
+/// runs [`evaluate_shared_tree_dispatch`] on the answer.
 /// Test: the pure half is covered exhaustively below; the network half's
-/// fail-open is `live_shared_tree_writers_is_empty_when_the_daemon_is_unreachable`,
+/// fail-open is `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`,
 /// and the end-to-end path runs through the real binary in
 /// `tests/tm_hook_pm_guard.rs`.
 pub(crate) async fn evaluate(
@@ -297,11 +310,7 @@ pub(crate) async fn evaluate_with_cwd(
         return None;
     }
     let cwd = cwd?;
-    let tool_use_id = payload
-        .get("tool_use_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
-    let live = live_shared_tree_writers(url, session_id, &cwd, tool_use_id).await;
+    let live = claim_shared_tree(url, session_id, &cwd, payload).await;
     evaluate_shared_tree_dispatch(tool_name, tool_input, &cwd, &live)
 }
 
@@ -562,17 +571,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_shared_tree_writers_is_empty_when_the_daemon_is_unreachable() {
+    async fn claim_shared_tree_is_empty_when_the_daemon_is_unreachable() {
         // Fail-open on the network path: an unroutable daemon must resolve to
-        // "nobody else is here", never hang and never deny.
-        let live = live_shared_tree_writers(
+        // "nobody else is here", never hang and never deny. Nothing is claimed
+        // either, so the verdict degrades to the pre-#4480 behaviour rather
+        // than to a directory nobody can release.
+        let live = claim_shared_tree(
             "http://127.0.0.1:1",
             "11111111-1111-1111-1111-111111111111",
             Path::new("/repo"),
-            Some("toolu_X"),
+            &serde_json::json!({"tool_use_id": "toolu_X"}),
         )
         .await;
         assert!(live.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_shared_tree_is_empty_without_a_session_id() {
+        // A hook payload with no `session_id` cannot address a session's
+        // delegations at all. Fail open before dialling anything — an unroutable
+        // URL would cost a real (bounded) wait if this branch were removed.
+        let started = std::time::Instant::now();
+        let live = claim_shared_tree(
+            "http://127.0.0.1:1",
+            "",
+            Path::new("/repo"),
+            &serde_json::json!({}),
+        )
+        .await;
+        assert!(live.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_millis(400));
     }
 
     #[tokio::test]

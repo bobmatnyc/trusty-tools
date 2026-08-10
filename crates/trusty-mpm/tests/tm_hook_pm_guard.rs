@@ -872,7 +872,7 @@ fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String
     String::from_utf8(output.stdout).expect("stdout is utf8")
 }
 
-/// A one-shot HTTP stand-in for the daemon's shared-tree-writers route.
+/// A one-shot HTTP stand-in for the daemon's shared-tree-dispatch route.
 ///
 /// Why: the DENY arm cannot be reached without a daemon that answers, and a
 /// real daemon is far too much machinery for one route's wire contract. A raw
@@ -1009,69 +1009,80 @@ fn pm_guard_allows_when_the_daemon_answer_is_malformed() {
     }
 }
 
-/// An HTTP mock that answers only once BOTH expected requests have arrived.
+/// Serve the REAL delegation router, releasing requests only once `expected` of
+/// them have arrived (#5324).
 ///
-/// Why: the race this probes is "two guards both query before either dispatch
-/// is recorded". Creating that window with a sleep would make the test's
-/// outcome depend on scheduling; blocking the responder until both requests are
-/// in makes it a property of the mock's control flow instead. The first
-/// response cannot be written until `accept()` + `read()` has returned for the
-/// second connection, so the interleaving is forced, not raced for. No clock,
-/// virtual or real, is involved — deliberately, since tokio's `start_paused`
-/// auto-advances virtual time whenever all tasks are idle and would make an
-/// inserted delay evaporate (#3494).
-/// What: binds an ephemeral port, accepts and fully reads `expected`
-/// connections, and only then writes `body` to each. Returns the base URL.
-fn spawn_barrier_writers_mock(expected: usize, body: &'static str) -> String {
-    use std::io::Read;
-    use std::net::{TcpListener, TcpStream};
+/// Why: the race this probes is "two dispatches both reach the daemon before
+/// either is recorded". Creating that window with a sleep would make the test's
+/// outcome depend on scheduling; holding every request at a barrier until all
+/// `expected` are in makes it a property of the harness's control flow instead.
+/// No clock, virtual or real, is involved — deliberately, since tokio's
+/// `start_paused` auto-advances virtual time whenever all tasks are idle and
+/// would make an inserted delay evaporate (#3494).
+///
+/// Why the real router and not a canned mock: before #5324 the whole decision
+/// lived in the guard, so a mock that always answered "nobody here" was enough
+/// to pin it. The fix moved the deciding half into the daemon — the answer and
+/// the record are now one operation — so a mock could only re-implement the
+/// thing under test. This stands up `delegation_routes::router()` over a real
+/// [`DaemonState`], which is what actually holds the claim.
+///
+/// What: binds an ephemeral port, serves the delegation sub-router behind a
+/// [`tokio::sync::Barrier`] applied with `route_layer` — matched routes only, so
+/// the deny path's best-effort audit POST to the unrouted `/hooks` 404s
+/// immediately instead of waiting on a barrier no one else will reach. Returns
+/// the base URL and the temp dir backing the hermetic state.
+fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfile::TempDir) {
+    use std::future::IntoFuture;
+    use std::sync::Arc;
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let url = format!("http://{}", listener.local_addr().expect("addr"));
-    std::thread::spawn(move || {
-        let mut held: Vec<TcpStream> = Vec::with_capacity(expected);
-        for _ in 0..expected {
-            let Ok((mut socket, _)) = listener.accept() else {
-                return;
-            };
-            let mut buf = [0u8; 4096];
-            let _ = socket.read(&mut buf);
-            held.push(socket);
-        }
-        // Barrier passed: every guard has issued its query and none has an
-        // answer yet. This is the exact state the race needs.
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        for mut socket in held {
-            let _ = socket.write_all(response.as_bytes());
-        }
-    });
-    url
+    use trusty_mpm::core::paths::FrameworkPaths;
+    use trusty_mpm::daemon::{delegation_routes, state::DaemonState};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
+    let barrier = Arc::new(tokio::sync::Barrier::new(expected));
+
+    let app = delegation_routes::router()
+        .route_layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let barrier = Arc::clone(&barrier);
+                async move {
+                    // Barrier passed: every guard's claim has reached the
+                    // daemon and none has been served. This is the exact state
+                    // the race needs; only the daemon's own critical section
+                    // decides what happens next.
+                    barrier.wait().await;
+                    next.run(req).await
+                }
+            },
+        ))
+        .with_state(state);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let addr = listener.local_addr().expect("addr");
+    let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+    tokio::spawn(axum::serve(listener, app).into_future());
+    (format!("http://{addr}"), dir)
 }
 
-#[test]
-fn pm_guard_admits_both_dispatches_that_query_before_either_is_recorded() {
-    // #4480, the check-then-decide window. `evaluate` reads the daemon's
-    // shared-tree-writers answer and decides; it takes no reservation. When two
-    // dispatches both query before either's `on_dispatch` recording lands, both
-    // see an empty set and both are ALLOWED — the collision the guard exists to
-    // prevent, in the shape the framework's own parallel-dispatch pattern
-    // produces.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
+    // #5324, the window #4480 left open. Two `Agent` dispatches issued in one PM
+    // turn — the framework's own documented pattern for parallel work — both
+    // reach the daemon before either is recorded. Pre-fix the daemon only
+    // ANSWERED, so both saw an empty set and both were ALLOWED, which is the
+    // collision the guard exists to prevent. The claim is now taken inside the
+    // same critical section that produced the answer, so exactly one is
+    // admitted.
     //
-    // The window is forced, not timed: `spawn_barrier_writers_mock` cannot
-    // answer the first guard until the second's request has been read, so this
-    // interleaving is deterministic.
-    //
-    // What this test does NOT establish: whether Claude Code ever produces it.
-    // Whether PreToolUse admission is serialized across simultaneous `tool_use`
-    // blocks is a harness property, not observable from this repo — the hooks
-    // reference states only that multiple handlers for ONE event run in
-    // parallel, and is silent on hooks across parallel tool calls. If a
-    // reservation step is ever added, this test flips to one ALLOW + one DENY
-    // and must be updated deliberately.
-    let url = spawn_barrier_writers_mock(2, r#"{"agents":[],"total":0}"#);
+    // The interleaving is forced, not timed: the barrier holds both claims until
+    // both have arrived, so the pre-fix code cannot pass by winning a race.
+    // Which of the two is denied is genuinely arbitrary — that is the point of a
+    // mutual exclusion — so the assertion counts verdicts rather than ordering
+    // them.
+    let (url, _dir) = serve_delegation_router_behind_a_barrier(2);
     let cwd = tempfile::tempdir().expect("tempdir");
 
     let mut children = Vec::new();
@@ -1091,10 +1102,21 @@ fn pm_guard_admits_both_dispatches_that_query_before_either_is_recorded() {
         .map(|h| h.join().expect("guard thread").trim().to_string())
         .collect();
 
+    let allowed = verdicts.iter().filter(|v| v.is_empty()).count();
+    let denied: Vec<&String> = verdicts.iter().filter(|v| !v.is_empty()).collect();
     assert_eq!(
-        verdicts,
-        vec![String::new(), String::new()],
-        "both dispatches querying before either is recorded are currently ALLOWED — \
-         if this changed, a reservation step was added and the module doc must say so"
+        allowed, 1,
+        "exactly one of two simultaneous dispatches may be admitted, got: {verdicts:?}"
+    );
+    assert_eq!(denied.len(), 1, "and exactly one must be denied");
+    assert_denied(denied[0]);
+    let reason: serde_json::Value =
+        serde_json::from_str(denied[0]).expect("deny stdout must be valid JSON");
+    let reason = reason["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(
+        reason.contains("#4480") && reason.contains("rust-engineer"),
+        "the deny must name the rule and the sibling already in the tree, got: {reason}"
     );
 }
