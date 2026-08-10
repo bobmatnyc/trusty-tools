@@ -300,13 +300,42 @@ jobs:
           # Separate cache key per job so fmt/clippy/test/msrv don't fight
           # over incompatible target directories.
           key: clippy
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota, and this
+          # repo was over it — see the note on the test-shard cache above.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo clippy --workspace --all-targets -- -D warnings
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
 
   # --------------------------------------------------------------------------
-  # test: run all unit + integration tests (stable, no --include-ignored).
+  # test-shard: run all unit + integration tests (stable, no --include-ignored),
+  # split four ways by nextest partition. The `test` job below aggregates these
+  # into the single required check named "Test".
+  #
+  # Why sharded: the unsharded job ran 16–24 minutes and was the critical path
+  # of every CI run — ~45% of it executing tests one binary at a time.
+  #
+  # Why partitioned rather than split by crate. Splitting by crate (`-p a -p b`
+  # per shard) would also cut the build, and that was the first design here. It
+  # is wrong, and quietly so. Cargo resolves features across the packages in ONE
+  # invocation, so a shard that builds a subset resolves a SUBSET of features:
+  # measured on this workspace, a shard containing trusty-common + its six
+  # nearest neighbours saw 24 of the 37 trusty-common features that `--workspace`
+  # resolves, losing embedder, memory-core, bm25, migrations and friends — and
+  # every test behind those `#[cfg(feature = …)]` gates with them. A bare
+  # `cargo test -p trusty-common --lib` lists 310 tests where `--workspace`
+  # lists 2062. Four green shards, ~1750 trusty-common tests not run, nothing
+  # anywhere saying so.
+  #
+  # `--partition` cannot do that. Every shard runs the same `--workspace` build,
+  # so feature resolution is byte-for-byte what it was before this change, and
+  # nextest assigns each test in the resolved list to exactly one partition.
+  # The split is over test EXECUTION only, and its totality is a property of
+  # nextest's partitioner rather than of a crate list somebody has to maintain.
+  # The build is not sharded; it is shared instead — see the cache note below.
+  #
   # ONNX-backed tests are #[ignore]-tagged; they are intentionally skipped here
   # because they require model downloads and a running embedderd daemon.
   # trusty-mpm-gui, trusty-code-gui, trusty-agents-ui excluded: see clippy note above.
@@ -338,18 +367,26 @@ jobs:
   # We cache the entire FASTEMBED_CACHE_DIR so any additional tokeniser /
   # config files pulled by fastembed are also captured.
   # --------------------------------------------------------------------------
-  test:
-    name: Test
+  test-shard:
+    name: Test shard ${{ matrix.shard }}
     needs: [changes]
     # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
     # GitHub reports a skipped required check as PASSING — reintroducing the
-    # fail-open hole this PR exists to close. `!cancelled()` overrides the
+    # fail-open hole that PR exists to close. `!cancelled()` overrides the
     # implicit success() so the job still runs; `docs_only` then resolves to
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      # Every shard runs to completion. Cancelling siblings on the first
+      # failure would hide the other shards' results, which is the opposite of
+      # what sharding is for: one PR usually breaks one crate, and seeing the
+      # other three shards stay green is what localises it.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       # Point fastembed (and hf-hub) at a stable, writable path so the
       # actions/cache key can target it precisely. This env var is honoured
@@ -379,14 +416,13 @@ jobs:
           fetch-depth: 0
 
       # Free disk space (#2091; prune gated #4402, SDK purge gated #5325).
-      # This is the job the reclamation exists for — #3668 was a real
-      # disk-exhaustion incident here, on a target/ tree fed by onnxruntime/ort,
-      # ~a dozen tree-sitter grammars, aws-sdk-bedrock and usearch. It is also
-      # the job where the purge cost the most: 147s in run 31410011416, to take
-      # 87G available up to 115G against the ~27G peak #4402 measured. The
-      # script keeps the reclamation and fires it on measured headroom instead
-      # of unconditionally; the .rcgu.o sweep below, not this step, is what
-      # actually remedied #3668.
+      # #3668 was a real disk-exhaustion incident in this job, on a target/
+      # tree fed by onnxruntime/ort, ~a dozen tree-sitter grammars,
+      # aws-sdk-bedrock and usearch. The script fires the reclamation on
+      # measured headroom instead of unconditionally; the .rcgu.o sweep below,
+      # not this step, is what actually remedied #3668. Every shard still does
+      # the full workspace build, so the disk pressure this guards against is
+      # unchanged by sharding.
       - name: Free disk space
         if: needs.changes.outputs.docs_only != 'true'
         run: bash scripts/ci-free-disk-space.sh
@@ -412,11 +448,38 @@ jobs:
             pkg-config \
             libssl-dev
 
+      # The official prebuilt binary (get.nexte.st) rather than `cargo install
+      # cargo-nextest`, which would compile the tool itself on every runner and
+      # cost more than nextest saves. No third-party action involved.
+      - name: Install cargo-nextest
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          set -euo pipefail
+          curl -LsSf https://get.nexte.st/latest/linux \
+            | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
+
+      # ONE cache shared by all four shards. Every shard runs the same
+      # `--workspace` build and differs only in which tests it executes, so the
+      # target/ trees are identical and four separate caches would be four
+      # copies of the same bytes against a quota that is already blown.
+      #
+      # `save-if` restricted to main is deliberate and is a FIX, not a
+      # restriction (see the PR that introduced sharding). GitHub scopes a
+      # cache saved on a PR ref to that PR alone, but counts it against the
+      # repo-wide 10 GB quota. This repo was sitting at 11.03 GB with FOUR
+      # byte-identical 1.29 GB copies of this job's cache — one per open PR,
+      # none readable by any other PR — which had evicted the one copy on
+      # refs/heads/main that every PR actually restores from. That eviction is
+      # what made ~half of all Test runs recompile the entire 864-crate
+      # dependency graph from scratch (~+350s). Saving only from main keeps the
+      # shared copy alive and stops PRs from evicting it.
       - name: Cache cargo artifacts
         if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          key: test
+          shared-key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Cache key for the fastembed ONNX models (issue #865, corrected #4940):
       # the fastembed crate VERSION + the two model repo IDs used by this
@@ -751,27 +814,16 @@ jobs:
           path: /home/runner/.cache/fastembed
           key: ${{ steps.fastembed-key.outputs.key }}
 
-      # Build phase only (no test execution yet): links all ~179 test
+      # Build phase only (no test execution yet): links this shard's test
       # binaries so the intermediate .rcgu.o codegen objects below can be
       # swept once linking is done and before the (disk-heavier) test
       # execution phase runs. See #3668.
       #
-      # This step is COMPILE-bound, not link-bound — measured, #5325. The cargo
-      # cache restores every dependency, so it compiles 25 workspace crates and
-      # links 194 test executables, and the linking is not where the time goes.
-      #
-      # mold 2.30 was tried here, invoked as `mold -run` so cargo's fingerprint
-      # and Swatinem/rust-cache's key (it hashes every RUST*-prefixed variable)
-      # stayed untouched and the comparison stayed clean. It changed nothing
-      # measurable: 8m01s with mold, against 7m42s / 7m49s / 8m00s / 8m16s
-      # across four runs of the identical unmodified command. Reverted rather
-      # than keep an apt package and an LD_PRELOAD interposer for an effect
-      # smaller than this step's run-to-run spread.
-      #
-      # The time is codegen for 25 large crates down a partly-serial dependency
-      # chain — everything waits on trusty-common — which no linker can touch.
-      # Don't re-try a linker swap without a `cargo build --timings` profile
-      # showing link time is actually the cost.
+      # `--no-run` under nextest is `list --list-type binaries-only`; plain
+      # `cargo test --no-run` is used instead because it produces byte-identical
+      # artefacts to the doctest step below and therefore shares one build
+      # fingerprint with it. (A `cargo nextest list` here resolved a DIFFERENT
+      # fingerprint and forced a ~91s recompile — measured in #4402.)
       - name: cargo test --workspace --no-run (build phase)
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
@@ -789,81 +841,72 @@ jobs:
           find target/debug/deps -name '*.rcgu.o' -delete
           echo "After sweep:"; du -sh target/debug 2>/dev/null || true
 
-      # #4402: per-crate failure attribution without changing HOW tests run
-      # or adding a second build.
+      # cargo-nextest instead of `cargo test`, for two reasons measured on this
+      # repo:
       #
-      # Two earlier attempts both cost more than the ~48s they were meant to
-      # save:
-      #   1. `cargo nextest run --workspace` replacing this step entirely —
-      #      nextest isolates every test in its own process (stricter than
-      #      `cargo test`'s one-process-per-binary model), which surfaced a
-      #      real, pre-existing trusty-memory test-order bug on this PR's own
-      #      CI run (add_alias_round_trip_through_prompt_cache and
-      #      dispatch_discover_aliases_inserts_new_and_dedupes implicitly
-      #      depend on a TRUSTY_SKIP_PALACE_ENFORCEMENT env var some other
-      #      test happens to set as a side effect in the shared process —
-      #      crates/trusty-memory/src/tools/palace_ops.rs:88-101). Both pass
-      #      reliably under plain `cargo test` on main. Reverted rather than
-      #      ship a runner switch that can turn a green suite red on
-      #      ordering alone; this PR is workflow-only, so fixing that bug is
-      #      out of scope here.
-      #   2. `cargo nextest list --workspace` (metadata-only, no test
-      #      execution) to build a name-to-crate manifest cross-referenced
-      #      against `cargo test`'s unchanged output: safe from the
-      #      isolation issue above, but measured on this PR's own CI run,
-      #      `cargo nextest list` resolves its own build fingerprint that
-      #      doesn't match `cargo test --workspace --no-run`'s and forced a
-      #      ~91s recompile of trusty-agents + trusty-agents-local — worse
-      #      than the step it was replacing.
+      #   1. Speed. `cargo test` runs the ~220 test binaries one after another,
+      #      parallelising only WITHIN a binary — so every binary drains its
+      #      own tail with idle cores, ~220 times. nextest schedules every test
+      #      in the shard from one global queue and keeps all cores busy.
+      #   2. Attribution. nextest prints the owning crate for every test, which
+      #      is what .github/scripts/attribute_test_failures.py (#4402) had to
+      #      reconstruct from panic-message source paths. The script is deleted
+      #      in the same change; nextest reports natively what it inferred.
       #
-      # This version needs neither: a Rust panic message self-reports its
-      # own source path (`thread '<test>' panicked at crates/<crate>/...`),
-      # naming both the failing test and its crate in one line cargo test
-      # already prints, with no dependency on cross-binary output ordering
-      # and no extra tool or build. See .github/scripts/
-      # attribute_test_failures.py for the full rationale and doctest
-      # handling.
-      # #4614: this step could not fail. It ran `cargo test ... | tee` inside an
-      # `if`, under GitHub's implicit `bash -e {0}` — no pipefail anywhere in
-      # this file (zero `shell:` keys). The `if` therefore tested `tee`'s exit
-      # code, which is always 0, so the success branch always ran and the
-      # `${PIPESTATUS[0]}` branch was dead code. A required check reported green
-      # on every test failure, on every commit, for as long as it existed.
+      # The #4402 comment that used to sit here said nextest was blocked by a
+      # trusty-memory test-order bug: two tests depended on
+      # TRUSTY_SKIP_PALACE_ENFORCEMENT being set as a side effect by a
+      # DIFFERENT test in the same process, which nextest's process-per-test
+      # isolation correctly exposed. That comment was stale — #4413 fixed the
+      # coupling at its root in 2026-07 (each test now calls
+      # `skip_palace_enforcement()` to establish its own precondition, see
+      # crates/trusty-memory/src/tools/tests.rs) and #4482 followed up. The
+      # whole workspace was re-verified under nextest before this switch: no
+      # test depends on another test's side effects.
       #
-      # Fixed structurally rather than by enabling a shell option: there is no
-      # pipe left, so `$?` is `cargo test`'s own exit code and no option can
-      # change that. `shell: bash` is a second, independent backstop — it also
-      # sets `-o pipefail`, so any pipe added here later still reports failure.
-      # Neither mechanism depends on the other.
+      # --no-fail-fast: report every failing crate in one run. `cargo test`
+      # stopped at the first failing BINARY, so a PR breaking two crates needed
+      # two CI rounds to discover that.
       #
-      # Trade-off, deliberate: output lands in the job log via `cat` when the
-      # step finishes instead of streaming live. `test-output.log` is unchanged,
-      # so attribute_test_failures.py reads exactly what it did before. Scoped
-      # to this step, NOT `defaults.run.shell` — flipping the whole workflow to
-      # pipefail at once would change every other step's failure semantics in
-      # the same commit.
-      - name: cargo test --workspace
+      # The divisor is `strategy.job-total`, not a literal 4. nextest only
+      # rejects a partition whose numerator exceeds its denominator, so a
+      # hand-written divisor left stale after the matrix changed would silently
+      # stop running a quarter of the suite with every shard green. Deriving it
+      # from the matrix makes `shard: [1, 2, 3, 4]` the only place the count
+      # exists.
+      #
+      # `hash:N/M` rather than `count:N/M`: hash assigns a test to a partition
+      # from its name, so a given test lands in the same shard on every run and
+      # a failure is reproducible by re-running that one shard. `count` is
+      # round-robin by position, which reshuffles the whole assignment whenever
+      # a test is added anywhere. Neither balances by RUNTIME — with ~24k tests
+      # per split the counts even out, and the handful of multi-second tests
+      # (the slowest is ~31s) are spread by name.
+      - name: cargo nextest run
         if: needs.changes.outputs.docs_only != 'true'
-        shell: bash
         run: |
-          set -uo pipefail
-          test_status=0
-          cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui \
-              -- --skip update::tests::cache_fresh_returns_some_when_newer \
-              > test-output.log 2>&1 || test_status=$?
-          cat test-output.log
-          if [ "$test_status" -ne 0 ]; then
-            echo "::group::Per-crate failure attribution (closes #950, via #4402)"
-            python3 .github/scripts/attribute_test_failures.py
-            echo "::endgroup::"
-            exit "$test_status"
-          fi
+          cargo nextest run --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-fail-fast \
+            --partition hash:${{ matrix.shard }}/${{ strategy.job-total }} \
+            -E 'not test(=update::tests::cache_fresh_returns_some_when_newer)'
+
+      # nextest cannot run doctests — it has no doctest harness at all (see
+      # nextest issue #16). Skipping this step would silently drop every
+      # doctest from CI, so `cargo test --doc` runs them separately.
+      #
+      # Shard 1 only: `--partition` splits the tests nextest owns, and doctests
+      # are not among them, so running this in all four shards would run the
+      # same doctests four times rather than a quarter of them each. There are
+      # ~7 across the workspace; this is here for coverage, not for speed.
+      - name: cargo test --doc
+        if: needs.changes.outputs.docs_only != 'true' && matrix.shard == 1
+        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --doc
 
       # trusty-common's cache_fresh_returns_some_when_newer needs CI unset
       # (see check_throttled in crates/trusty-common/src/update/mod.rs: it
       # returns None whenever CI is non-empty, and this test expects the
-      # live cache-freshness path instead). Previously CI="" was applied to
-      # the WHOLE `cargo test --workspace` invocation above, which flipped
+      # live cache-freshness path instead). It is filtered out of the nextest
+      # run above and re-run here with the override. Previously CI="" was
+      # applied to the WHOLE `cargo test --workspace` invocation, which flipped
       # cargo's fingerprint for every crate in the workspace and forced an
       # unrelated recompile of trusty-agents + trusty-agents-local (#4402).
       # Scoping the override to a single `-p trusty-common` invocation
@@ -873,12 +916,48 @@ jobs:
       # and only gets pulled in under `--workspace` via other crates'
       # feature unification, not under a bare `-p trusty-common` build.
       - name: cargo test -p trusty-common (cache-freshness, CI unset)
-        if: needs.changes.outputs.docs_only != 'true'
+        if: needs.changes.outputs.docs_only != 'true' && matrix.shard == 1
         env:
           CI: ""
         run: |
           cargo test -p trusty-common --lib --features update-check \
             update::tests::cache_fresh_returns_some_when_newer -- --exact
+
+  # --------------------------------------------------------------------------
+  # test: the aggregate gate over the sharded suite above.
+  #
+  # This job exists to keep ONE stable required-check name. Branch protection
+  # requires the literal context "Test"; sharding alone would rename the check
+  # to "Test (shard-N)" and silently drop the requirement, leaving main
+  # unprotected. Repointing branch protection at N shard names would work but
+  # would have to be re-edited every time the shard count changes — this job
+  # makes the shard count an implementation detail instead.
+  #
+  # `needs.test-shard.result` is the AGGREGATE of the matrix: it is 'success'
+  # only when every leg succeeded, and 'failure' / 'cancelled' / 'skipped'
+  # otherwise. The check is written as "must equal success" rather than "must
+  # not equal failure" so a skipped matrix fails closed — GitHub reports a
+  # skipped required check as PASSING, which is the exact fail-open hole #4179
+  # closed for this job's `if:` condition.
+  # --------------------------------------------------------------------------
+  test:
+    name: Test
+    needs: [changes, test-shard]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every test shard to have succeeded
+        env:
+          SHARDS_RESULT: ${{ needs.test-shard.result }}
+        run: |
+          set -euo pipefail
+          echo "test-shard matrix aggregate result: ${SHARDS_RESULT}"
+          if [ "${SHARDS_RESULT}" != "success" ]; then
+            echo "::error::Test is red: the test-shard matrix reported '${SHARDS_RESULT}'. Open the individual 'Test shard N' jobs — nextest names the owning crate for every failing test."
+            exit 1
+          fi
+          echo "every test shard succeeded"
 
   # --------------------------------------------------------------------------
   # msrv: verify the workspace compiles on the effective MSRV.
@@ -933,6 +1012,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: msrv-1-94
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota, and this
+          # repo was over it — see the note on the test-shard cache above.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo check --workspace
         if: needs.changes.outputs.docs_only != 'true'
@@ -1000,6 +1083,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: agents-ui
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota, and this
+          # repo was over it — see the note on the test-shard cache above.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Stub the frontendDist so tauri::generate_context!() can embed it.
       - name: Stub frontend dist for generate_context!
@@ -1110,6 +1197,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: embedder-cuda-check
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota, and this
+          # repo was over it — see the note on the test-shard cache above.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo check -p trusty-common --features embedder-cuda --all-targets
         if: needs.changes.outputs.docs_only != 'true'
@@ -1315,6 +1406,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: search-daemon-smoke
+          # Save only from main: a cache saved on a PR ref is readable by that
+          # PR alone but still counts against the repo-wide 10 GB quota, and this
+          # repo was over it — see the note on the test-shard cache above.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # SKIP_UI_BUILD=1 is already set globally via env: at the workflow level.
       # The committed ui-dist/ bundle is used as-is; pnpm is not required.
