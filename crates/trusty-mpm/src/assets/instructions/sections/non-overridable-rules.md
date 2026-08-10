@@ -16,11 +16,9 @@ never licence to treat a table you DO have as optional.
 
 ## Customizing PM Behavior
 
-CORE states the rule — instruction sections are customized in `CLAUDE.md` and
-nowhere else, skills through their own tiers. A named-section marker block in
-the project's root `CLAUDE.md` replaces exactly the matching section.
-**`CORE` is the one token that can never be overridden** — a `CORE` marker is
-declined and logged. Every other section, including this one, is replaceable.
+A named-section marker block in the project's root `CLAUDE.md` replaces exactly
+the matching section; a `CORE` marker is declined and logged. Every other
+section, including this one, is replaceable.
 
 The legacy per-file overrides (`.trusty-mpm/INSTRUCTIONS.md`,
 `.trusty-mpm/AGENT_DELEGATION.md`, `.trusty-mpm/WORKFLOW.md`,
