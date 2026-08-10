@@ -24,6 +24,10 @@
 //! that want to observe the branch taken, but production call sites (session
 //! launch) MUST treat every variant as fire-and-forget: this must NEVER block
 //! or fail a session launch.
+//! The same launch hook also ensures the two issue-lifecycle labels
+//! ([`LIFECYCLE_LABELS`]) `tm-ticketing`'s Lifecycle section applies, for the
+//! same first-use reason — see that constant for why they are created without
+//! `--force`.
 //! Test: `owner_repo_from_ssh_origin`, `owner_repo_from_https_origin`,
 //! `owner_repo_rejects_non_github_host`, `label_color_is_stable_and_valid_hex`,
 //! `label_color_differs_across_names`, `label_name_short_is_verbatim`,
@@ -33,7 +37,17 @@
 //! `ensure_skips_when_no_origin`, `ensure_skips_when_non_github`,
 //! `ensure_skips_when_name_blank`, `ensure_creates_label_via_runner`,
 //! `ensure_reports_runner_failure` drive the pure derivation + a scripted
-//! [`GhLabelRunner`] fake — no live `gh`/network.
+//! [`GhLabelRunner`] fake — no live `gh`/network. The lifecycle-label half and
+//! the launch-path failure contract are covered by
+//! `lifecycle_label_table_is_valid`,
+//! `lifecycle_labels_are_created_without_force`,
+//! `lifecycle_labels_attempt_every_label_when_gh_fails`,
+//! `launch_labels_ensure_all_three`,
+//! `lifecycle_labels_run_even_when_workstream_label_fails`,
+//! `workstream_label_runs_even_when_lifecycle_labels_fail`,
+//! `launch_labels_survive_total_gh_failure`,
+//! `launch_labels_skip_cleanly_on_non_github_remote`,
+//! `launch_labels_ensure_lifecycle_labels_when_session_name_is_blank`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -113,22 +127,12 @@ fn ensure_workstream_label_with<R: GhLabelRunner>(
         return LabelOutcome::SkippedBlankName;
     }
 
-    let origin = repo_url
-        .map(str::to_string)
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| origin_url_from_workspace(workspace_dir));
-    let Some(origin) = origin else {
-        tracing::debug!(session = %name, "workstream label: no git origin resolvable — skipping");
-        return LabelOutcome::SkippedNoOrigin;
-    };
-
-    let Some(gh_path) = owner_repo_from_origin(&origin) else {
-        tracing::debug!(
-            session = %name,
-            origin = %origin,
-            "workstream label: origin is not a github.com remote — skipping"
-        );
-        return LabelOutcome::SkippedNonGithub;
+    let gh_path = match resolve_github_repo(repo_url, workspace_dir) {
+        Ok(gh_path) => gh_path,
+        Err(skip) => {
+            tracing::debug!(session = %name, ?skip, "workstream label: repo not resolvable — skipping");
+            return skip;
+        }
     };
 
     let label = label_name_for(name);
@@ -136,7 +140,7 @@ fn ensure_workstream_label_with<R: GhLabelRunner>(
     let description = format!("trusty-mpm workstream {name}");
     let repo = gh_path.rel_path();
 
-    if runner.create_label(&repo, &label, &color, &description) {
+    if runner.create_label(&repo, &label, &color, &description, true) {
         tracing::info!(session = %name, repo = %repo, label = %label, "workstream label ensured");
         LabelOutcome::Ensured
     } else {
@@ -150,9 +154,110 @@ fn ensure_workstream_label_with<R: GhLabelRunner>(
     }
 }
 
-/// Fire-and-forget [`ensure_workstream_label`] on the blocking thread pool.
+/// The issue-lifecycle labels the PM's ticketing lifecycle applies, as
+/// `(name, color, description)`.
 ///
-/// Why: [`ensure_workstream_label`] shells out to `gh` (bounded by
+/// Why: a GitHub issue is only ever open or closed, so `tm-ticketing`'s
+/// Lifecycle section expresses progress with an `in-progress` / `blocked`
+/// label plus comments. `gh issue edit --add-label` fails on a label the repo
+/// has never seen, so the rule cannot fire on first use unless launch creates
+/// them — the same reason [`ensure_workstream_label`] exists.
+/// What: colors are ones this workspace's repo already uses (`0E8A16` from
+/// `tga`, `B60205` from `blocked-on-mvp`), so the two labels read as native
+/// rather than framework-branded.
+/// Test: `lifecycle_labels_are_created_without_force`,
+/// `lifecycle_label_table_is_valid`.
+const LIFECYCLE_LABELS: [(&str, &str, &str); 2] = [
+    (
+        "in-progress",
+        "0E8A16",
+        "Work has started; a session or agent is on it",
+    ),
+    (
+        "blocked",
+        "B60205",
+        "Blocked on a prerequisite; not scheduled",
+    ),
+];
+
+/// Ensure both [`LIFECYCLE_LABELS`] exist on `repo`, best-effort.
+///
+/// Why: see [`LIFECYCLE_LABELS`].
+/// What: one plain `gh label create` per label — deliberately WITHOUT
+/// `--force`, unlike the `ws/<session>` label. `ws/` is trusty-mpm's own
+/// namespace, but `in-progress`/`blocked` are ordinary repo labels a project
+/// may already own and have styled; `--force` would silently rewrite that
+/// project's color and description on every session launch. A create that
+/// fails because the label already exists is therefore the expected steady
+/// state, indistinguishable here from a real `gh` failure and equally
+/// harmless — both are debug-logged and neither is returned, because every
+/// caller is fire-and-forget. Both labels are always attempted: a failure on
+/// the first must not suppress the second.
+/// Test: `lifecycle_labels_are_created_without_force`,
+/// `lifecycle_labels_attempt_every_label_when_gh_fails`.
+fn ensure_lifecycle_labels_with<R: GhLabelRunner>(runner: &R, repo: &str) {
+    for (name, color, description) in LIFECYCLE_LABELS {
+        if runner.create_label(repo, name, color, description, false) {
+            tracing::info!(repo = %repo, label = %name, "issue lifecycle label created");
+        } else {
+            tracing::debug!(
+                repo = %repo,
+                label = %name,
+                "issue lifecycle label not created (already exists, or `gh` unavailable) — non-fatal"
+            );
+        }
+    }
+}
+
+/// Every launch-time label ensure, in one call: the session's `ws/<name>`
+/// label plus the two [`LIFECYCLE_LABELS`].
+///
+/// Why: the daemon's spawn paths need a single fire-and-forget entry point,
+/// and the two ensures must be independent — a `gh` failure on either one must
+/// leave the other attempted and must never propagate to the launch.
+/// What: runs [`ensure_workstream_label_with`], discards its outcome (already
+/// logged), then resolves the repo again for
+/// [`ensure_lifecycle_labels_with`]. Nothing here returns or panics on a
+/// failed `gh` call.
+/// Test: `launch_labels_ensure_all_three`,
+/// `lifecycle_labels_run_even_when_workstream_label_fails`,
+/// `launch_labels_survive_total_gh_failure`.
+fn ensure_launch_labels_with<R: GhLabelRunner>(
+    runner: &R,
+    repo_url: Option<&str>,
+    workspace_dir: &Path,
+    session_name: &str,
+) {
+    let _ = ensure_workstream_label_with(runner, repo_url, workspace_dir, session_name);
+    if let Ok(gh_path) = resolve_github_repo(repo_url, workspace_dir) {
+        ensure_lifecycle_labels_with(runner, &gh_path.rel_path());
+    }
+}
+
+/// Resolve the `<owner>/<repo>` a session's labels belong to.
+///
+/// Why: both launch-time ensures need the same target, derived the same way —
+/// one implementation, so the github.com-only rule cannot drift between them.
+/// What: prefers a non-blank `repo_url`, falling back to `workspace_dir`'s own
+/// `remote.origin.url`. `Err` carries the [`LabelOutcome`] skip the caller
+/// should report.
+/// Test: `ensure_skips_when_no_origin`, `ensure_skips_when_non_github`.
+fn resolve_github_repo(
+    repo_url: Option<&str>,
+    workspace_dir: &Path,
+) -> Result<GithubPath, LabelOutcome> {
+    let origin = repo_url
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| origin_url_from_workspace(workspace_dir))
+        .ok_or(LabelOutcome::SkippedNoOrigin)?;
+    owner_repo_from_origin(&origin).ok_or(LabelOutcome::SkippedNonGithub)
+}
+
+/// Fire-and-forget [`ensure_launch_labels_with`] on the blocking thread pool —
+/// the session's `ws/<name>` label plus the two [`LIFECYCLE_LABELS`].
+///
+/// Why: the ensures shell out to `gh` (bounded by
 /// [`GH_LABEL_TIMEOUT`], but still up to a few seconds on a slow/offline
 /// host); the daemon's `spawn_managed_*` branches call this at the identical
 /// point (right before launching the runtime) across all three spawn shapes
@@ -163,11 +268,11 @@ fn ensure_workstream_label_with<R: GhLabelRunner>(
 /// `gh` calls made from async handlers (see that module's `resolve_gh_env`
 /// doc comment).
 /// What: clones the three owned inputs, spawns a detached task that runs
-/// [`ensure_workstream_label`] on the blocking thread pool, and logs (at
-/// debug) if the spawned task itself could not be joined — the ensure call
-/// already logs its own outcome internally. Must be called from inside a
+/// [`ensure_launch_labels_with`] on the blocking thread pool, and logs (at
+/// debug) if the spawned task itself could not be joined — the ensure calls
+/// already log their own outcomes internally. Must be called from inside a
 /// tokio runtime (every call site is an async `spawn_managed_*` handler).
-/// Test: [`ensure_workstream_label`]'s own unit tests cover the pure logic
+/// Test: [`ensure_launch_labels_with`]'s own unit tests cover the pure logic
 /// this wraps; this wrapper is a thin, side-effect-only dispatch with
 /// nothing pure to assert beyond "doesn't block", which the
 /// `handler_spawn_*`/`resume_managed_*` integration tests already exercise
@@ -179,7 +284,12 @@ pub fn spawn_workstream_label_ensure(
 ) {
     tokio::task::spawn(async move {
         if let Err(e) = tokio::task::spawn_blocking(move || {
-            ensure_workstream_label(repo_url.as_deref(), &workspace_dir, &session_name)
+            ensure_launch_labels_with(
+                &RealGhRunner,
+                repo_url.as_deref(),
+                &workspace_dir,
+                &session_name,
+            )
         })
         .await
         {
@@ -368,8 +478,16 @@ fn hsl_to_hex(h: f64, s: f64, l: f64) -> String {
 /// Test: driven by `FakeGhRunner` in this module's tests.
 trait GhLabelRunner {
     /// Run `gh label create <name> --repo <repo> --color <color> --description
-    /// <description> --force`, returning whether it succeeded.
-    fn create_label(&self, repo: &str, name: &str, color: &str, description: &str) -> bool;
+    /// <description>` (with `--force` when `force`), returning whether it
+    /// succeeded.
+    fn create_label(
+        &self,
+        repo: &str,
+        name: &str,
+        color: &str,
+        description: &str,
+        force: bool,
+    ) -> bool;
 }
 
 /// Production [`GhLabelRunner`] — spawns real `gh`, bounded by
@@ -377,28 +495,35 @@ trait GhLabelRunner {
 struct RealGhRunner;
 
 impl GhLabelRunner for RealGhRunner {
-    fn create_label(&self, repo: &str, name: &str, color: &str, description: &str) -> bool {
+    fn create_label(
+        &self,
+        repo: &str,
+        name: &str,
+        color: &str,
+        description: &str,
+        force: bool,
+    ) -> bool {
         let repo = repo.to_string();
         let name = name.to_string();
         let color = color.to_string();
         let description = description.to_string();
         run_bounded(GH_LABEL_TIMEOUT, move || {
-            std::process::Command::new("gh")
-                .args([
-                    "label",
-                    "create",
-                    &name,
-                    "--repo",
-                    &repo,
-                    "--color",
-                    &color,
-                    "--description",
-                    &description,
-                    "--force",
-                ])
-                .output()
-                .ok()
-                .map(|out| out.status.success())
+            let mut cmd = std::process::Command::new("gh");
+            cmd.args([
+                "label",
+                "create",
+                &name,
+                "--repo",
+                &repo,
+                "--color",
+                &color,
+                "--description",
+                &description,
+            ]);
+            if force {
+                cmd.arg("--force");
+            }
+            cmd.output().ok().map(|out| out.status.success())
         })
         .unwrap_or(false)
     }
@@ -520,29 +645,62 @@ mod tests {
 
     // ── ensure_workstream_label skip-cleanly paths ──────────────────────
 
+    /// One recorded `create_label` call: `(repo, name, color, description,
+    /// force)`.
+    type RecordedCall = (String, String, String, String, bool);
+
     struct FakeGhRunner {
         succeed: bool,
-        calls: RefCell<Vec<(String, String, String, String)>>,
+        /// Label names this runner fails for regardless of `succeed`.
+        fail_for: Vec<&'static str>,
+        calls: RefCell<Vec<RecordedCall>>,
     }
 
     impl FakeGhRunner {
         fn new(succeed: bool) -> Self {
             Self {
                 succeed,
+                fail_for: Vec::new(),
                 calls: RefCell::new(Vec::new()),
             }
+        }
+
+        /// A runner that succeeds except for the named labels.
+        fn failing_for(names: &[&'static str]) -> Self {
+            Self {
+                succeed: true,
+                fail_for: names.to_vec(),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// The label names passed to `create_label`, in call order.
+        fn label_names(&self) -> Vec<String> {
+            self.calls
+                .borrow()
+                .iter()
+                .map(|(_, name, ..)| name.clone())
+                .collect()
         }
     }
 
     impl GhLabelRunner for FakeGhRunner {
-        fn create_label(&self, repo: &str, name: &str, color: &str, description: &str) -> bool {
+        fn create_label(
+            &self,
+            repo: &str,
+            name: &str,
+            color: &str,
+            description: &str,
+            force: bool,
+        ) -> bool {
             self.calls.borrow_mut().push((
                 repo.to_string(),
                 name.to_string(),
                 color.to_string(),
                 description.to_string(),
+                force,
             ));
-            self.succeed
+            self.succeed && !self.fail_for.contains(&name)
         }
     }
 
@@ -594,11 +752,12 @@ mod tests {
         assert_eq!(outcome, LabelOutcome::Ensured);
         let calls = runner.calls.borrow();
         assert_eq!(calls.len(), 1);
-        let (repo, name, color, description) = &calls[0];
+        let (repo, name, color, description, force) = &calls[0];
         assert_eq!(repo, "bobmatnyc/trusty-tools");
         assert_eq!(name, "ws/tm-tcode-01");
         assert_eq!(color.len(), 6);
         assert_eq!(description, "trusty-mpm workstream tm-tcode-01");
+        assert!(force, "the ws/ label is trusty-mpm's own — force is correct");
     }
 
     #[test]
@@ -611,5 +770,145 @@ mod tests {
             "tm-tcode-01",
         );
         assert_eq!(outcome, LabelOutcome::GhFailed);
+    }
+
+    // ── issue-lifecycle labels ──────────────────────────────────────────
+
+    const REPO_URL: &str = "https://github.com/bobmatnyc/trusty-tools.git";
+
+    #[test]
+    fn lifecycle_label_table_is_valid() {
+        for (name, color, description) in LIFECYCLE_LABELS {
+            assert!(!name.is_empty() && name.len() <= GITHUB_LABEL_MAX_LEN);
+            assert_eq!(color.len(), 6, "{name}'s color must be 6 hex chars");
+            assert!(color.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(!description.is_empty(), "{name} needs a description");
+        }
+        let names: Vec<&str> = LIFECYCLE_LABELS.iter().map(|(n, ..)| *n).collect();
+        assert_eq!(names, ["in-progress", "blocked"]);
+    }
+
+    #[test]
+    fn lifecycle_labels_are_created_without_force() {
+        let runner = FakeGhRunner::new(true);
+        ensure_lifecycle_labels_with(&runner, "bobmatnyc/trusty-tools");
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), LIFECYCLE_LABELS.len());
+        for (repo, name, color, description, force) in calls.iter() {
+            assert_eq!(repo, "bobmatnyc/trusty-tools");
+            assert!(
+                !force,
+                "{name} is an ordinary repo label — --force would rewrite a \
+                 project's own color/description on every launch"
+            );
+            let (_, want_color, want_description) = LIFECYCLE_LABELS
+                .iter()
+                .find(|(n, ..)| n == name)
+                .expect("only table labels are created");
+            assert_eq!(color, want_color);
+            assert_eq!(description, want_description);
+        }
+    }
+
+    #[test]
+    fn lifecycle_labels_attempt_every_label_when_gh_fails() {
+        // Every `gh` call fails (missing binary, unauthenticated, offline).
+        // Both labels must still be attempted, and nothing may panic.
+        let runner = FakeGhRunner::new(false);
+        ensure_lifecycle_labels_with(&runner, "bobmatnyc/trusty-tools");
+        assert_eq!(runner.label_names(), ["in-progress", "blocked"]);
+    }
+
+    // ── launch-time composition (failure paths) ─────────────────────────
+
+    #[test]
+    fn launch_labels_ensure_all_three() {
+        let runner = FakeGhRunner::new(true);
+        ensure_launch_labels_with(
+            &runner,
+            Some(REPO_URL),
+            Path::new("/nonexistent"),
+            "tm-tcode-01",
+        );
+        assert_eq!(
+            runner.label_names(),
+            ["ws/tm-tcode-01", "in-progress", "blocked"]
+        );
+    }
+
+    #[test]
+    fn lifecycle_labels_run_even_when_workstream_label_fails() {
+        // The ws/ label's `gh` call fails; the lifecycle labels are an
+        // independent concern and must still be attempted.
+        let runner = FakeGhRunner::failing_for(&["ws/tm-tcode-01"]);
+        ensure_launch_labels_with(
+            &runner,
+            Some(REPO_URL),
+            Path::new("/nonexistent"),
+            "tm-tcode-01",
+        );
+        assert_eq!(
+            runner.label_names(),
+            ["ws/tm-tcode-01", "in-progress", "blocked"]
+        );
+    }
+
+    #[test]
+    fn workstream_label_runs_even_when_lifecycle_labels_fail() {
+        let runner = FakeGhRunner::failing_for(&["in-progress", "blocked"]);
+        ensure_launch_labels_with(
+            &runner,
+            Some(REPO_URL),
+            Path::new("/nonexistent"),
+            "tm-tcode-01",
+        );
+        assert_eq!(
+            runner.label_names(),
+            ["ws/tm-tcode-01", "in-progress", "blocked"],
+            "a lifecycle-label failure must not suppress the ws/ label or the \
+             label after it"
+        );
+    }
+
+    #[test]
+    fn launch_labels_survive_total_gh_failure() {
+        // The launch-path contract: every `gh` call failing is a logged,
+        // non-fatal skip. The call returns normally — no panic, no error to
+        // propagate into `spawn_workstream_label_ensure`'s blocking task.
+        let runner = FakeGhRunner::new(false);
+        ensure_launch_labels_with(
+            &runner,
+            Some(REPO_URL),
+            Path::new("/nonexistent"),
+            "tm-tcode-01",
+        );
+        assert_eq!(
+            runner.label_names(),
+            ["ws/tm-tcode-01", "in-progress", "blocked"]
+        );
+    }
+
+    #[test]
+    fn launch_labels_skip_cleanly_on_non_github_remote() {
+        let runner = FakeGhRunner::new(true);
+        ensure_launch_labels_with(
+            &runner,
+            Some("git@gitlab.com:acme/widget.git"),
+            Path::new("/nonexistent"),
+            "tm-tcode-01",
+        );
+        assert!(
+            runner.calls.borrow().is_empty(),
+            "no gh call belongs on a non-github remote"
+        );
+    }
+
+    #[test]
+    fn launch_labels_ensure_lifecycle_labels_when_session_name_is_blank() {
+        // A blank session name skips the ws/ label only — the lifecycle
+        // labels do not depend on it.
+        let runner = FakeGhRunner::new(true);
+        ensure_launch_labels_with(&runner, Some(REPO_URL), Path::new("/nonexistent"), "  ");
+        assert_eq!(runner.label_names(), ["in-progress", "blocked"]);
     }
 }
