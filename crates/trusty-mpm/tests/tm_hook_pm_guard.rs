@@ -1098,3 +1098,237 @@ fn pm_guard_admits_both_dispatches_that_query_before_either_is_recorded() {
          if this changed, a reservation step was added and the module doc must say so"
     );
 }
+
+// ── Main-checkout destructive-git guard (ADR-0037) ──────────────────────────
+//
+// The rule these exercise pierces Guard 1 and Guard 4 exactly like the
+// worktree-tmp guard above, so the load-bearing case is a SUBAGENT-marked
+// payload: without the piercing, Guard 4 returns ALLOW before the Bash
+// classifier is ever reached and the guard does nothing for the incident it
+// was built from. Every case drives the working directory through the
+// payload's `cwd` field, which `pm_guard` reads ahead of the process
+// directory — the test binary's own cwd is inside a real checkout and would
+// otherwise decide the verdict.
+
+/// A directory that classifies as a project MAIN CHECKOUT: `.git` is a
+/// directory. Returns the `TempDir` guard (which must outlive the test) and
+/// the checkout path inside it.
+fn main_checkout_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+    std::fs::create_dir_all(repo.join("crates/trusty-mpm/src")).expect("mkdir src");
+    (dir, repo)
+}
+
+/// A `PreToolUse` Bash payload running `command` in `cwd`, with any extra
+/// top-level JSON fields (e.g. an `agent_id`) spliced in.
+fn bash_payload_at(command: &str, cwd: &std::path::Path, extra_fields: &str) -> String {
+    format!(
+        r#"{{"hook_event_name":"PreToolUse",{extra_fields}"cwd":"{}","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#,
+        cwd.display()
+    )
+}
+
+#[test]
+fn pm_guard_denies_the_incident_commands_in_a_main_checkout() {
+    // The 2026-08-10 incident, verbatim. Two of the three commands are this
+    // rule's business; `git reset HEAD` is deliberately NOT denied — the
+    // default `--mixed` unstages and destroys nothing, and the owner's
+    // boundary lists it as an explicit allow. Denying it would widen the rule
+    // past "irreversible destruction" into ordinary git work.
+    let (_dir, repo) = main_checkout_fixture();
+
+    for command in [
+        "git checkout a1b2c3d -- .",
+        "git clean -fdx -- crates/ docs/",
+    ] {
+        let stdout = run_pm_guard(&bash_payload_at(command, &repo, ""), &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("ADR-0037"),
+            "the deny must cite the ADR it enforces: {stdout}"
+        );
+        assert!(
+            stdout.contains(&repo.display().to_string()),
+            "the deny must name the directory it protected: {stdout}"
+        );
+    }
+
+    let reset = run_pm_guard(&bash_payload_at("git reset HEAD", &repo, ""), &[]);
+    assert_eq!(
+        reset.trim(),
+        "",
+        "`git reset HEAD` unstages without destroying anything and must stay allowed"
+    );
+}
+
+#[test]
+fn pm_guard_denies_every_destructive_form_in_a_main_checkout() {
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "git reset --hard origin/main",
+        "git reset --merge HEAD",
+        "git reset --keep HEAD~2",
+        "git checkout -- crates/",
+        "git checkout .",
+        "git checkout -f main",
+        "git restore src/lib.rs",
+        "git restore --staged --worktree src/",
+        "git clean -f",
+        "git clean -fdx",
+        "git switch --discard-changes main",
+        // Composition must not hide the verb behind a benign first segment.
+        "git status --short && git reset --hard",
+    ] {
+        let stdout = run_pm_guard(&bash_payload_at(command, &repo, ""), &[]);
+        assert_denied(&stdout);
+    }
+}
+
+#[test]
+fn pm_guard_allows_read_only_and_near_miss_git_in_a_main_checkout() {
+    // The false-positive boundary. #5356 is an OPEN P2 filed because pm_guard
+    // denied a turn of purely read-only `git status`/`git log`/`ls` calls;
+    // this rule must not add to it.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "git status",
+        "git status --short",
+        "git log --oneline -20",
+        "git diff HEAD~1 --stat",
+        "ls -la",
+        "git checkout -b feature/x",
+        "git checkout main",
+        "git reset",
+        "git reset --soft HEAD~1",
+        "git restore --staged src/lib.rs",
+        "git clean -n",
+        "git clean --dry-run -fdx",
+        "git switch main",
+        "git add -A",
+        "git stash list",
+    ] {
+        let stdout = run_pm_guard(&bash_payload_at(command, &repo, ""), &[]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "`{command}` must be allowed in a main checkout, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_main_checkout_destructive_git_from_a_subagent_payload() {
+    // THE load-bearing case, and the shape of the actual incident: a native
+    // Task/Agent-dispatched subagent (agent_id present) running the
+    // destructive command in a main checkout. Guard 4 exempts this payload
+    // shape from every ordinary Bash rule (see
+    // `pm_guard_native_subagent_dispatch_allows_bash` above), so a deny here
+    // can only come from the check running BEFORE that exemption. Remove the
+    // piercing and this test is the one that goes green-to-red.
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = bash_payload_at(
+        "git clean -fdx -- crates/ docs/",
+        &repo,
+        r#""agent_id":"agent-xyz789","agent_type":"local-ops","#,
+    );
+    let stdout = run_pm_guard(&payload, &[]);
+    assert_denied(&stdout);
+    assert!(stdout.contains("ADR-0037"), "{stdout}");
+}
+
+#[test]
+fn pm_guard_denies_main_checkout_destructive_git_from_the_mpm_subagent_env() {
+    // The other automatic marker: `CLAUDE_MPM_SUB_AGENT=1`, stamped by
+    // trusty-agents on every subagent process it spawns out-of-band. Guard 1
+    // exempts it from everything else, and must not exempt it from this.
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = bash_payload_at("git reset --hard origin/main", &repo, "");
+    let stdout = run_pm_guard(&payload, &[("CLAUDE_MPM_SUB_AGENT", "1")]);
+    assert_denied(&stdout);
+    assert!(stdout.contains("ADR-0037"), "{stdout}");
+}
+
+#[test]
+fn pm_guard_allows_destructive_git_inside_a_worktree() {
+    // Delegated work happens in worktrees and must stay fully writable — this
+    // is the exemption the whole rule is scoped around. Asserted for both
+    // worktree signals, and from a subagent payload, because that is who is
+    // actually working there.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let claude_wt = dir.path().join("repo/.claude/worktrees/wt-x");
+    std::fs::create_dir_all(claude_wt.join(".git")).expect("mkdir worktree");
+    let linked_wt = dir.path().join("linked-wt");
+    std::fs::create_dir_all(&linked_wt).expect("mkdir linked");
+    std::fs::write(linked_wt.join(".git"), "gitdir: /repo/.git/worktrees/x").expect("write .git");
+
+    for cwd in [&claude_wt, &linked_wt] {
+        for command in [
+            "git reset --hard origin/main",
+            "git clean -fdx",
+            "git checkout -- .",
+        ] {
+            let payload = bash_payload_at(command, cwd, r#""agent_id":"agent-xyz789","#);
+            let stdout = run_pm_guard(&payload, &[]);
+            assert_eq!(
+                stdout.trim(),
+                "",
+                "`{command}` in the worktree {} must be allowed, got: {stdout}",
+                cwd.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn pm_guard_allows_destructive_git_outside_any_checkout() {
+    // A declared fail-open arm: a directory with no `.git` ancestor is not a
+    // checkout, so there is nothing for this rule to protect and it stays out
+    // of the way. A path that does not exist resolves the same way.
+    let dir = tempfile::tempdir().expect("tempdir");
+    for cwd in [dir.path().to_path_buf(), dir.path().join("no/such/dir")] {
+        let stdout = run_pm_guard(&bash_payload_at("git clean -fdx", &cwd, ""), &[]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "a non-repository directory must be allowed, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_main_checkout_destructive_git_with_the_daemon_unreachable() {
+    // The fail-open check this rule most had to get right. Every other
+    // daemon-consulting guard in pm_guard answers ALLOW when the daemon is
+    // down; this one consults no daemon at all, so an unreachable daemon
+    // cannot weaken it. `run_pm_guard` always points `--url` at
+    // http://127.0.0.1:1 (nothing listens there), which is exactly that
+    // condition — the deny below is produced with no daemon in the picture,
+    // and the best-effort audit POST failing changes nothing.
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard(&bash_payload_at("git clean -fdx", &repo, ""), &[]);
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_operator_escape_hatches_still_allow_main_checkout_destructive_git() {
+    // `TRUSTY_MPM_DISABLE_HOOKS` and `TRUSTY_MPM_PM_UNRESTRICTED=1` are human
+    // escape hatches, never set programmatically anywhere in this codebase.
+    // They are deliberately NOT pierced — an operator who lifts enforcement
+    // gets exactly that, the same contract the worktree-tmp guard keeps.
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = bash_payload_at("git clean -fdx", &repo, "");
+    for env in [
+        ("TRUSTY_MPM_DISABLE_HOOKS", "1"),
+        ("TRUSTY_MPM_PM_UNRESTRICTED", "1"),
+    ] {
+        let stdout = run_pm_guard(&payload, &[env]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "{} must lift this guard along with every other",
+            env.0
+        );
+    }
+}
