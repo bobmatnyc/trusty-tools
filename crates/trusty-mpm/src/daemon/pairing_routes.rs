@@ -62,8 +62,12 @@ mod tests {
         let paths = FrameworkPaths::under(dir.path());
         let state = Arc::new(DaemonState::with_paths(&paths));
 
+        // All FOUR, matching this module's doc. `/pair/confirm` takes a JSON
+        // body it will not get here — it may answer 4xx for the missing body,
+        // but a 404 would mean the registration was dropped in the move.
         for (method, path) in [
             ("POST", "/pair/request"),
+            ("POST", "/pair/confirm"),
             ("GET", "/pair/status"),
             ("POST", "/pair/reset"),
         ] {

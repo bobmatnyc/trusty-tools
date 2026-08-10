@@ -956,3 +956,145 @@ fn pm_guard_allows_an_engineer_dispatch_into_an_empty_tree() {
     let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_first","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
     assert_eq!(run_pm_guard_at(payload, &url, cwd.path()).trim(), "");
 }
+
+/// A one-shot HTTP mock returning an arbitrary status line and body.
+///
+/// Why: [`spawn_writers_mock`] always answers 200 with a well-formed body, so
+/// it cannot drive the guard's malformed-response fail-open branch.
+/// What: as [`spawn_writers_mock`], but the caller supplies the status line
+/// (e.g. `"500 Internal Server Error"`) and the raw body bytes.
+fn spawn_writers_mock_with(status_line: &'static str, body: &'static str) -> String {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+#[test]
+fn pm_guard_allows_when_the_daemon_answer_is_malformed() {
+    // Declared fail-open branch: every unusable answer — a 5xx, a body that is
+    // not JSON, and well-formed JSON of the wrong shape — must ALLOW. A false
+    // deny here lands on the PM and halts every dispatch in the system.
+    let cases: [(&'static str, &'static str); 4] = [
+        (
+            "500 Internal Server Error",
+            r#"{"agents":[{"agent":"rust-engineer"}]}"#,
+        ),
+        ("200 OK", "not json at all"),
+        ("200 OK", r#"{"agents":"rust-engineer"}"#),
+        ("200 OK", r#"{"unexpected":"shape"}"#),
+    ];
+    for (status_line, body) in cases {
+        let url = spawn_writers_mock_with(status_line, body);
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_bad","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
+        assert_eq!(
+            run_pm_guard_at(payload, &url, cwd.path()).trim(),
+            "",
+            "a {status_line} / {body} answer must fail OPEN"
+        );
+    }
+}
+
+/// An HTTP mock that answers only once BOTH expected requests have arrived.
+///
+/// Why: the race this probes is "two guards both query before either dispatch
+/// is recorded". Creating that window with a sleep would make the test's
+/// outcome depend on scheduling; blocking the responder until both requests are
+/// in makes it a property of the mock's control flow instead. The first
+/// response cannot be written until `accept()` + `read()` has returned for the
+/// second connection, so the interleaving is forced, not raced for. No clock,
+/// virtual or real, is involved — deliberately, since tokio's `start_paused`
+/// auto-advances virtual time whenever all tasks are idle and would make an
+/// inserted delay evaporate (#3494).
+/// What: binds an ephemeral port, accepts and fully reads `expected`
+/// connections, and only then writes `body` to each. Returns the base URL.
+fn spawn_barrier_writers_mock(expected: usize, body: &'static str) -> String {
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        let mut held: Vec<TcpStream> = Vec::with_capacity(expected);
+        for _ in 0..expected {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            held.push(socket);
+        }
+        // Barrier passed: every guard has issued its query and none has an
+        // answer yet. This is the exact state the race needs.
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        for mut socket in held {
+            let _ = socket.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+#[test]
+fn pm_guard_admits_both_dispatches_that_query_before_either_is_recorded() {
+    // #4480, the check-then-decide window. `evaluate` reads the daemon's
+    // shared-tree-writers answer and decides; it takes no reservation. When two
+    // dispatches both query before either's `on_dispatch` recording lands, both
+    // see an empty set and both are ALLOWED — the collision the guard exists to
+    // prevent, in the shape the framework's own parallel-dispatch pattern
+    // produces.
+    //
+    // The window is forced, not timed: `spawn_barrier_writers_mock` cannot
+    // answer the first guard until the second's request has been read, so this
+    // interleaving is deterministic.
+    //
+    // What this test does NOT establish: whether Claude Code ever produces it.
+    // Whether PreToolUse admission is serialized across simultaneous `tool_use`
+    // blocks is a harness property, not observable from this repo — the hooks
+    // reference states only that multiple handlers for ONE event run in
+    // parallel, and is silent on hooks across parallel tool calls. If a
+    // reservation step is ever added, this test flips to one ALLOW + one DENY
+    // and must be updated deliberately.
+    let url = spawn_barrier_writers_mock(2, r#"{"agents":[],"total":0}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+
+    let mut children = Vec::new();
+    for tool_use_id in ["toolu_race_a", "toolu_race_b"] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"{tool_use_id}","tool_name":"Agent","tool_input":{{"subagent_type":"rust-engineer","prompt":"go"}}}}"#
+        );
+        let url = url.clone();
+        let dir = cwd.path().to_path_buf();
+        children.push(std::thread::spawn(move || {
+            run_pm_guard_at(&payload, &url, &dir)
+        }));
+    }
+
+    let verdicts: Vec<String> = children
+        .into_iter()
+        .map(|h| h.join().expect("guard thread").trim().to_string())
+        .collect();
+
+    assert_eq!(
+        verdicts,
+        vec![String::new(), String::new()],
+        "both dispatches querying before either is recorded are currently ALLOWED — \
+         if this changed, a reservation step was added and the module doc must say so"
+    );
+}
