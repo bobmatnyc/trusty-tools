@@ -458,11 +458,15 @@ mod tests {
             ]
         );
         assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "on"]);
-        // #5151: window scope (`-wg`), and `on` — the factory default this
-        // orchestrator passes through unchanged.
+        // #5364: window scope (`-wg`), and `off` — this orchestrator passes
+        // the shared default through unchanged, and that default flipped from
+        // tmux's factory `on` so managed sessions get working scrollback.
+        // Both crates must agree: they drive the same tmux server, and
+        // `alternate-screen` is global, so a disagreement would have each
+        // crate's session creation revert the other's.
         assert_eq!(
             tmux_argv(&cmds[2]),
-            ["set-option", "-wg", "alternate-screen", "on"]
+            ["set-option", "-wg", "alternate-screen", "off"]
         );
         // No `-A`: this orchestrator preserves its pre-#3004 fail-if-exists
         // semantics, unlike trusty-mpm's idempotent creation.

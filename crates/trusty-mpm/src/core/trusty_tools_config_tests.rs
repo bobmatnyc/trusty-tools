@@ -379,7 +379,7 @@ fn tmux_config_yaml_round_trip() {
 
 /// Why: with no `tmux:` section at all, resolution must fall back to the
 /// built-in defaults (100,000-line history-limit, mouse on,
-/// alternate-screen on).
+/// alternate-screen off since #5364).
 /// Test: itself.
 #[test]
 fn tmux_options_default_when_no_config() {
@@ -389,17 +389,18 @@ fn tmux_options_default_when_no_config() {
     assert_eq!(opts.alternate_screen, DEFAULT_TMUX_ALTERNATE_SCREEN);
 }
 
-/// Why (#5151): `alternate_screen` is an OPT-IN knob. `on` is tmux's
-/// factory default and today's behaviour, so an absent section — and an
-/// absent field within a present section — must both resolve to `true`.
-/// Defaulting the other way would silently change how every full-screen
-/// program in every pane on the shared server behaves.
+/// Why (#5364): the alternate screen is OFF by default, so a managed session
+/// has working scrollback without the operator finding the knob first. An
+/// absent section — and an absent field within a present section — must both
+/// resolve to `false`. #5151 shipped this defaulting to `true` (tmux's factory
+/// value), which left the unscrollable-session bug in place for everyone who
+/// never opted in; that is the regression this test exists to catch.
 /// Test: itself.
 #[test]
-fn tmux_options_alternate_screen_defaults_on() {
+fn tmux_options_alternate_screen_defaults_off() {
     // Compile-time tripwire: flipping the default is a deliberate act.
-    const { assert!(DEFAULT_TMUX_ALTERNATE_SCREEN) };
-    assert!(resolve_tmux_options(&TrustyToolsConfig::default()).alternate_screen);
+    const { assert!(!DEFAULT_TMUX_ALTERNATE_SCREEN) };
+    assert!(!resolve_tmux_options(&TrustyToolsConfig::default()).alternate_screen);
 
     // A `tmux:` section that sets other fields but not this one still
     // falls back per-field.
@@ -411,7 +412,7 @@ fn tmux_options_alternate_screen_defaults_on() {
         }),
         ..Default::default()
     };
-    assert!(resolve_tmux_options(&partial).alternate_screen);
+    assert!(!resolve_tmux_options(&partial).alternate_screen);
 }
 
 /// Why (#5151): a configured `false` is the ONLY thing that turns the
