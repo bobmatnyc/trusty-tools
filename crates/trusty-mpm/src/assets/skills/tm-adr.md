@@ -64,16 +64,35 @@ this writing — always check the actual latest file before picking a number.
 
 ---
 
-## Numbering Convention
+## Numbering Convention — Claim, Then Populate
 
-Sequential, zero-padded four-digit integers. Find the next number:
+Sequential, zero-padded four-digit integers. Concurrent worktrees each
+guessing "the next number" from a stale or dirty local checkout is exactly
+how two ADRs land on the same number — several can be in flight at once.
 
-```bash
-ls docs/adr/*.md | grep -E '^docs/adr/[0-9]{4}' | sort | tail -3
-```
+1. **Check before choosing** — list `docs/adr/` on `origin/main`, not your
+   local working tree:
+   ```bash
+   git fetch origin
+   git ls-tree -r --name-only origin/main -- docs/adr/ | grep -E '/[0-9]{4}-' | sort | tail -5
+   ```
+   Also check for a number already claimed by an in-flight branch or open PR
+   that hasn't merged yet (e.g. `gh pr list --search "docs/adr"`, or ask
+   whoever is coordinating concurrent work) — `origin/main` alone won't show
+   it.
+2. **Create the file, then stage it immediately** — a stub carrying at least
+   the title and `Status:` line, at `docs/adr/NNNN-your-title.md` (copy
+   `docs/adr/template.md`), followed by `git add docs/adr/NNNN-your-title.md`.
+   An untracked stub reserves nothing: a duplicate-number lint that reads
+   `git ls-files` (this repo's `scripts/check_doc_numbers.sh` is one) is blind
+   to it, and so is a peer session running the same check-before-choosing step
+   you just did. Staging it is what actually claims the number.
+3. **Then populate** Context, Decision, Consequences, and Related Decisions.
 
-Copy `docs/adr/template.md` to `docs/adr/NNNN-your-title.md` with the next
-available number.
+**On discovering a collision** — your number, or someone else's, is already
+taken — report it and pick a different number. Never silently renumber
+another author's ADR; that call belongs to them or whoever is coordinating
+the collision.
 
 ---
 
