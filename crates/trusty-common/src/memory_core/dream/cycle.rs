@@ -10,7 +10,8 @@
 
 use super::config::DreamConfig;
 use super::helpers::{
-    build_closet_index, is_low_quality_content, merge_into, rebuild_index_from_drawers,
+    build_closet_index, char_safe_prefix, is_low_quality_content, merge_into,
+    rebuild_index_from_drawers,
 };
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::palace::{Drawer, RoomType};
@@ -416,7 +417,9 @@ async fn apply_consolidation_result(
             }
             Err(e) => {
                 tracing::warn!(
-                    content = &canonical.content[..canonical.content.len().min(80)],
+                    // #5187: same defect as the merge cap — a `.min(80)` byte
+                    // clamp splits multi-byte content and panics the pass.
+                    content = char_safe_prefix(&canonical.content, 80),
                     "dream semantic: failed to add canonical drawer: {e:#}"
                 );
             }
