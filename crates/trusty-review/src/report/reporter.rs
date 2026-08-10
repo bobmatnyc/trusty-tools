@@ -22,7 +22,9 @@ use super::metrics::Severity;
 use super::model::{ReportModel, RepositoryReport};
 use super::polish::polish_with_gaps;
 use super::provenance::{self, Provenance, tag};
-use super::reporter_fill::{crate_version, fill_profile, instructions_block, set_scoring_model};
+use super::reporter_fill::{
+    crate_version, fill_profile, instructions_block, set_executive_summary, set_scoring_model,
+};
 use super::reporter_graph_datasets::{
     inject_complexity_distribution_dataset, inject_loc_by_technology_dataset,
 };
@@ -292,9 +294,14 @@ fn build_scope(model: &ReportModel) -> Scope {
     // never synthesized — filled independent of synthesis availability.
     push_green_topics(&mut root, model);
 
-    // M2: the executive summary and top-risk rationale have no deterministic M1
-    // source; fill them only from verified synthesis.  Absent/unavailable
-    // synthesis leaves both to the M1 honesty marker (unchanged behaviour).
+    // #5318: §2 has a deterministic source now.  It used to be filled ONLY from
+    // verified synthesis, so a run without `--synthesize` — which is every
+    // `tga audit` run — collapsed the first section a diligence reader opens
+    // while the report listed real RED/AMBER findings two sections below.  The
+    // roll-up counts what the report already contains; synthesis prose still
+    // overwrites it below when it runs and passes the guardrail.
+    let synthesized_risks = available_synthesis.is_some_and(|s| !s.top_risks.is_empty());
+    set_executive_summary(&mut root, model, !synthesized_risks);
     if let Some(syn) = available_synthesis {
         inject_synthesis_summary(&mut root, syn);
     }
