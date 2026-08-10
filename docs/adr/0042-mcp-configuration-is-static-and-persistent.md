@@ -27,9 +27,13 @@ On every `prepare_session` run, tm force-writes MCP server entries into the sess
 
 All five route through one read-merge-write helper, [`inject_mcp_server`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/settings.rs#L394). Their success bools then feed [`launch_trusted_mcp_names`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/mcp_config.rs#L564) at the [`mod.rs:1146`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/mod.rs#L1146) call site, and the resulting name set is written as `enabledMcpjsonServers` by [`preseed_workspace_trust`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/settings.rs#L697).
 
-### The bridge's stated rationale is stale
+### The bridge's stated rationale is stale for the daemon path, and live everywhere else
 
-[`native_mcp.rs:1-15`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/native_mcp.rs#L1-L15) justifies the whole bridge on one premise: daemon-managed sessions launch `claude --setting-sources project,local`, "which excludes the `user` tier where that map lives, so the managed servers are never read." That was true when written (it cites #2756). It is false now. Since #4451 relocated `CLAUDE_CONFIG_DIR`, a relocated spawn uses [`SETTING_SOURCES_FLAG_RELOCATED`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/model_inject.rs#L111) — `--setting-sources user,project,local` — selected by [`setting_sources_flag`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/model_inject.rs#L125), and every daemon-managed spawn relocates. The doc comment was never updated, so the bridge is now load-bearing only by inertia.
+[`native_mcp.rs:1-15`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/native_mcp.rs#L1-L15) justifies the whole bridge on one premise: daemon-managed sessions launch `claude --setting-sources project,local`, "which excludes the `user` tier where that map lives, so the managed servers are never read." That premise is real, and it was measured rather than assumed (see the flag table below). What changed is only its reach.
+
+For the **daemon-managed** path it no longer holds. Since #4451 relocated `CLAUDE_CONFIG_DIR`, a relocated spawn uses [`SETTING_SOURCES_FLAG_RELOCATED`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/model_inject.rs#L111) — `--setting-sources user,project,local` — selected by [`setting_sources_flag`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/model_inject.rs#L125), and every daemon-managed spawn relocates. The doc comment was never updated, so on that path the bridge is load-bearing only by inertia.
+
+For the **interactive** paths it still holds exactly as written, which is what makes it a constraint on this decision rather than a historical note. See "The interactive launch paths do not load user scope" in Consequences.
 
 ### The measurement that settled the shape
 
@@ -45,9 +49,26 @@ $ python3 -c "import json; print(sorted(json.load(open(D+'/.mcp.json'))['mcpServ
 ['trusty-memory', 'trusty-mpm', 'trusty-review', 'trusty-search']
 ```
 
-`D = ~/.trusty-tools/trusty-mpm/claude-config`. The five that connect silently are precisely the top-level `mcpServers` map of `<CLAUDE_CONFIG_DIR>/.claude.json` — the map `tm mcp add` writes ([`mcp_config.rs:639`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/mcp_config.rs#L639)). The four that require approval are in `<CLAUDE_CONFIG_DIR>/.mcp.json`, written by [`ensure_mcp_config`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/standalone/global_config.rs#L316) — a file at a path Claude Code appears not to read for a session whose cwd is elsewhere, since those four reach the session through the workspace copy instead.
+`D = ~/.trusty-tools/trusty-mpm/claude-config`. The five that connect silently are precisely the top-level `mcpServers` map of `<CLAUDE_CONFIG_DIR>/.claude.json` — the map `tm mcp add` writes ([`mcp_config.rs:639`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/mcp_config.rs#L639)). The four that require approval are in `<CLAUDE_CONFIG_DIR>/.mcp.json`, written by [`ensure_mcp_config`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/standalone/global_config.rs#L316); those four reach the session through the workspace copy instead.
 
 So workspace-scope declaration is what creates the approval gate. It is also what creates the per-worktree drift, the write-after-spawn race, and the dirty-tracked-file leak the issue describes. One cause, four symptoms.
+
+### How Claude Code discovers `.mcp.json`, measured
+
+Measured 2026-08-10 against `claude` 2.1.226, using a stub stdio MCP server that records its own `argv`, `cwd`, and environment to a file and then completes a real handshake, so a spawn is observed rather than inferred. Every run used a throwaway `CLAUDE_CONFIG_DIR` and a throwaway cwd; no operator configuration was read or written.
+
+**`.mcp.json` is discovered by walking up the directory tree from the session's cwd.** A run whose cwd was an empty scratch directory and whose config dir was freshly created still listed eight servers — exactly the `mcpServers` map of `/private/tmp/.mcp.json`, an ancestor of that cwd.
+
+That settles what `<CLAUDE_CONFIG_DIR>/.mcp.json` is for. The same file, declaring the same server, read twice with only cwd changed:
+
+| cwd | is the config dir's `.mcp.json` server listed? |
+|---|---|
+| a sibling scratch directory | no — absent entirely |
+| the config dir itself | yes, as `⏸ Pending approval` — i.e. as *project* scope |
+
+The file has no special status and no dedicated reader. It is read only when it happens to be an ancestor of cwd, which for a real session — cwd is the repo — it never is. The copy `ensure_mcp_config` writes is inert, and the function can be deleted outright rather than redirected.
+
+The tree walk also means a `.mcp.json` **above** a workspace is read by every session beneath it. `/private/tmp/.mcp.json` is doing that today on this machine: mode `0644`, dated 2026-08-08, declaring all four `trusty-*` servers plus four operator servers, and pinning `trusty-search serve --index tmp`. It is the same drift #4181 describes, one directory further up than the issue assumed, and deleting the injectors does not remove files already written. See Open questions.
 
 ## Decision
 
@@ -67,7 +88,7 @@ Concretely:
 
 4. **Declarations become argless where they can be.** A single shared declaration cannot carry a per-project argument, so per-project state moves to environment variables the spawn exports. `trusty-memory` already has the shape (`TRUSTY_MEMORY_PALACE`); `trusty-search` does not (see Consequences).
 
-5. **The `claude mcp` CLI is wrapped for ad hoc operator use only, not adopted wholesale.** Both limitations were verified against the installed CLI at `/Users/masa/.local/bin/claude`:
+5. **`tm mcp` does not wrap `claude mcp`.** No such wrap exists today, and none is added. The two CLIs were compared directly and tm's is a strict superset on both operations that matter for seeding:
 
    ```
    $ claude mcp add adrtest-probe /bin/echo -- hi ; echo "EXIT=$?"
@@ -76,9 +97,20 @@ Concretely:
    $ claude mcp add adrtest-probe /bin/echo -- hi ; echo "EXIT=$?"
    MCP server adrtest-probe already exists in local config
    EXIT=1
+
+   $ tm mcp add --root <throwaway> adr42-idem /bin/echo -- hi ; echo "EXIT=$?"
+   Added MCP server 'adr42-idem' to <throwaway>/claude-config/.claude.json
+   EXIT=0
+   $ tm mcp add --root <throwaway> adr42-idem /bin/echo -- hi ; echo "EXIT=$?"
+   MCP server 'adr42-idem' already present (no change)
+   EXIT=0
    ```
 
-   `claude mcp list --help` and `claude mcp get --help` each list exactly one option, `-h, --help` — there is no `--json`. So `add` is not idempotent (it fails on re-add at the same name and scope) and the read commands have no machine-readable output. tm keeps its own idempotent writer for the one-time seeding and its own `--json`-capable reader ([`list_cmd`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/bin/tm/commands/mcp.rs#L176), [`get_cmd`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/bin/tm/commands/mcp.rs#L215)); the `claude mcp` wrap is a convenience for an operator adding a one-off server by hand.
+   `claude mcp add` fails on re-add at the same name and scope; [`add_cmd`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/bin/tm/commands/mcp.rs#L87) succeeds, because [`mcp_config::add_server`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/bin/tm/commands/mcp.rs#L141) reports whether anything changed instead of erroring. `claude mcp list --help` and `claude mcp get --help` each expose exactly one option, `-h, --help`; tm's [`list_cmd`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/bin/tm/commands/mcp.rs#L176) and [`get_cmd`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/bin/tm/commands/mcp.rs#L215) take `--json` and emit it.
+
+   Adding the wrap would put a second writer on the one map this ADR makes authoritative, which the "common entry point" rule in `CLAUDE.md` treats as a defect rather than a convenience. An operator wanting `claude mcp add` can still run it directly — it writes the same file.
+
+6. **The interactive launch paths must relocate `CLAUDE_CONFIG_DIR` before the injectors are deleted.** `tm launch` and `tm connect` currently spawn `claude --setting-sources project,local` and do not relocate, which under a user-scope-only declaration leaves them with no MCP servers at all. This is the one measurement that resolved against the shape as first drafted; the evidence and the two candidate remedies are in Consequences under "The interactive launch paths do not load user scope". It is a precondition of the deletion, not a follow-up to it.
 
 ## Consequences
 
@@ -90,7 +122,15 @@ Derived by reading the current tip (`364aba4`), not from any prior report:
 - `custom_mcp.rs`'s project-scope `[mcp.custom]` injection loop, and with it the `project_scope_mcp_names` subtraction at the [`mod.rs:1146`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/mod.rs#L1146) call site.
 - [`exclude_mcp_json_from_git`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/native_mcp.rs#L564), called at [`mod.rs:999`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/mod.rs#L999) and again from `runtime/claude_code.rs`. It is a mitigation for the leak that only exists because tm writes the file; with no write there is nothing to exclude.
 - [`launch_trusted_mcp_names`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/mcp_config.rs#L564) / `_from`, [`preseed_workspace_trust`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/settings.rs#L697) / `_home`, and the `enabledMcpjsonServers` derivation in `standalone::trust_seed`. **These must go in the same change as the injectors — see the security section below.**
-- [`ensure_mcp_config`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/standalone/global_config.rs#L316)'s target changes from `<CLAUDE_CONFIG_DIR>/.mcp.json` to that dir's `.claude.json` `mcpServers`. The live inspection above shows the `.mcp.json` it writes today is inert.
+- [`ensure_mcp_config`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/standalone/global_config.rs#L316) is deleted rather than redirected. The measured tree-walk above shows the `.mcp.json` it writes is never read by a session whose cwd is the repo, so there is nothing to preserve.
+
+### Deleting `inject_trusty_memory_mcp` also deletes the #1939 alias healing
+
+`inject_trusty_memory_mcp` is not only an injector. It is the sole call site of [`maybe_register_palace_alias`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/palace_alias.rs#L45), invoked at [`settings.rs:483`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/settings.rs#L483) immediately before the write. Nothing else in the crate calls it. Delete the injector as written and #1939's claude-mpm split-brain healing — aliasing `owner-repo` to a pre-existing bare-repo palace — silently stops running, with no test failing to say so. The call has to be rehomed onto whatever still runs per launch, most naturally `ensure_managed_config_dir`.
+
+The original worry behind this question turns out not to apply. `palace_alias.rs:48` does bail when `TRUSTY_MEMORY_PALACE` is set, but it reads that through [`palace_override_from_env`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-common/src/palace_id.rs#L67), which is `std::env::var` in the **calling** process — tm itself. The ADR exports `TRUSTY_MEMORY_PALACE` into the spawned `claude` process's environment, not tm's, so the two never meet and alias registration is unaffected. The risk is the lost call site, not the override.
+
+On the trusty-memory side the export does take the highest-precedence branch: `cwd_palace_slug_at` returns the override immediately, short-circuiting the pin file and the git derivation below it. That is the intended effect — it is what replaces the `.mcp.json` `env` pin. Whether alias resolution still applies downstream of an overridden slug is not settled here; see Open questions.
 
 ### What survives
 
@@ -110,6 +150,17 @@ This is the part that cannot regress. The current design pins MCP *content* behi
 - A name a repo commits into its `.mcp.json` is therefore unapproved, and falls through to Claude Code's own "new MCP servers found" consent dialog — the same gate #2739's `[mcp.custom]` design already relies on for project-scope entries.
 - The servers the session actually needs are declared in user scope, where the operator put them, and are never sourced from repo content.
 
+**Measured precedence confirms this, and shows the approval is the whole hinge.** Two runs, identical except for one key, each declaring the same server name `adr42-collide` in both a workspace `.mcp.json` and the user-scope `mcpServers` map, with a distinct stub binary behind each so the spawn log records which one actually ran:
+
+| `enabledMcpjsonServers` contains the name | `claude mcp get` reports | binary actually spawned |
+|---|---|---|
+| no | `Scope: User config (available in all your projects)` | the user-scope one |
+| yes | `Scope: Project config (shared via .mcp.json)` | **the repo's one** |
+
+Unapproved, the repo's colliding entry is inert — it does not shadow, and it does not even surface as pending; only non-colliding repo names appear as `⏸ Pending approval`. Approved, project scope wins outright and the user-scope declaration is overridden.
+
+So the name-squatting attack is not merely *enabled* by the approval, it is *constituted* by it: `enabledMcpjsonServers` is precisely what lets repo content displace an operator's own declaration. Today's force-overwrite injectors defuse it by rewriting the entry to the canonical command before the approval is computed. Removing the approval defuses it by removing the displacement mechanism. Both are coherent; only the half-done state is not.
+
 The property becomes structural rather than procedural: today safety depends on an injector *succeeding* in the same run as the approval; afterwards there is no approval to get wrong. That is a stronger invariant, but only if the removal is atomic. **An implementation that lands the injector deletion without the approval deletion, or in a separate PR, reintroduces #3926 in its worst form.** The implementing PR must carry a regression test asserting that a workspace whose `.mcp.json` declares a builtin name produces no `enabledMcpjsonServers` entry for it — the natural successor to `tests_launch_trust_3926.rs`, which should be rewritten rather than deleted.
 
 Residual risk this accepts: user-scope `mcpServers` entries connect with no approval prompt, so `tm mcp add` becomes the single operator trust decision for MCP. That is already true today for the five non-trusty servers on this machine, and it is operator-initiated by construction — a cloned repo cannot reach that file.
@@ -125,6 +176,55 @@ So `TRUSTY_INDEX` is already parsed and already ignored by exactly the one code 
 
 The environment variable itself must be exported by the spawn. `spawn_command` ([`claude_code.rs:303`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/runtime/claude_code.rs#L303)) exports no per-project MCP variables today — [`env_bin_prefix`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/runtime/claude_code.rs#L197) sets `CLAUDE_CONFIG_DIR` and an OAuth token and scrubs inherited markers, nothing more. `TRUSTY_MEMORY_PALACE` reaches trusty-memory today only through the injected `.mcp.json` `env` block, and `TRUSTY_SEARCH_INDEX` does not exist anywhere in the workspace. Both exports are new work this ADR proposes, not existing behaviour.
 
+### The environment carrier works — measured end to end
+
+The whole argless-declaration plan rests on the `claude` process's environment reaching the stdio MCP servers it spawns. It does, unmodified.
+
+An argless server declared only in the user-scope `mcpServers` map came up `✔ Connected`, and the stub recorded a child environment containing every variable set on the `claude` process verbatim — including the three the plan depends on:
+
+```
+ADR42_PROBE_MARKER       = adr42-marker-9f3c1e7b
+TRUSTY_MEMORY_PALACE     = adr42-palace-probe
+TRUSTY_SEARCH_INDEX      = adr42-index-probe
+TRUSTY_INDEX             = adr42-trustyindex-probe
+```
+
+The child's environment was the parent's plus Claude Code's own additions (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PROJECT_DIR`, `AI_AGENT`). Nothing was dropped, renamed, or filtered — there is no allowlist and no sanitizing, so a variable name tm chooses freely will arrive. Item 4 of the Decision is sound, and the pins need no other carrier.
+
+One consequence worth naming: because inheritance is plain and unfiltered, the same mechanism carries *any* variable in the spawn's environment into every MCP server the session runs. That is what makes the argless plan work, and it is also why `env_bin_prefix`'s existing marker scrub stays load-bearing.
+
+### The interactive launch paths do not load user scope — this changes the plan
+
+This is the one open question that resolved **against** the design as first drafted, and it is a precondition rather than a caveat.
+
+`--setting-sources project,local` does not merely exclude the `user` *settings* tier. It suppresses the user-scope `mcpServers` map itself. Same throwaway config dir, same declaration, only the flag varying:
+
+| flag on `claude … mcp list` | user-scope server visible? |
+|---|---|
+| *(none)* | ✔ Connected |
+| `--setting-sources project,local` | **not listed at all** |
+| `--setting-sources user,project,local` | ✔ Connected |
+
+`CLAUDE_CONFIG_DIR` was set in all three runs, so relocation alone does not rescue it — the flag decides.
+
+Two live paths emit that flag and never relocate:
+
+- `tm launch` builds its pane command through [`build_claude_command`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/model_inject.rs#L256) at [`launch.rs:326`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/bin/tm/commands/launch.rs#L326).
+- `tm connect` does the same through [`connect_claude_cmd`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/bin/tm/commands/launch.rs#L622).
+
+`build_claude_command` appends [`SETTING_SOURCES_FLAG`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/model_inject.rs#L86) unconditionally at [`model_inject.rs:273`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/model_inject.rs#L273) — it takes no `config_dir` argument, so `setting_sources_flag`'s relocated branch is unreachable from it. The behaviour is pinned by [`claude_command_includes_setting_sources`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/model_inject.rs#L550), which asserts the composed line contains `--setting-sources project,local` and does not contain `user` at all. `prepare_managed_config` ([`claude_code.rs:714`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/runtime/claude_code.rs#L714)) also returns `None` when the home directory cannot be resolved, sending the daemon path down the same non-relocated branch.
+
+Today those sessions still get MCP servers, because the injectors write them into the workspace at project scope — the tier the flag *does* load. **Delete the injectors without touching these paths and `tm launch` and `tm connect` get no MCP servers whatsoever**: nothing at user scope is read, and nothing is written at project scope any more. That is a worse failure than the one #4181 reports, because it is total rather than partial.
+
+Two remedies, both small, neither yet chosen:
+
+- Give `build_claude_command` the same `config_dir` parameter its daemon-side siblings take, relocate on these paths, and let `setting_sources_flag` pick `user,project,local`. This is the uniform answer and it makes the tier contract single-sourced.
+- Keep the paths non-relocated and change the flag to `user,project,local` outright. Smaller diff, but it re-admits the operator's global `~/.claude` settings that #1269 excluded on purpose, since without relocation the `user` tier resolves to the operator's own home.
+
+The first preserves #1269's isolation goal by the same mechanism #4451 used; the second trades it away. The choice belongs with the owner, and it is a `trusty-mpm` behaviour change requiring its own regression coverage — the existing test above encodes the current invariant and would have to be rewritten deliberately, not deleted.
+
+The two halves of this finding were established differently, and the distinction matters for anyone rechecking it. That the flag suppresses user scope was **measured** against `claude` 2.1.226. That `tm launch` and `tm connect` emit it was established by **reading** the command builders and the test that pins them; neither command was run end to end, because doing so spawns a real interactive session.
+
 ### Smaller consequences
 
 - `#4181`'s two independent complaints separate cleanly. The placement/drift/leak half is resolved by construction. The **second, separable defect the issue names — that a declared-but-missing server is reported nowhere the session can see it — is untouched by this ADR** and stays open.
@@ -133,14 +233,15 @@ The environment variable itself must be exported by the spawn. `spawn_command` (
 
 ## Open questions
 
-Recorded rather than asserted, because they were not verified:
+The six questions this ADR opened were investigated on 2026-08-10; five resolved and moved into Context, the Decision, or Consequences above. What is left is genuinely unsettled, and is stated here rather than guessed at.
 
-1. **Precedence on a name collision.** If a repo's `.mcp.json` declares `trusty-memory` and the user-scope `.claude.json` also does, which wins, and does the workspace copy still surface a consent prompt? Not tested. This decides whether a hostile repo can shadow a working user-scope server or merely add an unapproved one.
-2. **Does an MCP child process inherit the spawn's environment?** The env-var plan assumes the `claude` process's environment reaches the stdio MCP servers it spawns, which is ordinary Unix inheritance, but it was not measured end to end for `TRUSTY_MEMORY_PALACE` under an argless user-scope declaration. If Claude Code sanitizes the child environment, item 4 of the Decision does not work and the pins need another carrier.
-3. **What is `<CLAUDE_CONFIG_DIR>/.mcp.json` actually for?** The live inspection shows it holds the four builtins and that they nonetheless require approval when reached via the workspace, which is consistent with the file being unread — but "consistent with" is not "confirmed." Whether `ensure_mcp_config`'s target should be redirected or the function deleted outright depends on that.
-4. **The standalone `tm run` driver.** This ADR reasons about the daemon-managed path, where the relocated `CLAUDE_CONFIG_DIR` guarantees the `user` tier is loaded. The non-relocated path still selects `--setting-sources project,local` ([`model_inject.rs:125`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/model_inject.rs#L125)), which is exactly the premise that made the bridge necessary. Whether any live spawn path still takes that branch was not established; if one does, it needs a different answer.
-5. **The `trusty-memory` palace pin under a shared declaration.** `inject_trusty_memory_mcp` derives the slug per project from the repo URL. Moving that to `TRUSTY_MEMORY_PALACE` on the spawn is straightforward, but `palace_alias.rs` treats a set `TRUSTY_MEMORY_PALACE` as an *operator override* and bails on aliasing when it sees one — so an unconditionally-exported variable may change alias-resolution behaviour. Not investigated.
-6. **Whether `tm mcp` should wrap `claude mcp add` at all.** The two limitations are verified; whether the wrap earns its keep given tm already has a superset writer is a product call, not a technical one.
+1. **Which remedy the interactive launch paths take.** That `tm launch` and `tm connect` lose MCP entirely under a user-scope-only declaration is settled. The fix is not: relocate `CLAUDE_CONFIG_DIR` and reuse `setting_sources_flag`, or switch those paths to `user,project,local` without relocating and accept the #1269 isolation loss. This is a design choice for the owner, not a fact to measure.
+
+2. **Whether palace-alias resolution still applies to an overridden slug.** `cwd_palace_slug_at` returns a set `TRUSTY_MEMORY_PALACE` immediately, ahead of the pin file and the git derivation. Whether `PalaceAliasStore` resolution then still runs against that slug downstream — which decides if an aliased palace keeps resolving once the pin moves from the `.mcp.json` `env` block to a spawn variable — was not traced to a conclusion. It affects #1939 parity, not the declaration model.
+
+3. **What to do about `.mcp.json` files already written above a workspace.** Discovery walks up from cwd, so a stale ancestor file keeps contaminating sessions after the injectors are gone; `/private/tmp/.mcp.json` is a live example on this machine. Deleting the write path does not delete what it already wrote, and nothing in this ADR cleans up. Whether that needs a `tm doctor` check, a one-shot cleanup, or nothing at all is unaddressed.
+
+A related note, not a question: the same tree walk means any directory above a workspace is a place a `.mcp.json` can be planted. On a shared machine `/tmp` is the obvious one. The user-scope declaration this ADR adopts is unaffected — it is not reached by the walk — but the residual risk in the security section covers only cloned repos, and this widens the surface it should be read against.
 
 ## Related Decisions
 
@@ -165,3 +266,5 @@ No conflicts found. No prior ADR is superseded or amended.
 - Index-pin regression this must preserve: #1373.
 - `CLAUDE_CONFIG_DIR` relocation that invalidated the bridge's premise: #4451.
 - All source citations above are pinned to `364aba420214d8191408e54b024bcc5874a2d66a`, the `origin/main` tip at the time of writing.
+- Measurements dated 2026-08-10 were run against `claude` 2.1.226 using a stub stdio MCP server that recorded its `argv`, `cwd`, and environment before completing a handshake, so each result reflects an observed spawn. Every run used a throwaway `CLAUDE_CONFIG_DIR` and a throwaway cwd; the operator's configuration was neither read nor written, and no daemon was restarted. What each one settled is stated where it is used: `.mcp.json` discovery in Context; precedence and environment inheritance in Consequences; the `--setting-sources` behaviour under "The interactive launch paths do not load user scope".
+- Palace-alias healing whose only call site the deletion removes: #1939.
