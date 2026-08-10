@@ -204,3 +204,79 @@ async fn restore_failed_index_grep_says_restart_not_retry() {
         "must not tell a permanently-failed index to wait, got: {message}"
     );
 }
+
+// ── #5075: DELETE must clear the cold store, or 503 becomes permanent ────────
+
+/// #5075: after `DELETE /indexes/:id`, a cold-parked index must report 404 —
+/// absent from every store — not 503 forever.
+///
+/// Why: the three guards above are what make this observable and permanent.
+/// `unregister_index` dropped the hot registration and the `indexes.toml` row
+/// but never purged `cold_store.entries` / `failed_entries`, so every one of
+/// them kept answering "registered but not resident" for an id that no longer
+/// exists anywhere. That inverts this file's own invariant — 404 means absent
+/// from every store — and it is unrecoverable: nothing else clears those maps,
+/// so the MCP layer could never again report `INDEX_NOT_READY` for the
+/// delete-then-reindex case (#4715).
+/// What: parks an index cold, deletes it through the real handler, then drives
+/// `index_status_handler`, `get_index_chunks_handler`, and `grep_handler` —
+/// the same three guards this file pins — asserting 404 from each. Pre-fix all
+/// three return 503.
+/// Test: this test.
+#[tokio::test]
+async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
+    let state = state_with_cold_index("cold-deleted");
+
+    let axum::Json(body) = super::search::delete_index_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("cold-deleted".to_string()),
+        axum::extract::Query(serde_json::from_value(serde_json::json!({})).expect("params")),
+    )
+    .await;
+    assert_eq!(
+        body["removed"],
+        serde_json::Value::Bool(true),
+        "#5075: deleting a cold-parked index must count as a removal — it is a \
+         real registration. Body: {body}"
+    );
+
+    let status_err = super::status::index_status_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("cold-deleted".to_string()),
+    )
+    .await
+    .expect_err("a deleted index cannot be reported");
+    assert_eq!(
+        status_err,
+        StatusCode::NOT_FOUND,
+        "#5075: /status must say the index is gone, not that it is still \
+         restoring — the 503 never clears"
+    );
+
+    let chunks_err = super::files::get_index_chunks_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("cold-deleted".to_string()),
+        axum::extract::Query(chunks_params()),
+    )
+    .await
+    .expect_err("a deleted index has no chunks");
+    assert_eq!(
+        chunks_err,
+        StatusCode::NOT_FOUND,
+        "#5075: /chunks must be 404"
+    );
+
+    let grep_err = super::files::grep_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("cold-deleted".to_string()),
+        axum::Json(grep_request()),
+    )
+    .await
+    .expect_err("a deleted index has nothing to grep");
+    assert_eq!(
+        grep_err.0,
+        StatusCode::NOT_FOUND,
+        "#5075: /grep must be 404, got body {:?}",
+        grep_err.1 .0
+    );
+}

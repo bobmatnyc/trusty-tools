@@ -31,7 +31,7 @@
 
 use std::path::Path;
 
-use crate::service::persistence::{save_index_registry, PersistedIndex};
+use crate::service::persistence::PersistedIndex;
 
 /// Environment variable overriding the reaper cadence, in seconds. `0` disables
 /// the runtime reaper entirely; any unparseable value falls back to the default.
@@ -123,9 +123,14 @@ pub fn heal_boot_orphans(entries: Vec<PersistedIndex>) -> Vec<PersistedIndex> {
         return kept;
     }
 
-    // `entries` was the full contents of `indexes.toml`, so `kept` is exactly
-    // "everything minus the orphans" — a single atomic rewrite is correct.
-    if let Err(e) = save_index_registry(&kept) {
+    // #4317: remove BY ID rather than republishing `kept` wholesale. `entries`
+    // was read before the daemon started serving, so a whole-file rewrite from
+    // it erases any index registered in between — the reaper reporting a clean
+    // self-heal while silently deregistering live indexes is exactly the
+    // incident this issue tracks. Removing by id re-reads the current file under
+    // the registry write lock and drops only what was judged orphaned.
+    let orphan_ids: Vec<&str> = orphans.iter().map(|o| o.id.as_str()).collect();
+    if let Err(e) = crate::service::persistence::remove_index_registry_entries(&orphan_ids) {
         tracing::warn!(
             "orphan-reaper(boot): could not rewrite indexes.toml ({e}); {} orphaned \
              registration(s) left on disk (they will be retried next boot)",
