@@ -46,6 +46,22 @@ pub(super) enum DispatchError {
     },
 }
 
+/// The one message every tool arm emits when it cannot resolve an `index_id`
+/// (issue #5213).
+///
+/// Why: the previous text was "missing required string field: index_id" — true,
+/// unactionable, and identical across four tools. A caller that does not know a
+/// valid id guesses one, which is the wrong-index failure (#1373) arriving by a
+/// different route. Naming `list_indexes` in the error is the owner's stated
+/// closure condition: an omitted id errors loudly AND points at discovery.
+/// What: a single constant so `search`, `search_lexical`/`_semantic`/`_kg`, and
+/// every index-management arm cannot drift apart.
+/// Test: `missing_index_id_error_names_list_indexes`.
+pub(super) const MISSING_INDEX_ID: &str =
+    "missing required string field: index_id — this session has no pinned index, \
+     so there is no default to fall back to. Call `list_indexes` to see the ids \
+     that exist on this daemon, then retry with an explicit index_id.";
+
 /// Extract a required `&str` field from a JSON args object.
 ///
 /// Why: every tool arm needs to pull required string fields and return a

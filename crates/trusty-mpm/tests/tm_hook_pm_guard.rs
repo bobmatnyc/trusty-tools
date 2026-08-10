@@ -829,3 +829,272 @@ fn pm_guard_subagent_keeps_its_working_tool_surface() {
     let read = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Read","tool_input":{"file_path":"/x/a.rs"}}"#;
     assert_eq!(run_pm_guard(read, &[]).trim(), "");
 }
+
+// ---------------------------------------------------------------------------
+// #4480 — concurrent shared-working-tree dispatch denial
+// ---------------------------------------------------------------------------
+
+/// Spawn `tm hook --pm-guard` against a chosen daemon URL, from a chosen cwd.
+///
+/// Why: the #4480 guard's verdict depends on two things
+/// [`run_pm_guard`] fixes by design — the daemon URL (it pins an unreachable
+/// one, which is the fail-open case) and the process working directory (the
+/// guard compares it against what the daemon recorded). Both have to be
+/// controllable to exercise the DENY arm end to end.
+/// What: as [`run_pm_guard`], plus an explicit `--url` and `current_dir`.
+fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String {
+    let bin = env!("CARGO_BIN_EXE_tm");
+    let mut child = Command::new(bin)
+        .args(["--url", url, "hook", "--pm-guard"])
+        .current_dir(cwd)
+        .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
+        .env_remove("CLAUDE_MPM_SUB_AGENT")
+        .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
+        .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT")
+        .env_remove("TM_MANAGED_SESSION_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn `tm hook --pm-guard`");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin_json.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        output.status.success(),
+        "tm hook --pm-guard must always exit 0 (fail-open): stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout is utf8")
+}
+
+/// A one-shot HTTP stand-in for the daemon's shared-tree-writers route.
+///
+/// Why: the DENY arm cannot be reached without a daemon that answers, and a
+/// real daemon is far too much machinery for one route's wire contract. A raw
+/// [`std::net::TcpListener`] is the lightest dependency-free mock and mirrors
+/// the technique `pm_guard_deny_by_default`'s tests already use.
+/// What: binds an ephemeral port, serves ONE request with the given JSON body,
+/// and returns the `http://127.0.0.1:PORT` base URL. The accept loop runs on a
+/// detached thread; the process exits with the test binary.
+fn spawn_writers_mock(body: &'static str) -> String {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+#[test]
+fn pm_guard_denies_a_second_unisolated_engineer_dispatch() {
+    // Causality (#4480): against PRE-FIX code this payload is allowed with no
+    // output at all — `evaluate_tool` allows `Agent` unconditionally and no
+    // branch ever consults the daemon. The deny below can only come from the
+    // new guard.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"python-engineer","count":1}],"total":1}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_second","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
+
+    let stdout = run_pm_guard_at(payload, &url, cwd.path());
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    assert_eq!(
+        parsed["hookSpecificOutput"]["permissionDecision"].as_str(),
+        Some("deny")
+    );
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(
+        reason.contains("#4480") && reason.contains("python-engineer"),
+        "the deny must name the rule and the agent already in the tree, got: {reason}"
+    );
+}
+
+#[test]
+fn pm_guard_allows_an_isolated_engineer_dispatch() {
+    // The remedy the deny asks for must work even with a sibling in the tree,
+    // and it must not even reach the daemon — the mock is deliberately never
+    // consumed here.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"python-engineer","count":1}],"total":1}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_iso","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","isolation":"worktree","prompt":"go"}}"#;
+    assert_eq!(run_pm_guard_at(payload, &url, cwd.path()).trim(), "");
+}
+
+#[test]
+fn pm_guard_allows_a_read_only_dispatch_beside_a_running_engineer() {
+    // Research/review fan-out beside a running engineer is the ordinary
+    // workflow; denying it would be a far worse regression than the race.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_res","tool_name":"Agent","tool_input":{"subagent_type":"research","prompt":"go"}}"#;
+    assert_eq!(run_pm_guard_at(payload, &url, cwd.path()).trim(), "");
+}
+
+#[test]
+fn pm_guard_allows_an_engineer_dispatch_into_an_empty_tree() {
+    // The first dispatch of a session — the overwhelmingly common case.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_first","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
+    assert_eq!(run_pm_guard_at(payload, &url, cwd.path()).trim(), "");
+}
+
+/// A one-shot HTTP mock returning an arbitrary status line and body.
+///
+/// Why: [`spawn_writers_mock`] always answers 200 with a well-formed body, so
+/// it cannot drive the guard's malformed-response fail-open branch.
+/// What: as [`spawn_writers_mock`], but the caller supplies the status line
+/// (e.g. `"500 Internal Server Error"`) and the raw body bytes.
+fn spawn_writers_mock_with(status_line: &'static str, body: &'static str) -> String {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+#[test]
+fn pm_guard_allows_when_the_daemon_answer_is_malformed() {
+    // Declared fail-open branch: every unusable answer — a 5xx, a body that is
+    // not JSON, and well-formed JSON of the wrong shape — must ALLOW. A false
+    // deny here lands on the PM and halts every dispatch in the system.
+    let cases: [(&'static str, &'static str); 4] = [
+        (
+            "500 Internal Server Error",
+            r#"{"agents":[{"agent":"rust-engineer"}]}"#,
+        ),
+        ("200 OK", "not json at all"),
+        ("200 OK", r#"{"agents":"rust-engineer"}"#),
+        ("200 OK", r#"{"unexpected":"shape"}"#),
+    ];
+    for (status_line, body) in cases {
+        let url = spawn_writers_mock_with(status_line, body);
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_bad","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
+        assert_eq!(
+            run_pm_guard_at(payload, &url, cwd.path()).trim(),
+            "",
+            "a {status_line} / {body} answer must fail OPEN"
+        );
+    }
+}
+
+/// An HTTP mock that answers only once BOTH expected requests have arrived.
+///
+/// Why: the race this probes is "two guards both query before either dispatch
+/// is recorded". Creating that window with a sleep would make the test's
+/// outcome depend on scheduling; blocking the responder until both requests are
+/// in makes it a property of the mock's control flow instead. The first
+/// response cannot be written until `accept()` + `read()` has returned for the
+/// second connection, so the interleaving is forced, not raced for. No clock,
+/// virtual or real, is involved — deliberately, since tokio's `start_paused`
+/// auto-advances virtual time whenever all tasks are idle and would make an
+/// inserted delay evaporate (#3494).
+/// What: binds an ephemeral port, accepts and fully reads `expected`
+/// connections, and only then writes `body` to each. Returns the base URL.
+fn spawn_barrier_writers_mock(expected: usize, body: &'static str) -> String {
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        let mut held: Vec<TcpStream> = Vec::with_capacity(expected);
+        for _ in 0..expected {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            held.push(socket);
+        }
+        // Barrier passed: every guard has issued its query and none has an
+        // answer yet. This is the exact state the race needs.
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        for mut socket in held {
+            let _ = socket.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+#[test]
+fn pm_guard_admits_both_dispatches_that_query_before_either_is_recorded() {
+    // #4480, the check-then-decide window. `evaluate` reads the daemon's
+    // shared-tree-writers answer and decides; it takes no reservation. When two
+    // dispatches both query before either's `on_dispatch` recording lands, both
+    // see an empty set and both are ALLOWED — the collision the guard exists to
+    // prevent, in the shape the framework's own parallel-dispatch pattern
+    // produces.
+    //
+    // The window is forced, not timed: `spawn_barrier_writers_mock` cannot
+    // answer the first guard until the second's request has been read, so this
+    // interleaving is deterministic.
+    //
+    // What this test does NOT establish: whether Claude Code ever produces it.
+    // Whether PreToolUse admission is serialized across simultaneous `tool_use`
+    // blocks is a harness property, not observable from this repo — the hooks
+    // reference states only that multiple handlers for ONE event run in
+    // parallel, and is silent on hooks across parallel tool calls. If a
+    // reservation step is ever added, this test flips to one ALLOW + one DENY
+    // and must be updated deliberately.
+    let url = spawn_barrier_writers_mock(2, r#"{"agents":[],"total":0}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+
+    let mut children = Vec::new();
+    for tool_use_id in ["toolu_race_a", "toolu_race_b"] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"{tool_use_id}","tool_name":"Agent","tool_input":{{"subagent_type":"rust-engineer","prompt":"go"}}}}"#
+        );
+        let url = url.clone();
+        let dir = cwd.path().to_path_buf();
+        children.push(std::thread::spawn(move || {
+            run_pm_guard_at(&payload, &url, &dir)
+        }));
+    }
+
+    let verdicts: Vec<String> = children
+        .into_iter()
+        .map(|h| h.join().expect("guard thread").trim().to_string())
+        .collect();
+
+    assert_eq!(
+        verdicts,
+        vec![String::new(), String::new()],
+        "both dispatches querying before either is recorded are currently ALLOWED — \
+         if this changed, a reservation step was added and the module doc must say so"
+    );
+}

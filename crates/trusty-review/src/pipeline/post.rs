@@ -218,6 +218,16 @@ pub async fn finalize_review(
     // paths, which both funnel through `finalize_run` → here).
     result.findings_count = result.findings.len();
 
+    // #4044: the narrative summary was written BEFORE the verification round on
+    // both paths, so it can still cite a finding the verifier refuted as a merge
+    // blocker.  Prepend the correction here — the one exit both paths funnel
+    // through — so the qualifier reaches the posted comment and the returned
+    // result alike.  No-op when nothing was refuted.
+    result.review_body = crate::pipeline::verification_notice::prepend_verification_notice(
+        &result.review_body,
+        &result.findings,
+    );
+
     // Append the metadata footer to review_body BEFORE the post/log branch so
     // the footer is identical in the live GitHub comment (which reads
     // result.review_body via build_review_comment_body) and in the returned

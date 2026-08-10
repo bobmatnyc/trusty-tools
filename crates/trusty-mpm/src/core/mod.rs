@@ -66,6 +66,8 @@ pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;
 pub mod discovery;
+/// Working-tree isolation policy for native Agent-tool dispatches (#4480).
+pub mod dispatch_isolation;
 pub mod doctor;
 pub mod doctor_repair;
 pub mod error;

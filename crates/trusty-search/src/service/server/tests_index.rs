@@ -10,9 +10,189 @@ use axum::Json;
 #[test]
 fn index_disk_and_mtime_handles_missing_dir() {
     let id = format!("nonexistent-index-{}", std::process::id());
-    let (disk, mtime) = index_disk_and_mtime(&id);
+    // #4706: a root with no `.trusty-search/` either — neither layout exists.
+    let root = std::path::PathBuf::from(format!("/nonexistent-root-{}", std::process::id()));
+    let (disk, mtime) = index_disk_and_mtime(&id, &root);
     assert!(disk.is_none(), "missing dir yields no disk_bytes");
     assert!(mtime.is_none(), "missing dir yields no last_indexed");
+}
+
+/// Build a colocated `<root>/.trusty-search/` holding `bytes` bytes of corpus.
+///
+/// Deliberately writes the real filenames (`index.redb`, `hnsw.usearch`) so the
+/// fixture matches what issue #403's layout actually produces.
+fn colocated_root_with(bytes: usize) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp
+        .path()
+        .join(crate::service::colocated_storage::COLOCATED_DIR_NAME);
+    std::fs::create_dir_all(&dir).expect("create .trusty-search");
+    std::fs::write(dir.join("index.redb"), vec![b'x'; bytes]).expect("write index.redb");
+    tmp
+}
+
+/// #4706 — a populated colocated index reports its real bytes, not 0/null.
+///
+/// Why: this is the whole defect. `index_disk_and_mtime` measured only the
+/// legacy global dir, which since #403 holds metadata while the live corpus
+/// sits at `<root_path>/.trusty-search/`. Because the global dir still exists,
+/// the helper took its `Some(dir_size_bytes(..))` branch and returned `0` — a
+/// healthy 527 MB index reporting empty. Eleven such indexes were diagnosed as
+/// broken and nearly deleted. Pre-fix this test fails behaviorally: the helper
+/// ignored `root_path` entirely, so the colocated bytes were never in the sum
+/// no matter which branch it took.
+/// What: a root whose `.trusty-search/` holds a known payload, under an index
+/// id with no global dir, must report at least that payload's size.
+/// Test: this test.
+#[test]
+fn disk_bytes_sums_colocated_storage_not_just_the_legacy_dir() {
+    const PAYLOAD: usize = 4096;
+    let tmp = colocated_root_with(PAYLOAD);
+    let id = format!("colocated-4706-{}", std::process::id());
+
+    let (disk, mtime) = index_disk_and_mtime(&id, tmp.path());
+
+    let bytes = disk.expect("a populated colocated index has a measurable size");
+    assert!(
+        bytes >= PAYLOAD as u64,
+        "colocated corpus must be counted: reported {bytes} for a {PAYLOAD}-byte index \
+         (0 or a legacy-only total is the #4706 defect)"
+    );
+    assert!(
+        mtime.is_some(),
+        "the colocated index.redb mtime is the freshness signal — null here is #4706's \
+         other half, the one #878 papered over with an in-memory timestamp"
+    );
+}
+
+/// #4706 — `None` is reserved for "neither layout exists".
+///
+/// Why: `null` must keep meaning "nothing on disk yet". If the fix had made the
+/// helper always return `Some(sum)`, callers would lose the one honest signal
+/// for a never-written index — trading a misleading `0` for a misleading `0`.
+/// Test: this test.
+#[test]
+fn disk_bytes_is_none_only_when_neither_layout_exists() {
+    let empty = tempfile::tempdir().expect("tempdir");
+    let id = format!("neither-4706-{}", std::process::id());
+    let (disk, mtime) = index_disk_and_mtime(&id, empty.path());
+    assert!(
+        disk.is_none(),
+        "no global dir and no .trusty-search/ ⇒ null, not 0"
+    );
+    assert!(mtime.is_none());
+}
+
+/// #4706 — the newer of the two layouts wins the freshness reading.
+///
+/// Why: a migrated index has files in both places, and the stale global copy
+/// must not shadow the live colocated write — that would report an index as
+/// older than it is, which is the same class of misinformation as the size bug.
+/// What: writes a colocated `index.redb` strictly later than a bare tempdir
+/// stand-in and asserts the helper's per-directory selector is applied across
+/// both, taking the max rather than the first.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn last_indexed_takes_the_newer_of_the_two_layouts() {
+    const LEGACY_BYTES: usize = 128;
+    const COLOCATED_BYTES: usize = 512;
+
+    // Both layouts, for real: the legacy dir needs `TRUSTY_DATA_DIR` (the var
+    // `persistence::data_dir` honours), which is process-wide — hence `#[serial]`. Without both present this test can
+    // only prove the single-directory case its name does not claim.
+    let data_dir = tempfile::tempdir().expect("data dir");
+    // SAFETY: `#[serial]` serialises every env-mutating test in this binary.
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR", data_dir.path());
+    }
+
+    let id = format!("newer-4706-{}", std::process::id());
+    let legacy = data_dir
+        .path()
+        .join("indexes")
+        .join(crate::service::persistence::sanitize_id_for_path(&id));
+    std::fs::create_dir_all(&legacy).expect("create legacy dir");
+    std::fs::write(legacy.join("index.redb"), vec![b'L'; LEGACY_BYTES]).expect("legacy redb");
+
+    // Strictly newer colocated write — the state a migrated index is in, where
+    // the stale global copy must NOT win the freshness reading.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let tmp = colocated_root_with(COLOCATED_BYTES);
+    let colocated_redb = tmp
+        .path()
+        .join(crate::service::colocated_storage::COLOCATED_DIR_NAME)
+        .join("index.redb");
+    let expected = std::fs::metadata(&colocated_redb)
+        .and_then(|m| m.modified())
+        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
+        .expect("colocated redb mtime");
+
+    let (disk, mtime) = index_disk_and_mtime(&id, tmp.path());
+
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+    }
+
+    assert_eq!(
+        mtime.as_deref(),
+        Some(expected.as_str()),
+        "the NEWER colocated write must win over the older legacy copy"
+    );
+    assert_eq!(
+        disk,
+        Some((LEGACY_BYTES + COLOCATED_BYTES) as u64),
+        "both layouts must be summed, not picked between"
+    );
+}
+
+/// #4706 review — a `.trusty-search/` with no `index.redb` is not a corpus.
+///
+/// Why: `$HOME/.trusty-search/` is the daemon's OWN runtime directory — it
+/// holds `http_addr` and `mcp_http_addr`. An index rooted at `$HOME` would
+/// otherwise report the daemon's runtime files as its corpus. The directory
+/// name alone is a coincidence; `index.redb` is what makes it storage.
+/// Test: this test.
+#[test]
+fn colocated_dir_without_a_redb_is_not_counted_as_a_corpus() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp
+        .path()
+        .join(crate::service::colocated_storage::COLOCATED_DIR_NAME);
+    std::fs::create_dir_all(&dir).expect("create .trusty-search");
+    // Exactly the daemon runtime files, no corpus.
+    std::fs::write(dir.join("http_addr"), b"127.0.0.1:7878").expect("http_addr");
+    std::fs::write(dir.join("mcp_http_addr"), b"127.0.0.1:7879").expect("mcp_http_addr");
+
+    let id = format!("runtime-dir-4706-{}", std::process::id());
+    let (disk, mtime) = index_disk_and_mtime(&id, tmp.path());
+    assert!(
+        disk.is_none(),
+        "the daemon's runtime dir must not be counted as an index corpus, got {disk:?}"
+    );
+    assert!(mtime.is_none());
+}
+
+/// #4706 review — the mtime-only helper agrees with the full one.
+///
+/// Why: `search_handler` was paying a recursive two-directory size walk per
+/// query for a byte count it discarded. Splitting the mtime path out is only
+/// safe if it reports the identical value; this pins that equivalence so the
+/// two cannot drift.
+/// Test: this test.
+#[test]
+fn last_indexed_only_matches_the_mtime_from_the_full_helper() {
+    let tmp = colocated_root_with(256);
+    let id = format!("split-4706-{}", std::process::id());
+
+    let (_disk, full) = index_disk_and_mtime(&id, tmp.path());
+    let mtime_only = crate::service::server::status::index_last_indexed(&id, tmp.path());
+
+    assert!(full.is_some(), "fixture must produce an mtime");
+    assert_eq!(
+        mtime_only, full,
+        "the search path's cheaper helper must not report a different freshness"
+    );
 }
 
 /// Issue #80 — `first_existing_mtime_rfc3339` prefers `index.redb` over the

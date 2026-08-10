@@ -23,18 +23,60 @@ use super::helpers::file_is_within_root;
 use super::router::{IndexFileRequest, RemoveFileRequest};
 use super::state::SearchAppState;
 
+/// `POST /indexes/:id/index-file` — add or replace one file in an index.
+///
+/// Why: this is the supported incremental-indexing path for network-mounted
+/// roots (#3408), where the OS watcher cannot fire — so a caller driving it
+/// from CI or a post-merge hook is the ONLY thing keeping the index current.
+/// A bare hot-registry miss reported a cold-parked index as unknown, and #4715
+/// establishes that a 404 from an index-scoped endpoint means "no such index
+/// anywhere". Told "unknown index" for an index that exists, such a caller
+/// deregisters it or gives up, and the writes stop arriving — silently, since
+/// nothing else drives that index.
+/// What: shares [`super::degraded::residency_miss_response`] with the read
+/// path, so a cold-parked index answers `503 index_not_resident` with the
+/// `restore_via` hint instead of a bodyless 404.
+/// Test: `write_path_cold_parked_index_is_503_with_restore_hint`.
 pub(super) async fn index_file_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(req): Json<IndexFileRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+    // #5061: the write path owes the same residency verdict as the read path.
+    let handle = match state.registry.get(&index_id) {
+        Some(h) => h,
+        None => {
+            return Err(super::degraded::residency_miss_response(
+                &state.cold_store,
+                &index_id,
+            ))
+        }
+    };
     let indexer = handle.indexer.read().await;
     indexer
         .index_file(&req.path, &req.content)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            // #5061: a write that failed must say so — the caller cannot infer
+            // it from a bare 500, and it has no other signal that the file it
+            // just pushed never landed.
+            tracing::warn!(
+                index_id = %index_id,
+                path = %req.path,
+                error = %e,
+                "index-file failed"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "index_file_failed",
+                    "index_id": index_id.0,
+                    "path": req.path,
+                    "message": e.to_string(),
+                })),
+            )
+        })?;
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "path": req.path,
@@ -42,18 +84,47 @@ pub(super) async fn index_file_handler(
     })))
 }
 
+/// `POST /indexes/:id/remove-file` — drop one file's chunks from an index.
+///
+/// Why and What: the delete half of [`index_file_handler`]'s contract — same
+/// callers, same network-mount motivation, same residency verdict.
+/// Test: `write_path_cold_parked_index_is_503_with_restore_hint`.
 pub(super) async fn remove_file_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(req): Json<RemoveFileRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+    // #5061: same residency verdict as its `index_file` twin.
+    let handle = match state.registry.get(&index_id) {
+        Some(h) => h,
+        None => {
+            return Err(super::degraded::residency_miss_response(
+                &state.cold_store,
+                &index_id,
+            ))
+        }
+    };
     let indexer = handle.indexer.read().await;
-    let removed = indexer
-        .remove_file(&req.path)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let removed = indexer.remove_file(&req.path).await.map_err(|e| {
+        // #5061: see the sibling handler — a silent 500 leaves the caller
+        // believing a deletion landed when it did not.
+        tracing::warn!(
+            index_id = %index_id,
+            path = %req.path,
+            error = %e,
+            "remove-file failed"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "remove_file_failed",
+                "index_id": index_id.0,
+                "path": req.path,
+                "message": e.to_string(),
+            })),
+        )
+    })?;
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "path": req.path,
@@ -125,16 +196,20 @@ pub(super) async fn get_index_chunks_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Query(params): Query<ChunksParams>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let index_id = IndexId::new(id);
     // #4715: 404 must mean "no such index anywhere", not "not resident" —
     // see `index_status_handler` for why the MCP layer depends on that.
+    // #5061: the miss now carries a body, via the builder all three
+    // non-reloading endpoints share.
     let handle = match state.registry.get(&index_id) {
         Some(h) => h,
-        None if state.cold_store.contains(&index_id) || state.cold_store.is_failed(&index_id) => {
-            return Err(StatusCode::SERVICE_UNAVAILABLE)
+        None => {
+            return Err(super::degraded::residency_miss_response(
+                &state.cold_store,
+                &index_id,
+            ))
         }
-        None => return Err(StatusCode::NOT_FOUND),
     };
     let limit = params.limit.min(MAX_CHUNKS_LIMIT);
     let indexer = handle.indexer.read().await;
@@ -279,43 +354,15 @@ pub(super) async fn grep_handler(
     })?;
     let index_id = IndexId::new(id);
     // #4715: same rule as `index_status_handler` — a cold-parked index exists.
+    // #5061: the three-way verdict (and the `restore_via` hint that tells a
+    // caller a plain `search` reloads a cold-parked index) now lives in one
+    // builder, so this handler cannot drift from its two neighbours.
     let handle = match state.registry.get(&index_id) {
         Some(h) => h,
-        // A permanently-failed restore never clears on its own, so the remedy
-        // is not "wait" — it is the operator action `search_handler` names.
-        // Keep this arm ahead of the cold-parked one, matching that handler's
-        // precedence: an id can sit in BOTH sets (nothing clears
-        // `failed_entries`, and re-registering re-adds to `entries`), and
-        // "retry later" would be a lie for it.
-        None if state.cold_store.is_failed(&index_id) => {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "index_restore_failed",
-                    "message": format!(
-                        "index '{}' previously failed to restore (blocked volume or \
-                         missing root_path) — restart the daemon or re-register to retry",
-                        index_id.0
-                    ),
-                })),
-            ))
-        }
-        None if state.cold_store.contains(&index_id) => {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "index_not_resident",
-                    "message": format!(
-                        "index '{}' is registered but not loaded — retry after it restores",
-                        index_id.0
-                    ),
-                })),
-            ))
-        }
         None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": format!("unknown index: {}", index_id.0) })),
+            return Err(super::degraded::residency_miss_response(
+                &state.cold_store,
+                &index_id,
             ))
         }
     };
