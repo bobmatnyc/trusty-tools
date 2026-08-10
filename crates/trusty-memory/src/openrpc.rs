@@ -60,6 +60,8 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "palace_list"
         | "palace_info"
         | "kg_query"
+        // #4776: subject enumeration reads the KG and writes nothing.
+        | "kg_list_subjects"
         | "kg_gaps"
         | "list_prompt_facts"
         | "get_prompt_context"

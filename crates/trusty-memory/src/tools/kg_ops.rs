@@ -11,6 +11,7 @@
 //! Test: `dispatch_kg_assert_then_query`, `dispatch_discover_aliases_*`,
 //! `dispatch_kg_gaps_returns_cached` in `tools::tests`.
 
+use crate::service::core_kg::{DEFAULT_KG_LIST_LIMIT, MAX_KG_LIST_LIMIT};
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -261,6 +262,60 @@ pub(crate) async fn handle_kg_gaps(state: &AppState, args: Value) -> Result<Valu
         })
         .collect();
     Ok(json!({ "palace": palace, "gaps": payload }))
+}
+
+/// MCP `kg_list_subjects` tool — enumerate the subjects a palace's KG holds.
+///
+/// Why (#4776): `kg_query` requires a subject the caller must already know, and
+/// a guessed subject that misses returns the same empty result as a genuinely
+/// empty graph. The enumeration existed at the HTTP layer
+/// (`GET /api/v1/palaces/{id}/kg/subjects`) but had no MCP equivalent, so a
+/// model could only discover subjects by guessing.
+/// What: resolves the palace, clamps `limit` into `[1, MAX_KG_LIST_LIMIT]`
+/// (default [`DEFAULT_KG_LIST_LIMIT`]), and reads the alphabetically-ordered
+/// subject list — bare strings, or `{subject, count}` objects when
+/// `with_counts` is true. `truncated` reports that the page filled to the
+/// effective limit, which is the only signal the caller has that more subjects
+/// may exist beyond it.
+/// Test: `dispatch_kg_list_subjects_returns_distinct_subjects`,
+/// `dispatch_kg_list_subjects_with_counts_returns_pairs`.
+pub(crate) async fn handle_kg_list_subjects(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "kg_list_subjects")?;
+    let handle = open_palace_handle(state, &palace)?;
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map_or(DEFAULT_KG_LIST_LIMIT, |n| n as usize)
+        .clamp(1, MAX_KG_LIST_LIMIT);
+    let with_counts = args
+        .get("with_counts")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let subjects: Vec<Value> = if with_counts {
+        handle
+            .kg
+            .list_subjects_with_counts(limit)
+            .context("kg.list_subjects_with_counts")?
+            .into_iter()
+            .map(|(subject, count)| json!({ "subject": subject, "count": count }))
+            .collect()
+    } else {
+        handle
+            .kg
+            .list_subjects(limit)
+            .context("kg.list_subjects")?
+            .into_iter()
+            .map(Value::String)
+            .collect()
+    };
+
+    Ok(json!({
+        "palace": palace,
+        "truncated": subjects.len() == limit,
+        "with_counts": with_counts,
+        "subjects": subjects,
+    }))
 }
 
 pub(crate) async fn handle_get_prompt_context(state: &AppState, args: Value) -> Result<Value> {

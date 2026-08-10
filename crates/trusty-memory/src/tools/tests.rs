@@ -194,6 +194,8 @@ fn tool_definitions_lists_all_tools() {
         "palace_unalias",
         "kg_assert",
         "kg_query",
+        // #4776: subject enumeration over MCP.
+        "kg_list_subjects",
         "memory_recall_all",
         "kg_gaps",
         "add_alias",
@@ -532,6 +534,113 @@ async fn dispatch_kg_assert_then_query() {
     assert_eq!(triples.len(), 1);
     assert_eq!(triples[0]["object"], "Acme");
     assert_eq!(triples[0]["predicate"], "works_at");
+}
+
+/// Why: #4776 — `kg_list_subjects` is the discovery read that makes `kg_query`
+/// usable without already knowing a subject, so the contract that matters is
+/// that every asserted subject comes back, once, in alphabetical order.
+/// What: asserts two triples under distinct subjects, dispatches
+/// `kg_list_subjects`, and checks the envelope plus the ordering.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_returns_distinct_subjects() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "subjects"}))
+        .await
+        .expect("palace_create");
+
+    for (subject, object) in [("zeta", "Acme"), ("alpha", "Globex")] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "subjects",
+                "subject": subject,
+                "predicate": "works_at",
+                "object": object,
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let listed = dispatch_tool(&state, "kg_list_subjects", json!({"palace": "subjects"}))
+        .await
+        .expect("kg_list_subjects");
+
+    assert_eq!(listed["palace"], "subjects");
+    assert_eq!(listed["with_counts"], false);
+    assert_eq!(listed["truncated"], false);
+    let subjects: Vec<&str> = listed["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        subjects.contains(&"alpha") && subjects.contains(&"zeta"),
+        "both asserted subjects should be listed: {subjects:?}"
+    );
+    let mut sorted = subjects.clone();
+    sorted.sort_unstable();
+    assert_eq!(subjects, sorted, "subjects should be alphabetical");
+}
+
+/// Why: #4776 — `with_counts` is what lets a caller pick the densest subject to
+/// query first, so the count has to be a real per-subject active-triple count,
+/// not a placeholder.
+/// What: asserts two triples on one subject and one on another, then checks the
+/// `{subject, count}` pairs the tool returns.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_with_counts_returns_pairs() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "counts"}))
+        .await
+        .expect("palace_create");
+
+    for (subject, predicate) in [
+        ("alpha", "works_at"),
+        ("alpha", "lives_in"),
+        ("beta", "owns"),
+    ] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "counts",
+                "subject": subject,
+                "predicate": predicate,
+                "object": "Acme",
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let listed = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "counts", "with_counts": true}),
+    )
+    .await
+    .expect("kg_list_subjects");
+
+    assert_eq!(listed["with_counts"], true);
+    let pairs: Vec<(&str, u64)> = listed["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .iter()
+        .filter_map(|v| Some((v["subject"].as_str()?, v["count"].as_u64()?)))
+        .collect();
+    assert!(
+        pairs.contains(&("alpha", 2)),
+        "alpha should carry both of its triples: {pairs:?}"
+    );
+    assert!(
+        pairs.contains(&("beta", 1)),
+        "beta should carry its single triple: {pairs:?}"
+    );
 }
 
 /// Why: Issue #53 — verify the MCP `kg_gaps` tool returns whatever was

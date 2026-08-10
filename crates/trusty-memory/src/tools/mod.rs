@@ -21,6 +21,7 @@
 //! - `room_rename(palace, room, new_label)`         -> renamed room
 //! - `kg_assert(palace, subject, predicate, object, confidence?, provenance?)` -> ()
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
+//! - `kg_list_subjects(palace, limit?, with_counts?)` -> subjects (#4776)
 //! - `wing_list(palace)`                            -> Vec<WingSummary>
 //! - `wing_create(palace, label)`                   -> wing_id (idempotent)
 //! - `wing_rename(palace, wing, new_label)`         -> WingSummary
@@ -68,8 +69,8 @@ use chat_ops::{
 use dream_ops::{handle_dream_consolidate_room, handle_palace_dream};
 use kg_ops::{
     handle_add_alias, handle_discover_aliases, handle_get_prompt_context, handle_kg_assert,
-    handle_kg_bootstrap, handle_kg_gaps, handle_kg_query, handle_list_prompt_facts,
-    handle_remove_prompt_fact, handle_upgrade_tool,
+    handle_kg_bootstrap, handle_kg_gaps, handle_kg_list_subjects, handle_kg_query,
+    handle_list_prompt_facts, handle_remove_prompt_fact, handle_upgrade_tool,
 };
 use memory_ops::{
     handle_memory_forget, handle_memory_list, handle_memory_note, handle_memory_recall,
@@ -110,6 +111,9 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "list_prompt_facts" => handle_list_prompt_facts(state, args).await,
         "remove_prompt_fact" => handle_remove_prompt_fact(state, args).await,
         "kg_query" => handle_kg_query(state, args).await,
+        // #4776: subject discovery — the read that makes `kg_query` usable
+        // without already knowing a subject.
+        "kg_list_subjects" => handle_kg_list_subjects(state, args).await,
         "memory_list" => handle_memory_list(state, args).await,
         "memory_forget" => handle_memory_forget(state, args).await,
         "palace_info" => handle_palace_info(state, args).await,
