@@ -40,8 +40,8 @@ pub mod template;
 // ── Re-exports for convenience ─────────────────────────────────────────────
 
 pub use analyze_adapter::{
-    AnalyzeAdapterError, AnalyzeFetch, AnalyzeGap, AnalyzeMetricsSource, HttpAnalyzeMetricsSource,
-    derive_index_id, enrich_with_analyze, enrich_with_analyze_gaps,
+    AnalyzeAdapterError, AnalyzeCaveat, AnalyzeFetch, AnalyzeGap, AnalyzeMetricsSource,
+    HttpAnalyzeMetricsSource, derive_index_id, enrich_with_analyze, enrich_with_analyze_gaps,
 };
 pub use benchmark::{
     BenchmarkReport, BenchmarkStatus, CorpusSnapshot, LoadedCorpus, MetricPlacement,

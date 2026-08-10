@@ -33,17 +33,6 @@ use super::metrics::{
 
 // ─── Tunables ──────────────────────────────────────────────────────────────
 
-/// How many complexity hotspots to request when building the distribution.
-///
-/// Why: `/complexity_hotspots` returns the top-N chunks ranked by descending
-/// cyclomatic complexity; a large N gives a representative distribution. The
-/// buckets therefore describe the N MOST complex functions, not the entire
-/// corpus (a documented, honest sampling limit — the endpoint exposes no
-/// full-corpus histogram).
-/// What: passed as `?top_n=` to the hotspots endpoint.
-/// Test: the value is not asserted; mapping tests drive fixtures directly.
-const HOTSPOT_SAMPLE: usize = 1000;
-
 /// Per-request HTTP timeout for analyze fetches (fail-open on timeout).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -92,19 +81,30 @@ struct IndexInfo {
     id: String,
 }
 
-/// `GET /indexes/{id}/complexity_hotspots` envelope (post-#2446).
+/// `GET /indexes/{id}/complexity_distribution` envelope (#5320).
+///
+/// Why: the exhaustive A–F histogram over the whole corpus. Its predecessor
+/// here bucketed a `complexity_hotspots` top-N, which is sorted descending and
+/// truncated — on a large repository the top 1000 are all grade D and F, so the
+/// report stated that a 1.37M-line codebase contains no simple functions.
+/// What: `total` is the counted code-chunk population (the percentage
+/// denominator the renderer needs) and `buckets` carries every band.
+/// Test: `analyze_adapter_tests.rs::distribution_maps_every_band`.
 #[derive(Debug, Deserialize)]
-struct HotspotsEnvelope {
+struct DistributionEnvelope {
     #[serde(default)]
-    hotspots: Vec<WireHotspot>,
+    total: u64,
+    #[serde(default)]
+    buckets: Vec<WireBucket>,
 }
 
-/// One hotspot — the flattened `CodeChunk` plus the #2446 complexity numbers.
-/// Only the fields the mapping needs are declared; the rest are ignored.
+/// One A–F band of the full distribution.
 #[derive(Debug, Deserialize)]
-struct WireHotspot {
+struct WireBucket {
     #[serde(default)]
-    cyclomatic: u32,
+    label: String,
+    #[serde(default)]
+    count: u64,
 }
 
 /// `GET /indexes/{id}/diagnostics` envelope.
@@ -112,6 +112,11 @@ struct WireHotspot {
 struct DiagnosticsEnvelope {
     #[serde(default)]
     diagnostics: Vec<WireDiagnostic>,
+    /// Which external linters actually ran. Empty means none was installed —
+    /// which is why the RED band can be empty without the code being clean
+    /// (#5317).
+    #[serde(default)]
+    tools_run: Vec<String>,
 }
 
 /// One external-tool diagnostic (`ToolDiagnostic`).
@@ -126,6 +131,9 @@ struct WireDiagnostic {
     severity: String,
     #[serde(default)]
     code: Option<String>,
+    /// The linter's own message. Verbatim tool output, not synthesis.
+    #[serde(default)]
+    message: String,
 }
 
 /// `GET /indexes/{id}/refactor-suggestions` envelope.
@@ -148,6 +156,13 @@ struct WireRefactor {
     /// `low` | `medium` | `high` | `critical` (lowercase).
     #[serde(default)]
     severity: String,
+    /// Why the rule fired, e.g. `cyclomatic complexity 31 (grade F)`.
+    #[serde(default)]
+    rationale: String,
+    /// The concrete action, e.g. `Extract the body of 'f' into 2-3 smaller
+    /// functions`.
+    #[serde(default)]
+    suggested_action: String,
 }
 
 // ─── Severity mapping (BINDING convention, epic #2445) ───────────────────────
@@ -172,57 +187,51 @@ fn map_diagnostic_severity(s: &str) -> Severity {
 /// Map a trusty-analyze refactor severity onto the report's RED/AMBER/GREEN
 /// band.
 ///
-/// Why: refactor suggestions use a `low/medium/high/critical` scale; the same
-/// balanced convention applies.
-/// What (convention): `critical → Red`, `high → Amber`, `medium`/`low`/unknown
-/// → `Green`.
-/// Test: `severity_map_refactors` in the tests module.
+/// Why (#5317): a refactor suggestion is not a defect. Its severity is derived
+/// from the chunk's complexity grade alone (`Severity::from_grade` in
+/// trusty-analyze), so `critical` there means "grade F", not "a critical risk".
+/// Routing that into RED put twenty "Extract method" entries into the most
+/// severe band of an acquirer-facing report, which reads code hygiene as
+/// business risk. The RED band is reserved for defect-class findings — external
+/// static-analysis errors — so a refactor suggestion tops out at AMBER however
+/// severe the analyzer graded it.
+/// What (convention): `critical`/`high` → `Amber`; `medium`, `low`, and unknown
+/// → `Green` (dropped from the rendered bands).
+/// Test: `severity_map_refactors`, `refactor_never_reaches_red`.
 fn map_refactor_severity(s: &str) -> Severity {
     match s.trim().to_ascii_lowercase().as_str() {
-        "critical" | "error" => Severity::Red,
-        "high" | "warning" => Severity::Amber,
+        "critical" | "error" | "high" | "warning" => Severity::Amber,
         _ => Severity::Green,
     }
 }
 
-// ─── Complexity bucketing (mirrors trusty-analyze ComplexityGrade) ───────────
+// ─── Complexity distribution ─────────────────────────────────────────────────
 
-/// Compute the cyclomatic-complexity distribution from per-hotspot cyclomatic
-/// counts, using the same bands as trusty-analyze's `ComplexityGrade`.
+/// Map the daemon's full A–F histogram onto the report's bucket list.
 ///
-/// Why: the §7 chart needs labelled buckets; trusty-analyze exposes no
-/// full-corpus histogram, so the adapter buckets the hotspot sample client-side
-/// against the canonical grade thresholds so the labels line up with the
-/// analyzer's own A–F grading.
-/// What (threshold table): `A: 0–5`, `B: 6–10`, `C: 11–15`, `D: 16–20`,
-/// `F: >20` — one bucket per band, in ascending order, empty buckets omitted so
-/// a sparse sample yields a compact chart.
-/// Test: `buckets_follow_grade_thresholds` asserts each boundary lands in the
-/// right band.
-fn complexity_buckets(cyclomatics: &[u32]) -> ComplexityDistribution {
-    // Ordered bands: (label, inclusive-lower, inclusive-upper).  u32::MAX is the
-    // open upper bound for the F band.
-    let bands: [(&str, u32, u32); 5] = [
-        ("A: simple (0-5)", 0, 5),
-        ("B: moderate (6-10)", 6, 10),
-        ("C: elevated (11-15)", 11, 15),
-        ("D: high (16-20)", 16, 20),
-        ("F: very high (>20)", 21, u32::MAX),
-    ];
-    let buckets = bands
-        .iter()
-        .filter_map(|(label, lo, hi)| {
-            let count = cyclomatics
-                .iter()
-                .filter(|c| **c >= *lo && **c <= *hi)
-                .count() as u64;
-            (count > 0).then(|| ComplexityBucket {
-                label: (*label).to_string(),
-                count,
+/// Why (#5320): the distribution is fetched whole and rendered whole. The
+/// percentage column the renderer computes is a share of the bucket sum, so the
+/// sum must be the counted population — which it is, exactly because this is
+/// the exhaustive histogram rather than a truncated top-N sample.
+/// What: preserves the daemon's ascending band order and its zero-count bands
+/// (an empty band is a measurement); returns an empty distribution when the
+/// envelope carried no counted chunks, which the renderer omits rather than
+/// charting a row of zeroes.
+/// Test: `distribution_maps_every_band`, `empty_distribution_maps_to_nothing`.
+fn map_distribution(env: &DistributionEnvelope) -> ComplexityDistribution {
+    if env.total == 0 {
+        return ComplexityDistribution::default();
+    }
+    ComplexityDistribution {
+        buckets: env
+            .buckets
+            .iter()
+            .map(|b| ComplexityBucket {
+                label: b.label.clone(),
+                count: b.count,
             })
-        })
-        .collect();
-    ComplexityDistribution { buckets }
+            .collect(),
+    }
 }
 
 // ─── Finding synthesis (prose-free, deterministic) ───────────────────────────
@@ -236,8 +245,8 @@ fn complexity_buckets(cyclomatics: &[u32]) -> ComplexityDistribution {
 /// What: `title` = the rule code when present, else a synthesised
 /// `"{tool} diagnostic"`; `category` = the producing tool (a stable provenance
 /// category, not the prose message); `component` = the file; `severity` via the
-/// diagnostic map. The human message is intentionally dropped (prose belongs to
-/// M2 synthesis).
+/// diagnostic map; `description` = the linter's own message, verbatim (#5317 —
+/// dropping it left every rendered prose slot reading the honesty marker).
 /// Test: `diagnostic_finding_synthesises_title` and `..._drops_green`.
 fn diagnostic_finding(d: &WireDiagnostic) -> Option<MetricFinding> {
     let severity = map_diagnostic_severity(&d.severity);
@@ -260,6 +269,8 @@ fn diagnostic_finding(d: &WireDiagnostic) -> Option<MetricFinding> {
             d.tool.clone()
         },
         component: d.file.clone(),
+        description: d.message.clone(),
+        remediation: String::new(),
     })
 }
 
@@ -267,13 +278,16 @@ fn diagnostic_finding(d: &WireDiagnostic) -> Option<MetricFinding> {
 /// to GREEN (omitted, as above).
 ///
 /// Why: high/critical refactor suggestions are actionable maintainability
-/// findings that belong in the RED/AMBER bands even with no synthesis.
+/// findings that belong in the AMBER band even with no synthesis — never RED,
+/// see [`map_refactor_severity`].
 /// What: `title` = the humanised refactor type plus the function name when
 /// known (e.g. `"Extract method — parse_config"`); `category` =
 /// `"maintainability"` (refactors are maintainability by construction);
-/// `component` = the file; `severity` via the refactor map. Prose (`rationale`,
-/// `suggested_action`) is dropped.
-/// Test: `refactor_finding_synthesises_title`.
+/// `component` = the file; `severity` via the refactor map; `description` =
+/// the analyzer's `rationale` and `remediation` = its `suggested_action`, both
+/// verbatim (#5317 — dropping them is what made the entries contentless).
+/// Test: `refactor_finding_synthesises_title`,
+/// `refactor_finding_carries_rationale_and_action`.
 fn refactor_finding(r: &WireRefactor) -> Option<MetricFinding> {
     let severity = map_refactor_severity(&r.severity);
     if severity == Severity::Green {
@@ -289,6 +303,8 @@ fn refactor_finding(r: &WireRefactor) -> Option<MetricFinding> {
         severity,
         category: "maintainability".to_string(),
         component: r.file.clone(),
+        description: r.rationale.clone(),
+        remediation: r.suggested_action.clone(),
     })
 }
 
@@ -319,32 +335,35 @@ fn humanise_refactor_type(t: &str) -> String {
 
 // ─── Pure mapping ────────────────────────────────────────────────────────────
 
-/// Map the three fetched analyze datasets onto a v0 [`AnalyzeMetrics`].
+/// Map the fetched analyze datasets onto a v0 [`AnalyzeMetrics`].
 ///
 /// Why: a single pure function makes the whole adapter unit-testable against
 /// fixture JSON with no live daemon — the HTTP layer only feeds it deserialized
 /// wire values.
-/// What: leaves `loc`/`counts` empty (the built-in scanner owns those);
-/// computes `complexity.buckets` from the hotspot cyclomatic sample; builds
-/// `findings` from RED/AMBER diagnostics then refactor suggestions.
-/// `schema_version` is tagged so the JSON twin records its provenance.
-/// Test: `map_metrics_populates_complexity_and_findings`.
+/// What: leaves `loc`/`counts` empty (the built-in scanner owns those); takes
+/// `complexity` from the daemon's full histogram; builds `findings` from
+/// RED/AMBER diagnostics then refactor suggestions, dropping any that would
+/// render as a title and a path with no stated observation or action
+/// ([`MetricFinding::is_contentless`], #5317). `schema_version` is tagged so the
+/// JSON twin records its provenance.
+/// Test: `map_metrics_populates_complexity_and_findings`,
+/// `contentless_findings_are_dropped`.
 fn map_metrics(
-    hotspots: &[WireHotspot],
+    distribution: Option<&DistributionEnvelope>,
     diagnostics: &[WireDiagnostic],
     refactors: &[WireRefactor],
 ) -> AnalyzeMetrics {
-    let cyclomatics: Vec<u32> = hotspots.iter().map(|h| h.cyclomatic).collect();
     let mut findings: Vec<MetricFinding> = Vec::new();
     findings.extend(diagnostics.iter().filter_map(diagnostic_finding));
     findings.extend(refactors.iter().filter_map(refactor_finding));
+    findings.retain(|f| !f.is_contentless());
 
     AnalyzeMetrics {
         schema_version: "analyze-live-v0".to_string(),
         repository: String::new(),
         loc: Default::default(),
         counts: Default::default(),
-        complexity: complexity_buckets(&cyclomatics),
+        complexity: distribution.map(map_distribution).unwrap_or_default(),
         findings,
     }
 }
@@ -377,8 +396,58 @@ pub trait AnalyzeMetricsSource: Send + Sync {
     /// Test: `analyze_adapter_tests.rs::default_fetch_named_reports_unavailable`.
     async fn fetch_named(&self, index_id: &str) -> AnalyzeFetch {
         match self.fetch(index_id).await {
-            Some(m) => AnalyzeFetch::Fetched(Box::new(m)),
+            Some(m) => AnalyzeFetch::Fetched {
+                metrics: Box::new(m),
+                caveats: Vec::new(),
+            },
             None => AnalyzeFetch::Missing(AnalyzeGap::Unavailable),
+        }
+    }
+}
+
+/// A dimension the daemon answered incompletely, for one repository (#5317,
+/// #5320).
+///
+/// Why: a fetch that succeeds is not the same as a fetch that answered
+/// everything, and the difference is invisible on the page. An empty RED band
+/// because no linter was installed reads exactly like a clean codebase; a
+/// missing complexity table reads like a rendering slip. Both are facts the
+/// report owes its reader, and both travel the same Gaps & Caveats path
+/// [`AnalyzeGap`] already uses.
+/// What: one variant per condition the fetch can distinguish, each with a fixed
+/// report-facing phrase carrying no run-specific detail.
+/// Test: `analyze_adapter_tests.rs::caveat_labels_are_stable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum AnalyzeCaveat {
+    /// The daemon serves no full-corpus histogram, so the §7 complexity
+    /// distribution was left out rather than filled from a truncated top-N.
+    ComplexityDistributionUnavailable,
+    /// No external static-analysis tool was installed, so nothing could
+    /// populate the RED/defect band.
+    NoStaticAnalysisTools,
+}
+
+impl AnalyzeCaveat {
+    /// The report-facing sentence for this caveat.
+    ///
+    /// Why: read by a stranger to this toolchain, so it names the condition and
+    /// what it means for the section, not the variant.
+    /// What: a fixed string per variant — deterministic across runs.
+    /// Test: `analyze_adapter_tests.rs::caveat_labels_are_stable`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ComplexityDistributionUnavailable => {
+                "complexity distribution not available — the analysis daemon serves no \
+                 full-corpus histogram, and the truncated top-N hotspot sample it does serve \
+                 is not a distribution. The §7 complexity table is omitted rather than \
+                 filled with shares of a truncation"
+            }
+            Self::NoStaticAnalysisTools => {
+                "no external static-analysis tool was available to the analysis daemon — the \
+                 RED/CRITICAL band is populated only from such tools, so an empty band here \
+                 means unassessed, not clean"
+            }
         }
     }
 }
@@ -431,8 +500,14 @@ impl AnalyzeGap {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum AnalyzeFetch {
-    /// Live metrics were fetched and mapped.
-    Fetched(Box<AnalyzeMetrics>),
+    /// Live metrics were fetched and mapped, along with any dimension the
+    /// daemon could not answer completely (#5317, #5320).
+    Fetched {
+        /// The mapped metrics.
+        metrics: Box<AnalyzeMetrics>,
+        /// Dimensions answered incompletely; empty on a full answer.
+        caveats: Vec<AnalyzeCaveat>,
+    },
     /// No metrics; this is the reason, for the report's gap list.
     Missing(AnalyzeGap),
 }
@@ -507,9 +582,18 @@ impl HttpAnalyzeMetricsSource {
     }
 
     /// The success path behind [`AnalyzeMetricsSource::fetch`]: probe readiness,
-    /// pull the three datasets, and map them. Returns `Err` on any failure; the
+    /// pull the datasets, and map them. Returns `Err` on any failure; the
     /// public `fetch` swallows it to `None`.
-    async fn try_fetch(&self, index_id: &str) -> AdapterResult<Option<AnalyzeMetrics>> {
+    ///
+    /// The complexity distribution is the one dataset whose absence is
+    /// tolerated rather than fatal (#5320): a daemon predating
+    /// `/complexity_distribution` answers 404, and the honest response to that
+    /// is to omit the §7 table and say so, not to abandon the findings that DID
+    /// come back.
+    async fn try_fetch(
+        &self,
+        index_id: &str,
+    ) -> AdapterResult<Option<(AnalyzeMetrics, Vec<AnalyzeCaveat>)>> {
         if !self.index_served(index_id).await? {
             tracing::warn!(
                 index_id,
@@ -522,21 +606,42 @@ impl HttpAnalyzeMetricsSource {
             );
             return Ok(None);
         }
-        let hotspots: HotspotsEnvelope = self
-            .get_json(&format!(
-                "/indexes/{index_id}/complexity_hotspots?top_n={HOTSPOT_SAMPLE}"
-            ))
-            .await?;
+        let mut caveats: Vec<AnalyzeCaveat> = Vec::new();
+
+        let distribution: Option<DistributionEnvelope> = match self
+            .get_json(&format!("/indexes/{index_id}/complexity_distribution"))
+            .await
+        {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!(index_id, error = %e, "--analyze: no complexity distribution");
+                eprintln!(
+                    "[trusty-review report] --analyze: '{index_id}' complexity distribution \
+                     unavailable ({e}); the §7 table is omitted"
+                );
+                caveats.push(AnalyzeCaveat::ComplexityDistributionUnavailable);
+                None
+            }
+        };
+
         let diagnostics: DiagnosticsEnvelope = self
             .get_json(&format!("/indexes/{index_id}/diagnostics"))
             .await?;
+        if diagnostics.tools_run.is_empty() {
+            caveats.push(AnalyzeCaveat::NoStaticAnalysisTools);
+        }
+
         let refactors: RefactorEnvelope = self
             .get_json(&format!("/indexes/{index_id}/refactor-suggestions"))
             .await?;
-        Ok(Some(map_metrics(
-            &hotspots.hotspots,
-            &diagnostics.diagnostics,
-            &refactors.suggestions,
+
+        Ok(Some((
+            map_metrics(
+                distribution.as_ref(),
+                &diagnostics.diagnostics,
+                &refactors.suggestions,
+            ),
+            caveats,
         )))
     }
 }
@@ -545,7 +650,7 @@ impl HttpAnalyzeMetricsSource {
 impl AnalyzeMetricsSource for HttpAnalyzeMetricsSource {
     async fn fetch(&self, index_id: &str) -> Option<AnalyzeMetrics> {
         match self.fetch_named(index_id).await {
-            AnalyzeFetch::Fetched(m) => Some(*m),
+            AnalyzeFetch::Fetched { metrics, .. } => Some(*metrics),
             AnalyzeFetch::Missing(_) => None,
         }
     }
@@ -554,7 +659,10 @@ impl AnalyzeMetricsSource for HttpAnalyzeMetricsSource {
     /// produced an empty result so the report can say so.
     async fn fetch_named(&self, index_id: &str) -> AnalyzeFetch {
         match self.try_fetch(index_id).await {
-            Ok(Some(m)) => AnalyzeFetch::Fetched(Box::new(m)),
+            Ok(Some((metrics, caveats))) => AnalyzeFetch::Fetched {
+                metrics: Box::new(metrics),
+                caveats,
+            },
             Ok(None) => AnalyzeFetch::Missing(AnalyzeGap::NotIndexed),
             Err(e) => {
                 tracing::warn!(
@@ -622,12 +730,14 @@ pub async fn enrich_with_analyze(
 /// renders from the built-in scan.
 /// What: walks the same repositories [`enrich_with_analyze`] does, using
 /// [`AnalyzeMetricsSource::fetch_named`]; returns at most one line per
-/// [`AnalyzeGap`] kind, each naming the affected repositories in model order so
-/// two runs over the same state produce identical lines. Repositories with a
-/// declared metrics file, and remote entries, are skipped — neither is a gap.
-/// Returns an empty vec when every eligible repository was populated.
+/// [`AnalyzeGap`] kind and one per [`AnalyzeCaveat`] kind, each naming the
+/// affected repositories in model order so two runs over the same state produce
+/// identical lines. Repositories with a declared metrics file, and remote
+/// entries, are skipped — neither is a gap. Returns an empty vec when every
+/// eligible repository was populated completely.
 /// Test: `analyze_adapter_tests.rs::{enrich_names_unreachable_repositories,
-/// enrich_reports_no_gaps_when_every_repo_is_populated}`.
+/// enrich_reports_no_gaps_when_every_repo_is_populated,
+/// enrich_reports_caveats_for_partially_answered_repositories}`.
 pub async fn enrich_with_analyze_gaps(
     model: &mut super::model::ReportModel,
     source: &dyn AnalyzeMetricsSource,
@@ -635,6 +745,7 @@ pub async fn enrich_with_analyze_gaps(
     // BTreeMap, not HashMap: the rendered line order must not depend on hash
     // iteration order (DOC-67 §9's determinism requirement).
     let mut missing: std::collections::BTreeMap<AnalyzeGap, Vec<String>> = Default::default();
+    let mut partial: std::collections::BTreeMap<AnalyzeCaveat, Vec<String>> = Default::default();
 
     for repo in &mut model.repositories {
         // Precedence: a declared metrics file always wins.
@@ -649,12 +760,15 @@ pub async fn enrich_with_analyze_gaps(
             continue;
         };
         match source.fetch_named(&index_id).await {
-            AnalyzeFetch::Fetched(metrics) => {
+            AnalyzeFetch::Fetched { metrics, caveats } => {
                 eprintln!(
                     "[trusty-review report] --analyze: populated metrics for '{}' from index '{index_id}'",
                     repo.name
                 );
                 repo.metrics = Some(*metrics);
+                for caveat in caveats {
+                    partial.entry(caveat).or_default().push(repo.name.clone());
+                }
             }
             AnalyzeFetch::Missing(gap) => {
                 missing.entry(gap).or_default().push(repo.name.clone());
@@ -662,7 +776,7 @@ pub async fn enrich_with_analyze_gaps(
         }
     }
 
-    missing
+    let mut lines: Vec<String> = missing
         .into_iter()
         .map(|(gap, repos)| {
             format!(
@@ -674,7 +788,13 @@ pub async fn enrich_with_analyze_gaps(
                 repos.join(", ")
             )
         })
-        .collect()
+        .collect();
+    lines.extend(
+        partial
+            .into_iter()
+            .map(|(caveat, repos)| format!("{} — affects: {}.", caveat.as_str(), repos.join(", "))),
+    );
+    lines
 }
 
 #[cfg(test)]

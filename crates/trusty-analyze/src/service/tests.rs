@@ -567,6 +567,135 @@ async fn spawn_empty_chunk_search() -> String {
     format!("http://{addr}")
 }
 
+/// Stand-in trusty-search serving one code chunk and one Markdown chunk.
+///
+/// Why (#5317/#5320): both defects are about what the analyzer does with a
+/// non-code file and how a caller reads a truncated result, and neither is
+/// observable without a corpus that mixes the two.
+/// What: binds an ephemeral loopback port answering
+/// `GET /indexes/{id}/chunks` with a `.rs` chunk holding 30 branches (grade F)
+/// and a `CHANGELOG.md` chunk of prose.
+/// Test: used by `complexity_distribution_endpoint_returns_all_bands` and
+/// `refactor_suggestions_skip_non_code_files`.
+async fn spawn_mixed_corpus_search() -> String {
+    let mut branchy = String::from("/// doc\nfn m(a: u32) {\n");
+    for _ in 0..30 {
+        branchy.push_str("    if a == 1 { return; }\n");
+    }
+    branchy.push_str("}\n");
+    // Release-note prose in the shape that actually reached a report's RED
+    // band: enough conditional English for the keyword text heuristic — the
+    // fallback for an unmapped extension — to grade it as complex code.
+    let mut changelog_prose = String::from("# Changelog\n\n## 1.0\n");
+    for i in 0..30 {
+        changelog_prose.push_str(&format!(
+            "- Fixed a case where, if the cache was cold and the token had expired, \
+             the retry loop would spin for each queued item while the lock was held ({i})\n"
+        ));
+    }
+    let body = serde_json::json!({ "chunks": [
+        {
+            "id": "code:1", "file": "/repo/src/lib.rs", "start_line": 1, "end_line": 40,
+            "content": branchy, "score": 0.0, "match_reason": "test"
+        },
+        {
+            "id": "doc:1", "file": "/repo/CHANGELOG.md", "start_line": 1, "end_line": 40,
+            "content": changelog_prose,
+            "score": 0.0, "match_reason": "test"
+        }
+    ]});
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    // The client pages the corpus with a concurrent window, so the stub must
+    // honour `offset` — answering every offset with the same page would
+    // multiply the corpus by the window width.
+    let stub = Router::new().route(
+        "/indexes/{id}/chunks",
+        axum::routing::get(
+            move |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| {
+                let body = body.clone();
+                async move {
+                    let first = q.get("offset").map(|o| o == "0").unwrap_or(true);
+                    axum::response::Json(if first {
+                        body
+                    } else {
+                        serde_json::json!({ "chunks": [] })
+                    })
+                }
+            },
+        ),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, stub).await.ok();
+    });
+    format!("http://{addr}")
+}
+
+/// Why (#5320): the report's §7 complexity table was a bucketed top-N hotspot
+/// slice rendered as a distribution, so a 1.37M-line repository reported zero
+/// simple functions. The endpoint that replaces it must answer with every band
+/// and with the denominator those percentages are shares of.
+/// What: asserts all five A–F bands are present, that the counts sum to the
+/// stated `total`, and that the Markdown chunk is reported as skipped rather
+/// than silently counted.
+/// Test: this test.
+#[tokio::test]
+async fn complexity_distribution_endpoint_returns_all_bands() {
+    let tmp = TempDir::new().unwrap();
+    let search_base = spawn_mixed_corpus_search().await;
+    let app = build_router(state_in_with_search(tmp.path(), &search_base));
+
+    let (status, body) = json_get(app, "/indexes/myidx/complexity_distribution").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let buckets = body["buckets"].as_array().expect("buckets array");
+    let grades: Vec<&str> = buckets
+        .iter()
+        .map(|b| b["grade"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        grades,
+        vec!["A", "B", "C", "D", "F"],
+        "every band renders, empty included: {body}"
+    );
+    assert_eq!(body["total"], 1, "only the .rs chunk is counted: {body}");
+    assert_eq!(body["skipped_non_code"], 1, "the .md chunk is skipped");
+    let summed: u64 = buckets.iter().map(|b| b["count"].as_u64().unwrap()).sum();
+    assert_eq!(
+        summed, 1,
+        "band counts must sum to the stated denominator: {body}"
+    );
+}
+
+/// Why (#5317): `CHANGELOG.md`, `FAQ.md`, and `.github/workflows/release.yml`
+/// were rendered as the Component of an "Extract method" finding, because the
+/// text-heuristic fallback grades prose F.
+/// What: asserts every returned suggestion names a file with a mapped language,
+/// and that the code chunk itself still produces one — the filter must not
+/// silence real signal.
+/// Test: this test.
+#[tokio::test]
+async fn refactor_suggestions_skip_non_code_files() {
+    let tmp = TempDir::new().unwrap();
+    let search_base = spawn_mixed_corpus_search().await;
+    let app = build_router(state_in_with_search(tmp.path(), &search_base));
+
+    let (status, body) = json_get(app, "/indexes/myidx/refactor-suggestions").await;
+    assert_eq!(status, StatusCode::OK);
+    let suggestions = body["suggestions"].as_array().expect("suggestions array");
+    assert!(
+        suggestions
+            .iter()
+            .all(|s| s["file"].as_str().unwrap().ends_with(".rs")),
+        "a refactor suggestion may only name a code file: {body}"
+    );
+    assert_eq!(
+        suggestions.len(),
+        1,
+        "the grade-F .rs chunk must still be suggested: {body}"
+    );
+}
+
 async fn graph_overlay_header(app: Router, index_id: &str) -> (StatusCode, String) {
     let resp = app
         .oneshot(

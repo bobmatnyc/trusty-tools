@@ -726,6 +726,57 @@ fn finding_fields_have_own_labeled_lines() {
     assert!(md.contains("- **Remediation:**"));
 }
 
+/// Why (#5317): every analyze-derived finding rendered its description and
+/// remediation as `not stated in source data` even when the daemon had returned
+/// both. Those two are deterministic tool output — the row must state them
+/// without waiting for synthesis.
+/// What: renders a metrics fixture carrying `description` and `remediation` and
+/// asserts both reach the page, and that neither slot falls to the marker.
+/// Test: this test itself.
+#[test]
+fn reporter_renders_metric_description_and_remediation() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let metrics = r#"{
+      "findings": [
+        { "title": "Extract method", "severity": "amber", "category": "maintainability",
+          "component": "src/hiargs.rs",
+          "description": "cyclomatic complexity 31 (grade F)",
+          "remediation": "Extract the body of 'from_low_args' into 2-3 smaller functions" }
+      ]
+    }"#;
+    std::fs::write(tmp.path().join("acme.json"), metrics).expect("write metrics");
+    let toml = r#"
+        [report]
+        title = "Acme Due Diligence"
+
+        [[repositories]]
+        name = "Acme Web"
+        path = "/nonexistent/acme-web"
+        metrics = "acme.json"
+    "#;
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("build model");
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(
+        md.contains("cyclomatic complexity 31 (grade F)"),
+        "the tool's own observation must render: {md}"
+    );
+    assert!(
+        md.contains("Extract the body of 'from_low_args' into 2-3 smaller functions"),
+        "the tool's own suggested action must render: {md}"
+    );
+    assert!(
+        !md.contains(&format!("**Remediation:** {HONESTY_MARKER}")),
+        "remediation must not fall to the honesty marker when the source stated it: {md}"
+    );
+}
+
 /// Why: with no findings metrics, the RED/AMBER/GREEN sections must not be
 /// fabricated — under the #2342 omit-empty default they collapse to a single line
 /// (no wall of honesty markers) and the empty sections are recorded under gaps.

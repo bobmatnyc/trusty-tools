@@ -38,6 +38,17 @@ pub fn base_tool_descriptors() -> Value {
             }
         },
         {
+            "name": "complexity_distribution",
+            "description": "Full A-F cyclomatic-complexity histogram over the whole index corpus, with the counted total. Unlike complexity_hotspots (a descending top-N), this is exhaustive, so its counts are the only honest denominator for a percentage.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "string" },
+                    "index_id": { "type": "string" }
+                }
+            }
+        },
+        {
             "name": "find_smells",
             "description": "Chunks with at least one detected code smell. Results are paginated (default limit 500) and content is omitted by default to keep responses bounded. Use limit/offset to page through large result sets; set omit_content=false to include raw source text.",
             "inputSchema": {
