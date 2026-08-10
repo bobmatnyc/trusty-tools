@@ -25,6 +25,7 @@ use std::path::Path;
 use trusty_common::claude_config::{
     default_settings_max_depth, discover_claude_settings, mcp_server_entry, patch_mcp_server,
 };
+use trusty_common::codex_config;
 
 /// Canonical MCP server key trusty-search is registered under in Claude
 /// settings files.
@@ -34,6 +35,14 @@ use trusty_common::claude_config::{
 /// writing `trusty_search`).
 /// What: the literal string `"trusty-search"`.
 const MCP_SERVER_KEY: &str = "trusty-search";
+
+/// The MCP stdio entrypoint every client registration must launch.
+///
+/// Why (#5264): a registration with no argument vector exec's the bare binary,
+/// which prints its top-level help and exits before MCP initialization — while
+/// the client still lists the connection as enabled. Naming the arg vector once
+/// keeps the Claude and Codex registrations from drifting apart.
+const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
 /// Entry point for `trusty-search setup`.
 ///
@@ -61,7 +70,7 @@ pub fn handle_setup() -> Result<()> {
         home.display()
     );
 
-    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve"]);
+    let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
     let files = discover_claude_settings(&home, default_settings_max_depth());
 
     let changed = if files.is_empty() {
@@ -103,6 +112,47 @@ pub fn handle_setup() -> Result<()> {
         "  Restart Claude Code (or reload MCP servers) to pick up `{}`.",
         MCP_SERVER_KEY.cyan()
     );
+
+    // #5264: Codex is registered from the same command so one setup run leaves
+    // both clients working. A Codex failure never fails the Claude setup.
+    println!();
+    if let Err(e) = setup_codex(&home) {
+        eprintln!("  {} Codex registration: {}", "✗".red(), e);
+    }
+    Ok(())
+}
+
+/// Register (or repair) the Codex CLI's stdio MCP entry for trusty-search.
+///
+/// Why (#5264): Codex Desktop showed `trusty-search` as an enabled stdio server
+/// while `codex mcp get trusty-search --json` reported `args: []`. Codex exec'd
+/// the bare binary, which printed help and exited before MCP initialization, so
+/// the model got no search, grep, or index tools from a connection that looked
+/// healthy. Nothing in trusty-search wrote that registration, which is why the
+/// broken shape had no owner to fix it.
+/// What: upserts `[mcp_servers.trusty-search]` in `~/.codex/config.toml` with
+/// `command = "trusty-search"` and `args = ["serve"]`, through the shared
+/// writer in `trusty_common::codex_config` — which repairs an empty, joined, or
+/// nested-JSON-string argument vector and leaves every other table and comment
+/// in the operator's config untouched. Prints one status line either way.
+/// Test: `setup_codex_writes_the_serve_entrypoint`,
+/// `setup_codex_is_idempotent`; the repair cases are covered by
+/// `trusty_common::codex_config`'s own tests.
+fn setup_codex(home: &Path) -> Result<()> {
+    let path = codex_config::codex_config_path(home);
+    let wrote =
+        codex_config::patch_mcp_server(&path, MCP_SERVER_KEY, MCP_SERVER_KEY, MCP_SERVER_ARGS)?;
+    if wrote {
+        println!("  {} Codex: {}", "✓ added".green(), path.display());
+        println!("  Restart Codex to pick up `{}`.", MCP_SERVER_KEY.cyan());
+    } else {
+        println!(
+            "  {} Codex: {} {}",
+            "↻".cyan(),
+            path.display().to_string().dimmed(),
+            "(already configured)".dimmed()
+        );
+    }
     Ok(())
 }
 
@@ -158,7 +208,7 @@ mod tests {
     fn setup_creates_fallback_settings_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("settings.json");
-        let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve"]);
+        let entry = mcp_server_entry(MCP_SERVER_KEY, MCP_SERVER_ARGS);
 
         let n = patch_one_with_report(&path, &entry, true).expect("patch ok");
         assert_eq!(n, 1);
@@ -220,5 +270,46 @@ mod tests {
         let servers = v["mcpServers"].as_object().unwrap();
         assert!(servers.contains_key("other"));
         assert!(servers.contains_key(MCP_SERVER_KEY));
+    }
+
+    /// Why (#5264): the whole defect is a registration that launches the bare
+    /// binary, so the one thing this must prove is that `serve` reaches the
+    /// generated argument vector as its own element.
+    /// What: runs `setup_codex` against a tempdir `$HOME` and reads the vector
+    /// back out of the written TOML.
+    /// Test: this is the test.
+    #[test]
+    fn setup_codex_writes_the_serve_entrypoint() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        setup_codex(tmp.path()).expect("codex setup ok");
+
+        let text =
+            std::fs::read_to_string(tmp.path().join(".codex").join("config.toml")).expect("read");
+        let cfg: toml::Value = text.parse().expect("valid TOML");
+        let entry = &cfg["mcp_servers"][MCP_SERVER_KEY];
+        assert_eq!(entry["command"].as_str(), Some("trusty-search"));
+        let args: Vec<&str> = entry["args"]
+            .as_array()
+            .expect("args array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            args,
+            vec!["serve"],
+            "#5264: Codex must exec `trusty-search serve`, not the bare binary"
+        );
+    }
+
+    /// Why: `setup` is re-run routinely; a second run must leave the operator's
+    /// Codex config byte-identical.
+    #[test]
+    fn setup_codex_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(".codex").join("config.toml");
+        setup_codex(tmp.path()).expect("first run");
+        let before = std::fs::read_to_string(&path).expect("read");
+        setup_codex(tmp.path()).expect("second run");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 }
