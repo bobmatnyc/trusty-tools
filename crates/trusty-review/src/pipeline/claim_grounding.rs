@@ -72,9 +72,16 @@
 
 use tracing::warn;
 
-use crate::models::{Effort, Finding, VerifyOutcome};
+use crate::models::{Finding, VerifyOutcome};
+use crate::pipeline::evidence_admission::{
+    UNVERIFIABLE_ADVISORY_CONFIDENCE, demote_to_unverifiable_advisory,
+};
 
 /// Confidence a demoted ungrounded registry claim is capped at.
+///
+/// #5309: the value now lives in `evidence_admission`, which owns the
+/// demotion every `Unverifiable` route applies; this stays as the name #4081's
+/// tests and docs reference. Its rationale, unchanged:
 ///
 /// Why: the value is load-bearing against two thresholds in `grade.rs`, and sits
 /// in the only band that satisfies both:
@@ -100,7 +107,7 @@ use crate::models::{Effort, Finding, VerifyOutcome};
 /// What: applied with `min`, never `max` — a finding the model already rated
 /// lower keeps its lower value; this is a ceiling, not an assignment.
 /// Test: `advisory_confidence_sits_in_the_visible_but_non_escalating_band`.
-pub const UNGROUNDED_CLAIM_ADVISORY_CONFIDENCE: f32 = 0.65;
+pub const UNGROUNDED_CLAIM_ADVISORY_CONFIDENCE: f32 = UNVERIFIABLE_ADVISORY_CONFIDENCE;
 
 /// Sentinel opening the advisory note appended to a demoted finding.
 ///
@@ -273,11 +280,9 @@ pub fn demote_ungrounded_registry_claims(findings: &mut [Finding]) -> usize {
         f.verified = Some(VerifyOutcome::Unverifiable {
             reason: UNVERIFIABLE_REASON.to_string(),
         });
-        f.code_provable = false;
-        if f.effort == Effort::High {
-            f.effort = Effort::Medium;
-        }
-        f.confidence = f.confidence.min(UNGROUNDED_CLAIM_ADVISORY_CONFIDENCE);
+        // #5309: one demotion for every route to `Unverifiable`, so the same
+        // claim carries the same weight whichever pass classified it.
+        demote_to_unverifiable_advisory(f);
         f.description = format!("{}\n\n{}", f.description, UNGROUNDED_CLAIM_NOTE);
         demoted += 1;
     }
