@@ -447,7 +447,8 @@ pub(super) async fn search_handler(
     // is unavailable (non-git directory, missing git binary) or the SHAs
     // match — i.e. defaults to "not stale" rather than scaring callers
     // about indexes whose freshness we cannot verify.
-    let (_disk_bytes, last_indexed) = index_disk_and_mtime(&index_id.0);
+    // #4706: the helper needs the root path to reach the colocated layout.
+    let (_disk_bytes, last_indexed) = index_disk_and_mtime(&index_id.0, &handle.root_path);
     let indexed_sha = handle.indexed_head_sha.read().await.clone();
     let current_sha = crate::core::git::head_sha(&handle.root_path);
     let results_may_be_stale = match (indexed_sha.as_deref(), current_sha.as_deref()) {

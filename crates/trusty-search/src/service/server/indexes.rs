@@ -177,7 +177,9 @@ pub(super) async fn list_indexes_handler(
                         return None;
                     }
                 }
-                let (size_bytes, _) = index_disk_and_mtime(&handle.id.0);
+                // #4706: sum both storage layouts — a colocated index kept its
+                // bytes outside the global dir and so reported 0, not null.
+                let (size_bytes, _) = index_disk_and_mtime(&handle.id.0, &handle.root_path);
                 let root_path = handle.root_path.to_str().map(|s| s.to_string());
                 Some(IndexDetailEntry {
                     id: handle.id.0.clone(),

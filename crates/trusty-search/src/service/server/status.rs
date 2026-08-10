@@ -20,21 +20,60 @@ use crate::service::reindex::ReindexStatus;
 
 use super::state::SearchAppState;
 
-pub(super) fn index_disk_and_mtime(index_id: &str) -> (Option<u64>, Option<String>) {
+/// On-disk footprint and freshness for one index, across BOTH storage layouts.
+///
+/// Why (#4706): this used to measure only the legacy global registry dir
+/// (`<data_dir>/indexes/<id>/`). Since #403 an index's live corpus normally
+/// lives colocated at `<root_path>/.trusty-search/`, and the global dir holds
+/// metadata only. Because that global dir still EXISTS, the old code took the
+/// `Some(dir_size_bytes(..))` branch and reported `0` — not `null` — for a
+/// populated index: a healthy 527 MB / 71,433-chunk index read as empty. An
+/// operator diagnosed 11 such indexes as broken and considered deleting them.
+/// A metric that reads `0` for a half-gigabyte index is dangerous, not merely
+/// inaccurate. The documented contract was already "sum of all file sizes under
+/// the index data directory" (`router::IndexDetailEntry`), so reading one of
+/// the two locations was the bug, not the contract.
+/// What: sums whichever of the two directories exist. `None` only when NEITHER
+/// does — that is the sole "nothing on disk yet" signal, and it is now reachable
+/// only in the state it actually describes. `root_path` is required because the
+/// colocated location is derived from it; every caller already holds the handle.
+/// Uses a manual path join rather than `colocated_storage::colocated_storage_dir`
+/// for the same reason it avoids `persistence::index_data_dir` — both create the
+/// directory as a side effect, which would make this read-only metric fabricate
+/// the very directory whose absence it reports.
+/// Test: `index_disk_and_mtime_handles_missing_dir`,
+/// `disk_bytes_sums_colocated_storage_not_just_the_legacy_dir`,
+/// `disk_bytes_is_none_only_when_neither_layout_exists`.
+pub(super) fn index_disk_and_mtime(
+    index_id: &str,
+    root_path: &std::path::Path,
+) -> (Option<u64>, Option<String>) {
     // Why: `persistence::index_data_dir` creates the directory as a side effect,
     // which would defeat the "missing dir → None" contract this helper relies
     // on. Compute the path manually (mirroring the persistence layer's logic)
     // and only touch the filesystem to *read* metadata.
-    let Ok(data_dir) = crate::service::persistence::data_dir() else {
-        return (None, None);
-    };
-    let dir = data_dir
-        .join("indexes")
-        .join(crate::service::persistence::sanitize_id_for_path(index_id));
-    if !dir.exists() {
+    let legacy_dir = crate::service::persistence::data_dir().ok().map(|d| {
+        d.join("indexes")
+            .join(crate::service::persistence::sanitize_id_for_path(index_id))
+    });
+    // #4706: the colocated layout (#403) is where a modern index's redb corpus
+    // and HNSW snapshot actually live.
+    let colocated_dir = root_path.join(crate::service::colocated_storage::COLOCATED_DIR_NAME);
+    let dirs: Vec<std::path::PathBuf> = legacy_dir
+        .into_iter()
+        .chain(std::iter::once(colocated_dir))
+        .filter(|d| d.is_dir())
+        .collect();
+    if dirs.is_empty() {
         return (None, None);
     }
-    let disk_bytes = Some(trusty_common::sys_metrics::dir_size_bytes(&dir));
+    // #4706: sum, don't pick. A migrated index legitimately holds bytes in both
+    // places; reporting either one alone understates it.
+    let disk_bytes = Some(
+        dirs.iter()
+            .map(|d| trusty_common::sys_metrics::dir_size_bytes(d))
+            .sum(),
+    );
     // Issue #80: after the redb cutover (issue #28), `chunks.json` is no
     // longer rewritten on every commit — the durable corpus lives in
     // `index.redb`. The previous implementation read `chunks.json` mtime
@@ -46,10 +85,23 @@ pub(super) fn index_disk_and_mtime(index_id: &str) -> (Option<u64>, Option<Strin
     // What: probe `index.redb` first (current authoritative file rewritten
     // by every redb commit / atomic swap), then fall back to `chunks.json`
     // for un-migrated indexes (the legacy JSON snapshot still rewritten by
-    // the migration shim). The first existing file wins.
+    // the migration shim). The first existing file wins WITHIN a directory;
+    // #4706 then takes the newest across the two directories, since a
+    // colocated index's writes land in `.trusty-search/` and the stale global
+    // copy must not win. This is why `IndexHandle::last_indexed_at` (#878)
+    // existed as an in-memory workaround — it stays, since it is still the
+    // only non-null source for a handle that has not yet written to disk.
     // Test: `index_disk_and_mtime_handles_missing_dir` (this fn) +
-    // `last_indexed_prefers_redb_then_chunks_json` (the pure selector below).
-    let last_indexed = first_existing_mtime_rfc3339(&dir, &["index.redb", "chunks.json"]);
+    // `last_indexed_prefers_redb_then_chunks_json` (the pure selector below) +
+    // `last_indexed_takes_the_newer_of_the_two_layouts`.
+    let last_indexed = dirs
+        .iter()
+        .filter_map(|d| first_existing_mtime_rfc3339(d, &["index.redb", "chunks.json"]))
+        .max_by_key(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.timestamp_nanos_opt().unwrap_or(i64::MIN))
+                .unwrap_or(i64::MIN)
+        });
     (disk_bytes, last_indexed)
 }
 
@@ -146,7 +198,9 @@ pub(super) async fn index_status_handler(
     // the admin UI's enhanced Indexes table. Both are derived from the
     // per-index data directory; absent / unreadable values degrade to null
     // so a fresh (never-reindexed) index still returns a 200.
-    let (disk_bytes, disk_last_indexed) = index_disk_and_mtime(&index_id.0);
+    // #4706: `disk_bytes` here is the same metric `list_indexes` reports as
+    // `size_bytes`; both read 0 for a colocated index before this fix.
+    let (disk_bytes, disk_last_indexed) = index_disk_and_mtime(&index_id.0, &handle.root_path);
     // Issue #878: prefer the in-memory `last_indexed_at` timestamp stamped
     // at reindex-complete time. This is authoritative regardless of storage
     // layout (legacy global dir vs. colocated `.trusty-search/`) and is
