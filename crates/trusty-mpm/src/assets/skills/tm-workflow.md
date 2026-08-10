@@ -159,6 +159,49 @@ derived rules live here because they apply only at a specific moment:
 Slow feature release *causes* too many things in flight. Shortening time-to-land
 is the fix; capping WIP treats the symptom.
 
+## Test Scope Widens by Stage
+
+Unit tests run on the new or changed code only while developing, on the full
+test files that changed when merging, and on the full corpus only when
+publishing.
+
+| Stage | Scope |
+|---|---|
+| Developing | tests covering the new or changed code only |
+| Merging | the full test files that changed |
+| Publishing | the full corpus |
+
+- **Developing** is the inner loop: the targeted test that proves the change,
+  re-run as you edit. Nothing wider is owed while the code is still moving.
+- **Merging** widens to whole files, never to the whole repository. Every test
+  file the diff touched runs in full — including the cases you did not edit, and
+  any normally-skipped test that lives in one of those files. A change to a
+  public interface or to shared test infrastructure alters what a dependent
+  package's test files mean, so those files count as changed even though the
+  diff never opened them.
+- **Publishing** is the only stage that owes the whole corpus, plus whatever
+  release gates the project defines.
+
+This is the two-phase doctrine at finer grain: developing is SPRINT; merging and
+publishing are two different widths inside HARDEN, and merging is the narrower.
+A green merge gate is therefore not a release gate.
+
+Stage and rigour are separate axes and both bind. The stage decides how *wide* a
+gate runs; the project's risk labels and test ladder decide how *hard* it is
+applied and which gates run at all. Pick the rung from the project's `CLAUDE.md`,
+then read the stage off where you are in the delivery chain.
+
+A consequence for branch protection: a full-corpus CI job is a publish gate, so a
+project may leave it off the required pre-merge contexts and merge while it is
+still pending. A **failing** check blocks the merge at every stage — only
+*pending* is tolerated.
+
+🔴 **Widening by stage is never licence to skip.** Choosing the narrower scope is
+a claim about blast radius that you must be able to prove. It is never licence to
+make a red gate green by deleting a test, marking it skipped or ignored, gating
+it out of the build, or excluding it from the run. That hard line ("Sprint, then
+Harden") is unchanged.
+
 ## Worktree Discipline (Mandatory Before Any Edit)
 
 The main checkout is **inspection-only** — read-only `git status`/`log`/`diff`/

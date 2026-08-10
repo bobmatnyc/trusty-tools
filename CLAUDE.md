@@ -77,9 +77,11 @@ Read that page's rung entry before running the gate, and paste the command you
 actually ran into the PR body.
 
 🔴 **`cargo test --workspace` is not the default inner-loop proof for a localized
-change.** It belongs at the hardening boundaries (rungs 4–6). Making every narrow
-PR depend on the whole workspace turns unrelated flakes into an issue factory
-without adding one line of coverage for your change.
+change.** It is keyed to the stage, not the rung: it belongs at the publish
+boundary, and rungs 4–6 are the ones that reach it — a rung-4 PR does not owe a
+workspace run to merge. Making every narrow PR depend on the whole workspace
+turns unrelated flakes into an issue factory without adding one line of coverage
+for your change.
 
 🔴 **Scope down, never scope away.** Choosing a lower rung is a statement about
 blast radius, and you must be able to prove it (see the baseline-failure rules
