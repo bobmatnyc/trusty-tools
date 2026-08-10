@@ -758,16 +758,20 @@ jobs:
       #
       # This step is COMPILE-bound, not link-bound — measured, #5325. The cargo
       # cache restores every dependency, so it compiles 25 workspace crates and
-      # links 194 test executables in ~7m50s. Linking 194 binaries looks like
-      # the obvious target, so mold 2.30 was tried here via `mold -run` (which
-      # keeps cargo's fingerprint and rust-cache's key intact, unlike a
-      # RUSTFLAGS linker override). Against its own base commit, with an
-      # identical full-match cache and an identical 25-crate/194-executable
-      # build, it made this step SLOWER: 7m49s -> 8m01s. Reverted. The time is
-      # in codegen for 25 large crates down a partly-serial dependency chain
-      # (everything waits on trusty-common), which a faster linker cannot touch.
-      # Don't re-try a linker swap here without a `cargo build --timings`
-      # profile showing link time is actually the cost.
+      # links 194 test executables, and the linking is not where the time goes.
+      #
+      # mold 2.30 was tried here, invoked as `mold -run` so cargo's fingerprint
+      # and Swatinem/rust-cache's key (it hashes every RUST*-prefixed variable)
+      # stayed untouched and the comparison stayed clean. It changed nothing
+      # measurable: 8m01s with mold, against 7m42s / 7m49s / 8m00s / 8m16s
+      # across four runs of the identical unmodified command. Reverted rather
+      # than keep an apt package and an LD_PRELOAD interposer for an effect
+      # smaller than this step's run-to-run spread.
+      #
+      # The time is codegen for 25 large crates down a partly-serial dependency
+      # chain — everything waits on trusty-common — which no linker can touch.
+      # Don't re-try a linker swap without a `cargo build --timings` profile
+      # showing link time is actually the cost.
       - name: cargo test --workspace --no-run (build phase)
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
