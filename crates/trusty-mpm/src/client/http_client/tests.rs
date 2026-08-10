@@ -883,3 +883,33 @@ fn health_snapshot_launchd_supervision_defaults_to_empty() {
     .expect("body with the field parses");
     assert_eq!(full.launchd_supervision, "unknown");
 }
+
+/// Why (#5007): the daemon discloses a degraded store on the list response, and
+/// every client that renders a listing reads it from this shared type. It must
+/// deserialize when present and default to `None` against an older daemon that
+/// never sends it — otherwise upgrading the CLI ahead of the daemon breaks
+/// `tm ls` outright.
+/// What: asserts both directions.
+/// Test: this test.
+#[test]
+fn managed_list_response_carries_store_health_when_degraded() {
+    let json = serde_json::json!({
+        "sessions": [],
+        "store_health": {
+            "message": "/x/sessions.json is corrupt",
+            "corrupt": true,
+            "observed_at": "2026-08-06T09:01:17Z",
+        },
+    });
+    let body: ManagedListResponse = serde_json::from_value(json).unwrap();
+    let health = body.store_health.expect("store_health must deserialize");
+    assert!(health.corrupt);
+    assert_eq!(health.message, "/x/sessions.json is corrupt");
+
+    let older: ManagedListResponse =
+        serde_json::from_value(serde_json::json!({"sessions": []})).unwrap();
+    assert!(
+        older.store_health.is_none(),
+        "a daemon that omits the field must still deserialize"
+    );
+}

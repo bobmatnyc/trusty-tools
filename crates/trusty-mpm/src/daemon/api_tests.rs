@@ -1213,6 +1213,8 @@ async fn doctor_endpoint_returns_report() {
         "scaffold_tracking",
         "push_guard",
         "binary_provenance",
+        // #5007: `sessions.json` integrity — a corrupt store blocks every write.
+        "session_store",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

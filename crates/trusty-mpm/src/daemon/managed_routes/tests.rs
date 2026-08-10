@@ -1370,3 +1370,34 @@ fn spawn_request_worktree_wire_shape() {
          rule as `force_new` and `background`"
     );
 }
+
+/// Why (#5007): the `store_health` disclosure must be ABSENT from a healthy
+/// list response, not present-and-null. Every existing consumer of this
+/// endpoint parses the body as-is, and a new always-present field is a wire
+/// change; an omitted one is not.
+/// What: serializes a healthy response and asserts the key does not appear,
+/// then serializes a degraded one and asserts it does.
+/// Test: this test.
+#[test]
+fn list_response_omits_store_health_when_healthy() {
+    let healthy = super::ListSessionsResponse {
+        sessions: vec![],
+        store_health: None,
+    };
+    let json = serde_json::to_value(&healthy).expect("serialize");
+    assert!(
+        json.get("store_health").is_none(),
+        "a healthy response must not grow a field: {json}"
+    );
+
+    let degraded = super::ListSessionsResponse {
+        sessions: vec![],
+        store_health: Some(super::StoreHealthPayload {
+            message: "/x/sessions.json is corrupt".into(),
+            corrupt: true,
+            observed_at: "2026-08-06T09:01:17Z".into(),
+        }),
+    };
+    let json = serde_json::to_value(&degraded).expect("serialize");
+    assert_eq!(json["store_health"]["corrupt"], serde_json::json!(true));
+}

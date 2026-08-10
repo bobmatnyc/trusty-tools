@@ -149,6 +149,13 @@ use doctor_legacy_overrides::check_legacy_overrides;
 mod doctor_search_pin;
 use doctor_search_pin::check_search_index_pin;
 
+// Split out to keep this file under the 500-SLOC production cap (issue #5007 —
+// the managed-session-store integrity probe; a corrupt `sessions.json` blocks
+// every write and was previously invisible to every diagnostic).
+#[path = "doctor_session_store.rs"]
+mod doctor_session_store;
+use doctor_session_store::check_session_store;
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -358,6 +365,11 @@ pub async fn run_doctor(
     // still exists. Reports UNKNOWN — never Ok — when provenance cannot be
     // determined. Read-only; never installs, moves, or deletes.
     checks.push(check_binary_provenance());
+    // Issue #5007: whether `sessions.json` still parses. A corrupt store blocks
+    // every write while `tm ls` keeps serving the daemon's in-memory copy, so
+    // without this probe the condition is invisible until someone attempts a
+    // mutation. Read-only; the repair is `tm repair session-store`.
+    checks.push(check_session_store(&FrameworkPaths::default().root));
 
     DoctorReport::from_checks(checks)
 }

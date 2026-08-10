@@ -152,6 +152,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "binary_provenance",
         "Where the RUNNING binary came from and whether that source still exists: reads cargo's own `$CARGO_HOME/.crates2.json` install ledger and compares it against the running executable. Fails when the same binary is provided by more than one install, when the running binary is OLDER than the ledger's record for that same file or the two cannot be ordered as semver, or when a `cargo install --path` source directory has been reaped (no provenance, no upgrade path). Warns for a live path/git install, which is invisible to registry update detection. Reports UNKNOWN — never `Ok` — when the ledger is unreadable, does not cover the binary (a prebuilt-installer or package-manager install), or records a version OLDER than what is running, which means the ledger no longer describes the file on disk (issue #4964). Read-only; never installs, moves, or deletes (issue #4033, ADR-0021).",
     ),
+    (
+        "session_store",
+        "Whether `~/.trusty-mpm/session-manager/sessions.json` still LOADS — validated against the same type the daemon deserializes, so this check can never call a store healthy that the daemon rejects. A store the daemon cannot read blocks every write (each write path reloads before it saves) while `tm ls` keeps serving the daemon's in-memory copy, so the condition is otherwise invisible until someone attempts a mutation. Fails with the byte offset where the valid document ends, and names `tm repair session-store` only when truncating there would actually leave a loadable store. An absent store is `Ok` (a machine that has never run a managed session has none); an unreadable one is UNKNOWN, never `Ok`. Read-only — it never truncates or writes (issue #5007).",
+    ),
 ];
 
 /// Render the full doctor-check reference.

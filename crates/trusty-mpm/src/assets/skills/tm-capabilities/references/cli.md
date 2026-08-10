@@ -101,6 +101,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `repair` — Recover from corrupt or inconsistent deploy state
   - `deploy` — Repair the agent/skill deploy state in `~/.claude/`
   - `push-guard` — Retrofit the #2867 cross-branch `pre-push` guard onto an existing clone
+  - `session-store` — Recover a corrupt managed-session store (`sessions.json`)
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
 - `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
