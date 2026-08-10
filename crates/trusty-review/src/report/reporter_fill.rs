@@ -47,6 +47,53 @@ pub(super) fn instructions_block(model: &ReportModel) -> String {
     )
 }
 
+/// Fill §2 from the report's own data, with no LLM involved (#5318).
+///
+/// Why: the executive summary was the report's only synthesis-gated section, so
+/// a deterministic run rendered `_No data available — see Gaps & Caveats._`
+/// where a diligence reader looks first. The counts, size, and severity mix it
+/// needs are already in the model.
+/// What: sets `executive_summary_paragraph` from
+/// [`super::exec_summary::compose`] — tagged with the provenance of the figures
+/// when composed, untagged when it is instead a statement naming which inputs
+/// were missing (a statement about the report, not a report value). When
+/// `with_risks` is set, also pushes one `top_risk_row` per deterministic risk;
+/// the caller clears it when synthesis has rows of its own, so the two never
+/// stack into one table.
+/// Test: `reporter_tests.rs::{reporter_fills_executive_summary_without_synthesis,
+/// reporter_names_missing_inputs_when_nothing_measured,
+/// reporter_prefers_synthesis_over_deterministic_summary}`.
+pub(super) fn set_executive_summary(root: &mut Scope, model: &ReportModel, with_risks: bool) {
+    match super::exec_summary::compose(model) {
+        super::exec_summary::ExecSummary::Composed { text, provenance } => {
+            root.set("executive_summary_paragraph", tag(text, provenance));
+        }
+        super::exec_summary::ExecSummary::Unavailable(text) => {
+            root.set("executive_summary_paragraph", text);
+        }
+    }
+
+    if !with_risks {
+        return;
+    }
+    for (i, risk) in super::exec_summary::top_risks(model)
+        .into_iter()
+        .enumerate()
+    {
+        let mut row = Scope::new();
+        row.set("risk_rank", (i + 1).to_string());
+        row.set(
+            "risk_description",
+            tag(risk.description, Provenance::Declared),
+        );
+        row.set("risk_severity", risk.severity);
+        row.set("risk_apps", risk.apps);
+        // `risk_cost` is deliberately unset: nothing deterministic states a
+        // remediation cost, so it falls through to the honesty marker.
+        root.push_block("top_risk_row", row);
+    }
+}
+
 /// Fill Section 3 with trusty-review's own normalized scoring model (#2342.2).
 ///
 /// Why: the scoring model is defined BY the tool — rendering it as "not stated"

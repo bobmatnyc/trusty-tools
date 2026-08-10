@@ -367,7 +367,7 @@ section with source and v1 status:
 | Template section | v1 status | Source |
 |---|---|---|
 | §1 Report Metadata | **Populated** | Manifest (`ReportSection` fields, §6) |
-| §2 Executive Summary + Top Risks | **Populated**, unchanged mechanism | trusty-review's existing LLM synthesis (`synthesize.rs`) over the RED/AMBER findings trusty-analyze supplies. Does **not** incorporate tga's DORA/velocity data in v1 (§12 Q3) |
+| §2 Executive Summary + Top Risks | **Populated** | Deterministic roll-up (`exec_summary.rs`) over the RED/AMBER findings and size data trusty-analyze supplies — AUDIT invokes `trusty-review report` without `--synthesize`, so the LLM path this row originally named never ran and §2 rendered empty until #5318. LLM synthesis (`synthesize.rs`) still overwrites both when a caller opts into it. Does **not** incorporate tga's DORA/velocity data in v1 (§12 Q3) |
 | §3 Scoring Model Normalization | **Populated**, unchanged mechanism | The fixed RED/AMBER/GREEN and A–F conventions already encoded in `analyze_adapter.rs:164-226` |
 | §4 Per-Application Scorecard — Profile (tech stack, LoC, frameworks, file counts) | **Populated**, unchanged mechanism | `report/scan.rs`'s `RepoScan` — computed directly from the local checkout (`git ls-files`, manifest detection), independent of trusty-analyze, already runs for any `RepositoryEntry::LocalPath` (`model.rs`) |
 | §4 Health-Factor Scores | **Populated, new call site** | trusty-analyze `/quality` (`avg_cyclomatic`/`pct_grade_a`/`grade`) — architecture factor; diagnostics/refactor rollup — security-proxy factor, captioned per §3's limitation |
