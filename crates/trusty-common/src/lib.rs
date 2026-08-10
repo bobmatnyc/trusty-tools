@@ -41,6 +41,17 @@ pub mod banner;
 pub mod chat;
 pub mod claude_config;
 
+/// Codex CLI MCP-server registration (`~/.codex/config.toml`).
+///
+/// Why: a Codex stdio registration with no argument vector launches the bare
+/// binary, which prints help and exits before MCP initialization while the
+/// connection still reads as enabled (#5264 / #5265).
+/// What: [`codex_config::codex_config_path`] and
+/// [`codex_config::patch_mcp_server`] — see the module docs.
+/// Test: `cargo test -p trusty-common --features codex-config`.
+#[cfg(feature = "codex-config")]
+pub mod codex_config;
+
 /// Canonical environment-variable name constants shared across the workspace.
 ///
 /// Why: the same credential env-var names were spelled as bare literals at ~40
