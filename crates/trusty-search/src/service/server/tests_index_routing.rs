@@ -286,6 +286,86 @@ async fn chunks_and_status_agree_on_a_cold_parked_index() {
     assert_eq!(status_body["restore_via"], chunks_body["restore_via"]);
 }
 
+/// The WRITE path answers a cold-parked index the same way the read path does.
+///
+/// Why (#5061): `index_file` / `remove_file` are the supported incremental
+/// path for network-mounted roots (#3408), where nothing else keeps the index
+/// current — so a caller told "unknown index" for an index that merely is not
+/// resident deregisters it or gives up, and the writes stop arriving with no
+/// other signal. Pre-fix both handlers did a bare hot-registry lookup and
+/// returned `StatusCode::NOT_FOUND` with no body, which under #4715's rule
+/// asserts the index exists nowhere. The `expect_err` still passes pre-fix —
+/// it is the 503, the `restore_via` hint, and the body itself that do not.
+/// Test: this test.
+#[tokio::test]
+async fn write_path_cold_parked_index_is_503_with_restore_hint() {
+    let state = state_with_cold_index("cold-write");
+    let index_req: super::router::IndexFileRequest = serde_json::from_value(
+        serde_json::json!({ "path": "src/auth.rs", "content": "fn authenticate() {}" }),
+    )
+    .expect("IndexFileRequest");
+    let (code, axum::Json(body)) = super::files::index_file_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("cold-write".to_string()),
+        axum::Json(index_req),
+    )
+    .await
+    .expect_err("a non-resident index cannot accept a write");
+
+    assert_eq!(
+        code,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a cold-parked index EXISTS — 404 would tell the caller to stop pushing"
+    );
+    assert_eq!(body["error"], "index_not_resident");
+    assert_eq!(
+        body["restore_via"], "POST /indexes/cold-write/search",
+        "the writer must learn how to bring the index back"
+    );
+
+    let remove_req: super::router::RemoveFileRequest =
+        serde_json::from_value(serde_json::json!({ "path": "src/auth.rs" }))
+            .expect("RemoveFileRequest");
+    let (rm_code, axum::Json(rm_body)) = super::files::remove_file_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("cold-write".to_string()),
+        axum::Json(remove_req),
+    )
+    .await
+    .expect_err("a non-resident index cannot accept a delete");
+
+    assert_eq!(
+        rm_code, code,
+        "the delete half must not diverge from the add"
+    );
+    assert_eq!(rm_body["error"], body["error"]);
+    assert_eq!(rm_body["restore_via"], body["restore_via"]);
+}
+
+/// A genuinely unknown id keeps its 404 on the write path too.
+///
+/// Why (#5061): widening the body must not widen the status code. #4715's
+/// invariant — a 404 rules out every store — has to survive this change, or
+/// the MCP layer would start classifying an unknown index as "not built yet".
+/// Test: this test.
+#[tokio::test]
+async fn write_path_unknown_index_is_still_404() {
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let req: super::router::RemoveFileRequest =
+        serde_json::from_value(serde_json::json!({ "path": "src/auth.rs" }))
+            .expect("RemoveFileRequest");
+    let (code, axum::Json(body)) = super::files::remove_file_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("never-existed".to_string()),
+        axum::Json(req),
+    )
+    .await
+    .expect_err("genuinely unknown");
+
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "unknown index: never-existed");
+}
+
 /// A genuinely unknown id is still a 404, and now says so in the body.
 ///
 /// Why (#5061): #4715 depends on this 404 meaning "absent from every store".

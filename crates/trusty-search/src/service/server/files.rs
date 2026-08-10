@@ -23,18 +23,60 @@ use super::helpers::file_is_within_root;
 use super::router::{IndexFileRequest, RemoveFileRequest};
 use super::state::SearchAppState;
 
+/// `POST /indexes/:id/index-file` — add or replace one file in an index.
+///
+/// Why: this is the supported incremental-indexing path for network-mounted
+/// roots (#3408), where the OS watcher cannot fire — so a caller driving it
+/// from CI or a post-merge hook is the ONLY thing keeping the index current.
+/// A bare hot-registry miss reported a cold-parked index as unknown, and #4715
+/// establishes that a 404 from an index-scoped endpoint means "no such index
+/// anywhere". Told "unknown index" for an index that exists, such a caller
+/// deregisters it or gives up, and the writes stop arriving — silently, since
+/// nothing else drives that index.
+/// What: shares [`super::degraded::residency_miss_response`] with the read
+/// path, so a cold-parked index answers `503 index_not_resident` with the
+/// `restore_via` hint instead of a bodyless 404.
+/// Test: `write_path_cold_parked_index_is_503_with_restore_hint`.
 pub(super) async fn index_file_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(req): Json<IndexFileRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+    // #5061: the write path owes the same residency verdict as the read path.
+    let handle = match state.registry.get(&index_id) {
+        Some(h) => h,
+        None => {
+            return Err(super::degraded::residency_miss_response(
+                &state.cold_store,
+                &index_id,
+            ))
+        }
+    };
     let indexer = handle.indexer.read().await;
     indexer
         .index_file(&req.path, &req.content)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            // #5061: a write that failed must say so — the caller cannot infer
+            // it from a bare 500, and it has no other signal that the file it
+            // just pushed never landed.
+            tracing::warn!(
+                index_id = %index_id,
+                path = %req.path,
+                error = %e,
+                "index-file failed"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "index_file_failed",
+                    "index_id": index_id.0,
+                    "path": req.path,
+                    "message": e.to_string(),
+                })),
+            )
+        })?;
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "path": req.path,
@@ -42,18 +84,47 @@ pub(super) async fn index_file_handler(
     })))
 }
 
+/// `POST /indexes/:id/remove-file` — drop one file's chunks from an index.
+///
+/// Why and What: the delete half of [`index_file_handler`]'s contract — same
+/// callers, same network-mount motivation, same residency verdict.
+/// Test: `write_path_cold_parked_index_is_503_with_restore_hint`.
 pub(super) async fn remove_file_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(req): Json<RemoveFileRequest>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let index_id = IndexId::new(id);
-    let handle = state.registry.get(&index_id).ok_or(StatusCode::NOT_FOUND)?;
+    // #5061: same residency verdict as its `index_file` twin.
+    let handle = match state.registry.get(&index_id) {
+        Some(h) => h,
+        None => {
+            return Err(super::degraded::residency_miss_response(
+                &state.cold_store,
+                &index_id,
+            ))
+        }
+    };
     let indexer = handle.indexer.read().await;
-    let removed = indexer
-        .remove_file(&req.path)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let removed = indexer.remove_file(&req.path).await.map_err(|e| {
+        // #5061: see the sibling handler — a silent 500 leaves the caller
+        // believing a deletion landed when it did not.
+        tracing::warn!(
+            index_id = %index_id,
+            path = %req.path,
+            error = %e,
+            "remove-file failed"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "remove_file_failed",
+                "index_id": index_id.0,
+                "path": req.path,
+                "message": e.to_string(),
+            })),
+        )
+    })?;
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "path": req.path,
