@@ -18,6 +18,24 @@ commands:
     examples:
       - cmd: tga author alice@example.com
       - cmd: tga author alice@example.com --format json --since 2026-01-01
+  audit:
+    description: One-shot acquisition-diligence sweep over an org or configured repo set
+    flags:
+      - name: org
+        description: GitHub organisation or Bitbucket workspace under audit
+      - name: title
+        description: Report title (defaults to "<org> — Technical Due Diligence")
+      - name: analyst
+        description: Name of the analyst producing the report
+      - name: client
+        description: Name of the client the report is produced for
+      - name: output
+        description: Directory for the audit's outputs (default ./audit-output)
+      - name: weeks
+        description: Limit collection to the last N ISO weeks
+    examples:
+      - cmd: tga audit
+      - cmd: tga audit --org acme --client "Acme Holdings" --weeks 26
   analyze:
     description: Run the full pipeline (collect → classify → report)
     flags:

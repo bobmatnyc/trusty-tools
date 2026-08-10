@@ -5,7 +5,7 @@
 
 #![warn(missing_docs)]
 
-mod commands;
+use tga::commands;
 
 use std::path::PathBuf;
 
@@ -21,6 +21,7 @@ use crate::commands::args::{
     IncidentsSubcommand, IncidentsSubcommandArgs, JiraSubcommand, JiraSubcommandArgs, ReportArgs,
     TuiArgs,
 };
+use crate::commands::audit::AuditArgs;
 use crate::commands::author::AuthorArgs;
 use crate::commands::backfill::BackfillArgs;
 use crate::commands::dora::DoraArgs;
@@ -139,6 +140,8 @@ enum Commands {
     Jira(JiraSubcommandArgs),
     /// Interactive terminal UI: repo picker, live progress, correlation results (#5197).
     Tui(TuiArgs),
+    /// One-shot acquisition-diligence sweep over an org or configured repo set (#5235).
+    Audit(AuditArgs),
 
     /// Manage inference provider configuration (API keys) — the universal
     /// `config keys set/list/test/unset` surface shared by every trusty-*
@@ -388,6 +391,9 @@ async fn run() -> anyhow::Result<()> {
             IncidentsSubcommand::Collect(a) => commands::incidents::run(config, &mut db, a)?,
         },
         Commands::Dora(args) => commands::dora::run(config, &mut db, args)?,
+        // #5237: the audit command owns orchestration; `tga::audit::run_full_sweep`
+        // owns stage sequencing. Nothing here re-sequences the subcommands.
+        Commands::Audit(args) => commands::audit::run(config, &mut db, args).await?,
         Commands::Jira(args) => match args.subcommand {
             JiraSubcommand::Sync(a) => commands::jira::run_sync(config, &mut db, a).await?,
             JiraSubcommand::Freshness(a) => commands::jira::run_freshness(&config, &db, a)?,

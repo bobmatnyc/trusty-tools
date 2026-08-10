@@ -129,7 +129,8 @@ pub struct AnalyzeArgs {
 }
 
 /// Arguments for `tga collect`.
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Collect commits from git repositories into the database (Stage 1).",
     long_about = "Walk configured git repositories and persist commit metadata, diff statistics,\n\
@@ -318,7 +319,8 @@ pub struct CollectArgs {
 /// `classification.sources:` block in `config.yaml`. They are consulted
 /// between the manual-override tier and custom rules. Pass `--no-external`
 /// to disable all external lookups (useful in CI or offline environments).
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Classify collected commits using the four-tier cascade (Stage 2).",
     long_about = "Run the classification cascade over commits already in the database.\n\n\
@@ -412,7 +414,8 @@ pub struct ClassifyArgs {
 }
 
 /// Arguments for `tga report`.
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Generate productivity reports from classified commits (Stage 3).",
     long_about = "Produce CSV, JSON, and/or Markdown reports from the classified commits\n\
