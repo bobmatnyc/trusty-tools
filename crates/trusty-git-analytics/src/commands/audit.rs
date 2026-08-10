@@ -12,13 +12,17 @@
 //! `audit_command_needs_no_positional_arguments` cover the clap wiring; the
 //! sweep's own behavior is covered alongside it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 
-use tga::audit::{run_full_sweep, AuditSweepStats, SweepOptions};
+use tga::audit::{
+    resolve_review_binary, run_full_sweep, run_review_report, sweep_gap_lines, AuditSweepStats,
+    SweepOptions, DATA_HANDLING_NOTE,
+};
 use tga::core::config::Config;
 use tga::core::db::Database;
+use tga::report::dd_manifest::{build_dd_manifest, configured_secrets, DdManifestOptions};
 
 /// Arguments for `tga audit`.
 ///
@@ -130,18 +134,82 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     );
 
     let options = SweepOptions {
-        output: Some(output),
+        output: Some(output.clone()),
         weeks: args.weeks,
     };
     let stats = run_full_sweep(&config, db, &options, None).await?;
     print_stage_report(&stats);
 
-    // PR B (#5236/#5238/#5239) plugs in here: build the DD manifest from
-    // `config` plus `args` (§6's field mapping), spawn `trusty-review report
-    // --manifest <path> --analyze --output <dir>`, and turn `stats.failures()`
-    // into the report's Gaps & Caveats lines. Nothing above needs to change
-    // for that — the manifest reads `config`, and the gap list is already
-    // carried by `stats`.
+    // #5236: the manifest is the whole tga→trusty-review seam. It carries the
+    // engagement metadata, the repository set, and — #5239/#5244 — the areas
+    // this run could not assess, so a failed stage reaches the report as a
+    // stated gap instead of an empty table.
+    //
+    // #5239: the gap lines excerpt a stage's `anyhow` cause chain, which can
+    // quote a credential back at us, so they are redacted before they are cut —
+    // against the same needles the manifest builder uses.
+    let secrets = configured_secrets(&config);
+    let mut gaps = sweep_gap_lines(&stats, &secrets);
+    gaps.push(DATA_HANDLING_NOTE.to_string());
+    let manifest = build_dd_manifest(
+        &config,
+        &DdManifestOptions {
+            title: args.resolved_title(),
+            analyst: args.analyst.clone(),
+            client: args.client.clone(),
+            gaps,
+            // #5236: the renderer resolves a relative repository path against
+            // the MANIFEST's directory, not ours; anchoring here is what keeps
+            // it pointed at the checkout tga actually collected from.
+            base_dir: std::env::current_dir().unwrap_or_default(),
+        },
+    )?;
+
+    let manifest_path = output.join(MANIFEST_FILE);
+    std::fs::write(&manifest_path, manifest.to_toml()?)?;
+    println!("\nManifest: {}", manifest_path.display());
+
+    render_report(&manifest_path, &output).await
+}
+
+/// Filename of the DD manifest written into the audit's output directory.
+const MANIFEST_FILE: &str = "manifest.toml";
+
+/// Invoke `trusty-review report` and report what it produced.
+///
+/// Why: #5238 — the manifest is not the deliverable; the rendered report is.
+/// The child's own streams are surfaced verbatim (DOC-67 §6 step 4) because
+/// they carry the per-repository analyze warnings an operator needs, and its
+/// artifact paths are printed last (step 5) so the run ends with the thing the
+/// reader was promised.
+/// What: spawns the renderer, echoes stderr, prints the artifact paths, and
+/// turns a failed render into an error — the sweep's own results are already
+/// printed by then, so nothing is lost by exiting non-zero.
+/// Test: `crate::audit::tests::missing_binary_is_a_named_actionable_error`
+/// covers the not-installed path; the rendered output is covered by the
+/// end-to-end smoke run.
+async fn render_report(manifest_path: &Path, output: &Path) -> anyhow::Result<()> {
+    println!("Rendering: {} report --manifest …", resolve_review_binary());
+    let run = run_review_report(manifest_path, output).await?;
+
+    if !run.stderr.trim().is_empty() {
+        eprintln!("{}", run.stderr.trim_end());
+    }
+    if !run.success {
+        anyhow::bail!(
+            "`{} report` exited with {}; no due-diligence report was produced. The manifest at \
+             {} is intact and can be rendered again once the cause is fixed.",
+            resolve_review_binary(),
+            run.code
+                .map_or_else(|| "a signal".to_string(), |c| format!("code {c}")),
+            manifest_path.display()
+        );
+    }
+
+    println!("\nReport artifacts:");
+    for path in &run.artifacts {
+        println!("  {}", path.display());
+    }
     Ok(())
 }
 

@@ -20,7 +20,7 @@ use super::fill::{Scope, render, strip_leading_comment};
 use super::manifest::slugify;
 use super::metrics::Severity;
 use super::model::{ReportModel, RepositoryReport};
-use super::polish::polish;
+use super::polish::polish_with_gaps;
 use super::provenance::{self, Provenance, tag};
 use super::reporter_fill::{crate_version, fill_profile, instructions_block, set_scoring_model};
 use super::reporter_graph_datasets::{
@@ -88,7 +88,10 @@ impl Reporter {
         // pre-fill step so the header's literal `{{…}}`/BEGIN-END examples are
         // never mistaken for real placeholders by the fill engine.
         let filled = render(strip_leading_comment(template), &scope);
-        let mut out = polish(&filled);
+        // #5239: the model's named gaps (an upstream orchestrator's unassessed
+        // areas, plus any repo the live analyze fetch could not populate) lead
+        // the Gaps & Caveats section.
+        let mut out = polish_with_gaps(&filled, &model.gaps);
         // #2366 wave-4: render a ```mermaid chart under every populated dataset
         // table.  Runs AFTER polish (so it sees the omit-empty'd tables and never
         // charts a dropped/empty dataset) and BEFORE the appended status notes.

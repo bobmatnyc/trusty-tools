@@ -56,6 +56,7 @@ fn model_with(repos: Vec<RepositoryReport>, investigation: Option<Investigation>
         generated_date: "2026-07-10".to_string(),
         manifest_path: "m.toml".to_string(),
         repositories: repos,
+        gaps: Vec::new(),
         synthesis: None,
         benchmark: None,
         investigation,

@@ -363,6 +363,78 @@ fn map_metrics(
 pub trait AnalyzeMetricsSource: Send + Sync {
     /// Fetch and map metrics for `index_id`, fail-open to `None`.
     async fn fetch(&self, index_id: &str) -> Option<AnalyzeMetrics>;
+
+    /// The same fetch, with the reason named when it yields no metrics (#5239).
+    ///
+    /// Why: [`Self::fetch`]'s `None` is correct as a control-flow signal and
+    /// useless as a report fact — a reader cannot tell an unassessed dimension
+    /// from a clean one. This variant preserves the fail-open contract (it
+    /// still never returns `Err`) while carrying the reason far enough to be
+    /// rendered under Gaps & Caveats.
+    /// What: the default implementation delegates to [`Self::fetch`] and, since
+    /// it cannot see why, reports [`AnalyzeGap::Unavailable`]. Implementations
+    /// that know more override it.
+    /// Test: `analyze_adapter_tests.rs::default_fetch_named_reports_unavailable`.
+    async fn fetch_named(&self, index_id: &str) -> AnalyzeFetch {
+        match self.fetch(index_id).await {
+            Some(m) => AnalyzeFetch::Fetched(Box::new(m)),
+            None => AnalyzeFetch::Missing(AnalyzeGap::Unavailable),
+        }
+    }
+}
+
+/// Why one repository has no live analyze metrics (#5239, DOC-67 §9).
+///
+/// Why: "the daemon was down" and "this repo was never indexed" are different
+/// facts to an acquirer reading the gap list — the first says nothing about the
+/// codebase, the second says the operator skipped a setup step — so they are
+/// distinct variants rather than one opaque string. The variant is also what
+/// keeps a raw transport error, which can quote a URL or a response body, out
+/// of the generated artifact: the detail stays on stderr, the category is what
+/// reaches the report.
+/// What: the two reasons [`HttpAnalyzeMetricsSource`] can distinguish, plus the
+/// catch-all a source that cannot tell them apart reports.
+/// Test: `analyze_adapter_tests.rs::gap_labels_are_stable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum AnalyzeGap {
+    /// The daemon answered, but serves no index for this repository.
+    NotIndexed,
+    /// The daemon could not be reached, or its answer could not be used.
+    Unreachable,
+    /// No metrics, and the source could not say why.
+    Unavailable,
+}
+
+impl AnalyzeGap {
+    /// The report-facing phrase for this gap, e.g. `"trusty-analyze unreachable"`.
+    ///
+    /// Why: the Gaps & Caveats line is read by a stranger to this toolchain, so
+    /// it names the condition in plain words rather than a variant name.
+    /// What: a fixed string per variant — deterministic, and free of any
+    /// run-specific detail.
+    /// Test: `analyze_adapter_tests.rs::gap_labels_are_stable`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotIndexed => "trusty-analyze index not built",
+            Self::Unreachable => "trusty-analyze unreachable",
+            Self::Unavailable => "trusty-analyze data unavailable",
+        }
+    }
+}
+
+/// The outcome of one named fetch.
+///
+/// Why/What: see [`AnalyzeMetricsSource::fetch_named`]. `Fetched` is boxed
+/// because [`AnalyzeMetrics`] dwarfs the gap variant.
+/// Test: `analyze_adapter_tests.rs::default_fetch_named_reports_unavailable`.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum AnalyzeFetch {
+    /// Live metrics were fetched and mapped.
+    Fetched(Box<AnalyzeMetrics>),
+    /// No metrics; this is the reason, for the report's gap list.
+    Missing(AnalyzeGap),
 }
 
 /// Live HTTP implementation of [`AnalyzeMetricsSource`] over the analyze daemon.
@@ -472,8 +544,18 @@ impl HttpAnalyzeMetricsSource {
 #[async_trait]
 impl AnalyzeMetricsSource for HttpAnalyzeMetricsSource {
     async fn fetch(&self, index_id: &str) -> Option<AnalyzeMetrics> {
+        match self.fetch_named(index_id).await {
+            AnalyzeFetch::Fetched(m) => Some(*m),
+            AnalyzeFetch::Missing(_) => None,
+        }
+    }
+
+    /// #5239: the same fail-open fetch, naming which of the two conditions
+    /// produced an empty result so the report can say so.
+    async fn fetch_named(&self, index_id: &str) -> AnalyzeFetch {
         match self.try_fetch(index_id).await {
-            Ok(m) => m,
+            Ok(Some(m)) => AnalyzeFetch::Fetched(Box::new(m)),
+            Ok(None) => AnalyzeFetch::Missing(AnalyzeGap::NotIndexed),
             Err(e) => {
                 tracing::warn!(
                     index_id,
@@ -484,7 +566,10 @@ impl AnalyzeMetricsSource for HttpAnalyzeMetricsSource {
                     "[trusty-review report] --analyze: fetch for '{index_id}' failed \
                      ({e}); falling back to scan"
                 );
-                None
+                // The error text stays here, on stderr: it can quote a URL or a
+                // response body, neither of which belongs in an artifact handed
+                // to a third party. The report gets the category only.
+                AnalyzeFetch::Missing(AnalyzeGap::Unreachable)
             }
         }
     }
@@ -523,6 +608,34 @@ pub async fn enrich_with_analyze(
     model: &mut super::model::ReportModel,
     source: &dyn AnalyzeMetricsSource,
 ) {
+    let _ = enrich_with_analyze_gaps(model, source).await;
+}
+
+/// Same enrichment, returning one Gaps & Caveats line per degraded condition
+/// (#5239, DOC-67 §9).
+///
+/// Why: fail-open is the right contract and fail-SILENT is not. A findings
+/// table that renders empty because the daemon was down is indistinguishable,
+/// on the page, from a codebase with no findings — so every repository the
+/// fetch could not populate is named, grouped by reason, in the report itself.
+/// The fetch contract is unchanged: nothing here aborts, and the report still
+/// renders from the built-in scan.
+/// What: walks the same repositories [`enrich_with_analyze`] does, using
+/// [`AnalyzeMetricsSource::fetch_named`]; returns at most one line per
+/// [`AnalyzeGap`] kind, each naming the affected repositories in model order so
+/// two runs over the same state produce identical lines. Repositories with a
+/// declared metrics file, and remote entries, are skipped — neither is a gap.
+/// Returns an empty vec when every eligible repository was populated.
+/// Test: `analyze_adapter_tests.rs::{enrich_names_unreachable_repositories,
+/// enrich_reports_no_gaps_when_every_repo_is_populated}`.
+pub async fn enrich_with_analyze_gaps(
+    model: &mut super::model::ReportModel,
+    source: &dyn AnalyzeMetricsSource,
+) -> Vec<String> {
+    // BTreeMap, not HashMap: the rendered line order must not depend on hash
+    // iteration order (DOC-67 §9's determinism requirement).
+    let mut missing: std::collections::BTreeMap<AnalyzeGap, Vec<String>> = Default::default();
+
     for repo in &mut model.repositories {
         // Precedence: a declared metrics file always wins.
         if repo.metrics.is_some() {
@@ -535,14 +648,33 @@ pub async fn enrich_with_analyze(
         let Some(index_id) = derive_index_id(path) else {
             continue;
         };
-        if let Some(metrics) = source.fetch(&index_id).await {
-            eprintln!(
-                "[trusty-review report] --analyze: populated metrics for '{}' from index '{index_id}'",
-                repo.name
-            );
-            repo.metrics = Some(metrics);
+        match source.fetch_named(&index_id).await {
+            AnalyzeFetch::Fetched(metrics) => {
+                eprintln!(
+                    "[trusty-review report] --analyze: populated metrics for '{}' from index '{index_id}'",
+                    repo.name
+                );
+                repo.metrics = Some(*metrics);
+            }
+            AnalyzeFetch::Missing(gap) => {
+                missing.entry(gap).or_default().push(repo.name.clone());
+            }
         }
     }
+
+    missing
+        .into_iter()
+        .map(|(gap, repos)| {
+            format!(
+                "{} — no analysis pass ran for: {}. \
+                 Those applications are described from the repository scan alone; \
+                 their findings, complexity, and health factors are not assessed, \
+                 not clean.",
+                gap.as_str(),
+                repos.join(", ")
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
