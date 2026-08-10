@@ -59,8 +59,29 @@ fn skip_palace_enforcement() {
     });
 }
 
+/// Pre-seed the process-wide shared embedder with `MockEmbedder`.
+///
+/// Why: `memory_remember` / `memory_recall` resolve
+/// `retrieval::shared_embedder()`, a process-wide `OnceCell`. Whichever caller
+/// seeds it first wins for the rest of the process, so under `cargo test` — one
+/// process for this whole binary — a single sibling's seed silently satisfied
+/// every other test. Under per-test process isolation (`cargo nextest run`)
+/// each test gets a virgin cell instead, reaches for the real ONNX model, and
+/// fails on the HuggingFace download (HTTP 429 in CI). Same defect class as
+/// [`skip_palace_enforcement`] / #4413: a test that passes only because a
+/// sibling ran first. Establishing the precondition in the fixtures every test
+/// already calls is what makes each test self-sufficient.
+/// What: delegates to `seed_shared_embedder_with_mock`, which is idempotent
+/// (`OnceCell::set`, first caller wins), so calling it from both fixtures is
+/// free and order-independent.
+/// Test: every test in this module that constructs state.
+fn seed_embedder() {
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+}
+
 fn test_state() -> (AppState, tempfile::TempDir) {
     skip_palace_enforcement();
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = AppState::new(root);
@@ -78,6 +99,7 @@ fn test_state() -> (AppState, tempfile::TempDir) {
 ///       `note_returns_warming_error_while_state_is_warming`.
 fn test_state_warming() -> (crate::AppState, tempfile::TempDir) {
     skip_palace_enforcement();
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = crate::AppState::new(root);
@@ -1875,10 +1897,15 @@ async fn bm25_index_queue_drops_when_full() {
 /// `handle.vector_store` returns a hit for the drawer id. This proves the
 /// deferred embed job is not just fired but actually completes.
 ///
-/// Deliberately does NOT seed a mock embedder: this unit-test binary also
-/// runs `dispatch_remember_then_recall` against the real, process-wide
-/// `shared_embedder()` singleton, and seeding a mock here would race with
-/// (and potentially poison) that test depending on execution order.
+/// Runs against the seeded `MockEmbedder` (via [`test_state_warming`] →
+/// [`seed_embedder`]). It used to deliberately skip the seed, on the reasoning
+/// that seeding would race `dispatch_remember_then_recall`'s use of the real
+/// embedder — but the cell is process-wide and first-writer-wins, so that
+/// reasoning made this test depend on whichever sibling happened to initialise
+/// it, and under `cargo nextest run` (a virgin cell per test) the
+/// `shared_embedder()` call below failed outright. The mock is a deterministic
+/// hash, so the backfilled vector and the query vector below match exactly;
+/// `dispatch_remember_then_recall` passes on the mock as well.
 /// Test: this test.
 #[tokio::test]
 async fn remember_succeeds_and_defers_embedding_while_state_is_warming() {
