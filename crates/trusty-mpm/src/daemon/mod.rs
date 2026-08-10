@@ -16,6 +16,8 @@ pub mod bug_report;
 pub mod bus;
 pub mod claude_config;
 pub mod coordinator;
+/// Delegation query routes merged into the main router (#4480).
+pub mod delegation_routes;
 pub mod discover;
 pub mod discovery;
 pub mod doctor;
@@ -37,6 +39,8 @@ pub mod openapi;
 pub mod optimizer;
 pub mod orphan_gc;
 pub mod overseer_compose;
+/// The `/pair/*` route registrations, extracted from `api.rs` (#4480).
+pub mod pairing_routes;
 pub mod pairing_store;
 pub mod provisioning;
 pub mod runtime_reap;
