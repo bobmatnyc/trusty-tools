@@ -7,7 +7,10 @@
 //! project HTTP API.
 //! What: [`ProjectAliasStore`] persists a `Vec<ProjectAliasEntry>` to
 //! `<root>/project-paths.json`. [`try_register_project_alias`] is the single
-//! non-fatal entry point for auto-registration on `tm` launch.
+//! non-fatal entry point for auto-registration on `tm` launch. The same file
+//! owns the worktree-vs-checkout classification the alias store needs —
+//! [`is_worktree_path`] and, for ADR-0037's write restriction,
+//! [`is_main_checkout`].
 //! Test: `project_alias_store_new_is_empty`, `try_register_idempotent`,
 //! `try_register_collision_keeps_existing`, `alias_from_path_basename`,
 //! `alias_from_path_no_component`.
@@ -260,6 +263,44 @@ pub(crate) fn is_worktree_path(path: &Path) -> bool {
     s.contains("/.claude/worktrees/") || s.contains("/.worktrees/")
 }
 
+/// Whether `path` sits inside a repository's MAIN CHECKOUT — the operator's
+/// live working copy — rather than a linked git worktree (ADR-0037).
+///
+/// Why: ADR-0037's write-restriction amendment makes the main checkout
+/// read-only except for documents and configuration, and records that the
+/// enforcement "is mechanical and NOT YET BUILT". `pm_guard`'s
+/// destructive-verb rule is that mechanism, and it needs one predicate for
+/// "is this the shared tree other sessions are standing in?". It lives here,
+/// beside [`is_worktree_path`] and [`find_git_root`], so the
+/// worktree-vs-checkout question keeps a single definition rather than
+/// growing a second one inside the guard.
+/// What: `true` only when `path` resolves into a git checkout whose root is
+/// NOT a linked worktree. Three cases answer `false`: a path with no `.git`
+/// ancestor (not a checkout at all — nothing for the rule to protect); a path
+/// under a `.claude/worktrees/` or `.worktrees/` segment ([`is_worktree_path`],
+/// matched on the string so a not-yet-created worktree path still classifies);
+/// and a root whose `.git` is a FILE rather than a directory, which is how git
+/// marks every linked worktree and submodule. Purely lexical plus two `stat`s:
+/// no `git` subprocess and no canonicalization, because the only caller is a
+/// `PreToolUse` hook that must stay fast and side-effect-free. It therefore
+/// cannot see through a symlink into a checkout, the same limit
+/// [`is_worktree_path`] carries.
+/// Test: `is_main_checkout_detects_a_plain_checkout`,
+/// `is_main_checkout_rejects_worktrees`,
+/// `is_main_checkout_rejects_a_non_repository`.
+pub fn is_main_checkout(path: &Path) -> bool {
+    if is_worktree_path(path) {
+        return false;
+    }
+    let Some(root) = find_git_root(path) else {
+        return false;
+    };
+    if is_worktree_path(&root) {
+        return false;
+    }
+    root.join(".git").is_dir()
+}
+
 /// Probe whether `path` is a linked git worktree using git itself.
 ///
 /// Why: the authoritative, git-level detection. `git rev-parse --git-dir` returns
@@ -460,6 +501,59 @@ mod tests {
         // The home directory itself must not be misidentified.
         let p = Path::new("/home/user");
         assert!(!is_worktree_path(p));
+    }
+
+    // ── is_main_checkout ────────────────────────────────────────────────────
+
+    #[test]
+    fn is_main_checkout_detects_a_plain_checkout() {
+        // The shape the ADR-0037 guard protects: a checkout whose `.git` is a
+        // directory. Asserted from the root AND from a subdirectory, because a
+        // destructive command is usually run from somewhere inside the tree.
+        let dir = TempDir::new().expect("tmpdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+        std::fs::create_dir_all(repo.join("crates/trusty-mpm/src")).expect("mkdir src");
+        assert!(is_main_checkout(&repo));
+        assert!(is_main_checkout(&repo.join("crates/trusty-mpm/src")));
+    }
+
+    #[test]
+    fn is_main_checkout_rejects_worktrees() {
+        // Delegated work happens in worktrees and must stay fully writable.
+        // Both signals are asserted independently: the `.claude/worktrees/`
+        // path segment, and git's own marker for a linked worktree — a `.git`
+        // FILE rather than a directory, which catches a worktree living
+        // anywhere at all.
+        let dir = TempDir::new().expect("tmpdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+
+        let claude_wt = repo.join(".claude/worktrees/wt-x/crates");
+        std::fs::create_dir_all(&claude_wt).expect("mkdir worktree");
+        assert!(
+            !is_main_checkout(&claude_wt),
+            "a .claude/worktrees path must never classify as the main checkout"
+        );
+
+        let elsewhere = dir.path().join("linked-wt");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir linked");
+        std::fs::write(elsewhere.join(".git"), "gitdir: /repo/.git/worktrees/x")
+            .expect("write .git file");
+        assert!(
+            !is_main_checkout(&elsewhere),
+            "a `.git` FILE marks a linked worktree, wherever it lives"
+        );
+    }
+
+    #[test]
+    fn is_main_checkout_rejects_a_non_repository() {
+        // The fail-open arm: no `.git` ancestor means there is no checkout to
+        // protect, so the guard built on this predicate stays out of the way.
+        // A path that does not exist at all resolves the same way.
+        let dir = TempDir::new().expect("tmpdir");
+        assert!(!is_main_checkout(dir.path()));
+        assert!(!is_main_checkout(&dir.path().join("does/not/exist")));
     }
 
     // ── find_git_root ───────────────────────────────────────────────────────
