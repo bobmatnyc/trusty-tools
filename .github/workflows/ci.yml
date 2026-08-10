@@ -403,14 +403,6 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
-      # mold (#5325): the build phase below links 194 test executables, and the
-      # cargo cache restores every dependency, so linking — not compiling — is
-      # most of what that step spends its time on (run 31410011416: 25 workspace
-      # crates compiled, 194 executables linked, 7m42s total). GNU ld resolves
-      # one object graph at a time on a single thread; mold parallelises it.
-      # Installed from apt rather than pulled from an action so the version
-      # tracks the runner image and a missing package fails loudly at install
-      # time, not mysteriously at link time.
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
         run: |
@@ -418,9 +410,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             pkg-config \
-            libssl-dev \
-            mold
-          mold --version
+            libssl-dev
 
       - name: Cache cargo artifacts
         if: needs.changes.outputs.docs_only != 'true'
@@ -766,18 +756,21 @@ jobs:
       # swept once linking is done and before the (disk-heavier) test
       # execution phase runs. See #3668.
       #
-      # `mold -run` rather than `-C link-arg=-fuse-ld=mold` (#5325), which is
-      # not a style preference: RUSTFLAGS and the linker setting are both inputs
-      # to cargo's fingerprint AND to Swatinem/rust-cache's key (it hashes every
-      # RUST*-prefixed variable). Setting either would invalidate the 1.2 GB
-      # dependency cache this step depends on and rebuild the whole graph — for
-      # one run on every branch that has not warmed a cache under the new key,
-      # which on this repo means most of them. `mold -run` LD_PRELOADs an
-      # interposer that redirects the `ld` the toolchain execs, so cargo's view
-      # of the build is byte-identical and the cache key does not move.
+      # This step is COMPILE-bound, not link-bound — measured, #5325. The cargo
+      # cache restores every dependency, so it compiles 25 workspace crates and
+      # links 194 test executables in ~7m50s. Linking 194 binaries looks like
+      # the obvious target, so mold 2.30 was tried here via `mold -run` (which
+      # keeps cargo's fingerprint and rust-cache's key intact, unlike a
+      # RUSTFLAGS linker override). Against its own base commit, with an
+      # identical full-match cache and an identical 25-crate/194-executable
+      # build, it made this step SLOWER: 7m49s -> 8m01s. Reverted. The time is
+      # in codegen for 25 large crates down a partly-serial dependency chain
+      # (everything waits on trusty-common), which a faster linker cannot touch.
+      # Don't re-try a linker swap here without a `cargo build --timings`
+      # profile showing link time is actually the cost.
       - name: cargo test --workspace --no-run (build phase)
         if: needs.changes.outputs.docs_only != 'true'
-        run: mold -run cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
+        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
 
       # Sweep intermediate per-codegen-unit object files (#3668): once a
       # test binary is linked, its .rcgu.o inputs are dead weight — cargo
