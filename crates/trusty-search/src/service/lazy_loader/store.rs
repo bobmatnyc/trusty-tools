@@ -152,7 +152,12 @@ pub struct ColdIndexStore {
     /// test). A `DashMap<IndexId, ()>` gives that without an extra `HashSet`.
     /// What: populated by `mark_failed`; checked by `is_failed`.
     /// Test: `cold_store_mark_failed_*` unit tests.
-    failed_entries: Arc<DashMap<IndexId, ()>>,
+    /// #5075 review MEDIUM: the value is the entry itself, not `()`. A
+    /// restore-failed index used to drop its `PersistedIndex` on the floor, so
+    /// `unregister_index` had no `root_path` to scrub from `roots.toml` — a
+    /// colocated index reported `removed: true` and then resurrected on the
+    /// next warm boot's rescan.
+    failed_entries: Arc<DashMap<IndexId, PersistedIndex>>,
 }
 
 impl ColdIndexStore {
@@ -424,8 +429,15 @@ impl ColdIndexStore {
     /// the identity token (irrelevant to this caller).
     /// Test: exercised by `get_or_load_index_loads_cold_index` (via
     /// `get_or_load_index`, the only caller).
+    /// #5075 review MEDIUM: falls back to `failed_entries`, so a
+    /// permanently-failed index still yields its `root_path` for the delete
+    /// path's `roots.toml` scrub. `get_or_load_index` is unaffected — it only
+    /// reaches this after `is_failed` has already short-circuited.
     pub(crate) fn get_persisted(&self, id: &IndexId) -> Option<PersistedIndex> {
-        self.entries.get(id).map(|kv| kv.value().persisted.clone())
+        self.entries
+            .get(id)
+            .map(|kv| kv.value().persisted.clone())
+            .or_else(|| self.failed_entries.get(id).map(|kv| kv.value().clone()))
     }
 
     /// Snapshot the identity token of `id`'s current cold entry, if any
@@ -533,14 +545,19 @@ impl ColdIndexStore {
     /// the index. This is conservative but safe: it prevents unbounded restore
     /// retry storms on every query.
     ///
-    /// What: moves the id from `entries` to `failed_entries`; also removes the
-    /// loading gate so it can be reclaimed.
+    /// What: moves the id from `entries` to `failed_entries`, CARRYING the
+    /// entry across (#5075 review MEDIUM) so the delete path can still recover
+    /// its `root_path`; also removes the loading gate so it can be reclaimed.
+    /// An id absent from `entries` (already failed, or never parked) leaves
+    /// `failed_entries` untouched rather than inserting a rootless placeholder.
     /// Test: `cold_store_mark_failed_*` and
     ///       `get_or_load_index_restore_false_marks_failed` unit tests.
     pub fn mark_failed(&self, id: &IndexId) {
-        self.entries.remove(id);
+        let removed = self.entries.remove(id);
         self.loading_gates.remove(id);
-        self.failed_entries.insert(id.clone(), ());
+        if let Some((_, parked)) = removed {
+            self.failed_entries.insert(id.clone(), parked.persisted);
+        }
     }
 
     /// Forget an id completely — cold entry, failed marker, and loading gate.
@@ -558,9 +575,8 @@ impl ColdIndexStore {
     /// the delete path can call it unconditionally. Deliberately NOT identity-
     /// guarded (unlike [`Self::mark_loaded_if`]): deregistration is a terminal
     /// operation on the id itself, so there is no newer record worth keeping.
-    /// Test: `purge_removes_cold_and_failed_records`,
-    /// `purge_is_idempotent_for_unknown_id`,
-    /// `delete_index_clears_cold_store_so_status_is_404_not_503`.
+    /// Test: `purge_removes_cold_and_failed_records` (also covers the
+    /// unknown-id no-op) and `deleted_cold_parked_index_is_404_not_a_permanent_503`.
     pub fn purge(&self, id: &IndexId) {
         self.entries.remove(id);
         self.failed_entries.remove(id);

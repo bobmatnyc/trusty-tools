@@ -20,7 +20,9 @@ use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::core::registry::{IndexHandle, IndexId};
-use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexProgress, ReindexStatus};
+use crate::service::reindex::{
+    spawn_reindex_with_cleanup, validate, ReindexProgress, ReindexStatus,
+};
 
 use super::helpers::{find_root_path_collision, validate_root_path};
 use super::state::SearchAppState;
@@ -170,6 +172,60 @@ pub(super) async fn reindex_handler(
                     })),
                 ));
             }
+            // #4951 review HIGH-1: refuse an override the reindex runner will
+            // refuse anyway. Syncing the indexer root below is only sound if
+            // the walk that re-relativizes the corpus against `new_root`
+            // actually runs. When the corpus's `indexed_root` disagrees with
+            // `new_root`, `runner.rs` re-checks `root_move_is_trusted` against
+            // the PERSISTED `indexes.toml` root and aborts before walking
+            // (#2178) — leaving chunks relative to the old root while the
+            // indexer resolves them against the new one. `file_is_within_root`
+            // is a lexical prefix test with no existence check, so every such
+            // path would pass it and `stale_index_root` would read `false`:
+            // a dangling (or wrong-file) result reported as healthy. Mirroring
+            // the runner's own gate here keeps the two decisions identical, so
+            // an accepted override always gets its walk.
+            let prior_indexed_root = handle.read_indexed_root().await.unwrap_or(None);
+            if validate::needs_path_relativization(prior_indexed_root.as_deref(), &new_root) {
+                let persisted_root = match &state.registry_path_override {
+                    Some(path) => crate::service::persistence::load_index_registry_at(path),
+                    None => crate::service::persistence::load_index_registry(),
+                }
+                .ok()
+                .and_then(|entries| entries.into_iter().find(|e| e.id == index_id.0))
+                .map(|e| e.root_path);
+                if !validate::root_move_is_trusted(persisted_root.as_deref(), &new_root) {
+                    tracing::warn!(
+                        "reindex_handler: refusing root_path override for '{}' to {} — the \
+                         corpus was last relativized against {:?} and the persisted \
+                         indexes.toml root_path is {:?}; the reindex would abort at the \
+                         #2178 guard, leaving chunk paths relative to a root the index no \
+                         longer claims (issue #4951)",
+                        index_id.0,
+                        new_root.display(),
+                        prior_indexed_root,
+                        persisted_root,
+                    );
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": format!(
+                                "root_path {:?} disagrees with this index's last-indexed root \
+                                 {:?} and its persisted indexes.toml root_path {:?}; a reindex \
+                                 override cannot durably move an index — use POST \
+                                 /indexes/{}/relocate for an explicit, persisted move \
+                                 (issues #2178, #4951)",
+                                new_root.display(),
+                                prior_indexed_root,
+                                persisted_root,
+                                index_id.0,
+                            ),
+                            "indexed_root": prior_indexed_root,
+                            "persisted_root": persisted_root,
+                        })),
+                    ));
+                }
+            }
             if handle.root_path.as_os_str().is_empty() || handle.root_path != new_root {
                 let indexer = Arc::clone(&handle.indexer);
                 // #4951: the override rebuilds the handle around this SAME
@@ -181,7 +237,16 @@ pub(super) async fn reindex_handler(
                 // against the NEW one, so every candidate was discarded and
                 // search returned `results: []` with `stale_index_root: true`
                 // on an index reporting `status: ready` and 85k chunks.
-                indexer.write().await.set_root_path(new_root.clone());
+                //
+                // Review MEDIUM: the guard is held across `registry.register`
+                // below, not dropped right after the write. A search that grabs
+                // the indexer read lock in between would otherwise materialize
+                // against the NEW indexer root while `search_handler`'s
+                // post-filter still holds the OLD handle — the same divergence,
+                // narrowed to a race window instead of made permanent.
+                let indexer_for_guard = Arc::clone(&indexer);
+                let mut indexer_guard = indexer_for_guard.write().await;
+                indexer_guard.set_root_path(new_root.clone());
                 // Preserve the filter set / domain vocabulary recorded on the
                 // existing handle — only the root_path is being overridden.
                 let new_handle = IndexHandle {
@@ -240,6 +305,8 @@ pub(super) async fn reindex_handler(
                 // `relocate_index_handler`. See `mark_loaded_if` below.
                 let cold_entry_before_register = state.cold_store.entry_token(&index_id);
                 handle = state.registry.register(new_handle);
+                // Both roots are now the new one; readers may proceed.
+                drop(indexer_guard);
                 // Issue #3993 review round 3 (HIGH, applied here for
                 // consistency with create/relocate): reap any stale
                 // `state.cold_store` record parked under this SAME id. Same

@@ -15,7 +15,10 @@ Fixed
   pre-boot snapshot of the survivors, so an index registered while the sweep
   was deciding is no longer erased by the cleanup.
 
-Known limitation: the fail-closed parse guarantees the WRITE path only. Read-only
-callers that swallow the load error (`reindex/runner.rs`, `warm_boot/mod.rs`,
-`server/tickers.rs`) still treat a corrupt registry as empty, exactly as before —
-no regression, but the guarantee does not extend to them. See #4871.
+Known limitation: the fail-closed parse guarantees the WRITE path only. Every
+read-only caller still swallows the load error and treats a corrupt registry as
+empty — `reindex/runner.rs`, `warm_boot/mod.rs`, `server/tickers.rs`,
+`reconcile.rs`, `server/indexes.rs`, `server/indexes_relocate.rs`,
+`server/index_config.rs`, `persistence_timestamps.rs`, and
+`commands/start/restore.rs`. That is unchanged behaviour, not a regression, but
+the guarantee does not extend to them. See #4871.

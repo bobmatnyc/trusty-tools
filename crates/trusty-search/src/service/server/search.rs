@@ -346,7 +346,12 @@ pub(super) async fn search_handler(
             state
                 .last_queried_write_cache
                 .insert(index_id.clone(), now_unix);
-            tokio::spawn(async move {
+            // Review MEDIUM: `spawn_blocking`, not `spawn`. This body takes the
+            // process-wide registry `std::sync::Mutex` (#4871) and then does
+            // synchronous file I/O — parking an async worker thread on a lock
+            // another blocking writer holds. On the blocking pool that is what
+            // the pool is for; on a worker it starves the runtime.
+            tokio::task::spawn_blocking(move || {
                 if let Err(e) =
                     crate::service::persistence::update_last_queried_unix(&id_str, now_unix)
                 {

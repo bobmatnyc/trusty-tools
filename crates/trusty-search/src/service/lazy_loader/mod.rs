@@ -743,4 +743,79 @@ mod tests {
         assert_eq!(cold.len(), 0);
         assert_eq!(cold.failed_len(), 0);
     }
+
+    /// #4253 review HIGH-2: a restore that marked the entry permanently failed
+    /// must terminate, not spin in a retryable 503 forever.
+    ///
+    /// Why: keeping the cold entry is the TRANSIENT policy. Two arms of
+    /// `restore_index_on_demand` return without registering for permanent
+    /// reasons — a deleted `root_path` and a failed `build_indexer_from_entry`.
+    /// Pre-#4253 they were terminated only by the unconditional `mark_loaded`
+    /// that fix removed; if #4253 had left them un-marked, an index whose root
+    /// was deleted would answer `503 index_loading` for the daemon's life,
+    /// re-entering restore on every query — re-opening the redb corpus and
+    /// re-allocating the HNSW arena each time. That is the unbounded restore
+    /// storm `mark_failed`'s policy exists to prevent.
+    /// What: a `restore_fn` that reports success but marks the entry failed
+    /// (what the two permanent arms now do). Asserts the loader honours the
+    /// verdict with `RestoreFailed` and does not retain a retryable entry.
+    /// Test: this test.
+    #[tokio::test]
+    async fn restore_that_marked_the_entry_failed_is_terminal_not_retryable() {
+        let registry = IndexRegistry::default();
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("root-deleted".to_string());
+        cold.register_cold_entries(vec![mk_entry("root-deleted", None, None)]);
+
+        let result = get_or_load_index(&id, &registry, &cold, Duration::from_secs(5), |_e| {
+            let cold = &cold;
+            let id = id.clone();
+            async move {
+                // What the missing-root / build-failure arms do on their way out.
+                cold.mark_failed(&id);
+                true
+            }
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(LazyLoadError::RestoreFailed)),
+            "#4253 HIGH-2: a permanent failure must not be reported as a \
+             retryable 503"
+        );
+        assert!(
+            !cold.contains(&id),
+            "#4253 HIGH-2: the entry must not stay retryable — that is the \
+             restore storm"
+        );
+        assert!(cold.is_failed(&id), "the failure verdict must stick");
+    }
+
+    /// #5075 review MEDIUM: `mark_failed` carries the entry across, so a
+    /// restore-failed index still yields its `root_path` for the delete path's
+    /// `roots.toml` scrub.
+    ///
+    /// Why: `failed_entries` used to map to `()`, dropping the `PersistedIndex`.
+    /// `unregister_index` then had no root to scrub, so a colocated index
+    /// reported `removed: true` and the next warm boot's rescan resurrected it
+    /// from `roots.toml`.
+    /// What: parks an entry, fails it, and asserts `get_persisted` still
+    /// resolves its root.
+    /// Test: this test.
+    #[test]
+    fn a_failed_entry_still_yields_its_root_path() {
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("failed-root".to_string());
+        cold.register_cold_entries(vec![mk_entry("failed-root", None, None)]);
+        cold.mark_failed(&id);
+
+        let persisted = cold
+            .get_persisted(&id)
+            .expect("#5075: a failed entry must still expose its metadata");
+        assert_eq!(
+            persisted.root_path,
+            PathBuf::from("/tmp/failed-root"),
+            "the root_path is what the roots.toml scrub needs"
+        );
+    }
 }

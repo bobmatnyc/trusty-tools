@@ -177,12 +177,18 @@ where
             cold_store.mark_loaded(id);
             Ok(handle)
         }
+        // #4253 review HIGH-2: a restore arm that judged the failure PERMANENT
+        // marks the entry failed on its way out (deleted root, indexer build
+        // failure). Honour that verdict — reporting `Loading` for it would
+        // promise a retry that can never succeed and would re-enter the
+        // expensive restore path on every query.
+        None if cold_store.is_failed(id) => Err(LazyLoadError::RestoreFailed),
         None => {
             tracing::warn!(
                 "lazy-load: index '{}' restore reported success but registered no \
-                 handle (transient corpus-open contention, or a skip arm) — keeping \
-                 the cold entry so a retry can recover it, and returning 503 \
-                 (issue #4253)",
+                 handle and did not mark the entry failed — treating as transient \
+                 (corpus-open contention); keeping the cold entry so a retry can \
+                 recover it, and returning 503 (issue #4253)",
                 id.0
             );
             Err(LazyLoadError::Loading {

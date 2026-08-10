@@ -98,11 +98,19 @@ pub(crate) async fn restore_index_on_demand(
     // they were parked; if it disappeared we skip gracefully (non-colocated path
     // used here — the relocation scan from issue #484 is a warm-boot-only flow).
     if !entry.root_path.exists() {
+        // #4253 review HIGH-2: this arm MUST mark the entry failed. Before
+        // #4253 it was terminated only by `get_or_load_index`'s unconditional
+        // `mark_loaded`; now that keeping the entry is the transient policy, a
+        // deleted root would otherwise return `503 index_loading` forever,
+        // re-entering restore on every query and staying counted in
+        // `/health`'s `indexes_lazy` for the daemon's life. A root that no
+        // longer exists is exactly the permanent case #1106 named.
         tracing::warn!(
-            "lazy-load: skipping index '{}' — root_path {} no longer exists",
+            "lazy-load: index '{}' permanently failed — root_path {} no longer exists",
             entry.id,
             entry.root_path.display(),
         );
+        state.cold_store.mark_failed(&id);
         return;
     }
 
@@ -121,10 +129,17 @@ pub(crate) async fn restore_index_on_demand(
     let mut indexer = match build_indexer_from_entry(&entry, embedder).await {
         Ok(idx) => idx,
         Err(e) => {
+            // #4253 review HIGH-2: same reasoning as the missing-root arm
+            // above. Left retryable, this re-opens the redb corpus and
+            // re-allocates the HNSW arena on EVERY query — the unbounded
+            // restore storm `ColdIndexStore::mark_failed`'s policy exists to
+            // prevent. The operator's remedy (restart or re-register) is the
+            // one `search_handler`'s 503 already names.
             tracing::error!(
-                "lazy-load: index '{}' HNSW allocator failed: {e} — skipping",
+                "lazy-load: index '{}' permanently failed — indexer build failed: {e}",
                 entry.id
             );
+            state.cold_store.mark_failed(&id);
             return;
         }
     };

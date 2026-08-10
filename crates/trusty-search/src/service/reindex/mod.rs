@@ -70,7 +70,9 @@ mod hash_cache;
 mod prune;
 pub mod quarantine;
 mod staging;
-mod validate;
+// #4951: `reindex_handlers` mirrors this module's #2178 trust gate at the HTTP
+// boundary so an accepted root override always gets the walk it depends on.
+pub(crate) mod validate;
 
 // ── public re-exports (external crate::service::reindex::* paths) ────────────
 

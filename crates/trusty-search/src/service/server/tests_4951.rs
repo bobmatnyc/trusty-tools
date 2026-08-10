@@ -188,3 +188,133 @@ async fn reindex_root_override_still_returns_search_results() {
          the mismatch was invisible on /status and surfaced only as empty results"
     );
 }
+
+/// #4951 review HIGH-1 reproduction: when the corpus's `indexed_root` disagrees
+/// with the override target, the #2178 guard aborts the walk — so syncing the
+/// indexer root alone leaves chunks relative to the OLD root resolving against
+/// the NEW one, and the post-filter no longer reports it.
+///
+/// Why: `file_is_within_root` is a lexical prefix test with no existence check.
+/// Once both roots agree, `<new>/<old-relative>` passes it unconditionally, so
+/// `stale_index_root` reads `false` while every `file` points at a path that
+/// does not exist — or, worse, at a DIFFERENT real file that happens to sit at
+/// the same relative path under the new root. That trades a loud failure for a
+/// silent wrong answer, which is the fail-open shape this cluster exists to
+/// remove.
+/// What: seeds a corpus-backed index whose `indexed_root` is `root_old` with a
+/// chunk relative to `root_old`, drives the override to `root_new`, and asserts
+/// the handler REFUSES rather than producing unresolvable results. The
+/// existence assertion is the point — a lexical check is what let this through.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reindex_root_override_is_refused_when_the_corpus_disagrees() {
+    use crate::core::corpus::CorpusStore;
+
+    let (_dir, root_old) = super::test_support::allowlisted_index_root("ts-4951-guard-");
+    let root_new = root_old.join("Jira");
+    std::fs::create_dir_all(root_new.join("src")).expect("create the sub-root");
+    // The real file lives under the OLD root — the corpus was built there.
+    std::fs::create_dir_all(root_old.join("src")).expect("create old src");
+    let seeded_relative = "src/auth.rs";
+    let contents = "fn onboarding_handler() { /* onboarding */ }";
+    std::fs::write(root_old.join(seeded_relative), contents).expect("write source file");
+
+    let dim = 16;
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch"));
+    let corpus = Arc::new(
+        CorpusStore::open(&root_old.join(".trusty-search").join("index.redb")).expect("corpus"),
+    );
+    // The corpus records the root its chunk paths are relative to.
+    corpus
+        .write_indexed_root_sync(&root_old)
+        .expect("stamp indexed_root");
+    let mut indexer = CodeIndexer::new("atlassian-guard", &root_old)
+        .with_components(Arc::clone(&embedder), Arc::clone(&store));
+    indexer.set_corpus_store(Arc::clone(&corpus));
+    indexer
+        .index_files_batch(&[(seeded_relative.to_string(), contents.to_string())])
+        .await
+        .expect("seed one chunk");
+
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("atlassian-guard"),
+        Arc::new(RwLock::new(indexer)),
+        root_old.clone(),
+    ));
+    // Point the handler's persisted-root read at an explicit file so this test
+    // never touches the process-wide data dir (#2717's injection seam). The
+    // registry names this index at its ORIGINAL root — the durable disagreement
+    // the #2178 guard keys on.
+    let registry_toml = root_old.join("indexes.toml");
+    crate::service::persistence::save_index_registry_at(
+        &registry_toml,
+        &[crate::service::persistence::PersistedIndex {
+            id: "atlassian-guard".to_string(),
+            root_path: root_old.clone(),
+            ..Default::default()
+        }],
+    )
+    .expect("seed registry");
+    let state = Arc::new(SearchAppState::new(registry).with_registry_path(registry_toml.clone()));
+    state.install_embedder(Arc::clone(&embedder)).await;
+
+    let result = reindex_handler(
+        State(Arc::clone(&state)),
+        Path("atlassian-guard".to_string()),
+        Some(Json(ReindexRequest {
+            root_path: Some(root_new.clone()),
+            force: None,
+            background: None,
+        })),
+    )
+    .await;
+
+    let err = result.err().map(|(status, Json(body))| (status, body));
+    let (status, body) = err.expect(
+        "#4951 HIGH-1: an override whose target disagrees with the corpus's \
+         indexed_root must be refused — accepting it re-points the indexer at a \
+         root the corpus was never relativized against, and the #2178 guard \
+         then aborts the walk that would have fixed it",
+    );
+    assert_eq!(status, axum::http::StatusCode::CONFLICT);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("relocate"),
+        "the refusal must name the durable alternative; got {body}"
+    );
+
+    // The refusal must leave BOTH roots untouched — no half-applied override.
+    let handle = state
+        .registry
+        .get(&IndexId::new("atlassian-guard".to_string()))
+        .expect("still registered");
+    assert_eq!(handle.root_path, root_old, "handle root must not move");
+    assert_eq!(
+        handle.indexer.read().await.root_path,
+        root_old,
+        "indexer root must not move either — a half-applied override is the \
+         divergence this whole issue is about"
+    );
+
+    // And search still resolves to a file that EXISTS. A lexical containment
+    // check cannot tell a real hit from a dangling one, so assert the disk.
+    let Json(after) = search_handler(
+        State(Arc::clone(&state)),
+        Path("atlassian-guard".to_string()),
+        Json(probe_query("onboarding")),
+    )
+    .await
+    .expect("search must still work");
+    let results = after["results"].as_array().expect("results array");
+    assert!(!results.is_empty(), "index must still serve: {after}");
+    let file = results[0]["file"].as_str().expect("file field");
+    assert!(
+        std::path::Path::new(file).exists(),
+        "#4951 HIGH-1: the resolved path must exist on disk, got {file} \
+         (response: {after})"
+    );
+}

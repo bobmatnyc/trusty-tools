@@ -738,6 +738,7 @@ pub fn save_index_registry_at(path: &Path, entries: &[PersistedIndex]) -> Result
     static WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("toml.tmp.{}.{seq}", std::process::id()));
+    reap_stale_staging_files(path);
     std::fs::write(&tmp, serialized).context("write indexes.toml tmp")?;
     if let Err(e) = std::fs::rename(&tmp, path) {
         // Never leave a uniquely-named staging file behind on a failed publish.
@@ -745,6 +746,54 @@ pub fn save_index_registry_at(path: &Path, entries: &[PersistedIndex]) -> Result
         return Err(e).context("rename indexes.toml");
     }
     Ok(())
+}
+
+/// How long an abandoned `indexes.toml.tmp.*` survives before a later write
+/// sweeps it. Comfortably longer than any real write, short enough that a crash
+/// does not leave litter for the machine's lifetime.
+const STAGING_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Delete `indexes.toml.tmp.*` files older than [`STAGING_STALE_AFTER`] (#4317).
+///
+/// Why (review LOW): per-write staging names fixed the shared-tmp collision but
+/// removed the accidental cleanup the single fixed name provided — a crash
+/// between `write` and `rename` now leaks a uniquely-named file that nothing
+/// ever reclaims. Sweeping on write keeps the data dir bounded without adding a
+/// boot-time pass or a ticker.
+/// What: best-effort. Scans the registry file's parent for siblings whose name
+/// starts with `<stem>.toml.tmp.` and unlinks those older than the window.
+/// Every failure is swallowed — this is tidiness, and it must never fail a
+/// registry write. Live files are protected by the age window, so a concurrent
+/// writer's staging file is never removed out from under it.
+/// Test: `stale_staging_files_are_reaped_fresh_ones_are_not`.
+fn reap_stale_staging_files(registry_path: &Path) {
+    let (Some(dir), Some(stem)) = (
+        registry_path.parent(),
+        registry_path.file_stem().and_then(|s| s.to_str()),
+    ) else {
+        return;
+    };
+    let prefix = format!("{stem}.toml.tmp.");
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in read_dir.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > STAGING_STALE_AFTER);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Append (or upsert) one entry to the registry file. Idempotent — re-adding
@@ -811,7 +860,7 @@ pub fn remove_index_registry_entry_at(path: &Path, id: &str) -> Result<()> {
 /// What: loads under the write lock, retains everything whose id is not in
 /// `ids`, and saves only when something was actually dropped. Ids that are
 /// absent are a no-op (idempotent delete).
-/// Test: `remove_entries_by_id_preserves_concurrent_registration`,
+/// Test: `boot_orphan_reap_preserves_a_registration_made_after_its_snapshot`,
 /// `remove_entries_by_id_is_idempotent`.
 pub fn remove_index_registry_entries_at(path: &Path, ids: &[&str]) -> Result<()> {
     if ids.is_empty() {
@@ -833,6 +882,36 @@ pub fn remove_index_registry_entries_at(path: &Path, ids: &[&str]) -> Result<()>
 /// Why/What/Test: see [`remove_index_registry_entries_at`].
 pub fn remove_index_registry_entries(ids: &[&str]) -> Result<()> {
     remove_index_registry_entries_at(&indexes_toml_path()?, ids)
+}
+
+/// Patch one existing entry in place, entirely inside the write lock (#4871).
+///
+/// Why (review MEDIUM): the LRU timestamp writers loaded the registry, found
+/// their entry, mutated the clone, and only THEN called `upsert…`, which loads
+/// again under the lock. The find happened OUTSIDE the critical section, so a
+/// concurrent writer's change to a DIFFERENT field of the same entry (e.g.
+/// `last_indexed_unix` while this one writes `last_queried_unix`) was
+/// overwritten by the stale clone. Reading and writing under one lock makes
+/// the read-modify-write actually atomic.
+/// What: loads under the lock, applies `patch` to the entry whose id matches,
+/// and saves. A missing id is `Ok(())` with no write — the entry may have been
+/// deleted between the caller's decision and this call, which is harmless.
+/// `patch` must not itself touch the registry (it runs while the lock is held).
+/// Test: `patch_entry_is_atomic_against_a_concurrent_field_write`,
+/// `patch_entry_for_a_missing_id_is_a_no_op`.
+pub fn patch_index_registry_entry_at(
+    path: &Path,
+    id: &str,
+    patch: impl FnOnce(&mut PersistedIndex),
+) -> Result<()> {
+    with_registry_write_lock(|| {
+        let mut entries = load_index_registry_at(path)?;
+        let Some(entry) = entries.iter_mut().find(|e| e.id == id) else {
+            return Ok(());
+        };
+        patch(entry);
+        save_index_registry_at(path, &entries)
+    })
 }
 
 /// Delete the on-disk data directory for an index (HNSW + chunks).
