@@ -431,6 +431,97 @@ fn load_or_create_claude_md_reads_a_present_file_in_a_git_worktree() {
 }
 
 #[test]
+fn load_or_create_claude_md_still_seeds_in_a_repo_with_no_remote() {
+    // The fall-open arm the fixture's `else { return; }` skip does NOT cover:
+    // git answers, the directory IS a work tree, and no candidate ref exists at
+    // all. `@{upstream}`, `origin/HEAD`, `origin/main` and `origin/master` must
+    // all miss and the stub must still be seeded. An untested fall-open arm is
+    // where the next regression lands.
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let dir = tmp.path();
+    if !git_ok(dir, &["init", "--initial-branch=main"]) {
+        eprintln!("#5228 tests: git unavailable, skipping");
+        return;
+    }
+    git_identity(dir);
+    fs::write(dir.join("README.md"), "local only\n").unwrap();
+    assert!(git_ok(dir, &["add", "-A"]));
+    assert!(git_ok(dir, &["commit", "-m", "local only"]));
+
+    let path = dir.join("CLAUDE.md");
+    let (content, created) =
+        load_or_create_claude_md(&path).expect("a repo with no remote is not stale, it is local");
+    assert!(created);
+    assert_eq!(content, CLAUDE_MD_STUB);
+    assert_eq!(fs::read_to_string(&path).unwrap(), CLAUDE_MD_STUB);
+}
+
+#[test]
+fn load_or_create_claude_md_ignores_an_abandoned_origin_main_when_upstream_answered() {
+    // Why (#5228 review, MEDIUM 1): `origin/main`/`origin/master` are a LAST
+    // RESORT, not an override. Default branch `develop` carries no CLAUDE.md, so
+    // this project is genuinely new — but a stale `origin/main` still has one.
+    // Consulting it would refuse a launch that should proceed AND print a remedy
+    // telling the operator to merge an abandoned branch.
+    let tmp = crate::test_support::hermetic_temp_dir();
+    let root = std::fs::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().into());
+    let origin = root.join("origin.git");
+    let seed = root.join("seed");
+    let work = root.join("work");
+    fs::create_dir_all(&origin).unwrap();
+    fs::create_dir_all(&seed).unwrap();
+
+    if !git_ok(&origin, &["init", "--bare", "--initial-branch=develop"]) {
+        eprintln!("#5228 tests: git unavailable, skipping");
+        return;
+    }
+    assert!(git_ok(&seed, &["init", "--initial-branch=main"]));
+    git_identity(&seed);
+    // The abandoned `main`, which DOES carry a CLAUDE.md.
+    fs::write(seed.join("CLAUDE.md"), UPSTREAM_CLAUDE_MD).unwrap();
+    assert!(git_ok(&seed, &["add", "-A"]));
+    assert!(git_ok(&seed, &["commit", "-m", "old main with CLAUDE.md"]));
+    assert!(git_ok(
+        &seed,
+        &["remote", "add", "origin", origin.to_str().unwrap()]
+    ));
+    assert!(git_ok(&seed, &["push", "origin", "main"]));
+    // The live default branch, which does not.
+    assert!(git_ok(&seed, &["checkout", "--orphan", "develop"]));
+    assert!(git_ok(&seed, &["rm", "-q", "-f", "CLAUDE.md"]));
+    fs::write(seed.join("README.md"), "develop\n").unwrap();
+    assert!(git_ok(&seed, &["add", "-A"]));
+    assert!(git_ok(&seed, &["commit", "-m", "develop line"]));
+    assert!(git_ok(&seed, &["push", "origin", "develop"]));
+    assert!(git_ok(
+        &origin,
+        &["symbolic-ref", "HEAD", "refs/heads/develop"]
+    ));
+
+    assert!(git_ok(
+        &root,
+        &["clone", origin.to_str().unwrap(), work.to_str().unwrap()]
+    ));
+    git_identity(&work);
+    assert!(!work.join("CLAUDE.md").exists());
+    // Both authoritative signals answer, and neither carries the file.
+    assert!(git_ok(
+        &work,
+        &["cat-file", "-e", "origin/main:./CLAUDE.md"]
+    ));
+    assert!(!git_ok(
+        &work,
+        &["cat-file", "-e", "origin/develop:./CLAUDE.md"]
+    ));
+
+    let path = work.join("CLAUDE.md");
+    let (content, created) = load_or_create_claude_md(&path)
+        .expect("an abandoned origin/main must not override origin/develop");
+    assert!(created);
+    assert_eq!(content, CLAUDE_MD_STUB);
+}
+
+#[test]
 fn stale_claude_md_refusal_names_the_branch_ref_and_recovery() {
     // Why: the refusal stops a launch, so its message is the whole interface —
     // a bare "file missing" would send the operator hunting the wrong problem.
@@ -438,7 +529,8 @@ fn stale_claude_md_refusal_names_the_branch_ref_and_recovery() {
         Path::new("/w/proj/CLAUDE.md"),
         &UpstreamTracked {
             reference: "origin/main".to_string(),
-            branch: "fix/4061-example".to_string(),
+            position: "branch `fix/4061-example`".to_string(),
+            detached: false,
         },
     );
     assert!(msg.contains("CLAUDE.md"), "{msg}");
@@ -451,6 +543,30 @@ fn stale_claude_md_refusal_names_the_branch_ref_and_recovery() {
     assert!(
         msg.contains("git -C /w/proj checkout origin/main -- CLAUDE.md"),
         "{msg}"
+    );
+}
+
+#[test]
+fn stale_claude_md_refusal_offers_no_merge_on_a_detached_head() {
+    // Why: `merge --ff-only` on a detached HEAD moves HEAD and drops the commit
+    // the operator deliberately checked out. Printing it as the headline remedy
+    // would make the refusal's own advice destructive.
+    let msg = stale_claude_md_message(
+        Path::new("/w/proj/CLAUDE.md"),
+        &UpstreamTracked {
+            reference: "origin/main".to_string(),
+            position: "detached HEAD at 1a2b3c4".to_string(),
+            detached: true,
+        },
+    );
+    assert!(msg.contains("detached HEAD at 1a2b3c4"), "{msg}");
+    assert!(
+        msg.contains("git -C /w/proj checkout origin/main -- CLAUDE.md"),
+        "{msg}"
+    );
+    assert!(
+        !msg.contains("merge --ff-only"),
+        "a detached HEAD must never be told to fast-forward: {msg}"
     );
 }
 

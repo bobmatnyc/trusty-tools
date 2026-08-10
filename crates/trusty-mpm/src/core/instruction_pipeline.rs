@@ -340,14 +340,15 @@ pub fn compiled_prompt_path(project_dir: &std::path::Path, session_id: &str) -> 
 /// Renamed from `instructions_failure_message` (round 4): it now also covers
 /// a [`build_instructions`] failure, so wording specific to the compiled prompt
 /// would have been wrong at half its call sites.
+///
+/// #5228 widened it again: the stale-`CLAUDE.md` refusal declines the write on
+/// purpose, so "could not write" was a false claim and the permissions remedy
+/// the wrong advice. It now states the condition and defers the remedy to
+/// `source`, which carries a specific one where it has it.
 /// What: names the path, the underlying cause, and the remedy.
 /// Test: `instructions_failure_message_names_the_path_and_a_remedy`.
 pub fn instructions_failure_message(path: &std::path::Path, source: &std::io::Error) -> String {
-    // #5228: "could not write" was a false claim for the stale-worktree refusal
-    // below — nothing is attempted there, the write is declined on purpose — and
-    // the permissions/free-space remedy was wrong for it too. The wording now
-    // states the condition (instructions not established) and defers the remedy
-    // to `source`, which carries its own where a specific one exists.
+    // See #5228.
     format!(
         "could not establish the session instructions at {}: {source}\n\
          The session was NOT started: it depends on those instructions. Resolve \
@@ -754,8 +755,13 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
 struct UpstreamTracked {
     /// The remote-tracking ref that has the file, e.g. `origin/main`.
     reference: String,
-    /// The branch this working tree has checked out.
-    branch: String,
+    /// Where this working tree sits, already rendered for the message:
+    /// ``branch `fix/x` `` or `detached HEAD at 1a2b3c4`.
+    position: String,
+    /// True when `HEAD` is detached. `merge --ff-only` would move HEAD and
+    /// drop the commit the operator deliberately checked out, so the refusal
+    /// offers only the file-level remedy in that state.
+    detached: bool,
 }
 
 /// Ask git whether `path` is absent only because this branch predates the
@@ -766,22 +772,32 @@ struct UpstreamTracked {
 /// handling — seed the stub, or refuse. git already knows: the remote-tracking
 /// ref is local (no network, no fetch) and either carries the file or does not.
 /// What: returns `Some` only when `path`'s directory is inside a git work tree
-/// AND one of the candidate upstream refs — the branch's own `@{upstream}`,
-/// `origin/HEAD`, then `origin/main` / `origin/master` — has a blob at `path`'s
-/// repo-relative location. Every uncertain answer is `None`, so the caller
-/// keeps its pre-#5228 behaviour wherever git cannot positively confirm the
-/// staleness. Ordinary launches never reach this: the caller only probes when
-/// the file is already known to be missing.
+/// AND a candidate remote-tracking ref has a blob at `path`'s repo-relative
+/// location. Candidates are the branch's own `@{upstream}` and `origin/HEAD`;
+/// `origin/main` / `origin/master` are consulted ONLY when neither of those
+/// resolved. Every uncertain answer is `None`, so the caller keeps its
+/// pre-#5228 behaviour wherever git cannot positively confirm the staleness.
+/// Ordinary launches never reach this: the caller only probes when the file is
+/// already known to be missing.
 /// Test: `load_or_create_claude_md_refuses_to_stub_a_branch_predating_the_tracked_file`,
-/// `load_or_create_claude_md_still_seeds_when_upstream_has_no_claude_md`.
+/// `load_or_create_claude_md_still_seeds_when_upstream_has_no_claude_md`,
+/// `load_or_create_claude_md_still_seeds_in_a_repo_with_no_remote`.
 fn upstream_tracking(path: &std::path::Path) -> Option<UpstreamTracked> {
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty())?;
     let name = path.file_name()?.to_str()?;
     if git_stdout(dir, &["rev-parse", "--is-inside-work-tree"])? != "true" {
         return None;
     }
-    let branch = git_stdout(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+    let head = git_stdout(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|| "HEAD".to_string());
+    let detached = head == "HEAD";
+    let position = if detached {
+        let short =
+            git_stdout(dir, &["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+        format!("detached HEAD at {short}")
+    } else {
+        format!("branch `{head}`")
+    };
 
     let tracked = git_stdout(
         dir,
@@ -795,17 +811,30 @@ fn upstream_tracking(path: &std::path::Path) -> Option<UpstreamTracked> {
     // `origin/HEAD` is resolved to the branch it points at so the message names
     // `origin/main`, not a symref the operator would have to dereference.
     let default_head = git_stdout(dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"]);
-    let candidates = tracked.into_iter().chain(default_head).chain(
-        ["origin/main", "origin/master"]
-            .into_iter()
-            .map(String::from),
-    );
+    // #5228 review: the hardcoded pair is a LAST RESORT, never an override. A
+    // repo whose default branch is `develop` can still carry an abandoned
+    // `origin/main`; consulting it when an authoritative signal already answered
+    // would refuse a launch that should proceed and then point the remedy at the
+    // abandoned branch.
+    let guessed: &[&str] = if tracked.is_none() && default_head.is_none() {
+        &["origin/main", "origin/master"]
+    } else {
+        &[]
+    };
+    let candidates = tracked
+        .into_iter()
+        .chain(default_head)
+        .chain(guessed.iter().map(|r| (*r).to_string()));
 
     for reference in candidates {
         // `<rev>:./<name>` resolves `name` relative to `dir` inside the repo, so
         // this stays correct for a project that is not the repository root.
         if git_succeeds(dir, &["cat-file", "-e", &format!("{reference}:./{name}")]) {
-            return Some(UpstreamTracked { reference, branch });
+            return Some(UpstreamTracked {
+                reference,
+                position,
+                detached,
+            });
         }
     }
     None
@@ -816,9 +845,13 @@ fn upstream_tracking(path: &std::path::Path) -> Option<UpstreamTracked> {
 /// Why: the refusal stops a launch, so it owes the operator the diagnosis AND
 /// the command that fixes it — recovery is one fast-forward away, and a bare
 /// "file missing" would send them looking for the wrong problem.
-/// What: names the file, the branch, the ref that has it, and two recovery
-/// commands (bring the branch current, or take just the file).
-/// Test: `stale_claude_md_refusal_names_the_branch_ref_and_recovery`.
+/// What: names the file, where this tree sits, the ref that has it, and the
+/// recovery. A branch is offered both remedies (bring the branch current, or
+/// take just the file); a detached HEAD is offered only the file-level one,
+/// because `merge --ff-only` there moves HEAD and drops the commit the operator
+/// deliberately checked out.
+/// Test: `stale_claude_md_refusal_names_the_branch_ref_and_recovery`,
+/// `stale_claude_md_refusal_offers_no_merge_on_a_detached_head`.
 fn stale_claude_md_message(path: &std::path::Path, upstream: &UpstreamTracked) -> String {
     let dir = path
         .parent()
@@ -828,16 +861,32 @@ fn stale_claude_md_message(path: &std::path::Path, upstream: &UpstreamTracked) -
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "CLAUDE.md".to_string());
-    let UpstreamTracked { reference, branch } = upstream;
+    let UpstreamTracked {
+        reference,
+        position,
+        detached,
+    } = upstream;
+    let dir = dir.display();
+    let remedy = if *detached {
+        format!(
+            "Take the file without moving HEAD:\n  \
+             git -C {dir} checkout {reference} -- {name}\n\
+             (No merge is offered: a fast-forward here would move a detached \
+             HEAD off the commit you checked out.)"
+        )
+    } else {
+        format!(
+            "Bring the real file in with either:\n  \
+             git -C {dir} merge --ff-only {reference}\n  \
+             git -C {dir} checkout {reference} -- {name}"
+        )
+    };
     format!(
         "{name} is absent from this working tree but tracked at {reference} — \
-         branch `{branch}` predates the commit that added it. No stub was \
-         written: a stub would replace every project instruction with \
-         boilerplate, and once on disk it is indistinguishable from an authored \
-         file to every later session. Bring the real file in with either:\n  \
-         git -C {dir} merge --ff-only {reference}\n  \
-         git -C {dir} checkout {reference} -- {name}",
-        dir = dir.display()
+         {position} predates the commit that added it. No stub was written: a \
+         stub would replace every project instruction with boilerplate, and once \
+         on disk it is indistinguishable from an authored file to every later \
+         session. {remedy}"
     )
 }
 
@@ -888,8 +937,10 @@ fn git_succeeds(dir: &std::path::Path, args: &[&str]) -> bool {
 /// [`PipelineError`] onto `PrepError::Instructions`, the one condition #4752
 /// rules must stop a launch — and the message carries the recovery command.
 /// Detection is conservative: anything git cannot answer (no git, not a work
-/// tree, no upstream ref, upstream has no such file) falls through to the
-/// ordinary stub, so a genuinely new project is unaffected.
+/// tree, no candidate remote-tracking ref carries the file) falls through to
+/// the ordinary stub, so a genuinely new project is unaffected. Note a missing
+/// `@{upstream}` alone does NOT fall open — `origin/HEAD` is still consulted,
+/// and a repo with no remote at all is what actually reaches the stub.
 /// Test: `pipeline_creates_claude_md`, `pipeline_claude_md_left_byte_identical`,
 /// `load_or_create_claude_md_refuses_to_stub_a_branch_predating_the_tracked_file`,
 /// `build_instructions_refuses_a_stale_worktree_rather_than_seeding_a_stub`,
