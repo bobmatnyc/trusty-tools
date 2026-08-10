@@ -1,4 +1,0 @@
-Added
-
-- `search_index::ensure_project_indexed_reporting` returns the derived index id alongside an `IndexRegistration` saying what the daemon actually did — `Confirmed`, `NotConfirmed`, `DaemonUnreachable`, or `SkippedUnderTest`. The id-only entry points cannot distinguish a confirmed registration from a silent no-op against a down daemon, which let callers log a success they never observed. The fail-open contract is unchanged: the id is still always returned and nothing propagates (refs [#5060](https://github.com/bobmatnyc/trusty-tools/issues/5060))
-- `IndexOptions` is now `#[non_exhaustive]`. The daemon already carries a third orthogonal flag this bag does not expose (`skip_kg`), so adding a field later would otherwise break external struct-literal construction in a published crate (refs [#5060](https://github.com/bobmatnyc/trusty-tools/issues/5060))

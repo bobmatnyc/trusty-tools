@@ -1,9 +1,0 @@
-Fixed
-
-- a session in a worktree cut before `CLAUDE.md` was tracked no longer runs on fabricated instructions (closes [#5228](https://github.com/bobmatnyc/trusty-tools/issues/5228))
-  - `instruction_pipeline::load_or_create_claude_md` read "file absent" as "new project" and wrote `CLAUDE_MD_STUB`. On a branch cut before #4660/#4661 tracked the real `CLAUDE.md`, that replaced every project instruction — and every `CLAUDE.md` named-section override — with boilerplate the session had no way to detect
-  - the damage also persisted: once the stub was on disk, every later run found a file present and took the read path, so the fabrication was indistinguishable from an authored file
-  - it now asks git whether a remote-tracking ref already carries the file — the branch's own `@{upstream}` and `origin/HEAD`, falling back to `origin/main`/`origin/master` only when neither of those resolves, so an abandoned `origin/main` cannot override a `develop` default branch. When one carries it, no stub is written and the launch is refused — `prepare_session` maps the error onto `PrepError::Instructions`, the one condition #4752 rules must stop a session
-  - the refusal names where the tree sits, the ref that has the file, and the recovery: `git merge --ff-only <ref>` or `git checkout <ref> -- CLAUDE.md` on a branch, and only the second on a detached HEAD, where a fast-forward would move HEAD off the checked-out commit
-  - detection is local-only (no fetch) and fails open: no git, not a work tree, or no candidate remote-tracking ref carrying the file all still seed the stub, so a genuinely new project is unaffected. A missing `@{upstream}` alone does not fall open — `origin/HEAD` is still consulted
-  - `instructions_failure_message` no longer says "could not write" and no longer points only at permissions and free space — nothing is written on this path, and the refusal carries its own remedy
