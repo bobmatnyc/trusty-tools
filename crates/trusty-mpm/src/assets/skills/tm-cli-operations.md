@@ -254,7 +254,15 @@ tm session activity <id>               # what a session is doing (no attach)
 tm session send <id> "<text>"          # inject text into the pane
 tm session answer <id> "<answer>"      # resolve a pending decision
 tm session attach <id>                 # print the tmux attach command
+tm session rename <id|name> <new-name> # rename from the master list
+tm session rename <new-name>           # rename the CURRENT session (in-session form)
 ```
+
+`rename` is the only lifecycle verb with a one-arg in-session form: with no
+target it resolves the current session from `$TM_MANAGED_SESSION_ID`. A managed
+session's name IS its tmux name, so a rename also renames the live tmux session
+and `tmux attach` / `tmux ls` reflect it immediately. Collisions and invalid
+names are rejected with an actionable error.
 
 **Shared verbs** (managed-aware — auto-detect managed vs local by id/name):
 

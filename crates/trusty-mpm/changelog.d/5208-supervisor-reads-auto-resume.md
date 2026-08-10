@@ -1,0 +1,9 @@
+Fixed
+
+- the console's auto-resume toggle now changes what the supervisor does (closes [#5208](https://github.com/bobmatnyc/trusty-tools/issues/5208))
+  - `auto_resume_set` wrote `~/.trusty-mpm/auto_resume` and reported success, but the only reader was the console's own status display. `TRUSTY_MPM_AUTO_RESUME`, read once at supervisor startup, was the sole thing that gated a resume, so toggling auto-resume in the console changed nothing in the running fleet and raised no error
+  - `Supervisor::tick` re-reads the file every sweep. Precedence is: the persisted file when present > the boot-time `TRUSTY_MPM_AUTO_RESUME` / `--auto-resume` flag > off. An operator's change takes effect within one poll interval, with no process restart
+  - the read uses a new tri-state `auto_resume::read_override_at`, which tells "file absent" (leave the boot flag alone) apart from "file says false" (turn a running supervisor off). The existing `read_desired_at` flattens both to `false`, which would have let a never-touched toggle disable an env-enabled supervisor
+  - an unreadable desired-state file holds the last known value and logs at `error` instead of failing open to off
+  - a failed auto-resume now marks the session `Errored` rather than leaving it `Stopped`. It was previously a `warn!` line and a counter on an endpoint the console does not read, while the session stayed dead and the next sweep silently retried it forever. `Errored` shows up in `FleetMetrics.errored`, which drives the console's Degraded health, and `resume` still accepts `Errored` so a manual retry works
+  - `supervisor_status` / `console_metrics` gained an `effective` field (what the next sweep will do) and now report `pending_restart: false` — the "restart pending" hint described the old behavior and would be a false claim now

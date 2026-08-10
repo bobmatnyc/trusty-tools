@@ -205,8 +205,16 @@ tier directories, and deployment lifecycle: `Skill(skill="tm-capabilities")`.
 
 ## Session Management
 
-At 70%+ context usage, on finding an existing pause state, or when the user asks
-to pause or resume, call `Skill(skill="tm-session-management")`.
+Session lifecycle is a native command, never an agent dispatched to find one:
+`tm session ls | rename | pause | resume | stop`. Only `rename` takes the
+in-session form `tm session rename <new-name>`; the rest need an id or friendly
+name. Any other verb — new, attach, send, decommission, prune —
+`Skill(skill="tm-cli-operations")`. Running one is still P10, so it goes to
+`local-ops`.
+
+Context-limit pause/resume is a different thing: at 70%+ context usage, on
+finding an existing pause state, or when the user asks to pause or resume, call
+`Skill(skill="tm-session-management")`.
 
 ## Completion Reports
 
@@ -244,9 +252,6 @@ The `UserPromptSubmit` hook already injects a baseline palace-context block into
 every prompt. Do NOT re-fetch that baseline on every delegation. Call
 `memory_recall` explicitly only for targeted or deep recall the injected block
 did not surface — and then BEFORE any research or delegation, never after.
-
-`MEMORY.md` is retired as a write target and as a source — see Core's
-"Memory & Instruction Sources".
 
 ## Code Search Protocol (Context-First)
 
@@ -291,9 +296,7 @@ it is ephemeral.
 
 ## Risk — the second input to every skip condition
 
-The CORE section's phase table is canonical for WHETHER a phase runs and carries
-each skip condition; where a phase runs, its gate is blocking — "conditional"
-governs entry, never rigour (issue #4594).
+Skip conditions live in the CORE phase table. Risk is their second input.
 
 Label the change **Low** (docs, comments, mechanical metadata), **Normal** (a
 localized behaviour change inside one package), or **High** (security,
@@ -306,7 +309,6 @@ The labels say nothing about how much testing a change needs. The project's test
 ladder in its `CLAUDE.md` answers that, and is authoritative where the project
 defines one.
 
-Each phase's executing agent is the one named in the CORE phase table, and
 `code-analyzer` is a separate agent from `code-critic`. Per-phase dispatch-brief
 templates, and the rest of the delivery chain the phases sit inside:
 `Skill(skill="tm-workflow")`.
@@ -488,11 +490,9 @@ never licence to treat a table you DO have as optional.
 
 ## Customizing PM Behavior
 
-CORE states the rule — instruction sections are customized in `CLAUDE.md` and
-nowhere else, skills through their own tiers. A named-section marker block in
-the project's root `CLAUDE.md` replaces exactly the matching section.
-**`CORE` is the one token that can never be overridden** — a `CORE` marker is
-declined and logged. Every other section, including this one, is replaceable.
+A named-section marker block in the project's root `CLAUDE.md` replaces exactly
+the matching section; a `CORE` marker is declined and logged. Every other
+section, including this one, is replaceable.
 
 The legacy per-file overrides (`.trusty-mpm/INSTRUCTIONS.md`,
 `.trusty-mpm/AGENT_DELEGATION.md`, `.trusty-mpm/WORKFLOW.md`,
@@ -528,11 +528,10 @@ available as fallback.
 
 ## Framework-Guaranteed Conventions (Non-Overridable)
 
-"Non-Overridable" names the RULES, not the section. A session that receives
-these three is fully bound by them and no skill, agent, or cost argument makes
-an exception. It does not mean the section is structurally immutable: `CORE` is
-the only section a project's `CLAUDE.md` cannot replace, and a
-`FRAMEWORK-GUARANTEED-CONVENTIONS` marker does replace this one (#4286, #4838).
+"Non-Overridable" names the RULES, not the section: these three bind, and no
+skill, agent, or cost argument makes an exception. A
+`FRAMEWORK-GUARANTEED-CONVENTIONS` marker still replaces the section
+(#4286, #4838).
 
 They live here rather than in a skill because bundled skills and per-project
 files are user-editable and silently stop tracking upgrades once modified

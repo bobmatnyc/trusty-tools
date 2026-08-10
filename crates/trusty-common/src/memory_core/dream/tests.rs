@@ -1,5 +1,5 @@
 use super::guard::CompactionGuard;
-use super::helpers::now_secs;
+use super::helpers::{MERGED_CONTENT_CAP, char_safe_prefix, merge_into, now_secs};
 use super::*;
 use crate::memory_core::palace::{Palace, PalaceId, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
@@ -1776,4 +1776,122 @@ impl Drop for EnvVarGuard {
             None => unsafe { std::env::remove_var(self.key) },
         }
     }
+}
+
+/// Why (#5187): `merge_into` capped the merged drawer with a raw
+/// `String::truncate(500)`. When the 500th byte fell inside a multi-byte char
+/// that truncate panicked — `assertion failed: self.is_char_boundary(new_len)`
+/// — killing a `tokio-rt-worker` inside the shipped `com.trusty.memory`
+/// daemon mid-consolidation.
+/// What: merges a 490-byte survivor with a loser whose first char is a 4-byte
+/// emoji, so the merged string straddles the cap at byte 500. Asserts the
+/// input really straddles it, then that the merge cuts at the boundary below
+/// instead of panicking.
+/// Test: this test.
+#[tokio::test]
+async fn dream_merge_into_caps_multibyte_content_without_panicking() {
+    let handle = open_test_handle("dream-merge-utf8").await;
+
+    // 490 ASCII bytes plus the 8-byte "\n\nAlso: " joiner puts the loser's
+    // first char at byte 498; a 4-byte emoji there spans 498..502, so the
+    // 500-byte cap lands two bytes inside it.
+    // Real prose, not filler — the write path rejects content that reads as
+    // raw code or JSON, and the merge must run against a drawer it accepted.
+    let mut survivor_content =
+        "The Tokyo office rollout review covered staffing and timelines. ".repeat(8);
+    survivor_content.truncate(490);
+    assert_eq!(survivor_content.len(), 490);
+    let loser_content =
+        "🎉 The 祝賀会 celebration is on Friday evening in the Tokyo office".to_string();
+
+    let naive = format!("{survivor_content}\n\nAlso: {loser_content}");
+    assert!(
+        naive.len() > MERGED_CONTENT_CAP,
+        "input must exceed the cap to exercise the truncate at all"
+    );
+    assert!(
+        !naive.is_char_boundary(MERGED_CONTENT_CAP),
+        "input must straddle the cap — otherwise this test cannot reproduce #5187"
+    );
+
+    let survivor_id = handle
+        .remember(survivor_content.clone(), RoomType::General, vec![], 0.8)
+        .await
+        .unwrap();
+    let loser_id = handle
+        .remember(
+            loser_content.clone(),
+            RoomType::General,
+            vec!["祝賀会".into()],
+            0.5,
+        )
+        .await
+        .unwrap();
+
+    let (survivor, loser) = {
+        let drawers = handle.drawers.read();
+        let find = |id: Uuid| drawers.iter().find(|d| d.id == id).cloned().unwrap();
+        (find(survivor_id), find(loser_id))
+    };
+
+    // Pre-fix, this call panics inside `String::truncate`.
+    merge_into(&handle, &survivor, &loser);
+
+    let merged = {
+        let drawers = handle.drawers.read();
+        drawers
+            .iter()
+            .find(|d| d.id == survivor_id)
+            .map(|d| d.content.clone())
+            .unwrap()
+    };
+
+    assert!(
+        merged.len() <= MERGED_CONTENT_CAP,
+        "merged content must respect the cap, got {} bytes",
+        merged.len()
+    );
+    assert_eq!(
+        merged,
+        format!("{survivor_content}\n\nAlso: "),
+        "merge should cut at the char boundary below the cap, dropping the emoji whole"
+    );
+}
+
+/// Why (#5187): the semantic pass logs a fixed-width preview of a canonical
+/// drawer's content. Its old `&content[..content.len().min(80)]` clamp is the
+/// same byte-offset slice as the merge cap and panics on the same input, so an
+/// error-path log statement could take the pass down.
+/// What: exercises `char_safe_prefix` with CJK, emoji, and a combining
+/// sequence positioned so the 80-byte cap falls mid-char, and checks the
+/// result is a real prefix, within the cap, and boundary-aligned.
+/// Test: this test.
+#[test]
+fn char_safe_prefix_stops_below_a_multibyte_char() {
+    // "東" is 3 bytes, so the char at 78..81 straddles the 80-byte cap.
+    let cjk = "東".repeat(30);
+    assert!(!cjk.is_char_boundary(80), "cap must fall inside a char");
+    let cut = char_safe_prefix(&cjk, 80);
+    assert_eq!(cut.len(), 78);
+    assert!(cjk.starts_with(cut));
+
+    // One ASCII byte then 4-byte emoji: the cap lands inside the 20th emoji.
+    let emoji = format!("x{}", "🎉".repeat(25));
+    assert!(!emoji.is_char_boundary(80));
+    assert_eq!(char_safe_prefix(&emoji, 80).len(), 77);
+
+    // "é" as e + U+0301 is 3 bytes per unit. The cut is char-aligned but may
+    // land between the base letter and its combining mark — valid UTF-8, and
+    // the deliberate limit of char-level (not grapheme-level) truncation.
+    let combining = "e\u{301}".repeat(30);
+    assert!(!combining.is_char_boundary(80));
+    let cut = char_safe_prefix(&combining, 80);
+    assert_eq!(cut.len(), 79);
+    assert!(combining.is_char_boundary(cut.len()));
+
+    // Already inside the cap: returns everything. Empty input and a zero cap
+    // are both well-defined.
+    assert_eq!(char_safe_prefix("短い", 80), "短い");
+    assert_eq!(char_safe_prefix("", 80), "");
+    assert_eq!(char_safe_prefix("🎉", 0), "");
 }
