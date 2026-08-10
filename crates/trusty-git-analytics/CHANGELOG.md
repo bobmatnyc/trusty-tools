@@ -6,6 +6,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.14.0] — 2026-08-10
+
+### Fixed
+
+- A repository `tga audit` collected from stale local refs is now named in the
+  report's Gaps & Caveats section, with its remote and the fetch error, and
+  states that its data may be behind the true remote state. The sweep hard-codes
+  `--allow-stale`, so an unreachable remote leaves the `collect` stage reporting
+  `ok`; the per-repository fetch outcomes were printed to stderr and dropped, and
+  a report over months-old refs was indistinguishable from a current one (#5321,
+  DOC-67 §9). `commands::collect::run_reporting_fetch` is the new entry point
+  that returns those outcomes — `run` and `run_with_progress` are unchanged and
+  still return `()`. The sweep's terminal table qualifies the same stage as
+  `ok (N stale)`; a run where every remote was reached renders as before.
+- `audit::run_full_sweep` now reports every stage on the `ProgressBus` it is
+  given, instead of discarding the parameter. Each of the eight stages emits a
+  start event (naming the stage and its position in the run) and a
+  completed/failed event under the new `Stage::Audit`, and the collection stage
+  is handed that same bus so its per-repository events land there too. A `None`
+  or disabled bus stays a no-op.
+
 ## [2.13.0] — 2026-08-10
 
 ### Added
