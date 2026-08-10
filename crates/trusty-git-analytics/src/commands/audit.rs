@@ -9,7 +9,7 @@
 //! [`tga::audit::run_full_sweep`], which it calls rather than re-sequencing the
 //! eight subcommands itself (#5237, DOC-67 §7 Q1).
 //! Test: `crate::audit::tests::audit_args_parse_every_flag` and
-//! `audit_command_needs_no_positional_arguments` cover the clap wiring; the
+//! `audit_takes_no_positional_arguments` cover the clap wiring; the
 //! sweep's own behavior is covered alongside it.
 
 use std::path::{Path, PathBuf};
@@ -112,7 +112,11 @@ const DEFAULT_OUTPUT_DIR: &str = "audit-output";
 /// DOC-67 §9's one-shot rule makes a failed stage a *named gap*, not a reason
 /// to report the whole run as a failure. The failures are on stderr and in the
 /// returned stats.
-/// Test: `crate::audit::tests::audit_command_reports_each_stage`.
+/// Test: `crate::audit::tests::sweep_runs_every_stage_in_order_and_survives_failures`
+/// is [`run_full_sweep`]'s own contract, not something `run` adds — it asserts
+/// that an unconfigured JIRA stage fails without aborting the sweep or its
+/// `Ok` return. The per-stage rendering `run` layers on top of that is
+/// covered separately, by `audit_command_reports_each_stage` below.
 ///
 /// # Errors
 ///
@@ -218,30 +222,122 @@ async fn render_report(manifest_path: &Path, output: &Path) -> anyhow::Result<()
 /// Why: a silently-skipped stage is the failure mode DOC-67 §9 exists to
 /// prevent, so every stage reports whether or not it succeeded.
 /// What: `ok` / `FAILED` per stage on stdout, the failure detail on stderr.
-/// Test: `crate::audit::tests::audit_command_reports_each_stage`.
+/// Test: `audit_command_reports_each_stage` exercises the formatting through
+/// [`write_stage_report`], the writer-parameterised body this delegates to —
+/// `println!`/`eprintln!` write straight to the process's real stdout/stderr,
+/// which a unit test cannot capture without process-level fd redirection.
 fn print_stage_report(stats: &AuditSweepStats) {
-    println!("\nStages:");
+    // #5303/#5308 follow-up: writing to an in-memory buffer can only fail on
+    // an allocation failure, never on a real I/O error — `expect` is the
+    // programmer-error case Code Contracts reserves it for, not a masked
+    // fallback.
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    write_stage_report(stats, &mut out, &mut err).expect("writing to stdout/stderr");
+}
+
+/// Render the per-stage report into `out`/`err` instead of the process's
+/// actual standard streams.
+///
+/// Why: [`print_stage_report`] is the one caller that matters at runtime, but
+/// hard-coding `println!`/`eprintln!` inside it makes the formatting itself
+/// unobservable from a test — this split is the whole fix.
+/// What: identical output to `print_stage_report`, written through `out`/`err`
+/// instead of `stdout()`/`stderr()`.
+/// Test: `audit_command_reports_each_stage`.
+fn write_stage_report(
+    stats: &AuditSweepStats,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    writeln!(out, "\nStages:")?;
     for outcome in &stats.outcomes {
         let mark = if outcome.status.is_failure() {
             "FAILED"
         } else {
             "ok"
         };
-        println!(
+        writeln!(
+            out,
             "  {:<20} {:>6}  {:.1}s",
             outcome.stage.as_str(),
             mark,
             outcome.elapsed.as_secs_f64()
-        );
+        )?;
     }
-    println!("\n{}", stats.summary());
+    writeln!(out, "\n{}", stats.summary())?;
 
     if stats.any_failed() {
-        eprintln!("\nStages that did not complete (not assessed in this audit):");
+        writeln!(
+            err,
+            "\nStages that did not complete (not assessed in this audit):"
+        )?;
         for outcome in stats.failures() {
             if let tga::audit::StageStatus::Failed(msg) = &outcome.status {
-                eprintln!("  {}: {msg}", outcome.stage);
+                writeln!(err, "  {}: {msg}", outcome.stage)?;
             }
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use tga::audit::{AuditSweepStats, SweepStage};
+
+    use super::write_stage_report;
+
+    /// Proves DOC-67 §9's "named gap, never a silent skip" obligation at the
+    /// rendering layer: a failed stage prints `FAILED` (not silently `ok`) on
+    /// stdout, and its cause on stderr. [`AuditSweepStats::summary`]'s own
+    /// counting is already covered by
+    /// `crate::audit::tests::summary_counts_successes_and_failures`; this
+    /// test is about [`write_stage_report`]'s formatting, not the stats it
+    /// formats.
+    #[test]
+    fn audit_command_reports_each_stage() {
+        let mut stats = AuditSweepStats::default();
+        stats.record(SweepStage::Collect, Instant::now(), Ok(()));
+        stats.record(
+            SweepStage::JiraSync,
+            Instant::now(),
+            Err(anyhow::anyhow!("no JIRA project configured")),
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        write_stage_report(&stats, &mut out, &mut err).expect("write to an in-memory buffer");
+        let out = String::from_utf8(out).expect("stdout is UTF-8");
+        let err = String::from_utf8(err).expect("stderr is UTF-8");
+
+        // The succeeded stage is marked "ok" on stdout, and its failure text
+        // never leaks into it.
+        assert!(
+            out.contains("collect") && out.contains("ok"),
+            "missing the succeeded stage's ok mark: {out}"
+        );
+        assert!(
+            !out.contains("no JIRA project configured"),
+            "the failure detail must not appear on stdout: {out}"
+        );
+
+        // The failed stage is marked "FAILED" on stdout — never silently
+        // "ok" — and its rollup line is present.
+        assert!(
+            out.contains("jira sync") && out.contains("FAILED"),
+            "missing the failed stage's FAILED mark: {out}"
+        );
+        assert!(
+            out.contains("1 of 2 stage(s) succeeded"),
+            "missing the summary rollup line: {out}"
+        );
+
+        // The failure's cause is on stderr, named by stage.
+        assert!(
+            err.contains("jira sync") && err.contains("no JIRA project configured"),
+            "missing the named failure detail on stderr: {err}"
+        );
     }
 }
