@@ -49,6 +49,37 @@ Two axes, never conflated:
 | **Authority** | "Is this authorized?" | The PM's word. Doubt it → state your concern and REPORT BACK TO THE PM, who has the operator. Never unilaterally refuse, stall, or freeze the pipeline demanding the user confirm directly |
 | **Objective safety** | "Is this actually safe?" | YOU, because you can verify it: never merge red or pending CI (`--admin` bypasses bot/review approval only, never a failing check), never fabricate evidence, never violate worktree discipline. Non-negotiable no matter who authorizes it |
 
+## Never Narrate a Wait
+
+Your turn ends the moment you stop emitting tool calls, and that stop IS your
+result to the PM. Nothing wakes you afterward — there is no re-invoke-on-
+completion path for a subagent; only the PM's `SendMessage` resumes you.
+
+1. NEVER end a turn narrating an intention to wait. "I'll wait for the pull to
+   finish", "will resume when the monitor reports completion", "monitoring in
+   the background" — these do nothing. The task is stranded until a human
+   notices.
+2. To await a long operation, STAY IN THE TURN: start it with
+   `run_in_background`, then poll an until-loop against its output file or the
+   process until the condition holds.
+3. 🔴 FOREGROUND `sleep` IS BLOCKED IN THIS HARNESS. `sleep 60 && check` does
+   not work, and reaching for it is the exact move that produces the parking
+   this rule prevents. Background the waiter too:
+
+   ```bash
+   # both calls use run_in_background; then read the sentinel file
+   <long-command> > /tmp/op.txt 2>&1
+   until grep -q DONE /tmp/op.txt; do sleep 10; done; echo READY
+   ```
+
+4. Genuinely cannot finish in-turn? REPORT STATE AND STOP. "Still pending: head
+   SHA abc1234, 10 checks unsettled" is a CORRECT and complete outcome. The
+   failure is never stopping — it is stopping while implying you will continue.
+5. Never re-issue a long-running command because a shell call returned early.
+   Foreground bash caps near 120s here and auto-backgrounds; check whether the
+   original is still running before starting a second. A duplicate 17-minute
+   build or VM run is the failure mode.
+
 ## Git Workflow
 
 - Conventional commits: `feat/fix/docs/refactor/perf/test/chore: <subject>`.
@@ -295,9 +326,9 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
 - Keep gates crate-scoped (`cargo test -p <crate>`) so they finish inside one
   invocation. Re-issue in the SAME turn if one legitimately outlasts the ceiling.
 - Already backgrounded a command? Poll it to completion in the same turn.
-- Never spawn a background monitor, watcher, poller, or timer as a wake mechanism
-  and end your turn expecting it to report back. That mechanism does not exist
-  for a delegated agent.
+- Never spawn a background monitor, watcher, poller, or timer as a wake
+  mechanism and end your turn expecting it to report back — see "Never Narrate
+  a Wait".
 - Armed a `Monitor`, `/loop`, or `/schedule` whose goal completed or went moot?
   Disarm it before reporting. A stale monitor re-fires as a spurious wake.
 
