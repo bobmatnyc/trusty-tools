@@ -170,11 +170,19 @@ still counted, as is any test module whose brace balance is skewed by a brace
 inside a string literal. The matcher is line-based and fails closed: it can
 raise a false cap violation, never silently drop production code.
 
+🟡 **No standalone SLOC-cap fix.** Never open a PR whose only purpose is bringing
+a file back under cap — the split ships inside the PR that next adds to that
+file, which is the PR the gate blocks anyway, so it costs one CI cycle instead of
+two. That is not licence to leave a red gate red: if your PR trips the cap, split
+in that PR. Example — a rebase pushed `bin/tm/main.rs` to 505 SLOC while the
+branch was adding a third `RepairAction` arm, and that same PR moved the match
+into a submodule.
+
 🔴 Mechanically enforced by `scripts/check_line_cap.sh` in CI and the pre-commit
 hook (#610) — a new tracked file over its cap **cannot merge**. Never turn this
 gate green by deleting, `#[ignore]`-ing, or excluding a file from the count;
-split it instead. Counting definition, the split pattern, ratchet-allowlist
-mechanics, and refactor history:
+split it instead. Counting definition, the split pattern, when a violation gets
+fixed, ratchet-allowlist mechanics, and refactor history:
 [docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
