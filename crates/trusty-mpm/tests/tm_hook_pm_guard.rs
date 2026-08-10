@@ -1082,6 +1082,18 @@ async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
     // Which of the two is denied is genuinely arbitrary — that is the point of a
     // mutual exclusion — so the assertion counts verdicts rather than ordering
     // them.
+    //
+    // What this pins, precisely: that a claim is taken at all, end to end,
+    // through the real binary and the real router. It does NOT pin atomicity.
+    // The barrier releases both requests into the handler and stops there, so
+    // how far each gets before the other resumes is the scheduler's business —
+    // moving `record` back outside the mutex fails this test at a 300 ms
+    // handler gap but PASSED at 50 ms. Atomicity is pinned deterministically by
+    // `shared_tree_dispatch_route_denies_the_second_claim`
+    // (`src/daemon/delegation_routes_tests.rs`), which drives the two claims
+    // through `claim_shared_tree_dispatch` directly with no scheduler in the
+    // way. Treat the two as a pair: this one proves the wiring, that one proves
+    // the mutual exclusion.
     let (url, _dir) = serve_delegation_router_behind_a_barrier(2);
     let cwd = tempfile::tempdir().expect("tempdir");
 

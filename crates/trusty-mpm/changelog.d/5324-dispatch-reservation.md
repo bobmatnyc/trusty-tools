@@ -13,3 +13,12 @@ Fixed
   malformed answer, an unresolvable working directory, an unknown agent, and a
   read-only or isolated dispatch all still allow the call and claim nothing
   (#5324).
+- The claim POST forwards only `subagent_type`, `isolation` and `description` —
+  the fields the daemon actually reads — instead of the whole dispatch prompt.
+  The record it writes is unchanged, and the request body can no longer grow
+  past a size limit and fail the guard open on the largest dispatches (#5324).
+- `tm hook --pm-guard` now warns on stderr when the daemon reports no live
+  writers but claims nothing, which only happens when a running daemon predates
+  the `tm` on PATH and does not recognise the agent being dispatched. The
+  dispatch is still allowed — this path fails open deliberately — but the guard
+  no longer goes silently unenforced (#5324).

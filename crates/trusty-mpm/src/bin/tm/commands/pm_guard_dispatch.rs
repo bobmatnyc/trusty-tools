@@ -202,6 +202,43 @@ pub(crate) fn resolve_dispatch_cwd(
     })
 }
 
+/// Narrow `payload["input"]` to the three fields the daemon actually reads.
+///
+/// Why: an `Agent` dispatch's `tool_input` carries the whole subagent prompt,
+/// which is unbounded — a long brief is ordinary, not pathological. Forwarding
+/// it verbatim would put this POST under axum's default 2 MB body limit and
+/// create a failure arm the old read-only GET could not have: a 413 returns an
+/// empty answer, so the dispatch is admitted having claimed nothing, and the
+/// guard is silently off for exactly the largest dispatches. Rather than test
+/// that arm, this removes it — the body is now bounded by an agent name, an
+/// isolation mode, and a description.
+///
+/// The record stays byte-identical: the route reads only `subagent_type`
+/// ([`dispatch_agent`]) and `isolation` ([`dispatch_isolation`]), and
+/// `delegation_tracker::on_dispatch` stores only those two plus `description`.
+/// Nothing downstream reads another key of `input`, so dropping the rest cannot
+/// change what is written.
+/// What: replaces `input` with an object of just those three keys, each copied
+/// only when present. A payload with no `input`, or a non-object one, is left
+/// exactly as it is — there is nothing to narrow and inventing a shape here
+/// could only make the daemon's classification disagree with the guard's.
+/// Test: `claim_payload_carries_only_the_fields_the_daemon_reads`,
+/// `claim_payload_projection_leaves_a_non_object_input_alone`.
+fn project_dispatch_input(forwarded: &mut Value) {
+    const FORWARDED_INPUT_FIELDS: [&str; 3] = ["subagent_type", "isolation", "description"];
+
+    let Some(input) = forwarded.get("input").filter(|i| i.is_object()) else {
+        return;
+    };
+    let mut projected = serde_json::Map::new();
+    for key in FORWARDED_INPUT_FIELDS {
+        if let Some(value) = input.get(key) {
+            projected.insert(key.to_string(), value.clone());
+        }
+    }
+    forwarded["input"] = Value::Object(projected);
+}
+
 /// Claim `cwd` for this dispatch, and learn who already holds it (#5324).
 ///
 /// Why: see the module doc — liveness is the daemon's to answer, and it is the
@@ -213,7 +250,10 @@ pub(crate) fn resolve_dispatch_cwd(
 /// carrying this dispatch in the daemon's own forwarded hook shape (built by the
 /// one [`build_hook_payload`], so the record the daemon writes is the record its
 /// own `matcher: "*"` hook would write) with `cwd` stamped to the directory the
-/// guard resolved. Sent under the same tight connect/total bounds `pm_guard`'s
+/// guard resolved and `input` narrowed by [`project_dispatch_input`] to the
+/// three fields the daemon reads — the dispatch prompt never travels, so the
+/// body stays small enough that a size limit is not a reachable failure arm.
+/// Sent under the same tight connect/total bounds `pm_guard`'s
 /// audit POSTs use (500 ms / 2 s) — this call sits inside a `PreToolUse` budget,
 /// so a slow daemon must cost a bounded wait and nothing more. EVERY failure —
 /// client build, transport, non-2xx, malformed body — returns an empty vec,
@@ -237,9 +277,9 @@ pub(crate) async fn claim_shared_tree(
         return Vec::new();
     };
     let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/shared-tree-dispatch");
-    let body = serde_json::json!({
-        "payload": build_hook_payload(&cwd.display().to_string(), Some(payload), None),
-    });
+    let mut forwarded = build_hook_payload(&cwd.display().to_string(), Some(payload), None);
+    project_dispatch_input(&mut forwarded);
+    let body = serde_json::json!({ "payload": forwarded });
     let Ok(response) = client.post(&endpoint).json(&body).send().await else {
         return Vec::new();
     };
@@ -249,7 +289,8 @@ pub(crate) async fn claim_shared_tree(
     let Ok(body) = response.json::<Value>().await else {
         return Vec::new();
     };
-    body.get("agents")
+    let live: Vec<String> = body
+        .get("agents")
         .and_then(Value::as_array)
         .map(|rows| {
             rows.iter()
@@ -257,7 +298,59 @@ pub(crate) async fn claim_shared_tree(
                 .map(str::to_owned)
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    warn_on_eligibility_divergence(&body, &live);
+    live
+}
+
+/// Warn when the daemon answered "nobody here" but claimed nothing (#5324).
+///
+/// Why: this combination is always a disagreement, never a normal outcome. The
+/// guard does not call this route at all unless it has already classified the
+/// dispatch as tree-sharing, so an empty answer means the daemon declined to
+/// claim a directory the guard believes needs claiming — and it re-derives
+/// eligibility from its own `core::bundle::ALL`. A running daemon built before
+/// an agent was added to that table sees an agent it does not know, classifies
+/// it ineligible, and claims nothing. Both dispatches are then admitted with the
+/// guard silently disabled, and `claimed` is the only evidence anything is
+/// wrong. Discarding it discards the one signal.
+/// What: one stderr line — `pm_guard` writes to stderr, which Claude Code
+/// surfaces without it reaching the hook's stdout JSON verdict. It does NOT
+/// deny: denying here would fail CLOSED on version skew, the exact opposite of
+/// the degradation this whole path is built for, and a stale daemon would then
+/// block every dispatch instead of merely failing to guard it.
+/// Test: `eligibility_divergence_is_an_empty_answer_that_claimed_nothing` and
+/// siblings.
+fn warn_on_eligibility_divergence(body: &Value, live: &[String]) {
+    if !eligibility_diverged(body, live) {
+        return;
+    }
+    eprintln!(
+        "tm hook --pm-guard: the daemon reported no live writers but claimed nothing (#5324). \
+         The guard classified this dispatch as sharing the working tree and the daemon did not, \
+         so concurrent shared-worktree dispatch is NOT being enforced for this agent. The usual \
+         cause is a running daemon older than the `tm` on PATH, built before this agent was \
+         added to its bundled table — restart the daemon (`tm restart`) to clear it. Allowing \
+         the dispatch: this path fails open by design."
+    );
+}
+
+/// Did the daemon answer "nobody here" while claiming nothing?
+///
+/// Why: split from the `eprintln!` so the condition is assertable without
+/// capturing stderr — the decision is the part worth pinning, not the plumbing.
+/// What: true only when the answer is EMPTY and `claimed` is not `true`. A
+/// missing `claimed` counts as not-claimed, which is the conservative read: an
+/// older daemon that never sends the field is exactly the skew this warns about.
+/// A non-empty answer is never divergence — the daemon deliberately claims
+/// nothing when it is about to deny.
+/// Test: `eligibility_divergence_is_an_empty_answer_that_claimed_nothing`.
+fn eligibility_diverged(body: &Value, live: &[String]) -> bool {
+    let claimed = body
+        .get("claimed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    live.is_empty() && !claimed
 }
 
 /// Resolve the full verdict for one `PreToolUse` call: `Some(reason)` denies.
@@ -601,6 +694,90 @@ mod tests {
         .await;
         assert!(live.is_empty());
         assert!(started.elapsed() < std::time::Duration::from_millis(400));
+    }
+
+    #[test]
+    fn claim_payload_carries_only_the_fields_the_daemon_reads() {
+        // #5324: the dispatch prompt must not travel to the daemon. Forwarding
+        // it verbatim puts an unbounded body under axum's 2 MB limit, and a 413
+        // is an empty answer — the dispatch admitted, unclaimed, guard silently
+        // off for exactly the biggest dispatches. Projecting removes that arm
+        // rather than testing it.
+        let mut forwarded = serde_json::json!({
+            "cwd": "/repo",
+            "tool": "Agent",
+            "input": {
+                "subagent_type": "rust-engineer",
+                "isolation": "worktree",
+                "description": "short label",
+                "prompt": "x".repeat(4096),
+                "extra": {"nested": true},
+            },
+        });
+        project_dispatch_input(&mut forwarded);
+
+        let input = forwarded.get("input").expect("input survives");
+        let keys: Vec<&String> = input
+            .as_object()
+            .expect("input stays an object")
+            .keys()
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["description", "isolation", "subagent_type"],
+            "only the three fields the route and the tracker read may be sent"
+        );
+        // The three that remain must be untouched — the record the daemon
+        // writes has to stay byte-identical to the tracker's own.
+        assert_eq!(input["subagent_type"], "rust-engineer");
+        assert_eq!(input["isolation"], "worktree");
+        assert_eq!(input["description"], "short label");
+        // Sibling keys outside `input` are not this function's business.
+        assert_eq!(forwarded["tool"], "Agent");
+        assert_eq!(forwarded["cwd"], "/repo");
+    }
+
+    #[test]
+    fn claim_payload_projection_leaves_a_non_object_input_alone() {
+        // Nothing to narrow, and inventing a shape here could only make the
+        // daemon's classification disagree with the guard's. Absent stays
+        // absent; a non-object stays whatever it was.
+        let mut absent = serde_json::json!({"cwd": "/repo", "tool": "Agent"});
+        project_dispatch_input(&mut absent);
+        assert!(absent.get("input").is_none(), "absent input stays absent");
+
+        let mut scalar = serde_json::json!({"cwd": "/repo", "input": "not-an-object"});
+        project_dispatch_input(&mut scalar);
+        assert_eq!(scalar["input"], "not-an-object");
+    }
+
+    #[test]
+    fn eligibility_divergence_is_an_empty_answer_that_claimed_nothing() {
+        // #5324: the guard never asks unless it already classified the dispatch
+        // as tree-sharing, so "nobody here" AND "claimed nothing" is always the
+        // daemon disagreeing about eligibility — the one observable symptom of
+        // a daemon older than the `tm` on PATH. It must warn, and must NOT deny:
+        // denying would fail closed on version skew.
+        let empty: Vec<String> = Vec::new();
+        assert!(
+            eligibility_diverged(&serde_json::json!({"agents": [], "claimed": false}), &empty),
+            "empty answer that claimed nothing is divergence"
+        );
+        assert!(
+            eligibility_diverged(&serde_json::json!({"agents": []}), &empty),
+            "a daemon too old to send `claimed` reads as not-claimed"
+        );
+        assert!(
+            !eligibility_diverged(&serde_json::json!({"agents": [], "claimed": true}), &empty),
+            "the ordinary first dispatch claims, and is silent"
+        );
+        assert!(
+            !eligibility_diverged(
+                &serde_json::json!({"claimed": false}),
+                &["rust-engineer".to_string()]
+            ),
+            "a non-empty answer is a deny, where claiming nothing is correct"
+        );
     }
 
     #[tokio::test]
