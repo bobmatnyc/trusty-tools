@@ -36,6 +36,14 @@ fn window() -> Duration {
     Duration::days(TERMINAL_RECORD_RETENTION_DAYS)
 }
 
+/// The worktree base names the sweep resolves once per tick, built hermetically.
+///
+/// `from_configured(None)` yields the built-in `.worktrees` without reading the
+/// machine's config, which is what every fixture below builds its paths under.
+fn names() -> trusty_common::workspace_layout::WorktreeDirNames {
+    trusty_common::workspace_layout::WorktreeDirNames::from_configured(None)
+}
+
 /// A terminal record with no workspace, dated `age_hours` ago.
 fn terminal_record(state: ManagedSessionState, age_hours: i64) -> SessionRecord {
     let mut r = base_record();
@@ -409,8 +417,8 @@ async fn sweep_never_touches_a_worktree_on_the_filesystem() {
 
 /// Why: the backlog this feature exists to clear is entirely legacy records —
 /// 76 of 116 on the reporting machine. Stamping them `now` would grandfather
-/// every one for a further seven days, so the owner would install the fix and
-/// still see the same `NUM`. An old record must be dated from its own history
+/// every one for another full retention window, so the owner would install the
+/// fix and still see the same `NUM`. An old record must be dated from its own history
 /// and become eligible on the very next sweep.
 /// What: seeds a legacy record whose last activity was 400 days ago, asserts
 /// sweep 1 backfills that date rather than deleting outright (so the inference
@@ -452,7 +460,7 @@ async fn sweep_backfills_an_old_legacy_record_and_evicts_it_without_waiting() {
     );
 
     // Already past the window, so it arms on the next sweep and goes on the one
-    // after — no seven-day wait.
+    // after — no fresh 24-hour wait.
     let second = mgr
         .sweep_terminal_records(Utc::now(), window(), &mut gate)
         .await
@@ -623,7 +631,7 @@ async fn revalidate_keeps_a_still_evictable_record() {
     let stale = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
 
     let survivors = mgr
-        .revalidate_for_eviction(vec![stale], Utc::now(), window())
+        .revalidate_for_eviction(vec![stale], &names(), Utc::now(), window())
         .await;
     assert_eq!(
         survivors,
@@ -649,7 +657,7 @@ async fn revalidate_drops_a_record_reactivated_after_the_snapshot() {
     let id = seed_terminal(&mgr, "stale", ManagedSessionState::Decommissioned, 30).await;
     // The snapshot said Evict…
     assert_eq!(
-        mgr.revalidate_for_eviction(vec![id], Utc::now(), window())
+        mgr.revalidate_for_eviction(vec![id], &names(), Utc::now(), window())
             .await,
         vec![id]
     );
@@ -661,7 +669,7 @@ async fn revalidate_drops_a_record_reactivated_after_the_snapshot() {
     mgr.mark_reactivated(&id).await.expect("reactivate");
 
     let survivors = mgr
-        .revalidate_for_eviction(vec![id], Utc::now(), window())
+        .revalidate_for_eviction(vec![id], &names(), Utc::now(), window())
         .await;
     assert!(
         survivors.is_empty(),
@@ -694,7 +702,7 @@ async fn revalidate_drops_a_record_whose_worktree_appeared_after_the_snapshot() 
 
     // The snapshot said Evict — a plain directory protects nothing…
     assert_eq!(
-        mgr.revalidate_for_eviction(vec![id], Utc::now(), window())
+        mgr.revalidate_for_eviction(vec![id], &names(), Utc::now(), window())
             .await,
         vec![id]
     );
@@ -709,7 +717,7 @@ async fn revalidate_drops_a_record_whose_worktree_appeared_after_the_snapshot() 
     .expect("sentinel");
 
     let survivors = mgr
-        .revalidate_for_eviction(vec![id], Utc::now(), window())
+        .revalidate_for_eviction(vec![id], &names(), Utc::now(), window())
         .await;
     assert!(
         survivors.is_empty(),
@@ -777,7 +785,7 @@ async fn revalidate_drops_a_record_a_concurrent_prune_already_removed() {
     mgr.compact_record(&id).await.expect("concurrent prune");
 
     let survivors = mgr
-        .revalidate_for_eviction(vec![id], Utc::now(), window())
+        .revalidate_for_eviction(vec![id], &names(), Utc::now(), window())
         .await;
     assert!(
         survivors.is_empty(),
@@ -806,14 +814,14 @@ async fn revalidate_drops_a_record_a_concurrent_prune_already_removed() {
 fn workspace_needs_protection_treats_an_undetermined_path_as_protected() {
     let path = PathBuf::from("/definitely/unreadable/plain-checkout");
     assert!(
-        workspace_needs_protection(Some(&path), |_| Err(std::io::Error::new(
+        workspace_needs_protection(Some(&path), &names(), |_| Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "EACCES"
         ))),
         "an undetermined workspace path must count as PROTECTED so the record is kept"
     );
     assert!(
-        workspace_needs_protection(Some(&path), |p| if p == path {
+        workspace_needs_protection(Some(&path), &names(), |p| if p == path {
             Ok(true)
         } else {
             Err(std::io::Error::other("EIO"))
@@ -821,11 +829,11 @@ fn workspace_needs_protection_treats_an_undetermined_path_as_protected() {
         "an undetermined SENTINEL probe must also count as PROTECTED"
     );
     assert!(
-        !workspace_needs_protection(Some(&path), |_| Ok(false)),
+        !workspace_needs_protection(Some(&path), &names(), |_| Ok(false)),
         "a workspace that is gone protects nothing"
     );
     assert!(
-        !workspace_needs_protection(None, |_| Ok(true)),
+        !workspace_needs_protection(None, &names(), |_| Ok(true)),
         "no path, nothing to protect"
     );
 
@@ -833,7 +841,7 @@ fn workspace_needs_protection_treats_an_undetermined_path_as_protected() {
     let mut r = terminal_record(ManagedSessionState::Decommissioned, 24 * 400);
     r.workspace_path = Some(path.clone());
     let undetermined =
-        workspace_needs_protection(Some(&path), |_| Err(std::io::Error::other("EIO")));
+        workspace_needs_protection(Some(&path), &names(), |_| Err(std::io::Error::other("EIO")));
     assert_eq!(
         retention_verdict(&r, undetermined, Utc::now(), window()),
         RetentionVerdict::Keep,
@@ -856,7 +864,7 @@ fn workspace_needs_protection_covers_a_session_worktree() {
     std::fs::remove_file(wt.join(super::super::decommission::WORKTREE_SENTINEL_FILE))
         .expect("strip sentinel");
     assert!(
-        workspace_needs_protection(Some(&wt), |p| p.try_exists()),
+        workspace_needs_protection(Some(&wt), &names(), |p| p.try_exists()),
         "a `.worktrees/<leaf>` path is protected on its shape alone, with no sentinel to read"
     );
 
@@ -868,7 +876,7 @@ fn workspace_needs_protection_covers_a_session_worktree() {
     )
     .expect("sentinel");
     assert!(
-        workspace_needs_protection(Some(&odd), |p| p.try_exists()),
+        workspace_needs_protection(Some(&odd), &names(), |p| p.try_exists()),
         "an ownership sentinel protects whatever the path's shape is"
     );
 }
@@ -892,7 +900,7 @@ fn workspace_needs_protection_ignores_a_plain_main_checkout() {
     std::fs::write(checkout.path().join("README.md"), b"a real repo").expect("write");
 
     assert!(
-        !workspace_needs_protection(Some(checkout.path()), |p| p.try_exists()),
+        !workspace_needs_protection(Some(checkout.path()), &names(), |p| p.try_exists()),
         "a main checkout carries no ownership sentinel and no sweep can delete it"
     );
     std::fs::write(
@@ -903,7 +911,7 @@ fn workspace_needs_protection_ignores_a_plain_main_checkout() {
     )
     .expect("sentinel");
     assert!(
-        workspace_needs_protection(Some(checkout.path()), |p| p.try_exists()),
+        workspace_needs_protection(Some(checkout.path()), &names(), |p| p.try_exists()),
         "…and the sentinel is what decides it, not the directory's existence"
     );
 }

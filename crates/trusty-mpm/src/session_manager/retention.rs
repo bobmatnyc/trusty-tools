@@ -87,11 +87,11 @@ pub enum RetentionVerdict {
 /// Why: every record written before `terminal_at` existed lacks it, and that is
 /// the entire pre-existing backlog — 76 of 116 records on the reporting
 /// machine, holding 76 of the slot numbers that put `NUM` in three digits.
-/// Stamping those with `now` would grandfather them for a further seven days,
-/// so the fix the owner asked for would not arrive until a week after he
-/// installed it. Clearing that backlog is the point, and a record whose last
-/// sign of life was two months ago has had its retention window many times
-/// over.
+/// Stamping those with `now` would grandfather them for another full retention
+/// window, so the fix the owner asked for would not arrive until a day after he
+/// installed it (and, pre-#5327, a week). Clearing that backlog is the point,
+/// and a record whose last sign of life was two months ago has had its
+/// retention window many times over.
 ///
 /// The earlier reasoning against inference was right about the mechanism and
 /// wrong about the goal: yes, the auto-prune (#4384/#4702) decommissions
@@ -244,6 +244,7 @@ impl RetentionOutcome {
 /// `workspace_needs_protection_ignores_a_plain_main_checkout`.
 fn workspace_needs_protection(
     path: Option<&std::path::Path>,
+    names: &trusty_common::workspace_layout::WorktreeDirNames,
     probe: impl Fn(&std::path::Path) -> std::io::Result<bool>,
 ) -> bool {
     let Some(p) = path else {
@@ -255,7 +256,7 @@ fn workspace_needs_protection(
         Ok(false) => return false,
         Ok(true) => {}
     }
-    super::decommission::is_session_worktree(p)
+    super::decommission::is_session_worktree_with(p, names)
         || probe(&p.join(super::decommission::WORKTREE_SENTINEL_FILE)).unwrap_or(true)
 }
 
@@ -310,10 +311,11 @@ impl SessionManager {
     /// hard-deletes a record without an operator asking for that specific
     /// record by id, so its scope is deliberately narrow: `sessions.json`, and
     /// the in-memory slot registry. Nothing on disk outside the store file is
-    /// read for deletion, opened for writing, or removed. Its only filesystem
-    /// calls are [`workspace_needs_protection`]'s two `try_exists` probes, and
-    /// every answer they can give other than "the workspace is gone" or "it is
-    /// a plain directory with no ownership sentinel" means KEEP.
+    /// read for deletion, opened for writing, or removed. It reads the config
+    /// once per sweep to resolve the worktree base names, and otherwise its only
+    /// filesystem calls are [`workspace_needs_protection`]'s two `try_exists`
+    /// probes — every answer they can give other than "the workspace is gone" or
+    /// "it is a plain directory with no ownership sentinel" means KEEP.
     /// What: three phases, mirroring `prune_orphaned_worktrees`'s #1845 item-9
     /// shape.
     ///
@@ -356,10 +358,15 @@ impl SessionManager {
         self.store.write().await.reload_if_changed().await?;
         let all = self.store.read().await.cached_all();
 
+        // Resolve the worktree base names ONCE for the whole sweep. Doing it per
+        // record would re-read config per record per 60s tick — see
+        // `decommission::is_session_worktree_with`.
+        let names = super::decommission::worktree_dir_names();
+
         let mut stamped: Vec<SessionRecord> = Vec::new();
         let mut candidates: Vec<ManagedSessionId> = Vec::new();
         for record in all {
-            match self.verdict_for(&record, now, retention) {
+            match self.verdict_for(&record, &names, now, retention) {
                 RetentionVerdict::Keep => {}
                 RetentionVerdict::Stamp(inferred) => {
                     let mut dated = record;
@@ -388,7 +395,7 @@ impl SessionManager {
         // Phase 3 — re-validate against the CURRENT store immediately before
         // deleting.
         let evicted = self
-            .revalidate_for_eviction(confirmed, now, retention)
+            .revalidate_for_eviction(confirmed, &names, now, retention)
             .await;
 
         if !evicted.is_empty() {
@@ -442,6 +449,7 @@ impl SessionManager {
     async fn revalidate_for_eviction(
         &self,
         confirmed: Vec<ManagedSessionId>,
+        names: &trusty_common::workspace_layout::WorktreeDirNames,
         now: DateTime<Utc>,
         retention: Duration,
     ) -> Vec<ManagedSessionId> {
@@ -449,7 +457,8 @@ impl SessionManager {
         for id in confirmed {
             match self.get(&id).await {
                 Ok(fresh)
-                    if self.verdict_for(&fresh, now, retention) == RetentionVerdict::Evict =>
+                    if self.verdict_for(&fresh, names, now, retention)
+                        == RetentionVerdict::Evict =>
                 {
                     evicted.push(id);
                 }
@@ -483,14 +492,19 @@ impl SessionManager {
     }
 
     /// [`retention_verdict`] with the production existence probes applied.
+    ///
+    /// `names` is resolved ONCE per sweep by the caller rather than per record —
+    /// see [`super::decommission::is_session_worktree_with`] for why a per-record
+    /// resolve would re-read config and re-log on every tick.
     fn verdict_for(
         &self,
         record: &SessionRecord,
+        names: &trusty_common::workspace_layout::WorktreeDirNames,
         now: DateTime<Utc>,
         retention: Duration,
     ) -> RetentionVerdict {
         let protected =
-            workspace_needs_protection(record.workspace_path.as_deref(), |p| p.try_exists());
+            workspace_needs_protection(record.workspace_path.as_deref(), names, |p| p.try_exists());
         retention_verdict(record, protected, now, retention)
     }
 }
