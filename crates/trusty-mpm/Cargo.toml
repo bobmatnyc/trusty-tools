@@ -212,6 +212,11 @@ chrono.workspace = true
 gray_matter.workspace = true
 walkdir.workspace = true
 dirs.workspace = true
+# #4964: `core::binary_provenance` must ORDER two crate versions, not merely
+# compare them for equality — which of the running binary and cargo's ledger
+# record is newer decides whether a mismatch is a stale ledger or a real
+# downgrade. Use the canonical parser rather than a second hand-rolled one.
+semver.workspace = true
 # Used by statusline/compaction.rs for atomic state-file writes (NamedTempFile::persist).
 tempfile.workspace = true
 sha2.workspace = true
