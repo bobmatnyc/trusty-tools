@@ -89,6 +89,15 @@ jobs:
           echo "crate=${NAME}" >> "$GITHUB_OUTPUT"
           echo "Checking crate: ${NAME}"
 
+      # STABLE, DELIBERATELY NOT THE MSRV 1.94 THIS REPO PINS (#5289).
+      # cargo-semver-checks builds rustdoc in a scratch project that ignores this
+      # workspace's Cargo.lock, so the graph it resolves can demand a higher
+      # rustc than we ship under — `takecell` 0.1.2 wants 1.96 where the lock
+      # pins 0.1.1, and under 1.94 the gate could not run at all. Which rustc
+      # renders the rustdoc JSON does not change what our public API is, so this
+      # costs no coverage; MSRV compliance is ci.yml's job and is untouched.
+      # check_semver.sh makes the same choice locally by picking the newest
+      # installed toolchain, so CI and a developer's machine agree.
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -116,7 +125,25 @@ jobs:
       - name: SemVer gate selftest (must refuse a blind run)
         run: bash scripts/check_semver_selftest.sh
 
+      # The two nonzero statuses are annotated differently ON PURPOSE (#5289).
+      # Exit 1 is a computed verdict that says break; exit 3 means the gate never
+      # compared anything, and reporting that as "your API changed" is the lie
+      # this issue was filed for. Both fail the job — a non-verdict is not a
+      # pass — but a reader must be able to tell which one they are looking at
+      # from the annotation alone.
       - name: Enforce public-API SemVer against crates.io
         env:
           SKIP_UI_BUILD: '1'
-        run: bash scripts/check_semver.sh --crate "${{ steps.crate.outputs.crate }}"
+          CRATE: ${{ steps.crate.outputs.crate }}
+        run: |
+          rc=0
+          bash scripts/check_semver.sh --crate "$CRATE" || rc=$?
+          if [[ "$rc" -eq 0 ]]; then
+            exit 0
+          fi
+          if [[ "$rc" -eq 3 ]]; then
+            echo "::error title=SemVer gate could not run::No verdict was computed for ${CRATE}. cargo-semver-checks never completed a comparison (see the log), so whether this release breaks the public API is UNKNOWN. Do not read this as a required version bump, and do not publish on it."
+          else
+            echo "::error title=SemVer break::${CRATE} has a breaking public-API change without a breaking version bump. See the failing lints in the log."
+          fi
+          exit "$rc"

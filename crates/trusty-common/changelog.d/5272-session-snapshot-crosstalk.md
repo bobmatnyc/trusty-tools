@@ -1,4 +1,4 @@
-Fixed
+Breaking
 
 - `catchup::session_finder::latest_trusty_mpm_snapshot` no longer resolves across session boundaries ([#5272](https://github.com/bobmatnyc/trusty-tools/issues/5272))
   - it now requires a session id and resolves only snapshots that `sessions-log.jsonl` attributes to it, via the new `session_log::resolve_session_snapshot`. Passing `None` returns `None` instead of the newest snapshot overall

@@ -1,0 +1,12 @@
+    Building trusty-progress v0.3.0 (current)
+       Built [   2.766s] (current)
+     Parsing trusty-progress v0.3.0 (current)
+      Parsed [   0.001s] (current)
+    Building trusty-progress v0.2.0 (baseline)
+       Built [   2.108s] (baseline)
+     Parsing trusty-progress v0.2.0 (baseline)
+      Parsed [   0.001s] (baseline)
+    Checking trusty-progress v0.2.0 -> v0.3.0 (major change)
+     Checked [   0.000s] 0 checks: 0 pass, 254 skip
+     Summary no semver update required
+    Finished [   5.613s] trusty-progress

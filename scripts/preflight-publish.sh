@@ -77,6 +77,13 @@
 #     as an already-breaking release and skips. A false positive and a real
 #     break have the same safe remedy.
 #
+#     A NON-VERDICT IS NOT A VERDICT (#5289). check_semver.sh exits 1 only when
+#     it computed a verdict that says break, and 3 when it could not compute one
+#     at all (rustdoc build failure, unreachable registry, missing tool). Both
+#     stop the publish; only the first is reported as "your API changed". The
+#     remedy above applies to exit 1 — for exit 3 the remedy is to fix the gate
+#     and re-run, never to bump a version on evidence that does not exist.
+#
 #     Requires `cargo-semver-checks` (`cargo install cargo-semver-checks@0.50.0
 #     --locked`). Its absence is a FAILURE with that remedy, never a skip.
 #
@@ -387,6 +394,15 @@ check4_version_not_live() {
 # Output goes to a file rather than the terminal because cargo-semver-checks
 # prints a per-lint progress stream; the file is echoed only when the check
 # fails, which is the only time any of it carries information.
+#
+# The two nonzero statuses are DIFFERENT FACTS and are reported as such (#5289).
+# This function used to render every nonzero exit as "public-API check failed …
+# publishing this would ship a breaking change", so a rustdoc build error at the
+# last barrier before `cargo publish` read as a SemVer verdict. Exit 3 means
+# check_semver.sh never computed one; saying "your API changed" there would be
+# inventing a result, and telling the operator to bump the breaking position
+# would be advising a version change on no evidence. Either way the publish
+# still stops — both branches return 1.
 check5_semver() {
   local log="${TMP_SEMVER}" rc=0
 
@@ -396,6 +412,16 @@ check5_semver() {
   if [ "$rc" -eq 0 ]; then
     echo "[PASS] semver: $(tail -1 "$log")" >&2
     return 0
+  fi
+
+  if [ "$rc" -eq 3 ]; then
+    echo "[FAIL] semver: NO VERDICT for ${PKG_NAME} ${VERSION} — the gate could not run:" >&2
+    sed 's/^/       /' "$log" >&2
+    echo "       cargo-semver-checks never completed a comparison, so whether this" >&2
+    echo "       release breaks the public API is UNKNOWN. That is not a reason to" >&2
+    echo "       bump the version and not a reason to publish." >&2
+    echo "       Fix the gate (see the NO SEMVER VERDICT block above), then re-run." >&2
+    return 1
   fi
 
   echo "[FAIL] semver: public-API check failed for ${PKG_NAME} ${VERSION}:" >&2
