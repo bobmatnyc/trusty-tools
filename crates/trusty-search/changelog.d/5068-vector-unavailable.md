@@ -1,4 +1,0 @@
-Fixed
-
-- `POST /indexes/:id/search` with `stage: "semantic"` against an index whose vector lane is unavailable now returns `503 vector_unavailable` instead of `200` carrying BM25 rows. `reason` separates `skipped_by_config` (permanent — the index was built with the vector component disabled, which #5060 made the default for worktree indexes) from `stage_not_ready` (transient — the embed pass has not finished), and `retryable` carries the same split as a boolean. This mirrors the `503 kg_unavailable` contract `get_call_chain` already uses for `skip_kg` indexes (#5068).
-- The search response `meta` block gained `vector_unavailable` and `vector_disabled_by_config`, the counterparts to the existing `bm25_lane_degraded` flag. An unpinned hybrid query still succeeds and still degrades to the ready lanes, but the caller can now see that no vector lane contributed without diffing `search_capabilities` (#5068).

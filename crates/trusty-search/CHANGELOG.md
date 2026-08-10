@@ -6,6 +6,246 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.44.0] — 2026-08-10
+
+### Added
+
+- Reindex now reports a per-stage wall-clock breakdown — hash-cache load, corpus
+  carryover copy, batch pipeline, prune, HNSW commit, corpus commit, KG, and an
+  explicit unattributed remainder — in the `reindex phase timings` log line and
+  in the `complete` SSE event's `timings` object. This replaces the derived
+  `model_load_approx_ms` residual, which folded five distinct stages into one
+  number computed by subtraction, leaving the cost of a corpus carryover copy
+  unmeasurable. Adds `tests/reindex_stage_profile.rs`, an `#[ignore]`d harness
+  that prints cold and warm breakdowns against a throwaway temp corpus (#5024).
+
+### Fixed
+
+- Updated doc comments, `Cargo.toml`, and `CLAUDE.md` that still named
+  `open-mpm` as a consumer/orchestrator to say `trusty-agents` (renamed in
+  #831), and removed an orphaned `.open-mpm/agents/` fixture directory
+  (2 stray `.toml` files, unreferenced by any code) that was left behind in
+  the crate tree.
+- `cargo test -p trusty-search` compiles again. #5345 gave `index_status` and
+  `chunks` a JSON body, changing their error type from `StatusCode` to
+  `(StatusCode, Json<Value>)`, but two `assert_eq!` calls in
+  `deleted_cold_parked_index_is_404_not_a_permanent_503` still compared the
+  whole tuple against a bare `StatusCode`, so the lib-test target failed to
+  build and took every gate on `main` with it. The three guards that test pins
+  now destructure the response and assert both the 404 and the
+  `unknown index: <id>` body, so a regression that returns 404 while still
+  advertising `restore_via` is caught rather than passing on the code alone.
+- A write-quarantined index (#4122) no longer performs any durable write. Its
+  shutdown flush used to write its deliberately-empty in-memory corpus over the
+  legacy `chunks.json` snapshot — a file the warm-boot `chunks.json →
+  index.redb` migration still reads — while the quarantine's own ERROR
+  diagnostic claimed the on-disk corpus was untouched. The gate now sits on the
+  whole snapshot-write family (`save_chunks_to_disk`, `flush_corpus_to_disk`,
+  `save_vector_store`, `spawn_incremental_persist`), so the HNSW graph is
+  protected on the same path, and the diagnostic's claim is true of every
+  on-disk artifact.
+- Warm boot no longer spends a full tracked-root relocation walk on every registry entry whose `root_path` was deleted. The walk (measured 9.5–10.5 s over 248 tracked roots) was recomputed per dead entry even though its result is identical for all of them within a boot; 55 dead entries on the reporting machine kept a live 70k-chunk index unreachable for the better part of an hour. Entries are now triaged with a single `stat`, live indexes are restored first, and the dead cohort shares one walk under a global `TRUSTY_WARMBOOT_SALVAGE_SECS` ceiling (default 30 s, `0` disables). No registration is removed and no index data is deleted by a failed or skipped probe. (#4846)
+- An index skipped by a warm-boot restore timeout is now retried on a backoff instead of staying dark until a human restarts the daemon. Parking it in the cold store (#4087) made it reachable only by a query naming its id verbatim — `list_indexes` omits cold entries and boot reconcile walks registered handles only, so PR #4717's never-walked guard could never see it. The cold store now records why an entry is parked, and a recovery pass drains the timeout cohort (never the deliberately deferred one) every `TRUSTY_WARMBOOT_RETRY_SECS` (default 60 s, `0` disables), giving up after 5 attempts into the existing `indexes_failed` state. (#4250)
+- `warm_boot_degraded` and `warmboot_summary.indexes_skipped_timeout` now report the live timeout cohort rather than a counter frozen at boot completion, so a daemon that got its indexes back stops reporting degraded and one that did not keeps a signal of its own. (#4250)
+- A cold index whose corpus open lost a race (`DatabaseAlreadyOpen`) or ran past
+  its deadline is no longer deregistered for the daemon's lifetime. The restore
+  ran to completion without registering a handle, so the loader consumed the
+  cold entry anyway and the index became a 404 with no way back — one client
+  retry against a slow ~20s cold-start open was enough. Registration is now the
+  only evidence a restore succeeded; a transient failure keeps the entry and
+  returns a retryable 503 so the next query recovers it.
+- No test process can resolve the operator's live data directory any more, so the test suite can no longer register fixture roots in `indexes.toml` (closes [#4255](https://github.com/bobmatnyc/trusty-tools/issues/4255))
+  - issue #4094 guarded this with `#[cfg(test)]`, which is set per compilation unit: the `tests/` integration targets and the `[[bin]]` unit tests link the library built without it and kept resolving the real location. `default_data_dir` now branches on the runtime check `trusty_common::running_under_test_harness()` instead
+  - `tests/registry_isolation.rs` proves it from the non-`cfg(test)` linkage the old guard missed: it performs a real `upsert_index_registry_entry` and asserts the operator's `indexes.toml` is byte-identical afterwards
+  - `TRUSTY_DATA_DIR` still wins over both branches, so tests that set it are unchanged
+- The shutdown flush can now actually finish. Its per-index budget floors at
+  30 s and ceilings at 20 min, while every window that terminates the daemon
+  granted 3–5 s: launchd's `ExitTimeOut` default (measured 5 s on macOS, not
+  the documented "system-defined" anything), `trusty-search stop`, and the
+  orphan reaper. A flush with real work to do was SIGKILLed mid-sweep on every
+  path, losing HNSW vectors committed since the last checkpoint. Two changes:
+  every generated LaunchAgent plist now declares `ExitTimeOut`, and `stop` and
+  the reaper wait the same window. **An already-installed LaunchAgent keeps
+  launchd's 5 s default until its plist is regenerated** — re-run the
+  installer's service setup to pick it up (#4393)
+- A per-index flush deadline can no longer outlive the process that granted it.
+  Deadlines are now minted by a `ShutdownBudget` counting down from the instant
+  SIGTERM landed, so a sweep that runs out of window stops cleanly at an index
+  boundary — logging how many indexes kept their last incremental checkpoint —
+  instead of being cut off partway through a write (#4393)
+- `trusty-search start` no longer SIGKILLs healthy daemons that merely share
+  its executable name. Its orphan reaper matched on process name plus `start`
+  in argv, so any lock-visibility asymmetry — a second instance under
+  `--data-dir`/`TRUSTY_DATA_DIR`, a daemon restarted without the override it
+  started with, a deleted lockfile — turned a routine `start` into the
+  destruction of a live production daemon, with 3 s to shut down. The reaper
+  now reaps only processes it has positively identified as sharing its own data
+  directory, read from the candidate's own `--data-dir` argument or
+  `TRUSTY_DATA_DIR`; a process whose argv or environment cannot be read is
+  spared and reported, never killed. `trusty-search stop` keeps its explicit
+  stop-everything contract (#4395)
+- Two daemons indexing the same repository can no longer splice each other's
+  HNSW snapshot. Both staged through the same `hnsw.usearch.tmp` before
+  renaming, and colocated indexes keep that file in the project root — outside
+  every data directory, so even fully data-dir-isolated daemons collided there.
+  The staging name is now scoped to the writing process (#4395)
+- `list_indexes?details=true`'s `size_bytes` and `GET /indexes/:id/status`'s `disk_bytes` now sum BOTH storage layouts — the legacy global `<data_dir>/indexes/<id>/` and the colocated `<root_path>/.trusty-search/` introduced by #403. They previously measured only the global directory, which for a colocated index holds metadata and no corpus; because that directory exists, the metric returned `0` rather than `null`. A healthy 527 MB / 71,433-chunk index reported `0`, and an operator diagnosed 11 such indexes as broken and considered deleting them. The field keeps its name and its documented contract ("sum of all file sizes under the index data directory") — reading one of the two locations was the bug, not the contract (#4706).
+- `null` now means what it says: neither layout exists. It is no longer reachable for an index that holds data (#4706).
+- `last_indexed` gained the same repair. It probed only the global directory for `index.redb`/`chunks.json`, so a colocated index reported `null` freshness — the gap `IndexHandle.last_indexed_at` (#878) was added to paper over, and which still read `null` for a warm-booted handle that had not reindexed in this daemon's lifetime. The newer mtime across the two layouts now wins, so a stale global copy cannot shadow a live colocated write (#4706).
+- A `<root_path>/.trusty-search/` with no `index.redb` is no longer counted as an index corpus. That directory name is also the daemon's own runtime directory (`$HOME/.trusty-search/` holds `http_addr` and `mcp_http_addr`), so an index rooted at `$HOME` would have reported the daemon's runtime files as its corpus (#4706).
+- `POST /indexes/:id/search` no longer walks both storage directories on every query to compute a byte count it discarded — the freshness field it actually uses now takes a `stat`-only path (#4706).
+- MCP `search`, `search_lexical`/`search_semantic`/`search_kg`/`search_all`, `grep`, `index_status`, and `list_chunks` against a worktree that has never been indexed now return a retryable `INDEX_NOT_READY` error carrying the state, reason, and a `grep`/`find` fallback, instead of the daemon's permanent-sounding `404 unknown index` (#4715).
+- `GET /indexes/:id/status`, `GET /indexes/:id/chunks`, and `POST /indexes/:id/grep` now return `503` rather than `404` for an index that is registered but not resident (cold-parked after a timed-out warm-boot restore, or permanently restore-failed). A `404` from these endpoints now means the same thing it has always meant on the search endpoint: no such index anywhere (#4715).
+- `POST /indexes/:id/grep` now reports a permanently restore-failed index as `index_restore_failed` with the operator remedy (`restart the daemon or re-register`), matching the search endpoint, instead of telling the caller to retry after a restore that will never happen (#4715).
+- `GET /indexes/:id/status` gained `semantic_coverage`, carrying `vectors_present` read from the live vector store alongside the per-boot `embedded_this_boot` delta. `stages.semantic.embedded` counts only what the current boot's embed pass computed, so it reads `0` on a fully-working index whose HNSW snapshot was already current — indistinguishable from the dead-lane signature of #2178, and enough to get three healthy indexes flagged during an estate audit. `stages.semantic.embedded` keeps its name and value for wire compatibility (#4787).
+- `semantic_coverage.vectors_unavailable_reason` distinguishes `no_vector_store` (BM25-only or `skip_vector` — healthy, nothing to count) from `count_unreadable` (a vector store is attached but its count errored — a fault). A single `null` reported the fault as "not applicable", which is this issue's own defect one level down (#4787).
+- `GET /health` gained `indexes_populated`, `indexes_empty`, and `total_chunks`. `indexes` and `warmboot_summary.indexes_loaded` count registration slots, so a deployment where 220 of 222 indexes held zero chunks reported `indexes_loaded: 222/222`, `indexes_failed: 0`, `status: ok` while a consuming application returned empty context on 913 consecutive operations across 44 days. Counts come from the durable corpus (the in-memory map reads `0` after idle eviction) and exclude corpus-failed indexes, whose real count is unknown rather than zero (#4839).
+- A durable chunk-count READ error no longer falls back to the in-memory map when counting populated indexes. That map reads 0 after idle eviction (#681), so an unreadable corpus on a populated index would have been counted as empty — manufacturing the exact false signal this issue exists to remove. Such an index is now excluded from `indexes_populated`, `indexes_empty`, and `total_chunks` and logged at warn, so `indexes_populated + indexes_empty <= indexes` and the shortfall is visible (#4839).
+- `service install` reads operator tunables from the LEGACY unit when the
+  canonical plist does not exist yet. On the host this issue describes — one
+  whose live agent still carries the old label — the read returned nothing, so
+  `TRUSTY_NO_AUTO_DISCOVER`, `TRUSTY_DEVICE` and `TRUSTY_BM25_CORPUS_CAP` were
+  silently dropped moments before eviction deleted the plist holding the only
+  record. That defeated #4823 precisely on the migration path this change
+  introduces (#4868)
+- `service install --force` reloads even when the rendered unit is unchanged,
+  and `make deploy` uses it. A deploy changes the BINARY behind a byte-identical
+  plist, so without it the install reported the unit already current and launchd
+  kept running the old image. `deploy` also boots the job out before
+  `cargo install` — the unit is `KeepAlive::Always` (#4113), so a SIGTERM'd
+  daemon is relaunched into the middle of the install and gets its binary
+  swapped underneath it, which is #87 (#4868)
+- `service install` no longer destroys environment variables the live unit
+  carried. Before this issue, install wrote a differently-named plist and never
+  touched the running agent, so anything the template failed to reproduce was
+  merely absent from a file nobody read. Once install began overwriting the LIVE
+  unit, the same gap became data loss: the plist on the owner's host carried
+  `TRUSTY_WARMBOOT_INDEX_TIMEOUT_SECS`, `TRUSTY_EMBEDDERD_CALL_TIMEOUT_SECS`,
+  `FASTEMBED_CACHE_DIR`, `FASTEMBED_CACHE_PATH` and `RUST_LOG`, none of which the
+  named-tunable allowlist mentioned. The first is the hand-patch from an incident
+  where a restart cost a 200k-chunk index to a 30 s redb open timeout under
+  warm-boot contention — dropping it re-arms that incident, invisibly, until the
+  next restart. Every key the installed unit carried is now carried forward
+  unless the template computes it itself (`HF_HOME`, `PATH`), so extending an
+  allowlist is no longer what stands between an operator and a lost setting
+  (#4868)
+- The regenerated unit keeps a `WorkingDirectory` the installed one had. The
+  template never emitted the key, so regeneration silently changed the daemon's
+  working directory (#4868)
+- `make deploy` boots out the LEGACY label as well as the canonical one. On a
+  mid-migration host the loaded unit is still `com.trusty.trusty-search` with
+  `KeepAlive::Always`, so booting out only the canonical label left that daemon
+  running into the binary swap — the #87 hazard the bootout exists to prevent,
+  and which the old `unload $(PLIST_LEGACY)` line had covered (#4868)
+- `trusty-search service install` now installs the unit launchd actually has
+  loaded. `LAUNCHD_LABEL` was `com.trusty.trusty-search`; the live agent is
+  `com.trusty.search`. So install wrote a plist under the wrong name,
+  bootstrapped a SECOND daemon contending for :7878 and the index locks, booted
+  out nothing, and left #4393's `ExitTimeOut` fix in a file launchd never reads
+  — the corrected plist was written but never activated. The label now comes
+  from `trusty_common::launchd_labels::SEARCH`, and install evicts the labels
+  earlier installers registered (`com.trusty.trusty-search`,
+  `com.bobmatnyc.trusty-search`) so #2938's stranded duplicate is cleaned up
+  rather than resurrected (#4868)
+- Re-running `service install` with no configuration change no longer restarts
+  the daemon: the unit is reloaded only when the rendered plist differs from
+  what is installed or the label is not loaded. A failed activation restores and
+  re-bootstraps the previous plist instead of leaving search down (#4868)
+- The log-rotation agent's label is derived from the daemon's rather than
+  restated, and install evicts the orphaned
+  `com.trusty.trusty-search.logrotate` a prior version left loaded (#4868)
+- `make deploy` no longer declares `com.bobmatnyc.trusty-search` canonical — a
+  third label family that has never existed on a host. Every deploy therefore
+  unloaded a missing file, killed the daemon, failed to load it back, and fell
+  through to `trusty-search start`, leaving it unsupervised and CLI-detached for
+  the whole `cargo install`. The target now defers to `service install` (#4868)
+- An unparseable `indexes.toml` is now an error rather than an empty registry.
+  It previously read back as "no index was ever registered", and the next write
+  published that view — overwriting a whole registry with a single entry, which
+  is the mass-deregistration both #4317 (73 → 31, then 42 → 5) and #4871
+  recorded. The corrupt file is left intact for recovery.
+- Registry mutations are serialized process-wide and stage through a
+  per-write temporary file instead of one shared `indexes.toml.tmp`. Concurrent
+  writers previously interleaved: a registration landing between another task's
+  load and its save was silently discarded (the observed 80 → 88 → 80 revert),
+  and two writers racing on the shared temp file could publish a spliced,
+  unparseable registry.
+- The boot orphan-reaper removes orphans by id instead of republishing a
+  pre-boot snapshot of the survivors, so an index registered while the sweep
+  was deciding is no longer erased by the cleanup.
+
+Known limitation: the fail-closed parse guarantees the WRITE path only. Every
+read-only caller still swallows the load error and treats a corrupt registry as
+empty — `reindex/runner.rs`, `warm_boot/mod.rs`, `server/tickers.rs`,
+`reconcile.rs`, `server/indexes.rs`, `server/indexes_relocate.rs`,
+`server/index_config.rs`, `persistence_timestamps.rs`, and
+`commands/start/restore.rs`. That is unchanged behaviour, not a regression, but
+the guarantee does not extend to them. See #4871.
+- A crafted spreadsheet can no longer force unbounded decompression: xlsx/xlsm packages are now capped at 256 MiB of total uncompressed content and 16384 entries before calamine opens them (closes [#4894](https://github.com/bobmatnyc/trusty-tools/issues/4894))
+  - a 511 KB adversarial workbook used to extract *successfully* in 143 ms while peaking at 529.8 MiB RSS. `MAX_OFFICE_FILE_BYTES` (10 MiB) bounds the container rather than the decompressed payload, and `EXTRACT_TIMEOUT` (30 s) is a time bound the attack never approaches — so neither existing mitigation applied
+  - calamine exposes no size limit and the zip layer bounds an entry read by its *compressed* length, so the check runs outside calamine: declared sizes are summed from the central directory first (rejecting a declared bomb with zero decompression), then every entry is drained through `Read::take` into a sink so a lying size field is caught too. The guard itself allocates O(1) regardless of the cap
+  - the document is read into memory once and both the guard and calamine parse those same bytes. Validating a path and then reopening it let an attacker with write access to a watched directory swap a benign workbook for a bomb between the two opens, with the watcher supplying unlimited retries
+  - an entry-count cap covers what the byte caps cannot: a package of empty entries declares and decompresses to nothing, yet 200 000 of them in a 16.6 MiB container cost 142.8 MiB of zip metadata before either byte pass ran
+  - measured on the same fixture: peak RSS 529.8 MiB before, 11.7 MiB after
+  - the cap is package-wide rather than per-part like the docx path because calamine reads the whole package, and because a dense workbook at the container cap decompresses to ~190 MiB almost entirely within one sheet entry — a 50 MiB per-part cap would reject legitimate files
+  - `.xls` is unaffected: CFB has no stream compression, so the container cap already bounds it
+  - one visible consequence: a file that is not a workbook in any format is now logged as `spreadsheet extraction failed: Cannot detect file format` rather than as the xlsx reader's zip failure, because format detection now sniffs content instead of trusting the extension
+  - the guard now fails CLOSED on a zip it cannot open. It reads with `zip` 2.x while calamine parses the same bytes with its own `zip` 8.x, so "our reader gave up" was never evidence that calamine would; treating it as nothing-to-bound let a package crafted to trip the older reader skip every cap and reach calamine unbounded. A container starting `PK` that fails to open is now refused; `.xls` (CFB) and non-workbook input still pass through so calamine keeps owning that diagnosis
+- `POST /indexes/:id/reindex` with a `root_path` override no longer makes every
+  search return nothing. The override rebuilt the index handle around the same
+  indexer, leaving the indexer's own `root_path` on the old value — so the
+  absolute `file` on each result was built against the old root while the search
+  post-filter (#64/#541) checked it against the new one, dropping 100% of
+  matches. Callers saw `results: []` with `stale_index_root: true` on an index
+  whose `/status` read `ready` with a full chunk count.
+- `GET /indexes/:id/status` and `GET /indexes/:id/chunks` now return a JSON body with their `503`/`404` instead of a bare status code. An MCP caller previously saw `returned 503 Service Unavailable: ` with empty text and could neither tell a cold-parked index from a permanently restore-failed one nor learn how to clear it (#5061).
+- The cold-parked `503` from `status`, `chunks`, and `grep` now carries `restore_via: "POST /indexes/{id}/search"`, naming the one endpoint that reloads the index. These three cannot reload it themselves, so without the hint a caller polled a `503` that nothing else would clear while a plain `search` on the same id self-healed (#5061).
+- `status`, `chunks`, and `grep` now render the not-resident / restore-failed / unknown verdict through one shared builder, so the three can no longer report the same daemon state three different ways (#5061).
+- `POST /indexes/:id/index-file` and `POST /indexes/:id/remove-file` join that contract. Both did a bare hot-registry lookup and returned a bodyless `404` for a cold-parked index, which under the #4715 rule asserts the index exists nowhere. These two are the supported incremental-indexing path for network-mounted roots (#3408), where the OS watcher cannot fire and the caller is the only thing keeping the index current — so a caller told "unknown index" stops pushing and the index silently stops being updated. They now return `503 index_not_resident` with the `restore_via` hint (#5061).
+- A failed `index-file` / `remove-file` now returns a JSON body naming the failure and the path instead of a bodyless `500`, so a caller can tell which push did not land (#5061).
+- `POST /indexes/:id/search` now renders its residency verdicts through the same builder as every other index-scoped endpoint. It previously hand-rolled them, omitting `retryable` and `index_id` — and it is the endpoint the other bodies' `restore_via` hint points at, so a caller that followed the hint into a restore failure met the one body that did not carry the field it was told to branch on. `index_loading` and `embedder_initializing` gained the same two fields (#5061).
+- `POST /indexes/:id/search` with `stage: "semantic"` against an index whose vector lane is unavailable now returns `503 vector_unavailable` instead of `200` carrying BM25 rows. `reason` separates `skipped_by_config` (permanent — the index was built with the vector component disabled, which #5060 made the default for worktree indexes) from `stage_not_ready` (transient — the embed pass has not finished), and `retryable` carries the same split as a boolean. This mirrors the `503 kg_unavailable` contract `get_call_chain` already uses for `skip_kg` indexes (#5068).
+- The search response `meta` block gained `vector_unavailable` and `vector_disabled_by_config`, the counterparts to the existing `bm25_lane_degraded` flag. An unpinned hybrid query still succeeds and still degrades to the ready lanes, but the caller can now see that no vector lane contributed without diffing `search_capabilities` (#5068).
+- `DELETE /indexes/:id` now clears the index's cold-store records. Deleting a
+  cold-parked or restore-failed index left them behind, so `/status`,
+  `/chunks`, and `grep` answered 503 forever for an id that no longer existed —
+  inverting #5057's rule that 404 means "absent from every store". A
+  cold-parked-only index is also removed from `indexes.toml` now, instead of
+  being resurrected by the next warm boot.
+- The two #4846 warm-boot budget regression tests now assert the NUMBER of tracked-root relocation walks a boot performs instead of how many milliseconds it took, ending a false CI red that fired at ~6% and reproduced crate-scoped at 1-in-20. Widening the ceiling was not available as a fix: a contended post-fix boot measured 416–435 ms (once 833 ms) while the pre-fix cost is 24 walks ≈ 340–400 ms, so any floor that cleared the false reds also cleared the regression the tests exist to catch. A count has no such overlap — post-fix a boot walks the tracked roots once, or not at all with salvage disabled, against 24 times before the fix. Both tests also print `boot`, `one_walk`, and the retired ceiling on a PASSING run (`cargo test -- --nocapture`), so cost erosion in the boot path is visible before it becomes anyone's red gate. (#5084)
+- Auto-discovery excludes the configured worktree base, not just a hardcoded `.worktrees`, so session worktrees under a retargeted base are no longer indexed as duplicate content (#5204).
+- The MCP `INDEX_NOT_READY` payload gained `next_steps.discover`, pointing at `list_indexes`, and `fallback_scope`, which names the circular-advice trap explicitly. `suggested_fallback: ["grep", "find"]` was previously the only actionable field; an agent read "grep" as trusty-search's own index-backed `grep` tool, which reports the same failure under the same session pin (#5213).
+- An unresolvable `index_id` on `search`, the per-lane search tools, and every index-management tool now errors with a message naming `list_indexes` rather than the bare "missing required string field: index_id" (#5213).
+- `search_all`'s tool description no longer contradicts its `index_id` parameter description. Both now state the actual three-tier precedence — explicit id, then the session pin (#1373), then cross-project fan-out only in an unpinned session — and the stale "issue #10" reference is gone (#5213).
+
+### Changed
+
+- The write-quarantine module docs no longer list genuine corruption among the
+  conditions that trigger it. Corruption is absorbed before `corpus_open_failed`
+  can be set: `open_corpus_db_or_recreate` classifies it as recoverable, moves
+  the file aside, and returns a fresh empty corpus. Only lock contention and
+  transient I/O reach the quarantine, so its population is transient-dominated —
+  which the docs now say, along with the recreate-to-empty gap it does not cover.
+- The signed-install script prints `trusty-search service install` as the
+  restart step instead of a hand-run `launchctl bootout`/`bootstrap` pair
+  against a plist path it guessed. Its path resolver had picked
+  `com.trusty.trusty-search.plist` as canonical and labelled the live
+  `com.trusty.search` a drifted alias — the reverse of the truth (#4868)
+- **The embedder UDS socket path moves into a per-uid directory**
+  ([#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099)).
+  `embedder_supervisor::default_socket_path` resolved to `$TMPDIR`, falling back
+  to `/tmp` on headless Linux — world-writable, and unable to be narrowed to
+  `0700`. It now resolves under `trusty_common::uds::scratch_socket_dir()`
+  (`<$TMPDIR or /tmp>/trusty-<uid>/`), keeping the PID suffix that separates
+  concurrent daemons. Affects the `TRUSTY_EMBEDDER=unix:/path` transport only;
+  the default auto-spawn path uses stdio and is unchanged.
+- The MCP tool section of `README.md` and `CLAUDE.md` is now generated from
+  `tool_descriptors()` by `tests/generated_docs.rs`, from one render call that
+  feeds both files, so the roster and count can no longer drift or disagree
+  between them. The table gains an `Arguments` column derived from each tool's
+  JSON Schema. Regenerate with
+  `UPDATE_DOCS=1 cargo test -p trusty-search --test generated_docs` (#5205)
+
 ## [0.42.3] — 2026-08-05
 
 ### Fixed
