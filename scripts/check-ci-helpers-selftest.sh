@@ -305,6 +305,38 @@ assert_eq "capabilities-drift.yml passes a base BRANCH, not base.sha" "1" \
   "$(grep -c 'DOCS_ONLY_BASE: origin/\${{ github.event.pull_request.base.ref }}' \
     "${capabilities_wf}" || true)"
 
+# ---------------------------------------------------------------------------
+# ci-free-disk-space.sh (#5325)
+#
+# The step it replaces spent 147s deleting SDKs on a runner that already had
+# 87G free against a ~27G peak. The gate that stops that is a threshold
+# comparison, and a threshold comparison is exactly the kind of thing that
+# silently inverts. Drive every branch with injected measurements; --dry-run so
+# nothing is actually deleted while this runs on a live runner.
+# ---------------------------------------------------------------------------
+disk_decision() { # disk_decision <avail_gb> [<avail_after_purge_gb>]
+  CI_DISK_AVAIL_GB="$1" CI_DISK_AVAIL_AFTER_GB="${2:-}" \
+    bash scripts/ci-free-disk-space.sh --dry-run 2>/dev/null |
+    sed -n 's/^decision=//p'
+}
+
+echo
+echo "ci-free-disk-space:"
+assert_eq "87G observed on the measured run -> no work" "skip-all" "$(disk_decision 87)"
+assert_eq "at the purge floor exactly"                  "skip-all" "$(disk_decision 45)"
+assert_eq "just below the purge floor"                  "purge"    "$(disk_decision 44 44)"
+assert_eq "purge frees enough to skip the prune"        "purge"    "$(disk_decision 30 60)"
+assert_eq "purge leaves under the prune floor"          "purge+prune" "$(disk_decision 30 24)"
+assert_eq "at the prune floor exactly"                  "purge"    "$(disk_decision 30 25)"
+assert_eq "empty disk takes both tiers"                 "purge+prune" "$(disk_decision 1 2)"
+
+# Wiring: the script being correct proves nothing if a job still inlines the
+# ungated `rm -rf`. All four jobs that reclaim disk must route through it.
+assert_eq "ci.yml has no inlined SDK purge left" "0" \
+  "$(grep -c 'sudo rm -rf /usr/share/dotnet' "${ci_wf}" || true)"
+assert_eq "all four disk-reclaim jobs call the helper" "4" \
+  "$(grep -c 'bash scripts/ci-free-disk-space.sh' "${ci_wf}" || true)"
+
 echo
 if [ "${FAILURES}" -gt 0 ]; then
   echo "check-ci-helpers-selftest: ${FAILURES}/${CASES} case(s) FAILED"
