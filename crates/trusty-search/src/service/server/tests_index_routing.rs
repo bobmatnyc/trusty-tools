@@ -444,9 +444,216 @@ async fn status_semantic_coverage_reports_live_vector_count() {
     );
 }
 
+/// `semantic_coverage` separates "no store wired" from "count unreadable".
+///
+/// Why (#4787 review): `vector_count()` returns `None` for both, so a single
+/// `null` reported a real fault as "not applicable" — this issue's own defect
+/// one level down. A BM25-only handle must say `no_vector_store`, which is a
+/// healthy answer, not a fault.
+/// Test: this test.
+#[tokio::test]
+async fn status_semantic_coverage_distinguishes_absent_from_unreadable() {
+    let state = state_with_handle("no-store", |_| {});
+    let axum::Json(body) = super::status::index_status_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("no-store".to_string()),
+    )
+    .await
+    .expect("resident index reports status");
+
+    assert!(body["semantic_coverage"]["vectors_present"].is_null());
+    assert_eq!(
+        body["semantic_coverage"]["vectors_unavailable_reason"], "no_vector_store",
+        "a BM25-only index has nothing to count — that is healthy, not a fault"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HIGH (review) — the search endpoint honours the residency contract it is
+// the target of
+// ---------------------------------------------------------------------------
+
+/// `search` reports a residency miss exactly as `status`/`chunks`/`grep` do.
+///
+/// Why: every other endpoint's `503 index_not_resident` carries
+/// `restore_via: POST /indexes/{id}/search`. A caller that follows that hint
+/// and hits a restore failure got `index_restore_failed` with `retryable`
+/// ABSENT — undefined to a client written against the contract, so
+/// treat-absent-as-retryable polls a permanently-failed index forever and
+/// treat-absent-as-false abandons states another endpoint calls retryable. The
+/// one endpoint the whole contract points at was the one not honouring it.
+/// Test: this test.
+#[tokio::test]
+async fn search_residency_bodies_match_the_shared_contract() {
+    let failed = state_with_cold_index("search-failed");
+    failed
+        .cold_store
+        .mark_failed(&IndexId::new("search-failed".to_string()));
+
+    let query: crate::core::indexer::SearchQuery =
+        serde_json::from_value(serde_json::json!({ "text": "anything" })).expect("query");
+    let (code, axum::Json(body)) = super::search::search_handler(
+        State(Arc::clone(&failed)),
+        axum::extract::Path("search-failed".to_string()),
+        axum::Json(query),
+    )
+    .await
+    .expect_err("a permanently-failed index cannot be searched");
+
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "index_restore_failed");
+    assert_eq!(
+        body["retryable"], false,
+        "the field a client branches on must be PRESENT here, not absent"
+    );
+    assert_eq!(
+        body["index_id"], "search-failed",
+        "and must name the index, as every sibling endpoint does"
+    );
+
+    // The same body the endpoint that pointed here would have produced.
+    let (status_code, axum::Json(status_body)) = super::status::index_status_handler(
+        State(Arc::clone(&failed)),
+        axum::extract::Path("search-failed".to_string()),
+    )
+    .await
+    .expect_err("failed");
+    assert_eq!(code, status_code);
+    assert_eq!(body["error"], status_body["error"]);
+    assert_eq!(body["retryable"], status_body["retryable"]);
+    assert_eq!(body["index_id"], status_body["index_id"]);
+}
+
+/// An unknown index is a 404 from `search` too, and carries `index_id`.
+///
+/// Why: the 404 arm had the same omission as the 503 arm.
+/// Test: this test.
+#[tokio::test]
+async fn search_unknown_index_404_carries_index_id() {
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let query: crate::core::indexer::SearchQuery =
+        serde_json::from_value(serde_json::json!({ "text": "anything" })).expect("query");
+    let (code, axum::Json(body)) = super::search::search_handler(
+        State(Arc::clone(&state)),
+        axum::extract::Path("never-existed".to_string()),
+        axum::Json(query),
+    )
+    .await
+    .expect_err("genuinely unknown");
+
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "unknown index: never-existed");
+    assert_eq!(body["index_id"], "never-existed");
+}
+
 // ---------------------------------------------------------------------------
 // #4839 — registered is not populated
 // ---------------------------------------------------------------------------
+
+/// Build a real redb corpus holding `n` chunks and return it with its tempdir.
+///
+/// Why: the counters read the DURABLE corpus, so a test that never wires one
+/// exercises only the no-corpus fallback — it would pass against a build where
+/// the durable path was broken.
+fn corpus_with_chunks(n: usize) -> (tempfile::TempDir, Arc<crate::core::corpus::CorpusStore>) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let corpus = crate::core::corpus::CorpusStore::open(&tmp.path().join("index.redb"))
+        .expect("open corpus");
+    let chunks: Vec<crate::core::chunker::RawChunk> = (0..n)
+        .map(|i| crate::core::chunker::RawChunk {
+            id: format!("src/f{i}.rs:1:2"),
+            file: format!("src/f{i}.rs"),
+            start_line: 1,
+            end_line: 2,
+            content: format!("fn f{i}() {{}}"),
+            function_name: Some(format!("f{i}")),
+            language: Some("rust".into()),
+            chunk_type: Default::default(),
+            calls: Vec::new(),
+            inherits_from: Vec::new(),
+            chunk_depth: 0,
+            parent_chunk_id: None,
+            child_chunk_ids: Vec::new(),
+            nlp_keywords: Vec::new(),
+            nlp_code_refs: Vec::new(),
+            virtual_terms: Vec::new(),
+        })
+        .collect();
+    if !chunks.is_empty() {
+        corpus.upsert_chunks(&chunks).expect("upsert chunks");
+    }
+    (tmp, Arc::new(corpus))
+}
+
+/// The #4839 counters read a REAL corpus, and exclude one that cannot be read.
+///
+/// Why: the original coverage registered bare handles with no corpus wired, so
+/// it only ever exercised the in-memory fallback — it would have passed against
+/// a build whose durable-count path was broken, which is the path that matters
+/// (the in-memory map reads 0 after idle eviction, #681). This registers three
+/// indexes in the three states the counters must separate: a populated durable
+/// corpus, a healthy-but-empty one, and a corpus-failed one whose count is
+/// UNKNOWN and must therefore appear in neither counter.
+/// Test: this test.
+#[tokio::test]
+async fn health_counts_a_real_corpus_and_excludes_a_corpus_failed_index() {
+    use crate::core::indexer::CodeIndexer;
+
+    const POPULATED: usize = 7;
+    let (_full_dir, full_corpus) = corpus_with_chunks(POPULATED);
+    let (_empty_dir, empty_corpus) = corpus_with_chunks(0);
+
+    let registry = IndexRegistry::new();
+
+    let mut populated = CodeIndexer::new("has-chunks", "/tmp/health-real");
+    populated.set_corpus_store(full_corpus);
+    registry.register(IndexHandle::bare(
+        IndexId::new("has-chunks".to_string()),
+        Arc::new(RwLock::new(populated)),
+        PathBuf::from("/tmp/health-real"),
+    ));
+
+    let mut empty = CodeIndexer::new("no-chunks", "/tmp/health-real");
+    empty.set_corpus_store(empty_corpus);
+    registry.register(IndexHandle::bare(
+        IndexId::new("no-chunks".to_string()),
+        Arc::new(RwLock::new(empty)),
+        PathBuf::from("/tmp/health-real"),
+    ));
+
+    // Corpus-open failure: the quarantine invariant guarantees no corpus is
+    // wired, so its real count is unknown — never zero.
+    let mut broken = CodeIndexer::new("corpus-failed", "/tmp/health-real");
+    broken.corpus_open_failed = true;
+    registry.register(IndexHandle::bare(
+        IndexId::new("corpus-failed".to_string()),
+        Arc::new(RwLock::new(broken)),
+        PathBuf::from("/tmp/health-real"),
+    ));
+
+    let state = Arc::new(SearchAppState::new(registry));
+    let axum::Json(resp) = super::health::health_handler(State(state)).await;
+
+    assert_eq!(resp.indexes, 3, "all three are registered");
+    assert_eq!(
+        resp.indexes_populated, 1,
+        "only the index with durable chunks counts as populated"
+    );
+    assert_eq!(
+        resp.indexes_empty, 1,
+        "the healthy-but-empty index counts as empty; the corpus-failed one does not"
+    );
+    assert_eq!(
+        resp.total_chunks, POPULATED as u64,
+        "the fleet total comes from the durable corpus, not the in-memory map"
+    );
+    assert_eq!(
+        resp.indexes_populated + resp.indexes_empty,
+        2,
+        "an index whose count is UNKNOWN must appear in neither counter — the \
+         shortfall against `indexes` is the honest signal"
+    );
+}
 
 /// `/health` distinguishes registered indexes from populated ones.
 ///

@@ -28,8 +28,15 @@
 //! not-resident / restore-failed / unknown triple; [`vector_lane_unavailable`]
 //! renders the #5068 semantic-against-a-vector-less-index verdict.
 //!
-//! Test: `service::server::tests_4087`, `service::server::tests_5061`,
-//! `service::server::tests_5068`.
+//! Test: `service::server::tests_4087` covers [`corpus_failure_response`];
+//! `residency_miss_is_404_only_when_absent_everywhere`,
+//! `cold_parked_status_503_body_names_search_as_the_restore_path`,
+//! `restore_failed_status_503_body_is_not_retryable`, and
+//! `search_residency_bodies_match_the_shared_contract` cover
+//! [`residency_miss_response`];
+//! `semantic_stage_on_skip_vector_index_is_503_not_degraded_200` and
+//! `semantic_stage_before_embed_completes_is_503_retryable` cover
+//! [`vector_lane_unavailable`].
 
 use axum::http::StatusCode;
 use axum::Json;

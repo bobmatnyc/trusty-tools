@@ -48,22 +48,7 @@ pub(super) fn index_disk_and_mtime(
     index_id: &str,
     root_path: &std::path::Path,
 ) -> (Option<u64>, Option<String>) {
-    // Why: `persistence::index_data_dir` creates the directory as a side effect,
-    // which would defeat the "missing dir → None" contract this helper relies
-    // on. Compute the path manually (mirroring the persistence layer's logic)
-    // and only touch the filesystem to *read* metadata.
-    let legacy_dir = crate::service::persistence::data_dir().ok().map(|d| {
-        d.join("indexes")
-            .join(crate::service::persistence::sanitize_id_for_path(index_id))
-    });
-    // #4706: the colocated layout (#403) is where a modern index's redb corpus
-    // and HNSW snapshot actually live.
-    let colocated_dir = root_path.join(crate::service::colocated_storage::COLOCATED_DIR_NAME);
-    let dirs: Vec<std::path::PathBuf> = legacy_dir
-        .into_iter()
-        .chain(std::iter::once(colocated_dir))
-        .filter(|d| d.is_dir())
-        .collect();
+    let dirs = index_storage_dirs(index_id, root_path);
     if dirs.is_empty() {
         return (None, None);
     }
@@ -94,15 +79,89 @@ pub(super) fn index_disk_and_mtime(
     // Test: `index_disk_and_mtime_handles_missing_dir` (this fn) +
     // `last_indexed_prefers_redb_then_chunks_json` (the pure selector below) +
     // `last_indexed_takes_the_newer_of_the_two_layouts`.
-    let last_indexed = dirs
-        .iter()
+    (disk_bytes, newest_mtime(&dirs))
+}
+
+/// The directories that hold one index's on-disk data, most-authoritative last.
+///
+/// Why (#4706): the two storage layouts — legacy global
+/// `<data_dir>/indexes/<id>/` and colocated `<root_path>/.trusty-search/`
+/// (#403) — are resolved identically for the size, freshness, and any future
+/// metric, so they are resolved in exactly one place.
+/// What: returns only the directories that EXIST; empty means nothing is on
+/// disk. Both lookups are read-only by construction — `persistence::index_data_dir`
+/// and `colocated_storage::colocated_storage_dir` each call `create_dir_all`, so
+/// neither is used here; the legacy path is joined manually and the colocated
+/// one goes through `has_colocated_storage`, the crate's read-only existence
+/// check.
+///
+/// The colocated directory additionally must contain `index.redb` to count.
+/// Without that gate a home-rooted index would absorb the daemon's OWN runtime
+/// directory: `$HOME/.trusty-search/` holds `http_addr` and `mcp_http_addr`, so
+/// an index rooted at `$HOME` would report the daemon's runtime files as its
+/// corpus. `index.redb` is what makes a `.trusty-search/` a corpus rather than
+/// a coincidence of naming. The cost is that a torn colocated directory holding
+/// only `hnsw.usearch` reads as absent — an undercount in a state that is
+/// already broken, versus a wrong count in a healthy one.
+/// Test: `disk_bytes_sums_colocated_storage_not_just_the_legacy_dir`,
+/// `colocated_dir_without_a_redb_is_not_counted_as_a_corpus`.
+fn index_storage_dirs(index_id: &str, root_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::with_capacity(2);
+    if let Ok(data_dir) = crate::service::persistence::data_dir() {
+        let legacy = data_dir
+            .join("indexes")
+            .join(crate::service::persistence::sanitize_id_for_path(index_id));
+        if legacy.is_dir() {
+            dirs.push(legacy);
+        }
+    }
+    // #4706: `.trusty-search/` alone is not proof of a corpus — see the gate
+    // rationale above.
+    if crate::service::colocated_storage::has_colocated_storage(root_path) {
+        let colocated = root_path.join(crate::service::colocated_storage::COLOCATED_DIR_NAME);
+        if colocated.join("index.redb").is_file() {
+            dirs.push(colocated);
+        }
+    }
+    dirs
+}
+
+/// Freshness only, skipping the directory-size walk (#4706 review).
+///
+/// Why: `search_handler` needs `last_indexed` for its response `meta` on EVERY
+/// query and discards the byte count. Routing it through `index_disk_and_mtime`
+/// made each search pay a blocking, recursive `dir_size_bytes` walk of both
+/// storage directories — on a large index that is a walk of the entire redb +
+/// HNSW tree, per query, for a number nobody reads. #4706 doubled the cost by
+/// adding the second directory.
+/// What: the same directory resolution and the same newest-mtime rule as
+/// `index_disk_and_mtime`, minus the size walk — two `stat` calls per
+/// directory rather than a full traversal.
+/// Test: `last_indexed_only_matches_the_mtime_from_the_full_helper`.
+pub(super) fn index_last_indexed(index_id: &str, root_path: &std::path::Path) -> Option<String> {
+    newest_mtime(&index_storage_dirs(index_id, root_path))
+}
+
+/// Newest `index.redb`/`chunks.json` mtime across an index's storage dirs.
+///
+/// Why (#4706): `first_existing_mtime_rfc3339` fixes precedence WITHIN one
+/// directory (issue #80 — redb over the legacy JSON snapshot). Across the two
+/// layouts the rule is different: a colocated index's writes land in
+/// `.trusty-search/` while a stale global copy may still exist, so the newest
+/// write wins rather than the first directory checked.
+/// What: applies the per-directory selector to each directory, then takes the
+/// chronological max by parsing back to a timestamp rather than comparing the
+/// strings — both are produced by the same UTC formatter so lexicographic order
+/// happens to agree, but that is a property of the formatter, not a contract.
+/// Test: `last_indexed_takes_the_newer_of_the_two_layouts`.
+fn newest_mtime(dirs: &[std::path::PathBuf]) -> Option<String> {
+    dirs.iter()
         .filter_map(|d| first_existing_mtime_rfc3339(d, &["index.redb", "chunks.json"]))
         .max_by_key(|s| {
             chrono::DateTime::parse_from_rfc3339(s)
                 .map(|dt| dt.timestamp_nanos_opt().unwrap_or(i64::MIN))
                 .unwrap_or(i64::MIN)
-        });
-    (disk_bytes, last_indexed)
+        })
 }
 
 /// Return the modification time (as an RFC3339 string) of the first file in
@@ -295,12 +354,26 @@ pub(super) async fn index_status_handler(
     // three healthy indexes on it. `vectors_present` is the cumulative ground
     // truth: `Index::size()` on the store that actually answers queries (the
     // same accessor #4707 made the reindex gate check), so it is never a
-    // bookkeeping figure that can drift from reality. `null` when no vector
-    // store is wired (BM25-only / `skip_vector` / test indexers) — an absent
-    // measurement, deliberately not reported as zero.
+    // bookkeeping figure that can drift from reality.
+    //
+    // #4787 review: `null` alone conflated two unrelated states — no store
+    // wired versus a store whose count could not be read. Reporting a failed
+    // read as "not applicable" is this issue's own defect one level down, so
+    // `vectors_unavailable_reason` names which of the two produced the null.
+    // It is absent whenever `vectors_present` is a number.
     let vectors_present = indexer.vector_count().await;
+    let vectors_unavailable_reason = match (vectors_present, indexer.has_vector_store()) {
+        (Some(_), _) => serde_json::Value::Null,
+        // A store is attached but `len()` errored — a real fault, not an
+        // absence, and distinct from `skip_vector`.
+        (None, true) => serde_json::Value::String("count_unreadable".into()),
+        // BM25-only, `skip_vector`, or a test indexer: there is nothing to
+        // count and that is the correct, healthy answer.
+        (None, false) => serde_json::Value::String("no_vector_store".into()),
+    };
     let semantic_coverage = serde_json::json!({
         "vectors_present": vectors_present,
+        "vectors_unavailable_reason": vectors_unavailable_reason,
         "chunk_count": chunk_count,
         // The same number `stages.semantic.embedded` carries, restated here
         // under a name that says what it measures. The field over in `stages`

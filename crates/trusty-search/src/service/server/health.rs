@@ -146,11 +146,17 @@ pub(super) struct HealthResponse {
     /// population are different facts and this response now reports both.
     /// What: computed live in the same single registry scan as
     /// `indexes_kg_disabled`, from the DURABLE corpus count (the in-memory map
-    /// reads 0 after idle eviction, so it cannot be the source). Indexes whose
-    /// corpus failed to open are excluded from both this and `indexes_empty` —
-    /// their count is unknown, not zero, and `indexes_corpus_failed` already
-    /// owns that state.
-    /// Test: `health_reports_populated_and_empty_index_counts`.
+    /// reads 0 after idle eviction, so it cannot be the source).
+    ///
+    /// An index is excluded from BOTH this and `indexes_empty` when its count
+    /// is unknown rather than zero: the corpus failed to open (`#4333`, already
+    /// owned by `indexes_corpus_failed`), the durable count read errored, or
+    /// the handle's lock was contended for this poll. So
+    /// `indexes_populated + indexes_empty <= indexes` — the shortfall is
+    /// indexes whose population could not be determined, never indexes silently
+    /// assumed empty.
+    /// Test: `health_reports_populated_and_empty_index_counts`,
+    /// `health_counts_a_real_corpus_and_excludes_a_corpus_failed_index`.
     pub(super) indexes_populated: usize,
     /// Issue #4839: registered indexes holding zero chunks whose corpus opened
     /// fine — see `indexes_populated`.
@@ -611,21 +617,46 @@ pub(super) async fn health_handler(
                 if !indexer.has_embed_pool() {
                     indexes_embed_pool_missing += 1;
                 }
-                // #4839: same fail-open discipline as every other counter in
-                // this scan — a contended handle is skipped for this poll and
-                // re-counted on the next one. A corpus-failed index is counted
-                // as NEITHER populated nor empty: its real chunk count is
-                // unknown (#4333), and calling it empty would invent a fact.
+                // #4839: a corpus-failed index is counted as NEITHER populated
+                // nor empty — its real chunk count is unknown (#4333), and
+                // calling it empty would invent a fact.
                 if !indexer.corpus_open_failed {
-                    let chunks = indexer
-                        .corpus_arc()
-                        .and_then(|c| c.chunk_count().ok())
-                        .unwrap_or_else(|| indexer.chunk_count());
-                    total_chunks = total_chunks.saturating_add(chunks as u64);
-                    if chunks > 0 {
-                        indexes_populated += 1;
-                    } else {
-                        indexes_empty += 1;
+                    // #4839 review: a durable-count READ error gets the same
+                    // treatment as a failed open, for the same reason. Falling
+                    // back to `indexer.chunk_count()` here would have been a
+                    // fail-open inside the fix for fail-opens: the in-memory
+                    // map reads 0 after idle eviction (#681), so an unreadable
+                    // corpus on a populated index would have been counted as
+                    // empty — manufacturing the exact false signal this issue
+                    // exists to remove.
+                    let counted = match indexer.corpus_arc() {
+                        Some(corpus) => match corpus.chunk_count() {
+                            Ok(n) => Some(n),
+                            Err(e) => {
+                                tracing::warn!(
+                                    index_id = %handle.id,
+                                    error = %e,
+                                    "health: durable chunk count unreadable — excluding this \
+                                     index from indexes_populated/indexes_empty/total_chunks \
+                                     for this poll rather than reporting a count it did not \
+                                     produce (#4839)"
+                                );
+                                None
+                            }
+                        },
+                        // No durable corpus wired at all (BM25-only or test
+                        // indexer). The in-memory map is the AUTHORITY for that
+                        // shape, not a fallback from a failure — no eviction
+                        // can make it lie, because there is nothing else.
+                        None => Some(indexer.chunk_count()),
+                    };
+                    if let Some(chunks) = counted {
+                        total_chunks = total_chunks.saturating_add(chunks as u64);
+                        if chunks > 0 {
+                            indexes_populated += 1;
+                        } else {
+                            indexes_empty += 1;
+                        }
                     }
                 }
             }

@@ -29,8 +29,8 @@ use super::{
 /// tool that lists valid values for it (#5213 — an error that says only "field
 /// missing" leaves the caller guessing an id, which is the failure #1373 pinned
 /// the session to avoid in the first place).
-/// Test: `pinned_index_status_defaults_to_pin` in `tests.rs`;
-/// `missing_index_id_error_names_list_indexes` in `tests_not_ready.rs`.
+/// Test: `resolve_index_id_prefers_explicit_then_pinned` pins the precedence
+/// and `missing_index_id_error_names_list_indexes` the error text.
 fn required_index_id(server: &McpServer, args: &Value) -> Result<String, DispatchError> {
     server
         .resolve_index_id(args)

@@ -93,8 +93,32 @@ fn disk_bytes_is_none_only_when_neither_layout_exists() {
 /// both, taking the max rather than the first.
 /// Test: this test.
 #[test]
+#[serial_test::serial]
 fn last_indexed_takes_the_newer_of_the_two_layouts() {
-    let tmp = colocated_root_with(64);
+    const LEGACY_BYTES: usize = 128;
+    const COLOCATED_BYTES: usize = 512;
+
+    // Both layouts, for real: the legacy dir needs `TRUSTY_DATA_DIR` (the var
+    // `persistence::data_dir` honours), which is process-wide — hence `#[serial]`. Without both present this test can
+    // only prove the single-directory case its name does not claim.
+    let data_dir = tempfile::tempdir().expect("data dir");
+    // SAFETY: `#[serial]` serialises every env-mutating test in this binary.
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR", data_dir.path());
+    }
+
+    let id = format!("newer-4706-{}", std::process::id());
+    let legacy = data_dir
+        .path()
+        .join("indexes")
+        .join(crate::service::persistence::sanitize_id_for_path(&id));
+    std::fs::create_dir_all(&legacy).expect("create legacy dir");
+    std::fs::write(legacy.join("index.redb"), vec![b'L'; LEGACY_BYTES]).expect("legacy redb");
+
+    // Strictly newer colocated write — the state a migrated index is in, where
+    // the stale global copy must NOT win the freshness reading.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let tmp = colocated_root_with(COLOCATED_BYTES);
     let colocated_redb = tmp
         .path()
         .join(crate::service::colocated_storage::COLOCATED_DIR_NAME)
@@ -104,12 +128,70 @@ fn last_indexed_takes_the_newer_of_the_two_layouts() {
         .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339())
         .expect("colocated redb mtime");
 
-    let id = format!("newer-4706-{}", std::process::id());
-    let (_disk, mtime) = index_disk_and_mtime(&id, tmp.path());
+    let (disk, mtime) = index_disk_and_mtime(&id, tmp.path());
+
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+    }
+
     assert_eq!(
         mtime.as_deref(),
         Some(expected.as_str()),
-        "the colocated write is the only one present, so it must be the reported mtime"
+        "the NEWER colocated write must win over the older legacy copy"
+    );
+    assert_eq!(
+        disk,
+        Some((LEGACY_BYTES + COLOCATED_BYTES) as u64),
+        "both layouts must be summed, not picked between"
+    );
+}
+
+/// #4706 review — a `.trusty-search/` with no `index.redb` is not a corpus.
+///
+/// Why: `$HOME/.trusty-search/` is the daemon's OWN runtime directory — it
+/// holds `http_addr` and `mcp_http_addr`. An index rooted at `$HOME` would
+/// otherwise report the daemon's runtime files as its corpus. The directory
+/// name alone is a coincidence; `index.redb` is what makes it storage.
+/// Test: this test.
+#[test]
+fn colocated_dir_without_a_redb_is_not_counted_as_a_corpus() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp
+        .path()
+        .join(crate::service::colocated_storage::COLOCATED_DIR_NAME);
+    std::fs::create_dir_all(&dir).expect("create .trusty-search");
+    // Exactly the daemon runtime files, no corpus.
+    std::fs::write(dir.join("http_addr"), b"127.0.0.1:7878").expect("http_addr");
+    std::fs::write(dir.join("mcp_http_addr"), b"127.0.0.1:7879").expect("mcp_http_addr");
+
+    let id = format!("runtime-dir-4706-{}", std::process::id());
+    let (disk, mtime) = index_disk_and_mtime(&id, tmp.path());
+    assert!(
+        disk.is_none(),
+        "the daemon's runtime dir must not be counted as an index corpus, got {disk:?}"
+    );
+    assert!(mtime.is_none());
+}
+
+/// #4706 review — the mtime-only helper agrees with the full one.
+///
+/// Why: `search_handler` was paying a recursive two-directory size walk per
+/// query for a byte count it discarded. Splitting the mtime path out is only
+/// safe if it reports the identical value; this pins that equivalence so the
+/// two cannot drift.
+/// Test: this test.
+#[test]
+fn last_indexed_only_matches_the_mtime_from_the_full_helper() {
+    let tmp = colocated_root_with(256);
+    let id = format!("split-4706-{}", std::process::id());
+
+    let (_disk, full) = index_disk_and_mtime(&id, tmp.path());
+    let mtime_only = crate::service::server::status::index_last_indexed(&id, tmp.path());
+
+    assert!(full.is_some(), "fixture must produce an mtime");
+    assert_eq!(
+        mtime_only, full,
+        "the search path's cheaper helper must not report a different freshness"
     );
 }
 
