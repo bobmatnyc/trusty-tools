@@ -48,34 +48,35 @@ const SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// object: `{ fleet, auto_resume: { desired, env, pending_restart } }`.
 ///
 /// Auto-resume control fields:
-/// - `desired`: the operator's persisted choice (console-mutable, the source of
-///   truth the supervisor will read on its next sweep).
-/// - `env`: the flag the supervisor process actually booted with
-///   (`TRUSTY_MPM_AUTO_RESUME`); changes only take full effect on restart.
-/// - `pending_restart`: `desired != env` — render a "restart pending" hint.
+/// - `desired`: the operator's persisted choice (console-mutable).
+/// - `env`: the flag the supervisor process booted with (`TRUSTY_MPM_AUTO_RESUME`).
+/// - `effective`: what the supervisor's next sweep will actually do — the
+///   persisted file when it exists, otherwise `env`.
+/// - `pending_restart`: always `false` since #5208. It used to be `desired != env`
+///   because the supervisor read only its boot env, so a console toggle really did
+///   need a restart. The supervisor now re-reads the file every sweep, so the
+///   "restart pending" hint would be a false claim; the key is kept so the
+///   console's existing `autoResumeLabel()` keeps parsing and simply falls through
+///   to plain on/off.
 ///
-/// There is deliberately NO `effective` field: until the supervisor-sweep wiring
-/// lands, "what is in force right now" is exactly `env`, so a separate
-/// `effective` field would just duplicate `env` and mislead readers into thinking
-/// it already reflects the desired-state file. Reintroduce it (distinct from
-/// `env`) only when the supervisor honours `desired` mid-run.
 /// Test: `supervisor_status_reports_fleet_and_auto_resume`.
 async fn fleet_snapshot(state: &Arc<DaemonState>) -> Value {
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
     let fleet = FleetMetrics::from_records(&records);
 
-    // The persisted desired flag is the console-mutable control; the env flag is
-    // what the supervisor process booted with. They can disagree until restart.
-    let desired = auto_resume::read_desired().unwrap_or(false);
+    // #5208: read the tri-state override so `effective` can say "no file → the
+    // supervisor's boot env stands" rather than flattening absence into `false`.
+    let over = auto_resume::read_override().unwrap_or(None);
     let env = auto_resume::effective_from_env();
 
     json!({
         "fleet": fleet,
         "auto_resume": {
-            "desired": desired,
+            "desired": over.unwrap_or(false),
             "env": env,
-            "pending_restart": desired != env,
+            "effective": over.unwrap_or(env),
+            "pending_restart": false,
         },
     })
 }
@@ -132,22 +133,24 @@ pub async fn supervisor_status(state: &Arc<DaemonState>) -> Result<Value, String
 /// (RFC §6 Q6 — controls live in the console, not CLI-only). The supervisor runs
 /// as a separate process, so this writes the desired state the supervisor reads
 /// on its next sweep rather than mutating a live env var.
-/// What: writes `~/.trusty-mpm/auto_resume`, then echoes the resulting
-/// `{ desired, env, pending_restart }` so the console can render the toggle and a
-/// "restart pending" hint when the persisted desire differs from the supervisor's
-/// boot-time env. (No `effective` field — see [`fleet_snapshot`] for why it would
-/// merely duplicate `env` and mislead until the supervisor-sweep wiring lands.)
-/// Test: `auto_resume_set_persists_desired`.
+/// What: writes `~/.trusty-mpm/auto_resume`, then echoes the same
+/// `{ desired, env, effective, pending_restart }` block [`fleet_snapshot`]
+/// returns. Since #5208 the write is load-bearing: the supervisor re-reads the
+/// file every sweep, so `effective` is `enabled` and no restart is pending.
+/// Test: `write_then_read_round_trips` (the persistence),
+/// `supervisor_honours_console_desired_state_without_restart` (the supervisor
+/// acting on it). This function itself writes the real `~/.trusty-mpm` root, so
+/// it is deliberately not unit-tested against a live `$HOME`.
 pub async fn auto_resume_set(enabled: bool) -> Result<Value, String> {
     auto_resume::write_desired(enabled)
         .map_err(|e| format!("persisting auto_resume desired state: {e}"))?;
 
-    let desired = enabled;
-    let env = auto_resume::effective_from_env();
     Ok(json!({
-        "desired": desired,
-        "env": env,
-        "pending_restart": desired != env,
+        "desired": enabled,
+        "env": auto_resume::effective_from_env(),
+        // #5208: the file outranks the boot env and is re-read every sweep.
+        "effective": enabled,
+        "pending_restart": false,
     }))
 }
 
