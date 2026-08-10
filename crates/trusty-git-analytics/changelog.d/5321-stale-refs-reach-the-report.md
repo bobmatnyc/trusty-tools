@@ -8,4 +8,5 @@ Fixed
   a report over months-old refs was indistinguishable from a current one (#5321,
   DOC-67 §9). `commands::collect::run_reporting_fetch` is the new entry point
   that returns those outcomes — `run` and `run_with_progress` are unchanged and
-  still return `()`.
+  still return `()`. The sweep's terminal table qualifies the same stage as
+  `ok (N stale)`; a run where every remote was reached renders as before.
