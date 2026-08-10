@@ -643,6 +643,93 @@ async fn dispatch_kg_list_subjects_with_counts_returns_pairs() {
     );
 }
 
+/// Why: #4810 — `truncated = subjects.len() == limit` cannot distinguish "the
+/// page filled and more subjects exist" from "the palace holds exactly
+/// `limit` subjects in total"; a caller that trusted the old flag would raise
+/// `limit` and get back an identical page for nothing.
+/// What: asserts three subjects, then discovers the palace's real total
+/// subject count with a wide-open `kg_list_subjects` call — `palace_create`
+/// auto-bootstraps its own `project_subject` triple (see
+/// `bootstrap::bootstrap_palace`), so the total is not simply the three
+/// asserted names. Requests `limit: <that total>` and confirms `truncated`
+/// is `false` — the case the length-equality check got wrong. Then requests
+/// `limit: 1` over the same palace and confirms `truncated` still comes back
+/// `true` there.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_exact_limit_is_not_truncated() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "exactlimit"}))
+        .await
+        .expect("palace_create");
+
+    for subject in ["alpha", "beta", "gamma"] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "exactlimit",
+                "subject": subject,
+                "predicate": "works_at",
+                "object": "Acme",
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let wide_open = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": 200}),
+    )
+    .await
+    .expect("kg_list_subjects wide-open baseline");
+    let total = wide_open["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .len();
+    assert!(
+        total >= 3,
+        "the three asserted subjects should all be present: total={total}"
+    );
+    assert_eq!(
+        wide_open["truncated"], false,
+        "a limit well above the real total is never truncated"
+    );
+
+    let listed = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": total}),
+    )
+    .await
+    .expect("kg_list_subjects");
+
+    let subjects = listed["subjects"].as_array().expect("subjects array");
+    assert_eq!(
+        subjects.len(),
+        total,
+        "every subject should come back: {subjects:?}"
+    );
+    assert_eq!(
+        listed["truncated"], false,
+        "exactly `limit` subjects total is not truncation"
+    );
+
+    let capped = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": 1}),
+    )
+    .await
+    .expect("kg_list_subjects");
+    assert_eq!(
+        capped["truncated"], true,
+        "limit below the subject count should still report truncated"
+    );
+}
+
 /// Why: Issue #53 — verify the MCP `kg_gaps` tool returns whatever was
 /// last cached on the registry. Two cases: empty cache returns an empty
 /// array, and a seeded cache returns the cached entries verbatim.

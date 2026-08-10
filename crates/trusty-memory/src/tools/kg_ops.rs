@@ -274,11 +274,15 @@ pub(crate) async fn handle_kg_gaps(state: &AppState, args: Value) -> Result<Valu
 /// What: resolves the palace, clamps `limit` into `[1, MAX_KG_LIST_LIMIT]`
 /// (default [`DEFAULT_KG_LIST_LIMIT`]), and reads the alphabetically-ordered
 /// subject list — bare strings, or `{subject, count}` objects when
-/// `with_counts` is true. `truncated` reports that the page filled to the
-/// effective limit, which is the only signal the caller has that more subjects
-/// may exist beyond it.
+/// `with_counts` is true. `truncated` cannot be `subjects.len() == limit`: a
+/// palace that holds exactly `limit` subjects would report `true` with no
+/// more subjects to page to. Instead the store is asked for one row past
+/// `limit` (#4810); if that extra row comes back it is dropped and
+/// `truncated` is `true`, otherwise every row returned is real and
+/// `truncated` is `false`.
 /// Test: `dispatch_kg_list_subjects_returns_distinct_subjects`,
-/// `dispatch_kg_list_subjects_with_counts_returns_pairs`.
+/// `dispatch_kg_list_subjects_with_counts_returns_pairs`,
+/// `dispatch_kg_list_subjects_exact_limit_is_not_truncated`.
 pub(crate) async fn handle_kg_list_subjects(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "kg_list_subjects")?;
     let handle = open_palace_handle(state, &palace)?;
@@ -291,28 +295,36 @@ pub(crate) async fn handle_kg_list_subjects(state: &AppState, args: Value) -> Re
         .get("with_counts")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // #4810: over-fetch by one so the extra row's presence — not a
+    // length-equals-limit coincidence — is the truncation signal.
+    let fetch_limit = limit + 1;
 
-    let subjects: Vec<Value> = if with_counts {
-        handle
+    let (subjects, truncated): (Vec<Value>, bool) = if with_counts {
+        let mut rows = handle
             .kg
-            .list_subjects_with_counts(limit)
-            .context("kg.list_subjects_with_counts")?
+            .list_subjects_with_counts(fetch_limit)
+            .context("kg.list_subjects_with_counts")?;
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
+        let subjects = rows
             .into_iter()
             .map(|(subject, count)| json!({ "subject": subject, "count": count }))
-            .collect()
+            .collect();
+        (subjects, truncated)
     } else {
-        handle
+        let mut rows = handle
             .kg
-            .list_subjects(limit)
-            .context("kg.list_subjects")?
-            .into_iter()
-            .map(Value::String)
-            .collect()
+            .list_subjects(fetch_limit)
+            .context("kg.list_subjects")?;
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
+        let subjects = rows.into_iter().map(Value::String).collect();
+        (subjects, truncated)
     };
 
     Ok(json!({
         "palace": palace,
-        "truncated": subjects.len() == limit,
+        "truncated": truncated,
         "with_counts": with_counts,
         "subjects": subjects,
     }))
