@@ -43,6 +43,14 @@
 //! the value lives beside `workspace_root` in the host config both are reachable
 //! from without a project in hand.
 //!
+//! That argument covers detection only. The CREATION sites
+//! (`inproject::worktree_path_for`, `provisioner::workspace::provision_in`) DO
+//! hold the project checkout and could read its `.trusty-mpm.toml` — but a base
+//! that creation and detection disagree about is worse than either choice alone:
+//! worktrees would be created somewhere the remover, the pruner, the indexer,
+//! and the attribution scan do not look. Since detection cannot be
+//! project-scoped, creation must not be either.
+//!
 //! Scope: this module governs trusty-mpm's OWN session provisioning base
 //! (`<repo>/.worktrees/<session-id>`, owner ruling 2026-08-05 — `.base` is
 //! retired and nothing writes it). It is deliberately unrelated to
@@ -52,9 +60,12 @@
 //! reclassify an agent worktree.
 //!
 //! Test: `default_root_is_trusty_mpm_projects`, `env_overrides_config_and_default`,
-//! `config_template_used_when_no_env`, `tilde_expansion`,
-//! `default_worktrees_dirname`, `configured_worktrees_dirname_is_honoured`,
+//! `config_template_used_when_no_env`, `config_file_drives_both_zero_argument_resolvers`,
+//! `tilde_expansion`, `default_worktrees_dirname`,
+//! `configured_worktrees_dirname_is_honoured`,
 //! `invalid_worktrees_dirname_falls_back_to_default`,
+//! `reserved_worktrees_dirname_falls_back_to_default`,
+//! `reserved_name_via_env_cannot_claim_the_claude_agent_store`,
 //! `detection_matches_configured_and_builtin`.
 
 use std::path::{Path, PathBuf};
@@ -207,17 +218,42 @@ pub fn resolve_worktrees_dirname(configured: Option<&str>) -> String {
         return DEFAULT_WORKTREES_DIRNAME.to_string();
     };
 
-    if is_single_component(candidate) {
-        candidate.to_string()
-    } else {
+    if !is_single_component(candidate) {
         tracing::warn!(
             candidate,
             default = DEFAULT_WORKTREES_DIRNAME,
             "worktrees_dirname must be a single path component — using the default"
         );
-        DEFAULT_WORKTREES_DIRNAME.to_string()
+        return DEFAULT_WORKTREES_DIRNAME.to_string();
     }
+    if RESERVED_WORKTREES_DIRNAMES.contains(&candidate) {
+        tracing::warn!(
+            candidate,
+            default = DEFAULT_WORKTREES_DIRNAME,
+            "worktrees_dirname collides with a reserved directory name — using the default"
+        );
+        return DEFAULT_WORKTREES_DIRNAME.to_string();
+    }
+    candidate.to_string()
 }
+
+/// Directory names a configured worktree base may never take.
+///
+/// Why: detection is a superset (configured name OR `.worktrees`), and
+/// trusty-mpm's ownership predicate `is_session_worktree` asks only whether a
+/// path's PARENT is a worktree base. Configuring the dotless `worktrees` would
+/// therefore make `.claude/worktrees/<agent>` — Claude Code's own agent
+/// worktree store, out of scope per ADR-0020 — match that predicate, and
+/// `worktree_reclaim::tm_provisioned` applies "exactly the predicate the remover
+/// applies". The classifier and the remover would then BOTH call an agent
+/// worktree tm-owned, with no second opinion left to catch it (#2919 removed
+/// that asymmetry deliberately). Rejecting the name is what keeps
+/// `worktree_reclaim`'s stated invariant true under every configuration.
+/// What: `worktrees` (the `.claude/worktrees` leaf), plus the git, harness, and
+/// legacy-base directories a worktree base must never shadow. A reserved value
+/// falls back to `.worktrees` with a warning — never to a sanitized variant.
+/// Test: `reserved_worktrees_dirname_falls_back_to_default`.
+const RESERVED_WORKTREES_DIRNAMES: &[&str] = &["worktrees", ".git", ".claude", ".base"];
 
 /// True iff `name` is one plain path component that cannot escape its parent.
 ///
@@ -441,6 +477,104 @@ mod tests {
                 "{bad:?} must be rejected back to the built-in default"
             );
         }
+    }
+
+    /// Why: every other test here drives the env var or passes a template
+    /// directly, so the CONFIG-FILE leg — the one the changelog advertises —
+    /// had no coverage at all: stubbing `WorkspaceLayoutConfig::load()` to
+    /// `Self::default()` left the suite fully green. This is the test that
+    /// fails when the config read is removed.
+    /// What: points `$HOME` at a tempdir, writes a real `config.yaml` at the
+    /// canonical `crate_config` location for [`MPM_CRATE_NAME`], and asserts
+    /// BOTH zero-argument resolvers read it — covering the crate name, the two
+    /// YAML key spellings, and the `crate-config` wiring together.
+    /// Test: this test.
+    #[test]
+    fn config_file_drives_both_zero_argument_resolvers() {
+        let _guard = env_lock();
+        clear_env();
+        let fake_home = tempfile::tempdir().expect("tempdir");
+        let cfg_path = crate::crate_config::crate_config_path_at(fake_home.path(), MPM_CRATE_NAME);
+        std::fs::create_dir_all(cfg_path.parent().expect("config parent")).expect("mkdir");
+        std::fs::write(
+            &cfg_path,
+            "workspace_root_template: /tmp/from-yaml-root\nworktrees_dirname: .from-yaml-wt\n",
+        )
+        .expect("write config.yaml");
+
+        let real_home = std::env::var_os("HOME");
+        // SAFETY: guarded by `env_lock()`; HOME is restored below.
+        unsafe { std::env::set_var("HOME", fake_home.path()) };
+        let root = workspace_root();
+        let wt = worktrees_dirname();
+        // SAFETY: as above — restore before any assertion can unwind.
+        unsafe {
+            match &real_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert_eq!(
+            root,
+            PathBuf::from("/tmp/from-yaml-root"),
+            "workspace_root() must read workspace_root_template from {}",
+            cfg_path.display()
+        );
+        assert_eq!(
+            wt,
+            ".from-yaml-wt",
+            "worktrees_dirname() must read worktrees_dirname from {}",
+            cfg_path.display()
+        );
+    }
+
+    /// Why: a dotless `worktrees` would make `.claude/worktrees/<agent>` satisfy
+    /// trusty-mpm's `is_session_worktree`, and `worktree_reclaim::tm_provisioned`
+    /// applies exactly the remover's predicate — so the classifier AND the
+    /// remover would both call a Claude Code agent worktree tm-owned and
+    /// deletable (ADR-0020 puts that store out of scope entirely).
+    /// What: every reserved name falls back to `.worktrees`, and the built-in
+    /// default is never itself rejected.
+    /// Test: this test.
+    #[test]
+    fn reserved_worktrees_dirname_falls_back_to_default() {
+        let _guard = env_lock();
+        clear_env();
+        for reserved in ["worktrees", ".git", ".claude", ".base"] {
+            assert_eq!(
+                resolve_worktrees_dirname(Some(reserved)),
+                DEFAULT_WORKTREES_DIRNAME,
+                "{reserved:?} must never become the worktree base"
+            );
+        }
+        // The default must still survive being configured explicitly.
+        assert_eq!(
+            resolve_worktrees_dirname(Some(DEFAULT_WORKTREES_DIRNAME)),
+            DEFAULT_WORKTREES_DIRNAME
+        );
+    }
+
+    /// Why: the reserved list must hold for the ENV leg too — an operator who
+    /// exports `TRUSTY_MPM_WORKTREES_DIRNAME=worktrees` reaches the same
+    /// agent-worktree-deletion path as one who writes it into config.
+    /// What: the env var carrying a reserved name resolves to the default, and
+    /// the detection matcher then refuses to claim a bare `worktrees` segment.
+    /// Test: this test.
+    #[test]
+    fn reserved_name_via_env_cannot_claim_the_claude_agent_store() {
+        let _guard = env_lock();
+        clear_env();
+        // SAFETY: guarded by `env_lock()`.
+        unsafe { std::env::set_var(WORKTREES_DIRNAME_ENV, "worktrees") };
+        let names = WorktreeDirNames::from_configured(None);
+        clear_env();
+
+        assert_eq!(names.creation_name(), DEFAULT_WORKTREES_DIRNAME);
+        assert!(
+            !names.matches("worktrees"),
+            "`.claude/worktrees/<agent>` must never be classified as a tm session worktree"
+        );
     }
 
     /// Why: retargeting the base must not orphan worktrees already on disk —

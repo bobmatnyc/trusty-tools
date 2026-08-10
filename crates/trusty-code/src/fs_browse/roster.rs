@@ -486,8 +486,12 @@ mod tests {
     /// Why: the companion to the regression above. A resolver that honoured
     /// config but changed the unconfigured default would break every existing
     /// install silently.
-    /// What: with both env vars cleared, the shared resolver returns
-    /// `<home>/trusty-mpm-projects`.
+    /// What: with the env var cleared AND no config template supplied, the
+    /// shared resolver returns `<home>/trusty-mpm-projects`. Asserts against
+    /// `resolve_workspace_root(None)` rather than the zero-argument
+    /// `workspace_root()`, which reads the DEVELOPER'S OWN `config.yaml` — a
+    /// machine with `workspace_root_template` set would otherwise fail this
+    /// test for a correct build.
     /// Test: this test.
     #[test]
     fn default_workspace_root_is_unchanged_when_nothing_is_configured() {
@@ -496,7 +500,7 @@ mod tests {
         unsafe {
             std::env::remove_var(trusty_common::workspace_layout::WORKSPACE_ROOT_ENV);
         }
-        let root = trusty_common::workspace_layout::workspace_root();
+        let root = trusty_common::workspace_layout::resolve_workspace_root(None);
         let home = dirs::home_dir().expect("home");
         assert_eq!(root, home.join("trusty-mpm-projects"));
     }

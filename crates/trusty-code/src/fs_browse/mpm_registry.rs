@@ -524,7 +524,11 @@ mod tests {
             repo_url: "https://github.com/bobmatnyc/trusty-tools".to_string(),
         }];
 
-        let merged = merge(fs_roster, &registry, Some(&home.path().join("trusty-mpm-projects")));
+        let merged = merge(
+            fs_roster,
+            &registry,
+            Some(&home.path().join("trusty-mpm-projects")),
+        );
 
         assert_eq!(merged.entries.len(), 1);
         assert!(merged.entries[0].registered, "must be marked registered");
@@ -550,7 +554,11 @@ mod tests {
             &home.path().join("trusty-mpm-projects"),
         );
 
-        let merged = merge(fs_roster, &[], Some(&home.path().join("trusty-mpm-projects")));
+        let merged = merge(
+            fs_roster,
+            &[],
+            Some(&home.path().join("trusty-mpm-projects")),
+        );
 
         assert_eq!(merged.entries.len(), 1);
         assert!(!merged.entries[0].registered, "must stay unregistered");
@@ -573,7 +581,11 @@ mod tests {
             repo_url: "https://github.com/someone/ghost-project".to_string(),
         }];
 
-        let merged = merge(fs_roster, &registry, Some(&home.path().join("trusty-mpm-projects")));
+        let merged = merge(
+            fs_roster,
+            &registry,
+            Some(&home.path().join("trusty-mpm-projects")),
+        );
 
         assert!(merged.entries.is_empty());
     }
@@ -628,7 +640,11 @@ mod tests {
             repo_url: "https://github.com/bobmatnyc/trusty-tools".to_string(),
         }];
 
-        let merged = merge(fs_roster, &registry, Some(&home.path().join("trusty-mpm-projects")));
+        let merged = merge(
+            fs_roster,
+            &registry,
+            Some(&home.path().join("trusty-mpm-projects")),
+        );
 
         assert_eq!(
             merged.entries.len(),
@@ -680,7 +696,11 @@ mod tests {
 
         // `merge` resolves the registry entry against the ALIAS, not the
         // real path the fs scan used.
-        let merged = merge(fs_roster, &registry, Some(&alias.join("trusty-mpm-projects")));
+        let merged = merge(
+            fs_roster,
+            &registry,
+            Some(&alias.join("trusty-mpm-projects")),
+        );
         let _ = std::fs::remove_file(&alias);
 
         assert_eq!(

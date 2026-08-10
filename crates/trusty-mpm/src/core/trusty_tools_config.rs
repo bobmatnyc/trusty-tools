@@ -78,6 +78,12 @@ pub use trusty_common::workspace_layout::{
 /// built-in default. `workspace_root_template` may contain a leading `~`.
 /// Test: `config_template_used_when_no_env`, the `crate_config` round-trip tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+// #5204: `#[non_exhaustive]` so adding a settings field stays non-breaking.
+// Without it, every new `pub` field on this all-public struct is a
+// `constructible_struct_adds_field` major under cargo-semver-checks — the
+// #4088 class of break, which a workspace `cargo check` cannot catch because
+// the root path override pairs local source with local dependency.
+#[non_exhaustive]
 pub struct TrustyToolsConfig {
     /// Template directory for managed-session workspace roots.
     ///

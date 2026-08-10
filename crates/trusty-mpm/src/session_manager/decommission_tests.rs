@@ -47,6 +47,47 @@ fn is_session_worktree_detects_dot_worktrees_component() {
     )));
 }
 
+/// #5204 REGRESSION: no configured worktree base may make a Claude Code agent
+/// worktree look tm-owned.
+///
+/// Why: making the base configurable put `.claude/worktrees/<agent>` one config
+/// value away from deletion. `is_session_worktree` asks only whether the
+/// immediate parent is a worktree base, and `worktree_reclaim::tm_provisioned`
+/// applies "exactly the predicate the remover applies" (#2919 removed the
+/// classifier/remover asymmetry on purpose, so there is no second opinion left).
+/// A dotless `worktrees` would therefore have both the survey and the remover
+/// classify an agent worktree — out of scope per ADR-0020 — as reclaimable.
+/// What: sets `TRUSTY_MPM_WORKTREES_DIRNAME=worktrees`, the adversarial value,
+/// and asserts both predicates still refuse `.claude/worktrees/<agent>`. The
+/// reserved-name guard in `trusty_common::workspace_layout` is what holds here.
+/// Test: this test.
+#[test]
+fn configured_base_can_never_claim_a_claude_agent_worktree() {
+    let _guard = crate::core::trusty_tools_config::env_test_lock();
+    // SAFETY: serialised by the crate-wide env lock; cleared before returning.
+    unsafe { std::env::set_var("TRUSTY_MPM_WORKTREES_DIRNAME", "worktrees") };
+
+    let agent_wt = std::path::Path::new(
+        "/Users/dev/trusty-mpm-projects/owner/repo/.claude/worktrees/agent-abc123",
+    );
+    let observed_session = is_session_worktree(agent_wt);
+    let observed_provisioned = crate::session_manager::worktree_reclaim::tm_provisioned(agent_wt);
+
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("TRUSTY_MPM_WORKTREES_DIRNAME") };
+
+    assert!(
+        !observed_session,
+        "`.claude/worktrees/<agent>` must never be a tm session worktree, whatever \
+         TRUSTY_MPM_WORKTREES_DIRNAME says"
+    );
+    assert!(
+        !observed_provisioned,
+        "the remover's own predicate must refuse a Claude Code agent worktree \
+         (ADR-0020 puts that store out of scope)"
+    );
+}
+
 #[test]
 fn is_session_worktree_absent_path_is_noop() {
     // remove_session_worktree must return true without panicking when path is

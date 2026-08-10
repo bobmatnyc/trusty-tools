@@ -158,19 +158,33 @@ mod tests {
         }
     }
 
+    /// Build a `TrustyToolsConfig` carrying only the fields these tests set.
+    ///
+    /// Why (#5204): `TrustyToolsConfig` is `#[non_exhaustive]` so that adding a
+    /// settings field stays non-breaking. A binary target is a separate crate
+    /// from the lib, so it cannot use a struct literal — this is the
+    /// build-then-assign shape every out-of-crate consumer must use.
+    /// What: `Default` with `github` and `projects` overridden.
+    /// Test: used by every `resolve_project_aware_*` test below.
+    fn cfg_of(github: Option<GithubConfig>, projects: Vec<ProjectConfig>) -> TrustyToolsConfig {
+        let mut c = TrustyToolsConfig::default();
+        c.github = github;
+        c.projects = projects;
+        c
+    }
+
     /// Why: a matched project's own `github:` binding must win over the
     /// global one — the #2184 precedence this module adds.
     /// Test: itself.
     #[test]
     fn resolve_project_aware_project_binding_wins() {
-        let config = TrustyToolsConfig {
-            github: Some(gh("/cfg/global")),
-            projects: vec![project(
+        let config = cfg_of(
+            Some(gh("/cfg/global")),
+            vec![project(
                 "https://github.com/acme/widget",
                 Some(gh("/cfg/project")),
             )],
-            ..Default::default()
-        };
+        );
         let env =
             resolve_project_aware(&config, Some("https://github.com/acme/widget.git")).expect("ok");
         assert_eq!(
@@ -184,11 +198,10 @@ mod tests {
     /// Test: itself.
     #[test]
     fn resolve_project_aware_falls_back_to_global() {
-        let config = TrustyToolsConfig {
-            github: Some(gh("/cfg/global")),
-            projects: vec![project("https://github.com/acme/widget", None)],
-            ..Default::default()
-        };
+        let config = cfg_of(
+            Some(gh("/cfg/global")),
+            vec![project("https://github.com/acme/widget", None)],
+        );
         let env =
             resolve_project_aware(&config, Some("https://github.com/acme/widget")).expect("ok");
         assert_eq!(
@@ -203,10 +216,7 @@ mod tests {
     /// Test: itself.
     #[test]
     fn resolve_project_aware_no_origin_uses_global() {
-        let config = TrustyToolsConfig {
-            github: Some(gh("/cfg/global")),
-            ..Default::default()
-        };
+        let config = cfg_of(Some(gh("/cfg/global")), Vec::new());
         let env = resolve_project_aware(&config, None).expect("ok");
         assert_eq!(
             env.vars(),
@@ -323,10 +333,7 @@ exit 1
 
         let mut cfg = gh(&config_dir.path().display().to_string());
         cfg.account = Some("bobmatnyc".to_string());
-        let config = TrustyToolsConfig {
-            github: Some(cfg),
-            ..Default::default()
-        };
+        let config = cfg_of(Some(cfg), Vec::new());
         let result = resolve_project_aware(&config, None);
 
         restore_path(prior_path);
@@ -357,10 +364,7 @@ exit 1
 
         let mut cfg = gh(&config_dir.path().display().to_string());
         cfg.account = Some("bobmatnyc".to_string());
-        let config = TrustyToolsConfig {
-            github: Some(cfg),
-            ..Default::default()
-        };
+        let config = cfg_of(Some(cfg), Vec::new());
         let result = resolve_project_aware(&config, None);
 
         restore_path(prior_path);
@@ -384,10 +388,10 @@ exit 1
         write_fake_gh(bin_dir.path(), "irrelevant", true);
         let prior_path = prepend_path(bin_dir.path());
 
-        let config = TrustyToolsConfig {
-            github: Some(gh(&config_dir.path().display().to_string())),
-            ..Default::default()
-        };
+        let config = cfg_of(
+            Some(gh(&config_dir.path().display().to_string())),
+            Vec::new(),
+        );
         let result = resolve_project_aware(&config, None);
 
         restore_path(prior_path);
