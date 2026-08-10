@@ -749,3 +749,162 @@ fn production_data_dir_is_the_real_user_location() {
         "the production data dir must stay the operator's real location"
     );
 }
+
+// ─── #4317 / #4871: registry read-modify-write integrity ─────────────────────
+
+/// Build a minimal entry for the registry-integrity tests below.
+fn reg_entry(id: &str) -> PersistedIndex {
+    PersistedIndex {
+        id: id.to_string(),
+        root_path: PathBuf::from(format!("/tmp/{id}")),
+        ..Default::default()
+    }
+}
+
+/// #4317 / #4871: an unparseable `indexes.toml` must be an ERROR, and the write
+/// that follows must not run — the file is left byte-for-byte intact.
+///
+/// Why: this is the fail-open at the centre of both incidents. The loader mapped
+/// a TOML parse failure to `Ok(vec![])`, so an unreadable registry read back as
+/// "no index was ever registered". `upsert_index_registry_entry_at` then went
+/// load(empty) → push one → save, publishing a 1-entry file over a real N-entry
+/// registry and reporting success to its caller. That is the mass-deregistration
+/// signature both issues recorded (73 → 31; 42 → 5 across six restarts).
+/// What: writes a corrupt registry, asserts the load errors, drives an upsert,
+/// asserts it errors and that the on-disk bytes are unchanged. Pre-fix the load
+/// returns `Ok([])`, the upsert returns `Ok(())`, and the file is replaced by a
+/// single `[[index]]` block — so all three assertions fail.
+/// Test: this test.
+#[test]
+fn corrupt_registry_is_an_error_and_is_never_overwritten() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("indexes.toml");
+    let corrupt = "[[index]]\nid = \"real-one\"\nroot_pa";
+    std::fs::write(&path, corrupt).expect("write corrupt registry");
+
+    let loaded = load_index_registry_at(&path);
+    assert!(
+        loaded.is_err(),
+        "#4317: a corrupt registry must NOT read back as an empty one — that view \
+         is what every subsequent save deregisters the whole fleet from"
+    );
+
+    let upsert = upsert_index_registry_entry_at(&path, reg_entry("newcomer"));
+    assert!(
+        upsert.is_err(),
+        "#4871: a write on top of an unreadable registry must fail loudly, not \
+         report success while discarding every real entry"
+    );
+
+    let after = std::fs::read_to_string(&path).expect("registry still readable");
+    assert_eq!(
+        after, corrupt,
+        "#4317: the corrupt file must be left intact for recovery, not replaced"
+    );
+}
+
+/// #4871: concurrent registrations must all survive — none may be discarded by
+/// another writer's stale snapshot.
+///
+/// Why: every mutation is load → mutate → whole-file save and nothing ordered
+/// them. A busy daemon runs many concurrently (`search_handler` spawns a
+/// fire-and-forget `update_last_queried_unix` per query alongside the
+/// registration handlers), so a write landing between another task's load and
+/// its save was silently erased — the observed 80 → 88 → byte-identical-80
+/// revert where 8 real registrations vanished and every caller saw success.
+/// What: 16 threads each upsert a distinct id into one registry file, then
+/// assert all 16 are present. Pre-fix this drops entries nondeterministically.
+/// Test: this test.
+#[test]
+fn concurrent_upserts_lose_no_entries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("indexes.toml");
+    save_index_registry_at(&path, &[]).expect("seed empty registry");
+
+    const WRITERS: usize = 16;
+    std::thread::scope(|scope| {
+        for n in 0..WRITERS {
+            let path = path.clone();
+            scope.spawn(move || {
+                upsert_index_registry_entry_at(&path, reg_entry(&format!("idx-{n}")))
+                    .expect("upsert must succeed");
+            });
+        }
+    });
+
+    let entries = load_index_registry_at(&path).expect("registry must still parse");
+    assert_eq!(
+        entries.len(),
+        WRITERS,
+        "#4871: every concurrent registration must survive; lost {} of {WRITERS}. \
+         A discarded write is indistinguishable from a successful one to its caller",
+        WRITERS - entries.len(),
+    );
+    for n in 0..WRITERS {
+        let want = format!("idx-{n}");
+        assert!(
+            entries.iter().any(|e| e.id == want),
+            "#4871: '{want}' was written but is absent from the registry"
+        );
+    }
+}
+
+/// #4317: the boot reaper removes orphans BY ID, so an index registered while
+/// it was deciding survives the sweep.
+///
+/// Why: the reaper published its survivors with `save_index_registry(&kept)` —
+/// a whole-file overwrite from a snapshot taken before the daemon began serving.
+/// Anything registered in between was erased, while the reaper logged a clean
+/// self-heal. That is registry loss caused by the cleanup, not by the orphans.
+/// What: models the window directly — snapshot two entries, register a third
+/// out of band, then remove one of the original two by id. Asserts the newcomer
+/// survives. Pre-fix, replaying the snapshot's survivors would drop it.
+/// Test: this test.
+#[test]
+fn remove_entries_by_id_preserves_concurrent_registration() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("indexes.toml");
+    save_index_registry_at(&path, &[reg_entry("keep-me"), reg_entry("orphan")])
+        .expect("seed registry");
+
+    // A registration lands after the reaper read the file but before it writes.
+    upsert_index_registry_entry_at(&path, reg_entry("registered-mid-sweep"))
+        .expect("concurrent registration");
+
+    remove_index_registry_entries_at(&path, &["orphan"]).expect("reap the orphan");
+
+    let entries = load_index_registry_at(&path).expect("load");
+    let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        ids.contains(&"registered-mid-sweep"),
+        "#4317: an index registered during the sweep must not be collateral; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"keep-me"),
+        "healthy entry must survive: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"orphan"),
+        "the judged orphan must actually be removed: {ids:?}"
+    );
+}
+
+/// #4317: removing ids that are absent is a no-op, and the file is untouched.
+///
+/// Why: the reaper calls this on every boot; an idempotent delete keeps a
+/// repeated sweep from churning the file (and from being a second write window).
+/// What: removes two unknown ids from a two-entry registry, asserts both entries
+/// remain.
+/// Test: this test.
+#[test]
+fn remove_entries_by_id_is_idempotent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("indexes.toml");
+    save_index_registry_at(&path, &[reg_entry("a"), reg_entry("b")]).expect("seed");
+
+    remove_index_registry_entries_at(&path, &["nope", "also-nope"]).expect("no-op remove");
+    remove_index_registry_entries_at(&path, &[]).expect("empty remove");
+
+    let entries = load_index_registry_at(&path).expect("load");
+    assert_eq!(entries.len(), 2, "an unknown id must remove nothing");
+}
