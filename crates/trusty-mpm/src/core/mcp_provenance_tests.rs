@@ -274,3 +274,75 @@ fn absolute_key_survives_a_missing_file() {
     let key = absolute_key(&tmp.path().join(".mcp.json"));
     assert!(key.ends_with(".mcp.json"), "{key}");
 }
+
+#[test]
+fn record_keeps_every_entry_below_the_threshold() {
+    // The sweep costs one stat per entry and runs on the session-launch write
+    // path. Below the threshold it must not run at all — including for entries
+    // whose file never existed.
+    let (_tmp, root) = root();
+    for i in 0..20 {
+        record_write(&root, &PathBuf::from(format!("/gone{i}/.mcp.json")), "{}").unwrap();
+    }
+    let LedgerLoad::Loaded(ledger) = load(&root) else {
+        panic!("expected a loaded ledger");
+    };
+    assert_eq!(
+        ledger.written.len(),
+        20,
+        "no entry may be dropped below the threshold"
+    );
+}
+
+#[test]
+fn record_prunes_vanished_entries_above_the_threshold() {
+    // Above the threshold, records whose file is gone are dropped — this repo
+    // creates a worktree per PR, each with its own `.mcp.json`, so the entry
+    // count otherwise tracks worktrees-ever-created and only climbs.
+    let (tmp, root) = root();
+
+    // One entry whose file genuinely exists; it must survive the sweep.
+    let live = write_mcp(&tmp.path().join("live"), "{}");
+    record_write(&root, &live, "{}").unwrap();
+
+    // Fill past the threshold with entries pointing at paths that do not exist.
+    let mut ledger = match load(&root) {
+        LedgerLoad::Loaded(l) => l,
+        _ => panic!("expected a loaded ledger"),
+    };
+    for i in 0..=PRUNE_THRESHOLD {
+        ledger.written.insert(
+            format!("{}/vanished{i}/.mcp.json", tmp.path().display()),
+            McpWriteRecord {
+                checksum: "x".to_string(),
+                written_at: "now".to_string(),
+            },
+        );
+    }
+    std::fs::write(
+        ledger_path(&root),
+        serde_json::to_string_pretty(&ledger).unwrap(),
+    )
+    .unwrap();
+
+    // The next write triggers the sweep.
+    let trigger = write_mcp(&tmp.path().join("trigger"), "{}");
+    record_write(&root, &trigger, "{}").unwrap();
+
+    let LedgerLoad::Loaded(after) = load(&root) else {
+        panic!("expected a loaded ledger");
+    };
+    assert!(
+        after.written.len() < PRUNE_THRESHOLD,
+        "vanished entries must be swept, {} remain",
+        after.written.len()
+    );
+    assert!(
+        after.written.contains_key(&absolute_key(&live)),
+        "an entry whose file still exists must survive the sweep"
+    );
+    assert!(
+        after.written.contains_key(&absolute_key(&trigger)),
+        "the entry just written must survive the sweep"
+    );
+}

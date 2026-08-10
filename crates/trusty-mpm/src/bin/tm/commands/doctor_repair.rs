@@ -83,56 +83,28 @@ fn quarantine_one_mcp(target: &std::path::Path, apply: bool) {
         target,
         mode,
     );
-    print_steps(
-        &[step],
-        apply,
-        &format!("tm doctor --quarantine-mcp {} --yes", target.display()),
-    );
+    print_steps(&[step], apply, &quarantine_apply_hint(target));
 }
 
-/// Hidden `--prune-stale-skills` action — force-remove pre-rename
-/// `~/.claude/skills/mpm-*` directories.
+/// The command that applies a `--quarantine-mcp` preview.
 ///
-/// Why: the mpm-*→tm-* skill rename (#1905) never deletes a skill's old
-/// directory when it is renamed (`skill_deployer::deploy_skills` only writes,
-/// never removes). In normal operation this is handled automatically and
-/// silently by the one-time startup migration
-/// (`core::stale_skills::run_stale_mpm_skills_migration_once`); this hidden
-/// flag exists only as a manual escape hatch for troubleshooting (e.g. the
-/// migration marker file was lost or hand-edited).
-///
-/// It is the ONE action here that deletes, which is why it is hidden, narrowly
-/// scoped to trusty-mpm's own frozen pre-rename skill names, and deliberately
-/// NOT part of `--fix`: `--fix` never deletes.
-/// What: resolves `~/.claude/skills/` via `FrameworkPaths::default`, lists only
-/// trusty-mpm's own pre-rename skill names (never an unrelated `mpm-*` skill
-/// from another tool), prints what it found, then removes them.
-/// Test: `core::stale_skills::tests` covers the detection/removal logic this
-/// wraps; this function itself is thin I/O + printing.
-fn prune_stale_skills_locally() {
-    use trusty_mpm::core::paths::FrameworkPaths;
-    use trusty_mpm::core::stale_skills::{find_stale_mpm_skills, remove_stale_mpm_skills};
-
-    let paths = FrameworkPaths::default();
-    let dir = paths.claude_skills_dir();
-    let stale = find_stale_mpm_skills(&dir);
-    if stale.is_empty() {
-        println!(
-            "\nno stale pre-rename mpm-* skills found in {}",
-            dir.display()
-        );
-        return;
-    }
-
-    println!("\nremoving {} stale pre-rename skill(s):", stale.len());
-    for skill in &stale {
-        println!("  - {}", skill.name);
-    }
-    match remove_stale_mpm_skills(&stale) {
-        Ok(n) => println!("removed {n} stale skill directory(ies)"),
-        Err(e) => eprintln!("failed to remove stale skills: {e}"),
-    }
+/// Why (#5371 critic MEDIUM): the shared step printer originally hardcoded
+/// `tm doctor --fix --yes`, so a `--quarantine-mcp` dry run told the operator
+/// to run a command that would not touch their file. The fix was a one-line
+/// string and had no test, which is exactly how it comes back. Naming the
+/// string makes it assertable without capturing stdout.
+/// What: `tm doctor --quarantine-mcp <path> --yes`.
+/// Test: `quarantine_hint_names_the_quarantine_command_and_path`.
+fn quarantine_apply_hint(target: &std::path::Path) -> String {
+    format!("tm doctor --quarantine-mcp {} --yes", target.display())
 }
+
+/// The command that applies a `--fix` preview.
+///
+/// Why: the counterpart to [`quarantine_apply_hint`] — pinned so the two
+/// cannot collapse back into one shared literal.
+/// Test: `fix_hint_names_the_fix_command`.
+const FIX_APPLY_HINT: &str = "tm doctor --fix --yes";
 
 /// `--fix` action — preview, or apply, every safe repair.
 ///
@@ -185,7 +157,7 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         ));
     }
 
-    print_steps(&steps, apply, "tm doctor --fix --yes");
+    print_steps(&steps, apply, FIX_APPLY_HINT);
 }
 
 /// Print one repair's worth of steps, with the per-outcome tallies.
@@ -294,4 +266,73 @@ fn skill_steps(include_frozen: bool, mode: RepairMode) -> Vec<RepairStep> {
             }
         })
         .collect()
+}
+
+/// Hidden `--prune-stale-skills` action — force-remove pre-rename
+/// `~/.claude/skills/mpm-*` directories.
+///
+/// Why: the mpm-*→tm-* skill rename (#1905) never deletes a skill's old
+/// directory when it is renamed (`skill_deployer::deploy_skills` only writes,
+/// never removes). In normal operation this is handled automatically and
+/// silently by the one-time startup migration
+/// (`core::stale_skills::run_stale_mpm_skills_migration_once`); this hidden
+/// flag exists only as a manual escape hatch for troubleshooting (e.g. the
+/// migration marker file was lost or hand-edited).
+///
+/// It is the ONE action here that deletes, which is why it is hidden, narrowly
+/// scoped to trusty-mpm's own frozen pre-rename skill names, and deliberately
+/// NOT part of `--fix`: `--fix` never deletes.
+/// What: resolves `~/.claude/skills/` via `FrameworkPaths::default`, lists only
+/// trusty-mpm's own pre-rename skill names (never an unrelated `mpm-*` skill
+/// from another tool), prints what it found, then removes them.
+/// Test: `core::stale_skills::tests` covers the detection/removal logic this
+/// wraps; this function itself is thin I/O + printing.
+fn prune_stale_skills_locally() {
+    use trusty_mpm::core::paths::FrameworkPaths;
+    use trusty_mpm::core::stale_skills::{find_stale_mpm_skills, remove_stale_mpm_skills};
+
+    let paths = FrameworkPaths::default();
+    let dir = paths.claude_skills_dir();
+    let stale = find_stale_mpm_skills(&dir);
+    if stale.is_empty() {
+        println!(
+            "\nno stale pre-rename mpm-* skills found in {}",
+            dir.display()
+        );
+        return;
+    }
+
+    println!("\nremoving {} stale pre-rename skill(s):", stale.len());
+    for skill in &stale {
+        println!("  - {}", skill.name);
+    }
+    match remove_stale_mpm_skills(&stale) {
+        Ok(n) => println!("removed {n} stale skill directory(ies)"),
+        Err(e) => eprintln!("failed to remove stale skills: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quarantine_hint_names_the_quarantine_command_and_path() {
+        let hint = quarantine_apply_hint(std::path::Path::new("/private/tmp/.mcp.json"));
+        assert_eq!(
+            hint,
+            "tm doctor --quarantine-mcp /private/tmp/.mcp.json --yes"
+        );
+        assert!(
+            !hint.contains("--fix"),
+            "a quarantine preview must never point at --fix, which would not touch the \
+             named file: {hint}"
+        );
+    }
+
+    #[test]
+    fn fix_hint_names_the_fix_command() {
+        assert_eq!(FIX_APPLY_HINT, "tm doctor --fix --yes");
+        assert!(!FIX_APPLY_HINT.contains("--quarantine-mcp"));
+    }
 }

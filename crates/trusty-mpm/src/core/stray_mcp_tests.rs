@@ -463,3 +463,105 @@ fn quarantine_destination_does_not_collide() {
     bodies.sort();
     assert_eq!(bodies, vec!["first", "second"], "both must survive");
 }
+
+// ------------------------------------------- path-comparison regression (#5371 critic CRITICAL)
+
+#[cfg(unix)]
+#[test]
+fn explicit_refuses_the_workspaces_own_file_via_a_symlinked_workspace_spelling() {
+    // The workspace guard compared paths lexically. A caller holding a
+    // SYMLINKED spelling of the workspace (`/tmp/...` while the file resolves
+    // under `/private/tmp/...`, the exact aliasing this PR already fixed for
+    // the ledger key and the scan-dir dedupe) slipped past it, and the
+    // project's own LIVE `.mcp.json` was renamed away.
+    let f = fixture();
+    let real_ws = f.home.join("real-ws");
+    let own = write_mcp(&real_ws, SAMPLE);
+    let linked_ws = f.home.join("linked-ws");
+    std::os::unix::fs::symlink(&real_ws, &linked_ws).unwrap();
+
+    // Caller passes the symlinked spelling; the target is the real spelling.
+    let step = quarantine_explicit(&f.root, Some(&linked_ws), &own, RepairMode::Apply);
+
+    assert!(
+        matches!(step.status, StepStatus::Refused(_)),
+        "the workspace's own .mcp.json must be refused however the workspace is \
+         spelled, got {step:?}"
+    );
+    assert!(
+        own.exists(),
+        "the project's live .mcp.json must still be there"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn scan_dirs_stops_at_home_through_a_symlinked_spelling() {
+    // Same bug class as the guard above: the home CEILING was also a lexical
+    // comparison, so a symlinked home spelling never matched and the walk ran
+    // on to the depth cap, scanning directories above home that are none of
+    // tm's business.
+    let tmp = tempfile::tempdir().unwrap();
+    let real_home = tmp.path().join("real-home");
+    let ws = real_home.join("a").join("b");
+    std::fs::create_dir_all(&ws).unwrap();
+    let linked_home = tmp.path().join("linked-home");
+    std::os::unix::fs::symlink(&real_home, &linked_home).unwrap();
+
+    let dirs = scan_dirs(Some(&ws), &linked_home);
+    assert!(
+        !dirs.iter().any(|d| d == tmp.path()),
+        "the walk must stop at home however home is spelled — it reached above it: {dirs:?}"
+    );
+}
+
+// ------------------------------------------------ TOCTOU regression (#5371 critic HIGH)
+
+#[test]
+fn sweep_refuses_a_file_edited_between_scan_and_rename() {
+    // Drives a mutation into the exact window the critic named: the sweep
+    // classified during `scan`, and the rename happened later. This calls the
+    // post-scan half directly with a file whose bytes changed after that
+    // classification — the state a concurrent session launch or an operator's
+    // editor save produces. The stale verdict must not be trusted.
+    let f = fixture();
+    let stray = write_mcp(&f.home.join("projects"), SAMPLE);
+    record_write(&f.root, &stray, SAMPLE).unwrap();
+
+    // Scan-time verdict: tm wrote it, bytes unchanged.
+    assert_eq!(
+        crate::core::mcp_provenance::classify(&mcp_provenance::load(&f.root), &stray),
+        Provenance::TmWritten
+    );
+
+    // ...the window: somebody edits the file.
+    let edited = r#"{"mcpServers":{"my-own-server":{"type":"stdio","command":"mine"}}}"#;
+    std::fs::write(&stray, edited).unwrap();
+
+    let step = apply_verified(&f.root, &stray, RepairMode::Apply);
+    let StepStatus::Refused(why) = &step.status else {
+        panic!("a file edited inside the window must be refused, got {step:?}");
+    };
+    assert!(why.contains("changed between"), "reason: {why}");
+    assert_eq!(
+        std::fs::read_to_string(&stray).unwrap(),
+        edited,
+        "the edit made inside the window must survive"
+    );
+}
+
+#[test]
+fn sweep_still_quarantines_when_nothing_changed_in_the_window() {
+    // The re-verification must not turn every quarantine into a refusal —
+    // proves the guard is discriminating, not just always-refusing.
+    let f = fixture();
+    let stray = write_mcp(&f.home.join("projects"), SAMPLE);
+    record_write(&f.root, &stray, SAMPLE).unwrap();
+
+    let step = apply_verified(&f.root, &stray, RepairMode::Apply);
+    assert!(
+        matches!(step.status, StepStatus::Applied { .. }),
+        "an unchanged tm-written file must still be quarantined, got {step:?}"
+    );
+    assert!(!stray.exists());
+}

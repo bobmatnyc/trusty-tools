@@ -104,8 +104,11 @@ pub fn scan_dirs(workspace: Option<&Path>, home: &Path) -> Vec<PathBuf> {
             }
             dirs.push(ancestor.to_path_buf());
             // Home is the ceiling — above it lies other users' and the
-            // system's business.
-            if ancestor == home {
+            // system's business. Compared canonically: a lexical `==` misses
+            // when the caller's `home` is a symlinked spelling of the one the
+            // ancestor walk reaches, and the walk then runs past it to the
+            // depth cap (observed reaching `/var/folders`).
+            if same_dir(ancestor, home) {
                 break;
             }
         }
@@ -122,11 +125,40 @@ pub fn scan_dirs(workspace: Option<&Path>, home: &Path) -> Vec<PathBuf> {
     // temp-root list names the former — without this the same file is reported
     // twice and an operator reasonably concludes there are two of them.
     let mut seen = std::collections::HashSet::new();
-    dirs.retain(|d| {
-        let key = std::fs::canonicalize(d).unwrap_or_else(|_| d.clone());
-        seen.insert(key)
-    });
+    dirs.retain(|d| seen.insert(canonical_dir(d)));
     dirs
+}
+
+/// A directory's canonical form, falling back to its lexical path.
+///
+/// Why: every path comparison in this module decides whether a file is left
+/// alone, and two spellings of one directory must never read as two
+/// directories. Symlinked spellings are the normal case here, not an edge:
+/// macOS makes `/tmp` a symlink to `/private/tmp`, and a caller can hold either
+/// spelling of a workspace or a home directory. Centralised so the comparison
+/// cannot be done lexically at one site and canonically at another — which is
+/// exactly the drift that let a lexical workspace guard rename a project's own
+/// live `.mcp.json` away.
+/// What: [`std::fs::canonicalize`], or the path unchanged when it cannot be
+/// resolved (absent, unreadable). A comparison against an unresolvable path
+/// falls back to the lexical one, which can only ever FAIL to match — and a
+/// failed match here means "not the workspace, not home", so the caller
+/// re-examines rather than acts. The mirror of
+/// [`mcp_provenance::absolute_key`](crate::core::mcp_provenance), which
+/// canonicalizes a file's PARENT for the same reason.
+/// Test: `explicit_refuses_the_workspaces_own_file_via_a_symlinked_workspace_spelling`,
+/// `scan_dirs_stops_at_home_through_a_symlinked_spelling`,
+/// `scan_dirs_has_no_duplicates`.
+fn canonical_dir(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Are these two paths the same directory, whatever their spelling?
+///
+/// Why: see [`canonical_dir`]. This is the only comparison the module makes.
+/// Test: as [`canonical_dir`].
+fn same_dir(a: &Path, b: &Path) -> bool {
+    canonical_dir(a) == canonical_dir(b)
 }
 
 /// Find every stray `.mcp.json` in the bounded scan set.
@@ -205,13 +237,15 @@ fn declared_servers(path: &Path) -> Vec<String> {
 /// `refuse_legacy_sources` reports rather than acts. The operator clears those
 /// with [`quarantine_explicit`], where naming the path IS the attribution.
 /// What: one [`RepairStep`] per finding; [`RepairMode::DryRun`] classifies and
-/// prints without touching the filesystem.
+/// prints without touching the filesystem. A file cleared for quarantine is
+/// RE-CLASSIFIED immediately before the rename — see [`apply_verified`].
 /// Test: `sweep_quarantines_a_tm_written_stray`,
 /// `sweep_refuses_an_unattributed_stray`,
 /// `sweep_refuses_a_stray_edited_after_tm_wrote_it`,
 /// `sweep_refuses_when_the_ledger_is_unreadable`,
 /// `sweep_dry_run_writes_nothing`,
-/// `sweep_never_touches_the_workspaces_own_file`.
+/// `sweep_never_touches_the_workspaces_own_file`,
+/// `sweep_refuses_a_file_edited_between_scan_and_rename`.
 pub fn quarantine_strays(
     framework_root: &Path,
     workspace: Option<&Path>,
@@ -222,7 +256,7 @@ pub fn quarantine_strays(
     scan(workspace, home, &ledger)
         .into_iter()
         .map(|stray| match &stray.provenance {
-            Provenance::TmWritten => apply_or_plan(framework_root, &stray.path, mode),
+            Provenance::TmWritten => apply_verified(framework_root, &stray.path, mode),
             Provenance::TmWrittenThenEdited => refuse(
                 &stray.path,
                 "tm wrote this file, but its bytes changed afterwards — the current content is \
@@ -275,8 +309,12 @@ pub fn quarantine_explicit(
              Claude Code's upward walk",
         );
     }
+    // Canonical, never lexical (#5371 critic CRITICAL): a caller holding a
+    // symlinked spelling of the workspace slipped past a `target.parent() ==
+    // Some(workspace)` comparison, and the project's own live `.mcp.json` was
+    // renamed away.
     if let Some(workspace) = workspace
-        && target.parent() == Some(workspace)
+        && target.parent().is_some_and(|p| same_dir(p, workspace))
     {
         return refuse(
             target,
@@ -299,6 +337,39 @@ pub fn quarantine_explicit(
         Err(e) => return refuse(target, &format!("cannot stat the path: {e}")),
     }
     apply_or_plan(framework_root, target, mode)
+}
+
+/// Re-verify provenance immediately before renaming, then rename.
+///
+/// Why (#5371 critic HIGH): the sweep classifies during [`scan`] and renames
+/// later. Anything can happen in that window — a concurrent session launch
+/// rewriting the file, or an operator opening it in an editor and saving — and
+/// a rename driven by the earlier verdict would discard an edit made since,
+/// which is the one outcome this whole design exists to prevent. The window
+/// cannot be closed (there is no atomic compare-and-rename), so it is made
+/// small and the stale verdict is never trusted: the checksum is re-read at the
+/// point of action.
+///
+/// A file that changed in the window is REFUSED, not retried. Retrying would
+/// race the same way, and the operator's edit is precisely what must survive.
+/// What: re-runs [`mcp_provenance::classify`]; only a still-[`Provenance::TmWritten`]
+/// verdict proceeds to [`apply_or_plan`]. Skipped in [`RepairMode::DryRun`],
+/// which writes nothing and whose preview is allowed to be a moment stale.
+/// Test: `sweep_refuses_a_file_edited_between_scan_and_rename`,
+/// `sweep_quarantines_a_tm_written_stray`.
+fn apply_verified(framework_root: &Path, path: &Path, mode: RepairMode) -> RepairStep {
+    if mode == RepairMode::Apply {
+        let fresh = mcp_provenance::classify(&mcp_provenance::load(framework_root), path);
+        if fresh != Provenance::TmWritten {
+            return refuse(
+                path,
+                "the file changed between this run's scan and the rename — its current bytes \
+                 are no longer the ones tm wrote, so they are somebody's edit. Re-run \
+                 `tm doctor` to see its current state",
+            );
+        }
+    }
+    apply_or_plan(framework_root, path, mode)
 }
 
 /// Rename the file aside, or describe the rename.

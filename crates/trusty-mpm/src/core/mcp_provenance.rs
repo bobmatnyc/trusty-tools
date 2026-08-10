@@ -264,6 +264,7 @@ pub fn record_write(
         };
         ledger.version = LEDGER_VERSION;
         ledger.written.insert(key, record);
+        prune_vanished(&mut ledger);
         let text = serde_json::to_string_pretty(&ledger)
             .map(|mut s| {
                 s.push('\n');
@@ -273,6 +274,44 @@ pub fn record_write(
         atomic_write(&ledger_path(framework_root), &text)
     })
 }
+
+/// Above [`PRUNE_THRESHOLD`], drop records whose file no longer exists.
+///
+/// Why (#5371 critic MEDIUM): the ledger gained one entry per distinct
+/// `.mcp.json` path and never shed one. Each entry is roughly 200 bytes, so
+/// size alone is not the problem — but this repo creates and destroys a
+/// worktree per PR, each with its own `.mcp.json`, so the entry count tracks
+/// worktrees-ever-created rather than workspaces-that-exist, and it only ever
+/// climbs. A stale entry is harmless to correctness ([`classify`] reads the
+/// file and returns [`Provenance::Unknown`] when it is gone), so this is
+/// housekeeping, not a safety fix.
+///
+/// It runs only ABOVE a threshold because the sweep costs one `stat` per
+/// entry and this is called from the session-launch write path: an
+/// unconditional sweep would put thousands of `stat` calls on every launch to
+/// reclaim bytes nobody is short of.
+/// What: when the map exceeds [`PRUNE_THRESHOLD`], retains only entries whose
+/// path still exists. The entry just inserted always survives — its file was
+/// written moments earlier.
+/// Test: `record_prunes_vanished_entries_above_the_threshold`,
+/// `record_keeps_every_entry_below_the_threshold`.
+fn prune_vanished(ledger: &mut McpProvenanceLedger) {
+    if ledger.written.len() <= PRUNE_THRESHOLD {
+        return;
+    }
+    ledger
+        .written
+        .retain(|path, _| Path::new(path).try_exists().unwrap_or(true));
+}
+
+/// Entry count above which [`prune_vanished`] sweeps.
+///
+/// Why: high enough that an ordinary machine never pays the sweep, low enough
+/// that the ledger cannot grow without bound. At ~200 bytes per entry this caps
+/// the steady-state document near 100 KB plus however many live workspaces
+/// exist.
+/// Test: `record_prunes_vanished_entries_above_the_threshold`.
+const PRUNE_THRESHOLD: usize = 512;
 
 /// Drop `path`'s record after the file it describes is gone.
 ///
