@@ -28,8 +28,12 @@ pub(super) struct IndexListResponse {
 /// trusty-review's auto-derive logic, issue #661) can match an index to the
 /// current project directory without a separate per-index status round-trip.
 /// What: `id` + `root_path` (canonical absolute path stored on the handle) +
-/// `size_bytes` (sum of all file sizes under the index data directory; `null`
-/// when the directory has not been created yet).
+/// `size_bytes` (sum of all file sizes under the index's data directories —
+/// BOTH the legacy global `<data_dir>/indexes/<id>/` and the colocated
+/// `<root_path>/.trusty-search/` of issue #403; `null` only when neither
+/// exists). #4706: reading only the global dir made a populated colocated
+/// index report `0` rather than `null`, because that dir exists but holds
+/// metadata only.
 /// Test: `list_indexes_details_includes_size_bytes`,
 /// `list_indexes_details_includes_root_path`.
 #[derive(serde::Serialize)]

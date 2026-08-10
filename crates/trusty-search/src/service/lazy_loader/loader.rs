@@ -45,12 +45,14 @@ use super::store::ColdIndexStore;
 /// root_path), call `cold_store.mark_failed(id)` to evict the entry from
 /// `entries` (so `indexes_lazy` decreases and `contains()` returns `false`)
 /// and return `LazyLoadError::RestoreFailed` instead of re-returning `Loading`.
-/// Subsequent calls for the same id go through the `cold_store.contains()`
-/// guard in the search handler, which returns `false` for failed entries,
-/// causing the handler to return 404 (which is acceptable — the index exists
-/// in the registry sense but cannot be served). Callers that need to
-/// distinguish "truly unknown" from "restore failed" should additionally check
-/// `cold_store.is_failed(id)`.
+/// Subsequent calls for the same id go through the search handler's residency
+/// check, which since #5061 tests `is_failed` BEFORE `contains` and reports
+/// `503 index_restore_failed` with `retryable: false`. The 404 this paragraph
+/// used to describe — "acceptable — the index exists in the registry sense but
+/// cannot be served" — is no longer what any endpoint returns for a failed
+/// entry; a 404 now means absent from every store. Both paths that produce
+/// `RestoreFailed` guarantee `is_failed(id)`, which is what lets the handler
+/// route this variant through the shared residency builder.
 ///
 /// What: generic over the restore function so tests can inject a fake restore.
 ///

@@ -160,5 +160,5 @@ async fn chunks_endpoint_unknown_index_is_404() {
     )
     .await
     .expect_err("unknown index must 404");
-    assert_eq!(err, axum::http::StatusCode::NOT_FOUND);
+    assert_eq!(err.0, axum::http::StatusCode::NOT_FOUND);
 }

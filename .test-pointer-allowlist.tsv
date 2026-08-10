@@ -805,7 +805,6 @@ crates/trusty-search/src/core/symbol_graph/build.rs	test_update_file_drops_old_e
 crates/trusty-search/src/mcp/tools/http.rs	delete_index
 crates/trusty-search/src/mcp/tools/http.rs	list_chunks
 crates/trusty-search/src/mcp/tools/http.rs	search_health
-crates/trusty-search/src/mcp/tools/index.rs	pinned_index_status_defaults_to_pin
 crates/trusty-search/src/mcp/tools/typeahead.rs	typeahead_mcp_tool_returns_hits
 crates/trusty-search/src/mcp/tools/typeahead.rs	typeahead_tool_returns_daemon_response
 crates/trusty-search/src/service/colocated_storage.rs	colocated_dir_exists_after_create
