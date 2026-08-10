@@ -172,6 +172,16 @@ pub(super) async fn reindex_handler(
             }
             if handle.root_path.as_os_str().is_empty() || handle.root_path != new_root {
                 let indexer = Arc::clone(&handle.indexer);
+                // #4951: the override rebuilds the handle around this SAME
+                // indexer Arc, so the indexer's own `root_path` — the base
+                // every root-relative chunk path is joined against to produce
+                // the absolute `CodeChunk::file` — must move with it. Left
+                // stale, materialization joined against the OLD root while
+                // `search_handler`'s `file_is_within_root` post-filter compared
+                // against the NEW one, so every candidate was discarded and
+                // search returned `results: []` with `stale_index_root: true`
+                // on an index reporting `status: ready` and 85k chunks.
+                indexer.write().await.set_root_path(new_root.clone());
                 // Preserve the filter set / domain vocabulary recorded on the
                 // existing handle — only the root_path is being overridden.
                 let new_handle = IndexHandle {
