@@ -155,6 +155,12 @@ use doctor_search_pin::check_search_index_pin;
 #[path = "doctor_session_store.rs"]
 mod doctor_session_store;
 use doctor_session_store::check_session_store;
+// Claude Code finds `.mcp.json` by walking UP from a session's cwd, so one
+// written above real projects configures every session beneath it with nothing
+// in the project to point at. Read-only; the quarantine is opt-in.
+#[path = "doctor_stray_mcp.rs"]
+mod doctor_stray_mcp;
+use doctor_stray_mcp::check_stray_mcp_json;
 
 /// Per-probe network timeout.
 ///
@@ -275,7 +281,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_thirty_checks`,
+/// Test: `run_doctor_produces_thirty_two_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -370,6 +376,15 @@ pub async fn run_doctor(
     // without this probe the condition is invisible until someone attempts a
     // mutation. Read-only; the repair is `tm repair session-store`.
     checks.push(check_session_store(&FrameworkPaths::default().root));
+    // A `.mcp.json` ABOVE the workspace is read by every session whose cwd is
+    // beneath it — including agent scratchpads under /tmp — and nothing else
+    // reports it. Read-only, and it names the provenance verdict per file so
+    // the operator can see which ones `--fix` will refuse to touch.
+    checks.push(check_stray_mcp_json(
+        &crate::core::mcp_provenance::default_framework_root(),
+        project_dir,
+        &home,
+    ));
 
     DoctorReport::from_checks(checks)
 }

@@ -280,6 +280,7 @@ fn cli_parses_doctor() {
                 fix: false,
                 yes: false,
                 include_frozen: false,
+                quarantine_mcp: None,
             }
         }
     ));
@@ -297,6 +298,7 @@ fn cli_parses_doctor_prune_stale_skills() {
                 fix: false,
                 yes: false,
                 include_frozen: false,
+                quarantine_mcp: None,
             }
         }
     ));
@@ -321,6 +323,7 @@ fn cli_parses_doctor_fix_skills() {
                 fix: false,
                 yes: false,
                 include_frozen: false,
+                quarantine_mcp: None,
             }
         }
     ));
@@ -2218,4 +2221,56 @@ fn cli_parses_shell_init() {
     }
     assert!(Cli::try_parse_from(["trusty-mpm", "shell-init", "ksh"]).is_err());
     assert!(Cli::try_parse_from(["trusty-mpm", "shell-init"]).is_err());
+}
+
+/// `--quarantine-mcp <PATH>` parses, and `--yes` promotes it.
+///
+/// Why: this flag is the operator's only route to clearing a stray `.mcp.json`
+/// written before the provenance ledger existed, so both halves of its
+/// contract are pinned here — it takes a path, and it stays a preview until
+/// `--yes`. `--yes` had `requires = "fix"`; widening it to the `writes` group
+/// is what lets this flag apply at all, and a regression there would silently
+/// leave the operator with a permanent dry run.
+/// Test: this test.
+#[test]
+fn cli_parses_doctor_quarantine_mcp() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--quarantine-mcp", "/tmp/.mcp.json"])
+        .unwrap();
+    let Command::Doctor { flags } = cli.command.unwrap() else {
+        panic!("expected doctor");
+    };
+    assert_eq!(
+        flags.quarantine_mcp.as_deref(),
+        Some(std::path::Path::new("/tmp/.mcp.json"))
+    );
+    assert!(!flags.yes, "it must default to a preview");
+    assert!(!flags.fix, "it must not imply the full --fix sweep");
+
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "doctor",
+        "--quarantine-mcp",
+        "/tmp/.mcp.json",
+        "--yes",
+    ])
+    .unwrap();
+    let Command::Doctor { flags } = cli.command.unwrap() else {
+        panic!("expected doctor");
+    };
+    assert!(flags.yes, "--yes must promote a quarantine, not just --fix");
+}
+
+/// `--yes` still requires a write action, and `--quarantine-mcp` needs a value.
+///
+/// Why: `--yes` is the second deliberate act that lets a write happen; if it
+/// ever parsed alone it would read as "yes to whatever a later flag adds".
+/// Test: this test.
+#[test]
+fn cli_rejects_doctor_yes_without_a_write_action() {
+    assert!(Cli::try_parse_from(["trusty-mpm", "doctor", "--yes"]).is_err());
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "doctor", "--fix-skills", "--yes"]).is_err(),
+        "--fix-skills applies directly and has no preview to promote"
+    );
+    assert!(Cli::try_parse_from(["trusty-mpm", "doctor", "--quarantine-mcp"]).is_err());
 }

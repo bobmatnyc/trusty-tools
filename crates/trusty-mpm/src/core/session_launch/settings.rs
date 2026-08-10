@@ -437,10 +437,15 @@ pub(super) fn inject_mcp_server(
             s
         })
         .map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(&mcp_path, serialized).map_err(|source| PrepError::Io {
+    std::fs::write(&mcp_path, serialized.as_str()).map_err(|source| PrepError::Io {
         path: mcp_path.clone(),
         source,
     })?;
+
+    // The ONLY place project-scope `.mcp.json` provenance is created. Without
+    // it `tm doctor`'s stray sweep cannot tell tm's own output from a
+    // `.mcp.json` the operator wrote by hand, and refuses to touch either.
+    crate::core::mcp_provenance::record_write_best_effort(&mcp_path, &serialized);
     Ok(())
 }
 
