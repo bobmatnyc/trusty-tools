@@ -1305,6 +1305,46 @@ fn output_styles_mirror_the_pm_prose_rules() {
 }
 
 #[test]
+fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
+    // The owner banned "load-bearing" on 2026-08-10 as an instance of a
+    // category. It has to bind PM prose (the output styles, #2647) and agent
+    // prose (BASE-AGENT.md composition) alike, and it has to state the
+    // CATEGORY — asserting only the word would rebuild the phrase-list failure
+    // the sycophancy and framing-opener rules were rewritten to avoid.
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    const REQUIRED: &[&str] = &[
+        "**No borrowed-metaphor jargon.**",
+        "an engineering metaphor borrowed to signal precision",
+        "Scope: PM and agent prose.",
+    ];
+
+    for style in OUTPUT_STYLES {
+        for needle in REQUIRED {
+            assert!(
+                style.content.contains(needle),
+                "{} is missing the borrowed-metaphor ban {needle:?}",
+                style.id
+            );
+        }
+    }
+
+    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("assets")
+        .join("agents");
+    let composed =
+        compose_agent("version-control", &assets_dir).expect("compose_agent must succeed");
+    for needle in REQUIRED {
+        assert!(
+            composed.contains(needle),
+            "composed agent is missing the borrowed-metaphor ban {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn base_agent_graduated_verbosity_survives_composition() {
     // Output styles do NOT apply to subagents (they run their own system
     // prompt), so the sparse-on-success rule has to reach agents through
