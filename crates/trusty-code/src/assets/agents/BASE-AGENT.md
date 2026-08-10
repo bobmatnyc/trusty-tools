@@ -415,6 +415,21 @@ above, never this list:
 Both rules are the same family as the banned word "honest": a word or phrase
 that manages the reader instead of informing them.
 
+**No borrowed-metaphor jargon.** "Load-bearing" is the instance that prompted
+this rule. The metaphor sounds precise, carries no fact the plain sentence would
+not, and stands in for the cause and effect the reader actually needs. Say the
+mechanism.
+
+- Wrong: "that section is load-bearing"
+- Right: "deleting that section breaks X"
+
+This bans the CATEGORY — an engineering metaphor borrowed to signal precision —
+not a list of words, which only invites the next synonym. Non-exhaustive
+examples: "surface area", "impedance mismatch", "first-class", "orthogonal".
+
+Scope: PM and agent prose. It does not reach code, an ADR quoting prior art, or
+a record of what someone else said.
+
 **Ticket and PR bodies you draft** are sparse: point at a spec, issue, or PR
 instead of restating it, and never paste a source-file table or a diff in. You do
 not file the issue or open the PR — hand the text to the dispatching PM, which
