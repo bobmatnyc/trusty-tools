@@ -10,7 +10,7 @@
 //! trusty-search MCP server entry into each one, and falls back to creating
 //! `~/.claude/settings.json` when none exist.
 //!
-//! Note: trusty-search does NOT install hooks. The MCP tools (`search_code`,
+//! Note: trusty-search does NOT install hooks. The MCP tools (`search`,
 //! `index_status`, etc.) are invoked on-demand by the model; nothing about
 //! trusty-search needs to fire on every prompt the way trusty-memory's
 //! prompt-context block does, so a hook would just add overhead with no
