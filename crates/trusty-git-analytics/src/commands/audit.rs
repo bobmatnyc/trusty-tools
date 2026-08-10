@@ -22,7 +22,7 @@ use tga::audit::{
 };
 use tga::core::config::Config;
 use tga::core::db::Database;
-use tga::report::dd_manifest::{build_dd_manifest, DdManifestOptions};
+use tga::report::dd_manifest::{build_dd_manifest, configured_secrets, DdManifestOptions};
 
 /// Arguments for `tga audit`.
 ///
@@ -144,7 +144,12 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // engagement metadata, the repository set, and — #5239/#5244 — the areas
     // this run could not assess, so a failed stage reaches the report as a
     // stated gap instead of an empty table.
-    let mut gaps = sweep_gap_lines(&stats);
+    //
+    // #5239: the gap lines excerpt a stage's `anyhow` cause chain, which can
+    // quote a credential back at us, so they are redacted before they are cut —
+    // against the same needles the manifest builder uses.
+    let secrets = configured_secrets(&config);
+    let mut gaps = sweep_gap_lines(&stats, &secrets);
     gaps.push(DATA_HANDLING_NOTE.to_string());
     let manifest = build_dd_manifest(
         &config,

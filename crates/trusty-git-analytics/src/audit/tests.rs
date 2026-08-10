@@ -298,6 +298,12 @@ fn audit_args_expose_a_complete_clap_command() {
 // Gaps & Caveats lines from the sweep's own record (#5239, #5244)
 // ---------------------------------------------------------------------------
 
+/// A config holding no credentials. The redaction path itself is proved end to
+/// end against a real token in
+/// `crate::report::dd_manifest_tests::a_token_straddling_the_excerpt_boundary_leaves_no_fragment`;
+/// these tests are about the wording and ordering of the lines.
+const NO_SECRETS: &[&str] = &[];
+
 #[test]
 fn sweep_gap_lines_name_each_failed_stage() {
     let mut stats = AuditSweepStats::default();
@@ -313,7 +319,7 @@ fn sweep_gap_lines_name_each_failed_stage() {
         Err(anyhow::anyhow!("fact_deployments is empty")),
     );
 
-    let lines = crate::audit::sweep_gap_lines(&stats);
+    let lines = crate::audit::sweep_gap_lines(&stats, NO_SECRETS);
 
     assert_eq!(lines.len(), 2, "one line per failure, none for success");
     assert!(lines[0].contains("`jira sync`"), "{}", lines[0]);
@@ -328,7 +334,7 @@ fn sweep_gap_lines_name_each_failed_stage() {
         assert!(line.contains("not assessed"), "{line}");
     }
     // Execution order, so two runs over the same failures read identically.
-    assert_eq!(lines, crate::audit::sweep_gap_lines(&stats));
+    assert_eq!(lines, crate::audit::sweep_gap_lines(&stats, NO_SECRETS));
 }
 
 #[test]
@@ -337,7 +343,7 @@ fn sweep_gap_lines_are_empty_for_a_clean_run() {
     for stage in EXPECTED_ORDER {
         stats.record(stage, Instant::now(), Ok(()));
     }
-    assert!(crate::audit::sweep_gap_lines(&stats).is_empty());
+    assert!(crate::audit::sweep_gap_lines(&stats, NO_SECRETS).is_empty());
 }
 
 #[test]
@@ -349,7 +355,7 @@ fn long_stage_reasons_are_truncated() {
         Err(anyhow::anyhow!("x".repeat(4000))),
     );
 
-    let line = crate::audit::sweep_gap_lines(&stats).remove(0);
+    let line = crate::audit::sweep_gap_lines(&stats, NO_SECRETS).remove(0);
 
     assert!(line.contains('…'), "a long reason is excerpted: {line}");
     assert!(

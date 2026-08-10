@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use super::*;
-use crate::core::config::{GithubConfig, RepositoryConfig};
+use crate::core::config::{GithubConfig, JiraConfig, RepositoryConfig};
 
 /// A config naming `n` repositories, with no credentials.
 fn config_with_repos(entries: &[(&str, Option<&str>)]) -> Config {
@@ -197,6 +197,155 @@ fn configured_token_never_reaches_the_manifest() {
     );
     // The surrounding diagnostic survives — scrubbing must not destroy the gap.
     assert!(toml.contains("Stage `collect` did not complete"), "{toml}");
+}
+
+// ---------------------------------------------------------------------------
+// The real sweep → gap-line → manifest path, with a credential positioned
+// across the excerpt boundary (#5239)
+// ---------------------------------------------------------------------------
+
+/// `audit::gaps::MAX_REASON_CHARS` — private there, restated here because these
+/// tests exist to position a credential relative to it. A change to one without
+/// the other makes the straddle stop straddling, and the assertions below still
+/// hold, so the duplication costs no correctness.
+const EXCERPT_BOUNDARY: usize = 160;
+
+/// Run one failed stage through the pipeline `tga audit` actually uses.
+///
+/// `configured_token_never_reaches_the_manifest` hands `build_dd_manifest`
+/// short gap strings it wrote itself, which is why it cannot see this class of
+/// bug: the excerpt never runs. This helper drives the real
+/// `sweep_gap_lines` → `build_dd_manifest` path instead.
+fn manifest_from_stage_failure(cfg: &Config, message: String) -> String {
+    let mut stats = crate::audit::AuditSweepStats::default();
+    stats.record(
+        crate::audit::SweepStage::Collect,
+        std::time::Instant::now(),
+        Err(anyhow::anyhow!(message)),
+    );
+
+    let secrets = configured_secrets(cfg);
+    let opts = DdManifestOptions {
+        title: "Acme — Technical Due Diligence".to_string(),
+        gaps: crate::audit::sweep_gap_lines(&stats, &secrets),
+        ..Default::default()
+    };
+    build_dd_manifest(cfg, &opts)
+        .expect("builds")
+        .to_toml()
+        .expect("serializes")
+}
+
+/// A config whose GitHub and JIRA tokens are the two given values.
+fn config_with_tokens(github: &str, jira: &str) -> Config {
+    let mut cfg = config_with_repos(&[("/src/a", Some("A"))]);
+    cfg.github = Some(GithubConfig {
+        token: Some(github.to_string()),
+        ..Default::default()
+    });
+    cfg.jira = Some(JiraConfig {
+        token: Some(jira.to_string()),
+        ..Default::default()
+    });
+    cfg
+}
+
+/// Assert that not even an 8-character prefix of `token` appears in `toml`.
+///
+/// The 8 is deliberate: `scrub_secrets` refuses needles shorter than that, so a
+/// surviving 8-char prefix is precisely a fragment no downstream scrub could
+/// ever remove. Any longer fragment contains this one, so one assertion covers
+/// every fragment length.
+fn assert_no_fragment(toml: &str, token: &str, label: &str) {
+    assert!(!toml.contains(token), "{label}: full token leaked:\n{toml}");
+    assert!(
+        !toml.contains(&token[..8]),
+        "{label}: a prefix fragment survived:\n{toml}"
+    );
+}
+
+/// Why: `scrub_secrets` matches a credential's whole value, so truncating a
+/// stage message before scrubbing it leaves a token that spans the boundary
+/// behind as a prefix no later scrub can match — and the manifest is handed to a
+/// third party. Found by security review of #5239's gap reporting.
+/// Test: itself.
+#[test]
+fn a_token_straddling_the_excerpt_boundary_leaves_no_fragment() {
+    let token = "ghp_STRADDLE0123456789abcdefGHIJKLMNOPQR"; // pragma: allowlist secret
+    let lead = "GET /orgs/acme/repos returned 401 for ";
+    // Start the token 10 chars short of the cut, so it begins inside the excerpt
+    // and ends outside it — the exact geometry that produced the leak.
+    let pad = "x".repeat(EXCERPT_BOUNDARY - 10 - lead.chars().count());
+    let message = format!(
+        "{lead}{pad}{token}: bad credentials. The remainder of this cause chain exists to \
+         carry the message past 200 characters so the excerpt is guaranteed to truncate."
+    );
+    assert!(message.chars().count() > 200, "the excerpt must truncate");
+
+    let cfg = config_with_tokens(token, "unused-jira-token-000");
+    let toml = manifest_from_stage_failure(&cfg, message);
+
+    assert_no_fragment(&toml, token, "straddling token");
+    // Scrubbing must remove the value, not the diagnostic around it.
+    assert!(toml.contains("[REDACTED]"), "{toml}");
+    assert!(toml.contains("not assessed"), "{toml}");
+}
+
+/// Why: the opposite geometry, and a distinct path. A token sitting entirely
+/// beyond the boundary was safe before this fix only by accident — truncation
+/// dropped it. Redacting first shortens the text, so text that used to fall
+/// outside the excerpt now moves inside it; a second credential must survive
+/// that shift as `[REDACTED]`, not as itself.
+/// Test: itself.
+#[test]
+fn a_token_beyond_the_boundary_survives_the_shift_scrubbing_causes() {
+    // `early` sits near the start; `late` sits past char 160 in the raw text but
+    // moves under it once `early` collapses to `[REDACTED]`.
+    let early = "ghp_EARLY0123456789abcdefGHIJKLMNOPQRSTUV"; // pragma: allowlist secret
+    let late = "jira_LATE0123456789abcdefGHIJKLMNOPQRSTUV"; // pragma: allowlist secret
+    let message = format!(
+        "GET /rest/api/3/search failed for {early}; retried with {} and got 401 for {late}, \
+         then gave up.",
+        "y".repeat(EXCERPT_BOUNDARY)
+    );
+
+    let cfg = config_with_tokens(early, late);
+    let toml = manifest_from_stage_failure(&cfg, message);
+
+    assert_no_fragment(&toml, early, "early token");
+    assert_no_fragment(&toml, late, "late token");
+}
+
+/// Why: `[REDACTED]` is longer than most of what it replaces, so scrubbing
+/// before truncating could push the excerpt over its budget if the cap were
+/// applied to the pre-redaction text. The cap must bind the string that is
+/// actually emitted.
+/// Test: itself.
+#[test]
+fn redaction_before_truncation_keeps_the_excerpt_within_budget() {
+    // Twelve occurrences, each expanding to `[REDACTED]`, in a message far
+    // longer than the cap.
+    let token = "ghp_BUDGET0123456789abcdefGHIJKLMNOPQRST"; // pragma: allowlist secret
+    let message = std::iter::repeat_n(format!("401 for {token}"), 12)
+        .collect::<Vec<_>>()
+        .join(" and ");
+
+    let cfg = config_with_tokens(token, "unused-jira-token-000");
+    let mut stats = crate::audit::AuditSweepStats::default();
+    stats.record(
+        crate::audit::SweepStage::Collect,
+        std::time::Instant::now(),
+        Err(anyhow::anyhow!(message)),
+    );
+    let line = crate::audit::sweep_gap_lines(&stats, &configured_secrets(&cfg)).remove(0);
+
+    assert!(line.contains('…'), "must still truncate: {line}");
+    assert!(
+        line.chars().count() < 400,
+        "one verbose error must not dominate the Gaps section ({} chars)",
+        line.chars().count()
+    );
+    assert!(!line.contains(&token[..8]), "{line}");
 }
 
 /// Why: trusty-review rejects a manifest with no repositories, and a message

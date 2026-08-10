@@ -21,6 +21,12 @@
 //! title, or a stage's error message is removed rather than merely unlikely to
 //! be there. It is a guarantee about the output, not a claim about the inputs.
 //!
+//! That guarantee has one precondition the caller owes, because `scrub_secrets`
+//! matches a credential's whole value: nothing may shorten a string between the
+//! moment it is captured and the moment it arrives here. Stage messages are the
+//! one channel that shortens — [`crate::audit::sweep_gap_lines`] excerpts them —
+//! so it redacts first, using [`configured_secrets`] on the same config (#5239).
+//!
 //! **The same input yields the same bytes** (DOC-67 §9). Nothing here reads the
 //! clock, the environment, or the filesystem, and every collection is an
 //! ordered `Vec` walked in config order. The one machine-dependent value is the
@@ -244,12 +250,16 @@ fn repo_name(configured: Option<&str>, path: &Path) -> String {
 /// Why: `scrub_secrets` can only remove values the caller already knows, so the
 /// needle set decides how much the guarantee is worth. These are the fields tga
 /// itself reads to authenticate — the ones an error message or an expanded
-/// `${GITHUB_TOKEN}` can carry into text this module emits.
+/// `${GITHUB_TOKEN}` can carry into text this module emits. Public since #5239
+/// because [`crate::audit::sweep_gap_lines`] must redact a stage message
+/// *before* it excerpts it, and it has to redact against the same needles this
+/// builder does — a second derivation here would be the drift the
+/// common-entry-point rule exists to prevent.
 /// What: the GitHub / Bitbucket / JIRA / Linear / Azure-DevOps / OpenRouter
-/// credentials, skipping absent and empty values. Never logged or serialized —
-/// the return value's only use is as a needle set.
+/// credentials, skipping absent and empty values. Returns raw secrets: the only
+/// correct use is as a needle set, never logged, displayed, or serialized.
 /// Test: `super::dd_manifest_tests::configured_token_never_reaches_the_manifest`.
-fn configured_secrets(cfg: &Config) -> Vec<String> {
+pub fn configured_secrets(cfg: &Config) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |v: Option<&String>| {
         if let Some(v) = v.filter(|v| !v.is_empty()) {
