@@ -22,6 +22,7 @@ fn mf(title: &str, severity: Severity, category: &str, component: &str) -> Metri
         severity,
         category: category.to_string(),
         component: component.to_string(),
+        ..Default::default()
     }
 }
 

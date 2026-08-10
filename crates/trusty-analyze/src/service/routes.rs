@@ -79,6 +79,10 @@ pub fn build_router_with_self_origins(
             "/indexes/{id}/complexity_hotspots",
             get(handlers::analysis::complexity_hotspots),
         )
+        .route(
+            "/indexes/{id}/complexity_distribution",
+            get(handlers::analysis::complexity_distribution),
+        )
         .route("/indexes/{id}/smells", get(handlers::analysis::smells))
         .route(
             "/indexes/{id}/refactor-suggestions",

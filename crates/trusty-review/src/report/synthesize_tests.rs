@@ -186,6 +186,7 @@ fn red(title: &str) -> MetricFinding {
         severity: Severity::Red,
         category: "security".to_string(),
         component: "auth".to_string(),
+        ..Default::default()
     }
 }
 
@@ -195,6 +196,7 @@ fn green(title: &str) -> MetricFinding {
         severity: Severity::Green,
         category: "maintainability".to_string(),
         component: "core".to_string(),
+        ..Default::default()
     }
 }
 

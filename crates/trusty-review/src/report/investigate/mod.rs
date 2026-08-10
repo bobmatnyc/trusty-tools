@@ -336,6 +336,11 @@ pub fn apply_investigation(model: &mut ReportModel, inv: &Investigation) {
                 severity: f.severity,
                 category: f.dimension.clone(),
                 component: component_ref(f),
+                // #5317: a verified finding already carries its own one-line
+                // description and remediation — carrying them through means the
+                // rendered entry states something even before synthesis runs.
+                description: f.description.clone(),
+                remediation: f.remediation.clone(),
             });
         }
     }

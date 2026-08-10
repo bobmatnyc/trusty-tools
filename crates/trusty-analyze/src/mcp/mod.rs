@@ -336,6 +336,7 @@ impl AnalyzerMcpServer {
     async fn call_tool(&self, tool: &str, args: &Value) -> Result<Value, DispatchError> {
         match tool {
             "complexity_hotspots" => self.handle_complexity_hotspots(args).await,
+            "complexity_distribution" => self.handle_complexity_distribution(args).await,
             "find_smells" => self.handle_find_smells(args).await,
             "analyze_quality" => self.handle_analyze_quality(args).await,
             "run_diagnostics" => self.handle_run_diagnostics(args).await,
@@ -374,6 +375,15 @@ impl AnalyzerMcpServer {
             "/indexes/{index_id}/complexity_hotspots?top_n={top_n}"
         ))
         .await
+    }
+
+    /// #5320: the exhaustive counterpart to `complexity_hotspots` — forwards to
+    /// `GET /indexes/{id}/complexity_distribution`, which returns all five A–F
+    /// bands plus the counted total.
+    async fn handle_complexity_distribution(&self, args: &Value) -> Result<Value, DispatchError> {
+        let index_id = index_id_or_default(args);
+        self.get(&format!("/indexes/{index_id}/complexity_distribution"))
+            .await
     }
 
     async fn handle_find_smells(&self, args: &Value) -> Result<Value, DispatchError> {

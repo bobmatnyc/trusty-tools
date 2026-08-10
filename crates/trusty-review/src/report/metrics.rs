@@ -119,6 +119,18 @@ pub enum Severity {
 }
 
 /// A single deterministic finding from trusty-analyze (no LLM prose in M1).
+///
+/// Why (#5317): `description` and `remediation` were absent, so every
+/// analyze-derived finding rendered with `not stated in source data` in all
+/// three prose slots — an entry carrying a title and a path and nothing else.
+/// The data was never missing: the daemon returns a rationale and a suggested
+/// action per refactor suggestion and a message per diagnostic, and the adapter
+/// discarded both. These two fields carry them. They are deterministic tool
+/// output, not synthesis, and synthesis still overwrites them when it runs.
+/// What: `title`/`severity`/`category`/`component` as before, plus the two
+/// prose-slot fields, each defaulting to empty so an older metrics JSON still
+/// parses.
+/// Test: `analyze_adapter_tests.rs::refactor_finding_carries_rationale_and_action`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct MetricFinding {
     /// Short finding title.
@@ -133,6 +145,29 @@ pub struct MetricFinding {
     /// Affected component/path, if known.
     #[serde(default)]
     pub component: String,
+    /// What the tool observed, verbatim (e.g. `cyclomatic complexity 31
+    /// (grade F)`). Empty when the source stated none.
+    #[serde(default)]
+    pub description: String,
+    /// The action the tool suggested, verbatim. Empty when the source stated
+    /// none.
+    #[serde(default)]
+    pub remediation: String,
+}
+
+impl MetricFinding {
+    /// Whether this finding would render as nothing but a title and a path.
+    ///
+    /// Why (#5317): a findings entry whose every prose slot falls through to
+    /// the honesty marker tells a reader nothing they can act on while
+    /// occupying a numbered slot in a severity band. Such an entry is dropped
+    /// rather than rendered.
+    /// What: true when both [`Self::description`] and [`Self::remediation`] are
+    /// empty after trimming.
+    /// Test: `analyze_adapter_tests.rs::contentless_findings_are_dropped`.
+    pub fn is_contentless(&self) -> bool {
+        self.description.trim().is_empty() && self.remediation.trim().is_empty()
+    }
 }
 
 impl AnalyzeMetrics {
