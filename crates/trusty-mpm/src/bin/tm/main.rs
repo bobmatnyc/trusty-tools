@@ -33,7 +33,6 @@ use commands::{
     misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
     project::project,
     projects::projects,
-    repair::repair_deploy,
     services::services,
     session::session,
     slack::slack,
@@ -515,20 +514,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::Services { action }) => services(action),
-        Some(Command::Repair { action }) => {
-            use cli::RepairAction;
-            match action {
-                RepairAction::Deploy { force } => repair_deploy(force),
-                RepairAction::PushGuard { path, dry_run } => {
-                    commands::push_guard::repair_push_guard(path, dry_run)
-                }
-                RepairAction::SessionStore {
-                    path,
-                    dry_run,
-                    force,
-                } => commands::repair_session_store::repair_session_store(path, dry_run, force),
-            }
-        }
+        Some(Command::Repair { action }) => commands::repair::dispatch(action),
         Some(Command::Auth { action }) => {
             use cli::AuthAction;
             match action {
