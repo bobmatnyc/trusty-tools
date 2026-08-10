@@ -10,6 +10,6 @@ Added
   everywhere else: a read-only dispatch, an unknown agent name, an unresolvable
   working directory, and an unreachable daemon all allow the dispatch (#4480).
   - Delegation records now carry the `isolation` mode a dispatch declared, and the
-    daemon serves `GET /api/v1/sessions/{id}/delegations/shared-tree-writers` so the
-    guard can ask which agents are already writing in a directory rather than guess
-    from a timer.
+    daemon serves `POST /api/v1/sessions/{id}/delegations/shared-tree-dispatch` so
+    the guard can learn which agents are already writing in a directory rather than
+    guess from a timer.
