@@ -708,4 +708,39 @@ mod tests {
             "a genuinely successful restore does consume the cold entry"
         );
     }
+
+    /// #5075: `ColdIndexStore::purge` clears BOTH the cold entry and the
+    /// permanent-failure marker, so a deregistered id is absent from every
+    /// store.
+    ///
+    /// Why: `unregister_index` removed the hot registration and the
+    /// `indexes.toml` row but left these records, so #5057's guards answered
+    /// 503 forever for an id that no longer existed — inverting the invariant
+    /// that 404 means "absent from every store".
+    /// What: parks an id, fails it, purges, and asserts every predicate is
+    /// clear. Also asserts idempotency for an unknown id.
+    /// Test: this test.
+    #[test]
+    fn purge_removes_cold_and_failed_records() {
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("gone".to_string());
+        cold.register_cold_entries(vec![mk_entry("gone", None, None)]);
+        assert!(cold.contains(&id));
+        cold.mark_failed(&id);
+        assert!(cold.is_failed(&id), "precondition: id is in failed_entries");
+
+        cold.purge(&id);
+
+        assert!(!cold.contains(&id), "#5075: cold entry must be gone");
+        assert!(
+            !cold.is_failed(&id),
+            "#5075: failed marker must be gone too — it is what pinned the 503"
+        );
+        assert_eq!(cold.failed_len(), 0);
+
+        // Idempotent: purging an id in no store at all is a no-op.
+        cold.purge(&IndexId::new("never-existed".to_string()));
+        assert_eq!(cold.len(), 0);
+        assert_eq!(cold.failed_len(), 0);
+    }
 }

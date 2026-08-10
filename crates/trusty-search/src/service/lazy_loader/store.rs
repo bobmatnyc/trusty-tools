@@ -543,6 +543,30 @@ impl ColdIndexStore {
         self.failed_entries.insert(id.clone(), ());
     }
 
+    /// Forget an id completely — cold entry, failed marker, and loading gate.
+    ///
+    /// Why (#5075): `unregister_index` dropped the hot registration and the
+    /// `indexes.toml` row but left this store's records behind, so the three
+    /// cold-store guards #5057 added (`status.rs`, `files.rs`) kept answering
+    /// `503 index_not_resident` / `index_restore_failed` forever for an id that
+    /// no longer exists anywhere. That inverts the #5057 invariant that 404
+    /// means "absent from every store" — after a DELETE the index IS absent, so
+    /// a later `create_index` + reindex could never be reported as
+    /// `INDEX_NOT_READY` again (the #4715 scenario).
+    /// What: removes the id from `entries`, `failed_entries`, and
+    /// `loading_gates`. Idempotent — an id in none of the three is a no-op, so
+    /// the delete path can call it unconditionally. Deliberately NOT identity-
+    /// guarded (unlike [`Self::mark_loaded_if`]): deregistration is a terminal
+    /// operation on the id itself, so there is no newer record worth keeping.
+    /// Test: `purge_removes_cold_and_failed_records`,
+    /// `purge_is_idempotent_for_unknown_id`,
+    /// `delete_index_clears_cold_store_so_status_is_404_not_503`.
+    pub fn purge(&self, id: &IndexId) {
+        self.entries.remove(id);
+        self.failed_entries.remove(id);
+        self.loading_gates.remove(id);
+    }
+
     /// Acquire or create the per-index loading gate.
     ///
     /// Why: double-checked lock — two concurrent queries for the same cold index
