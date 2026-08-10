@@ -29,6 +29,11 @@ mod sweep;
 #[cfg(test)]
 mod tests;
 
+/// The excerpt cap, visible to `report::dd_manifest_tests` so its
+/// boundary-straddle tests position a credential against the real value instead
+/// of a copy that can drift away from it (#5308 review).
+#[cfg(test)]
+pub(crate) use gaps::MAX_REASON_CHARS;
 pub use gaps::{sweep_gap_lines, DATA_HANDLING_NOTE};
 pub use review::{
     artifact_paths, resolve_review_binary, run_review_report, ReviewRun, ReviewRunError,

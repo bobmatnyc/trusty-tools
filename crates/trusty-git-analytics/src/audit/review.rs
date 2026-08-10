@@ -98,13 +98,28 @@ pub struct ReviewRun {
 /// The `trusty-review` binary this process will invoke.
 ///
 /// Why/What: `TRUSTY_REVIEW_BIN` when set to a non-empty value, else
-/// [`DEFAULT_REVIEW_BIN`] resolved on PATH by the OS.
+/// [`DEFAULT_REVIEW_BIN`] resolved on PATH by the OS. Reading the variable is
+/// all this function does; the rule itself lives in [`binary_from_override`] so
+/// it can be tested without mutating the process environment.
 /// Test: `super::tests::binary_resolution_prefers_the_env_override`.
 pub fn resolve_review_binary() -> String {
-    std::env::var(ENV_REVIEW_BIN)
-        .ok()
+    binary_from_override(std::env::var(ENV_REVIEW_BIN).ok().as_deref())
+}
+
+/// The resolution rule itself: an override wins unless it is empty.
+///
+/// Why: taking the override as a parameter keeps the rule a pure function, so
+/// the tests never call `std::env::set_var`. That call is `unsafe` in edition
+/// 2024 because another thread reading the environment concurrently is UB, and
+/// `cargo test` runs tests in parallel — a test-only guarantee of
+/// single-threadedness does not exist (#5308 review).
+/// What: `None` and `Some("")` both fall back to [`DEFAULT_REVIEW_BIN`].
+/// Test: `super::tests::binary_resolution_prefers_the_env_override`.
+pub(super) fn binary_from_override(override_value: Option<&str>) -> String {
+    override_value
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_REVIEW_BIN.to_string())
+        .unwrap_or(DEFAULT_REVIEW_BIN)
+        .to_string()
 }
 
 /// Render `manifest` into `out_dir` by invoking `trusty-review report`.
@@ -134,7 +149,21 @@ pub async fn run_review_report(
     manifest: &Path,
     out_dir: &Path,
 ) -> Result<ReviewRun, ReviewRunError> {
-    let binary = resolve_review_binary();
+    run_review_report_with(resolve_review_binary(), manifest, out_dir).await
+}
+
+/// [`run_review_report`] with the binary already resolved.
+///
+/// Why: the environment is read exactly once, at the public entry point, so a
+/// test can drive the whole spawn-and-map path at a binary that certainly does
+/// not exist without touching the process environment (#5308 review).
+/// What: everything `run_review_report` does apart from resolution.
+/// Test: `super::tests::missing_binary_is_a_named_actionable_error`.
+pub(super) async fn run_review_report_with(
+    binary: String,
+    manifest: &Path,
+    out_dir: &Path,
+) -> Result<ReviewRun, ReviewRunError> {
     let (bin, manifest_owned, out_owned) = (
         binary.clone(),
         manifest.to_path_buf(),

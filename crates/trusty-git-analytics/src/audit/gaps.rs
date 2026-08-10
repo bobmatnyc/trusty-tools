@@ -39,7 +39,7 @@ use super::stage::{AuditSweepStats, StageStatus};
 /// transport detail that means nothing to the report's reader, and the Gaps
 /// section is read under time pressure. The full message is already on stderr
 /// and in the sweep's own record; this is the reader's excerpt.
-const MAX_REASON_CHARS: usize = 160;
+pub(crate) const MAX_REASON_CHARS: usize = 160;
 
 /// The placeholder data-retention statement AUDIT carries until #5218 ships.
 ///

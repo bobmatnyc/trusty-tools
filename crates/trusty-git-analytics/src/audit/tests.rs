@@ -406,19 +406,14 @@ async fn missing_binary_is_a_named_actionable_error() {
     let manifest = dir.path().join("manifest.toml");
     std::fs::write(&manifest, "[report]\ntitle = \"T\"\n").expect("write");
 
-    // SAFETY: single-threaded test process mutating its own env before use.
-    unsafe {
-        std::env::set_var(
-            crate::audit::ENV_REVIEW_BIN,
-            dir.path().join("definitely-not-installed"),
-        );
-    }
-    let err = crate::audit::run_review_report(&manifest, dir.path())
-        .await
-        .expect_err("a missing binary must be an error");
-    unsafe {
-        std::env::remove_var(crate::audit::ENV_REVIEW_BIN);
-    }
+    // The binary is passed in, never installed through the environment: this is
+    // the same path `run_review_report` takes once resolution has happened, and
+    // it stays sound under the parallel harness (#5308 review).
+    let missing = dir.path().join("definitely-not-installed");
+    let err =
+        super::review::run_review_report_with(missing.display().to_string(), &manifest, dir.path())
+            .await
+            .expect_err("a missing binary must be an error");
 
     let msg = err.to_string();
     assert!(
@@ -436,29 +431,26 @@ async fn missing_binary_is_a_named_actionable_error() {
     );
 }
 
+/// The rule is exercised as a pure function over the override value, which is
+/// what `resolve_review_binary` reads `TRUSTY_REVIEW_BIN` into. Mutating the
+/// process environment to test it would be unsound under the parallel test
+/// harness, and no `unsafe` block can make it sound (#5308 review).
 #[test]
 fn binary_resolution_prefers_the_env_override() {
-    // SAFETY: single-threaded test process mutating its own env before use.
-    unsafe {
-        std::env::set_var(crate::audit::ENV_REVIEW_BIN, "/opt/bin/trusty-review");
-    }
+    use super::review::binary_from_override;
+
     assert_eq!(
-        crate::audit::resolve_review_binary(),
+        binary_from_override(Some("/opt/bin/trusty-review")),
         "/opt/bin/trusty-review"
     );
-    unsafe {
-        std::env::set_var(crate::audit::ENV_REVIEW_BIN, "");
-    }
     assert_eq!(
-        crate::audit::resolve_review_binary(),
+        binary_from_override(Some("")),
         crate::audit::DEFAULT_REVIEW_BIN,
         "an empty override falls back to the PATH lookup"
     );
-    unsafe {
-        std::env::remove_var(crate::audit::ENV_REVIEW_BIN);
-    }
-    assert_eq!(
-        crate::audit::resolve_review_binary(),
-        crate::audit::DEFAULT_REVIEW_BIN
-    );
+    assert_eq!(binary_from_override(None), crate::audit::DEFAULT_REVIEW_BIN);
+    // The public entry point returns one of the two, whatever this machine's
+    // environment happens to hold — read only, never written.
+    let resolved = crate::audit::resolve_review_binary();
+    assert!(!resolved.is_empty(), "{resolved}");
 }

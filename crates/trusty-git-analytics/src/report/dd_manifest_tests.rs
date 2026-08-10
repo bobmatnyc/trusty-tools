@@ -204,11 +204,14 @@ fn configured_token_never_reaches_the_manifest() {
 // across the excerpt boundary (#5239)
 // ---------------------------------------------------------------------------
 
-/// `audit::gaps::MAX_REASON_CHARS` — private there, restated here because these
-/// tests exist to position a credential relative to it. A change to one without
-/// the other makes the straddle stop straddling, and the assertions below still
-/// hold, so the duplication costs no correctness.
-const EXCERPT_BOUNDARY: usize = 160;
+/// The excerpt cap these tests position a credential across, taken from the
+/// production constant rather than copied.
+///
+/// Why: a copy that drifted would not fail — the token would land wholly inside
+/// a wider excerpt, the straddle would stop straddling, and
+/// `a_token_straddling_the_excerpt_boundary_leaves_no_fragment` would keep
+/// passing while guarding nothing (#5308 review).
+const EXCERPT_BOUNDARY: usize = crate::audit::MAX_REASON_CHARS;
 
 /// Run one failed stage through the pipeline `tga audit` actually uses.
 ///
@@ -250,16 +253,55 @@ fn config_with_tokens(github: &str, jira: &str) -> Config {
     cfg
 }
 
-/// Assert that not even an 8-character prefix of `token` appears in `toml`.
+/// `scrub_secrets`'s shortest scrubbable needle, in characters.
 ///
-/// The 8 is deliberate: `scrub_secrets` refuses needles shorter than that, so a
-/// surviving 8-char prefix is precisely a fragment no downstream scrub could
-/// ever remove. Any longer fragment contains this one, so one assertion covers
-/// every fragment length.
+/// Why: it is private to `trusty_common::credentials::redact`, and exporting it
+/// would add a public item to a crate every other crate depends on for the sake
+/// of one assertion here. `scrub_min_chars_is_what_the_fragment_assertions_assume`
+/// pins this value against the real behaviour instead, so a change over there
+/// fails a test rather than silently weakening every assertion below (#5308
+/// review).
+const SCRUB_MIN_CHARS: usize = 8;
+
+/// The shortest leading fragment of `token` that no later `scrub_secrets` call
+/// could remove — measured in characters, because `scrub_secrets`'s own guard
+/// counts characters and a byte slice would panic mid-codepoint.
+fn unscrubbable_fragment(token: &str) -> String {
+    token.chars().take(SCRUB_MIN_CHARS).collect()
+}
+
+/// Why: [`SCRUB_MIN_CHARS`] is a restatement of a constant in another crate, and
+/// the fragment assertions are only as strong as that number is right. A needle
+/// of exactly this length must be scrubbable and one character shorter must not
+/// be — which is what makes a surviving fragment of this length unremovable by
+/// anything downstream.
+/// Test: itself.
+#[test]
+fn scrub_min_chars_is_what_the_fragment_assertions_assume() {
+    let needle: String = "abcdefghijklmnop".chars().take(SCRUB_MIN_CHARS).collect();
+    assert_eq!(
+        trusty_common::credentials::scrub_secrets(&format!("value {needle} here"), &[&needle]),
+        "value [REDACTED] here",
+        "a needle of exactly SCRUB_MIN_CHARS must be scrubbable"
+    );
+
+    let shorter: String = needle.chars().take(SCRUB_MIN_CHARS - 1).collect();
+    let text = format!("value {shorter} here");
+    assert_eq!(
+        trusty_common::credentials::scrub_secrets(&text, &[&shorter]),
+        text,
+        "one character shorter must be refused"
+    );
+}
+
+/// Assert that not even an unscrubbable prefix of `token` appears in `toml`.
+///
+/// Any longer fragment contains [`unscrubbable_fragment`]'s, so one assertion
+/// covers every fragment length.
 fn assert_no_fragment(toml: &str, token: &str, label: &str) {
     assert!(!toml.contains(token), "{label}: full token leaked:\n{toml}");
     assert!(
-        !toml.contains(&token[..8]),
+        !toml.contains(&unscrubbable_fragment(token)),
         "{label}: a prefix fragment survived:\n{toml}"
     );
 }
@@ -345,7 +387,7 @@ fn redaction_before_truncation_keeps_the_excerpt_within_budget() {
         "one verbose error must not dominate the Gaps section ({} chars)",
         line.chars().count()
     );
-    assert!(!line.contains(&token[..8]), "{line}");
+    assert!(!line.contains(&unscrubbable_fragment(token)), "{line}");
 }
 
 /// Why: trusty-review rejects a manifest with no repositories, and a message
