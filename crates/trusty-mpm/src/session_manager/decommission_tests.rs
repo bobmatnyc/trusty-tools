@@ -17,7 +17,9 @@
 //! `SessionManager` API via `decommission_with_root`.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
-use super::decommission::{WORKTREE_SENTINEL_FILE, is_session_worktree, remove_session_worktree};
+use super::decommission::{
+    WORKTREE_SENTINEL_FILE, is_session_worktree, remove_session_worktree, worktrees_dirname,
+};
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
@@ -45,6 +47,31 @@ fn is_session_worktree_detects_dot_worktrees_component() {
     assert!(!is_session_worktree(std::path::Path::new(
         "/base/worktrees/session"
     )));
+}
+
+/// Why (#5204): this module's `worktrees_dirname()` is NOT the same function as
+/// `core::trusty_tools_config::worktrees_dirname(&cfg)` — that one is a pure
+/// function of a config the caller already holds, while this one LOADS the host
+/// config itself. The loading step is the part with nothing else covering it,
+/// so it gets its own test rather than borrowing the other's name.
+/// What: with the env override set the delegation returns it; with the override
+/// cleared it returns `.worktrees`. Driving the env leg (rather than asserting a
+/// bare default) keeps the test deterministic on a developer machine that has
+/// `worktrees_dirname` set in its own `config.yaml`.
+/// Test: itself.
+#[test]
+fn worktrees_dirname_delegates_to_the_shared_resolver() {
+    let _guard = crate::core::trusty_tools_config::env_test_lock();
+    // SAFETY: serialised by the crate-wide env lock; cleared below.
+    unsafe { std::env::set_var("TRUSTY_MPM_WORKTREES_DIRNAME", ".sessions") };
+    let configured = worktrees_dirname();
+    // SAFETY: as above.
+    unsafe { std::env::remove_var("TRUSTY_MPM_WORKTREES_DIRNAME") };
+
+    assert_eq!(
+        configured, ".sessions",
+        "the loaded-config delegation must carry the resolved base through"
+    );
 }
 
 /// #5204 REGRESSION: no configured worktree base may make a Claude Code agent

@@ -58,7 +58,7 @@ pub(crate) const WORKTREE_SENTINEL_FILE: &str = ".trusty-mpm-worktree";
 /// worktree is being created or a path is being built; every "is this a
 /// worktree base?" question goes to [`worktree_dir_names`] instead.
 /// Test: `is_session_worktree_detects_dot_worktrees_component`,
-/// `worktrees_dirname_defaults_to_dot_worktrees`.
+/// `worktrees_dirname_delegates_to_the_shared_resolver`.
 pub(crate) fn worktrees_dirname() -> String {
     crate::core::trusty_tools_config::worktrees_dirname(
         &crate::core::trusty_tools_config::TrustyToolsConfig::load(),
