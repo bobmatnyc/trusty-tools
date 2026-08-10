@@ -1,0 +1,27 @@
+    Building trusty-mpm v1.3.5 (current)
+error: running cargo-doc on crate 'trusty-mpm' failed with output:
+-----
+warning: /REPO/crates/trusty-mpm/Cargo.toml: file `/REPO/crates/trusty-mpm/src/bin/tm/main.rs` found to be present in multiple build targets:
+  * `bin` target `tm`
+  * `bin` target `trusty-mpm`
+error: rustc 1.94.1 is not supported by the following package:
+  takecell@0.1.2 requires rustc 1.96
+Either upgrade rustc or select compatible dependency versions with
+`cargo update <name>@<current-ver> --precise <compatible-ver>`
+where `<compatible-ver>` is the latest version supporting rustc 1.94.1
+
+
+-----
+
+error: failed to build rustdoc for crate trusty-mpm v1.3.5
+note: this is usually due to a compilation error in the crate,
+      and is unlikely to be a bug in cargo-semver-checks
+note: the following command can be used to reproduce the error:
+      cargo new --lib example &&
+          cd example &&
+          echo '[workspace]' >> Cargo.toml &&
+          cargo add --path /REPO/crates/trusty-mpm --no-default-features --features bedrock,cli,daemon,gui,manager-memory,mcp,slack,sm-memory,swagger-ui,telegram,tui &&
+          cargo check &&
+          cargo doc
+
+error: aborting due to failure to build rustdoc for crate trusty-mpm v1.3.5
