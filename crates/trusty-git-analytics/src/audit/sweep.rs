@@ -21,9 +21,18 @@ use crate::commands::{classify, collect, deployments, dora, incidents, jira, pr_
 use crate::commands::{dora::DoraArgs, pr_metrics::PrMetricsArgs};
 use crate::core::config::Config;
 use crate::core::db::Database;
-use crate::core::progress::ProgressBus;
+use crate::core::progress::{ProgressBus, ProgressEvent, Stage};
 
 use super::stage::{AuditSweepStats, SweepStage};
+
+/// How many stages [`run_full_sweep`] drives.
+///
+/// Why: the per-stage start event says "stage 3 of 8", and that denominator has
+/// to come from one place or it drifts the next time a stage is added.
+/// What: `8`.
+/// Test: `super::tests::sweep_runs_every_stage_in_order_and_survives_failures`
+/// asserts the sweep records exactly this many outcomes.
+pub(crate) const TOTAL_STAGES: usize = 8;
 
 /// The knobs `tga audit` (or a TUI action) hands the sweep.
 ///
@@ -58,10 +67,15 @@ pub struct SweepOptions {
 /// → pr-metrics → report by calling each subcommand's own `run`, recording
 /// every outcome into an [`AuditSweepStats`]. No stage result is propagated
 /// with `?`, so no stage can abort the run. `--allow-stale` is applied to
-/// collection as a fixed default (§9) — not an operator choice. `progress`,
-/// when supplied, is the existing bus the collection pipeline emits into; the
-/// remaining stages have no progress instrumentation of their own today and
-/// are silent on it.
+/// collection as a fixed default (§9) — not an operator choice.
+///
+/// `progress`, when supplied, receives a [`Stage::Audit`] start event before
+/// each of the eight stages and a completed/failed event after it, with
+/// [`SweepStage::as_str`] as the target — so a ten-minute sweep is observable
+/// even though seven of the eight subcommands have no instrumentation of their
+/// own (#5361). The collection stage additionally gets the SAME bus handed to
+/// its pipeline, so its per-repository [`Stage::Collect`] events land there
+/// too. `None` emits nothing at all.
 ///
 /// A failed STAGE is reported inside `AuditSweepStats`, never as `Err` —
 /// `Err` means the run could not be started at all. Callers must therefore check
@@ -76,7 +90,8 @@ pub struct SweepOptions {
 /// fail identically, which is noise rather than a gap list.
 ///
 /// Test: `super::tests::sweep_runs_every_stage_in_order_and_survives_failures`,
-/// `super::tests::failed_stage_is_recorded_and_does_not_stop_the_sweep`.
+/// `super::tests::failed_stage_is_recorded_and_does_not_stop_the_sweep`,
+/// `super::tests::sweep_emits_progress_for_non_collection_stages`.
 ///
 /// # Spec References
 /// - [`SPEC-TGAUDIT-02~draft`](../../../../docs/specs/DOC-67-tga-audit-mode.md#SPEC-TGAUDIT-02~draft)
@@ -88,12 +103,6 @@ pub async fn run_full_sweep(
     options: &SweepOptions,
     progress: Option<&ProgressBus>,
 ) -> anyhow::Result<AuditSweepStats> {
-    // The bus is accepted but not yet threaded past collection: only
-    // `CollectionPipeline` emits events today, and it reads the bus off the
-    // config-carrying pipeline rather than off the command wrapper. Kept in the
-    // signature per DOC-67 §7 so the TUI caller does not need a second one.
-    let _ = progress;
-
     // Created once, up front, so the stages that write into it do not each
     // race to create it — and so an unwritable path fails as a precondition
     // rather than as eight identical stage failures.
@@ -102,8 +111,11 @@ pub async fn run_full_sweep(
     }
 
     let mut stats = AuditSweepStats::default();
+    // #5361: the collection pipeline wants an owned bus and an absent one is
+    // the disabled bus, on which every emit is a no-op.
+    let collect_bus = progress.cloned().unwrap_or_default();
 
-    let t = Instant::now();
+    let t = begin(progress, &stats, SweepStage::Collect);
     let args = CollectArgs {
         weeks: options.weeks,
         // #5217: DOC-67 §9 — a one-shot org sweep cannot inherit `tga
@@ -112,55 +124,37 @@ pub async fn run_full_sweep(
         allow_stale: true,
         ..CollectArgs::default()
     };
-    stats.record(
-        SweepStage::Collect,
-        t,
-        collect::run(config.clone(), db, args).await,
-    );
+    let result = collect::run_with_progress(config.clone(), db, args, &collect_bus).await;
+    finish(progress, &mut stats, SweepStage::Collect, t, result);
 
-    let t = Instant::now();
+    let t = begin(progress, &stats, SweepStage::Classify);
     let args = ClassifyArgs {
         weeks: options.weeks,
         ..ClassifyArgs::default()
     };
-    stats.record(
-        SweepStage::Classify,
-        t,
-        classify::run(config.clone(), db, args).await,
-    );
+    let result = classify::run(config.clone(), db, args).await;
+    finish(progress, &mut stats, SweepStage::Classify, t, result);
 
-    let t = Instant::now();
-    stats.record(
-        SweepStage::JiraSync,
-        t,
-        jira::run_sync(config.clone(), db, JiraSyncArgs::default()).await,
-    );
+    let t = begin(progress, &stats, SweepStage::JiraSync);
+    let result = jira::run_sync(config.clone(), db, JiraSyncArgs::default()).await;
+    finish(progress, &mut stats, SweepStage::JiraSync, t, result);
 
     // Deployments and incidents populate `fact_deployments` / `fact_incidents`,
     // which `dora` reduces — so they precede it here even though DOC-67 §5's
     // prose lists dora first. See the module-level note in `super`.
-    let t = Instant::now();
-    stats.record(
-        SweepStage::Deployments,
-        t,
-        deployments::run(config.clone(), db, DeploymentsCollectArgs::default()).await,
-    );
+    let t = begin(progress, &stats, SweepStage::Deployments);
+    let result = deployments::run(config.clone(), db, DeploymentsCollectArgs::default()).await;
+    finish(progress, &mut stats, SweepStage::Deployments, t, result);
 
-    let t = Instant::now();
-    stats.record(
-        SweepStage::Incidents,
-        t,
-        incidents::run(config.clone(), db, IncidentsCollectArgs::default()),
-    );
+    let t = begin(progress, &stats, SweepStage::Incidents);
+    let result = incidents::run(config.clone(), db, IncidentsCollectArgs::default());
+    finish(progress, &mut stats, SweepStage::Incidents, t, result);
 
-    let t = Instant::now();
-    stats.record(
-        SweepStage::Dora,
-        t,
-        dora::run(config.clone(), db, DoraArgs::default()),
-    );
+    let t = begin(progress, &stats, SweepStage::Dora);
+    let result = dora::run(config.clone(), db, DoraArgs::default());
+    finish(progress, &mut stats, SweepStage::Dora, t, result);
 
-    let t = Instant::now();
+    let t = begin(progress, &stats, SweepStage::PrMetrics);
     // `pr-metrics --output` names a FILE, not a directory (unlike `report
     // --output`), so it gets a path inside the run directory rather than the
     // directory itself — passing the directory makes it write a regular file
@@ -170,19 +164,65 @@ pub async fn run_full_sweep(
         csv: true,
         output: options.output.as_ref().map(|d| d.join("pr-metrics.csv")),
     };
-    stats.record(
-        SweepStage::PrMetrics,
-        t,
-        pr_metrics::run(config.clone(), db, args),
-    );
+    let result = pr_metrics::run(config.clone(), db, args);
+    finish(progress, &mut stats, SweepStage::PrMetrics, t, result);
 
-    let t = Instant::now();
+    let t = begin(progress, &stats, SweepStage::Report);
     let args = ReportArgs {
         output: options.output.clone(),
         ..ReportArgs::default()
     };
-    stats.record(SweepStage::Report, t, report::run(config.clone(), db, args));
+    let result = report::run(config.clone(), db, args);
+    finish(progress, &mut stats, SweepStage::Report, t, result);
 
     tracing::info!(summary = %stats.summary(), "audit sweep finished");
     Ok(stats)
+}
+
+/// Announce that `stage` is starting, and return the instant to time it from.
+///
+/// Why: a stage with no instrumentation of its own is indistinguishable from a
+/// hang until it ends, which for `collect` against a large org is minutes of
+/// frozen screen (#5302). The start event is what puts the row on screen.
+/// What: emits [`ProgressEvent::started`] on `progress` under
+/// [`Stage::Audit`], targeted at the stage name and detailed with its position
+/// in the run, then returns `Instant::now()`. A `None` bus emits nothing; the
+/// returned instant is unaffected either way.
+/// Test: `super::tests::sweep_emits_progress_for_non_collection_stages`.
+fn begin(progress: Option<&ProgressBus>, stats: &AuditSweepStats, stage: SweepStage) -> Instant {
+    if let Some(bus) = progress {
+        let position = stats.outcomes.len() + 1;
+        bus.emit(
+            ProgressEvent::started(Stage::Audit, stage.as_str(), Some(1))
+                .with_detail(format!("stage {position} of {TOTAL_STAGES}")),
+        );
+    }
+    Instant::now()
+}
+
+/// Publish `stage`'s verdict, then record it in `stats`.
+///
+/// Why: the bus and the stats must never disagree about how a stage ended, so
+/// one function owns both writes — a caller cannot record an outcome without
+/// announcing it, or announce one it did not record.
+/// What: emits [`ProgressEvent::completed`] or [`ProgressEvent::failed`]
+/// (carrying the full `{e:#}` cause chain, the same text
+/// [`AuditSweepStats::record`] stores), then hands `result` to
+/// [`AuditSweepStats::record`]. Never propagates: a stage failure is a recorded
+/// fact, per DOC-67 §9.
+/// Test: `super::tests::sweep_emits_progress_for_non_collection_stages`.
+fn finish(
+    progress: Option<&ProgressBus>,
+    stats: &mut AuditSweepStats,
+    stage: SweepStage,
+    started: Instant,
+    result: anyhow::Result<()>,
+) {
+    if let Some(bus) = progress {
+        bus.emit(match &result {
+            Ok(()) => ProgressEvent::completed(Stage::Audit, stage.as_str(), 1),
+            Err(e) => ProgressEvent::failed(Stage::Audit, stage.as_str(), format!("{e:#}")),
+        });
+    }
+    stats.record(stage, started, result);
 }

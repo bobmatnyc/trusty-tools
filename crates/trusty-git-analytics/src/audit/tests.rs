@@ -8,6 +8,7 @@ use crate::audit::{run_full_sweep, AuditSweepStats, StageStatus, SweepOptions, S
 use crate::commands::audit::AuditArgs;
 use crate::core::config::Config;
 use crate::core::db::Database;
+use crate::core::progress::{ProgressBus, Stage};
 
 /// The order `run_full_sweep` is contracted to execute in.
 ///
@@ -122,6 +123,9 @@ async fn sweep_runs_every_stage_in_order_and_survives_failures() {
 
     let stages: Vec<_> = stats.outcomes.iter().map(|o| o.stage).collect();
     assert_eq!(stages, EXPECTED_ORDER.to_vec());
+    // The "stage N of 8" denominator in the progress start events is this
+    // constant; a stage added without updating it would lie to the operator.
+    assert_eq!(stages.len(), super::sweep::TOTAL_STAGES);
 
     // JIRA is unconfigured here, so that stage must have failed — and the
     // seven stages after it must still have run.
@@ -206,6 +210,102 @@ async fn sweep_writes_reports_into_the_requested_directory() {
             out.display()
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Progress reporting from every stage, not just collection (#5361)
+// ---------------------------------------------------------------------------
+
+/// #5361: `run_full_sweep` used to bind and discard its `progress` parameter,
+/// so a caller that supplied a bus saw nothing for classify, report, pr-metrics,
+/// jira sync, dora, deployments, or incidents — a ~10-minute sweep behind a
+/// frozen screen. This asserts the non-collection stages reach the bus the
+/// caller passed in; before the fix the drained event list is empty.
+#[tokio::test]
+async fn sweep_emits_progress_for_non_collection_stages() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
+    let options = SweepOptions {
+        output: Some(dir.path().join("out")),
+        weeks: Some(1),
+    };
+    let bus = ProgressBus::new();
+
+    let stats = run_full_sweep(&Config::default(), &mut db, &options, Some(&bus))
+        .await
+        .expect("sweep");
+
+    let events = bus.drain();
+    assert_eq!(bus.dropped(), 0, "the run must fit in the default ring");
+    assert!(
+        !events.is_empty(),
+        "a bus handed to run_full_sweep received nothing at all"
+    );
+
+    // Report and classify are the stages furthest from collection: neither has
+    // any instrumentation of its own, so if the parameter is not threaded they
+    // are silent no matter what the collection pipeline does.
+    for stage in [SweepStage::Classify, SweepStage::Report] {
+        let mine: Vec<_> = events
+            .iter()
+            .filter(|e| e.stage == Stage::Audit && e.target == stage.as_str())
+            .collect();
+        assert!(
+            mine.iter().any(|e| !e.is_terminal()),
+            "no start event for the {stage} stage: {events:#?}"
+        );
+        assert!(
+            mine.iter().any(|e| e.is_terminal()),
+            "no completion event for the {stage} stage: {events:#?}"
+        );
+    }
+
+    // Every stage, not just those two — and the bus's verdict agrees with the
+    // recorded one, so a stage cannot report green on screen and red in stats.
+    for outcome in &stats.outcomes {
+        let terminal = events
+            .iter()
+            .find(|e| {
+                e.stage == Stage::Audit && e.target == outcome.stage.as_str() && e.is_terminal()
+            })
+            .unwrap_or_else(|| panic!("no terminal event for {}", outcome.stage));
+        let announced_failure = terminal
+            .outcome
+            .as_ref()
+            .is_some_and(|o| matches!(o, crate::core::progress::Outcome::Failed { .. }));
+        assert_eq!(
+            announced_failure,
+            outcome.status.is_failure(),
+            "{} announced and recorded different verdicts",
+            outcome.stage
+        );
+    }
+}
+
+/// An inactive bus must change nothing — the `None` caller's contract, proved
+/// through the one shape that is observable from outside.
+#[tokio::test]
+async fn a_disabled_bus_stays_a_no_op() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
+    let options = SweepOptions {
+        output: Some(dir.path().join("out")),
+        weeks: Some(1),
+    };
+    let bus = ProgressBus::disabled();
+
+    let stats = run_full_sweep(&Config::default(), &mut db, &options, Some(&bus))
+        .await
+        .expect("sweep");
+
+    assert!(bus.drain().is_empty(), "a disabled bus queued events");
+    assert_eq!(bus.dropped(), 0);
+    let stages: Vec<_> = stats.outcomes.iter().map(|o| o.stage).collect();
+    assert_eq!(
+        stages,
+        EXPECTED_ORDER.to_vec(),
+        "sequencing must not depend on whether anybody is watching"
+    );
 }
 
 // ---------------------------------------------------------------------------
