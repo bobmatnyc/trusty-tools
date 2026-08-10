@@ -144,10 +144,19 @@ const DIFF_ABSENT_SPECULATION_MARKERS: &[&str] = &[
 /// Why: a bare tuple stopped reading clearly once a third pass (#4081) joined
 /// the two original ones — `(usize, usize, usize)` at a call site says nothing
 /// about which count is which.
+///
+/// `#[non_exhaustive]` because this struct grows a field every time a hygiene
+/// pass is added, and each addition was otherwise a breaking change for any
+/// external exhaustive literal — the #4088 class of break, and the fix
+/// `scripts/check_semver.sh` itself recommends. It is applied in the same
+/// unpublished 0.13.0 as #5309's fourth counter so the FIFTH pass costs
+/// nothing. Construct one with `..Default::default()` from outside the crate;
+/// in-crate literals are unaffected.
 /// What: plain public counters; every field is "how many findings this pass
 /// acted on".
 /// Test: `sanitize_findings_runs_every_pass`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct HygieneCounts {
     /// Findings dropped as self-negated / chain-of-thought-leaking (#4044).
     pub dropped_self_negated: usize,
