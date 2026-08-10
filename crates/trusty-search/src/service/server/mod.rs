@@ -59,6 +59,9 @@ mod tests_4123;
 // Issue #4715: an index-scoped 404 must rule out the cold store.
 #[cfg(test)]
 mod tests_4715;
+// #4951: a reindex root_path override must not empty every search result.
+#[cfg(test)]
+mod tests_4951;
 // #4250: timeout-parked index recovery and the /health un-latch.
 #[cfg(test)]
 mod tests_4250;
