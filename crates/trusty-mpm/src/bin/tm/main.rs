@@ -582,7 +582,7 @@ async fn main() -> anyhow::Result<()> {
                 let (sort, term) = commands::session_picker::parse_ls_terms(&terms);
                 // #3483 scope: `tm ls <term>` matches every visible column.
                 let filter = term.map(commands::session_picker::SessionFilter::visible);
-                commands::session_picker::run_ls_connector(
+                commands::session_ls_connector::run_ls_connector(
                     &client, &url, json, source_id, current, all, sort, filter,
                 )
                 .await

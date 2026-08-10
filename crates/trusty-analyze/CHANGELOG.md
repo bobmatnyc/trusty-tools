@@ -7,6 +7,79 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.9.0] — 2026-08-10
+
+### Breaking
+
+- **`POST /webhooks/github` is retired and now returns 404** (#5181, ADR-0034). GitHub deliveries reach `trusty-analyze` only through `trusty-console`'s `POST /api/webhooks/{source}`, which verifies the HMAC once, spools the payload durably, and relays over UDS to `trusty-analyze webhook-listen`. The route is deleted rather than stubbed, so a delivery still aimed at it fails visibly at GitHub instead of being acknowledged and dropped. Anyone with a GitHub webhook pointed at `trusty-analyze` directly must repoint it at the console. The analysis pipeline is unchanged — the route's handler already delegated to `webhook_drain`, which the UDS path uses.
+- **Removed public API:** `service::handlers::review::github_webhook_handler`, `core::verify_webhook_signature` (and `core::github::verify_webhook_signature`), and `AnalyzerAppState::{webhook_secret, with_webhook_secret}`. This crate no longer verifies a webhook signature at all; that is `trusty-console`'s single implementation (ADR-0034 §3), so the `hmac`, `sha2` and `hex` dependencies are dropped.
+- `webhook_listener::run` now takes a `TrustySearchClient`, which it needs to run the analysis pipeline. Callers must pass the client they already build from `--search-url` (#5192).
+
+### Added
+
+- `trusty-analyze webhook-listen` binds `trusty-analyze-webhook.sock`, the socket `trusty-console` has been relaying verified GitHub deliveries to since #5089 step 3 with nothing on the other end. Each delivery is fsync'd to a durable inbox under the crate's data directory before the acknowledgement is written; an acknowledgement is what lets console delete its own copy, so nothing is acked that is not already held. The listener exits on SIGTERM, so the socket exists without the service running resident. Both the socket and the inbox root resolve from `trusty_common::webhook_relay` rather than being spelled here, so the directory this service writes to is by construction the one `trusty-console` meters for an undrained backlog. The legacy `POST /webhooks/github` route is unchanged.
+- `GET /indexes/{id}/complexity_distribution` and the matching `complexity_distribution` MCP tool return the full A-F cyclomatic-complexity histogram over an index, with the counted total, in a payload bounded at five rows regardless of corpus size (#5320).
+
+### Fixed
+
+- `service install` evicts `com.trusty.trusty-analyze`, the label an older
+  installer registered. The registry recorded it as a legacy alias and nothing
+  acted on it, so the record meant nothing on a host that needed it (#4868)
+- **SCIP graph overlays now survive a daemon restart** (closes [#5049](https://github.com/bobmatnyc/trusty-tools/issues/5049)). `POST /indexes/{id}/scip` wrote into an in-process `HashMap<String, KgGraph>` and answered HTTP 200; a restart discarded the ingest, and `GET /indexes/{id}/graph` then served a tree-sitter-only graph indistinguishable from one where the overlay had been applied. A SCIP index is uploaded by the operator and cannot be re-derived from the corpus, so the overlay is now written to a redb store (`scip_overlays.redb`, a sibling of the facts store — no new CLI flag).
+- **A caller can now tell "no SCIP data" from "empty SCIP graph"**. `GET /indexes/{id}/scip` is new: 404 when nothing has ever been ingested for that index, 200 with `{index_id, nodes, edges, ingested_at}` when an overlay exists — including a legitimately symbol-free one, which reports `nodes: 0`. `GET /indexes/{id}/graph` carries the same fact as an `x-scip-overlay: present|absent` response header; its JSON body is still a bare `KgGraph`, so existing consumers are unaffected. A failure to read the overlay store is a 500 rather than a silent fall-through to the tree-sitter-only graph.
+- **`POST /webhooks/github` now fails closed when no webhook secret is configured** (closes [#5173](https://github.com/bobmatnyc/trusty-tools/issues/5173)). With `GITHUB_WEBHOOK_SECRET` unset the handler logged `no webhook secret configured — skipping webhook signature verification` and processed the payload, so any local process that could reach the loopback port could inject arbitrary PR coordinates into the analyze pipeline and make the daemon fetch a diff and post a comment under the daemon's `GITHUB_TOKEN`. An unset or empty secret now returns 401 `webhook secret not configured` before the payload is parsed, matching `trusty-review`'s `handle_github_webhook`. Deployments that relied on the unauthenticated path must set `GITHUB_WEBHOOK_SECRET`; every other endpoint is unaffected and the daemon still starts without it.
+- Scope: this closes the webhook route only. `POST /review/github-pr` still accepts arbitrary `owner`/`repo`/`pr` coordinates with no authentication and drives the same `GITHUB_TOKEN`; it is unchanged here.
+- `trusty-analyze webhook-listen` now drains its webhook inbox into the analysis pipeline instead of holding acknowledged deliveries forever. The PR-event filter and the fetch/analyse/comment pipeline moved to `webhook_drain`, so the legacy `POST /webhooks/github` route and the UDS drain run one implementation.
+- A delivery is never analysed twice. The shared drain's processed-delivery ledger closes the crash window that would otherwise post a duplicate PR comment (#5192).
+- `GET /indexes/{id}/refactor-suggestions` no longer suggests refactors for files with no mapped language. Documents, FAQs, and CI workflow YAML were scored by the keyword text heuristic, graded F, and returned as critical "extract method" suggestions (#5317).
+
+### Changed
+
+- `LAUNCHD_LABEL` is read from `trusty_common::launchd_labels::ANALYZE` rather
+  than restated beside the installer's separate copy of it. The value is
+  unchanged — the point is that the installer's copy can no longer drift away
+  from the daemon's, which is what broke trusty-search (#4868)
+- **One shared open-with-quarantine policy for both redb stores**, in the new `core::redb_open` module (part of [#5049](https://github.com/bobmatnyc/trusty-tools/issues/5049)). `FactStore` already renamed a format-obsolete `facts.redb` aside as `*.v2-incompatible` and booted with a loud `ERROR` ([#702](https://github.com/bobmatnyc/trusty-tools/issues/702)); the new SCIP overlay store now does the same, quarantining as `*.quarantined`. Both classify the redb error first: an obsolete on-disk format is moved aside, while a transient failure to open — permissions, disk, a held lock — stays fatal, because recreating on top of a file that is merely unavailable would destroy data that is still good. Neither store deletes anything. This replaces a duplicated classifier, so the two stores cannot drift into giving opposite answers to the same byte-level cause.
+- **Breaking (library API), part of [#5049](https://github.com/bobmatnyc/trusty-tools/issues/5049):** `AnalyzerAppState::scip_overlays` changed type from `Arc<RwLock<HashMap<String, KgGraph>>>` to the new `core::ScipOverlayStore`, and `AnalyzerAppState::new` / `AnalyzerAppState::with_registry` take it as a required argument. It is a constructor parameter rather than a `with_*` override so no caller can end up with a non-durable overlay store by omission — that omission was the bug.
+- The MCP tool section of `README.md` and `CLAUDE.md` is now generated from
+  `mcp::tool_descriptors()` plus `mcp::descriptors::review_tool_descriptors()`
+  by `tests/generated_docs.rs`. The feature-dependent surface is stated as
+  derived numbers — 19 tools with default features, 22 with `--features
+  review` — with a per-row `Available` column, replacing prose that told the
+  reader to go read `tool_descriptors()` because no fixed number was safe.
+  Regenerate with
+  `UPDATE_DOCS=1 cargo test -p trusty-analyze --test generated_docs` (#5205)
+- `review_tool_descriptors()` moved from the `#[cfg(feature = "review")]`
+  `mcp::review` module to `mcp::descriptors`, so the three `tr_review_*`
+  descriptors compile in every build. Dispatch stays feature-gated and
+  `tools/list` is unchanged in both configurations; the move is what lets a
+  default build — the only one CI runs — verify the documented review rows
+  (#5205)
+- `README.md` keeps its HTTP-equivalents table hand-written, because the route
+  a tool forwards to is not in the descriptors. It now sits outside the
+  generated markers and every tool name in it is asserted to be real by
+  `http_equivalents_name_only_real_tools` (#5205)
+
+### Removed
+
+- **BREAKING — the next release of this crate must be `0.9.0`, not `0.8.x`.**
+  Removed the fastembed/ONNX neural clustering embedder and, with it, public
+  API: `EmbedderKind::Neural`, `embedder::NeuralEmbedder`, the
+  `bundled-ort` / `load-dynamic` / `cuda` Cargo features (`default` is now
+  `["http-server"]`), and `ClusterQueryParams::method`'s type (now
+  `Option<String>`, validated in the handler). CI cannot detect a SemVer break
+  (#4088 — the gap that got 0.7.3 yanked), so this line is the record a
+  releaser has to act on. Nothing selected `method=neural` —
+  `trusty-console`, the `cluster_concepts` MCP tool and the embedded UI all
+  used the `bow` default — yet the daemon constructed the model at every boot,
+  and the untimed Hugging Face request that construction made blocked the
+  listener for as long as the request took (31m46s in one production boot;
+  reproduced at 60.17s and 120.13s against a stub HF endpoint with matching
+  injected delays, versus 0.20s after the fix). `bow` is now the sole
+  embedder, `--fastembed-cache` is an accepted no-op so existing launchd
+  plists keep starting, and `?method=neural` returns 400 instead of BOW
+  vectors labelled `neural` (#5067)
+
 ## [0.8.0] — 2026-07-27
 
 MINOR, not the patch 0.7.5 this was originally staged as (#4177). This crate

@@ -10,9 +10,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `tga audit` now produces the report, not just the data. After the sweep it writes a `manifest.toml` into the output directory and invokes `trusty-review report --manifest <path> --analyze --out <dir>`, then prints the rendered artifact paths (#5236, #5238, DOC-67 §6).
+- `tga::report::dd_manifest::build_dd_manifest` — the DD-manifest adapter, a pure function mapping the resolved config onto trusty-review's manifest schema per DOC-67 §6's field table. Writing the file is the caller's job, so the mapping, its determinism (the same config yields byte-identical TOML), and its credential handling are all unit-testable. Every string it emits is scrubbed of the credentials the config holds, so a token that reached a repository name, a report title, or a stage's error message cannot reach the artifact.
+- A collection stage that did not complete is now named in the report's Gaps & Caveats section instead of only on stderr, so a missing dimension reads as unassessed rather than clean (#5239, DOC-67 §9).
+- The report carries a placeholder data-handling statement recording that a formal data-retention attestation is pending (#5244, #5218, DOC-67 §10).
+- A missing `trusty-review` binary is reported as a named, actionable error naming `TRUSTY_REVIEW_BIN`, the install command, and the manifest that was already written — never a panic or a silent skip. `TRUSTY_REVIEW_BIN` overrides the PATH lookup.
 - `tga audit` — a strictly non-interactive acquisition-diligence command taking `--org`, `--title`, `--analyst`, `--client`, `--output`, and `--weeks`. Once started it never prompts, confirms, or waits for input (#5235, DOC-67 §2).
 - `tga::audit::run_full_sweep` — a library entry point that drives the eight data-collection subcommands (collect, classify, jira sync, deployments, incidents, dora, pr-metrics, report) end to end with no TTY and no clap. It returns per-stage outcomes, so a failed stage is named rather than aborting the run or reading as a clean pass (#5217, DOC-67 §9). `tga audit` calls it instead of re-sequencing the subcommands itself (#5237).
 - `tga::commands` is now part of the library rather than private to the binary, so the sweep reuses each subcommand's existing `run` function instead of a second copy of its logic.
+
+### Fixed
+
+- Three dangling `Test:` doc-comment pointers in `src/commands/audit.rs` are corrected (#5303). `audit_command_needs_no_positional_arguments` never matched a real test; it's repointed at the actual `audit_takes_no_positional_arguments`. `audit_command_reports_each_stage`, cited by both `run` and `print_stage_report` for two different claims, never had a matching test at all: `run`'s "exit `Ok` despite a failed stage" claim is repointed at `sweep_runs_every_stage_in_order_and_survives_failures`, the sweep-layer test that actually establishes it; `print_stage_report`'s own per-stage stdout/stderr formatting claim gets a real test, `audit_command_reports_each_stage`, backed by splitting the function into a writer-parameterised `write_stage_report` so the output is observable without capturing process file descriptors.
+- `tga deployments collect` no longer fails with `unknown deployment_source ''` when `config.yaml` has no `dora:` block (#5304). `DoraConfig`'s derived `Default` zeroed `deployment_source`, and the `#[serde(default = "…")]` fallbacks only fire when a `dora:` mapping is actually present — so the `unwrap_or_default()` path bypassed them. `Default` is now hand-written through the same `default_*` functions, and an audit of a repo set without DORA configured no longer reports a failed stage.
+
+### Changed
+
+- The `trusty-review` binary AUDIT invokes is resolved by a pure function over the `TRUSTY_REVIEW_BIN` value, and `run_review_report` reads the environment exactly once at its entry point. Behaviour is unchanged — an override wins unless it is empty, otherwise `trusty-review` is looked up on PATH — but the resolution rule and the spawn path are now testable without mutating the process environment, which `std::env::set_var` cannot do soundly under a parallel test harness.
+
+### Security
+
+- `tga audit` now redacts a failed stage's error text before excerpting it, so a credential that spans the 160-character excerpt boundary can no longer survive as a prefix fragment in the generated `manifest.toml` or the due-diligence report handed to a third party. `sweep_gap_lines` takes the credential set as a required argument, and `report::dd_manifest::configured_secrets` is public so the sweep and the manifest builder redact against the same values.
 
 ## [2.12.0] — 2026-08-10
 

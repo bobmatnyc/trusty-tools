@@ -19,15 +19,16 @@
 //! Records written before `terminal_at` existed — the whole pre-existing
 //! backlog, which is what put `NUM` in three digits — are backfilled from
 //! [`inferred_terminal_at`] rather than from the current time, so one already
-//! weeks past the window is eligible on the next sweep instead of seven days
+//! weeks past the window is eligible on the next sweep instead of a full window
 //! after this ships.
 //!
 //! Scope, and the reason it is drawn this tightly: this sweep touches
 //! `sessions.json` and nothing else. It never removes a worktree, a workspace
 //! directory, a git branch, or any other file — see [`retention_verdict`]'s
-//! `workspace_on_disk` parameter for the guard that keeps a record-only
-//! eviction from becoming a filesystem deletion by proxy, and
-//! [`workspace_present`] for why an undetermined path counts as present.
+//! `workspace_needs_protection` parameter for the guard that keeps a
+//! record-only eviction from becoming a filesystem deletion by proxy, and
+//! [`workspace_needs_protection`] for which workspaces that guard now covers
+//! and why an undetermined answer counts as protected.
 //!
 //! Test: `retention_tests.rs`.
 
@@ -39,15 +40,23 @@ use super::record::{ManagedSessionId, SessionRecord};
 
 /// How long a record stays in the store after entering a terminal state.
 ///
-/// Why: the owner's ruling on the inflated-`NUM` report — "evict old records,
-/// 7 days". Long enough that a tombstone an operator captured a number from is
-/// still there days later (#3034's guarantee, which in practice never survived
-/// a daemon restart anyway); short enough that the store stops being an
-/// append-only log of every session ever run.
+/// Why (#5327): protecting a worktree is [`workspace_needs_protection`]'s job,
+/// and it holds a record for as long as there is one, at any age. All the clock
+/// has to buy is the span in which an operator can still act on a record that
+/// is already dead — a `NUM` read off a listing, or the #2777 in-pane revive,
+/// which reads the record out of the store. Both are same-working-day actions
+/// that must survive an overnight gap. 24 hours is also how long this crate
+/// already waits before an automatic sweep acts on a session with no operator
+/// present ([`super::MAX_EPHEMERAL_AGE_HOURS`]), and retention does strictly
+/// less than that sweep: it deletes a record, never a process or a directory.
+///
+/// The unit stays days because the NAME is published API on a 1.x crate.
+/// Renaming it to hours to write `24` instead of `1` is a major-version break
+/// for a cosmetic gain.
 /// What: the retention window in days, applied to
 /// [`SessionRecord::terminal_at`].
-/// Test: `retention_window_is_seven_days`.
-pub const TERMINAL_RECORD_RETENTION_DAYS: i64 = 7;
+/// Test: `retention_window_is_twenty_four_hours`.
+pub const TERMINAL_RECORD_RETENTION_DAYS: i64 = 1;
 
 /// What the sweep should do with one record.
 ///
@@ -78,11 +87,11 @@ pub enum RetentionVerdict {
 /// Why: every record written before `terminal_at` existed lacks it, and that is
 /// the entire pre-existing backlog — 76 of 116 records on the reporting
 /// machine, holding 76 of the slot numbers that put `NUM` in three digits.
-/// Stamping those with `now` would grandfather them for a further seven days,
-/// so the fix the owner asked for would not arrive until a week after he
-/// installed it. Clearing that backlog is the point, and a record whose last
-/// sign of life was two months ago has had its retention window many times
-/// over.
+/// Stamping those with `now` would grandfather them for another full retention
+/// window, so the fix the owner asked for would not arrive until a day after he
+/// installed it (and, pre-#5327, a week). Clearing that backlog is the point,
+/// and a record whose last sign of life was two months ago has had its
+/// retention window many times over.
 ///
 /// The earlier reasoning against inference was right about the mechanism and
 /// wrong about the goal: yes, the auto-prune (#4384/#4702) decommissions
@@ -120,7 +129,7 @@ pub fn inferred_terminal_at(record: &SessionRecord, now: DateTime<Utc>) -> DateT
 ///    record is live work — a `stopped` session is explicitly resumable, with
 ///    its workspace intact.
 ///
-/// 2. **A record whose workspace still exists on disk is never evicted**,
+/// 2. **A record whose workspace is a worktree on disk is never evicted**,
 ///    however old. This is not tidiness, it is the load-bearing guard.
 ///    `prune_orphaned_worktrees` protects a worktree from deletion by finding
 ///    its path in the set of `workspace_path`s read from the store — a set that
@@ -130,9 +139,10 @@ pub fn inferred_terminal_at(record: &SessionRecord, now: DateTime<Utc>) -> DateT
 ///    two independent reads of the protected set come from the store, so
 ///    deleting the record removes the path from BOTH at once — collapsing a
 ///    defense-in-depth pair into nothing and handing the worktree to an
-///    unattended, `dry_run: false` timer. `workspace_on_disk` keeps the record,
-///    and therefore the protection, alive for exactly as long as there is a
-///    directory to protect.
+///    unattended, `dry_run: false` timer. `workspace_needs_protection` keeps
+///    the record, and therefore the protection, alive for exactly as long as
+///    there is a worktree to protect — see that function for why a plain
+///    main-checkout path (#5274) is not one and what it costs to be wrong.
 ///
 /// 3. **`terminal_at == None` is backfilled, never evicted directly.** A record
 ///    predating the field is dated from [`inferred_terminal_at`] and written
@@ -142,23 +152,23 @@ pub fn inferred_terminal_at(record: &SessionRecord, now: DateTime<Utc>) -> DateT
 ///    absence. It also means an old legacy record still passes through the
 ///    two-observation debounce and phase-3 re-validation like any other.
 ///
-/// What: `Keep` unless the record is terminal AND its workspace is not on
-/// disk; then `Stamp(inferred)` when undated, `Evict` when `now - terminal_at
-/// >= retention`, `Keep` otherwise. `workspace_on_disk` is supplied by the
-/// caller (via [`workspace_present`], which resolves an undetermined path to
-/// `true`) so this function stays pure and does no I/O.
+/// What: `Keep` unless the record is terminal AND its workspace needs no
+/// protection; then `Stamp(inferred)` when undated, `Evict` when `now -
+/// terminal_at >= retention`, `Keep` otherwise. `workspace_needs_protection` is
+/// supplied by the caller (via the function of the same name, which resolves an
+/// undetermined probe to `true`) so this function stays pure and does no I/O.
 /// Test: `retention_verdict_keeps_live_states`,
-/// `retention_verdict_keeps_record_whose_workspace_still_exists`,
+/// `retention_verdict_keeps_record_whose_worktree_still_exists`,
 /// `retention_verdict_stamps_undated_terminal_record`,
 /// `retention_verdict_keeps_record_inside_window`,
 /// `retention_verdict_evicts_record_outside_window`.
 pub fn retention_verdict(
     record: &SessionRecord,
-    workspace_on_disk: bool,
+    workspace_needs_protection: bool,
     now: DateTime<Utc>,
     retention: Duration,
 ) -> RetentionVerdict {
-    if !record.state.is_terminal() || workspace_on_disk {
+    if !record.state.is_terminal() || workspace_needs_protection {
         return RetentionVerdict::Keep;
     }
     match record.terminal_at {
@@ -189,23 +199,65 @@ impl RetentionOutcome {
     }
 }
 
-/// Is this record's workspace directory still on disk?
+/// Would evicting this record expose a worktree to `prune_orphaned_worktrees`?
 ///
-/// Why: `Path::exists()` maps EVERY stat error to `false` — a permission error
-/// on an ancestor, a stale NFS/SMB handle, `EIO` from a departed volume — so
-/// "cannot determine" and "not there" produce the same answer, and that answer
-/// evicts. The guard this feeds is the one keeping a record's `workspace_path`
-/// in `prune_orphaned_worktrees`'s protected set, so failing open here means a
-/// transient stat error can hand a live worktree to an unattended sweep.
-/// What: `probe` is `Path::try_exists` in production. An `Err` — undetermined —
-/// counts as PRESENT, so an unreadable path is never evicted. A `None` path is
-/// absent: there is nothing to protect and nothing to fail on.
-/// Test: `workspace_present_treats_an_undetermined_path_as_present`.
-fn workspace_present(
+/// Why: a record's `workspace_path` is what puts a directory in that sweep's
+/// protected set, so evicting the record is what can get the directory deleted.
+/// Until #5327 the question asked here was the broader "is the workspace still
+/// on disk", which was the right question when every session provisioned a
+/// worktree. Under ADR-0037 as amended (#5274) the default session runs on the
+/// project's own main checkout and records it as its `workspace_path` — a
+/// directory that never goes away — so the broad form pinned every such record
+/// in the store permanently, at any window. That is the measured cause of
+/// #5327's unbounded `NUM`, and shortening the window alone would not have
+/// moved it.
+///
+/// The narrowing is tied to what the sweep can actually reach. A candidate must
+/// carry a `.trusty-mpm-worktree` ownership sentinel naming a resolvable owner
+/// (#3649); an absent sentinel is reported and never removed. The sentinel has
+/// exactly two write sites — `provisioner::workspace` and
+/// `managed_routes::inproject` — and each writes it immediately after its own
+/// `git worktree add`. A path with no sentinel was therefore not provisioned as
+/// a session worktree, and the sweep will not delete it however the record
+/// changes.
+///
+/// What: `probe` is `Path::try_exists` in production and answers both reads.
+/// Protected when ANY of:
+///
+/// - the workspace path cannot be probed (`Err`) — `Path::exists()` collapses a
+///   permission error, a stale NFS/SMB handle, and `EIO` from a departed volume
+///   into "not there", and "not there" is what evicts;
+/// - the path's immediate parent is a worktree base
+///   ([`super::decommission::is_session_worktree`], a deliberate superset of
+///   creation since #5204);
+/// - a sentinel file exists at the path, or its existence cannot be determined.
+///
+/// The sentinel and shape clauses are independent on purpose. The sweep reads
+/// the sentinel at deletion time, this reads it now, and a read that fails
+/// transiently here would drop the protection for good while the sweep's own
+/// later read succeeds; the shape clause covers that for the standard
+/// `.worktrees` layout, and treating an undetermined sentinel probe as present
+/// covers it for the rest. Unprotected only when there is no path, the path is
+/// gone, or it is a plain directory with no sentinel — the main-checkout case.
+/// Test: `workspace_needs_protection_treats_an_undetermined_path_as_protected`,
+/// `workspace_needs_protection_covers_a_session_worktree`,
+/// `workspace_needs_protection_ignores_a_plain_main_checkout`.
+fn workspace_needs_protection(
     path: Option<&std::path::Path>,
+    names: &trusty_common::workspace_layout::WorktreeDirNames,
     probe: impl Fn(&std::path::Path) -> std::io::Result<bool>,
 ) -> bool {
-    path.is_some_and(|p| probe(p).unwrap_or(true))
+    let Some(p) = path else {
+        return false;
+    };
+    match probe(p) {
+        // Undetermined: never evict on the strength of an answer we do not have.
+        Err(_) => return true,
+        Ok(false) => return false,
+        Ok(true) => {}
+    }
+    super::decommission::is_session_worktree_with(p, names)
+        || probe(&p.join(super::decommission::WORKTREE_SENTINEL_FILE)).unwrap_or(true)
 }
 
 /// Two-observation gate before a record may be evicted.
@@ -214,18 +266,21 @@ fn workspace_present(
 /// (`orphan_gc::OrphanGc`, `core::pid_registry::PidOrphanGc`) each require a
 /// candidate to survive TWO consecutive observations before acting, and
 /// retention deletes something no less permanent. The condition it reads is not
-/// purely a persisted timestamp: "the workspace directory is gone" is a live
+/// purely a persisted timestamp: "no worktree behind this workspace" is a live
 /// filesystem observation, and an external volume that unmounts between ticks
 /// answers `Ok(false)` — genuinely absent, indistinguishable from deleted —
-/// which [`workspace_present`]'s error handling cannot catch. Requiring the
-/// same verdict on two ticks ~60s apart costs nothing against a 7-day window
-/// and rules that case out.
+/// which [`workspace_needs_protection`]'s error handling cannot catch.
+/// Requiring the same verdict on two ticks ~60s apart costs one to two minutes
+/// against a 24-hour window and rules that case out. #5327 kept it unchanged
+/// and unrelaxed: shortening the window makes this sweep act sooner, which
+/// raises what a single stale observation costs rather than lowering it.
 /// What: [`Self::confirm`] returns the candidates that were ALSO candidates on
 /// the previous call, then re-arms with the current set — so a record that
 /// stops being a candidate (reactivated, workspace remounted) disarms itself.
 /// Owned by the caller across ticks, exactly like its two siblings.
 /// Test: `debounce_requires_two_consecutive_observations`,
-/// `debounce_disarms_a_candidate_that_lapses`.
+/// `debounce_disarms_a_candidate_that_lapses`,
+/// `sweep_spares_a_record_whose_worktree_appears_between_sweeps`.
 #[derive(Debug, Default)]
 pub struct RetentionDebounce {
     armed: std::collections::HashSet<ManagedSessionId>,
@@ -256,10 +311,11 @@ impl SessionManager {
     /// hard-deletes a record without an operator asking for that specific
     /// record by id, so its scope is deliberately narrow: `sessions.json`, and
     /// the in-memory slot registry. Nothing on disk outside the store file is
-    /// read for deletion, opened for writing, or removed. Its only filesystem
-    /// call is [`workspace_present`]'s `try_exists`, whose two non-`Ok(false)`
-    /// answers — present, or undetermined — both mean KEEP, so it can only ever
-    /// make the sweep evict fewer records.
+    /// read for deletion, opened for writing, or removed. It reads the config
+    /// once per sweep to resolve the worktree base names, and otherwise its only
+    /// filesystem calls are [`workspace_needs_protection`]'s two `try_exists`
+    /// probes — every answer they can give other than "the workspace is gone" or
+    /// "it is a plain directory with no ownership sentinel" means KEEP.
     /// What: three phases, mirroring `prune_orphaned_worktrees`'s #1845 item-9
     /// shape.
     ///
@@ -281,11 +337,11 @@ impl SessionManager {
     /// the clock and a global so tests are deterministic.
     /// Test: `sweep_evicts_only_records_past_the_window`,
     /// `sweep_releases_the_evicted_slot`,
-    /// `sweep_never_touches_the_filesystem`,
+    /// `sweep_never_touches_a_worktree_on_the_filesystem`,
     /// `sweep_backfills_an_old_legacy_record_and_evicts_it_without_waiting`,
     /// `sweep_gives_a_recent_legacy_record_its_full_window`,
     /// `sweep_stamps_now_when_a_legacy_record_has_no_usable_signal`,
-    /// `sweep_backfill_still_spares_a_legacy_record_whose_workspace_exists`,
+    /// `sweep_backfill_still_spares_a_legacy_record_whose_worktree_exists`,
     /// `sweep_spares_a_record_reactivated_between_sweeps` (which the debounce
     /// and phase 1 protect — phase 3's own arms are covered by
     /// [`Self::revalidate_for_eviction`]'s `revalidate_*` tests) in
@@ -302,10 +358,15 @@ impl SessionManager {
         self.store.write().await.reload_if_changed().await?;
         let all = self.store.read().await.cached_all();
 
+        // Resolve the worktree base names ONCE for the whole sweep. Doing it per
+        // record would re-read config per record per 60s tick — see
+        // `decommission::is_session_worktree_with`.
+        let names = super::decommission::worktree_dir_names();
+
         let mut stamped: Vec<SessionRecord> = Vec::new();
         let mut candidates: Vec<ManagedSessionId> = Vec::new();
         for record in all {
-            match self.verdict_for(&record, now, retention) {
+            match self.verdict_for(&record, &names, now, retention) {
                 RetentionVerdict::Keep => {}
                 RetentionVerdict::Stamp(inferred) => {
                     let mut dated = record;
@@ -322,9 +383,9 @@ impl SessionManager {
             info!(
                 stamped = n,
                 "retention: backfilled `terminal_at` on {n} record(s) that predate the field, \
-                 from their last evidence of life; any already older than {} day(s) become \
+                 from their last evidence of life; any already older than {} hour(s) become \
                  evictable on the next sweep",
-                retention.num_days()
+                retention.num_hours()
             );
         }
 
@@ -334,7 +395,7 @@ impl SessionManager {
         // Phase 3 — re-validate against the CURRENT store immediately before
         // deleting.
         let evicted = self
-            .revalidate_for_eviction(confirmed, now, retention)
+            .revalidate_for_eviction(confirmed, &names, now, retention)
             .await;
 
         if !evicted.is_empty() {
@@ -345,8 +406,8 @@ impl SessionManager {
             }
             info!(
                 evicted = evicted.len(),
-                "retention: evicted terminal record(s) older than {} day(s) and freed their slots",
-                retention.num_days()
+                "retention: evicted terminal record(s) older than {} hour(s) and freed their slots",
+                retention.num_hours()
             );
         }
 
@@ -383,10 +444,12 @@ impl SessionManager {
     /// skipped — a concurrent prune beating us to it is not an error.
     /// Test: `revalidate_keeps_a_still_evictable_record`,
     /// `revalidate_drops_a_record_reactivated_after_the_snapshot`,
+    /// `revalidate_drops_a_record_whose_worktree_appeared_after_the_snapshot`,
     /// `revalidate_drops_a_record_a_concurrent_prune_already_removed`.
     async fn revalidate_for_eviction(
         &self,
         confirmed: Vec<ManagedSessionId>,
+        names: &trusty_common::workspace_layout::WorktreeDirNames,
         now: DateTime<Utc>,
         retention: Duration,
     ) -> Vec<ManagedSessionId> {
@@ -394,7 +457,8 @@ impl SessionManager {
         for id in confirmed {
             match self.get(&id).await {
                 Ok(fresh)
-                    if self.verdict_for(&fresh, now, retention) == RetentionVerdict::Evict =>
+                    if self.verdict_for(&fresh, names, now, retention)
+                        == RetentionVerdict::Evict =>
                 {
                     evicted.push(id);
                 }
@@ -427,15 +491,21 @@ impl SessionManager {
             .await
     }
 
-    /// [`retention_verdict`] with the production existence probe applied.
+    /// [`retention_verdict`] with the production existence probes applied.
+    ///
+    /// `names` is resolved ONCE per sweep by the caller rather than per record —
+    /// see [`super::decommission::is_session_worktree_with`] for why a per-record
+    /// resolve would re-read config and re-log on every tick.
     fn verdict_for(
         &self,
         record: &SessionRecord,
+        names: &trusty_common::workspace_layout::WorktreeDirNames,
         now: DateTime<Utc>,
         retention: Duration,
     ) -> RetentionVerdict {
-        let on_disk = workspace_present(record.workspace_path.as_deref(), |p| p.try_exists());
-        retention_verdict(record, on_disk, now, retention)
+        let protected =
+            workspace_needs_protection(record.workspace_path.as_deref(), names, |p| p.try_exists());
+        retention_verdict(record, protected, now, retention)
     }
 }
 

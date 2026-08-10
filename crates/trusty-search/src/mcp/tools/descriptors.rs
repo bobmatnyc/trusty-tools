@@ -96,17 +96,17 @@ pub fn tool_descriptors() -> Value {
         },
         {
             "name": "search_all",
-            "description": "When in doubt, use this. Runs the full hybrid pipeline (lexical + semantic + KG expansion) and merges results via RRF. More expensive than the targeted tools but catches edge cases. Use when: your query has both literal symbols AND conceptual phrasing (\"find the `AuthValidator` that handles refresh tokens\"), or when you've tried the targeted tools and they didn't surface what you need. Always available; gracefully degrades to whatever lanes are ready. When called without `index_id`, falls back to legacy cross-project fan-out behaviour (issue #10) — provide `index_id` for the per-index hybrid path.",
+            "description": "When in doubt, use this. Runs the full hybrid pipeline (lexical + semantic + KG expansion) and merges results via RRF. More expensive than the targeted tools but catches edge cases. Use when: your query has both literal symbols AND conceptual phrasing (\"find the `AuthValidator` that handles refresh tokens\"), or when you've tried the targeted tools and they didn't surface what you need. Always available; gracefully degrades to whatever lanes are ready. Index selection has THREE tiers, in strict precedence order (issue #5213): an explicit `index_id` wins; otherwise this session's pinned index is used if one is set (issue #1373), and cross-project fan-out is NOT reached; only an unpinned session with no `index_id` fans out across every registered index. If the pinned index has not been built yet the call fails with INDEX_NOT_READY — call `list_indexes` and pass an explicit `index_id` that exists.",
             "inputSchema": {
                 "type": "object",
                 "required": ["query"],
                 "properties": {
-                    "index_id":         { "type": "string", "description": "Target index (omit for cross-project fan-out)" },
+                    "index_id":         { "type": "string", "description": "Target index id (from `list_indexes`). Omitting it falls back to this session's pinned index when one is set, and only fans out across every index when there is no pin (issue #5213)" },
                     "query":            { "type": "string" },
                     "top_k":            { "type": "integer", "default": 10 },
                     "mode":             { "type": "string", "enum": ["code", "text", "data"], "default": "code" },
                     "exclude_archived": { "type": "boolean", "default": false },
-                    "full_content":     { "type": "boolean", "default": false, "description": "Legacy fan-out only: include full chunk content in each hit" },
+                    "full_content":     { "type": "boolean", "default": false, "description": "Fan-out path only: include full chunk content in each hit" },
                     "branch_files":     { "type": "array", "items": { "type": "string" } },
                     "branch_boost":     { "type": "number" },
                     "branch":           { "type": "string" },
@@ -117,8 +117,8 @@ pub fn tool_descriptors() -> Value {
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "AuthValidator that handles refresh tokens" },
-                    { "query": "global cross-project fan-out without index_id" },
-                    { "query": "global fan-out forced serial", "serial": true }
+                    { "query": "cross-project fan-out — reached only in an UNPINNED session" },
+                    { "query": "fan-out forced serial", "serial": true }
                 ]
             }
         },

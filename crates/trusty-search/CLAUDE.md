@@ -88,10 +88,36 @@ pub struct CodeChunk {
   do **not** bind it to a non-loopback interface.
 - **Content-Type**: `application/json` for all request and response bodies (SSE
   endpoint excepted — it returns `text/event-stream`).
-- **Error response**: any 4xx / 5xx returns a JSON body of the shape
-  `{ "error": "<message>" }`. Status codes follow standard HTTP semantics
-  (`404` = unknown `index_id`, `503` = subsystem disabled / not configured,
-  `500` = internal error).
+- **Error response**: any 4xx / 5xx returns a JSON body whose `error` field is a
+  machine-readable code. Status codes follow standard HTTP semantics
+  (`404` = the index exists nowhere, `503` = exists but cannot serve this
+  request, `500` = internal error).
+
+  **Index-scoped error contract (#5061, #5068).** Every index-scoped endpoint
+  reports the same daemon state the same way, because they all render it through
+  one builder (`service/server/degraded.rs`). Two fields are present on every
+  such body and are the ones to branch on:
+
+  - `index_id` — the index the verdict is about.
+  - `retryable` — `true` when waiting or retrying can succeed, `false` when it
+    never will without operator action. Never absent; do not treat an absent
+    value as either.
+
+  | `error` | Status | `retryable` | Meaning |
+  |---|---|---|---|
+  | `unknown index: <id>` | 404 | — | Absent from the hot registry, the cold store, AND the failed set. Permanent. |
+  | `index_not_resident` | 503 | `true` | Registered and built, cold-parked by `TRUSTY_MAX_RESIDENT_INDEXES`. Carries `restore_via` — see below. |
+  | `index_restore_failed` | 503 | `false` | Restore permanently failed (blocked volume, missing `root_path`). Restart the daemon or re-register. |
+  | `index_loading` | 503 | `true` | A lazy load is in flight; also carries `retry_after_secs`. |
+  | `embedder_initializing` | 503 | `true` | Retry once `/health` reports `embedder: "ready"`. |
+  | `index_corpus_unavailable` | 503 | see `transient` | Durable corpus failed to open (#4087); carries the #4333 `failure_kind`. |
+  | `vector_unavailable` | 503 | per `reason` | Semantic lane cannot serve this query — see `POST /indexes/:id/search`. |
+
+  `restore_via` on `index_not_resident` names `POST /indexes/{id}/search`, the
+  only endpoint that reloads a cold-parked index. `status`, `chunks`, `grep`,
+  `index-file`, and `remove-file` report the state truthfully but cannot clear
+  it themselves; a search against the same id does, after which they answer
+  normally.
 - **CORS**: permissive (`*`) for browser-based admin UIs.
 - **Gzip**: responses are gzipped when `Accept-Encoding: gzip` is set.
 
@@ -114,6 +140,17 @@ daemon.
     see `indexes_watcher_network_degraded` below).
   - `version`: `CARGO_PKG_VERSION` of the running binary.
   - `indexes`: number of indexes currently registered in the in-memory registry.
+  - `indexes_populated` / `indexes_empty` / `total_chunks` (#4839): registration
+    is not population. `indexes` and `warmboot_summary.indexes_loaded` count
+    SLOTS — a deployment where 220 of 222 indexes held zero chunks reported
+    `222/222` and `status: ok` while a consuming application returned empty
+    context for 44 days. These three count from the DURABLE corpus (the
+    in-memory map reads 0 after idle eviction). An index whose count is
+    UNKNOWN rather than zero — corpus failed to open, count unreadable, or its
+    lock was contended for this poll — is excluded from both counters, so
+    `indexes_populated + indexes_empty <= indexes`; the shortfall is the honest
+    signal. An empty-but-walked index is not itself a fault and does not force
+    `degraded` — `indexes_stuck_empty` (#4680) covers the genuinely broken case.
   - `indexes_watcher_network_degraded` (issue #3408): count of registered
     indexes whose file watcher was refused because `root_path` was detected as
     a network-mounted filesystem (NFS/EFS/SMB/CIFS). inotify/FSEvents cannot
@@ -196,7 +233,24 @@ Per-index stats.
     network-mounted; `degraded_reason` then carries the full actionable
     message (names the `index-file`/`remove-file` endpoints). Both are
     `false`/`null` for a normal local-disk index.
-- **Response 404**: unknown `index_id`.
+  - `disk_bytes` (#4706): sum of all file sizes across BOTH storage layouts —
+    the legacy global `<data_dir>/indexes/<id>/` and the colocated
+    `<root_path>/.trusty-search/` of issue #403. `null` only when neither
+    exists. A `.trusty-search/` without an `index.redb` is not counted: that
+    directory name is also the daemon's own runtime directory, so an index
+    rooted at `$HOME` would otherwise report the daemon's runtime files as its
+    corpus. Same metric as `size_bytes` on `GET /indexes?details=true`.
+  - `semantic_coverage` (#4787): cumulative vector coverage, beside the
+    per-pass delta. `vectors_present` is read from the live vector store, so it
+    is ground truth rather than bookkeeping; `stages.semantic.embedded` counts
+    only what the CURRENT boot's embed pass computed and reads `0` on a
+    fully-working index whose HNSW snapshot was already current at boot.
+    `embedded_this_boot` restates that delta under a name that says what it
+    measures. When `vectors_present` is `null`,
+    `vectors_unavailable_reason` says which state produced it:
+    `no_vector_store` (BM25-only / `skip_vector` — healthy) or
+    `count_unreadable` (a store is attached but its count errored — a fault).
+- **Response 404 / 503**: see the index-scoped error contract above.
 
 ##### `POST /indexes/:id/search`
 
@@ -258,6 +312,23 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     `branch_files` or derived from `branch`). Always `false` when no branch
     context was provided. Lets clients highlight branch work in the UI
     without re-doing the lookup.
+  - `meta.vector_unavailable` / `meta.vector_disabled_by_config` (#5068): `true`
+    when no vector lane contributed to this result set — the results are
+    lexical however conceptual the query was. The second field separates "off
+    for this index" from "not built yet". Counterparts to the existing
+    `meta.bm25_lane_degraded`.
+- **Response 503** `vector_unavailable` (#5068): returned when the request
+  PINNED `"stage": "semantic"` and the vector lane cannot serve it. Returning
+  lexical rows under a `200` would answer a different question than the one
+  asked, so this mirrors the `503 kg_unavailable` contract `get_call_chain`
+  already uses for `skip_kg` indexes. `reason` is `skipped_by_config`
+  (`retryable: false` — the index was built with the vector component
+  disabled, which is the default for worktree indexes since #5060; change it
+  via `PATCH /indexes/{id}/config`) or `stage_not_ready` (`retryable: true` —
+  the embed pass has not finished). The body carries the `stages` snapshot so
+  the caller need not re-probe. An UNPINNED query is unaffected: it still
+  returns `200` and degrades to whatever lanes are ready, reporting that via
+  the `meta` flags above.
 
 ##### `POST /indexes/:id/search_similar`
 

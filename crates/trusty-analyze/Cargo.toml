@@ -1,12 +1,6 @@
 [package]
 name        = "trusty-analyze"
-# 🔴 #5067 removed public API — `EmbedderKind::Neural`, `embedder::NeuralEmbedder`,
-# the `bundled-ort` / `load-dynamic` / `cuda` features, and the type of
-# `ClusterQueryParams::method`. The next release MUST be 0.9.0, not 0.8.x.
-# CI does not detect SemVer breaks (#4088, the gap that got 0.7.3 yanked), so
-# this comment and the changelog fragment are the only record. Version bumps
-# stay with `local-ops` — do not bump here as a side effect of another change.
-version     = "0.8.0"
+version     = "0.9.0"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true

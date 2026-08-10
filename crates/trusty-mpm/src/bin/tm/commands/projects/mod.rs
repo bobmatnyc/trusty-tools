@@ -97,7 +97,7 @@ pub(crate) fn is_bare_projects_argv(argv: &[String]) -> bool {
 /// CI runners) would still see `stdout.is_terminal() == true` and launch a
 /// raw-mode TUI against a dead stdin — with no keyboard path able to ever
 /// send `q`/Ctrl-C, only an external signal can kill it. Mirrors
-/// `session_picker::should_show_picker`'s established "require both streams"
+/// `session_ls_connector::should_show_picker`'s established "require both streams"
 /// convention in this same codebase. Taking `stdin_tty`/`stdout_tty` as plain
 /// `bool` parameters (rather than calling `std::io::stdin()/stdout()` here)
 /// keeps this pure and unit-testable without faking a real terminal; `main.rs`

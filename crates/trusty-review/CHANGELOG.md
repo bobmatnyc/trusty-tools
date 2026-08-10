@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.13.0] — 2026-08-10
 
+### Breaking
+
+- `ReportSection` and `ReportModel` gain a public `gaps` field (added for #5239's Gaps & Caveats reporting). Both structs are externally constructible, so an exhaustive struct literal built against 0.12.0 no longer compiles — `cargo-semver-checks` flags this as `constructible_struct_adds_field`. Version bumped 0.12.0 -> 0.13.0 per Cargo's 0.x rule (the breaking bump lands in the MINOR position). No in-workspace crate needed a source change: `trusty-analyze` and `trusty-mpm` both reference `trusty-review` via `workspace = true`, so bumping the workspace-level `version = "0.13"` pin in the root `Cargo.toml` was sufficient.
+
 ### Added
 
 - `report --analyze` now names every repository it could not enrich, in the report's Gaps & Caveats section, instead of only warning on stderr. A findings table that renders empty because the analyze daemon was unreachable no longer looks like a codebase with no findings (#5239, DOC-67 §9). The fetch contract is unchanged — still fail-open, still never aborts the report.
@@ -15,6 +19,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `enrich_with_analyze_gaps` is the enrichment entry point that returns those lines; `enrich_with_analyze` is unchanged and now delegates to it.
 - A manifest may declare `[report] gaps = [...]` — Gaps & Caveats lines from whoever produced the manifest. `tga audit` uses this to carry the stages its sweep could not complete into the report (#5236).
 - `polish_with_gaps` renders declared gaps as their own bullets ahead of the auto-collected `Data gaps:` list. A template with no Gaps & Caveats heading gets one appended rather than dropping the lines.
+
+### Fixed
+
+- A finding the verifier REFUTED no longer leaves the model's own grade standing: the
+  post-verification grade is reconciled in both directions, so a relaxed verdict can no
+  longer sit beside an `F` that rested on discarded evidence (#4044).
+- The narrative summary is written before the verification round and nothing revisited
+  it, so it kept citing refuted findings as merge blockers. A deterministic verification
+  notice now leads the review body, naming each refuted finding by the index the prose
+  uses (#4044).
+- A `code_provable` finding whose own text admits the evidence was not available —
+  "the diff does not show their signatures, so this cannot be confirmed from the diff
+  alone" — is no longer markable `verified: "confirmed"`. It is pre-stamped
+  `unverifiable`, stripped of its escalation signals, and never sent to the verifier.
+  This generalises #4081's rule from the claim's subject (registry vocabulary) to the
+  claim's own admission, which is what let the defect recur (#5309).
+- The verifier can now answer `UNVERIFIABLE`. With only CONFIRMED and REFUTED available
+  it had to pick one even for a claim the diff cannot settle, and it picked CONFIRMED
+  (#5309).
+- Refactor suggestions from trusty-analyze no longer render in the report's RED/CRITICAL band, and analyze-derived findings now carry the daemon's own rationale and suggested action instead of showing `not stated in source data` in every prose slot. A finding that would still render as a bare title and path is dropped, and a repository whose analysis ran with no external static-analysis tool installed is named under Gaps & Caveats so an empty RED band reads as unassessed rather than clean (#5317).
+- The §7 complexity distribution is fetched from trusty-analyze's new full-corpus histogram instead of being bucketed from a truncated top-1000 hotspot list, so its bands and percentages describe the whole codebase. On a daemon that serves no histogram the table is omitted and the reason stated under Gaps & Caveats, rather than rendering shares of a truncation as if they were shares of the codebase (#5320).
+
+### Changed
+
+- `pipeline::finding_hygiene::HygieneCounts` gained a fourth per-pass counter and is now
+  `#[non_exhaustive]`. Construct it with `..Default::default()` from outside the crate.
+  Both land in this release together so adding a fifth hygiene pass is not a further
+  break (#4088).
 
 ## [0.12.0] — 2026-08-10
 
