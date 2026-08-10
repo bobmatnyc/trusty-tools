@@ -103,7 +103,10 @@ globset = { workspace = true }
 # (common-entry-point principle) — mirrors trusty-agents' TrustySearchPlugin.
 # `search-index` provides the shared ensure-project-indexed helper for tcode
 # task startup.
-trusty-common = { workspace = true, features = ["catchup", "mcp", "stdio-mcp-client", "axum-server", "inference-client", "config-cli", "bedrock-client", "search-index"] }
+# `crate-config` (#5203): supplies `workspace_layout::workspace_root`, the one
+# resolver the project picker shares with trusty-mpm. serde_yaml + thiserror are
+# already in this crate's dependency graph, so it adds no new transitive deps.
+trusty-common = { workspace = true, features = ["catchup", "mcp", "stdio-mcp-client", "axum-server", "inference-client", "config-cli", "bedrock-client", "search-index", "crate-config"] }
 
 # `tui_client::CodeEngine` (#3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3): the
 # shared engine-adapter trait + event vocabulary (`TuiEngine`/`ReplEvent`)

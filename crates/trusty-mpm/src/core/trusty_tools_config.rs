@@ -59,21 +59,13 @@ pub const CRATE_NAME: &str = "trusty-mpm";
 /// Test: `managed_claude_config_dir_nests_under_trusty_tools`.
 pub const MANAGED_CLAUDE_CONFIG_SUBDIR: &str = "claude-config";
 
-/// Built-in default workspace-root directory name under `$HOME` (#1220).
-///
-/// Why: #1220 fixes the new default at `~/trusty-mpm-projects/`. Naming it once
-/// keeps the resolver and the migration scan in agreement.
-/// What: `"trusty-mpm-projects"`.
-/// Test: `default_template_is_trusty_mpm_projects`.
-pub const DEFAULT_WORKSPACE_DIR: &str = "trusty-mpm-projects";
-
-/// Environment variable that overrides the resolved workspace root.
-///
-/// Why: operators (and tests) need an escape hatch that wins over the config file,
-/// matching the pre-#1220 behaviour where this env var alone selected the root.
-/// What: `"TRUSTY_MPM_WORKSPACE_ROOT"`.
-/// Test: `env_overrides_config_and_default`.
-pub const WORKSPACE_ROOT_ENV: &str = "TRUSTY_MPM_WORKSPACE_ROOT";
+// #5203: the layout constants live with the resolver in trusty-common so the
+// crates that cannot depend on trusty-mpm read the same values. Re-exported
+// here (rather than redeclared) to keep every existing `trusty_tools_config::`
+// spelling working.
+pub use trusty_common::workspace_layout::{
+    DEFAULT_WORKSPACE_DIR, DEFAULT_WORKTREES_DIRNAME, WORKSPACE_ROOT_ENV, WORKTREES_DIRNAME_ENV,
+};
 
 /// trusty-mpm's slice of the `~/.trusty-tools/<crate>/config.yaml` convention.
 ///
@@ -94,6 +86,20 @@ pub struct TrustyToolsConfig {
     /// `<this>/<owner>/<repo>/<session-id>/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_root_template: Option<String>,
+
+    /// Directory name under a project checkout that holds session worktrees.
+    ///
+    /// `None` → the built-in default `.worktrees`. Must be a single path
+    /// component; anything else is rejected back to the default rather than
+    /// allowed to escape the checkout.
+    ///
+    /// #5204: host-level rather than project-level for the same structural
+    /// reason `workspace_root` is (see `core::project_config`'s module doc) —
+    /// the detection sites in trusty-search and trusty-memory are handed an
+    /// opaque path and must identify the worktree base BEFORE they could locate
+    /// the project whose config would answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktrees_dirname: Option<String>,
 
     /// Default supervisor auto-resume preference surfaced in the console Config UI.
     ///
@@ -620,66 +626,41 @@ pub fn managed_claude_config_dir_at(base: &Path) -> PathBuf {
         .join(MANAGED_CLAUDE_CONFIG_SUBDIR)
 }
 
-/// Expand a leading `~` in a path template to the home directory.
-///
-/// Why: config templates and the built-in default are written home-relative
-/// (`~/trusty-mpm-projects`); the resolver must turn them into absolute paths.
-/// What: replaces a leading `~` (optionally `~/`) with `home`; other paths pass
-/// through unchanged. Absolute paths and templates without `~` are returned as-is.
-/// Test: `tilde_expansion`.
-fn expand_tilde(template: &str, home: &Path) -> PathBuf {
-    if let Some(rest) = template.strip_prefix("~/") {
-        home.join(rest)
-    } else if template == "~" {
-        home.to_path_buf()
-    } else {
-        PathBuf::from(template)
-    }
-}
-
 /// Resolve the absolute workspace root for managed sessions.
 ///
 /// Why: the spawn path needs ONE answer for "where do session workspaces live?"
 /// with #1220's new default and an env/config override, in a tested place so the
 /// HTTP route and the MCP tool cannot diverge.
-/// What: applies the precedence **`TRUSTY_MPM_WORKSPACE_ROOT` env > config
-/// `workspace_root_template` > built-in `~/trusty-mpm-projects`**, expanding a
-/// leading `~`. Falls back to `/tmp/trusty-mpm-projects` only when the home
-/// directory is unresolvable AND nothing absolute was supplied.
+/// What: #5203 moved the precedence chain itself into
+/// [`trusty_common::workspace_layout::resolve_workspace_root`] so `trusty-code`
+/// — which cannot depend on this crate — resolves the identical value. This
+/// function is now the trusty-mpm-shaped façade over it: unwrap the template
+/// from [`TrustyToolsConfig`] and delegate. The precedence is unchanged
+/// (**`TRUSTY_MPM_WORKSPACE_ROOT` env > config `workspace_root_template` >
+/// built-in `~/trusty-mpm-projects`**).
 /// Test: `default_template_is_trusty_mpm_projects`, `env_overrides_config_and_default`,
 /// `config_template_used_when_no_env`.
 pub fn workspace_root(config: &TrustyToolsConfig) -> PathBuf {
-    let home = dirs::home_dir();
+    // #5203: one resolver, in trusty-common, for every consumer.
+    trusty_common::workspace_layout::resolve_workspace_root(
+        config.workspace_root_template.as_deref(),
+    )
+}
 
-    // 1. Env override wins (back-compat with the pre-#1220 behaviour).
-    if let Ok(raw) = std::env::var(WORKSPACE_ROOT_ENV) {
-        let raw = raw.trim();
-        if !raw.is_empty() {
-            return match &home {
-                Some(h) => expand_tilde(raw, h),
-                None => PathBuf::from(raw),
-            };
-        }
-    }
-
-    // 2. Config template (from ~/.trusty-tools/trusty-mpm/config.yaml).
-    if let Some(template) = config
-        .workspace_root_template
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return match &home {
-            Some(h) => expand_tilde(template, h),
-            None => PathBuf::from(template),
-        };
-    }
-
-    // 3. Built-in default: ~/trusty-mpm-projects.
-    match home {
-        Some(h) => h.join(DEFAULT_WORKSPACE_DIR),
-        None => PathBuf::from("/tmp").join(DEFAULT_WORKSPACE_DIR),
-    }
+/// Resolve the session-worktree base directory name (#5204).
+///
+/// Why: the creation sites (`provisioner::workspace`,
+/// `daemon::managed_routes::inproject`) need the single name new worktrees are
+/// created under. Detection sites must use [`worktree_dir_names`] instead —
+/// see that function for why the two differ.
+/// What: delegates to [`trusty_common::workspace_layout::worktrees_dirname`],
+/// which applies **`TRUSTY_MPM_WORKTREES_DIRNAME` env > config
+/// `worktrees_dirname` > built-in `.worktrees`**.
+/// Test: `worktrees_dirname_defaults_to_dot_worktrees`,
+/// `worktrees_dirname_honours_config`.
+pub fn worktrees_dirname(config: &TrustyToolsConfig) -> String {
+    // #5203/#5204: one resolver, in trusty-common, for every consumer.
+    trusty_common::workspace_layout::resolve_worktrees_dirname(config.worktrees_dirname.as_deref())
 }
 
 /// Join a project's `<owner>/<repo>` identity onto the workspace root.

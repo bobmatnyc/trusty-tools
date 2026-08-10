@@ -420,9 +420,14 @@ pub fn is_creator_tag(tag: &str) -> bool {
 /// `resolve_workstream_name_none_when_unresolvable`.
 pub fn resolve_workstream_name(cwd: Option<&str>) -> Option<String> {
     let cwd = cwd?;
+    // #5204: match the CONFIGURED worktree base as well as the built-in
+    // `.worktrees`. Hardcoding the literal here silently dropped the
+    // `creator:workstream=` tag off every memory written after a retarget —
+    // and looked retroactive, since drawers written before it kept their tags.
+    let names = trusty_common::workspace_layout::WorktreeDirNames::resolve();
     let mut components = cwd.split('/');
     while let Some(part) = components.next() {
-        if part == ".worktrees" {
+        if names.matches(part) {
             let candidate = components.next()?;
             return is_valid_workstream_name(candidate).then(|| candidate.to_string());
         }

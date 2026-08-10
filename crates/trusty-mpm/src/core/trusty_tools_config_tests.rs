@@ -90,6 +90,9 @@ fn config_template_used_when_no_env() {
 /// Test: itself.
 #[test]
 fn tilde_expansion() {
+    // #5203: expansion moved to the shared resolver in trusty-common; this
+    // asserts the behaviour trusty-mpm still depends on.
+    use trusty_common::workspace_layout::expand_tilde;
     let home = PathBuf::from("/home/bob");
     assert_eq!(
         expand_tilde("~/trusty-mpm-projects", &home),

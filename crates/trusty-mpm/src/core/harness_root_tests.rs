@@ -349,7 +349,7 @@ fn protected_state_in_names_each_protected_entry() {
         let dir = tmp.path().join("owner").join("repo");
         std::fs::create_dir_all(dir.join(name)).expect("create protected entry");
         assert_eq!(
-            protected_state_in(&dir),
+            protected_state_in(&dir).as_deref(),
             Some(name),
             "{name} must be recognised as protected state"
         );
@@ -412,7 +412,7 @@ fn protected_state_in_treats_an_unreadable_entry_as_present() {
         return;
     }
     assert_eq!(
-        observed,
+        observed.as_deref(),
         Some(".git"),
         "an entry that cannot be stat'd must count as present — Path::exists would \
          report false here and the caller would rename live work"

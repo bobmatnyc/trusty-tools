@@ -784,8 +784,9 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         // beside it in `.worktrees/` — the git-standard shape the in-project
         // spawn path already produces. Nothing writes `.base` any more.
         let base_dir = project_dir.to_path_buf();
+        // #5204: CREATION site — resolve the configured base, not a literal.
         let workspace_path = project_dir
-            .join(crate::session_manager::decommission::WORKTREES_DIRNAME)
+            .join(crate::session_manager::decommission::worktrees_dirname())
             .join(session_id.to_string());
         // The branch backing this worktree is named after the session id
         // itself (not e.g. "session/<id>") so that
