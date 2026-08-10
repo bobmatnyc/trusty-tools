@@ -488,7 +488,16 @@ mod tests {
     /// canonical `crate_config` location for [`MPM_CRATE_NAME`], and asserts
     /// BOTH zero-argument resolvers read it — covering the crate name, the two
     /// YAML key spellings, and the `crate-config` wiring together.
+    ///
+    /// Gated on `crate-config` because everything it drives is: `workspace_root`,
+    /// `worktrees_dirname`, and `crate_config::crate_config_path_at` all compile
+    /// only under that feature, so an ungated test breaks the crate's `lib test`
+    /// target for any build that omits it (#5288). The gate does not park the
+    /// coverage: CI's `cargo test --workspace` job builds trusty-common with the
+    /// union of its dependents' features, and trusty-code / trusty-memory /
+    /// trusty-mpm / trusty-search all request `crate-config`.
     /// Test: this test.
+    #[cfg(feature = "crate-config")]
     #[test]
     fn config_file_drives_both_zero_argument_resolvers() {
         let _guard = env_lock();
