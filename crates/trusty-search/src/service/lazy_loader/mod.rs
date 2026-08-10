@@ -641,4 +641,71 @@ mod tests {
             "restore_fn must be called exactly once (not re-attempted after failure)"
         );
     }
+
+    /// #4253: a restore that reports success but registers NO handle must leave
+    /// the cold entry intact and return a retryable 503 — never consume the
+    /// entry and report the index unknown.
+    ///
+    /// Why: this is the fail-open that permanently orphaned an index. During a
+    /// ~20 s cold-start corpus open a client retry raced the in-flight open,
+    /// redb answered `DatabaseAlreadyOpen`, and `restore_index_on_demand`
+    /// returned WITHOUT registering — but it had run to completion, so
+    /// `restore_fn` reported `true`. The old code then called `mark_loaded`
+    /// unconditionally, which removed the entry from `entries`, and the handle
+    /// lookup that followed mapped its miss to `NotFound`. The index was gone
+    /// from every store with no path back: `contains()` false, so the search
+    /// handler answered 404 and never re-entered the restore path. Five prior
+    /// issues in this class were closed before the mechanism was named.
+    /// What: drives `get_or_load_index` with a `restore_fn` that returns `true`
+    /// and registers nothing — exactly the shape a lost corpus-open race
+    /// produces. Asserts the cold entry survives and the error is `Loading`.
+    /// Pre-fix this panics on the first assertion (`cold.contains` is false).
+    /// Test: this test.
+    #[tokio::test]
+    async fn completed_restore_that_registered_nothing_keeps_the_cold_entry() {
+        let registry = IndexRegistry::default();
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("contended-idx".to_string());
+        cold.register_cold_entries(vec![mk_entry("contended-idx", None, None)]);
+
+        let result = get_or_load_index(&id, &registry, &cold, Duration::from_secs(5), |_e| async {
+            // Ran to completion, registered nothing — a lost corpus-open race.
+            true
+        })
+        .await;
+
+        assert!(
+            cold.contains(&id),
+            "#4253: a restore that registered nothing must NOT consume the cold \
+             entry — evicting it deregisters a live index with no self-heal"
+        );
+        assert!(
+            !cold.is_failed(&id),
+            "#4253: contention is not permanent failure — the id must stay retryable"
+        );
+        assert!(
+            matches!(result, Err(LazyLoadError::Loading { .. })),
+            "#4253: caller must get a retryable 503, not a 404 for an index that \
+             is still registered"
+        );
+
+        // The retry succeeds once the competing opener releases the file.
+        let registered = build_mock_handle("contended-idx");
+        let result2 = get_or_load_index(&id, &registry, &cold, Duration::from_secs(5), |_e| {
+            let reg = &registry;
+            async move {
+                reg.register(registered);
+                true
+            }
+        })
+        .await;
+        assert!(
+            result2.is_ok(),
+            "#4253: the next attempt must recover the index"
+        );
+        assert!(
+            !cold.contains(&id),
+            "a genuinely successful restore does consume the cold entry"
+        );
+    }
 }
