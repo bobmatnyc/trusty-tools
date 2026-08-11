@@ -107,7 +107,16 @@ mod tests {
     }
 
     /// Helper: build a registry + palace under a tempdir and return both.
+    ///
+    /// Seeds the process-wide `retrieval::shared_embedder()` OnceCell with
+    /// `MockEmbedder` first: `send_message_to_palace` writes a drawer, which
+    /// embeds. That cell is first-writer-wins for the whole process, so under
+    /// `cargo test` a sibling's seed satisfied these tests; under per-test
+    /// process isolation (`cargo nextest run`) each gets a virgin cell and
+    /// reaches for the real ONNX model (HTTP 429 in CI) — same defect class as
+    /// #4413. The call is idempotent, so order does not matter.
     fn fresh_palace(id: &str) -> (PalaceRegistry, Arc<PalaceHandle>, PathBuf) {
+        trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().to_path_buf();
         std::mem::forget(tmp);

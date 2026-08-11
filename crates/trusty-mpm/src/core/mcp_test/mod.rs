@@ -274,10 +274,10 @@ pub fn select_targets(
             Ok(vec![make_target(n.to_string(), entry)])
         }
         None => {
-            // Reuse the exact union semantics `managed_mcp_server_names` applies
-            // when seeding trust, so the sweep and the trust list never diverge.
+            // #4181: `managed_mcp_server_names` is now purely this enumeration —
+            // builtins plus the operator's registry, with no trust meaning left.
             let config = json!({ "mcpServers": Value::Object(servers.clone()) });
-            let names = managed_mcp_server_names(&config, true, true, true, true);
+            let names = managed_mcp_server_names(&config);
             let targets = names
                 .into_iter()
                 .map(|n| {

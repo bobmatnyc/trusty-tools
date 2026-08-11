@@ -23,9 +23,11 @@ tm
 
 ## What You Just Installed
 
-When you ran `tctl install trusty-mpm`, three binaries were installed to `~/.local/bin`:
+When you ran `tctl install trusty-mpm`, three members were installed —
+normally to `~/.local/bin` (the prebuilt path), or `~/.cargo/bin` if the
+installer fell back to `cargo install` for your platform:
 
-- **`trusty-mpm`** (binary: `tm`) — the session orchestrator. Manages Claude Code sessions, coordinates with daemons, provides the CLI and daemon interface.
+- **`trusty-mpm`** (binaries: `trusty-mpm` and `tm`) — the session orchestrator. Manages Claude Code sessions, coordinates with daemons, provides the CLI and daemon interface.
 - **`trusty-memory`** — long-term memory storage daemon. Stores development context, notes, snippets. Started automatically as a macOS/Linux service.
 - **`trusty-search`** — hybrid code search daemon (BM25 + vector + knowledge graph). Indexes your projects. Started automatically as a macOS/Linux service.
 
@@ -247,21 +249,61 @@ systemctl --user start trusty-search trusty-memory trusty-mpm
 
 ### Q: How do I uninstall?
 
-The binaries live in `~/.local/bin`. Remove them:
+**On macOS, stop the daemons first, while their binaries still exist to do
+it.** Unloading before deleting matters both ways: a daemon left running after
+its binary is gone gets no cleaner, and a plist deleted while its job is still
+registered leaves launchd running a copy you can no longer address by file.
 
 ```bash
-rm ~/.local/bin/trusty-mpm ~/.local/bin/trusty-memory ~/.local/bin/trusty-search ~/.local/bin/tctl
-```
-
-On macOS, also remove the launchd plists:
-```bash
-# Unload first, then remove — a plist deleted while its job is still registered
-# leaves launchd running a daemon you can no longer address by file.
 trusty-search service uninstall 2>/dev/null || true
 launchctl bootout gui/$(id -u)/com.trusty.memory 2>/dev/null || true
 launchctl bootout gui/$(id -u)/com.trusty.mpm 2>/dev/null || true
 rm -f ~/Library/LaunchAgents/com.trusty.*.plist
 ```
+
+**Then remove the binaries.** They can land in either of two directories,
+depending on how they were installed — a prebuilt `tctl install` (or the
+one-liner) uses `~/.local/bin` (overridable via `TRUSTY_INSTALL_DIR`); a
+`cargo install` or build-from-source path uses `~/.cargo/bin` (or
+`$CARGO_HOME/bin` if you've overridden `CARGO_HOME`). Check both — `rm -f` so
+a name missing from one directory doesn't stop the command:
+
+```bash
+rm -f ~/.cargo/bin/{trusty-mpm,tm,trusty-memory,trusty-search,tctl} \
+      ~/.local/bin/{trusty-mpm,tm,trusty-memory,trusty-search,tctl}
+```
+
+(`trusty-mpm` installs two binaries, `trusty-mpm` and `tm` — both need
+removing. Installed an optional member too, e.g. `trusty-analyze` or
+`trusty-console`? Add its name to both brace lists.)
+
+**If you installed via mise** (`mise use -g cargo:trusty-mpm`, or mise's
+automatic reshimming of `~/.cargo/bin` after a plain `cargo install`), the
+command on your `$PATH` may be a shim in `~/.local/share/mise/shims/`, not the
+binary itself — check with `which -a tm` (or any of the other names above). The
+`rm -f` above does not touch that shim file, so run `mise reshim` afterward to
+prune it:
+
+```bash
+mise reshim
+```
+
+Skip that step and the shim lingers on disk; invoking it fails loudly rather
+than silently, e.g.:
+
+```
+mise ERROR trusty-mpm is not a valid shim. This likely means you uninstalled a
+tool and the shim does not point to anything. Run `mise use <TOOL>` to
+reinstall the tool.
+```
+
+Confirm everything is gone:
+
+```bash
+command -v trusty-mpm tm trusty-memory trusty-search tctl
+```
+
+Every name should print nothing.
 
 ### Q: Installation failed. What do I do?
 

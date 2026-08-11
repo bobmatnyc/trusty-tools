@@ -54,8 +54,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::{AutoPruneConfig, GlobalConfig};
 use crate::service::colocated_storage::COLOCATED_DIR_NAME;
 use crate::service::persistence::{
-    indexes_toml_path, load_index_registry_at, remove_index_data_dir, sanitize_id_for_path,
-    save_index_registry_at, PersistedIndex,
+    indexes_toml_path, load_index_registry_at, remove_index_data_dir,
+    remove_index_registry_entries_at, sanitize_id_for_path, PersistedIndex,
 };
 
 /// Decision for one index entry (computed by [`classify_entry`]).
@@ -348,17 +348,17 @@ pub(crate) fn handle_prune_at(
         }
     }
 
-    // Batch-remove eligible entries from the registry in one atomic save.
-    // This prevents N separate load-retain-save cycles that race with the
-    // daemon's last_queried_unix flush. (Stop the daemon before --apply for
-    // a fully safe update.)
+    // #5344: remove BY ID, never by republishing the survivors of the snapshot
+    // loaded above. This runs in a SEPARATE process from the daemon, so the
+    // registry can have gained entries — a `POST /indexes`, a warm-boot
+    // backfill, a `last_queried_unix` flush — while the operator was reading the
+    // report and answering the prompt. Publishing `survivors` erased every one
+    // of them and reported success. `remove_index_registry_entries_at` re-reads
+    // the current file under the cross-process write lock and drops only the ids
+    // this run actually judged eligible.
     let eligible_ids: Vec<&str> = eligible.iter().map(|(e, _, _)| e.id.as_str()).collect();
-    let survivors: Vec<PersistedIndex> = entries
-        .into_iter()
-        .filter(|e| !eligible_ids.contains(&e.id.as_str()))
-        .collect();
-    let remaining = survivors.len();
-    save_index_registry_at(toml_path, &survivors)?;
+    remove_index_registry_entries_at(toml_path, &eligible_ids)?;
+    let remaining = load_index_registry_at(toml_path)?.len();
 
     // Delete on-disk data dirs after the registry save.
     let mut deleted = 0usize;

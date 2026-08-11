@@ -60,4 +60,33 @@ pub(crate) enum RepairAction {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Recover a corrupt managed-session store (`sessions.json`).
+    ///
+    /// Why (#5007): the store is read before every write, so a file the daemon
+    /// cannot parse is a file it can never rewrite — the corruption is
+    /// permanent until something outside the daemon repairs it. On 2026-08-06
+    /// that something was a human hand-truncating JSON at 09:00 while every
+    /// session mutation failed. This is that repair, automated.
+    /// What: backs the file up to a timestamped sibling
+    /// (`sessions.json.corrupt-backup-<YYYYMMDD-HHMMSS>`) and truncates it to
+    /// the longest complete JSON document at its head. It REFUSES when the
+    /// bytes it would discard name a session id the recovered document does not
+    /// contain, unless `--force`. `--dry-run` reports the cut and writes
+    /// nothing. A store that parses is left alone.
+    /// Test: `cli_parses_repair_session_store`,
+    /// `cli_parses_repair_session_store_flags`.
+    SessionStore {
+        /// Store file to repair. Defaults to
+        /// `~/.trusty-mpm/session-manager/sessions.json`.
+        #[arg(long)]
+        path: Option<String>,
+        /// Report the cut without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Discard the trailing bytes even when they name a session id the
+        /// recovered document does not contain.
+        #[arg(long)]
+        force: bool,
+    },
 }

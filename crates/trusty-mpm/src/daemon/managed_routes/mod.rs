@@ -159,6 +159,18 @@ pub struct SpawnRequest {
     /// mismatch (400), not tolerated as `false`.
     #[serde(default)]
     pub background: bool,
+    /// Optional EXPLICIT worktree request (#5274): `true` provisions the session
+    /// its own per-session git worktree; absent/`false` runs it in the project's
+    /// main checkout.
+    ///
+    /// Why: this is the wire form of the only input allowed to decide session
+    /// placement — see [`lifecycle::SpawnParams::worktree`] for why the project's
+    /// `worktree` flag deliberately cannot. `tm launch --worktree` sets it; every
+    /// other client omits it and gets the main checkout. Like `force_new` and
+    /// `background` it is a plain `#[serde(default)]` bool, so an explicit
+    /// `"worktree": null` is a 400 rather than a silently-tolerated `false`.
+    #[serde(default)]
+    pub worktree: bool,
 }
 
 /// Response body for POST /api/v1/sessions/managed (spawn, 201 Created).
@@ -258,6 +270,36 @@ pub struct AdoptExistingResponse {
 pub struct ListSessionsResponse {
     /// All managed sessions as summaries.
     pub sessions: Vec<SessionSummary>,
+    /// Present ONLY when the daemon served this list from its last-known
+    /// in-memory set because it could not read `sessions.json` (#5007).
+    ///
+    /// Why: the fallback that produced this list is the resilience feature that
+    /// hid a totally wedged store — `tm ls` kept printing a healthy fleet while
+    /// every write failed. Disclosing the degradation in the same response the
+    /// fallback produced is what makes it impossible to read the list without
+    /// also seeing that it is stale.
+    /// What: `None` (and omitted from the JSON entirely, so a healthy response
+    /// is byte-identical to before) whenever the last store read succeeded.
+    /// Test: `list_response_omits_store_health_when_healthy`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_health: Option<StoreHealthPayload>,
+}
+
+/// A store read failure disclosed alongside a degraded list response (#5007).
+///
+/// Why: see [`ListSessionsResponse::store_health`].
+/// What: the rendered error, whether the file is corrupt (permanent) rather
+/// than merely unreadable (possibly transient), and when it was observed.
+/// Test: `list_response_omits_store_health_when_healthy`.
+#[derive(Debug, Serialize)]
+pub struct StoreHealthPayload {
+    /// The rendered store error — names the file, the byte offset, and the
+    /// repair command when the failure is corruption.
+    pub message: String,
+    /// Whether the file is corrupt rather than transiently unreadable.
+    pub corrupt: bool,
+    /// RFC3339 timestamp of the observation.
+    pub observed_at: String,
 }
 
 // `SessionSummary` lives in its own file (issue #2444) — see
@@ -456,6 +498,10 @@ pub async fn spawn_session(
         // session", `tm session new`) sets `force_new: true` to skip the
         // in-project reconnect pre-flight and always spawn fresh.
         force_new: req.force_new,
+        // #5274: the explicit "give this session its own worktree" request. Only
+        // a human-driven surface sets it (`tm launch --worktree`); absent, the
+        // session runs in the project's main checkout.
+        worktree: req.worktree,
     };
 
     // Async path (#2605): provision on a detached task and return the job id
@@ -613,7 +659,18 @@ pub async fn list_managed_sessions(
     let all_records = mgr.list().await;
     let numbered = mgr.numbered_snapshot(&all_records).await;
     let sessions = numbered_summaries(numbered, mgr.tmux.as_ref(), sid_filter, !slim).await;
-    Json(ListSessionsResponse { sessions })
+    // #5007: if `mgr.list()` just served its last-known in-memory set because
+    // the store could not be read, say so in the same response. Absent on a
+    // healthy store, so the wire shape is unchanged for every normal listing.
+    let store_health = mgr.store_health().await.map(|d| StoreHealthPayload {
+        message: d.message,
+        corrupt: d.corrupt,
+        observed_at: d.observed_at.to_rfc3339(),
+    });
+    Json(ListSessionsResponse {
+        sessions,
+        store_health,
+    })
 }
 
 /// GET /api/v1/sessions/managed/{id} — get one session record.

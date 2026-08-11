@@ -17,10 +17,12 @@
 //! the daemon is discoverable — best-effort registers the index (`POST
 //! /indexes`, ~1s cap) then best-effort triggers a freshness-gated reindex
 //! (`POST /indexes/{id}/reindex`, ~2s cap, skipped when the index already holds
-//! chunks indexed within the last hour). Every step is fail-open: failures are
-//! logged at warn/debug and swallowed, never propagated, so the caller (a
+//! chunks indexed within the last hour). Every step is fail-open in the sense
+//! that failures are logged at warn/debug and never propagated, so the caller (a
 //! session launch or a task run) is never blocked or aborted by an
-//! unreachable/slow search daemon. The blocking HTTP calls run on dedicated OS
+//! unreachable/slow search daemon. What it is NOT (#5091) is fail-open in its
+//! RETURN: the id comes back only when the daemon confirmed the index, so a
+//! failed create cannot advance a caller's pin. The blocking HTTP calls run on dedicated OS
 //! threads so the function is safe to call from inside a tokio runtime.
 //!
 //! Mid-task incremental re-indexing: [`ensure_project_indexed`] runs once, at
@@ -53,7 +55,8 @@
 //! now takes `allow_sensitive_path` as an explicit parameter so each caller
 //! states its own intent instead of inheriting trusty-code's opt-in for free.
 //!
-//! Test: `ensure_project_indexed_returns_derived_id_when_daemon_down`,
+//! Test: `create_rejected_by_the_daemon_withholds_the_pinnable_id`,
+//! `ensure_project_indexed_withholds_id_when_nothing_was_registered`,
 //! `ensure_project_indexed_none_for_root`, the `index_is_fresh_*` predicate
 //! tests, the `index_files_inner_*` / `relative_index_path_*` /
 //! `index_file_request_body_*` tests, and the incremental-hardening tests
@@ -95,15 +98,216 @@ use std::path::Path;
 /// when the id is non-empty AND the trusty-search daemon address is discoverable
 /// — POSTs `{id, root_path, allow_sensitive_path}` to `/indexes` then
 /// best-effort triggers a reindex (skipping it when the index is already
-/// fresh; see [`best_effort_trigger_reindex`]). ALWAYS returns the derived id
-/// (`None` only when derivation yields an empty string) so the caller can
-/// still pin the id even if the daemon is unreachable; every failed/skipped
-/// step is logged at warn/debug and never propagates (the caller must still
-/// make progress).
-/// Test: `ensure_project_indexed_returns_derived_id_when_daemon_down`,
+/// fresh; see [`best_effort_trigger_reindex`]). Returns the id ONLY when that
+/// POST came back 2xx — see [`pinnable_index_id`] for why an unconfirmed create
+/// must yield `None`. Errors still never propagate: a refusing or absent daemon
+/// is logged at warn and the caller makes progress unindexed.
+/// Test: `create_rejected_by_the_daemon_withholds_the_pinnable_id`,
+/// `ensure_project_indexed_withholds_id_when_nothing_was_registered`,
 /// `ensure_project_indexed_none_for_root`,
 /// `ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body`.
 pub fn ensure_project_indexed(project_root: &Path, allow_sensitive_path: bool) -> Option<String> {
+    ensure_project_indexed_with(
+        project_root,
+        IndexOptions {
+            allow_sensitive_path,
+            ..IndexOptions::default()
+        },
+    )
+}
+
+/// Per-call knobs for [`ensure_project_indexed_with`] (#5060).
+///
+/// Why: [`ensure_project_indexed`] grew a second orthogonal dimension when
+/// trusty-mpm began registering an index for a git WORKTREE at the moment the
+/// worktree is created. A worktree differs from its base checkout by a small
+/// diff: its exact text (BM25) and its symbol graph (KG) are branch-specific
+/// and must be worktree-accurate, but conceptual similarity is not — it does
+/// not change because a branch moved a few functions. So the expensive lane
+/// (embedding) is built once on the base checkout and the cheap lanes are
+/// built per worktree. A struct rather than a third positional `bool` keeps
+/// the two flags from being silently transposed at a call site.
+/// What: a plain options bag whose `Default` reproduces the pre-#5060
+/// behaviour exactly (`allow_sensitive_path: false`, `skip_vector: false`), so
+/// [`ensure_project_indexed`] stays a one-line wrapper and no existing caller
+/// changes behaviour.
+///
+/// `#[non_exhaustive]`: this crate is published, and the daemon already carries
+/// a third orthogonal flag this bag does not yet expose (`skip_kg`), so a third
+/// field is expected. Without the attribute, adding it would break every
+/// external struct-literal construction — a SemVer break this crate has taken
+/// before. The attribute bars struct expressions from other crates outright
+/// (functional-update syntax does not exempt them), so external callers build
+/// with [`IndexOptions::default`] plus the `with_*` setters:
+/// `IndexOptions::default().with_skip_vector(true)`.
+/// Test: `index_options_default_matches_legacy_ensure_call`,
+/// `create_index_request_body_sets_skip_vector`,
+/// `index_options_builders_match_field_construction`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IndexOptions {
+    /// Forwarded to `POST /indexes`' `allow_sensitive_path` field — see
+    /// [`ensure_project_indexed`]'s doc comment for when `true` is correct.
+    pub allow_sensitive_path: bool,
+
+    /// When `true`, ask the daemon to register this index with its vector
+    /// lane permanently suppressed (`skip_vector`, trusty-search issue #2984
+    /// Phase 1): the embedder is never invoked, the semantic stage is marked
+    /// `Skipped`, and the index's reported `search_capabilities` omit
+    /// `vector`. BM25 and KG are built as normal.
+    pub skip_vector: bool,
+}
+
+impl IndexOptions {
+    /// Set `allow_sensitive_path`, consuming and returning `self`.
+    ///
+    /// Why: `#[non_exhaustive]` bars other crates from constructing this bag
+    /// with a struct expression at all, so a setter is the only way an external
+    /// caller can express a non-default value. See the type's doc for why the
+    /// attribute is there.
+    /// Test: `index_options_builders_match_field_construction`.
+    #[must_use]
+    pub fn with_allow_sensitive_path(mut self, allow: bool) -> Self {
+        self.allow_sensitive_path = allow;
+        self
+    }
+
+    /// Set `skip_vector`, consuming and returning `self`.
+    ///
+    /// Why: see [`IndexOptions::with_allow_sensitive_path`].
+    /// Test: `index_options_builders_match_field_construction`.
+    #[must_use]
+    pub fn with_skip_vector(mut self, skip: bool) -> Self {
+        self.skip_vector = skip;
+        self
+    }
+}
+
+/// What the daemon-side half of an `ensure_project_indexed*` call achieved
+/// (#5065 review).
+///
+/// Why: [`ensure_project_indexed_with`] returns the derived id unconditionally,
+/// so its caller cannot tell "the daemon confirmed this index exists" from "the
+/// daemon was down and nothing was sent". trusty-mpm's worktree hook was
+/// logging `worktree index registered` for the second case — announcing a
+/// success it never observed, in the one code path whose stated purpose is to
+/// make outcomes distinguishable. Reporting the registration outcome beside the
+/// id fixes that without making the call fallible: nothing here ever propagates
+/// an error. #5091 then wired this enum into the return rather than leaving it
+/// advisory: the id-only entry points hand back an id only when it says
+/// `Confirmed` (see [`pinnable_index_id`]), while this report still carries the
+/// derived id in every case.
+/// What: the four terminal states of the `POST /indexes` attempt. Only
+/// `Confirmed` means the index is known to exist daemon-side.
+/// Test: `reporting_says_skipped_under_test_harness`,
+/// `reporting_says_daemon_unreachable_when_no_daemon_is_discoverable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IndexRegistration {
+    /// `POST /indexes` returned 2xx — the index exists in the daemon.
+    Confirmed,
+    /// The daemon address resolved but the create call did not confirm: a
+    /// non-2xx response, a transport error, or a panicked worker thread. All
+    /// three are logged at warn by [`best_effort_create_index`].
+    NotConfirmed,
+    /// No trusty-search daemon address could be resolved, so nothing was sent.
+    DaemonUnreachable,
+    /// This is a test process and the write was deliberately suppressed
+    /// (#4255). Never a real registration.
+    SkippedUnderTest,
+}
+
+/// The derived index id plus what actually happened daemon-side (#5065 review).
+///
+/// Why: see [`IndexRegistration`]. A struct rather than a tuple so a third
+/// reported quantity can be added without breaking callers.
+/// What: `index_id` is `None` only when derivation yielded an empty string, in
+/// which case nothing was attempted and `registration` is `NotConfirmed`.
+/// Test: `reporting_says_skipped_under_test_harness`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EnsureIndexReport {
+    /// The canonical index id, or `None` when derivation yielded empty.
+    pub index_id: Option<String>,
+    /// What the `POST /indexes` attempt achieved.
+    pub registration: IndexRegistration,
+}
+
+/// [`ensure_project_indexed`] with explicit per-call [`IndexOptions`] (#5060).
+///
+/// Why: see [`IndexOptions`]. Kept as a thin wrapper over
+/// [`ensure_project_indexed_reporting`] so the register-then-populate sequence
+/// can never drift between the session-launch, task-start, and
+/// worktree-creation callers.
+/// What: identical to [`ensure_project_indexed`] in every respect except that
+/// `opts.skip_vector` is threaded into the `POST /indexes` body. Failures are
+/// still logged and swallowed rather than propagated, and the returned id is
+/// still gated on a confirmed registration ([`pinnable_index_id`]). A caller
+/// that needs the DERIVED id whether or not the daemon confirmed it — to name
+/// the index in a log line, or to GC it — must use
+/// [`ensure_project_indexed_reporting`], where the adjacent `registration`
+/// field makes ignoring the failure a visible choice.
+/// Test: `create_rejected_by_the_daemon_withholds_the_pinnable_id`,
+/// `ensure_project_indexed_none_for_root`,
+/// `create_index_request_body_sets_skip_vector`.
+pub fn ensure_project_indexed_with(project_root: &Path, opts: IndexOptions) -> Option<String> {
+    pinnable_index_id(ensure_project_indexed_reporting(project_root, opts))
+}
+
+/// The id a caller may PIN, or `None` when nothing observed the index (#5091).
+///
+/// Why: `POST /indexes` can fail — a non-2xx, a transport error, a daemon that
+/// is not running — and the id-only entry points used to hand the derived id
+/// back anyway. Session launch writes that id into `.mcp.json` as
+/// `trusty-search serve --index <id>`, so a create that silently failed left the
+/// session pinned to an index the daemon has never heard of: every `search`
+/// answers `404 unknown index` for the life of the session, while
+/// `search_health` and the `search` doctor probe both stay green because they
+/// ask about the daemon, not the pin (#5045 measured 4 of 75 live worktrees
+/// actually indexed). Withholding the id leaves the pin unadvanced, which is the
+/// one outcome that cannot lie: an unpinned stub is visibly unpinned, and
+/// `tm doctor`'s `search_index_pin` check says so.
+/// What: returns `report.index_id` for [`IndexRegistration::Confirmed`] — the
+/// only variant that means the daemon acknowledged the index, and since `POST
+/// /indexes` is find-or-create it covers "already existed" too. Every other
+/// variant, including the #4255 test-harness suppression (which sends nothing,
+/// so it registers nothing), logs at warn and returns `None`.
+/// Test: `create_rejected_by_the_daemon_withholds_the_pinnable_id`,
+/// `ensure_project_indexed_withholds_id_when_nothing_was_registered`.
+fn pinnable_index_id(report: EnsureIndexReport) -> Option<String> {
+    if report.registration == IndexRegistration::Confirmed {
+        return report.index_id;
+    }
+    if let Some(id) = &report.index_id {
+        // #5091: an unconfirmed create must not advance the caller's pin.
+        tracing::warn!(
+            "trusty-search index '{id}' was NOT confirmed ({:?}); withholding it so the \
+             caller cannot pin an index that may not exist",
+            report.registration
+        );
+    }
+    None
+}
+
+/// [`ensure_project_indexed_with`], but reporting what the daemon actually did
+/// (#5065 review).
+///
+/// Why: the id-only return cannot distinguish a confirmed registration from a
+/// silent no-op against a down daemon — see [`IndexRegistration`]. This is the
+/// ONE implementation; the two id-only entry points delegate here, so no third
+/// copy of the register-then-populate sequence exists.
+/// What: resolves the git-root, derives the id, and — when the id is non-empty,
+/// this is not a test process, and a daemon address resolves — issues the
+/// find-or-create `POST /indexes` followed by the freshness-gated reindex
+/// trigger. Returns the id in every case except empty derivation, alongside the
+/// registration outcome. Still fail-open: no step propagates an error.
+/// Test: `reporting_says_skipped_under_test_harness`,
+/// `reporting_says_daemon_unreachable_when_no_daemon_is_discoverable`,
+/// `ensure_project_indexed_none_for_root`.
+pub fn ensure_project_indexed_reporting(
+    project_root: &Path,
+    opts: IndexOptions,
+) -> EnsureIndexReport {
     let root = crate::resolve_project_root(project_root);
     let index_id = crate::derive_index_id(&root);
     if index_id.trim().is_empty() {
@@ -111,33 +315,45 @@ pub fn ensure_project_indexed(project_root: &Path, allow_sensitive_path: bool) -
             "skipping trusty-search index registration: empty index id for {}",
             root.display()
         );
-        return None;
+        return EnsureIndexReport {
+            index_id: None,
+            registration: IndexRegistration::NotConfirmed,
+        };
     }
 
     // #4255: never register a fixture root against the operator's real daemon.
     if refuse_daemon_write_under_test("registration", &index_id) {
-        return Some(index_id);
+        return EnsureIndexReport {
+            index_id: Some(index_id),
+            registration: IndexRegistration::SkippedUnderTest,
+        };
     }
 
     // Discover the running daemon's address (issue #2033: via the shared
     // `resolve_daemon_base_url` helper — never a hardcoded port). Absent /
-    // unreadable file ⇒ daemon not started: skip registration (best-effort) but
-    // still return the id so the caller can pin it — the daemon will create the
-    // index on first reindex.
-    match crate::resolve_daemon_base_url("trusty-search") {
+    // unreadable file ⇒ daemon not started, so nothing is sent and nothing is
+    // registered. #5091: the earlier claim here — that the daemon would create
+    // the index on first reindex — was false; no later step retries, which is
+    // why `DaemonUnreachable` is not a pinnable outcome.
+    let registration = match crate::resolve_daemon_base_url("trusty-search") {
         Some(base) => {
-            best_effort_create_index(&base, &index_id, &root, allow_sensitive_path);
+            let outcome = best_effort_create_index(&base, &index_id, &root, opts);
             best_effort_trigger_reindex(&base, &index_id);
+            outcome
         }
         None => {
             tracing::warn!(
-                "trusty-search daemon address not found; pinning index '{index_id}' \
-                 without pre-registering it (it will be created on first reindex)"
+                "trusty-search daemon address not found; index '{index_id}' was NOT \
+                 registered and nothing will retry it"
             );
+            IndexRegistration::DaemonUnreachable
         }
-    }
+    };
 
-    Some(index_id)
+    EnsureIndexReport {
+        index_id: Some(index_id),
+        registration,
+    }
 }
 
 /// Should this process refuse to mutate a real trusty-search daemon?
@@ -511,16 +727,22 @@ fn index_file_request_body(rel_path: &str, content: &str) -> serde_json::Value {
 /// (credential dirs, sensitive file names, top-level home dirs) — see
 /// `trusty-search::allowlist::is_denied_allowing_sensitive_path`'s doc comment
 /// for exactly what stays enforced.
-/// Test: `create_index_request_body_respects_allow_sensitive_path_param`.
-fn create_index_request_body(
-    index_id: &str,
-    root: &Path,
-    allow_sensitive_path: bool,
-) -> serde_json::Value {
+///
+/// `skip_vector` (#5060) asks the daemon to register the index with its vector
+/// lane permanently suppressed — see [`IndexOptions::skip_vector`]. It is sent
+/// unconditionally (as `false` for every pre-#5060 caller) because the
+/// daemon's `CreateIndexRequest` field is `Option<bool>` with `None` and
+/// `Some(false)` both meaning "build the vector lane": an explicit `false` is
+/// byte-for-byte equivalent to omitting it, and keeping the field present
+/// makes the request shape uniform across callers.
+/// Test: `create_index_request_body_respects_allow_sensitive_path_param`,
+/// `create_index_request_body_sets_skip_vector`.
+fn create_index_request_body(index_id: &str, root: &Path, opts: IndexOptions) -> serde_json::Value {
     serde_json::json!({
         "id": index_id,
         "root_path": root.to_string_lossy(),
-        "allow_sensitive_path": allow_sensitive_path,
+        "allow_sensitive_path": opts.allow_sensitive_path,
+        "skip_vector": opts.skip_vector,
     })
 }
 
@@ -544,11 +766,21 @@ fn create_index_request_body(
 /// are harmless. The client uses a tight ~1s overall timeout (750 ms connect)
 /// so the joined thread returns quickly: this call sits on a hot path and
 /// must NOT stall when the daemon is slow or unreachable.
+///
+/// Returns [`IndexRegistration::Confirmed`] ONLY for a 2xx response (#5065
+/// review): a non-2xx, a transport error, and a panicked worker thread are all
+/// `NotConfirmed`. They are still logged and swallowed — the return value gives
+/// the caller something honest to report, it does not make the call fallible.
 /// Test: exercised via `ensure_project_indexed_returns_derived_id_when_daemon_down`
 /// (daemon-down path); the live HTTP path is covered by integration use.
-fn best_effort_create_index(base: &str, index_id: &str, root: &Path, allow_sensitive_path: bool) {
+fn best_effort_create_index(
+    base: &str,
+    index_id: &str,
+    root: &Path,
+    opts: IndexOptions,
+) -> IndexRegistration {
     let url = format!("{base}/indexes");
-    let body = create_index_request_body(index_id, root, allow_sensitive_path);
+    let body = create_index_request_body(index_id, root, opts);
     let index_id = index_id.to_string();
     let root_display = root.display().to_string();
 
@@ -567,17 +799,21 @@ fn best_effort_create_index(base: &str, index_id: &str, root: &Path, allow_sensi
     match result {
         Ok(Ok(status)) if status.is_success() => {
             tracing::debug!("registered trusty-search index '{index_id}' (root={root_display})");
+            IndexRegistration::Confirmed
         }
         Ok(Ok(status)) => {
             tracing::warn!(
                 "trusty-search index registration for '{index_id}' returned HTTP {status}"
             );
+            IndexRegistration::NotConfirmed
         }
         Ok(Err(e)) => {
             tracing::warn!("trusty-search index registration for '{index_id}' failed: {e}");
+            IndexRegistration::NotConfirmed
         }
         Err(_) => {
             tracing::warn!("trusty-search index registration thread for '{index_id}' panicked");
+            IndexRegistration::NotConfirmed
         }
     }
 }

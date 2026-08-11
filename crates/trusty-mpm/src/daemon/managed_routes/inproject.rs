@@ -220,7 +220,8 @@ fn migrate_old_layout_aside(base_path: &Path) -> Result<Option<PathBuf>, String>
              needs it.",
             base = base_path.display(),
             legacy = crate::core::harness_root::BASE_CLONE_DIRNAME,
-            worktrees = crate::session_manager::decommission::WORKTREES_DIRNAME,
+            // #5204: name the configured base in the operator-facing message.
+            worktrees = crate::session_manager::decommission::worktrees_dirname(),
         ));
     }
 
@@ -361,11 +362,16 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
 /// steer `SessionManager::resolve_session_name` away from a name whose
 /// worktree already exists on disk, #2032) must agree on exactly where a
 /// worktree for a given name would live.
-/// What: `<base_path>/.worktrees/<worktree_name>` (dot-prefixed so
-/// `ensure_worktrees_gitignored` hides it from `git status`).
-/// Test: `session_worktree_path_uses_dot_prefix`.
+/// What: `<base_path>/<worktrees-dirname>/<worktree_name>`, where the base name
+/// is the configured one (#5204) and defaults to `.worktrees` — dot-prefixed so
+/// `ensure_worktrees_gitignored` hides it from `git status`.
+/// Test: `session_worktree_path_uses_dot_prefix`,
+/// `worktree_path_for_honours_configured_base`.
 pub fn worktree_path_for(base_path: &Path, worktree_name: &str) -> PathBuf {
-    base_path.join(".worktrees").join(worktree_name)
+    // #5204: CREATION site — resolve the single configured base, not a literal.
+    base_path
+        .join(crate::session_manager::decommission::worktrees_dirname())
+        .join(worktree_name)
 }
 
 /// Compute the per-session branch name for `worktree_name`.
@@ -538,6 +544,15 @@ pub fn create_session_worktree(
     }
 
     info!(worktree = %worktree_path.display(), "inproject: per-session worktree created");
+
+    // #5060: register this worktree with trusty-search NOW rather than waiting
+    // for a session to launch in it. Fire-and-forget on a detached thread — a
+    // cold BM25+KG walk of a large repo takes ~35s, and worktree creation must
+    // never wait on it. The index is BM25+KG only (no embeddings); see
+    // `core::worktree_index`. Its teardown is already owned by
+    // `session_manager::search_gc`, which derives the same id (#2033).
+    crate::core::worktree_index::index_new_worktree_in_background(worktree_path.clone());
+
     Ok(worktree_path)
 }
 

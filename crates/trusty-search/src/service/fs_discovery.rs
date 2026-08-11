@@ -102,6 +102,10 @@ pub fn scan_roots_for_colocated_indexes(
             }
         };
 
+        // #5084: record the walk before doing it, so a test can assert on the
+        // NUMBER of walks a boot performs instead of on how long they took.
+        walk_probe::record(&canonical_root);
+
         scan_dir_recursive(
             &canonical_root,
             &canonical_root,
@@ -113,6 +117,89 @@ pub fn scan_roots_for_colocated_indexes(
     }
 
     results
+}
+
+/// Counts depth-5 tracked-root walks for one test's directory subtree (#5084).
+///
+/// Why: #4846's guarantee is a claim about *work done* — "the relocation walk
+/// runs once per boot, not once per dead entry". Its regression tests proxied
+/// that with a wall-clock ceiling, which fails under CI load at ~6% and
+/// reproduces crate-scoped at 1-in-20; and because the pre-fix cost
+/// (24 walks) and a contended post-fix boot land in the same millisecond range,
+/// no ceiling separates them. Counting the walks is immune to load and
+/// separates 0/1 from 24 unconditionally.
+/// What: `WalkProbe::watching(prefix)` arms a process-global counter that
+/// [`scan_roots_for_colocated_indexes`] bumps for every root under `prefix`,
+/// and disarms it on drop. Scoping to the caller's own tempdir is what keeps a
+/// parallel sibling test's scan out of the count — the same contamination that
+/// made the clock unusable.
+/// Test: `dead_entries_do_not_consume_the_live_index_budget`,
+/// `disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat`.
+///
+/// Not `#[cfg(test)]`: the tests that use it live in the `trusty-search` BIN
+/// target, which links this lib as an ordinary dependency compiled without
+/// `cfg(test)`, so a gated module is invisible to them. Disarmed — which is
+/// every non-test build — `record` is one `Relaxed` load and a return, against
+/// a depth-5 `read_dir` + `canonicalize` tree walk.
+#[doc(hidden)]
+pub mod walk_probe {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Mutex, PoisonError};
+
+    /// Whether any probe is live. Read on every walk; the mutex is not.
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    /// The subtree currently being counted, or `None` when no probe is armed.
+    static WATCHED: Mutex<Option<PathBuf>> = Mutex::new(None);
+    /// Walks recorded since the live probe was armed.
+    static WALKS: AtomicUsize = AtomicUsize::new(0);
+
+    /// An armed walk counter. Disarms itself on drop.
+    pub struct WalkProbe;
+
+    impl WalkProbe {
+        /// Arm the counter for walks of any root at or under `prefix`.
+        ///
+        /// Why: only one probe may be armed at a time, so callers must be
+        /// `#[serial_test::serial]` with respect to each other. `prefix` is
+        /// canonicalized because the scanner records canonical roots, and on
+        /// macOS a tempdir's `/var/…` and `/private/var/…` forms differ.
+        pub fn watching(prefix: &Path) -> Self {
+            let canonical = prefix
+                .canonicalize()
+                .unwrap_or_else(|_| prefix.to_path_buf());
+            WALKS.store(0, Ordering::SeqCst);
+            *WATCHED.lock().unwrap_or_else(PoisonError::into_inner) = Some(canonical);
+            ARMED.store(true, Ordering::SeqCst);
+            Self
+        }
+
+        /// Walks of the watched subtree since this probe was armed.
+        pub fn walks(&self) -> usize {
+            WALKS.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for WalkProbe {
+        fn drop(&mut self) {
+            ARMED.store(false, Ordering::SeqCst);
+            *WATCHED.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        }
+    }
+
+    /// Count `canonical_root` if an armed probe is watching its subtree.
+    pub(super) fn record(canonical_root: &Path) {
+        if !ARMED.load(Ordering::Relaxed) {
+            return;
+        }
+        let watched = WATCHED.lock().unwrap_or_else(PoisonError::into_inner);
+        if watched
+            .as_deref()
+            .is_some_and(|prefix| canonical_root.starts_with(prefix))
+        {
+            WALKS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 
 /// Recursive helper that descends into `dir` looking for `.trusty-search/`
@@ -162,6 +249,8 @@ fn scan_dir_recursive(
         }
     };
 
+    // #5204: resolve the ephemeral-dir matcher once per directory, not per entry.
+    let ephemeral = crate::service::constants::ephemeral_dir_names();
     for entry in read_dir.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -175,7 +264,7 @@ fn scan_dir_recursive(
         if name == COLOCATED_DIR_NAME
             || name == ".git"
             || name == "node_modules"
-            || crate::service::constants::is_ephemeral_dir_name(name)
+            || ephemeral.matches(name)
         {
             continue;
         }
@@ -341,5 +430,50 @@ mod tests {
             1,
             "inner .trusty-search must not be discovered"
         );
+    }
+
+    /// Why (#5084): the warm-boot budget tests now assert on this counter
+    /// instead of on a wall clock, so the counter itself has to be trustworthy
+    /// — it must count every walk of the watched subtree, count nothing
+    /// outside it (that scoping is what makes it immune to a parallel sibling
+    /// test's scan), and stop counting once dropped.
+    /// What: arms a probe on one tempdir, scans it twice and an unwatched
+    /// tempdir once, then re-scans after the drop.
+    /// Test: this test.
+    #[test]
+    #[serial_test::serial]
+    fn walk_probe_counts_only_the_watched_subtree() {
+        let watched = tempdir().unwrap();
+        let elsewhere = tempdir().unwrap();
+        let watched_root = watched.path().to_path_buf();
+        let other_root = elsewhere.path().to_path_buf();
+
+        {
+            let probe = walk_probe::WalkProbe::watching(watched.path());
+            scan_roots_for_colocated_indexes(
+                std::slice::from_ref(&watched_root),
+                DEFAULT_SCAN_DEPTH,
+            );
+            assert_eq!(probe.walks(), 1, "a walk of the watched root must count");
+
+            scan_roots_for_colocated_indexes(std::slice::from_ref(&other_root), DEFAULT_SCAN_DEPTH);
+            assert_eq!(
+                probe.walks(),
+                1,
+                "a walk outside the watched subtree must not count"
+            );
+
+            scan_roots_for_colocated_indexes(
+                std::slice::from_ref(&watched_root),
+                DEFAULT_SCAN_DEPTH,
+            );
+            assert_eq!(probe.walks(), 2, "every walk counts, not just the first");
+        }
+
+        // Dropped: the next probe starts from zero and sees only its own walks.
+        let probe = walk_probe::WalkProbe::watching(watched.path());
+        assert_eq!(probe.walks(), 0, "a fresh probe starts at zero");
+        scan_roots_for_colocated_indexes(&[other_root], DEFAULT_SCAN_DEPTH);
+        assert_eq!(probe.walks(), 0, "still scoped to the watched subtree");
     }
 }

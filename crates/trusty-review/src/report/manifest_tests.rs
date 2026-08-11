@@ -161,3 +161,30 @@ fn slug_derivation() {
     assert_eq!(slugify("!!!"), "report");
     assert_eq!(slugify("Already-slugged"), "already-slugged");
 }
+
+/// Why: #5239 — an orchestrator's unassessed areas travel to the report through
+/// the manifest, and a manifest that declares none must behave exactly as before.
+/// Test: itself.
+#[test]
+fn parse_declared_gaps() {
+    let m = parse_manifest(
+        "[report]\ntitle = \"T\"\ngaps = [\"Stage `dora` did not complete.\", \"No CVE scan.\"]\n\n\
+         [[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert_eq!(
+        m.report.gaps,
+        vec![
+            "Stage `dora` did not complete.".to_string(),
+            "No CVE scan.".to_string()
+        ]
+    );
+
+    let none = parse_manifest(
+        "[report]\ntitle = \"T\"\n\n[[repositories]]\nname = \"A\"\npath = \"/x\"\n",
+        Path::new("m.toml"),
+    )
+    .expect("parses");
+    assert!(none.report.gaps.is_empty(), "absent key defaults to empty");
+}

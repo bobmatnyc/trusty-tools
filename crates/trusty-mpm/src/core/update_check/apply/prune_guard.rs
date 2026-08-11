@@ -33,13 +33,12 @@
 //! `apply_prune_skips_hand_edited_agent`,
 //! `apply_prune_spares_a_user_origin_agent`.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::ApplyError;
 use crate::core::agent_manifest::AgentManifest;
-use crate::core::skill_drift::{deployed_path, key_stem};
 use crate::core::skill_manifest::SkillManifest;
+use crate::core::skill_retire::{SkillRemoval, skill_removal_verdict};
 
 /// Whether one managed asset may be deleted, and why not when it may not.
 ///
@@ -136,6 +135,10 @@ pub(super) fn agent_verdict(manifest: &AgentManifest, target: &Path, filename: &
 /// match" but "is everything under it something trusty-mpm deployed and the user
 /// has not touched". `remove_dir_all` takes the untracked sibling with it, which
 /// is why an unclaimed file is disqualifying on its own.
+/// #5224 asks the IDENTICAL question before removing a retired skill, so the
+/// implementation moved to [`crate::core::skill_retire::skill_removal_verdict`]
+/// and this is the thin adapter onto prune's own [`Verdict`]. Two copies of a
+/// deletion gate is how the two would come to disagree about what is safe.
 /// What: `Prunable` when the directory is absent, or when every file under it is
 /// claimed by a ledger key belonging to `stem` AND still checksums to that key's
 /// entry. `Kept` when the directory holds a file no ledger key claims, when a
@@ -146,82 +149,10 @@ pub(super) fn agent_verdict(manifest: &AgentManifest, target: &Path, filename: &
 /// `apply_prune_spares_untracked_file_in_a_managed_skill`,
 /// `apply_prune_removes_deselected_skill`.
 pub(super) fn skill_verdict(manifest: &SkillManifest, target: &Path, stem: &str) -> Verdict {
-    let dir = target.join(stem);
-    if !dir.is_dir() {
-        return Verdict::Prunable;
+    match skill_removal_verdict(manifest, target, stem) {
+        SkillRemoval::Removable => Verdict::Prunable,
+        SkillRemoval::Kept(why) => Verdict::Kept(why),
     }
-
-    let claimed_keys: Vec<&String> = manifest
-        .managed
-        .keys()
-        .filter(|key| key_stem(key) == stem)
-        .collect();
-    let claimed_paths: BTreeSet<PathBuf> = claimed_keys
-        .iter()
-        .map(|key| deployed_path(target, key))
-        .collect();
-
-    let mut on_disk = Vec::new();
-    if let Err(e) = collect_files(&dir, &mut on_disk) {
-        return Verdict::Kept(format!(
-            "{} could not be walked, so it cannot be verified: {e}",
-            dir.display()
-        ));
-    }
-    // A file the ledger does not claim is the user's — and `remove_dir_all`
-    // would take it along with everything else in the directory.
-    if let Some(stray) = on_disk.iter().find(|path| !claimed_paths.contains(*path)) {
-        return Verdict::Kept(format!(
-            "it holds {}, which trusty-mpm never deployed",
-            stray.display()
-        ));
-    }
-
-    for key in claimed_keys {
-        let path = deployed_path(target, key);
-        if !path.exists() {
-            continue;
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(content) if manifest.checksum_matches(key, &content) => {}
-            Ok(_) => {
-                return Verdict::Kept(format!(
-                    "{} was edited after it was deployed",
-                    path.display()
-                ));
-            }
-            Err(e) => {
-                return Verdict::Kept(format!(
-                    "{} could not be read, so it cannot be verified: {e}",
-                    path.display()
-                ));
-            }
-        }
-    }
-    Verdict::Prunable
-}
-
-/// Collect every regular file under `dir`, recursively.
-///
-/// Why: [`skill_verdict`] must see the whole subtree `remove_dir_all` would
-/// take, not just the entry point — a reference file or a carried script is user
-/// content too.
-/// What: appends each file path to `out`. Directory entries recurse; a symlink
-/// is reported as a plain path (`DirEntry::file_type` does not follow it), which
-/// makes it unclaimed and therefore disqualifying — the conservative answer.
-/// Test: exercised through [`skill_verdict`] by
-/// `apply_prune_spares_untracked_file_in_a_managed_skill`.
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            collect_files(&path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// Copy one file under the prune backup root before it is deleted.

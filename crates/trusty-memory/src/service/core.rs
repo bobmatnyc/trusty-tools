@@ -598,10 +598,13 @@ impl MemoryService {
 
     /// Forget (delete) a drawer and emit the matching events.
     ///
-    /// Why: same dedup story as `create_drawer`.
-    /// What: parses the drawer UUID, calls `PalaceHandle::forget`, emits
-    /// `DrawerDeleted` + `StatusChanged`.
-    /// Test: indirectly via the drawer-related HTTP tests.
+    /// Why: same dedup story as `create_drawer`. #5231: `DELETE` on a drawer id
+    /// that was never stored used to answer `204 No Content`, the same as a
+    /// real delete — this now 404s, matching `delete_palace`.
+    /// What: parses the drawer UUID, calls `PalaceHandle::forget`, maps
+    /// [`ForgetOutcome::NotFound`] to `ServiceError::not_found`, and emits
+    /// `DrawerDeleted` only when a drawer was actually removed.
+    /// Test: `delete_drawer_404s_for_an_unknown_drawer_id`.
     pub async fn delete_drawer(
         &self,
         id: &str,
@@ -611,10 +614,15 @@ impl MemoryService {
         let handle = self.open_handle(id)?;
         let uuid = Uuid::parse_str(drawer_id)
             .map_err(|_| ServiceError::bad_request("drawer_id must be a UUID"))?;
-        handle
+        let outcome = handle
             .forget(uuid)
             .await
             .map_err(|e| ServiceError::internal(format!("forget: {e:#}")))?;
+        if !outcome.is_deleted() {
+            return Err(ServiceError::not_found(format!(
+                "drawer '{drawer_id}' not found in palace '{id}'"
+            )));
+        }
         let drawer_count = handle.drawers.read().len();
         self.state.emit(DaemonEvent::DrawerDeleted {
             palace_id: id.to_string(),

@@ -6,6 +6,567 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.30.0] — 2026-08-10
+
+### Breaking
+
+- `catchup::session_finder::latest_trusty_mpm_snapshot` no longer resolves across session boundaries ([#5272](https://github.com/bobmatnyc/trusty-tools/issues/5272))
+  - it now requires a session id and resolves only snapshots that `sessions-log.jsonl` attributes to it, via the new `session_log::resolve_session_snapshot`. Passing `None` returns `None` instead of the newest snapshot overall
+  - `session_log::resolve_latest_snapshot` keeps the session-blind fallback chain but is now used only by the legacy claude-mpm JSON store
+  - `catchup::pause::write_pause_snapshot` writes under `sessions/<session-id>/` and records the snapshot path relative to the store root, so one containment-checked join serves both the new and the pre-#5272 flat layout
+  - `find_paused_sessions` scans per-session directories in addition to the store root
+  - a log entry whose `snapshot` escapes the store (absolute path or `..`) is refused rather than read
+
+### Added
+
+- `credentials::scrub_secrets(text, secrets)` removes known credential values from text this process did not author — a provider's non-2xx response body, a child process's stderr — replacing each occurrence with `[REDACTED]`, longest value first so an overlapping pair cannot leave a tail behind. `credentials::resolved_secret_values()` collects the values to scrub, walking the provider registry through the usual env > `.env.local` > secure-store resolver so a newly registered provider is covered without the caller changing. Values under 8 characters, including the empty string, are skipped: an unset or placeholder credential must not blank the message it appears in. This promotes the scrub that was private to `config keys test`, which now routes through it, so redaction has one implementation. It removes only values the caller already holds — a secret this process never resolved (one a child read from its own config, one quoted inside a provider's error body) still passes through, so scrubbed text is lower-risk, not proven secret-free ([#4321](https://github.com/bobmatnyc/trusty-tools/issues/4321))
+- `panic_hook::install_panic_logger` — a process-wide panic hook that emits the
+  panic payload, source location, thread name, and a force-captured backtrace
+  as one `tracing::error!` before delegating to the previously installed hook.
+  macOS `.ips` crash reports carry mangled Rust symbols but not the panic
+  message, which left the literal cause of #4764's daemon aborts unrecoverable
+  in production (#4764)
+- Rooms are a real, persisted, enumerable entity (ADR-0027 T1/T2/T4). Two new
+  redb tables in each palace's `kg.db` — `rooms` and `room_keys` — give every
+  room a durable id, a first-seen label, and a canonical `(wing, label)` key.
+  Ids are now READ from that table rather than recomputed: legacy rooms keep
+  the exact `room_to_uuid` value already stamped on their drawers, and new
+  rooms mint a UUIDv5, which removes the structured-collision class the old
+  16-byte fold admitted for any custom room name of 9+ characters.
+  - An additive backfill runs at palace open and registers a row for every
+    room the palace's drawers already use. It is insert-only, so it is
+    idempotent and a later rename survives every reopen; it is fail-open, so a
+    registry problem degrades room listing rather than blocking the palace; and
+    it is per-palace on demand, with no sweep across the whole data root.
+    **It writes zero `DRAWERS` rows** — existing drawers are named, never
+    reclassified or moved.
+  - Labels are recovered in four steps: a rainbow table over the nine built-in
+    variants, direct inversion of the fold for short labels, a dictionary
+    match against the palace's own KG `room:` subjects, and a non-lossy
+    `unresolved-<first8>` fallback flagged `resolved: false` for a human to
+    rename.
+  - `wing_id` is reserved on every room row and defaults to a per-palace
+    `DEFAULT_WING_ID`. The Wing entity itself is not implemented (ADR-0027 T9,
+    gated on its #3064 consumer).
+- Room registry surface backing the new MCP room tools (ADR-0027 T6):
+  `create_room` (idempotent — a racing second caller reads the winner's id back
+  out of `ROOM_KEYS` rather than minting a second room), `rename_room`,
+  `list_room_summaries`, `resolve_room_selector` (a room id or a
+  case-insensitive label), and `parse_room_preserving_case`, which classifies a
+  caller-typed name through the one `RoomType::parse` while keeping the
+  capitalisation a human chose for the stored label.
+  - `rename_room` is the ONLY code in the room registry that rewrites a row.
+    It touches `ROOMS` / `ROOM_KEYS` only and provably changes zero `DRAWERS`
+    bytes; it refuses to take a name already owned by another room, because
+    merging two rooms is ADR-0027 D5 and is deliberately deferred.
+- Room-scoped recall entry points `recall_in_room` and `recall_deep_in_room`
+  (ADR-0027 T7). `retrieve_l2` has enforced a room filter since #3274 but no
+  recall entry point exposed it, so a room scope was unreachable from the
+  recall path. L0/L1 stay unfiltered — they are the palace's always-on identity
+  and essential grounding, not search results.
+- `store::room_plan::plan_rooms` — the read-only plan of what a room backfill
+  would write (ADR-0027 T10), behind the new `trusty-memory rooms backfill
+  --dry-run`. `backfill_rooms` now executes exactly this plan rather than
+  re-deriving it, so the audit an operator approves and the write that follows
+  cannot disagree. Planning opens read transactions only and is proven not to
+  change one byte of `ROOMS`, `ROOM_KEYS`, or `DRAWERS`.
+- Wings are a real, persisted, enumerable scope over rooms (ADR-0027 D2, ticket T9, closes [#4809](https://github.com/bobmatnyc/trusty-tools/issues/4809))
+  - a Wing is the "who" axis (scope/ownership); a Room stays the "what" axis (topic).
+    `engineer`/`Planning` and `pm`/`Planning` are now two distinct rooms, with no
+    `Custom("engineer-planning")` name mangling
+  - new `WINGS` / `WING_KEYS` redb tables in the palace's `kg.db`, initialised in the
+    same transaction as `DRAWERS` and `ROOMS` so the schema is never half-present
+  - every palace gets a `default` wing, seeded at open. **Wing is never required of a
+    caller**: `wing_id` defaults to the default wing on every write and read, so a
+    caller that never mentions a wing behaves exactly as it did before
+  - existing rooms land in the default wing by NAMING, never reclassification — every
+    `RoomRecord` has carried `DEFAULT_WING_ID` since T1, so the migration writes one
+    wing row and changes zero drawer rows and zero room rows (proven byte-for-byte by
+    `seeding_the_default_wing_changes_no_room_or_drawer_rows`)
+  - seeding is insert-only and probes by id, so it is idempotent and a wing renamed
+    between palace opens keeps its new name
+  - `RecallScope` (`All` / `Room` / `Wing`) plus `retrieve_l2_scoped`, `recall_scoped`,
+    and `list_drawers_in_wing` give wing-scoped recall and listing. A wing scope
+    resolves **fail-closed** — an unresolvable scope admits nothing rather than
+    everything, because a scope boundary that fails open is a leak (the #3064
+    "two agent types cannot accidentally read/write the same room" criterion)
+  - `resolve_or_create_room_in_wing` lets a write place a room in a named wing;
+    without it a non-default wing could never receive a drawer
+  - a wing rename reads the row, checks the new label is free, rewrites the row,
+    points the new key at it, and retires the old key — all in ONE redb write
+    transaction. No crash can leave the retired label resolving as a stale alias,
+    and a concurrent `wing_create` cannot claim the new label between the check
+    and the write. A rejected rename writes nothing at all
+  - `retrieve_l3` / `recall_deep` gained the same `RecallScope` generalisation as
+    L2, so `memory_recall_deep` honours a wing instead of ignoring it
+- `retrieval::shared_embedder_initialized()` reports whether the process-wide embedder cell is live, without triggering a cold init ([#4836](https://github.com/bobmatnyc/trusty-tools/issues/4836))
+  - lets a caller distinguish "the embedder is genuinely still warming" from "a startup flag was never cleared", instead of degrading on a stale signal
+- `Drawer.fact_key` and the `DRAWERS_BY_FACT_KEY` redb index — storage groundwork for ADR-0028 D5's "one slot, one live fact" model, where a Tier C fact claims a namespaced slot (`pr:4818/state`) and writing that slot retires its prior occupant. `KgStoreRedb::drawer_id_for_fact_key()` answers "who holds this slot?" with a point lookup instead of a full drawer scan; the index is maintained inside the same write transaction as the row it describes, on the single-op, batch, and import paths alike, and a delete releases the slot only when the departing drawer still owns it. Purely additive: no existing `DRAWERS` row is rewritten, rows written before the field decode with `fact_key = None` through a new `PreFactKeyDrawerRecord` fallback that preserves the `completed_at` an unlinked chain would have dropped, and nothing writes a non-`None` value until the Tier C write path lands (closes [#4884](https://github.com/bobmatnyc/trusty-tools/issues/4884))
+- ADR-0028 Tier C write path — `RememberOptions` now carries `fact_key` and `expires_at`, and `PalaceHandle::remember_with_options` is the single admission point for both. Naming a slot makes a write a Tier C ("current fact") write: writing a slot another drawer already holds atomically retires that incumbent, so `pr:4818/state` can be written fifty times and still occupy one slot. Admission fails closed per D4 — a key that breaks the `<domain>:<id>/<aspect>` grammar, or an `expires_at` that has already elapsed, is refused Tier C and the drawer is written exactly as it would have been before, never admitted-with-a-warning; a slot with no explicit expiry takes a 24-hour default, so an admitted Tier C fact always declares how it ends. The incumbent's retirement and the newcomer's arrival commit in ONE redb transaction (`KnowledgeGraph::upsert_drawers_atomic`), under the existing per-palace write mutex, so a concurrent writer on the same slot can neither leave two drawers claiming it nor retire an incumbent without a replacement landing (closes [#4886](https://github.com/bobmatnyc/trusty-tools/issues/4886))
+- `bm25_client::Bm25Client::stats` and `Bm25Stats` — a caller can now ask a BM25
+  daemon how much corpus it is serving. Without it an empty search result was
+  ambiguous between "the query matched nothing" and "nothing is indexed", so a
+  partially-backfilled palace served partial content while looking healthy.
+- `sys_metrics::process_rss_mb` — resident memory of an arbitrary pid (macOS
+  `phys_footprint`, Linux `/proc/<pid>/status` `VmRSS`). The one entry point
+  every trusty-* supervisor uses to enforce a child-memory limit, so #2846's
+  declared-but-never-compared `rss_limit_mb` cannot recur per-crate. `None`
+  means "cannot measure", never "measured zero".
+- **A relevance floor for recall results ([#5037](https://github.com/bobmatnyc/trusty-tools/issues/5037)).** `DEFAULT_RELEVANCE_FLOOR`,
+  `FloorOutcome`, and `apply_relevance_floor` in a new
+  `memory_core::retrieval::relevance` module. Every retrieval path in `layers.rs`
+  ended in `truncate(top_k)` and nothing else, so a query with no good answer
+  still returned a full `top_k` of whatever ranked highest — including L1
+  drawers scoring `importance * L1_NO_SIMILARITY_PENALTY`, at most `0.15`.
+  `apply_relevance_floor` is the one implementation of "below the floor, it is
+  not shown", and it returns the count of what it dropped so a caller can say so
+  rather than going silent. An item whose score is unknown is kept, never
+  dropped.
+
+  The default is `0.35`, picked from measured distributions against the live
+  1,332-drawer `trusty-tools` palace rather than guessed: 150 candidates from 15
+  off-topic prompts span 0.1500–0.3439 (75 of them at exactly 0.1500, the L1
+  penalty), while 57 self-retrieval correct-drawer hits span 0.4844–0.9743 and
+  1,200 candidates from real logged hook prompts span 0.4042–0.7527. `0.35` is
+  the smallest swept value at which no off-topic candidate survives.
+
+  `recall`/`recall_scoped` are deliberately unchanged: `truncate(top_k)` stays a
+  length cap, and gating inside it would change every MCP and CLI recall
+  caller's contract. Callers that must not show a weak match apply the floor to
+  what comes back.
+- `Bm25Client::missing_docs` asks the daemon which of a set of doc ids it does
+  not hold — the only call that establishes coverage. `Bm25RpcError` and
+  `is_method_not_found` let a caller tell a daemon that predates a method from
+  one that is unreachable; both fail closed but need different operator action.
+- **`same_origin_cors` and `with_guarded_middleware_same_origin_cors`** — the
+  standard daemon middleware stack with the permissive CORS policy swapped for
+  one that reflects only same-machine origins: loopback,
+  a local webview shell (`origin_is_local_webview`), or the daemon's own
+  resolved non-loopback bind ([#5052](https://github.com/bobmatnyc/trusty-tools/issues/5052)).
+  `with_guarded_middleware`'s write guard is method-gated, so it never covered
+  cross-origin READS; a daemon whose GET surface carries sensitive content opts
+  into this variant instead. trusty-agents is the first consumer; the other
+  daemons keep `with_guarded_middleware` until each is reviewed on its own.
+- `search_index::IndexOptions` and `ensure_project_indexed_with`, so a caller can register a trusty-search index with its vector lane suppressed (`skip_vector: true` — BM25 and KG only, no embeddings) ([#5060](https://github.com/bobmatnyc/trusty-tools/issues/5060))
+  - `ensure_project_indexed` is now a one-line wrapper over it; `IndexOptions::default()` reproduces the previous behaviour exactly, so no existing caller changes
+  - `POST /indexes` now always carries a `skip_vector` field; `false` is equivalent to omitting it
+- `search_index::ensure_project_indexed_reporting` returns the derived index id alongside an `IndexRegistration` saying what the daemon actually did — `Confirmed`, `NotConfirmed`, `DaemonUnreachable`, or `SkippedUnderTest`. The id-only entry points cannot distinguish a confirmed registration from a silent no-op against a down daemon, which let callers log a success they never observed. The fail-open contract is unchanged: the id is still always returned and nothing propagates (refs [#5060](https://github.com/bobmatnyc/trusty-tools/issues/5060))
+- `IndexOptions` is now `#[non_exhaustive]`. The daemon already carries a third orthogonal flag this bag does not expose (`skip_kg`), so adding a field later would otherwise break external struct-literal construction in a published crate (refs [#5060](https://github.com/bobmatnyc/trusty-tools/issues/5060))
+- `uds::rpc::send_framed_request` — the shared one-request/one-response,
+  newline-framed JSON transport over a hardened Unix socket (ADR-0034 §4,
+  #5089 step 3). Dials through `connect_hardened`, so the socket's `0700`
+  directory and `0600` mode are verified before a byte is written; caps the
+  response at `MAX_FRAME_BYTES` and bounds the whole exchange with a
+  caller-supplied timeout. Errors are a `UdsRpcError` variant per failure
+  point, and none of them may be read as an acknowledgement. The four existing
+  hand-rolled clients (`embedder_client/uds.rs`, `bm25_client.rs`, and
+  trusty-agents' `ctrl/socket.rs` and `bus`) migrate onto it in a follow-up
+- `webhook_hmac` (feature `webhook-hmac`) — the single GitHub
+  `X-Hub-Signature-256` verifier. `verify_github_signature` returns a
+  three-state `SignatureVerdict` rather than a `bool`, so "no secret is
+  configured" cannot be collapsed into "the signature is wrong" and silently
+  become permission to proceed — the shape of trusty-analyze's live fail-open
+  (ADR-0034 §3). `sign_github_body` is the matching test-harness helper.
+  trusty-analyze's and trusty-review's copies are retired in #5089 step 4
+- `webhook_relay` (feature `webhook-relay`) — the console→target relay wire
+  contract: `RELAY_METHOD`, the borrowed `RelayFrame` the sender writes, the
+  owned `RelayRequest` a receiver reads, `Provenance`, and `RelayResponse`.
+  It lives here rather than in trusty-console because step 4's receivers are
+  trusty-review and trusty-analyze, which cannot depend on the console — a
+  contract held by one half only is two copies waiting to drift.
+  `RelayResult::ack` is `#[serde(default)]` and `RelayResponse::is_ack` is the
+  only predicate a deletion path may consult, so a receiver that answers with
+  an empty result object has not acknowledged
+- `uds::supervisor::UdsServiceSupervisor`, behind the new `uds-supervisor`
+  feature: the on-demand spawn supervisor generalised out of `trusty-memory`'s
+  `Bm25Supervisor`, so `trusty-console` can start `trusty-review` /
+  `trusty-analyze` at webhook-delivery time without either being resident
+  (ADR-0034 §1, milestone `tm 1.3.5` criterion (c)). It carries the whole state
+  machine that crate had already hardened: spawn-gate serialisation against
+  double-spawn and against a fan-out that satisfies the cap per-caller,
+  adoption of a socket another process bound, an LRU cap on live children, an
+  RSS ceiling compared against a real measurement, exponential-backoff socket
+  probing, `kill_on_drop`, and SIGTERM→SIGKILL with a patience window (#5089)
+- Liveness is decided by the socket, never by `try_wait()`. `SocketVerdict` is
+  three-state and only ENOENT / ECONNREFUSED mean `NotServing`; a timeout or any
+  other errno is `Inconclusive` and leaves the child alone, so load cannot turn
+  into a respawn storm. A child evicted while still alive goes onto a `doomed`
+  queue drained under the spawn gate — SIGTERM plus socket unlink, in that order
+  — rather than being dropped onto `kill_on_drop`'s SIGKILL, because the doomed
+  child unlinks the shared socket path as the last step of its own shutdown and
+  a concurrent termination could land that unlink after the replacement bound
+  the same path (#5085, #5119, #5089)
+- `ServiceTimeouts` makes the spawn-probe budget, the child's own shutdown-flush
+  budget and the SIGTERM patience per-service values rather than constants. Its
+  constructor is a `const fn` whose assert enforces `sigterm_patience >
+  shutdown_flush`, so a service that declares its timeouts as a `const` gets the
+  same compile-time failure `bm25_supervisor.rs`'s `const _: () = assert!(…)`
+  gave — now bound to the value actually passed to the supervisor rather than to
+  a free-standing constant (#5089)
+- Socket adoption is verified, not assumed: a socket that answers but fails
+  `verify_socket_for_connect` is refused with `SupervisorError::UntrustedSocket`
+  instead of being adopted silently or falling through to a spawn that dies on
+  EADDRINUSE. This is the one path where the target's own `bind_hardened` never
+  runs, which ADR-0034 §3 makes the permission bits load-bearing for (#5099,
+  #5089)
+- Every new public enum and struct is `#[non_exhaustive]` while the crate is
+  unpublished at 0.30.0 against a released 0.28.1 (#5089)
+- `ServiceTimeouts::try_new` is the fallible sibling of the `const fn`
+  constructor, for a service deriving its timeouts from config rather than
+  declaring them as a `const`. `#[non_exhaustive]` left no other way to build
+  the value, so without it the runtime case could only panic. The type also now
+  documents the sourcing rule the assert cannot check: `shutdown_flush` must be
+  the supervised binary's own flush constant, imported, not a literal that
+  happens to match it today (#5089)
+- **New `uds` module: the `0600` socket permission ADR-0031 and ADR-0032 both
+  cite as an existing property** ([#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099)).
+  No production code in the workspace set permissions on any socket — every
+  `set_permissions` / `PermissionsExt` hit was a test fixture — so sockets were
+  created at the process umask (commonly `0755`). `uds::bind_hardened` is the
+  single entry point every bind site now routes through: it creates the
+  containing directory at `0700` via `DirBuilder::mode()` (passed to `mkdir(2)`,
+  so the directory is never observable at a wider mode) and narrows the socket
+  to `0600` before the caller's first `accept`. `uds::ensure_peer_is_self`
+  refuses any connection whose uid is not this process's own, via `SO_PEERCRED`
+  on Linux and `getpeereid` on macOS/BSD, which is what makes the permission
+  bits an enforced boundary rather than a documented intention. Gated behind a
+  new `uds` feature, implied by `bm25-client` and `embedder-client`; adds no new
+  dependency (`libc` moves from a macOS-only to a `cfg(unix)` target dependency).
+- **`uds::connect_hardened` — the dialer's half of the same contract.** Hardening
+  only the bind side left every client trusting whatever sat at the path: a
+  daemon predating the change still answers, and `Bm25Supervisor` adopts an
+  existing socket rather than spawning, so the daemon's own ownership check may
+  never run. `connect_hardened` refuses unless the containing directory is a
+  non-symlink `0700` directory owned by this uid and the socket is a non-symlink
+  socket owned by this uid at `0600`. `bm25_client` and `UdsEmbedderClient` now
+  dial through it.
+- **`uds::check_sun_path_budget`** turns the kernel's bare `invalid argument`
+  into a diagnostic naming the platform's `sun_path` capacity (104 on macOS, 108
+  on Linux), the actual byte length, and the offending path.
+- **`UdsSecurityError` is `#[non_exhaustive]`.** It gained two variants across
+  two review rounds of this PR alone and will keep growing as the checks
+  tighten. The attribute is free while this crate is unpublished at 0.30.0
+  against a published 0.28.1, and stops being free once 0.30.0 ships — after
+  which each variant would be a break. On an enum it constrains matching only
+  (external crates need a wildcard arm), not construction; every in-tree
+  consumer converts the error rather than matching it, so nothing changed.
+  Matches `DedupError` (#5112) and `IndexOptions` (#5065).
+- `tmux::scrollback_option_commands` and `tmux::managed_session_commands` now emit an `alternate-screen` entry alongside `history-limit` and `mouse`, and both take an `alternate_screen: bool` parameter ([#5151](https://github.com/bobmatnyc/trusty-tools/issues/5151)). `DEFAULT_TMUX_ALTERNATE_SCREEN` is `true` — tmux's own factory value — so nothing changes until a consumer passes `false`.
+- Two `TmuxCommand` variants for the window option scope: `SetWindowGlobalOption` (`set-option -wg`) and `ShowWindowGlobalOption` (`show-options -wg -v`). `alternate-screen` is a pane option inheriting from the window scope, not a server option like `history-limit`. Measured against tmux 3.6b, `set-option -pg alternate-screen off` and `set-option -s alternate-screen off` both exit 0, a same-flag readback reports `off`, and the pane still enters the alternate screen; only the window scope takes effect. Pairing the two variants keeps a caller's set and its verification probe on the same scope.
+- The receive half of the console→target webhook relay: `webhook_relay::Inbox` (a durable, fsync-before-return delivery store that reads the held copy back before treating a repeat as already-owned), `webhook_relay::serve` (the `webhook.deliver` listener, which acknowledges only after the inbox has taken ownership, refuses any other method by name, and distinguishes a supervisor liveness probe from a dropped delivery), and `webhook_relay::WebhookListener` (bind, serve, exit on SIGTERM, unlink before closing). Socket and inbox paths for both targets resolve from `webhook_relay::{review_socket_path, analyze_socket_path, socket_path_for, inbox_root_for}` instead of a literal in each crate, and `webhook_relay::held_count` lets `trusty-console` meter an undrained backlog without touching another service's directory. `uds::bind_singleton_hardened` takes over a socket file only on a proved `SocketVerdict::NotServing`, and that classification moved from `uds::supervisor::probe` to `uds::probe` so both callers share it (re-exported, so no existing path changes). The `webhook-relay` feature now implies `uds`.
+- `uds::send_framed_request` now reports a target that hangs up without answering as `UdsRpcError::NoResponse` whichever way the platform delivers it. Closing a Unix socket that still holds unread bytes makes Linux reset the peer where macOS sends a clean EOF, so the same refusal — `webhook_relay::serve` dropping an over-long frame after reading its first bytes — used to arrive as `NoResponse` on macOS and `Read`/`ECONNRESET` on Linux. A reset that arrives after part of a frame has landed is still `Read`, since bytes did come back. Both variants were, and remain, errors that no caller may read as an acknowledgement.
+- `webhook_relay::drain_once` reads a receiver's inbox back out and drives a `DeliveryProcessor`, removing an entry only after the pipeline accepted it. Exclusive per-entry claims use an `flock` the kernel releases on process death, so a drainer killed mid-processing leaves the delivery claimable rather than stranded.
+- A delivery is recorded in a `<inbox>/processed/` ledger before its entry is removed, and the ledger is consulted before any processor runs — so a drainer that dies between accepting a delivery and unlinking it cannot cause the work to be repeated. The `delivery_id` deduplication the relay contract requires now lives in the drain rather than in each receiver. Markers are pruned after 30 days.
+- Processing failures are counted in a durable sidecar, bounded, and quarantined under `<inbox>/quarantine/` rather than deleted; `quarantined_count` exposes that to `trusty-console`.
+- `WebhookListener::with_processor` and `run_until_signal_with_processor` run the drain at startup, on every accepted delivery, and on a 30-second backstop (#5192).
+- `workspace_layout` — the one resolver for trusty-mpm's managed workspace root and session-worktree base name, so the four crates that hardcoded `~/trusty-mpm-projects` and `.worktrees` independently now read the same configured values (#5203, #5204). A configured worktree base is rejected back to `.worktrees` if it is not a single path component or collides with a reserved name (`worktrees`, `.git`, `.claude`, `.base`), which keeps Claude Code's `.claude/worktrees/` agent store outside trusty-mpm's ownership predicate.
+- `docgen` feature (off by default, test-facing): marker-delimited generated
+  documentation regions. Renders MCP tool tables and counts from a crate's real
+  descriptor function into `<!-- BEGIN GENERATED: <id> -->` regions in markdown,
+  then asserts the checked-in copy matches — or rewrites it under
+  `UPDATE_DOCS=1`. Rows sort by tool name so no map or source ordering reaches a
+  committed file, and the `descriptor_source!` macro makes the cited symbol a
+  compile-time reference rather than a hand-typed string. Adds no dependency
+  (#5205)
+
+### Fixed
+
+- Updated doc comments and Cargo.toml that still named `open-mpm` as a
+  consumer crate to say `trusty-agents` (renamed in #831), and corrected the
+  `symgraph::SymbolRegistry` on-disk path from the stale, hardcoded
+  `.open-mpm/state/symbol-registry.json` to `.trusty-agents/state/…`,
+  matching the rest of trusty-agents's config-dir convention. The registry is
+  a regenerable content-addressed cache, so existing installs simply rebuild
+  it under the new path. Genuine back-compat (`OPEN_MPM_*` env-var fallbacks
+  and the `.open-mpm` legacy-dir migration) is unchanged. `KuzuSource`'s
+  `~/.open-mpm/memory` root is left alone too, but it is not back-compat: it
+  has zero callers, its feature is enabled by nobody, and the real migrator
+  (`trusty-memory`'s `kuzu_migrate`) takes a mandatory `--from <store.redb>`
+  instead of discovering that path.
+- `search_index`'s two mutating entry points (`ensure_project_indexed`, `index_files_best_effort`) no longer reach a live trusty-search daemon from a `cargo test` process, so a `tempfile` fixture root can no longer be registered in the operator's `indexes.toml` (closes [#4255](https://github.com/bobmatnyc/trusty-tools/issues/4255))
+  - new `test_harness::running_under_test_harness()` detects a cargo test binary at runtime, which — unlike `cfg(test)` — also covers `tests/` and `[[bin]]` targets and the cross-process case where the write lands in a different process
+  - `TRUSTY_ALLOW_PRODUCTION_STATE=1` is the explicit opt-in for a test that deliberately drives a real daemon; `TRUSTY_TEST_HARNESS=1` forces detection on for a child process a test spawns
+  - reads are unaffected — only the writes are gated
+- the memory secret detector no longer rejects ordinary Markdown-shaped prose — file:line citations, cargo feature lists, hyphenated English, decorated paths, issue/PR lists, and most bare URLs (refs [#4312](https://github.com/bobmatnyc/trusty-tools/issues/4312))
+  - root cause: the base64 branch of `looks_like_secret` fired on any token of 20 chars or more containing a `/` plus one letter, whenever a segment fell outside `is_word_segment`'s deliberately narrow charset. Every Markdown decoration — backtick, `**`, `"`, `'`, `[`, `(`, `|`, `%`, `,` — put prose on the credential path. That is the single cause the four previous per-shape exemptions ([#1667](https://github.com/bobmatnyc/trusty-tools/issues/1667), [#2800](https://github.com/bobmatnyc/trusty-tools/issues/2800), [#4216](https://github.com/bobmatnyc/trusty-tools/issues/4216), #4312) each patched one symptom of
+  - the branch is now gated on the charset a real blob is made of, plus an entropy floor: base64 encodes bytes, so an encoded run of that length carries an uppercase letter or a digit, while an all-lowercase run is English. Credential-bearing URLs (`scheme://user:pass@host`) are exempted from the floor by shape rather than entropy, so `postgres://user:password@host/database` is still caught while a bare documentation link is not
+  - `find_secret_token` additionally treats the backtick as a token delimiter, so adjacent inline-code spans joined by a bare `/` are no longer read as one token
+  - measured against `origin/main` over 18 prose shapes, 14 URL-shaped prose shapes, and 30 credential shapes: prose false positives 17 to 0 and 14 to 4. Detection is tightened in one place — a credential written flush against a backtick was previously missed
+  - known limitations, all documented and pinned by tests. A backtick inside a connection-string password splits the token and that credential is missed (machine-generated credentials cannot contain a backtick; user-chosen passwords can). Four URL-shaped prose tokens carrying a digit or capital, including a bare GitHub issue link, are still flagged — exempting bare URLs outright would lose a `…/services/<id>/<id>/<token>` webhook secret, so that shape needs its own change. And requiring `user:pass@` for the URL exemption gives up one class this branch previously caught: a userinfo-free URL whose path secret is entirely lowercase and digit-free now reads as English to the entropy floor. Real webhook tokens are near-universally mixed-case or digit-bearing and stay caught
+- Generated LaunchAgent plists now declare `ExitTimeOut`. Without the key
+  launchd applies its "system-defined" default, which measures 5 s on macOS —
+  SIGTERM, then SIGKILL 5 s later on every `launchctl bootout`, `kickstart -k`,
+  logout and reboot. That is shorter than the shutdown work several trusty-*
+  daemons do; trusty-search's index flush alone floors at 30 s per index, so it
+  was cut off mid-write every time. The rendered window comes from the new
+  `shutdown::TERMINATION_GRACE_SECS` (60 s), which `trusty-search stop` and its
+  orphan reaper now wait as well, so the window a daemon plans for and the
+  window its terminator grants cannot drift apart. **Already-installed agents
+  keep launchd's 5 s default until their plist is regenerated** (#4393)
+- memory TUI no longer hides palaces whose counts the daemon never measured — `palace_has_content()` now reads the `Option<u64>` accessors instead of the raw zeroed fields, so *unknown* counts keep a palace visible (rendered as `—`) while a measured-empty palace stays filtered out (closes [#4690](https://github.com/bobmatnyc/trusty-tools/issues/4690))
+- Secret detector no longer flags dotted or underscored filenames that carry a capital letter (closes [#4739](https://github.com/bobmatnyc/trusty-tools/issues/4739))
+  - `Agents.app.bak-20260729-000028` and shapes like it reached the mixed-case branch, which #4723's base64-branch narrowing never covered
+  - `is_structural_token`'s segmented-identifier branch now splits on `.` and `_` as well as `-`, and accepts a `Capitalized` segment alongside `lowercase` and `UPPERCASE`
+  - Measured over a 36-shape prose battery and a 30-shape credential battery: prose false positives 17 → 2, credential misses 0 → 0
+  - CamelCase segments (`TrustyMemory.app.bak-…`) are a stated known bound, not fixed: admitting them would lose delimiter-segmented mixed-case credentials
+- `sys_metrics::dir_size_bytes` can no longer abort the calling process. The
+  walk was recursive, so descending N levels held N `ReadDir` handles open at
+  once; when `std`'s `impl Drop for DirStream` hit a failing `closedir(3)` and
+  panicked, the unwind ran the enclosing handles' destructors, a second
+  `closedir` failed the same way, and a panic raised during unwinding is a
+  non-unwinding panic Rust aborts on unconditionally. The walk is now
+  iterative and holds at most one directory handle at a time — removing the
+  second destructor from the unwind path — and is additionally wrapped in
+  `catch_unwind`, which returns the partial byte total instead of propagating.
+  This took down the `trusty-search` daemon 40 times in a week, roughly every
+  7 minutes under load (#4764)
+- The size walk is now bounded: it refuses to descend past 64 levels and
+  abandons a walk that exceeds a 30 s wall-clock budget, reporting the partial
+  total in both cases. A best-effort disk figure should never become an
+  unbounded sweep of an actively-mutating tree (#4764)
+- `install_and_activate` gained a forced variant. A deploy replaces the binary
+  behind a byte-identical plist, so the unchanged-unit skip that removes the
+  reinstall outage would have let `make deploy` finish without ever activating
+  what it built — launchd kept running the old image (#4868)
+- Rollback no longer reports success it did not achieve, and no longer takes
+  down a daemon it should have left alone. Liveness is captured before the plist
+  is overwritten, because launchd keeps a job registered after its plist file is
+  deleted — so "no previous plist" never meant "nothing was running". The
+  restoring bootstrap's result is now checked, and a failed restore says the
+  service is down instead of claiming it was preserved (#4868)
+- `launchd_labels` is now the one definition of every trusty-* LaunchAgent's
+  label, and each daemon crate, the installer, and `tctl` read it instead of
+  restating their own literal. They had drifted: `trusty-search service install`
+  wrote and bootstrapped `com.trusty.trusty-search` while the unit launchd
+  actually had loaded was `com.trusty.search`, so the install evicted nothing,
+  started a second daemon contending for :7878 and the index locks (#2938), and
+  left #4393's `ExitTimeOut` in a plist launchd never reads. `trusty-console`
+  had the same divergence (`com.trusty.trusty-console` in code,
+  `com.trusty.console` loaded). The canonical form is `com.trusty.<member with
+  its `trusty-` prefix stripped>`, which every loaded unit on a real host obeys;
+  `canonical_label` is that rule as code and the registry table is checked
+  against it. Correcting one literal is what was done for #2827, and the defect
+  came back — so the second copy is gone rather than corrected (#4868)
+- `LaunchdConfig::install_and_activate` replaces the bare `install()` +
+  `bootstrap()` pair for service installs. It boots out the service's recorded
+  legacy labels and deletes their plists first, so an upgrade cannot leave the
+  old unit running beside the new one; skips the reload entirely when the
+  rendered plist matches what is installed and the label is already loaded,
+  which is where the ~1 minute of release downtime came from; verifies the label
+  actually came up rather than trusting `launchctl bootstrap`'s exit code
+  (#2498); and restores plus re-bootstraps the previous plist if activation
+  fails, so a failed install no longer leaves the service down (#4868)
+- A workspace-scanning test now fails on any `com.trusty.*` / `com.bobmatnyc.*`
+  label literal in production source that the registry does not own. Codesign
+  identifiers (`macos_signing`) are exempt — they are a different namespace and
+  renaming one invalidates a binary's designated requirement (#2558) (#4868)
+- The launchd-label drift guard no longer skips production code. Four holes, each
+  proven by planting a literal that passed: `#[cfg(not(test))]` and
+  `#[cfg(any(…, test))]` gate PRODUCTION code but were treated as test items, so
+  the scan skipped exactly what it should read (eight such sites exist);
+  `strip_comment` blanked any line starting with `*`, so a deref assignment
+  `*target = "…"` was read as a comment while the identical `let` form was not;
+  `#[cfg(test)] use std::fmt;` puts attribute and item on one line, so consuming
+  the NEXT line ate production code; and the codesign exemption was whole-line,
+  so a launchd label sharing a line with a `*_IDENTIFIER` assignment was skipped
+  along with it. Polarity is now checked rather than token presence, block-comment
+  state is tracked across lines, a self-contained attribute line consumes nothing
+  further, and only the identifier token adjacent to the marker is exempt. A
+  build file may name a legacy label on a `bootout`/`unload` line — evicting an
+  old label is the migration, not the drift (#4868)
+- Rollback no longer reports success while the service is down. `bootstrap`
+  boots out first, so on the "no previous plist but the label was loaded" path
+  the running job is already gone by the time rollback executes — deleting the
+  plist and returning "nothing was taken down" produced service down, plist
+  gone, and a message denying both. That path now keeps the plist just written
+  and bootstraps it, because the displaced job had no plist on disk and cannot be
+  reconstructed; a failed revival reports the outage instead of swallowing it.
+  The effects are injected so the outcome is asserted rather than the plan value,
+  which is why the previous tests passed while the goal was unmet (#4868)
+- `LaunchdConfig` renders a `WorkingDirectory` when one is set, so a regenerated
+  unit can preserve the installed one's (#4868)
+- `evict_legacy` is public, so `service uninstall` can remove a unit registered
+  under an old label rather than reporting "nothing to do" (#4868)
+- recall no longer serves a drawer past its `expires_at`. Expiry used to be consulted only when a palace was opened, and the daemon opens once as `OpenIntent::Writer` and holds that handle for its whole life — so a drawer that expired mid-session kept being injected until the daemon restarted. `retrieve_l0_l1`, `retrieve_l2_scoped`, and `retrieve_l3_scoped` now drop expired drawers on every read (ADR-0028 D4), which also closes a second gap: `l1_drawers` is filled from the L1 cache snapshot, which the open-time sweep never pruned, so an expired L1 drawer survived even a reopen. The read paths filter without deleting — reclamation stays with `purge_expired` and the open-time sweep, so a recall can never fail because a cleanup failed. All three sites plus the sweep now share one predicate, `Drawer::is_expired_at`, instead of hand-copying the comparison (closes [#4885](https://github.com/bobmatnyc/trusty-tools/issues/4885))
+- memory secret-scanner no longer rejects ordinary prose, branch names, or short tokens as credentials (closes [#4898](https://github.com/bobmatnyc/trusty-tools/issues/4898))
+  - a `+`-joined English phrase (`PM+instructions+subagents`) is recognised as prose instead of base64; `+` no longer disqualifies a token outright, and each segment must be character-class-uniform so encoder output like `j1u7nJd+tvZers+wdZyr` stays flagged
+  - a delimiter segment may carry one capital anywhere, not only in first position, so a branch name like `fix-3696-slice1-gapA-emit` is a human identifier again
+  - the 20-character length floor now runs before the credential-prefix test, so a 4-character token (`Asia`) can no longer match `AKIA`/`ASIA`; AWS key ids are matched by the all-uppercase shape of their first 20 bytes, which keeps `AKIAIOSFODNN7EXAMPLE-old` and a key-id/secret-key pair flagged while letting `ASIA-PACIFIC-ROLLOUT-NOTES` through
+  - added a deterministic generated-encoder corpus as a ratchet on base64 and base64url miss rates
+- memory recall ranks by relevance again: L2/L3 scored a candidate `eff_importance * similarity`, but inside one candidate pool `eff_importance` spans ~0.44 where similarity spans ~0.07, so the product ranked by importance and discarded the search. Importance now tilts the score by at most 5% (`IMPORTANCE_TILT`), which is the tiebreaker role its own docs described. Measured on a 1,272-drawer palace with a 400-drawer self-retrieval probe: recall@5 295/400 → 351/400, recall@1 102/400 → 291/400 (closes [#4904](https://github.com/bobmatnyc/trusty-tools/issues/4904))
+  - L2 and L3 now share one `rank_score` instead of repeating the expression, so deep recall cannot be left on an older formula
+  - every L2 candidate is traced with its score components before the `top_k` truncation, on the `memory_recall_rank` target — the pre-truncation view that tells "never a candidate" apart from "ranked below the cutoff"
+- deferred embedding no longer drops failures silently — a drawer can no longer be stored, durable, and permanently unfindable (closes [#4906](https://github.com/bobmatnyc/trusty-tools/issues/4906))
+  - the background embed lane retries transient failures with bounded exponential backoff instead of giving up on the first error
+  - a final failure writes a durable row to the palace's `embed_failures.json` ledger, so the loss outlives the `warn!` that used to be its only trace — serialised through `json_rmw`, so a burst of concurrent failures keeps every row instead of only the last writer's
+  - "no embedder on this host" is separated from "the embedder is here and this drawer failed"; only the second marks a drawer, so a machine with no model downloaded is not reported as having thousands of broken drawers
+  - new `PalaceHandle::embed_health()` answers "which drawers have no vector" by set-differencing the drawer table against the vector index, replacing a self-retrieval guess
+  - new `PalaceHandle::backfill_missing_vectors()` re-embeds drawers that already lack a vector — idempotent, safe to re-run, and a no-op on a healthy palace (it does not even resolve an embedder when there is nothing to repair)
+- one failing embedder test no longer cascades into seven. `ENV_LOCK.lock().unwrap()` poisoned the shared `Mutex<()>` when the ONNX accuracy gate panicked, so the six `resolve_*` tests — pure model/provider/cache-dir resolution that never touches fastembed — failed with `PoisonError` and buried the real cause. Call sites now go through `test_env::env_lock()`, which recovers via `PoisonError::into_inner`; the lock guards no data, and `EnvVarGuard::drop` restores the environment during the panicking test's unwind (closes [#4940](https://github.com/bobmatnyc/trusty-tools/issues/4940))
+- `HnswStore` no longer aliases vector ids across two live stores over one palace file, which silently overwrote one drawer's embedding with another's (closes [#5005](https://github.com/bobmatnyc/trusty-tools/issues/5005))
+  - the vector-id counter now lives in redb (`vector_id_seq`) and is reserved inside the same write transaction as the insert, so every writer on the file serialises against it; an existing palace has its counter seeded to the file's high-water mark on open, and re-raised on every subsequent open so a rolling upgrade cannot leave it behind
+  - `upsert` refuses an id that already has a `VECTORS` row: it allocates past it, or fails with `IdAllocationFailed` — it never overwrites
+  - `PalaceHandle::embed_health` and `palace_reembed` now carry an `AliasAudit`: key presence alone reported a false all-clear for this class, and `is_healthy()` is now false when any drawer is aliased
+  - an alias audit that could not run is `AliasAudit::Unavailable`, not zeros; `is_healthy()` is false for it, so a failed scan can never be read as a clean palace
+  - new `PalaceHandle::repair_aliases`: the operator surface for the repair, which had no caller at all. Dry-run by default; a real run frees the whole collision group and then re-audits, and reports `Repaired` only when that verification ran and came back clean. `Partial` and `Unavailable` are distinct outcomes and neither is a success
+  - `UsearchStore::unalias` now returns `UnaliasOutcome`, carrying the keys it freed but could not parse back into a drawer id instead of dropping them — those drawers would otherwise be missing from the operator's re-embed worklist inside a reported success
+  - `alias_audit` no longer drops collision-group keys that are not uuids, and `AliasAudit::is_clean` now consults `key_rows` vs `distinct_vector_ids` rather than the id list alone. Two `VECTOR_KEYS` rows on one `vector_id` with non-uuid keys previously reported `is_clean() == true`, `is_healthy() == true`, and a `clean` repair while leaving the collision in place — the counts come straight off the table and no parse can shrink them, so they are the signal that cannot be fooled
+- Secret detector no longer flags `::`-joined Rust symbol paths (closes [#5043](https://github.com/bobmatnyc/trusty-tools/issues/5043))
+  - `Bm25Index::queryTopK`, `Sha256Hasher::finalizeInto`, `OAuth2Client::refreshToken` and `Utf8Error::validUpTo` all reached the mixed-case branch and blocked memory writes; `check_secret` runs even under `force`, so only `allow_secret_like` got past it
+  - Root cause is the CamelCase rule, not the delimiter set: a segment with two capitals fails `is_human_word_segment` however the token is split, so adding `:` to `IDENTIFIER_DELIMITERS` — the fix the issue proposed — changes nothing
+  - `is_symbol_path` decomposes on `::` and decides each segment on its CamelCase word structure: at most one digit run and one stray single letter per word, and a longest word of five letters — three when the segment is 8 bytes or shorter, a graduated floor rather than an exemption
+  - The relaxation is keyed on `::` because it appears in no encoder alphabet; `-` and `_` are base64url's own symbols and `.` is the JWT separator, so relaxing the case rule for those measurably widens base64url misses on tokens with no colon at all, and still does not fix this issue
+  - A segment too short to hold a three-letter word (`io`, `rc`, `rt`, `os`) is decided on case uniformity instead, so ordinary two-letter module names do not flag the path they sit in
+  - Generated-encoder ceilings are unmoved; the measured price is credentials a human writes in path syntax (`secretKey::<blob>`, 1017 → 2022 misses per 30k) plus 37 per 20k at one chunk width, pinned as ratchets alongside a second ratchet for `::`-chunked blobs
+- Added a consolidated recurrence corpus covering all seven cycles (#1667, #1676, #2800/#4216, #4312, #4739, #4898, #5043) — 26 false positives and 22 credential shapes in two tables, walked by two tests, so the next change sees the whole accumulated obligation instead of six scattered batteries
+- `Bm25Stats` no longer carries `#[serde(default)]` on its fields. A daemon-side
+  field rename decoded as `doc_count: 0`, which reads exactly like an empty
+  palace; it now fails the decode.
+- Catch-up no longer returns only the one paused session it cannot date ([#5072](https://github.com/bobmatnyc/trusty-tools/issues/5072))
+  - `session_finder::parse_trusty_mpm_session` derived `paused_at` from the `session-YYYYMMDD-HHMMSS.md` filename alone, so a hand-written snapshot such as `session-20260730-bounce.md` had no timestamp. The watermark filter — `s.sort_key().is_none_or(|ts| ts > wm)`, duplicated verbatim in `catchup/mod.rs` and `catchup/json.rs` — reads an unknown key as "newer than the watermark", so that one undatable record was admitted by every watermark while all 99 well-formed snapshots in the same directory were correctly dropped
+  - both `PausedSession` arms now fall back to the file's mtime when the recorded timestamp is missing or unparseable: an undated `.md` filename, and a claude-mpm JSON carrying only `session_id` (whose `paused_at` defaults to `None`). Symmetry matters because the filter is now fail-closed — rescuing one arm alone would have retired the other
+  - the duplicated predicate is one `session_finder::filter_sessions_since` returning a `FilteredSessions` receipt. A session with no derivable pause instant is withheld rather than admitted unconditionally, and the count comes back in the return value: the watermark advances past a withheld session and never returns for it, so "nothing paused since last catch-up" and "N sessions existed but could not be dated" must not read alike. `full` still returns everything
+- **`prepare_socket_dir` followed symlinks, which defeated the whole scheme**
+  ([#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099) review finding
+  1). `std::fs::metadata` and `set_permissions` both resolve links, so when the
+  socket directory already existed as a symlink the owner and mode checks read
+  the *target's* inode and the chmod retargeted it. An attacker who pre-created
+  `trusty-<uid>` as a link to any directory the running user owns passed the
+  ownership check outright — verified on macOS: `mkdir` returned `EEXIST`,
+  `metadata()` reported uid 502 / mode 0777 from the target, and
+  `set_permissions` chmod'd the target to 0700. Directory verification now uses
+  `symlink_metadata` and refuses a symlink before considering owner or mode. The
+  residual post-check swap race is not closed — it needs `openat`/`fchmod` on a
+  directory fd, and `/tmp`'s sticky bit makes it impractical — and the module
+  documentation now states that boundary instead of claiming more than it holds.
+- **A non-directory at the socket-directory path got chmod'd to `0700`.**
+  `classify_existing_dir` asserted symlink and ownership but never the file
+  type, so a regular file owned by this uid was classified `Narrow`, had its
+  mode rewritten, and only then failed `ENOTDIR` at `bind` — mangling a file
+  this process did not create and naming neither the cause nor what was
+  actually there. It now refuses with `NotADirectory`, which reports the type
+  `lstat` found, before anything can chmod it. Both `prepare_socket_dir` and
+  `connect_hardened` apply the check.
+- **A dialer reported "create socket directory …" while creating nothing.** A
+  failed `symlink_metadata` on the connect path mapped to `CreateDir`; it now
+  uses a dedicated `StatForConnect` variant.
+- `HnswStore::search` now ranks by scanning every point when the index holds
+  256 or fewer, instead of traversing the HNSW graph. The traversal returned
+  only what was reachable from its descent pivot along pruned layer-0 neighbour
+  lists, so a genuinely relevant drawer could be absent from the candidate
+  pool — and because `hnsw_rs` seeds its level RNG from OS entropy, *which*
+  drawer went missing changed on every palace open. Measured against
+  brute-force truth on real 384-dim palace embeddings, 2–4% of queries lost a
+  true top-5 neighbour at 6–16 points; recall is now exact below the threshold.
+  The scan is also faster than the traversal it replaces at these sizes
+  (27µs vs 34µs at 64 points, 45µs vs 56µs at 128); at 256 it costs 5% more.
+  Palaces above 256 drawers keep the graph path and its recall loss, which is
+  larger there, not smaller — 8.4% of queries lost a true top-5 neighbour at
+  1024 points, and 1.8% lost the nearest one. That residual is unchanged by
+  this fix (#5171)
+- `HnswStore::search` now scores a re-embedded drawer against the vector
+  `VECTORS` currently holds for it. Because `hnsw_rs` cannot remove a point, a
+  re-upsert leaves the old embedding in the graph until the next palace open,
+  and the drawer was ranked by whichever copy was closer — so a query matching
+  text the drawer no longer holds came back at distance 0.0, which
+  `VectorStore::search` reports as similarity 1.0. `palace_reembed` creates
+  that state in bulk. The drawer also no longer occupies two result slots
+  (#5171)
+- `HnswStore::search` selects the exact path on the live drawer count rather
+  than the graph's point count, so deletes and re-embeds accumulating within a
+  session can no longer push a small palace back onto the approximate path
+  (#5171)
+- Below the threshold, `HnswStore::search` no longer trims its candidate list
+  before re-scoring re-embedded drawers. A drawer that has been re-embedded is
+  ranked provisionally by whichever of its two embeddings is nearer, and
+  trimming on that optimistic score let a drawer whose SUPERSEDED vector sat
+  near the query push a genuinely nearer drawer out of the results entirely —
+  the same lost-neighbour symptom this fix exists to remove, reached through
+  re-embedding rather than through the graph. `palace_reembed` puts every
+  drawer in that state (#5171)
+- the dream cycle no longer panics when it caps drawer text that contains multi-byte UTF-8 — CJK, Cyrillic, emoji, or accented Latin (refs [#5187](https://github.com/bobmatnyc/trusty-tools/issues/5187))
+  - root cause: `merge_into` capped merged drawer content with `String::truncate(500)`. `truncate` asserts its argument is a char boundary, so whenever byte 500 of the merged string landed inside a multi-byte char it panicked with `assertion failed: self.is_char_boundary(new_len)`, killing a `tokio-rt-worker` inside the shipped `com.trusty.memory` daemon mid-consolidation
+  - the same defect was present a second time in the semantic pass: the failure log for a canonical drawer sliced `&content[..content.len().min(80)]`, so an error-path log statement could itself panic the pass
+  - both sites now route through one `char_safe_prefix` helper that rounds the cap DOWN to the nearest char boundary via `str::floor_char_boundary`. The cut is char-aligned, never grapheme-aligned — a combining mark can be separated from its base letter, which stays valid UTF-8 and cannot panic
+- `PalaceHandle::forget` now returns `ForgetOutcome` (`Deleted` / `NotFound`) instead of `Result<()>`, so a caller can tell a real delete from a no-op. `drawers.retain` never reports whether it matched, so forgetting a drawer id that was never stored was indistinguishable from deleting one (closes [#5231](https://github.com/bobmatnyc/trusty-tools/issues/5231))
+  - a failed drawer-metadata delete is now an error rather than a `warn!` when the drawer existed: redb is what `PalaceHandle::open` reloads the drawer table from, so a surviving row resurrects the drawer on the next open. The metadata delete also runs first, so that failure leaves the drawer wholly intact instead of half-deleted. Vector and KG-triple removal stay best-effort — survivors are orphans reclaimed by `palace_compact`, not undead drawers
+  - `purge_expired` and the dream `prune_pass` / `content_prune_pass` / `dream_consolidate_room` counters now report drawers actually removed rather than candidates attempted; the content-prune count could also exceed reality by exiting early on its wall-clock budget
+
+### Changed
+
+- AtlasCloud's seeded `default_model` is now `deepseek-ai/deepseek-v4-flash`,
+  replacing `openai/gpt-5.6-sol`
+  ([#3765](https://github.com/bobmatnyc/trusty-tools/issues/3765)).
+  A live probe found AtlasCloud gates its catalog by account PLAN, not only by
+  key validity: a Coding-Plan key answers `403 invalid token for coding plan`
+  for `openai/gpt-5.6-sol` and most of the catalog even though `GET /v1/models`
+  lists them, so "just pick AtlasCloud" failed on a valid key. The replacement
+  was verified live on such a key — a real completion and a real OpenAI-style
+  `tool_calls` response — and has a 1,048,576-token context with the cheapest
+  rates of the callable set. It is Coding-Plan-informed, which the seed comment
+  records; `max_context_window` is unchanged at 1,050,000 because it is the
+  provider-level fallback, not this model's own window.
+- `bin_resolve::resolve_binary` now delegates to an internal
+  `resolve_binary_in`, which takes the well-known-directory fallback list as a
+  parameter. Behaviour is identical; the seam exists so the fallback branch —
+  "find a binary the process `PATH` does not list", the branch a launchd-spawned
+  daemon depends on — can be tested without mutating the process-global `PATH`
+  (#4125)
+- The memory write path resolves a drawer's `room_id` through the new room
+  registry instead of hashing a `RoomType`'s `Debug` string, and the room
+  filters on `list_drawers` / `retrieve_l2` resolve the same way. Both fall
+  back to the legacy fold when a palace has no registry row, so filtering on an
+  un-backfilled palace is byte-identical to before. Room selection remains
+  caller-supplied-or-`General`: content and tag inference are deliberately not
+  implemented, because a mis-inferred room fails invisibly (ADR-0027 D4.4).
+- The documented palace model is `Palace -> Wing -> Room -> Drawer`. A *closet*
+  is not a hierarchy level — it is the many-to-many keyword -> drawer-ids
+  inverted index on `PalaceHandle`, and the field keeps its name (ADR-0027 D3).
+- Room-filter resolution is performed before the drawer (and closet) read guards
+  are acquired on the `list_drawers` and `retrieve_l2` paths, so the redb read
+  transaction no longer runs while a palace lock is held.
+- `retrieve_l3` takes an optional `room_filter`, matching `retrieve_l2`
+  (ADR-0027 T7). Deep recall was the one retrieval path a room scope could not
+  reach, so a caller narrowing to one room silently got every room back. Callers
+  pass `None` for the previous behaviour, which is byte-identical; when a filter
+  is set the search over-fetches so filtered-out neighbours do not eat the
+  `top_k` budget.
+- `RememberOptions` gains a `wing_id: Option<Uuid>` field (ADR-0027 T9, [#4809](https://github.com/bobmatnyc/trusty-tools/issues/4809))
+  - `None` (the default) resolves the room in the palace's default wing, which is
+    byte-identical to the previous behaviour — every in-tree call site constructs
+    `RememberOptions` with `..Default::default()` and is unaffected
+  - external callers that build the struct with an exhaustive literal will need to add
+    the field; note this when cutting the next release of this crate
+- A displaced Tier C drawer now has its own `fact_key` cleared, not just its index entry moved. #4884's storage layer deliberately left the field reading the old slot name, which was correct while nothing read it as a liveness signal; with a write path it would let `load_drawers()` show two drawers claiming one slot. `expires_at` is cleared with it — on a Tier C drawer that field IS the retirement condition D4 demanded, and supersession has discharged it, so the demoted record becomes an ordinary permanent Tier E drawer rather than self-destructing at the next sweep
+- The expiry sweeps (`PalaceHandle::open_with_intent`, `purge_expired`) skip drawers holding a Tier C slot. Read-time expiry (#4885) already stops an expired current fact being served, which is the demotion D6 asks for; hard-deleting the row on top of that would destroy the corrected record D6 preserves and orphan the supersession pointer #4887 will hang off it
+- **MSRV raised to Rust 1.94** (was 1.91). `aws-config` >= 1.9.0 and
+  `aws-sdk-bedrockruntime` >= 1.136.0, published 2026-07-08, declare
+  `rust-version = "1.94.1"`; because those are unpinned caret ranges in the
+  workspace manifest, `cargo install` **without `--locked`** re-resolves into
+  them and then refuses to build on rustc below 1.94.1 — the reported
+  `cargo install trusty-code` failure on rustc 1.91.1. Users on rustc
+  1.91-1.93 must `rustup update` before installing any `trusty-*` crate. See
+  [ADR-0029](../../docs/adr/0029-msrv-1-94-and-edition-policy.md)
+  ([#4928](https://github.com/bobmatnyc/trusty-tools/pull/4928))
+- `PalaceHandle::embed_health` states its liveness filter as
+  `!expired || tier_c` instead of `!(expired && !tier_c)`. Same drawers, same
+  order — De Morgan on the guard clippy flagged as `nonminimal_bool`, which
+  broke `cargo clippy -p trusty-common --features memory-core --all-targets
+  -- -D warnings` on `main`. The new form also reads as the doc comment already
+  described it: keep a drawer unless it is expired and not Tier C
+- **BM25 and embedder sockets move into a per-uid directory**
+  ([#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099)).
+  `bm25_client::socket_path_for_palace` and `UdsEmbedderClient::default_path`
+  resolved to `$TMPDIR`, falling back to `/tmp` when `TMPDIR` was unset — mode
+  `1777` and owned by root on a Linux host, so the socket was reachable by every
+  local user and the directory could be neither narrowed nor trusted. Both now
+  resolve under `uds::scratch_socket_dir()` — `<$TMPDIR or /tmp>/trusty-<uid>` —
+  which the daemon holds at `0700`. **A running daemon must be restarted to be
+  found at the new path**; the client and daemon resolvers changed together.
+  The extra path segment costs 11 bytes of the kernel's `sun_path` budget (104
+  on macOS, where `$TMPDIR` alone is ~50), narrowing the usable palace-name
+  length from roughly 37 characters to roughly 26.
+
 ## [0.28.0] — 2026-08-03
 
 ### Added

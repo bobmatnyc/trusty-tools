@@ -116,18 +116,20 @@ fn run_macos(target: &str, dir: Option<PathBuf>, json: bool, verbose: bool) -> i
 /// Why: `cargo install` writes here; `tctl sign` (run standalone, without a
 /// preceding `tctl install`) needs the same default so it finds the binaries.
 ///
-/// What: Reads `CARGO_HOME`; joins `bin`, or falls back to the home directory.
+/// What: #4964 — delegates to the shared
+/// [`trusty_common::bin_resolve::canonical_bin_dir`] rather than restating the
+/// `CARGO_HOME` read, so `tctl sign`'s default and every other cargo-bin-dir
+/// resolution in the workspace cannot drift apart.
 ///
-/// Test: Not unit-tested directly (thin env/home-dir read); the equivalent
-/// logic in `commands::install::cargo_bin_dir_from_env` is tested there.
+/// Test: no test in this crate — a two-line delegation that only supplies the
+/// last-resort `/usr/local/bin`. The rule it delegates to is covered in
+/// trusty-common by the `canonical_bin_dir_from_*` tests, which the pointer
+/// lint cannot verify from here because it scopes citations to the citing
+/// file's own crate.
 #[cfg(target_os = "macos")]
 fn default_bin_dir() -> PathBuf {
-    match std::env::var("CARGO_HOME") {
-        Ok(home) if !home.is_empty() => PathBuf::from(home).join("bin"),
-        _ => dirs::home_dir()
-            .map(|h| h.join(".cargo").join("bin"))
-            .unwrap_or_else(|| PathBuf::from("/usr/local/bin")),
-    }
+    trusty_common::bin_resolve::canonical_bin_dir()
+        .unwrap_or_else(|| PathBuf::from("/usr/local/bin"))
 }
 
 #[cfg(test)]

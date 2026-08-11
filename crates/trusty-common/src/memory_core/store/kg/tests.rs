@@ -73,13 +73,17 @@ async fn retract_closes_active_interval() {
     assert_eq!(again, 0);
 }
 
+/// #4810: superseding is now a property of the predicate. `is_alias_for` is
+/// functional, so the second object closes the first; a multi-valued
+/// predicate would keep both (covered by
+/// `assert_multiple_objects_for_multivalued_predicate_all_survive`).
 #[tokio::test]
 async fn second_assert_closes_prior_interval() {
     let dir = tempdir().unwrap();
     let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).unwrap();
     let t1 = Triple {
         subject: "alice".to_string(),
-        predicate: "works_at".to_string(),
+        predicate: "is_alias_for".to_string(),
         object: "Acme Corp".to_string(),
         valid_from: Utc::now(),
         valid_to: None,
@@ -90,7 +94,7 @@ async fn second_assert_closes_prior_interval() {
 
     let t2 = Triple {
         subject: "alice".to_string(),
-        predicate: "works_at".to_string(),
+        predicate: "is_alias_for".to_string(),
         object: "Beta Inc".to_string(),
         valid_from: Utc::now(),
         valid_to: None,
@@ -102,6 +106,47 @@ async fn second_assert_closes_prior_interval() {
     let active = kg.query_active("alice").await.unwrap();
     assert_eq!(active.len(), 1, "should have exactly 1 active triple");
     assert_eq!(active[0].object, "Beta Inc");
+}
+
+/// #4810: the counterpart to `second_assert_closes_prior_interval` — an
+/// unlisted predicate is multi-valued, so both objects stay live and the
+/// in-memory adjacency keeps both edges after a re-open.
+#[tokio::test]
+async fn parallel_edges_survive_hydration() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("kg.db");
+    {
+        let kg = KnowledgeGraph::open(&path).unwrap();
+        for object in ["drawer:a", "drawer:b", "drawer:c"] {
+            kg.assert(Triple {
+                subject: "room:General".into(),
+                predicate: "contains".into(),
+                object: object.into(),
+                valid_from: Utc::now(),
+                valid_to: None,
+                confidence: 1.0,
+                provenance: None,
+            })
+            .await
+            .unwrap();
+        }
+        let neighbors = kg.neighbors("room:General").unwrap();
+        assert_eq!(neighbors.len(), 3, "all three edges live before reopen");
+        assert_eq!(kg.edge_count(), 3);
+    }
+
+    // Reopen: `hydrate_adjacency` replays every active triple through
+    // `upsert_edge`, which used to drop the sibling edges on each replay.
+    let kg = KnowledgeGraph::open(&path).unwrap();
+    assert_eq!(kg.edge_count(), 3, "parallel edges survive hydration");
+    let mut neighbors: Vec<String> = kg
+        .neighbors("room:General")
+        .unwrap()
+        .into_iter()
+        .map(|(other, _)| other)
+        .collect();
+    neighbors.sort();
+    assert_eq!(neighbors, vec!["drawer:a", "drawer:b", "drawer:c"]);
 }
 
 #[tokio::test]
@@ -181,7 +226,7 @@ async fn count_active_triples_returns_live_only() {
 
     kg.assert(Triple {
         subject: "alice".into(),
-        predicate: "works_at".into(),
+        predicate: "is_alias_for".into(),
         object: "Acme".into(),
         valid_from: Utc::now(),
         valid_to: None,
@@ -193,9 +238,10 @@ async fn count_active_triples_returns_live_only() {
     assert_eq!(kg.count_active_triples(), 1);
 
     // Superseding triple closes the prior interval — count stays at 1.
+    // #4810: only because `is_alias_for` is a functional predicate.
     kg.assert(Triple {
         subject: "alice".into(),
-        predicate: "works_at".into(),
+        predicate: "is_alias_for".into(),
         object: "Beta".into(),
         valid_from: Utc::now(),
         valid_to: None,

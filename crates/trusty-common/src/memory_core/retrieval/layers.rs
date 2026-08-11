@@ -233,6 +233,9 @@ pub fn rescore_l1_by_similarity(
                 Some(&sim) => sim,
                 // Drawer was not in the HNSW results — likely off-topic.
                 // Apply penalty so importance alone can't dominate ranking.
+                // #5037: demoted is not excluded — this branch still yields a
+                // score that competes for a `top_k` slot. See
+                // `super::relevance::DEFAULT_RELEVANCE_FLOOR`.
                 None => r.drawer.importance * L1_NO_SIMILARITY_PENALTY,
             };
         }
@@ -664,6 +667,10 @@ pub async fn recall_scoped(
     // L1_CAP+1 entries before any L2 hits are merged; without this truncation
     // the caller receives more than top_k results whenever the palace has a
     // non-empty identity string plus several high-importance drawers.
+    // #5037: this stays a length cap, not a quality gate — callers that must
+    // not show a weak match apply `super::relevance::apply_relevance_floor` to
+    // what comes back. Gating here would silently change every MCP and CLI
+    // recall caller's contract, which #5037's ruling does not ask for.
     combined.truncate(top_k);
 
     handle.log_recall(query, &combined);

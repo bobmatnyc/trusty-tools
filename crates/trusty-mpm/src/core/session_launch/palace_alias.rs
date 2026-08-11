@@ -42,7 +42,7 @@ use super::settings::git_remote_origin;
 /// Never returns a value or errors; failures are logged and ignored.
 /// Test: `creates_alias_for_split_brain`, `noop_when_owner_repo_exists`,
 /// `noop_when_no_bare_palace`, `noop_when_override_set`.
-pub(super) fn maybe_register_palace_alias(project_path: &Path, git_remote: Option<&str>) {
+pub(crate) fn maybe_register_palace_alias(project_path: &Path, git_remote: Option<&str>) {
     // An explicit operator override means the palace name was chosen
     // deliberately — do not second-guess it with an alias.
     if trusty_common::palace_override_from_env().is_some() {

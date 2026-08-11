@@ -592,7 +592,7 @@ impl PalaceRegistry {
     /// Open a registry rooted at `data_root` and pre-hydrate every persisted
     /// palace into the in-memory LRU cache.
     ///
-    /// Why: Issue #52 — production hosts (open-mpm) want a single call that
+    /// Why: Issue #52 — production hosts (trusty-agents) want a single call that
     /// brings up the full registry on daemon startup so that recall paths
     /// don't pay a lazy-open latency on the first request after a restart.
     /// Existing call sites continue to use `new()` + `open_palace()`; this is

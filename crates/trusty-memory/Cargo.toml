@@ -14,7 +14,7 @@ exclude = [".fastembed_cache/", "ui/node_modules/**"]
 
 [lib]
 # Why: Explicit `rlib` keeps the crate linkable as a Rust library from
-#      host processes (open-mpm) that want to register `MemoryMcpService`
+#      host processes (trusty-agents) that want to register `MemoryMcpService`
 #      directly via the shared `ServiceDescriptor` trait, rather than
 #      spawning a separate MCP stdio child. Matches the rest of the
 #      trusty-* ecosystem (see trusty-mcp-core) for consistency.
@@ -32,7 +32,7 @@ name = "trusty-memory"
 path = "src/main.rs"
 # Why: `serve` / `start` boot the axum HTTP/SSE daemon, so the binary needs
 #      the `axum-server` feature compiled in. Listing it here keeps
-#      `--no-default-features` library builds (e.g. open-mpm in-process linker
+#      `--no-default-features` library builds (e.g. trusty-agents in-process linker
 #      that only wants `MemoryMcpService`) from accidentally trying to build
 #      this binary without axum and failing to link `run_http_*`.
 required-features = ["axum-server"]
@@ -77,13 +77,13 @@ path = "src/bin/mcp_bridge.rs"
 
 [dependencies]
 # Why: `axum-server` is gated on this crate's own `axum-server` feature so
-#      downstream library consumers (e.g. `open-mpm` linking
+#      downstream library consumers (e.g. `trusty-agents` linking
 #      `trusty_memory::MemoryMcpService`) can drop the axum/tower-http
 #      surface entirely by setting `default-features = false`. The default
 #      build for the binary path keeps `axum-server` on (see [features]
 #      below), so existing `cargo install` / `cargo build` flows are
 #      unaffected.
-trusty-common = { path = "../trusty-common", version = "0.29", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25-client", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli"] }
+trusty-common = { path = "../trusty-common", version = "0.31", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25-client", "uds-supervisor", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli", "crate-config"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why: declaring trusty-bm25-daemon as a Cargo dependency causes `cargo install
 #      trusty-memory` to also build and install the daemon binary alongside
@@ -105,7 +105,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 # Why (issue #226): axum + tower-http are HTTP-server only. Gating them behind
 #      the `axum-server` feature mirrors the rule already enforced in
-#      `trusty-common` and lets `open-mpm` (which only links
+#      `trusty-common` and lets `trusty-agents` (which only links
 #      `MemoryMcpService` for in-process `rpc.discover` merging) build a
 #      slimmer dependency tree by setting `default-features = false`.
 axum = { workspace = true, optional = true }
@@ -169,18 +169,23 @@ open = "5"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# #5005: encode a real 384-dim vector when seeding a synthetic id collision
+# into a palace's index redb, so HnswStore's dimension check accepts the file.
+postcard = { workspace = true }
 tower = { workspace = true }
 serial_test = { workspace = true }
 # Issue #1722: `task_mcp` integration tests drive `seed_shared_embedder_with_mock`
 # which is gated behind `embedder-test-support`. Re-declaring trusty-common here
 # with the feature activates it for all integration tests without enabling it in
 # the production library (mirrors the trusty-mpm and trusty-search pattern).
-trusty-common = { path = "../trusty-common", version = "0.29", default-features = false, features = ["memory-core", "embedder-test-support"] }
+# `docgen` (#5205 follow-up): `tests/generated_docs.rs` renders the MCP tool
+# section of README.md from `tool_definitions()`.
+trusty-common = { path = "../trusty-common", version = "0.31", default-features = false, features = ["memory-core", "embedder-test-support", "docgen"] }
 chrono = { workspace = true }
 
 [features]
 # Why (issue #226): library consumers that only need `MemoryMcpService` for
-#      in-process MCP discovery (e.g. `open-mpm`) should not be forced to
+#      in-process MCP discovery (e.g. `trusty-agents`) should not be forced to
 #      compile the axum + tower-http HTTP/SSE surface. Mirrors the
 #      `trusty-common` pattern where `axum-server` gates the same crates.
 # Defaults to `axum-server` so the `trusty-memory` / `trusty-bm25-daemon`

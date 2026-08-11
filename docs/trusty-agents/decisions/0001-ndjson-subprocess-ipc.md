@@ -1,9 +1,10 @@
 # 0001. NDJSON-over-stdin/stdout subprocess IPC for sub-agents
 
-- **Status:** Accepted
+- **Status:** Superseded by [workspace ADR-0024](../../adr/0024-subagents-in-process-only-assistants-communicate-not-delegate.md)
 - **Date:** 2026-05-29
 - **Scope:** Crate `open-mpm`
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** Workspace ADR-0024 replaces subprocess
+  sub-agents with in-process, single-edge leaves.
 
 ## Context
 

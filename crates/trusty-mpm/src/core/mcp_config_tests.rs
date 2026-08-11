@@ -4,9 +4,7 @@
 //! What: CRUD round-trips for the user-scope `mcpServers` map, the
 //! `BUILTIN_MANAGED_MCP_SERVERS`/`UNCONDITIONAL_BUILTIN_MCP_SERVERS`/
 //! `CONDITIONAL_BUILTIN_MCP_SERVERS` drift guard, and the trust-derivation
-//! coverage for [`super::managed_mcp_server_names`],
-//! [`super::launch_trusted_mcp_names_from`], and
-//! [`super::resolve_conditional_mcp_toggles`] — including the issue #3934
+//! coverage for [`super::managed_mcp_server_names`] — including the issue #3934
 //! regression (a conditional builtin must drop out of the trust list when its
 //! injector toggle is off) and the issue #3950 regression (either builtin —
 //! conditional OR unconditional — must drop out when its pin write fails,
@@ -238,7 +236,7 @@ fn builtin_mcp_server_split_unions_to_full_set() {
 
 #[test]
 fn managed_mcp_server_names_defaults_to_builtin() {
-    let names = managed_mcp_server_names(&serde_json::json!({}), true, true, true, true);
+    let names = managed_mcp_server_names(&serde_json::json!({}));
     assert_eq!(
         names,
         vec![
@@ -258,7 +256,7 @@ fn managed_mcp_server_names_unions_builtin_with_configured() {
             "trusty-memory": { "type": "stdio", "command": "trusty-memory", "args": [] }
         }
     });
-    let names = managed_mcp_server_names(&config, true, true, true, true);
+    let names = managed_mcp_server_names(&config);
     // Built-in four + the custom server, sorted + deduped (trusty-memory
     // appears once despite being in both the builtin list and the config).
     assert_eq!(
@@ -271,89 +269,6 @@ fn managed_mcp_server_names_unions_builtin_with_configured() {
             "trusty-search"
         ]
     );
-}
-
-#[test]
-fn managed_mcp_server_names_excludes_disabled_conditional_builtins() {
-    // Issue #3934: when a manifest disables the trusty-memory/trusty-search
-    // injector for this run, the derived trust list must NOT include the
-    // name (unrelated to the config's own `tm mcp add` registry, which is
-    // a SEPARATE, always-trusted union source — see the next test for
-    // that source's own, unrelated collision behaviour).
-    let config = serde_json::json!({
-        "mcpServers": {
-            "aaa-custom": { "type": "stdio", "command": "x", "args": [] }
-        }
-    });
-    let names = managed_mcp_server_names(&config, true, true, false, false);
-    assert!(
-        !names.contains(&"trusty-memory".to_string()),
-        "trusty-memory must be excluded when its injector did not run: {names:?}"
-    );
-    assert!(!names.contains(&"trusty-search".to_string()));
-    // The unconditional two are present when THEIR pin succeeded.
-    assert!(names.contains(&"trusty-mpm".to_string()));
-    assert!(names.contains(&"trusty-review".to_string()));
-}
-
-#[test]
-fn managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed() {
-    // Issue #3950 (fifth instance): the two UNCONDITIONAL builtins
-    // (`trusty-mpm`/`trusty-review`) have no manifest toggle, but their
-    // force-overwrite WRITE can still fail (disk full, permission error,
-    // transient I/O fault). Before this fix `managed_mcp_server_names` had
-    // no parameter for this at all — it unconditionally trusted both names
-    // regardless of whether prepare_session_inner's injectors actually
-    // succeeded this run. A failed pin must drop the name from the trust
-    // list exactly like a disabled conditional injector does.
-    let config = serde_json::json!({
-        "mcpServers": {
-            "aaa-custom": { "type": "stdio", "command": "x", "args": [] }
-        }
-    });
-    let names = managed_mcp_server_names(&config, false, false, true, true);
-    assert!(
-        !names.contains(&"trusty-mpm".to_string()),
-        "trusty-mpm must be excluded when its pin write failed this run: {names:?}"
-    );
-    assert!(
-        !names.contains(&"trusty-review".to_string()),
-        "trusty-review must be excluded when its pin write failed this run: {names:?}"
-    );
-    // The conditional two are unaffected by the unconditional pair's result.
-    assert!(names.contains(&"trusty-memory".to_string()));
-    assert!(names.contains(&"trusty-search".to_string()));
-}
-
-#[test]
-fn managed_mcp_server_names_registry_collision_is_a_separate_trusted_source() {
-    // Documents the (correct, unrelated) behaviour a naive reading of the
-    // #3934 fix might expect to change: the `config` parameter is the
-    // operator's OWN `tm mcp add` registry (`<config_dir>/.claude.json`'s
-    // top-level `mcpServers`), a source this module's existing security
-    // model already treats as trusted (see the module doc) — NOT the
-    // workspace's `.mcp.json` a cloned repo controls. A registry entry
-    // happening to be named `trusty-memory` is unioned in regardless of
-    // the conditional-injector toggle, exactly like any other registry
-    // name; the toggle only gates the FRAMEWORK BUILTIN union member.
-    let config = serde_json::json!({
-        "mcpServers": {
-            "trusty-memory": { "type": "stdio", "command": "trusty-memory", "args": [] }
-        }
-    });
-    let names = managed_mcp_server_names(&config, true, true, false, false);
-    assert!(
-        names.contains(&"trusty-memory".to_string()),
-        "a registry-sourced name is trusted independently of the conditional-builtin toggle: {names:?}"
-    );
-}
-
-#[test]
-fn managed_mcp_server_names_partial_conditional_toggle() {
-    // Only trusty_search disabled: trusty-memory still trusted, trusty-search not.
-    let names = managed_mcp_server_names(&serde_json::json!({}), true, true, true, false);
-    assert!(names.contains(&"trusty-memory".to_string()));
-    assert!(!names.contains(&"trusty-search".to_string()));
 }
 
 #[test]
@@ -381,120 +296,195 @@ fn mcp_server_names_empty_when_absent() {
     assert!(mcp_server_names(tmp.path()).is_empty());
 }
 
-#[test]
-fn launch_trusted_mcp_names_from_unions_registry() {
-    // Why (#3926): the interactive `tm launch` path must trust the SAME
-    // provenance-safe set as the daemon-managed path — builtin four union
-    // the operator's own `tm mcp add` registry, regardless of what a
-    // cloned repo's workspace `.mcp.json` separately declares (this
-    // function never reads a workspace's `.mcp.json` keys — the
-    // conditional-builtin toggles are supplied explicitly by the caller,
-    // issue #3934).
-    let tmp = TempDir::new().unwrap();
-    let cfg = tmp.path().join("claude-config");
-    add_server(&cfg, "slack-mcp", stdio("slack-mcp", &["serve"])).unwrap();
+// ─── #4181 / ADR-0042: seed_builtin_servers ───────────────────────────────
+//
+// Seeding declares the framework builtins ONCE in the user-scope `mcpServers`
+// map, insert-if-absent, on a path that runs before every launch. The contract
+// these tests pin: it inserts what is missing, it never touches what is already
+// there, and it never destroys the file it reads — which also holds OAuth state.
 
-    let names = launch_trusted_mcp_names_from(&cfg, true, true, true, true);
+/// The four builtin names, sorted, as `seed_builtin_servers` reports them.
+fn all_builtins() -> Vec<String> {
+    let mut names: Vec<String> = BUILTIN_MANAGED_MCP_SERVERS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+fn read_servers(config_dir: &std::path::Path) -> Map<String, Value> {
+    let text = std::fs::read_to_string(config_dir.join(".claude.json")).unwrap();
+    let val: Value = serde_json::from_str(&text).unwrap();
+    val["mcpServers"].as_object().cloned().unwrap_or_default()
+}
+
+#[test]
+fn seed_builtin_servers_inserts_every_builtin_when_absent() {
+    let tmp = TempDir::new().unwrap();
+    let seeded = seed_builtin_servers(tmp.path()).unwrap();
+
+    assert_eq!(seeded, all_builtins(), "every builtin must be reported");
+    let servers = read_servers(tmp.path());
+    for name in BUILTIN_MANAGED_MCP_SERVERS {
+        assert_eq!(
+            servers.get(*name),
+            builtin_server_entry(name).as_ref(),
+            "{name} must be written as its canonical builtin entry"
+        );
+    }
+}
+
+#[test]
+fn seed_builtin_servers_never_overwrites_an_existing_entry() {
+    let tmp = TempDir::new().unwrap();
+    // The operator's own declaration, under a builtin name, with a different
+    // binary and a pinned index — exactly what `tm mcp add` writes.
+    let operator = stdio("/opt/operator/trusty-search", &["serve", "--index", "cto"]);
+    add_server(tmp.path(), "trusty-search", operator.clone()).unwrap();
+
+    let seeded = seed_builtin_servers(tmp.path()).unwrap();
+
     assert_eq!(
-        names,
-        vec![
-            "slack-mcp",
-            "trusty-memory",
-            "trusty-mpm",
-            "trusty-review",
-            "trusty-search"
-        ]
+        seeded,
+        strings(&["trusty-memory", "trusty-mpm", "trusty-review"]),
+        "the occupied name must not be reported as seeded"
+    );
+    assert_eq!(
+        read_servers(tmp.path()).get("trusty-search"),
+        Some(&operator),
+        "the operator's entry must survive verbatim — tm mcp add wins"
     );
 }
 
 #[test]
-fn launch_trusted_mcp_names_from_defaults_to_builtin_when_absent() {
-    // Why (#3926): a fresh install with no `tm mcp add` registry yet must
-    // still trust exactly the framework builtin four — never error, never
-    // an empty list (the four builtins always launch, so they must always
-    // be pre-approved).
+fn seed_builtin_servers_is_idempotent() {
     let tmp = TempDir::new().unwrap();
-    let cfg = tmp.path().join("does-not-exist");
+    let claude_json = tmp.path().join(".claude.json");
 
-    let names = launch_trusted_mcp_names_from(&cfg, true, true, true, true);
+    assert_eq!(seed_builtin_servers(tmp.path()).unwrap(), all_builtins());
+    let first = std::fs::read(&claude_json).unwrap();
+
+    let second_run = seed_builtin_servers(tmp.path()).unwrap();
+    assert!(
+        second_run.is_empty(),
+        "a second run must insert nothing, got {second_run:?}"
+    );
     assert_eq!(
-        names,
-        vec![
-            "trusty-memory",
-            "trusty-mpm",
-            "trusty-review",
-            "trusty-search"
-        ]
+        first,
+        std::fs::read(&claude_json).unwrap(),
+        "a no-op run must not rewrite the file"
     );
 }
 
 #[test]
-fn launch_trusted_mcp_names_from_excludes_disabled_conditional_builtins() {
-    // Issue #3934 (the actual attack, unit-level): a manifest disabling
-    // the trusty-memory injector for this run must drop the name from
-    // the trust list even though the operator's own registry (or, in the
-    // real attack, a spoofed workspace `.mcp.json` entry the caller does
-    // not even consult here) might otherwise suggest it belongs.
+fn seed_builtin_servers_preserves_unrelated_keys() {
     let tmp = TempDir::new().unwrap();
-    let cfg = tmp.path().join("claude-config");
-
-    let names = launch_trusted_mcp_names_from(&cfg, true, true, false, false);
-    assert!(!names.contains(&"trusty-memory".to_string()));
-    assert!(!names.contains(&"trusty-search".to_string()));
-    assert!(names.contains(&"trusty-mpm".to_string()));
-    assert!(names.contains(&"trusty-review".to_string()));
-}
-
-#[test]
-fn launch_trusted_mcp_names_from_excludes_unconditional_builtin_when_pin_failed() {
-    // Issue #3950 (fifth instance): mirrors
-    // `managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed`
-    // one layer up — a failed `trusty-mpm`/`trusty-review` pin write must
-    // drop the name from the interactive-path trust derivation too.
-    let tmp = TempDir::new().unwrap();
-    let cfg = tmp.path().join("claude-config");
-
-    let names = launch_trusted_mcp_names_from(&cfg, false, false, true, true);
-    assert!(!names.contains(&"trusty-mpm".to_string()));
-    assert!(!names.contains(&"trusty-review".to_string()));
-    assert!(names.contains(&"trusty-memory".to_string()));
-    assert!(names.contains(&"trusty-search".to_string()));
-}
-
-#[test]
-fn resolve_conditional_mcp_toggles_defaults_to_both_on() {
-    // No manifest at all (compiled-in default): both conditional builtins
-    // are enabled, matching today's zero-regression behaviour.
-    let tmp_home = TempDir::new().unwrap();
-    let tmp_project = TempDir::new().unwrap();
-    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
-
-    let (memory, search) = resolve_conditional_mcp_toggles(&fw, tmp_project.path());
-    assert!(memory);
-    assert!(search);
-}
-
-#[test]
-fn resolve_conditional_mcp_toggles_honors_project_manifest_toggle() {
-    // Issue #3934: a project-scope manifest.toml (the attack's vector —
-    // git-tracked, arrives WITH a cloned repo) disabling trusty_memory
-    // must resolve to `inject_trusty_memory == false`, and must NOT affect
-    // the untouched trusty_search toggle.
-    let tmp_home = TempDir::new().unwrap();
-    let tmp_project = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp_project.path().join(".trusty-mpm").join("framework")).unwrap();
+    // `.claude.json` also holds OAuth state and every project's trust — seeding
+    // shares the file and must leave the rest of it alone.
     std::fs::write(
-        tmp_project
-            .path()
-            .join(".trusty-mpm")
-            .join("framework")
-            .join("manifest.toml"),
-        "[mcp]\ntrusty_memory = false\n",
+        tmp.path().join(".claude.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "oauthAccount": { "emailAddress": "op@example.com" },
+            "projects": { "/w": { "hasTrustDialogAccepted": true } }
+        }))
+        .unwrap(),
     )
     .unwrap();
-    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    let (memory, search) = resolve_conditional_mcp_toggles(&fw, tmp_project.path());
-    assert!(!memory, "project manifest toggle must be honored");
-    assert!(search, "untouched toggle must keep its default");
+    seed_builtin_servers(tmp.path()).unwrap();
+
+    let text = std::fs::read_to_string(tmp.path().join(".claude.json")).unwrap();
+    let val: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        val["oauthAccount"]["emailAddress"].as_str(),
+        Some("op@example.com"),
+        "OAuth state must survive seeding"
+    );
+    assert_eq!(val["projects"]["/w"]["hasTrustDialogAccepted"], true);
+    assert!(val["mcpServers"]["trusty-mpm"].is_object());
+}
+
+#[test]
+fn seed_builtin_servers_declines_a_malformed_config_without_quarantining() {
+    let tmp = TempDir::new().unwrap();
+    let claude_json = tmp.path().join(".claude.json");
+    let malformed = br#"{"oauthAccount": {"emailAddress": "op@example.com"},"#;
+    std::fs::write(&claude_json, malformed).unwrap();
+
+    let seeded = seed_builtin_servers(tmp.path()).unwrap();
+
+    assert!(seeded.is_empty(), "a malformed config must seed nothing");
+    assert_eq!(
+        std::fs::read(&claude_json).unwrap(),
+        malformed,
+        "the file must be byte-identical — no rename, no write"
+    );
+    // `read_config` (the `tm mcp` path) renames to a timestamped `.corrupt`
+    // sibling. Seeding runs unattended on every launch, so it must not.
+    let strays: Vec<String> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != ".claude.json")
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "seeding must leave no siblings behind: {strays:?}"
+    );
+}
+
+#[test]
+fn seed_builtin_servers_declines_a_non_object_config() {
+    let tmp = TempDir::new().unwrap();
+    let claude_json = tmp.path().join(".claude.json");
+    std::fs::write(&claude_json, b"[1, 2, 3]").unwrap();
+
+    assert!(seed_builtin_servers(tmp.path()).unwrap().is_empty());
+    assert_eq!(std::fs::read(&claude_json).unwrap(), b"[1, 2, 3]");
+}
+
+#[test]
+fn seed_builtin_servers_declines_a_non_object_mcp_servers_map() {
+    let tmp = TempDir::new().unwrap();
+    let claude_json = tmp.path().join(".claude.json");
+    // `mcp_servers_mut` (the `tm mcp` path) replaces this with `{}`, discarding
+    // it. Seeding must decline instead — it is not entitled to destroy operator
+    // state it merely failed to understand.
+    let hand_edited = br#"{"mcpServers": ["trusty-mpm"]}"#;
+    std::fs::write(&claude_json, hand_edited).unwrap();
+
+    assert!(seed_builtin_servers(tmp.path()).unwrap().is_empty());
+    assert_eq!(
+        std::fs::read(&claude_json).unwrap(),
+        hand_edited,
+        "a non-object mcpServers must be left exactly as found"
+    );
+}
+
+#[test]
+fn seed_builtin_servers_creates_the_config_when_the_dir_is_absent() {
+    let tmp = TempDir::new().unwrap();
+    let config_dir = tmp.path().join("never").join("created");
+
+    assert_eq!(seed_builtin_servers(&config_dir).unwrap(), all_builtins());
+    assert!(config_dir.join(".claude.json").is_file());
+}
+
+#[test]
+fn seed_builtin_servers_errors_when_claude_json_is_unreadable() {
+    let tmp = TempDir::new().unwrap();
+    // A directory where the file belongs: a read error that is neither
+    // NotFound nor uid-dependent, so it reproduces for root too.
+    std::fs::create_dir_all(tmp.path().join(".claude.json")).unwrap();
+
+    let err = seed_builtin_servers(tmp.path()).unwrap_err().to_string();
+    assert!(
+        err.contains("failed to read"),
+        "the read failure must be reported, got: {err}"
+    );
+    assert!(
+        tmp.path().join(".claude.json").is_dir(),
+        "an unreadable path must be left alone"
+    );
 }

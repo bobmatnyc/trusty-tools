@@ -18,6 +18,7 @@ pub mod mpm_registry;
 pub mod mpm_session;
 pub mod palace;
 pub mod pause;
+pub mod resolve;
 pub mod session_finder;
 pub mod session_log;
 pub mod state;
@@ -31,7 +32,7 @@ pub use json::{CatchupJson, PausedSessionJson, RecentMemoryJson, generate_catchu
 use self::{
     git::git_commits_since,
     palace::fetch_recent_palace_drawers,
-    session_finder::{find_paused_sessions, render_resume_context},
+    session_finder::{filter_sessions_since, find_paused_sessions, render_resume_context},
     state::{CatchupState, load_catchup_state, save_catchup_state},
 };
 
@@ -137,6 +138,46 @@ fn probe_head_sha(project_dir: &Path) -> Option<String> {
     if sha.is_empty() { None } else { Some(sha) }
 }
 
+/// Render the whole Paused Sessions section body from a filter outcome.
+///
+/// Why: markdown is the surface that ADVANCES the watermark — `run_catchup`
+/// calls `save_catchup_state` right after building this string — so a session
+/// withheld here leaves every future window permanently. The receipt therefore
+/// has to appear whether or not anything else survived: reporting it only in
+/// the empty case hid it in exactly the run where the operator is least likely
+/// to look, because a populated digest reads as complete. Split out as its own
+/// function because an undatable session is unreachable through the filesystem
+/// once both [`session_finder::PausedSession`] arms fall back to mtime — this
+/// is the seam that keeps both the branch and its wiring to
+/// [`session_finder::FilteredSessions::dropped_undatable`] testable.
+/// What: the kept sessions rendered by [`render_resume_context`], or the plain
+/// "nothing since last catch-up" notice when none survived; then, whenever
+/// `dropped_undatable` is non-zero, a notice naming the count and pointing at
+/// `full`.
+/// Test: `sessions_section_reports_withheld_alongside_kept`,
+/// `sessions_section_distinguishes_empty_from_withheld`.
+fn render_sessions_section(filtered: &session_finder::FilteredSessions) -> String {
+    let mut out = if filtered.kept.is_empty() {
+        "No paused sessions since last catch-up.\n\n".to_string()
+    } else {
+        format!("{}\n", render_resume_context(&filtered.kept))
+    };
+    // #5072: unconditional — NOT an `else` on the empty case.
+    if filtered.dropped_undatable > 0 {
+        let n = filtered.dropped_undatable;
+        let (verb, object) = if n == 1 {
+            ("was", "it")
+        } else {
+            ("were", "them")
+        };
+        out.push_str(&format!(
+            "{n} further paused session(s) could not be dated and {verb} withheld \
+             — re-run catch-up with `full` to see {object}.\n\n"
+        ));
+    }
+    out
+}
+
 /// Generate a markdown catch-up digest for the given options.
 ///
 /// Why: a single entry point for assembling all three activity sources into one
@@ -161,21 +202,10 @@ pub async fn generate_catchup_context(opts: &CatchupOptions) -> String {
     out.push_str("## Paused Sessions\n\n");
     match find_paused_sessions(&opts.project_dir) {
         Ok(sessions) => {
-            // Filter by watermark when available.
-            let sessions: Vec<_> = if let Some(wm) = watermark {
-                sessions
-                    .into_iter()
-                    .filter(|s| s.sort_key().is_none_or(|ts| ts > wm))
-                    .collect()
-            } else {
-                sessions
-            };
-            if sessions.is_empty() {
-                out.push_str("No paused sessions since last catch-up.\n\n");
-            } else {
-                out.push_str(&render_resume_context(&sessions));
-                out.push('\n');
-            }
+            // #5072: shared fail-closed predicate — see `filter_sessions_since`.
+            out.push_str(&render_sessions_section(&filter_sessions_since(
+                sessions, watermark,
+            )));
         }
         Err(e) => {
             eprintln!("catchup: warning: could not scan paused sessions: {e}");
@@ -451,6 +481,64 @@ mod tests {
         assert!(
             !ctx.is_empty(),
             "blocking wrapper should return non-empty context"
+        );
+    }
+
+    fn filtered(kept: usize, dropped: usize) -> session_finder::FilteredSessions {
+        session_finder::FilteredSessions {
+            kept: (0..kept)
+                .map(|_| session_finder::PausedSession::ClaudeMpm {
+                    session: crate::catchup::mpm_session::ClaudeMpmSession {
+                        resume_instructions: Some("work".to_string()),
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+            dropped_undatable: dropped,
+        }
+    }
+
+    /// Why: #5072 — the withheld case used to render the byte-identical
+    /// "No paused sessions since last catch-up." line as the genuinely-empty
+    /// case, so the operator got no signal that sessions existed and no reason
+    /// to re-run with `full`. The watermark advances past them regardless.
+    /// What: the two causes produce different text, and the withheld text names
+    /// the count and the recovery.
+    /// Test: itself.
+    #[test]
+    fn sessions_section_distinguishes_empty_from_withheld() {
+        let empty = render_sessions_section(&filtered(0, 0));
+        let withheld = render_sessions_section(&filtered(0, 3));
+        assert_ne!(
+            empty, withheld,
+            "withheld sessions must not read as a genuinely empty digest"
+        );
+        assert!(!empty.contains("withheld"), "{empty}");
+        assert!(withheld.contains('3'), "must name the count: {withheld}");
+        assert!(
+            withheld.contains("full"),
+            "must name the recovery: {withheld}"
+        );
+        assert!(render_sessions_section(&filtered(0, 1)).contains("was withheld"));
+    }
+
+    /// Why: markdown is the surface that advances the watermark, so a withheld
+    /// session leaves every future window permanently. Reporting the receipt
+    /// only when NOTHING survived hid it in the one run where the operator is
+    /// least likely to look — a populated digest reads as complete (#5072).
+    /// What: with one session kept and two withheld, the section renders the
+    /// kept session AND the withheld notice.
+    /// Test: itself.
+    #[test]
+    fn sessions_section_reports_withheld_alongside_kept() {
+        let out = render_sessions_section(&filtered(1, 2));
+        assert!(
+            out.contains("Paused Session Catch-Up"),
+            "kept sessions still render: {out}"
+        );
+        assert!(
+            out.contains("withheld") && out.contains('2'),
+            "the receipt must appear even when other sessions survived: {out}"
         );
     }
 

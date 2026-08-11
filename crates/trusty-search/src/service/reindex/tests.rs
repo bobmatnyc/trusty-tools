@@ -231,6 +231,77 @@ async fn reindex_walks_directory_and_emits_events() {
     );
 }
 
+/// Issue #5024: the `complete` event must carry the per-stage breakdown, and
+/// the named stages must partition `elapsed_ms`.
+///
+/// Why: before #5024 everything outside the batch loop's four subsystem
+/// accumulators was folded into a `model_load_approx_ms` residual computed by
+/// subtraction, so the cost of the hash-cache load, the carryover copy, the
+/// prune pass, and both swap commits was unmeasurable — which is exactly what a
+/// caching or corpus-reuse proposal needs to size. A refactor that drops one of
+/// the new stage clocks would silently inflate `other_ms` instead of failing, so
+/// this asserts the partition rather than the individual keys' magnitudes.
+/// What: runs the same fixture as `reindex_walks_directory_and_emits_events`,
+/// parses the terminal event, and checks every stage key is present and that
+/// walk + stages + kg + other reconstructs `elapsed_ms`.
+/// Test: this test.
+#[tokio::test]
+async fn reindex_emits_per_stage_timings() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    fs::write(root.join("a.rs"), "fn a() {}").unwrap();
+    fs::write(root.join("b.py"), "def b():\n    pass\n").unwrap();
+
+    let indexer = CodeIndexer::new("stage-timings".to_string(), root.clone());
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new("stage-timings"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.clone(),
+    ));
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle, progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
+    assert_eq!(progress.status.load(), ReindexStatus::Complete);
+
+    let events = progress.events.lock().await;
+    let complete: serde_json::Value = events
+        .last()
+        .map(|s| serde_json::from_str(s).expect("complete event must be valid JSON"))
+        .expect("at least one event");
+    assert_eq!(complete["event"], "complete");
+
+    let t = &complete["timings"];
+    let stage_keys = [
+        "walk_ms",
+        "hash_cache_ms",
+        "carryover_ms",
+        "pipeline_ms",
+        "prune_ms",
+        "corpus_commit_ms",
+        "hnsw_commit_ms",
+        "poller_stop_ms",
+        "kg_ms",
+        "other_ms",
+    ];
+    for key in stage_keys {
+        assert!(
+            t[key].is_u64(),
+            "timings.{key} must be present and numeric; got {t}"
+        );
+    }
+
+    let elapsed = complete["elapsed_ms"].as_u64().expect("elapsed_ms");
+    let named: u64 = stage_keys.iter().map(|k| t[*k].as_u64().unwrap_or(0)).sum();
+    // Each stage clock rounds down to whole milliseconds independently, so the
+    // reconstruction can undershoot by up to one ms per stage. It must never
+    // overshoot: `other_ms` is a saturating remainder.
+    assert!(
+        named <= elapsed && named + stage_keys.len() as u64 >= elapsed,
+        "named stages ({named}ms) must partition elapsed ({elapsed}ms): {t}"
+    );
+}
+
 /// Issue #100 follow-up: end-to-end guard that the walker → chunker →
 /// corpus pipeline persists chunks, distinct from the walker-only unit
 /// tests next to `walk_source_files_with_options`. The follow-up report

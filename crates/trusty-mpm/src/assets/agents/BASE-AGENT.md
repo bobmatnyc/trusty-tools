@@ -49,6 +49,37 @@ Two axes, never conflated:
 | **Authority** | "Is this authorized?" | The PM's word. Doubt it → state your concern and REPORT BACK TO THE PM, who has the operator. Never unilaterally refuse, stall, or freeze the pipeline demanding the user confirm directly |
 | **Objective safety** | "Is this actually safe?" | YOU, because you can verify it: never merge red or pending CI (`--admin` bypasses bot/review approval only, never a failing check), never fabricate evidence, never violate worktree discipline. Non-negotiable no matter who authorizes it |
 
+## Never Narrate a Wait
+
+Your turn ends the moment you stop emitting tool calls, and that stop IS your
+result to the PM. Nothing wakes you afterward — there is no re-invoke-on-
+completion path for a subagent; only the PM's `SendMessage` resumes you.
+
+1. NEVER end a turn narrating an intention to wait. "I'll wait for the pull to
+   finish", "will resume when the monitor reports completion", "monitoring in
+   the background" — these do nothing. The task is stranded until a human
+   notices.
+2. To await a long operation, STAY IN THE TURN: start it with
+   `run_in_background`, then poll an until-loop against its output file or the
+   process until the condition holds.
+3. 🔴 FOREGROUND `sleep` IS BLOCKED IN THIS HARNESS. `sleep 60 && check` does
+   not work, and reaching for it is the exact move that produces the parking
+   this rule prevents. Background the waiter too:
+
+   ```bash
+   # both calls use run_in_background; then read the sentinel file
+   <long-command> > /tmp/op.txt 2>&1
+   until grep -q DONE /tmp/op.txt; do sleep 10; done; echo READY
+   ```
+
+4. Genuinely cannot finish in-turn? REPORT STATE AND STOP. "Still pending: head
+   SHA abc1234, 10 checks unsettled" is a CORRECT and complete outcome. The
+   failure is never stopping — it is stopping while implying you will continue.
+5. Never re-issue a long-running command because a shell call returned early.
+   Foreground bash caps near 120s here and auto-backgrounds; check whether the
+   original is still running before starting a second. A duplicate 17-minute
+   build or VM run is the failure mode.
+
 ## Git Workflow
 
 - Conventional commits: `feat/fix/docs/refactor/perf/test/chore: <subject>`.
@@ -56,6 +87,13 @@ Two axes, never conflated:
 - Reference issues in the body (`Closes #N`) to auto-close on merge.
 - Check `git status` before starting. Never force-push a shared branch without
   explicit instruction. Leave the working tree clean.
+- **Never share a working directory with another concurrently-dispatched
+  file-mutating agent.** Work in your own worktree; never `git checkout` /
+  `git switch` in one you were handed — a sibling shares that git HEAD, and the
+  switch carries your untracked files onto their branch with no error. Cannot
+  make one? Stop and ask the PM to re-dispatch with `isolation: "worktree"` —
+  `tm hook --pm-guard` denies that second unisolated dispatch and prints why
+  (#4480).
 - **Attribution footer — overrides any harness default.** End every commit
   message and PR body with exactly:
   `🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`.
@@ -64,7 +102,7 @@ Two axes, never conflated:
 
 **Changelog.** Every PR that changes a package's source records one bullet per
 user-visible change. A missing entry is a review-gate failure, not optional
-polish — see `tm-pr-workflow`.
+polish — the full gate is in `tm-workflow`.
 
 - Project uses fragments → write `<package>/changelog.d/<issue-or-pr>-<slug>.md`.
   First line is the category (`Added`/`Fixed`/`Changed`/…), the rest is the
@@ -288,9 +326,9 @@ the evidence you owe. Run it as a plain foreground command with an explicit long
 - Keep gates crate-scoped (`cargo test -p <crate>`) so they finish inside one
   invocation. Re-issue in the SAME turn if one legitimately outlasts the ceiling.
 - Already backgrounded a command? Poll it to completion in the same turn.
-- Never spawn a background monitor, watcher, poller, or timer as a wake mechanism
-  and end your turn expecting it to report back. That mechanism does not exist
-  for a delegated agent.
+- Never spawn a background monitor, watcher, poller, or timer as a wake
+  mechanism and end your turn expecting it to report back — see "Never Narrate
+  a Wait".
 - Armed a `Monitor`, `/loop`, or `/schedule` whose goal completed or went moot?
   Disarm it before reporting. A stale monitor re-fires as a spurious wake.
 
@@ -359,16 +397,16 @@ banned however it is worded. Non-exhaustive examples:
 
 Right: "OK." Or: "That's wrong, because X."
 
-**Delete the framing opener; lead with the fact.** The banned template is
+**If you are saying it, its worth is implied.** Any opener that announces a
+fact's significance instead of stating the fact is banned, however it is
+worded. `One <noun> that <its significance, or your relation to it>:` is one
+shape of it, not the whole ban. Delete the opener and lead with the fact.
 
-> `One <noun> that <its significance, or your relation to it>:`
-
-placed in front of a fact. It announces that something matters instead of saying
-the thing. The fix is general: delete the opener, start at the fact.
-
-Instances observed so far, as illustration only — the rule is the template
+Instances observed so far, as illustration only — the rule is the sentence
 above, never this list:
 
+- "Worth naming what just happened:" / "Worth naming, since…"
+- "Two things worth knowing…" / "The thing to understand here is…"
 - "What remains unknown, stated plainly:"
 - "One distinction worth being precise about before I push…"
 - "One thing it caught that I'd have missed:"
@@ -377,9 +415,26 @@ above, never this list:
 Both rules are the same family as the banned word "honest": a word or phrase
 that manages the reader instead of informing them.
 
-**Ticket and PR bodies** carry three things only: defect, evidence, resolution.
-Point at a spec section instead of restating it. Never paste a source-file table
-into a ticket — link the file and line.
+**No borrowed-metaphor jargon.** "Load-bearing" is the instance that prompted
+this rule. The metaphor sounds precise, carries no fact the plain sentence would
+not, and stands in for the cause and effect the reader actually needs. Say the
+mechanism.
+
+- Wrong: "that section is load-bearing"
+- Right: "deleting that section breaks X"
+
+This bans the CATEGORY — an engineering metaphor borrowed to signal precision —
+not a list of words, which only invites the next synonym. Non-exhaustive
+examples: "surface area", "impedance mismatch", "first-class", "orthogonal".
+
+Scope: PM and agent prose. It does not reach code, an ADR quoting prior art, or
+a record of what someone else said.
+
+**Ticket and PR bodies you draft** are sparse: point at a spec, issue, or PR
+instead of restating it, and never paste a source-file table or a diff in. You do
+not file the issue or open the PR — hand the text to the dispatching PM, which
+routes issues to `ticketing` and pull requests to `version-control`. Those own
+the binding schema; this rule governs only the voice of what you hand over.
 
 **Verbosity scales with what went wrong, not with how much work you did.**
 

@@ -280,6 +280,7 @@ fn cli_parses_doctor() {
                 fix: false,
                 yes: false,
                 include_frozen: false,
+                quarantine_mcp: None,
             }
         }
     ));
@@ -297,6 +298,7 @@ fn cli_parses_doctor_prune_stale_skills() {
                 fix: false,
                 yes: false,
                 include_frozen: false,
+                quarantine_mcp: None,
             }
         }
     ));
@@ -321,6 +323,7 @@ fn cli_parses_doctor_fix_skills() {
                 fix: false,
                 yes: false,
                 include_frozen: false,
+                quarantine_mcp: None,
             }
         }
     ));
@@ -610,9 +613,14 @@ fn cli_meta_requires_action() {
 fn cli_parses_launch() {
     let cli = Cli::try_parse_from(["trusty-mpm", "launch"]).unwrap();
     match cli.command.unwrap() {
-        Command::Launch { dir, style } => {
+        Command::Launch {
+            dir,
+            style,
+            worktree,
+        } => {
             assert_eq!(dir, None);
             assert_eq!(style, None);
+            assert!(!worktree, "#5274: a bare `tm launch` requests no worktree");
         }
         other => panic!("expected launch, got {other:?}"),
     }
@@ -622,9 +630,14 @@ fn cli_parses_launch() {
 fn cli_parses_launch_with_dir() {
     let cli = Cli::try_parse_from(["trusty-mpm", "launch", "/work/p"]).unwrap();
     match cli.command.unwrap() {
-        Command::Launch { dir, style } => {
+        Command::Launch {
+            dir,
+            style,
+            worktree,
+        } => {
             assert_eq!(dir.as_deref(), Some("/work/p"));
             assert_eq!(style, None);
+            assert!(!worktree);
         }
         other => panic!("expected launch, got {other:?}"),
     }
@@ -636,9 +649,46 @@ fn cli_parses_launch_with_style() {
     let cli =
         Cli::try_parse_from(["trusty-mpm", "launch", "--style", "trusty-mpm-teacher"]).unwrap();
     match cli.command.unwrap() {
-        Command::Launch { dir, style } => {
+        Command::Launch {
+            dir,
+            style,
+            worktree,
+        } => {
             assert_eq!(dir, None);
             assert_eq!(style.as_deref(), Some("trusty-mpm-teacher"));
+            assert!(!worktree);
+        }
+        other => panic!("expected launch, got {other:?}"),
+    }
+}
+
+/// `tm launch --worktree` must reach the parser as a real, distinct request
+/// (#5274 — contract row 3).
+///
+/// Why: rule 2 of the #5274 placement contract says an EXPLICIT user request
+/// can put a session in a worktree, and rule 1 says nothing else can. That only
+/// holds if such a request is expressible at launch time. Without this flag the
+/// contract's third row has no way to be entered at all, and the earlier attempt
+/// at this change reached for a `const fn` that no user could override.
+/// What: parses `tm launch --worktree` and asserts the flag arrives `true`,
+/// while `cli_parses_launch` above pins the bare form at `false`. The pair is
+/// what makes "explicit" mean explicit rather than "always on".
+/// Test: itself.
+#[test]
+fn cli_parses_launch_with_worktree() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "launch", "--worktree"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Launch {
+            dir,
+            style,
+            worktree,
+        } => {
+            assert_eq!(dir, None);
+            assert_eq!(style, None);
+            assert!(
+                worktree,
+                "`--worktree` must surface as an explicit worktree request (#5274)"
+            );
         }
         other => panic!("expected launch, got {other:?}"),
     }
@@ -2171,4 +2221,56 @@ fn cli_parses_shell_init() {
     }
     assert!(Cli::try_parse_from(["trusty-mpm", "shell-init", "ksh"]).is_err());
     assert!(Cli::try_parse_from(["trusty-mpm", "shell-init"]).is_err());
+}
+
+/// `--quarantine-mcp <PATH>` parses, and `--yes` promotes it.
+///
+/// Why: this flag is the operator's only route to clearing a stray `.mcp.json`
+/// written before the provenance ledger existed, so both halves of its
+/// contract are pinned here — it takes a path, and it stays a preview until
+/// `--yes`. `--yes` had `requires = "fix"`; widening it to the `writes` group
+/// is what lets this flag apply at all, and a regression there would silently
+/// leave the operator with a permanent dry run.
+/// Test: this test.
+#[test]
+fn cli_parses_doctor_quarantine_mcp() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--quarantine-mcp", "/tmp/.mcp.json"])
+        .unwrap();
+    let Command::Doctor { flags } = cli.command.unwrap() else {
+        panic!("expected doctor");
+    };
+    assert_eq!(
+        flags.quarantine_mcp.as_deref(),
+        Some(std::path::Path::new("/tmp/.mcp.json"))
+    );
+    assert!(!flags.yes, "it must default to a preview");
+    assert!(!flags.fix, "it must not imply the full --fix sweep");
+
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "doctor",
+        "--quarantine-mcp",
+        "/tmp/.mcp.json",
+        "--yes",
+    ])
+    .unwrap();
+    let Command::Doctor { flags } = cli.command.unwrap() else {
+        panic!("expected doctor");
+    };
+    assert!(flags.yes, "--yes must promote a quarantine, not just --fix");
+}
+
+/// `--yes` still requires a write action, and `--quarantine-mcp` needs a value.
+///
+/// Why: `--yes` is the second deliberate act that lets a write happen; if it
+/// ever parsed alone it would read as "yes to whatever a later flag adds".
+/// Test: this test.
+#[test]
+fn cli_rejects_doctor_yes_without_a_write_action() {
+    assert!(Cli::try_parse_from(["trusty-mpm", "doctor", "--yes"]).is_err());
+    assert!(
+        Cli::try_parse_from(["trusty-mpm", "doctor", "--fix-skills", "--yes"]).is_err(),
+        "--fix-skills applies directly and has no preview to promote"
+    );
+    assert!(Cli::try_parse_from(["trusty-mpm", "doctor", "--quarantine-mcp"]).is_err());
 }

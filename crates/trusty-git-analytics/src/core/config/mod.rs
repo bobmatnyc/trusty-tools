@@ -881,7 +881,9 @@ pub struct PmConfig {
 /// and incident-source paths in one block.
 /// Test: parsed by the YAML loader; consumed by the
 /// `tga deployments collect` and `tga dora` commands.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// `Default` is hand-written rather than derived — see the `impl` below.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoraConfig {
     /// Source for deployment ingestion.
     ///
@@ -917,6 +919,29 @@ pub struct DoraConfig {
     /// incidents (if configured) populate `fact_incidents`.
     #[serde(default)]
     pub datadog_dir: Option<PathBuf>,
+}
+
+/// Why: #5304 — a config with no `dora:` block reached
+/// `commands::deployments::run` through `config.dora.unwrap_or_default()`, and
+/// the DERIVED `Default` zeroed `deployment_source` to `String::new()`. The
+/// `#[serde(default = "…")]` attributes only fire when a `dora:` mapping is
+/// actually present, so the two paths disagreed and every unconfigured repo
+/// failed with `unknown deployment_source ''`.
+/// What: routes each field through the same `default_*` function serde uses, so
+/// "no `dora:` key" and "`dora:` with every field omitted" cannot drift apart.
+/// Test: `commands::deployments::tests::missing_dora_block_defaults_to_git_tags`,
+/// `core::config::tests::dora_default_matches_empty_dora_block`.
+impl Default for DoraConfig {
+    fn default() -> Self {
+        Self {
+            deployment_source: default_deployment_source(),
+            deployment_tag_pattern: default_deployment_tag_pattern(),
+            production_branch: default_production_branch(),
+            deployment_workflow: None,
+            failure_signals: Vec::new(),
+            datadog_dir: None,
+        }
+    }
 }
 
 fn default_deployment_source() -> String {
@@ -1526,6 +1551,35 @@ mod tests {
         let llm = LlmConfig::default();
         assert_eq!(llm.source, LlmSource::Openrouter);
         assert_eq!(llm.api_key_env, "OPENROUTER_API_KEY");
+    }
+
+    /// Why: #5304 — `DoraConfig::default()` is what `config.dora` collapses to
+    /// when the YAML carries no `dora:` block, so it must be indistinguishable
+    /// from a `dora:` block with every field omitted. A derived `Default` made
+    /// them differ and left `deployment_source` empty.
+    /// What: parse a config with a present-but-empty `dora:` block and assert
+    /// it equals `DoraConfig::default()` field for field.
+    /// Test: pure deserialization plus construction.
+    #[test]
+    fn dora_default_matches_empty_dora_block() {
+        let yaml = "version: \"1.0\"\nrepositories: []\ndora: {}\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse config");
+        let parsed = cfg.dora.expect("dora block present");
+        let defaulted = DoraConfig::default();
+
+        assert_eq!(parsed.deployment_source, "git_tags");
+        assert_eq!(defaulted.deployment_source, parsed.deployment_source);
+        assert_eq!(
+            defaulted.deployment_tag_pattern,
+            parsed.deployment_tag_pattern
+        );
+        assert_eq!(defaulted.production_branch, parsed.production_branch);
+        assert_eq!(defaulted.deployment_workflow, parsed.deployment_workflow);
+        assert_eq!(
+            defaulted.failure_signals.len(),
+            parsed.failure_signals.len()
+        );
+        assert_eq!(defaulted.datadog_dir, parsed.datadog_dir);
     }
 
     /// Why: `anthropic-api` uses a hyphen in the YAML value; a missing serde

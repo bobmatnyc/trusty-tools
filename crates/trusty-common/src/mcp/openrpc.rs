@@ -3,7 +3,7 @@
 //! Why: Every trusty-* MCP server (trusty-memory, trusty-search,
 //! trusty-gworkspace, …) exposes the same JSON-RPC method names for its
 //! tools and benefits from a machine-readable `rpc.discover` manifest so
-//! orchestrators such as open-mpm can route requests and reason about
+//! orchestrators such as trusty-agents can route requests and reason about
 //! per-tool scopes without bespoke adapters. The OpenRPC document shape is
 //! identical across servers — only the title/version and the scope mapping
 //! differ. Consolidating the builder here removes ~100 lines of duplication
@@ -13,13 +13,24 @@
 //! What: A small `OpenRpcBuilder` plus the convenience `discover_response`
 //! function. Both accept the server's tool list (one JSON object per tool
 //! with `name`, `description`, and `inputSchema`) and a scope-resolver
-//! callback. Output is the exact OpenRPC 1.3.2 document already produced
-//! by `trusty-gworkspace/src/openrpc.rs` — `{ openrpc, info, methods }` —
-//! with each `methods[i]` carrying an `x-scopes` extension field so the
-//! scope vocabulary is server-defined (Google OAuth, memory.read /
-//! memory.write, search scopes, …).
+//! callback. Output is `{ openrpc, info, methods }`, with each `methods[i]`
+//! carrying an `x-scopes` extension field so the scope vocabulary is
+//! server-defined (memory.read / memory.write, search scopes, …).
 //!
-//! Test: `cargo test -p trusty-mcp-core openrpc` covers builder output,
+//! Two limits, recorded because this module's doc used to claim it emitted
+//! "the exact document already produced by `trusty-gworkspace`" and #5331
+//! measured that it does not:
+//!
+//! - The extension field name is hardcoded to `x-scopes`. A server whose
+//!   scope vocabulary is OAuth URLs rather than dotted strings needs
+//!   `x-google-scopes`, because `trusty-agents`'s discovery parser reads
+//!   `x-scopes` entries verbatim and only URL-maps the `x-google-scopes`
+//!   fallback. trusty-gworkspace is such a server, which is why it still
+//!   builds its own document.
+//! - `info` carries only `title`, `version`, and an optional `description`.
+//!   There is no `license` slot.
+//!
+//! Test: `cargo test -p trusty-common mcp::openrpc` covers builder output,
 //! the `x-scopes` extension, and a representative tool with required
 //! params being flattened into the OpenRPC `params` array.
 
@@ -85,7 +96,7 @@ impl OpenRpcBuilder {
 
     /// Build a merged OpenRPC document from a list of `ServiceDescriptor`s.
     ///
-    /// Why: The host process (e.g. open-mpm / a unified trusty daemon) links
+    /// Why: The host process (e.g. trusty-agents / a unified trusty daemon) links
     /// several MCP services into one binary and needs a single `rpc.discover`
     /// document covering all of them. This constructor accepts a slice of
     /// trait objects, iterates each service's tools, and produces one merged

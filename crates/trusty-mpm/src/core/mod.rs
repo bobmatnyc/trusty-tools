@@ -59,11 +59,15 @@ pub mod claude_mpm_session;
 
 pub mod compress;
 pub mod config;
+/// Unrecognised-key reporting for the host-level config files (#5207).
+pub mod config_keys;
 pub mod connect;
 pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;
 pub mod discovery;
+/// Working-tree isolation policy for native Agent-tool dispatches (#4480).
+pub mod dispatch_isolation;
 pub mod doctor;
 pub mod doctor_repair;
 pub mod error;
@@ -90,6 +94,10 @@ pub mod llm_overseer;
 pub mod managed_config;
 pub mod manifest;
 pub mod mcp_config;
+pub mod mcp_provenance;
+// #4181: per-project MCP pins now travel as spawn environment variables, not as
+// arguments injected into a workspace `.mcp.json` (ADR-0042).
+pub mod mcp_session_env;
 pub mod mcp_test;
 pub mod memory;
 pub mod memory_import;
@@ -113,6 +121,8 @@ pub mod pid_registry;
 pub mod process;
 pub mod project;
 pub mod project_aliases;
+/// The committed, project-level `.trusty-mpm.toml` config surface (#5207).
+pub mod project_config;
 pub mod project_discovery;
 // #4880: the project skill tier redeploys on project-manifest change.
 pub mod project_skill_tier;
@@ -135,6 +145,7 @@ pub mod skill_drift;
 pub mod skill_manifest;
 pub mod skill_reconcile;
 pub mod skill_repair;
+pub mod skill_retire;
 pub mod skill_source;
 pub mod skill_staleness;
 pub mod skill_tiers;
@@ -144,12 +155,14 @@ pub mod spawn_disclaim;
 pub mod stack_profile;
 pub mod stale_skills;
 pub mod standalone;
+pub mod stray_mcp;
 pub mod tmux;
 pub mod trusty_tools_config;
 pub mod update_check;
 pub mod version_staleness;
 pub mod workspace_liveness;
 pub mod workspace_scan;
+pub mod worktree_index;
 pub mod worktree_naming;
 
 pub use connect::{ResolveResult, SessionSummary, resolve_target};

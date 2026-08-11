@@ -949,11 +949,14 @@ async fn create_canvas_returns_id() {
     assert_eq!(out["canvas_id"], "F123");
 }
 
+// #5155: a `channel_id` must route to `conversations.canvases.create`, which
+// makes a channel canvas every member can edit. `canvases.create` would make a
+// bot-owned standalone canvas that only *looks* channel-bound.
 #[tokio::test]
 async fn create_canvas_with_channel_and_markdown() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/canvases.create"))
+        .and(path("/conversations.canvases.create"))
         .and(body_partial_json(json!({
             "title": "Runbook",
             "channel_id": "C1",
@@ -965,6 +968,13 @@ async fn create_canvas_with_channel_and_markdown() {
         })))
         .mount(&server)
         .await;
+    // The standalone endpoint must not be touched when a channel is named.
+    Mock::given(method("POST"))
+        .and(path("/canvases.create"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
 
     let client = client_for(&server);
     let out = dispatch(
@@ -974,6 +984,35 @@ async fn create_canvas_with_channel_and_markdown() {
     )
     .await
     .expect("create canvas with content should succeed");
+
+    assert_eq!(out["canvas_id"], "F456");
+}
+
+// #5155: without a `channel_id` the standalone endpoint stays in use unchanged.
+#[tokio::test]
+async fn create_canvas_without_channel_uses_standalone_endpoint() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "canvases.create",
+        json!({ "ok": true, "canvas_id": "F456" }),
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.canvases.create"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_create_canvas",
+        json!({ "title": "Runbook", "markdown": "# Runbook" }),
+    )
+    .await
+    .expect("standalone create should succeed");
 
     assert_eq!(out["canvas_id"], "F456");
 }
@@ -1100,11 +1139,13 @@ async fn canvas_create_requires_markdown() {
     assert!(matches!(err, ToolCallError::InvalidArgs(_)));
 }
 
+// #5155: the connector-parity clone routes through the same
+// `post_create_canvas`, so it must pick the channel endpoint identically.
 #[tokio::test]
 async fn canvas_create_posts_document_content_and_channel() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/canvases.create"))
+        .and(path("/conversations.canvases.create"))
         .and(body_partial_json(json!({
             "title": "Runbook",
             "channel_id": "C1",
@@ -1114,6 +1155,12 @@ async fn canvas_create_posts_document_content_and_channel() {
             "ok": true,
             "canvas_id": "F789",
         })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/canvases.create"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
         .mount(&server)
         .await;
 
@@ -1127,6 +1174,111 @@ async fn canvas_create_posts_document_content_and_channel() {
     .expect("canvas_create with markdown should succeed");
 
     assert_eq!(out["canvas_id"], "F789");
+}
+
+// #5155: absent `channel_id`, `slack_canvas_create` keeps its old endpoint.
+#[tokio::test]
+async fn canvas_create_without_channel_uses_standalone_endpoint() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/canvases.create"))
+        .and(body_partial_json(json!({
+            "document_content": { "type": "markdown", "markdown": "# Runbook" },
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "canvas_id": "F789",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.canvases.create"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_canvas_create",
+        json!({ "markdown": "# Runbook" }),
+    )
+    .await
+    .expect("standalone canvas_create should succeed");
+
+    assert_eq!(out["canvas_id"], "F789");
+}
+
+// #5155: the MCP caller must not be able to tell which endpoint ran. Both
+// endpoints return `canvas_id` at the top level, and one shaping function reads
+// it — this pins that the returned structure is byte-identical either way.
+#[tokio::test]
+async fn both_create_paths_return_the_same_structure() {
+    let channel_server = MockServer::start().await;
+    mount_ok(
+        &channel_server,
+        "conversations.canvases.create",
+        json!({ "ok": true, "canvas_id": "F001" }),
+    )
+    .await;
+    let channel_out = dispatch(
+        &client_for(&channel_server),
+        "slack_canvas_create",
+        json!({ "markdown": "# doc", "channel_id": "C1" }),
+    )
+    .await
+    .expect("channel canvas create should succeed");
+
+    let standalone_server = MockServer::start().await;
+    mount_ok(
+        &standalone_server,
+        "canvases.create",
+        json!({ "ok": true, "canvas_id": "F001" }),
+    )
+    .await;
+    let standalone_out = dispatch(
+        &client_for(&standalone_server),
+        "slack_canvas_create",
+        json!({ "markdown": "# doc" }),
+    )
+    .await
+    .expect("standalone canvas create should succeed");
+
+    assert_eq!(channel_out, standalone_out);
+    assert_eq!(channel_out, json!({ "ok": true, "canvas_id": "F001" }));
+}
+
+// #5155: an error must name the endpoint that produced it, so diagnosing a
+// `channel_canvas_already_exists` does not mean reading the source to find out
+// which of the two create methods ran.
+#[tokio::test]
+async fn canvas_create_channel_endpoint_error_names_the_endpoint() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "conversations.canvases.create",
+        json!({ "ok": false, "error": "channel_canvas_already_exists" }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_canvas_create",
+        json!({ "markdown": "# Runbook", "channel_id": "C1" }),
+    )
+    .await
+    .expect_err("Slack ok:false must surface as an error");
+    match err {
+        ToolCallError::Slack(SlackError::Api(message)) => {
+            assert_eq!(
+                message,
+                "channel_canvas_already_exists (from conversations.canvases.create)"
+            );
+        }
+        other => panic!("expected ToolCallError::Slack(SlackError::Api(_)), got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1151,8 +1303,12 @@ async fn canvas_create_surfaces_slack_api_error() {
     .await
     .expect_err("Slack ok:false must surface as an error");
     match err {
-        ToolCallError::Slack(SlackError::Api(slug)) => {
-            assert_eq!(slug, "free_teams_cannot_create_non_tabbed_canvases");
+        // #5155: the slug still leads, with the attempted endpoint appended.
+        ToolCallError::Slack(SlackError::Api(message)) => {
+            assert_eq!(
+                message,
+                "free_teams_cannot_create_non_tabbed_canvases (from canvases.create)"
+            );
         }
         other => panic!("expected ToolCallError::Slack(SlackError::Api(_)), got {other:?}"),
     }

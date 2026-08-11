@@ -215,14 +215,9 @@ pub(super) async fn dispatch_cli_mode(
             .filter(|s| !s.is_empty());
         // #3329: default to loopback; `--bind` is the explicit non-loopback
         // opt-in (which serve_with_config gates on a token being present).
-        let bind = cli
-            .bind
-            .unwrap_or_else(|| std::net::Ipv4Addr::LOCALHOST.into());
-        return crate::api::server::serve_with_config(crate::api::server::ApiConfig {
-            bind,
-            port,
-            token,
-        })
+        return crate::api::server::serve_with_config(crate::api::server::ApiConfig::with_bind(
+            cli.bind, port, token,
+        ))
         .await;
     }
 
@@ -386,6 +381,13 @@ pub(super) async fn dispatch_cli_mode(
                     .await
                     .map(|_| ());
             }
+            // #5089 review: this process is a CLIENT — it forwards argv and
+            // binds nothing, so it may only unlink a socket the kernel has
+            // confirmed dead. `is_stale_socket_for_owner` also fires when the
+            // containing directory is not 0700, which says nothing about the
+            // socket, and would orphan a live controller onto an unlinked
+            // inode. `bind_singleton` re-probes from the owner side moments
+            // later and cleans up anything this arm leaves behind.
             Err(e) if ctrl::is_connection_refused(&e) => {
                 tracing::debug!(path = %sock_path.display(), "stale ctrl socket — cleaning up");
                 ctrl::CtrlSocket::cleanup(&sock_path);

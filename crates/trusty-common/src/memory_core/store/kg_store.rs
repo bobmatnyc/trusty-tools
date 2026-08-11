@@ -12,10 +12,17 @@ use serde::{Deserialize, Serialize};
 /// Primary triple store.
 ///
 /// Why: Composite key encoding allows efficient range scans by subject prefix
-///      while preserving Ord semantics for redb's BTreeMap-backed tables.
-/// What: Key = `[subject_len: u16 BE][subject bytes][predicate bytes]`.
-///       Value = postcard-encoded [`TripleValue`].
-/// Test: See `round_trip_triple_key` and `subject_prefix_range_simulation`.
+///      while preserving Ord semantics for redb's BTreeMap-backed tables. The
+///      object is PART of the key (#4810): keying on `(subject, predicate)`
+///      alone meant `room:General --contains--> drawer:X` held one row no
+///      matter how many drawers the room contained, and every further member
+///      silently closed its predecessor.
+/// What: Key = `[subject_len: u16 BE][subject][predicate_len: u16 BE]
+///       [predicate][object bytes]`. Value = postcard-encoded [`TripleValue`],
+///       which still carries the object — the key copy exists to make rows
+///       distinct, the value stays the authoritative read.
+/// Test: See `round_trip_triple_key`, `subject_prefix_range_simulation`, and
+///       `subject_predicate_prefix_excludes_a_longer_predicate`.
 pub const TRIPLES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("triples");
 
 /// Reverse index: object → (subject+predicate key) for O(degree) reverse lookup.
@@ -29,10 +36,16 @@ pub const TRIPLES_BY_OBJECT: TableDefinition<&[u8], &[u8]> =
 
 /// Predicate index for queries like "all triples with predicate P".
 ///
-/// Why: Predicate-first range scans (e.g. all `created_by` edges).
-/// What: Key = `[predicate_len: u16 BE][predicate bytes][subject_len: u16 BE][subject bytes]`.
-///       Value = empty `&[u8]`.
-/// Test: Range-scan simulation in `predicate_index_key_orders_by_predicate`.
+/// Why: Predicate-first range scans (e.g. all `created_by` edges). It carries
+///      the object as of #4810 for the same reason [`TRIPLES`] does: without
+///      it, two active rows sharing `(subject, predicate)` produce ONE index
+///      entry, and retracting either would evict the other's. No reader
+///      consumes this table today, which is exactly why the fix belongs
+///      here — a known-broken index is not something to ship forward.
+/// What: Key = `[predicate_len: u16 BE][predicate][subject_len: u16 BE]
+///       [subject][object bytes]`. Value = empty `&[u8]`.
+/// Test: Range-scan simulation in `predicate_index_key_orders_by_predicate`,
+///       plus `predicate_index_key_separates_objects`.
 pub const TRIPLES_BY_PREDICATE: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("triples_by_predicate");
 
@@ -123,7 +136,7 @@ pub const WINGS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wings");
 /// Test: `store::wings::tests::wing_create_is_idempotent`.
 pub const WING_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("wing_keys");
 
-/// Payload store (for `open-mpm`'s `TrustyBackedMemoryStore`).
+/// Payload store (for `trusty-agents`'s `TrustyBackedMemoryStore`).
 ///
 /// Why: Payloads are namespaced by segment and addressed by id; share the
 ///      same redb env as the KG so payload + KG ops can ride a single
@@ -180,6 +193,116 @@ pub const VECTOR_KEYS: TableDefinition<&str, u64> = TableDefinition::new("vector
 /// Test: Coverage lives in `crate::memory_core::store::hnsw_store::tests`
 ///       (`delete_filters_results`).
 pub const DELETED_VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("deleted_vectors");
+
+/// Persisted vector-id allocator (issue #5005).
+///
+/// Why: `HnswStore` used to allocate vector ids from a process-local
+///      `AtomicU64` seeded at open from `max(VECTORS, VECTOR_KEYS) + 1`. Two
+///      live stores over the same database — which the in-process vector-db
+///      cache deliberately supports, see
+///      `crate::memory_core::store::vector::open_or_get_cached_db` — each
+///      seeded their own counter from the same high-water mark and then handed
+///      out the same ids, so `VECTOR_KEYS` aliased several drawers onto one
+///      `vector_id` and `VECTORS` overwrote in place. Keeping the reservation
+///      in redb and bumping it inside the same write transaction as the insert
+///      makes allocation serialisable with every other writer on the file.
+/// What: Single-row table. Key = [`NEXT_VECTOR_ID`], value = the next
+///       unissued `u64` vector_id.
+/// Test: `crate::memory_core::store::hnsw_store::tests::
+///       two_live_stores_over_one_file_never_alias_ids` and
+///       `old_palace_without_a_seq_row_is_seeded_on_open`.
+pub const VECTOR_ID_SEQ: TableDefinition<&str, u64> = TableDefinition::new("vector_id_seq");
+
+/// The only key stored in [`VECTOR_ID_SEQ`].
+pub const NEXT_VECTOR_ID: &str = "next_vector_id";
+
+/// Triple-storage schema marker (#4810).
+///
+/// Why: the #4810 key widening is an on-disk format change, and the migration
+/// that performs it must be able to tell a migrated palace from one that has
+/// never been touched. It cannot infer that from the rows: a two-component key
+/// and a three-component key are both just bytes, and guessing wrong either
+/// re-migrates already-correct rows or leaves broken ones alone. A marker table
+/// makes the question a point read. Mirrors `RoomSchemaMarker` /
+/// `WingSchemaMarker`, with one difference — those record which shape wrote the
+/// rows, whereas this one GATES a rewrite, so it is written in the same
+/// transaction as that rewrite.
+/// What: Single-row table. Key = [`KG_SCHEMA_TRIPLE_KEY`], value =
+/// postcard-encoded [`KgSchemaMarker`]. A palace with no row predates #4810.
+/// Test: `store::kg_redb::tests::migration_stamps_schema_and_is_idempotent`.
+pub const KG_SCHEMA: TableDefinition<&str, &[u8]> = TableDefinition::new("kg_schema");
+
+/// The only key stored in [`KG_SCHEMA`] today.
+pub const KG_SCHEMA_TRIPLE_KEY: &str = "triple_key";
+
+/// Current triple-key schema version — 1 is the `(subject, predicate, object)`
+/// key introduced by #4810. Version 0 (no marker row) is the old
+/// `(subject, predicate)` key.
+pub const KG_TRIPLE_KEY_SCHEMA_VERSION: u32 = 1;
+
+/// Value stored under [`KG_SCHEMA_TRIPLE_KEY`].
+///
+/// Why/What: mirrors `RoomSchemaMarker` — a one-field postcard record so the
+/// on-disk triple-key shape is self-describing.
+/// Test: `store::kg_redb::tests::migration_stamps_schema_and_is_idempotent`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KgSchemaMarker {
+    pub schema_version: u32,
+}
+
+/// Predicates that hold at most ONE active object per subject (#4810).
+///
+/// Why: this list is INVERTED on purpose — multi-valued is the default and
+/// anything absent from it keeps every object asserted against it. The two
+/// failure modes are not symmetric. Forgetting to list a multi-valued
+/// predicate costs silent data loss: that is precisely the #4810 defect, where
+/// `room:General --contains--> drawer:X` overwrote the room's entire
+/// membership on every new drawer. Forgetting to list a functional one costs
+/// one extra queryable row that a reader can see and a human can retract.
+/// Cheap-and-visible beats silent-and-gone, so the default falls that way.
+/// What: a sorted static slice; [`is_functional_predicate`] is a linear scan
+/// over it. The first four entries are trusty-memory's ADR-0028 `HOT_PREDICATES`
+/// (`is_alias_for`, `has_convention`, `is_fact`, `is_shorthand_for`); the rest
+/// are single-valued attributes minted by the bootstrap scanner and the
+/// supersession machinery.
+///
+/// `has_language` is deliberately EXCLUDED even though a project usually has
+/// one primary language: `scan_cargo_toml` and `scan_package_json` derive their
+/// subject independently from their own manifest, so a polyglot repo whose
+/// `Cargo.toml` and `package.json` agree on the package name asserts two
+/// `has_language` triples under one subject. Marking it functional would make
+/// whichever scanner ran second silently erase the other's language.
+/// Test: `functional_predicates_are_sorted_and_unique`,
+/// `is_functional_predicate_defaults_to_multi_valued`.
+pub const FUNCTIONAL_PREDICATES: &[&str] = &[
+    "alias_of",
+    "bootstrapped_at",
+    "created_at",
+    "has_convention",
+    "has_description",
+    "has_edition",
+    "has_module_path",
+    "has_rust_version",
+    "has_version",
+    "is_alias_for",
+    "is_fact",
+    "is_shorthand_for",
+    "requires_python",
+    "source_repo",
+    "superseded_by",
+];
+
+/// Whether asserting `predicate` supersedes the subject's prior object.
+///
+/// Why: the write path branches on this — a functional predicate closes every
+/// active row at `(subject, predicate)` before inserting, a multi-valued one
+/// adds a row alongside them.
+/// What: linear scan over [`FUNCTIONAL_PREDICATES`]; unlisted means
+/// multi-valued.
+/// Test: `is_functional_predicate_defaults_to_multi_valued`.
+pub fn is_functional_predicate(predicate: &str) -> bool {
+    FUNCTIONAL_PREDICATES.contains(&predicate)
+}
 
 /// Chat-session store (for the trusty-memory web UI's chat panel).
 ///
@@ -258,25 +381,63 @@ pub struct DrawerRecord {
 
 /// Why: redb requires Ord-preserving byte keys for range scans. Composite
 ///      string keys are encoded with a u16 BE length prefix per leading
-///      component so prefix-based range scans (`subject..`) work correctly.
-/// What: Encodes `(subject, predicate)` → `Vec<u8>` for TRIPLES table lookup.
-/// Test: `round_trip_triple_key`.
-pub fn encode_triple_key(subject: &str, predicate: &str) -> Vec<u8> {
+///      component so prefix-based range scans (`subject..`, `(subject,
+///      predicate)..`) work correctly. #4810 added the object as the trailing
+///      component so two objects under one `(subject, predicate)` occupy two
+///      rows instead of overwriting each other.
+/// What: Encodes `(subject, predicate, object)` → `Vec<u8>` for TRIPLES table
+///       lookup. The object needs no length prefix — it is the last component.
+/// Test: `round_trip_triple_key`, `triple_key_separates_objects`.
+pub fn encode_triple_key(subject: &str, predicate: &str, object: &str) -> Vec<u8> {
     let s = subject.as_bytes();
     let p = predicate.as_bytes();
-    let mut out = Vec::with_capacity(2 + s.len() + p.len());
+    let o = object.as_bytes();
+    let mut out = Vec::with_capacity(4 + s.len() + p.len() + o.len());
     out.extend_from_slice(&(s.len() as u16).to_be_bytes());
     out.extend_from_slice(s);
+    out.extend_from_slice(&(p.len() as u16).to_be_bytes());
     out.extend_from_slice(p);
+    out.extend_from_slice(o);
     out
 }
 
 /// Why: Round-trip decode for diagnostic/debug paths and tests.
-/// What: Splits an encoded triple key back into `(subject, predicate)`.
-///       Returns `None` if the key is malformed (length prefix exceeds bytes
-///       remaining or interior bytes are not valid UTF-8).
-/// Test: `round_trip_triple_key`.
-pub fn decode_triple_key(bytes: &[u8]) -> Option<(String, String)> {
+/// What: Splits an encoded triple key back into `(subject, predicate, object)`.
+///       Returns `None` if the key is malformed (a length prefix exceeds the
+///       bytes remaining, or an interior span is not valid UTF-8).
+/// Test: `round_trip_triple_key`, `decode_triple_key_rejects_truncated`.
+pub fn decode_triple_key(bytes: &[u8]) -> Option<(String, String, String)> {
+    if bytes.len() < 2 {
+        return None;
+    }
+    let s_len = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+    let rest = &bytes[2..];
+    if rest.len() < s_len {
+        return None;
+    }
+    let subject = std::str::from_utf8(&rest[..s_len]).ok()?.to_string();
+    let rest = &rest[s_len..];
+    if rest.len() < 2 {
+        return None;
+    }
+    let p_len = u16::from_be_bytes([rest[0], rest[1]]) as usize;
+    let rest = &rest[2..];
+    if rest.len() < p_len {
+        return None;
+    }
+    let predicate = std::str::from_utf8(&rest[..p_len]).ok()?.to_string();
+    let object = std::str::from_utf8(&rest[p_len..]).ok()?.to_string();
+    Some((subject, predicate, object))
+}
+
+/// Why: The #4810 migration is the one code path that must read a key written
+///      before the object joined it; every other reader uses
+///      [`decode_triple_key`].
+/// What: Splits a pre-#4810 key (`[subject_len][subject][predicate]`) into
+///       `(subject, predicate)`. Returns `None` on the same malformed-input
+///       conditions as [`decode_triple_key`].
+/// Test: `decode_legacy_triple_key_round_trips`.
+pub fn decode_legacy_triple_key(bytes: &[u8]) -> Option<(String, String)> {
     if bytes.len() < 2 {
         return None;
     }
@@ -309,18 +470,22 @@ pub fn encode_object_index_key(object: &str, subject: &str, predicate: &str) -> 
 }
 
 /// Why: Predicate-first index — find all subjects connected via a given
-///      predicate.
-/// What: Encodes `(predicate, subject)` → composite key with two
-///       length-prefixed components.
-/// Test: `predicate_index_key_orders_by_predicate`.
-pub fn encode_predicate_index_key(predicate: &str, subject: &str) -> Vec<u8> {
+///      predicate. #4810 added the object so two objects under one
+///      `(predicate, subject)` no longer collapse into a single entry.
+/// What: Encodes `(predicate, subject, object)` → composite key with two
+///       length-prefixed leading components.
+/// Test: `predicate_index_key_orders_by_predicate`,
+///       `predicate_index_key_separates_objects`.
+pub fn encode_predicate_index_key(predicate: &str, subject: &str, object: &str) -> Vec<u8> {
     let p = predicate.as_bytes();
     let s = subject.as_bytes();
-    let mut out = Vec::with_capacity(4 + p.len() + s.len());
+    let o = object.as_bytes();
+    let mut out = Vec::with_capacity(4 + p.len() + s.len() + o.len());
     out.extend_from_slice(&(p.len() as u16).to_be_bytes());
     out.extend_from_slice(p);
     out.extend_from_slice(&(s.len() as u16).to_be_bytes());
     out.extend_from_slice(s);
+    out.extend_from_slice(o);
     out
 }
 
@@ -334,6 +499,39 @@ pub fn subject_prefix(subject: &str) -> Vec<u8> {
     out.extend_from_slice(&(s.len() as u16).to_be_bytes());
     out.extend_from_slice(s);
     out
+}
+
+/// Why (#4810): `assert` and `retract` both need "every row at this
+///      `(subject, predicate)`, whatever the object" — the question the old
+///      point-read answered by accident when the pair was the whole key.
+/// What: `(subject, predicate)` prefix = `[subject_len: u16 BE][subject]
+///       [predicate_len: u16 BE][predicate]`. Because the predicate carries its
+///       own length prefix, a longer predicate sharing this one's leading bytes
+///       (`has_convention` vs `has_conventions`) does NOT fall inside the
+///       range.
+/// Test: `subject_predicate_prefix_excludes_a_longer_predicate`.
+pub fn subject_predicate_prefix(subject: &str, predicate: &str) -> Vec<u8> {
+    let s = subject.as_bytes();
+    let p = predicate.as_bytes();
+    let mut out = Vec::with_capacity(4 + s.len() + p.len());
+    out.extend_from_slice(&(s.len() as u16).to_be_bytes());
+    out.extend_from_slice(s);
+    out.extend_from_slice(&(p.len() as u16).to_be_bytes());
+    out.extend_from_slice(p);
+    out
+}
+
+/// Why: every prefix range scan over [`TRIPLES`] needs an exclusive upper
+///      bound, and every call site was building it the same way by hand.
+/// What: returns `prefix` with `0xFF` appended. Whatever follows the prefix in
+///       a real key is either UTF-8 text (`0xFF` is never a legal UTF-8 byte)
+///       or the high byte of a u16 length, which reaches `0xFF` only for a
+///       component of 65 280 bytes or more.
+/// Test: `subject_predicate_prefix_excludes_a_longer_predicate`.
+pub fn prefix_range_end(prefix: &[u8]) -> Vec<u8> {
+    let mut end = prefix.to_vec();
+    end.push(0xFF);
+    end
 }
 
 /// Why: The PAYLOADS table is keyed by `(segment, id)`; this helper produces
@@ -409,26 +607,56 @@ mod tests {
 
     #[test]
     fn round_trip_triple_key() {
-        let key = encode_triple_key("user:alice", "knows");
-        let (subject, predicate) = decode_triple_key(&key).expect("decode");
+        let key = encode_triple_key("user:alice", "knows", "user:bob");
+        let (subject, predicate, object) = decode_triple_key(&key).expect("decode");
         assert_eq!(subject, "user:alice");
         assert_eq!(predicate, "knows");
+        assert_eq!(object, "user:bob");
     }
 
     #[test]
-    fn round_trip_triple_key_empty_predicate() {
-        let key = encode_triple_key("subj", "");
-        let (s, p) = decode_triple_key(&key).expect("decode");
+    fn round_trip_triple_key_empty_components() {
+        let key = encode_triple_key("subj", "", "");
+        let (s, p, o) = decode_triple_key(&key).expect("decode");
         assert_eq!(s, "subj");
         assert_eq!(p, "");
+        assert_eq!(o, "");
+    }
+
+    #[test]
+    fn triple_key_separates_objects() {
+        // #4810: the whole point — two objects under one (subject, predicate)
+        // must be two distinct keys, both inside the pair's prefix range.
+        let a = encode_triple_key("room:General", "contains", "drawer:a");
+        let b = encode_triple_key("room:General", "contains", "drawer:b");
+        assert_ne!(a, b);
+        let prefix = subject_predicate_prefix("room:General", "contains");
+        assert!(a.starts_with(&prefix));
+        assert!(b.starts_with(&prefix));
     }
 
     #[test]
     fn decode_triple_key_rejects_truncated() {
         assert!(decode_triple_key(&[]).is_none());
         assert!(decode_triple_key(&[0u8]).is_none());
-        // length prefix says 10 bytes follow but only 2 do
+        // subject length prefix says 10 bytes follow but only 2 do
         assert!(decode_triple_key(&[0, 10, b'a', b'b']).is_none());
+        // subject decodes, but there is no predicate length prefix
+        assert!(decode_triple_key(&[0, 2, b'a', b'b']).is_none());
+        // predicate length prefix says 9 bytes follow but only 1 does
+        assert!(decode_triple_key(&[0, 2, b'a', b'b', 0, 9, b'p']).is_none());
+    }
+
+    #[test]
+    fn decode_legacy_triple_key_round_trips() {
+        // The pre-#4810 shape the migration reads: no predicate length prefix.
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&(5u16).to_be_bytes());
+        legacy.extend_from_slice(b"alice");
+        legacy.extend_from_slice(b"knows");
+        let (s, p) = decode_legacy_triple_key(&legacy).expect("decode legacy");
+        assert_eq!(s, "alice");
+        assert_eq!(p, "knows");
     }
 
     #[test]
@@ -437,9 +665,9 @@ mod tests {
         // and no triple for subject "alicia" should — even though "alicia" starts
         // with "alic" — because the length prefix differs.
         let prefix_alice = subject_prefix("alice");
-        let alice_knows = encode_triple_key("alice", "knows");
-        let alice_likes = encode_triple_key("alice", "likes");
-        let alicia_knows = encode_triple_key("alicia", "knows");
+        let alice_knows = encode_triple_key("alice", "knows", "bob");
+        let alice_likes = encode_triple_key("alice", "likes", "tea");
+        let alicia_knows = encode_triple_key("alicia", "knows", "bob");
 
         assert!(alice_knows.starts_with(&prefix_alice));
         assert!(alice_likes.starts_with(&prefix_alice));
@@ -447,14 +675,50 @@ mod tests {
     }
 
     #[test]
+    fn subject_predicate_prefix_excludes_a_longer_predicate() {
+        // The predicate's own length prefix is what keeps `has_convention`'s
+        // range from swallowing `has_conventions` rows.
+        let prefix = subject_predicate_prefix("proj", "has_convention");
+        let end = prefix_range_end(&prefix);
+        let inside = encode_triple_key("proj", "has_convention", "tabs");
+        let outside = encode_triple_key("proj", "has_conventions", "tabs");
+        assert!(inside.starts_with(&prefix));
+        assert!(!outside.starts_with(&prefix));
+        assert!(inside.as_slice() >= prefix.as_slice() && inside.as_slice() < end.as_slice());
+    }
+
+    #[test]
     fn subject_prefix_orders_lexicographically() {
         // BTreeMap-backed redb tables sort keys lexicographically. Length-
         // prefixed keys with the same length sort by content order.
-        let k1 = encode_triple_key("aaa", "p");
-        let k2 = encode_triple_key("aab", "p");
-        let k3 = encode_triple_key("bbb", "p");
+        let k1 = encode_triple_key("aaa", "p", "o");
+        let k2 = encode_triple_key("aab", "p", "o");
+        let k3 = encode_triple_key("bbb", "p", "o");
         assert!(k1 < k2);
         assert!(k2 < k3);
+    }
+
+    #[test]
+    fn functional_predicates_are_sorted_and_unique() {
+        // Sorted-and-unique is what makes the list reviewable; a duplicate
+        // would be a silent no-op and an out-of-order entry hides near-misses.
+        let mut sorted = FUNCTIONAL_PREDICATES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.as_slice(), FUNCTIONAL_PREDICATES);
+    }
+
+    #[test]
+    fn is_functional_predicate_defaults_to_multi_valued() {
+        assert!(is_functional_predicate("is_alias_for"));
+        assert!(is_functional_predicate("has_version"));
+        // #4810: the defect predicate, and every unlisted predicate, is
+        // multi-valued.
+        assert!(!is_functional_predicate("contains"));
+        assert!(!is_functional_predicate("works_at"));
+        assert!(!is_functional_predicate("knows"));
+        // Deliberately excluded — two manifests can name one subject.
+        assert!(!is_functional_predicate("has_language"));
     }
 
     #[test]
@@ -470,11 +734,20 @@ mod tests {
 
     #[test]
     fn predicate_index_key_orders_by_predicate() {
-        let k1 = encode_predicate_index_key("knows", "s1");
-        let k2 = encode_predicate_index_key("knows", "s2");
-        let k3 = encode_predicate_index_key("likes", "s0");
+        let k1 = encode_predicate_index_key("knows", "s1", "o");
+        let k2 = encode_predicate_index_key("knows", "s2", "o");
+        let k3 = encode_predicate_index_key("likes", "s0", "o");
         assert!(k1 < k2);
         assert!(k2 < k3);
+    }
+
+    #[test]
+    fn predicate_index_key_separates_objects() {
+        // #4810: one entry per (predicate, subject) meant retracting one
+        // object evicted the index entry the other object still needed.
+        let a = encode_predicate_index_key("contains", "room:General", "drawer:a");
+        let b = encode_predicate_index_key("contains", "room:General", "drawer:b");
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -611,6 +884,9 @@ mod tests {
             VECTORS.name(),
             VECTOR_KEYS.name(),
             DELETED_VECTORS.name(),
+            VECTOR_ID_SEQ.name(),
+            DRAWERS_BY_FACT_KEY.name(),
+            KG_SCHEMA.name(),
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

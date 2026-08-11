@@ -117,11 +117,17 @@ async fn reachable_today_matches_documented_set() {
     assert!(reachable_today("fireworks"));
     assert!(!reachable_today("openai"));
     assert!(!reachable_today("together"));
-    assert!(!reachable_today("atlascloud"));
-    // The registry's `local` provider (#3247) isn't wired into the legacy
+    // #3765 gave AtlasCloud its own `adapter_for_model` branch
+    // (api.atlascloud.ai + `ATLASCLOUD_API_KEY`), so it dispatches for real
+    // instead of falling through to OpenRouter with a slug OpenRouter does
+    // not serve.
+    assert!(reachable_today("atlascloud"));
+    // The registry's `local` provider (#3247) was not wired into the legacy
     // dispatch under its OWN name — only the synthetic `local.provider_id ==
-    // "ollama"` entry below is (via the `ollama/` prefix).
-    assert!(!reachable_today("local"));
+    // "ollama"` entry below was (via the `ollama/` prefix). #3765's
+    // `provider_pin::pinned_model_slug` normalises a `local` pin onto that
+    // same `ollama/` marker, so the two entries no longer disagree.
+    assert!(reachable_today("local"));
 
     assert_eq!(body["local"]["reachable_today"], true);
 }

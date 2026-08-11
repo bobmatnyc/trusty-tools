@@ -125,6 +125,73 @@ pub fn is_connection_refused(err: &io::Error) -> bool {
     ) || err.raw_os_error() == Some(ENOTSOCK)
 }
 
+/// Flatten a hardened-dial failure into the `io::Error` shape every `probe`
+/// caller already handles.
+///
+/// Why: `is_connection_refused` classifies on `ErrorKind` and raw errno, and
+/// `bind_singleton`'s stale-takeover branch depends on it. Wrapping every
+/// `UdsSecurityError` in `io::Error::other` would erase the kernel's `NotFound`
+/// for an absent socket and leave the controller unable to ever start.
+/// What: unwraps the two variants that carry the original `io::Error`; every
+/// other variant is preserved as the source of an `io::Error::other`, where
+/// [`is_untrusted_socket`] can still downcast to it.
+fn probe_error_from_uds(err: trusty_common::uds::UdsSecurityError) -> io::Error {
+    use trusty_common::uds::UdsSecurityError as E;
+    match err {
+        E::Connect { source, .. } | E::StatForConnect { source, .. } => source,
+        other => io::Error::other(other),
+    }
+}
+
+/// True when a probe error means the socket failed [`trusty_common::uds`]
+/// verification — wrong mode, wrong owner, a symlink, or not a socket at all.
+///
+/// Why: the dialer refuses to *talk* to such a socket (#5089 step 1a), but
+/// refusing alone would brick the project: nothing would ever replace the bad
+/// socket. Classifying it takeover-safe is what lets `bind_singleton` unlink it
+/// and bind a hardened one. Note this does NOT relax the check — the untrusted
+/// socket is still never written to.
+/// What: downcasts the `io::Error`'s source to `UdsSecurityError` and matches
+/// the one variant that means "the path exists but is not trustworthy".
+fn is_untrusted_socket(err: &io::Error) -> bool {
+    err.get_ref()
+        .and_then(|e| e.downcast_ref::<trusty_common::uds::UdsSecurityError>())
+        .is_some_and(|e| {
+            matches!(
+                e,
+                trusty_common::uds::UdsSecurityError::UntrustedSocket { .. }
+            )
+        })
+}
+
+/// True when the path holds nothing this process should preserve, **for a
+/// caller that owns the path and is about to bind it**.
+///
+/// 🔴 **Precondition — owner only.** Do not use this to decide whether to
+/// unlink a socket some *other* process may be serving. `UntrustedSocket`
+/// covers four socket-level reasons (wrong mode, wrong owner, symlink, not a
+/// socket) and one that is not about the socket at all: **the containing
+/// directory is not `0700`**. That last arm is true of a perfectly healthy
+/// `0600` socket with a live process behind it, condemned for its directory's
+/// mode. [`CtrlSocket::bind_singleton`] may act on it because it calls
+/// `prepare_socket_dir` *before* probing — so the directory arm is unreachable
+/// there — and because it binds the path it just unlinked. A caller with
+/// neither property must use [`is_connection_refused`], which fires only when
+/// the kernel says nobody is listening. #5089 review: the argv-forward client
+/// path used this predicate and unlinked live controllers.
+///
+/// Why: refusing to dial an unverifiable socket would otherwise brick the
+/// project — nothing would replace the bad socket. This is what lets the owner
+/// self-heal. It does not relax the check; the untrusted socket is still never
+/// written to.
+/// What: [`is_connection_refused`] OR a `UdsSecurityError::UntrustedSocket`.
+/// Test: `probe_refuses_a_socket_that_fails_verification`,
+/// `bind_singleton_takes_over_a_socket_that_fails_verification`,
+/// `a_live_controller_in_a_wide_directory_is_not_client_clobberable`.
+pub fn is_stale_socket_for_owner(err: &io::Error) -> bool {
+    is_connection_refused(err) || is_untrusted_socket(err)
+}
+
 /// Outcome of an attempt to become the singleton controller for a project.
 ///
 /// Why: `bind_singleton` has to distinguish three states the caller treats
@@ -155,14 +222,24 @@ impl CtrlSocket {
     /// Why: Lets the CLI determine "is a controller already running?" with
     /// a hard upper bound on latency. Used at startup before the process
     /// commits to becoming the controller itself.
-    /// What: Wraps `UnixStream::connect` in `tokio::time::timeout`. Returns
-    /// `Err(io::ErrorKind::TimedOut)` when the connect doesn't complete in
-    /// time so the caller can treat timeout the same as a non-listening
-    /// socket. All other connect errors propagate unchanged.
-    /// Test: `probe_times_out_when_no_listener`.
+    /// What: Wraps [`trusty_common::uds::connect_hardened`] in
+    /// `tokio::time::timeout`. Returns `Err(io::ErrorKind::TimedOut)` when the
+    /// connect doesn't complete in time so the caller can treat timeout the
+    /// same as a non-listening socket. All other connect errors propagate
+    /// unchanged.
+    ///
+    /// #5089 semantics change: a socket that exists but fails verification
+    /// (not `0600`, not owned by this uid, in a directory that is not `0700`)
+    /// is now an error rather than an open stream. Callers that classified the
+    /// old `ENOTSOCK`/`ConnectionRefused` errors with [`is_connection_refused`]
+    /// must use [`is_stale_socket_for_owner`] to keep treating "nothing usable is here"
+    /// as takeover-safe.
+    /// Test: `probe_times_out_when_no_listener`,
+    /// `probe_refuses_a_socket_that_fails_verification`,
+    /// `probe_succeeds_against_live_listener`.
     pub async fn probe(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
-        match tokio::time::timeout(timeout, UnixStream::connect(path)).await {
-            Ok(result) => result,
+        match tokio::time::timeout(timeout, trusty_common::uds::connect_hardened(path)).await {
+            Ok(result) => result.map_err(probe_error_from_uds),
             Err(_) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "ctrl socket probe timed out",
@@ -180,17 +257,19 @@ impl CtrlSocket {
     /// Why: Encapsulates parent-dir creation + stale-file cleanup + the
     /// actual bind, which would otherwise be duplicated between the
     /// controller startup path and any future "restart the listener" code.
-    /// What: Creates `~/.trusty-agents/sockets/`, removes any stale file at
-    /// `path`, then binds. Caller is responsible for `tokio::spawn`-ing the
-    /// accept loop and removing the socket file on shutdown.
-    /// Test: `bind_creates_listener_and_replaces_stale_file`.
+    /// What: removes any stale file at `path`, then binds through
+    /// [`trusty_common::uds::bind_hardened`], which creates
+    /// `~/.trusty-agents/sockets/` at `0700` and narrows the socket to `0600`
+    /// before the first accept (#5099 — this used to be `create_dir_all` plus a
+    /// bare bind, so both landed at the process umask). Caller is responsible
+    /// for `tokio::spawn`-ing the accept loop and removing the socket file on
+    /// shutdown.
+    /// Test: `bind_creates_listener_and_replaces_stale_file`,
+    /// `bind_produces_a_0600_socket_in_a_0700_dir`.
     pub async fn bind(path: &Path) -> io::Result<UnixListener> {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
         // Remove stale socket before binding (otherwise bind fails with EADDRINUSE).
         Self::cleanup(path);
-        UnixListener::bind(path)
+        trusty_common::uds::bind_hardened(path).map_err(io::Error::other)
     }
 
     /// Singleton-safe bind: probe first, only clobber a confirmed-dead socket.
@@ -213,16 +292,20 @@ impl CtrlSocket {
     /// `bind_singleton_binds_when_socket_absent`, and
     /// `bind_singleton_binds_over_stale_socket`.
     pub async fn bind_singleton(path: &Path, timeout: Duration) -> io::Result<BindOutcome> {
+        // #5099: harden the directory BEFORE probing. The probe can succeed
+        // against a socket sitting in a wide directory, and the takeover branch
+        // below must not be the only path that narrows it.
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            trusty_common::uds::prepare_socket_dir(parent).map_err(io::Error::other)?;
         }
         match Self::probe(path, timeout).await {
             // A controller answered — refuse to clobber; hand the stream back.
             Ok(stream) => Ok(BindOutcome::AlreadyRunning(stream)),
-            // Stale socket (or no socket at all): safe to take over.
-            Err(e) if is_connection_refused(&e) || e.kind() == io::ErrorKind::TimedOut => {
+            // Stale, unverifiable, or no socket at all: safe to take over.
+            Err(e) if is_stale_socket_for_owner(&e) || e.kind() == io::ErrorKind::TimedOut => {
                 Self::cleanup(path);
-                Ok(BindOutcome::Bound(UnixListener::bind(path)?))
+                let listener = trusty_common::uds::bind_hardened(path).map_err(io::Error::other)?;
+                Ok(BindOutcome::Bound(listener))
             }
             // Any other error (permission denied, etc.): do NOT clobber.
             Err(e) => Err(e),
@@ -252,6 +335,138 @@ impl CtrlSocket {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// #5099 regression: `CtrlSocket::bind` must produce a 0600 socket in a
+    /// 0700 directory. Against the pre-fix commit it used `create_dir_all`
+    /// plus a bare bind, so both landed at the process umask (0755/0755).
+    #[tokio::test]
+    async fn bind_produces_a_0600_socket_in_a_0700_dir() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sockets");
+        let sock = dir.join("p.ctrl.sock");
+
+        let _listener = CtrlSocket::bind(&sock).await.expect("bind");
+
+        let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode(&sock), 0o600, "ctrl socket must be 0600");
+        assert_eq!(mode(&dir), 0o700, "ctrl socket dir must be 0700");
+    }
+
+    /// #5099: the singleton path hardens the directory before probing, so a
+    /// takeover of a stale socket also lands 0600/0700.
+    #[tokio::test]
+    async fn bind_singleton_hardens_the_socket_it_takes_over() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sockets");
+        let sock = dir.join("p.ctrl.sock");
+
+        let outcome = CtrlSocket::bind_singleton_default(&sock)
+            .await
+            .expect("bind singleton");
+        assert!(
+            matches!(outcome, BindOutcome::Bound(_)),
+            "must win the race"
+        );
+
+        let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode(&sock), 0o600, "ctrl socket must be 0600");
+        assert_eq!(mode(&dir), 0o700, "ctrl socket dir must be 0700");
+    }
+
+    /// #5089 step 1a: the probe must not report a controller it cannot verify.
+    /// Against the pre-migration bare `UnixStream::connect` this returns the
+    /// open stream and the caller goes on to write NDJSON commands into it.
+    #[tokio::test]
+    async fn probe_refuses_a_socket_that_fails_verification() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("wide.ctrl.sock");
+        // Listener stays alive, so a bare connect would succeed.
+        let _listener = CtrlSocket::bind(&sock).await.expect("bind");
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666))
+            .expect("widen socket");
+
+        let err = CtrlSocket::probe_default(&sock)
+            .await
+            .expect_err("probe must refuse a socket that is not 0600");
+        assert!(
+            is_stale_socket_for_owner(&err),
+            "an unverifiable socket must be classified takeover-safe: {err}"
+        );
+    }
+
+    /// #5089 step 1a: the availability half of the refusal above. Refusing to
+    /// *dial* an unverifiable socket must not brick the project — the singleton
+    /// path unlinks it and binds a hardened replacement.
+    #[tokio::test]
+    async fn bind_singleton_takes_over_a_socket_that_fails_verification() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("wide.ctrl.sock");
+        let _stale = CtrlSocket::bind(&sock).await.expect("bind");
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666))
+            .expect("widen socket");
+
+        let outcome = CtrlSocket::bind_singleton_default(&sock)
+            .await
+            .expect("must take over rather than fail");
+        assert!(
+            matches!(outcome, BindOutcome::Bound(_)),
+            "an unverifiable socket must be replaced, not adopted"
+        );
+        let mode = std::fs::metadata(&sock).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the replacement socket must be 0600");
+    }
+
+    /// #5089 review, HIGH: the argv-forward client path must not unlink a live
+    /// controller's socket. A sockets directory at the process umask — the
+    /// pre-#5124 on-disk state of every upgrading install — makes the probe
+    /// fail on the *directory*, while the socket itself is a healthy 0600 with
+    /// a live listener behind it. `is_stale_socket_for_owner` says "take over"
+    /// here, which is correct only for `bind_singleton` (it hardens the
+    /// directory first and binds what it unlinks). The client predicate must
+    /// say no, and the incumbent must still be there afterwards.
+    #[tokio::test]
+    async fn a_live_controller_in_a_wide_directory_is_not_client_clobberable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sockets");
+        let sock = dir.join("incumbent.ctrl.sock");
+        let _incumbent = CtrlSocket::bind(&sock).await.expect("bind incumbent");
+        // Regress the directory to the pre-#5124 state. The socket is untouched.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("widen dir");
+
+        let err = CtrlSocket::probe_default(&sock)
+            .await
+            .expect_err("a wide directory must fail verification");
+        assert!(
+            !is_connection_refused(&err),
+            "the kernel never said nobody is home, so a client may NOT unlink: {err}"
+        );
+        assert!(
+            is_stale_socket_for_owner(&err),
+            "the owner predicate does fire here — that is why a client must not use it: {err}"
+        );
+
+        // Nothing unlinked the incumbent, and it was healthy all along: repair
+        // the directory and the very same listener answers.
+        assert!(
+            sock.exists(),
+            "the incumbent's socket must still be present"
+        );
+        trusty_common::uds::prepare_socket_dir(&dir).expect("repair dir");
+        let stream = CtrlSocket::probe_default(&sock)
+            .await
+            .expect("the incumbent must still be reachable once the dir is repaired");
+        drop(stream);
+    }
 
     #[test]
     fn sanitize_project_id_replaces_unsafe_chars() {
@@ -306,15 +521,21 @@ mod tests {
     #[tokio::test]
     async fn probe_times_out_when_no_listener() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("ghost.ctrl.sock");
+        // #5089: `tempfile::tempdir()` creates at the process umask (0755),
+        // not 0700, so the hardened dial refuses the *directory* before it
+        // ever looks for the socket. Lay the dir out the way the real
+        // `~/.trusty-agents/sockets/` is laid out.
+        let dir = tmp.path().join("sockets");
+        trusty_common::uds::prepare_socket_dir(&dir).expect("harden socket dir");
+        let path = dir.join("ghost.ctrl.sock");
         let result = CtrlSocket::probe(&path, Duration::from_millis(50)).await;
         // No file exists, so connect returns NotFound (or ConnectionRefused
         // on some platforms). Either way it should be classified as
-        // "controller not present" via `is_connection_refused`.
+        // "controller not present" via `is_stale_socket_for_owner`.
         let err = result.expect_err("expected probe failure");
         assert!(
-            is_connection_refused(&err) || err.kind() == io::ErrorKind::TimedOut,
-            "unexpected probe error kind: {:?}",
+            is_stale_socket_for_owner(&err) || err.kind() == io::ErrorKind::TimedOut,
+            "unexpected probe error kind: {:?} ({err})",
             err.kind()
         );
     }

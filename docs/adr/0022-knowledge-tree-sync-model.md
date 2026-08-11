@@ -5,6 +5,7 @@
 - **Scope:** Workspace-wide (trusty-agents multi-machine sync, trusty-tools monorepo policy)
 - **Reversibility Cost:** Low — the decision defers knowledge-tree sync to a follow-up; implementations of config-only (Phase 1–4 of DOC-56) are unaffected and remain shippable
 - **Decision Drivers:** Knowledge tree growth profile (unbounded, per DOC-55 extractors/connectors), storage coupling (config vs. corpus have opposite constraints), merge semantics (append-only ledgers produce multi-machine conflicts), data sensitivity (distinct content classes require distinct repos), independent lifecycle (knowledge trees are regenerable by ingest; configs are hand-curated)
+- **Supersedes / Superseded by:** —
 - **Closes DOC-56 §5.3:** Open question left for owner sign-off
 
 ## Context

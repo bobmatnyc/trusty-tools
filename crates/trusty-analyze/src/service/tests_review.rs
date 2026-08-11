@@ -1,8 +1,9 @@
-//! Integration tests for review, deep analysis, synthesis helpers, and webhook handlers.
+//! Integration tests for review, deep analysis, and synthesis helpers.
 //!
 //! Why: Split from `service/tests.rs` to keep both test files under the
 //! 500-line cap. This file covers `POST /review`, `POST /review/github-pr`,
-//! `POST /analyze/deep`, and `POST /webhooks/github`.
+//! and `POST /analyze/deep`, plus the regression test pinning that
+//! `POST /webhooks/github` is gone (#5181).
 //!
 //! What: Each test boots the router with a stub `TrustySearchClient` pointing
 //! at port 1 so any path through trusty-search returns 502, keeping tests
@@ -197,111 +198,30 @@ fn lookup_frameworks_reads_stored_facts() {
     assert_eq!(got, vec!["Next.js".to_string(), "React".to_string()]);
 }
 
+/// The retired webhook route answers 404, not 200-and-discard (#5181).
+///
+/// Why: this is the failure this deletion exists to avoid. A route removed by
+/// gutting its handler — left registered, answering 202, doing nothing — would
+/// look identical to a working webhook from GitHub's delivery log while every
+/// delivery vanished. Asserting the handler function is gone proves nothing
+/// about what the router does with the path, so this drives the real router
+/// and asserts the real response.
+///
+/// What: sends the request GitHub actually sends (POST, `X-GitHub-Event`, no
+/// `Origin`) at the retired path and requires 404. Before #5181 the same
+/// request reached `github_webhook_handler` and returned 401 (unset secret) —
+/// never 404 — so this test fails against the pre-fix state.
+/// Test: this is the test.
 #[tokio::test]
-async fn webhook_ignores_non_pr_event() {
-    // A `push` event is acknowledged with 202 but triggers no analysis.
-    // No webhook secret injected → signature verification is skipped, so
-    // the test is hermetic regardless of ambient env.
+async fn retired_webhook_route_is_not_registered() {
     let (state, _tmp) = make_state();
     let app = build_router(state);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/webhooks/github")
-                .header("X-GitHub-Event", "push")
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-}
-
-#[tokio::test]
-async fn webhook_ignores_non_actionable_pr_action() {
-    // A `pull_request` event with action `closed` is acknowledged but
-    // does not trigger a review. No webhook secret → verification skipped.
-    let (state, _tmp) = make_state();
-    let app = build_router(state);
-    let body = serde_json::json!({ "action": "closed" }).to_string();
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/webhooks/github")
-                .header("X-GitHub-Event", "pull_request")
-                .header("content-type", "application/json")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-}
-
-#[tokio::test]
-async fn webhook_rejects_bad_signature() {
-    // With a secret injected via app state, a wrong signature must 401.
-    // Injecting through state (not env) keeps the test hermetic and
-    // free of cross-test env-var races.
-    let (state, _tmp) = make_state();
-    let state = state.with_webhook_secret(Some("test-secret".to_string()));
-    let app = build_router(state);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/webhooks/github")
-                .header("X-GitHub-Event", "pull_request")
-                .header("X-Hub-Signature-256", "sha256=deadbeef")
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn webhook_accepts_valid_signature() {
-    // With a secret injected and a correctly-computed signature, the
-    // request passes verification (and is then 400 for missing PR data).
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let (state, _tmp) = make_state();
-    let state = state.with_webhook_secret(Some("test-secret".to_string()));
-    let app = build_router(state);
-    let body = serde_json::json!({ "action": "closed" }).to_string();
-    let mut mac = Hmac::<Sha256>::new_from_slice(b"test-secret").unwrap();
-    mac.update(body.as_bytes());
-    let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/webhooks/github")
-                .header("X-GitHub-Event", "pull_request")
-                .header("X-Hub-Signature-256", &sig)
-                .header("content-type", "application/json")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    // Valid signature → past auth; `closed` action → 202 (ignored).
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-}
-
-#[tokio::test]
-async fn webhook_rejects_malformed_pr_payload() {
-    // pull_request + opened, but no PR number / repo → 400.
-    // No webhook secret → verification skipped.
-    let (state, _tmp) = make_state();
-    let app = build_router(state);
-    let body = serde_json::json!({ "action": "opened" }).to_string();
+    let body = serde_json::json!({
+        "action": "opened",
+        "pull_request": { "number": 7, "head": { "sha": "abc123" } },
+        "repository": { "name": "trusty-tools", "owner": { "login": "bobmatnyc" } },
+    })
+    .to_string();
     let resp = app
         .oneshot(
             Request::builder()
@@ -314,5 +234,9 @@ async fn webhook_rejects_malformed_pr_payload() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "the retired webhook route must be unreachable, not silently accepting"
+    );
 }

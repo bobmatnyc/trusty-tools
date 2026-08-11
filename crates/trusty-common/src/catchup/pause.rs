@@ -9,11 +9,16 @@
 //! a session this module writes round-trips through the existing reader
 //! unchanged.
 //! What: [`write_pause_snapshot`] writes `session-YYYYMMDD-HHMMSS.md` under
-//! `<project_dir>/.trusty-mpm/sessions/` and appends the matching `pause` line
-//! to `sessions-log.jsonl` via [`crate::catchup::session_log::append_entry`].
+//! `<project_dir>/.trusty-mpm/sessions/<session-id>/` and appends the matching
+//! `pause` line to `sessions-log.jsonl` via
+//! [`crate::catchup::session_log::append_entry`], recording the snapshot path
+//! relative to the store root so the log stays the attribution index for both
+//! the per-session and the pre-#5272 flat layout.
 //! Test: `write_pause_snapshot_round_trips_through_reader`,
 //! `write_pause_snapshot_omits_empty_sections`,
-//! `write_pause_snapshot_appends_log_entry`.
+//! `write_pause_snapshot_appends_log_entry`,
+//! `write_pause_snapshot_writes_under_session_dir`,
+//! `write_pause_snapshot_falls_back_to_root_for_unsafe_id`.
 
 use std::path::{Path, PathBuf};
 
@@ -91,27 +96,53 @@ fn render_bullet_section(header: &str, items: &[String]) -> Option<String> {
 /// Why: the single write-side entry point for `session_context_pause` — keeps
 /// the markdown shape and the log append atomic-ish (write-then-append, same
 /// order the bash skill used) and in one auditable place.
-/// What: creates `<project_dir>/.trusty-mpm/sessions/` if needed, captures
-/// git status via [`capture_git_status`] for the `## Git Context` section,
-/// writes `session-<UTC timestamp>.md` with `## Summary` (always present,
-/// even if `input.summary` is empty — the caller contract requires a
+/// What: creates `<project_dir>/.trusty-mpm/sessions/<session-id>/` if needed,
+/// captures git status via [`capture_git_status`] for the `## Git Context`
+/// section, writes `session-<UTC timestamp>.md` with `## Summary` (always
+/// present, even if `input.summary` is empty — the caller contract requires a
 /// non-empty summary) followed by `## Completed` / `## In Progress` /
 /// `## Next Steps` / `## Git Context` / `## Tmux Window`, each omitted when it
-/// would be empty, then appends a `pause` [`SessionLogEntry`] naming the new
-/// file. Returns the resolved path and timestamp.
+/// would be empty, then appends a `pause` [`SessionLogEntry`] whose `snapshot`
+/// is the new file's path RELATIVE to the store root. Returns the resolved
+/// absolute path and timestamp.
+///
+/// #5272: a session id that cannot be a directory name (see
+/// [`session_log::session_dir_name`]) writes flat at the store root instead,
+/// with a warning — mangling it into a safe name would let two ids share one
+/// directory, which is the crosstalk this change exists to remove. Attribution
+/// is unaffected either way: the log line, not the location, is what
+/// [`session_log::resolve_session_snapshot`] reads.
 /// Test: `write_pause_snapshot_round_trips_through_reader`,
 /// `write_pause_snapshot_omits_empty_sections`,
-/// `write_pause_snapshot_appends_log_entry`.
+/// `write_pause_snapshot_appends_log_entry`,
+/// `write_pause_snapshot_writes_under_session_dir`,
+/// `write_pause_snapshot_falls_back_to_root_for_unsafe_id`.
 pub fn write_pause_snapshot(
     project_dir: &Path,
     input: &PauseSnapshotInput<'_>,
 ) -> anyhow::Result<PauseSnapshotOutcome> {
     let sessions_dir = project_dir.join(".trusty-mpm").join("sessions");
-    std::fs::create_dir_all(&sessions_dir)?;
 
     let now = Utc::now();
-    let filename = format!("session-{}.md", now.format("%Y%m%d-%H%M%S"));
-    let snapshot_path = sessions_dir.join(&filename);
+    let basename = format!("session-{}.md", now.format("%Y%m%d-%H%M%S"));
+    // #5272: snapshots live under `sessions/<session-id>/` so the store is
+    // partitioned by owner, not just indexed by it.
+    let relative = match session_log::session_dir_name(input.session_id) {
+        Some(dir) => format!("{dir}/{basename}"),
+        None => {
+            tracing::warn!(
+                session_id = input.session_id,
+                "session id is not usable as a directory name; writing the pause \
+                 snapshot flat at the store root (attribution still comes from \
+                 sessions-log.jsonl)"
+            );
+            basename
+        }
+    };
+    let snapshot_path = sessions_dir.join(&relative);
+    if let Some(parent) = snapshot_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     let git = capture_git_status(project_dir);
     let mut git_context = String::new();
@@ -160,7 +191,7 @@ pub fn write_pause_snapshot(
         &SessionLogEntry {
             session_id: input.session_id.to_string(),
             event: session_log::EVENT_PAUSE.to_string(),
-            snapshot: filename,
+            snapshot: relative,
             timestamp: now.to_rfc3339(),
         },
     )?;
@@ -278,9 +309,84 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].session_id, "s-log");
         assert_eq!(entries[0].event, session_log::EVENT_PAUSE);
+        // #5272: the log records the path relative to the store root, not a
+        // bare basename, so one containment-checked join serves both layouts.
         assert_eq!(
-            entries[0].snapshot,
-            outcome.snapshot_path.file_name().unwrap().to_str().unwrap()
+            sessions_dir.join(&entries[0].snapshot),
+            outcome.snapshot_path
+        );
+    }
+
+    /// Why: #5272 — the store is partitioned by owner, and the log entry must
+    /// record the path relative to the store root so resolution stays a single
+    /// containment-checked join across both layouts.
+    /// What: the file lands under `sessions/<session-id>/`, the log entry names
+    /// `<session-id>/<basename>`, and the pair round-trips back through
+    /// `resolve_session_snapshot` to the same path.
+    /// Test: itself.
+    #[test]
+    fn write_pause_snapshot_writes_under_session_dir() {
+        let tmp = TempDir::new().unwrap();
+        let id = "7bd5c27a-475b-41df-9e9f-a6f630801717";
+        let input = PauseSnapshotInput {
+            session_id: id,
+            summary: "Summary.",
+            completed: &[],
+            in_progress: &[],
+            next_steps: &[],
+            tmux_window: None,
+        };
+        let outcome = write_pause_snapshot(tmp.path(), &input).unwrap();
+        let sessions_dir = tmp.path().join(".trusty-mpm").join("sessions");
+        assert_eq!(
+            outcome.snapshot_path.parent().unwrap(),
+            sessions_dir.join(id),
+            "snapshot belongs to its session's directory"
+        );
+
+        let entries = session_log::read_log(&sessions_dir);
+        assert_eq!(entries.len(), 1);
+        let basename = outcome.snapshot_path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(entries[0].snapshot, format!("{id}/{basename}"));
+
+        assert_eq!(
+            session_log::resolve_session_snapshot(&sessions_dir, id, "md").as_ref(),
+            Some(&outcome.snapshot_path),
+        );
+        assert_eq!(
+            session_log::resolve_session_snapshot(&sessions_dir, "someone-else", "md"),
+            None,
+        );
+    }
+
+    /// Why: #5272 — an id that cannot be a directory name is never mangled into
+    /// one, because two ids collapsing onto one directory is the crosstalk this
+    /// change removes. The pause still succeeds and stays attributable.
+    /// What: a `/`-bearing id writes flat at the store root and resolves for
+    /// itself through the log, and for no one else.
+    /// Test: itself.
+    #[test]
+    fn write_pause_snapshot_falls_back_to_root_for_unsafe_id() {
+        let tmp = TempDir::new().unwrap();
+        let id = "weird/id";
+        let input = PauseSnapshotInput {
+            session_id: id,
+            summary: "Summary.",
+            completed: &[],
+            in_progress: &[],
+            next_steps: &[],
+            tmux_window: None,
+        };
+        let outcome = write_pause_snapshot(tmp.path(), &input).unwrap();
+        let sessions_dir = tmp.path().join(".trusty-mpm").join("sessions");
+        assert_eq!(outcome.snapshot_path.parent().unwrap(), sessions_dir);
+        assert_eq!(
+            session_log::resolve_session_snapshot(&sessions_dir, id, "md").as_ref(),
+            Some(&outcome.snapshot_path),
+        );
+        assert_eq!(
+            session_log::resolve_session_snapshot(&sessions_dir, "other", "md"),
+            None,
         );
     }
 

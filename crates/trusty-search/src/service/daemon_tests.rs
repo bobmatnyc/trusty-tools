@@ -353,3 +353,143 @@ async fn run_daemon_isolated_instance_never_pollutes_shared_discovery() {
         "isolated instance's own http_addr file must be removed on shutdown"
     );
 }
+
+/// #4827: a line with no `=` used to be dropped in silence, so a typo cost the
+/// operator the setting and reported nothing. The parser must hand malformed
+/// lines back with their line numbers so the caller can warn.
+#[test]
+fn parse_daemon_env_reports_malformed_lines() {
+    let (pairs, malformed) = super::parse_daemon_env(
+        "# comment\n\
+         TRUSTY_MEMORY_LIMIT_MB=512\n\
+         \n\
+         TRUSTY_MAX_CHUNKS 100000\n\
+         TRUSTY_DEVICE = cpu \n",
+    );
+    assert_eq!(
+        pairs,
+        vec![
+            ("TRUSTY_MEMORY_LIMIT_MB".to_string(), "512".to_string()),
+            ("TRUSTY_DEVICE".to_string(), "cpu".to_string()),
+        ],
+        "keys and values must be trimmed; comments and blanks skipped"
+    );
+    assert_eq!(
+        malformed,
+        vec![(4, "TRUSTY_MAX_CHUNKS 100000".to_string())],
+        "a line with no `=` must be reported, not swallowed"
+    );
+}
+
+/// A typo'd credential assignment must not put the secret in the log.
+///
+/// `daemon.env` holds live provider keys. Writing `OPENROUTER_API_KEY sk-…`
+/// instead of `OPENROUTER_API_KEY=sk-…` lands in the malformed arm, which used
+/// to log the line verbatim — leaking the key in cleartext to anyone who can
+/// read the daemon log.
+#[test]
+fn malformed_line_summary_redacts_a_typod_credential() {
+    let secret = "sk-or-v1-0123456789abcdef0123456789abcdef";
+    let summary = super::malformed_line_summary(&format!("OPENROUTER_API_KEY {secret}"));
+
+    assert!(
+        !summary.contains(secret),
+        "the secret must never reach the log, got: {summary}"
+    );
+    assert!(
+        !summary.contains("sk-or"),
+        "not even a prefix of the secret may survive, got: {summary}"
+    );
+    assert!(
+        summary.contains("OPENROUTER_API_KEY"),
+        "the key name is the whole point of the diagnostic, got: {summary}"
+    );
+}
+
+/// A bare token on its own line has no key name to report, so nothing but the
+/// length may be logged — the leading token IS the secret in that case.
+#[test]
+fn malformed_line_summary_redacts_a_bare_secret() {
+    let secret = "sk-or-v1-0123456789abcdef";
+    let summary = super::malformed_line_summary(secret);
+
+    assert!(
+        !summary.contains(secret) && !summary.contains("sk-or"),
+        "a bare secret must degrade to a length-only summary, got: {summary}"
+    );
+    assert_eq!(summary, "25 chars", "got: {summary}");
+}
+
+/// The common case — a fumbled separator on an ordinary setting — must still
+/// name the setting, or the warning tells the operator nothing actionable.
+#[test]
+fn malformed_line_summary_names_a_conventional_key() {
+    let summary = super::malformed_line_summary("TRUSTY_MAX_CHUNKS 100000");
+    assert!(summary.contains("TRUSTY_MAX_CHUNKS"), "got: {summary}");
+    assert!(
+        !summary.contains("100000"),
+        "the value is never this function's to reproduce, got: {summary}"
+    );
+}
+
+/// #4827: the early pass must skip exactly the keys whose value a CLI flag
+/// stamps in after parsing, plus `TRUSTY_DATA_DIR` — which decides where
+/// `daemon.env` itself lives, so applying it early would let the production
+/// data dir's file redirect a `--data-dir /tmp/isolated` run at production data.
+#[test]
+fn early_load_skips_flag_derived_keys() {
+    for key in [
+        "TRUSTY_DATA_DIR",
+        "TRUSTY_DEVICE",
+        "TRUSTY_SEARCH_FANOUT_CONCURRENCY",
+    ] {
+        assert!(
+            super::EARLY_LOAD_EXCLUDED_ENV.contains(&key),
+            "{key} must stay on the post-parse pass so the CLI flag still wins"
+        );
+    }
+    assert!(
+        !super::EARLY_LOAD_EXCLUDED_ENV.contains(&"TRUSTY_NO_AUTO_DISCOVER"),
+        "TRUSTY_NO_AUTO_DISCOVER is the setting #4827 exists to make work"
+    );
+}
+
+/// #4827: the daemon path is the only one that may source `daemon.env`.
+#[test]
+fn argv_selects_daemon_start_for_the_daemon_path() {
+    let argv = |args: &[&str]| -> Vec<String> {
+        std::iter::once("trusty-search")
+            .chain(args.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    };
+    assert!(super::argv_selects_daemon_start(&argv(&["start"])));
+    assert!(super::argv_selects_daemon_start(&argv(&[
+        "start",
+        "--foreground",
+        "--port",
+        "7878"
+    ])));
+    assert!(
+        super::argv_selects_daemon_start(&argv(&["--verbose", "start"])),
+        "a leading global flag must not hide the subcommand"
+    );
+
+    // A client subcommand must not inherit the daemon's environment —
+    // TRUSTY_INDEX in daemon.env would otherwise repoint every CLI query.
+    for cmd in ["query", "status", "serve", "doctor", "index"] {
+        assert!(
+            !super::argv_selects_daemon_start(&argv(&[cmd])),
+            "{cmd} must not source daemon.env"
+        );
+    }
+    assert!(!super::argv_selects_daemon_start(&argv(&[])));
+
+    // `-i start` passes "start" as the VALUE of --index, not as the subcommand.
+    assert!(!super::argv_selects_daemon_start(&argv(&[
+        "-i", "start", "query", "x"
+    ])));
+    assert!(!super::argv_selects_daemon_start(&argv(&[
+        "--index", "start", "status"
+    ])));
+}

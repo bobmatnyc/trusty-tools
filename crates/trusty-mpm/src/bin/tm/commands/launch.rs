@@ -92,13 +92,19 @@ impl Drop for LaunchSessionGuard {
 /// session with the daemon, prints the banner, creates a detached tmux session
 /// running `claude` in the managed clone, and `attach`es to it. Errors with a
 /// `tm connect` hint when the directory has no parseable GitHub remote.
+///
+/// #5274: `worktree` is the operator's explicit request for isolation
+/// (`tm launch --worktree`). Without it the session runs in the project's own
+/// checkout and no clone is made — the sentence above about the live checkout
+/// never being touched describes the `--worktree` branch only.
 /// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`,
-/// `cli_parses_launch_with_style`.
+/// `cli_parses_launch_with_style`, `cli_parses_launch_with_worktree`.
 pub(crate) async fn launch(
     client: &reqwest::Client,
     url: &str,
     dir: Option<String>,
     style: Option<String>,
+    worktree: bool,
 ) -> anyhow::Result<()> {
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
@@ -166,20 +172,22 @@ pub(crate) async fn launch(
     //    via the daemon's `spawn_managed_inproject` path — both converge on the
     //    SAME base clone at `~/trusty-mpm-projects/<owner>/<repo>/` and the SAME
     //    per-session worktree at `<base>/.worktrees/<session-id>/`.
-    //    #4300: `provision_for_launch` consults the per-project `worktree`
-    //    opt-out (#3455) FIRST — a project registered with `worktree: false`
-    //    gets neither a base clone nor a worktree here, exactly as the daemon's
-    //    `spawn_managed_on_main` gives it neither. It also resolves the repo
-    //    ROOT of `live_path` (so `tm launch` from a subdirectory of an
-    //    opted-out project deploys to the project, not the subdirectory) and
-    //    owns the uncommitted-changes notice, which only applies when there
-    //    IS a clone.
+    //    #5274: the base clone and worktree are provisioned ONLY when the
+    //    operator passed `--worktree`. Without it the session runs in the
+    //    project's main checkout, matching what the daemon's
+    //    `spawn_managed_routed` does for a spawn carrying no worktree request —
+    //    the project's `worktree` flag is deliberately not consulted here, since
+    //    it governs agent isolation rather than session placement.
+    //    `provision_for_launch` also resolves the repo ROOT of `live_path` (so
+    //    `tm launch` from a subdirectory deploys to the project, not the
+    //    subdirectory) and owns the uncommitted-changes notice, which only
+    //    applies when there IS a clone.
     let session_uuid = trusty_mpm::session_manager::ManagedSessionId::new();
     let workspace = super::managed_workspace::provision_for_launch(
-        &trusty_mpm::project::registry_data_dir(),
         &origin_url,
         &project_dir,
         &live_path,
+        worktree,
         &session_uuid,
     )
     .await?;
@@ -192,7 +200,7 @@ pub(crate) async fn launch(
     //     worktree (the harness cwd, set at step 12) rather than `$HOME` — the
     //     `claude` spawned at step 13 carries `--setting-sources project,local`
     //     and would never read a `$HOME/.claude` deploy.
-    {
+    let config_dir = {
         match trusty_mpm::core::session_launch::prepare_isolated_session(
             &managed_path,
             Some(&origin_url),
@@ -219,15 +227,11 @@ pub(crate) async fn launch(
                     managed_path.display()
                 );
             }
-        }
-        // Pre-seed workspace trust so claude starts without blocking prompts.
-        if let Err(e) = trusty_mpm::core::home_trust_seed::preseed_home_trust(&managed_path) {
-            tracing::warn!(
-                "home trust pre-seed failed for {} (non-fatal): {e}",
-                managed_path.display()
-            );
-        }
-    }
+        };
+        // #4181: relocate CLAUDE_CONFIG_DIR and seed trust into the file the
+        // relocated session actually reads.
+        relocate_config_dir(&managed_path)
+    };
     let managed_workdir = managed_path.to_string_lossy().to_string();
 
     // 8. Write project-scoped MPM hooks into the managed clone (NOT the live checkout).
@@ -290,7 +294,14 @@ pub(crate) async fn launch(
     //     receives is built below and written by `prepare_isolated_session`.
 
     // Resolve the PM model (config > frontmatter > default).
-    let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_default();
+    // #5207: `load_effective_default` folds the project's committed
+    // `.trusty-mpm.toml` and the previously-orphaned `config.yaml`
+    // `default_model` into the same chain, so both actually reach a launch
+    // instead of being written and ignored. It resolves the framework root
+    // internally: the #4203 guard forbids this file from naming the framework
+    // paths' default constructor at all, and matches on source text, so even a
+    // comment spelling that symbol out would trip it.
+    let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(&managed_path));
     let pm_model = trusty_mpm::core::model_inject::resolve_pm_model(&mpm_cfg, None);
 
     // Build the `--append-system-prompt` text from the managed clone (where the
@@ -308,9 +319,15 @@ pub(crate) async fn launch(
     // disclaim-exec so tccd blames Claude Code, not the tmux server. No-op off
     // macOS / under TM_DISABLE_SPAWN_DISCLAIM.
     let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
+        // #4181: `config_dir` selects `--setting-sources user,project,local` and
+        // carries the #2246 OAuth token; `None` keeps the pre-#4181 posture.
         &trusty_mpm::core::model_inject::build_claude_command(
             Some(&pm_model),
             prompt_path.as_deref(),
+            config_dir.as_deref(),
+            // #4181: the per-project MCP pins the shared user-scope declarations
+            // cannot carry as arguments.
+            &trusty_mpm::core::mcp_session_env::session_mcp_env(&managed_path, Some(&origin_url)),
         ),
     );
 
@@ -477,6 +494,9 @@ pub(crate) async fn connect(
             );
         }
     }
+    // #4181: same relocation `tm launch` performs — `tm connect` reads the same
+    // user-tier MCP declaration and needs the same #1269 isolation posture.
+    let config_dir = relocate_config_dir(&path);
 
     // 1d. Build the PM system-prompt text for the live checkout (where 1c just
     //     deployed the framework) and write it to a temp file for
@@ -566,9 +586,13 @@ pub(crate) async fn connect(
         // #2997: disclaim the pane's `claude` off the shared tmux server (same
         // wrapper the daemon + `tm launch` paths use). No-op off macOS / under
         // TM_DISABLE_SPAWN_DISCLAIM.
-        let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
-            &connect_claude_cmd(prompt_path.as_deref()),
-        );
+        let claude_cmd =
+            trusty_mpm::core::spawn_disclaim::disclaim_pane_command(&connect_claude_cmd(
+                prompt_path.as_deref(),
+                config_dir.as_deref(),
+                // #4181: the per-project MCP pins.
+                &trusty_mpm::core::mcp_session_env::session_mcp_env(&path, None),
+            ));
         let send = trusty_mpm::core::tmux::send_line(
             None,
             &trusty_mpm::core::tmux::TmuxTarget::session(&tmux_name),
@@ -599,13 +623,50 @@ pub(crate) async fn connect(
 /// `launch`'s own `claude_cmd`) already has.
 /// What: thin wrapper over [`trusty_mpm::core::model_inject::build_claude_command`]
 /// with no `--model` override (`connect` does not resolve a PM model tier);
-/// always carries `SETTING_SOURCES_FLAG` (`--setting-sources project,local`)
-/// and `PERMISSION_MODE_FLAG` (`--dangerously-skip-permissions`), plus
+/// always carries the `--setting-sources` flag matching `config_dir` and
+/// `PERMISSION_MODE_FLAG` (`--dangerously-skip-permissions`), plus
 /// `--append-system-prompt-file <path>` when `prompt_file` is `Some`.
+///
+/// #4181: `config_dir` is `Some` whenever the tm-owned config home resolves, in
+/// which case the line relocates `CLAUDE_CONFIG_DIR` and carries
+/// `--setting-sources user,project,local`; `None` (unresolvable home) keeps the
+/// pre-#4181 `project,local`.
 /// Test: `cli_parses_connect`, `cli_parses_connect_with_dir` (in
 /// `tests_behavior_b_tests.rs`) assert both flags are present in the output.
-pub(crate) fn connect_claude_cmd(prompt_file: Option<&std::path::Path>) -> String {
-    trusty_mpm::core::model_inject::build_claude_command(None, prompt_file)
+pub(crate) fn connect_claude_cmd(
+    prompt_file: Option<&std::path::Path>,
+    config_dir: Option<&std::path::Path>,
+    mcp_env: &[(String, String)],
+) -> String {
+    trusty_mpm::core::model_inject::build_claude_command(None, prompt_file, config_dir, mcp_env)
+}
+
+/// Relocate `CLAUDE_CONFIG_DIR` for an interactive launch, provisioning and
+/// trust-seeding it.
+///
+/// Why (issue #4181): thin binary-side wrapper so `tm launch` and `tm connect`
+/// share one call rather than two copies of the same sequence. Why relocation
+/// preserves #1269 lives on the library function.
+/// What: delegates to
+/// [`trusty_mpm::core::managed_config::prepare_interactive_config_dir`], then
+/// warns once when the spawn will relocate with no resolvable
+/// `CLAUDE_CODE_OAUTH_TOKEN` — the #2246 shape where a Keychain credential
+/// stored under the operator's default config dir is unreadable under the
+/// relocated one.
+/// Test: `core::managed_config`'s `interactive_config_dir_*` tests.
+fn relocate_config_dir(workspace: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = trusty_mpm::core::managed_config::prepare_interactive_config_dir(workspace);
+    // #2246: relocating moves which Keychain entry `claude` reads. Say so once
+    // rather than let the session present as "logged in, then not logged in".
+    if dir.is_some() && trusty_mpm::core::oauth_token::resolve_oauth_token().is_none() {
+        eprintln!(
+            "warning: no CLAUDE_CODE_OAUTH_TOKEN resolved; this session reads the \
+             keychain entry keyed to the tm-managed config dir. If it starts \
+             unauthenticated, run `claude setup-token | tm auth set-token` \
+             (see issue #2246)."
+        );
+    }
+    dir
 }
 
 /// Find the first LIVE session whose `workdir` matches `workdir` (exact) or lies

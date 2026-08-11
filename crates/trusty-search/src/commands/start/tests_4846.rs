@@ -7,12 +7,16 @@
 //! that machine's 248 roots, 55 dead entries, and a live 70k-chunk index
 //! starved behind the backlog for the better part of an hour.
 //!
-//! So the assertion here is a RATIO measured in-process: the test builds a
-//! tracked-root tree deep enough for one walk to be measurable, times a single
-//! walk, then times a whole warm boot carrying many dead entries and requires
-//! the boot to cost a small multiple of ONE walk. Against the pre-fix code that
-//! multiple is the dead-entry count. Self-calibrating, so it does not depend on
-//! this machine being any particular speed.
+//! Both tests originally asserted a wall-clock ratio — boot time against a
+//! multiple of one timed walk. #5084 replaced that with a COUNT of walks. The
+//! clock could not work: a contended post-fix boot measured 416–435 ms (once
+//! 833 ms) while the pre-fix cost is 24 walks ≈ 340–400 ms, so every ceiling
+//! that cleared the false reds also cleared the real regression. The count has
+//! no such overlap — post-fix a boot walks the tracked roots once (or, with
+//! salvage disabled, not at all); pre-fix it walked them 24 times.
+//!
+//! The timings survive as a printed diagnostic (`--nocapture`) so cost erosion
+//! stays observable, but nothing asserts on them.
 //!
 //! Test: the two tests below.
 
@@ -67,6 +71,25 @@ fn make_live_root(base: &Path, name: &str) -> PathBuf {
     root
 }
 
+/// Print what the boot cost, on PASS as well as on failure (#5084).
+///
+/// Why: the wall-clock ceiling is gone as a gate, but the numbers behind it are
+/// still the early warning that the boot path is getting more expensive. A
+/// passing run used to print nothing, so margin erosion was invisible until the
+/// day it turned red. `former_ceiling` is the value the retired assertion would
+/// have compared against — a reference point for reading the numbers, not a
+/// threshold anything checks.
+/// What: writes one line to stderr. Shown by `cargo test -- --nocapture`, and
+/// replayed automatically by libtest for a failing test.
+fn report_cost(test: &str, boot: Duration, one_walk: Duration, walks: usize, multiple: u32) {
+    let former_ceiling = std::cmp::max(one_walk * multiple, Duration::from_millis(250));
+    eprintln!(
+        "#4846 cost report [{test}]: boot={boot:?} one_walk={one_walk:?} \
+         tracked_root_walks={walks} (retired wall-clock ceiling was {former_ceiling:?}, \
+         non-gating since #5084)"
+    );
+}
+
 /// Why (#4846, the acceptance test): a live index must come up on a boot whose
 /// registry is dominated by dead entries, and it must not wait behind them.
 /// Before the fix, warm-boot walked entries in registry order under one shared
@@ -78,9 +101,10 @@ fn make_live_root(base: &Path, name: &str) -> PathBuf {
 ///
 /// What: writes an `indexes.toml` whose dead entries come FIRST (the adversarial
 /// order — the pre-fix code would process them first), boots, and asserts (a)
-/// the live index is registered, and (b) the whole boot costs no more than a
-/// small multiple of ONE relocation walk timed in this same process. Against
-/// the pre-fix code (b) fails by roughly `DEAD_ENTRIES`x.
+/// the live index is registered, and (b) the boot performed at most ONE
+/// tracked-root relocation walk. Against the pre-fix code (b) counts
+/// `DEAD_ENTRIES` walks. #5084 replaced a wall-clock form of (b) that no ceiling
+/// could separate from a contended pass.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::serial]
@@ -116,16 +140,29 @@ async fn dead_entries_do_not_consume_the_live_index_budget() {
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(16));
     let state = SearchAppState::new(IndexRegistry::new());
 
+    // #5084: count the boot's tracked-root walks. Armed after the reference
+    // walk above so the count covers the boot and nothing else, and scoped to
+    // this test's tempdir so a parallel sibling's scan cannot inflate it.
+    let probe = crate::service::fs_discovery::walk_probe::WalkProbe::watching(work.path());
     let boot_started = Instant::now();
     // `no_auto_discover = true` keeps the colocated discovery scan out of the
     // measurement — this test is about the relocation walk, not discovery.
     super::restore::restore_indexes(&state, &embedder, true).await;
     let boot = boot_started.elapsed();
+    let walks = probe.walks();
 
     unsafe {
         std::env::remove_var("TRUSTY_DATA_DIR");
         std::env::remove_var("TRUSTY_DISABLE_WATCHER");
     }
+
+    report_cost(
+        "dead_entries_do_not_consume_the_live_index_budget",
+        boot,
+        one_walk,
+        walks,
+        6,
+    );
 
     assert!(
         state.registry.get(&IndexId::new("live-index")).is_some(),
@@ -133,17 +170,15 @@ async fn dead_entries_do_not_consume_the_live_index_budget() {
          precede it in indexes.toml (issue #4846)"
     );
 
-    // The budget assertion. Post-fix the boot pays at most ONE walk (the shared
-    // salvage scan); pre-fix it paid one per dead entry. 6x leaves room for the
-    // live restore and scheduler noise while staying far below 24x. The 250 ms
-    // floor keeps a very fast filesystem from making the ceiling absurdly tight
-    // without ever letting it approach the pre-fix cost.
-    let ceiling = std::cmp::max(one_walk * 6, Duration::from_millis(250));
+    // The budget assertion. Post-fix the whole cohort shares ONE salvage walk;
+    // pre-fix every dead entry paid its own, so this counts `DEAD_ENTRIES`.
+    // Counting the walks rather than timing them is what makes the check
+    // load-independent (#5084) — 1 and 24 do not overlap at any machine speed.
     assert!(
-        boot <= ceiling,
-        "warm boot took {boot:?} with {DEAD_ENTRIES} dead entries, but ONE relocation \
-         walk costs {one_walk:?} — the walk is being repeated per dead entry instead of \
-         shared across the boot (issue #4846). Ceiling was {ceiling:?}."
+        walks <= 1,
+        "warm boot walked the tracked roots {walks} times with {DEAD_ENTRIES} dead \
+         entries — the walk must be shared across the boot, not repeated per dead \
+         entry (issue #4846). One walk costs {one_walk:?}; the boot took {boot:?}."
     );
 }
 
@@ -153,9 +188,11 @@ async fn dead_entries_do_not_consume_the_live_index_budget() {
 /// triage stat and NOTHING else — no relocation walk at all — while every live
 /// index still comes up.
 /// What: same registry shape with salvage disabled; asserts the live index is
-/// registered and the boot costs less than a single walk. Against the pre-fix
-/// code there was no way to disable the per-entry walk, so the boot cost
-/// `DEAD_ENTRIES` walks regardless of any environment variable.
+/// registered and the boot performed ZERO tracked-root walks. Against the
+/// pre-fix code there was no way to disable the per-entry walk, so the boot
+/// walked `DEAD_ENTRIES` times regardless of any environment variable. #5084
+/// replaced a wall-clock form of the second assertion — "nothing but a stat" is
+/// a claim about work done, and zero is the exact number that claim names.
 /// Test: this test.
 #[tokio::test]
 #[serial_test::serial]
@@ -190,9 +227,13 @@ async fn disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat() {
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(16));
     let state = SearchAppState::new(IndexRegistry::new());
 
+    // #5084: see the sibling test — armed after the reference walk, scoped to
+    // this test's tempdir.
+    let probe = crate::service::fs_discovery::walk_probe::WalkProbe::watching(work.path());
     let boot_started = Instant::now();
     super::restore::restore_indexes(&state, &embedder, true).await;
     let boot = boot_started.elapsed();
+    let walks = probe.walks();
 
     // Read the registry BEFORE clearing TRUSTY_DATA_DIR — otherwise this
     // resolves to the operator's real registry rather than the test's.
@@ -204,16 +245,23 @@ async fn disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat() {
         std::env::remove_var(crate::service::warm_boot::SALVAGE_BUDGET_ENV);
     }
 
+    report_cost(
+        "disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat",
+        boot,
+        one_walk,
+        walks,
+        2,
+    );
+
     assert!(
         state.registry.get(&IndexId::new("live-index")).is_some(),
         "disabling salvage must never cost a LIVE index its restore (issue #4846)"
     );
-    let ceiling = std::cmp::max(one_walk * 2, Duration::from_millis(250));
-    assert!(
-        boot <= ceiling,
+    assert_eq!(
+        walks, 0,
         "with salvage disabled, {DEAD_ENTRIES} dead entries must cost one stat each and \
-         no relocation walk at all — boot took {boot:?} against a single-walk cost of \
-         {one_walk:?} (ceiling {ceiling:?}, issue #4846)"
+         no relocation walk at all — the boot walked the tracked roots {walks} times \
+         (one walk costs {one_walk:?}; the boot took {boot:?}; issue #4846)"
     );
 
     // And the dead registrations are still there: a missing root is a reason to

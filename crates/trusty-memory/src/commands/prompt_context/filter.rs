@@ -5,25 +5,33 @@
 //! testing and future tuning straightforward without touching the network or
 //! orchestration layers.
 //! What: exports `RecalledDrawer`, `RawTriple`, `filter_drawers_by_deny_tags`,
-//! `select_relevant_triples`, and `triple_overlaps`.
-//! Test: `filter_drawers_by_deny_tags_handles_edge_cases` and
+//! `filter_drawers_by_relevance_floor`, `select_relevant_triples`, and
+//! `triple_overlaps`.
+//! Test: `filter_drawers_by_deny_tags_handles_edge_cases`,
+//! `relevance_floor_drops_all_noise_drawers`, and
 //! `select_relevant_triples_filters_by_prompt_overlap` in `mod.rs`.
 
 use serde_json::Value;
+use trusty_common::memory_core::retrieval::{apply_relevance_floor, FloorOutcome};
 
 /// A drawer parsed from the `/recall` endpoint's flat JSON shape.
 ///
 /// Why: the recall endpoint hoists drawer fields to the top level (see
 /// `web::recall_entry_json`), so we don't need the full `Drawer` schema —
 /// only the fields the injection renders.
-/// What: holds the content string, tag list, and recall layer. Implements
-/// `from_recall_entry` for safe extraction from `serde_json::Value`.
+/// What: holds the content string, tag list, recall layer, and the recall
+/// score. Implements `from_recall_entry` for safe extraction from
+/// `serde_json::Value`.
 /// Test: indirectly via `prompt_context_recalls_palace_drawers`.
 #[derive(Debug, Clone)]
 pub(super) struct RecalledDrawer {
     pub(super) content: String,
     pub(super) tags: Vec<String>,
     pub(super) layer: Option<u8>,
+    // #5037: the wire has always carried `score` (`service::recall_entry_json`
+    // inserts it); nothing parsed it, so noise and signal were indistinguishable
+    // by the time they reached the injection.
+    pub(super) score: Option<f32>,
 }
 
 impl RecalledDrawer {
@@ -46,6 +54,9 @@ impl RecalledDrawer {
             })
             .unwrap_or_default();
         let layer = v.get("layer").and_then(|l| l.as_u64()).map(|n| n as u8);
+        // #5037: `None` here means "the daemon did not tell us" — the floor
+        // keeps such an entry rather than dropping what it cannot judge.
+        let score = v.get("score").and_then(|s| s.as_f64()).map(|n| n as f32);
         if content.trim().is_empty() {
             return None;
         }
@@ -53,6 +64,7 @@ impl RecalledDrawer {
             content,
             tags,
             layer,
+            score,
         })
     }
 }
@@ -129,6 +141,28 @@ pub(super) fn filter_drawers_by_deny_tags(
                 .any(|t| deny_tags.iter().any(|deny| deny.eq_ignore_ascii_case(t)))
         })
         .collect()
+}
+
+/// Drop recalled drawers whose score falls below `floor`, counting them.
+///
+/// Why (issue #5037): the deny-tag filter above judges *provenance*; nothing
+/// judged *relevance*. A probe of "what is the capital of France" against the
+/// live palace returned five drawers all scoring exactly `0.15` — the
+/// `L1_NO_SIMILARITY_PENALTY` given to an essential drawer the vector search
+/// never returned — rendered identically to a genuine hit at `0.56`. `top_k`
+/// cannot tell those apart because it is a length cap, not a quality gate.
+/// What: delegates to `trusty_common`'s [`apply_relevance_floor`] so the
+/// comparison and the unknown-score policy have exactly one implementation
+/// shared with any other recall consumer. Returns the survivors plus the count
+/// of what was withheld, which the injection renders as the "more" signal so a
+/// suppressed recall is never mistaken for an empty palace.
+/// Test: `relevance_floor_drops_all_noise_drawers`,
+/// `relevance_floor_keeps_high_scoring_drawer`.
+pub(super) fn filter_drawers_by_relevance_floor(
+    drawers: Vec<RecalledDrawer>,
+    floor: f32,
+) -> FloorOutcome<RecalledDrawer> {
+    apply_relevance_floor(drawers, floor, |d| d.score)
 }
 
 /// Filter a triple list down to those whose subject or object appears in

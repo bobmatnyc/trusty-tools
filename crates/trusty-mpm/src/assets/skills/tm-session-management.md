@@ -44,17 +44,25 @@ Sessions are stored **project-local**, not under the user's home directory:
 
 ```
 <project-root>/.trusty-mpm/sessions/
-├── sessions-log.jsonl          # append-only per-session pause/resume log
-└── session-YYYYMMDD-HHMMSS.md  # human-readable snapshot
+├── sessions-log.jsonl              # append-only per-session pause/resume log
+├── <session-id>/
+│   └── session-YYYYMMDD-HHMMSS.md  # human-readable snapshot
+└── session-YYYYMMDD-HHMMSS.md      # pre-#5272 snapshot, still resolvable
 ```
 
 Pausing **appends** one `pause` line per snapshot to `sessions-log.jsonl`
-(`{"session_id","event","snapshot","timestamp"}`) instead of overwriting a
-single global pointer — so concurrent `tm` sessions in the same project never
-clobber each other's resume target. Resume resolves the latest snapshot for the
-current session id from the log (latest-overall = last `pause` line), with the
-legacy `LATEST-SESSION.txt` pointer and an mtime scan of `session-*.md` as
-back-compat fallbacks. `LATEST-SESSION.txt` is **no longer written**.
+(`{"session_id","event","snapshot","timestamp"}`, where `snapshot` is the path
+relative to `sessions/`) instead of overwriting a single global pointer — so
+concurrent `tm` sessions in the same project never clobber each other's resume
+target. `LATEST-SESSION.txt` is **no longer written**.
+
+🔴 **Resume never crosses session boundaries (#5272).** It resolves only
+snapshots the log attributes to the session id you ask for. A session with no
+snapshot of its own gets nothing — there is no latest-overall, pointer, or
+mtime fallback, because with the PM on the project's main checkout several
+sessions share one store and those fallbacks hand over someone else's context.
+Flat snapshots at the store root still resolve through their log line; one with
+no log line is attributable to nobody and resolves for nobody.
 
 Add `.trusty-mpm/sessions/` to `.gitignore` — this is machine-local state,
 not a deliverable.

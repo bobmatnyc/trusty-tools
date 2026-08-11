@@ -11,15 +11,15 @@
 //! [`format_tombstone_row`] are the pure row formatters; [`format_state_column`]
 //! and the two small text helpers came across unchanged.
 //!
-//! Color, and why padding had to change with it: `NUM` and `NAME` are colored
-//! in DISTINCT hues. They must not share one — a name's trailing `NN` is a
-//! per-project serial from `allocate_serial` that reuses gaps, while `NUM` is a
-//! global slot, so `tm-foo-01` sitting at `NUM 1` is coincidence. 57 currently
-//! listed sessions end in `-01`; one hue across both columns would assert a
-//! correspondence that does not exist. Colored text also breaks `{:<N}`, which
-//! counts an ANSI escape's bytes as width while the terminal draws none of
-//! them — hence [`pad_visible`], which measures the visible text and appends
-//! the padding outside the escape.
+//! Color, and why padding had to change with it: `NUM`, `ID`, and `NAME` are
+//! colored in DISTINCT hues. `NUM` and `NAME` must not share one — a name's
+//! trailing `NN` is a per-project serial from `allocate_serial` that reuses
+//! gaps, while `NUM` is a global slot, so `tm-foo-01` sitting at `NUM 1` is
+//! coincidence. 57 currently listed sessions end in `-01`; one hue across both
+//! columns would assert a correspondence that does not exist. Colored text also
+//! breaks `{:<N}`, which counts an ANSI escape's bytes as width while the
+//! terminal draws none of them — hence [`pad_visible`], which measures the
+//! visible text and appends the padding outside the escape.
 //!
 //! Test: `format_tombstone_row_*`, `format_state_column_*`, `truncate_*`,
 //! `short_timestamp_*`, and the color/alignment cases in `managed_tests.rs`.
@@ -31,8 +31,30 @@ use super::session_picker_render::{StateColor, colorize};
 /// Hue for the `NUM` column — the stable, global slot number (#3034).
 const NUM_COLOR: StateColor = StateColor::Magenta;
 
+/// Hue for the `ID` column — dimmed, because the full UUID is the widest thing
+/// on the row and the least often read: it exists to be copy-pasted, not
+/// scanned. Dimming pushes it behind `NUM`/`NAME` without hiding it, and it is
+/// a third hue so no two adjacent columns share one.
+const ID_COLOR: StateColor = StateColor::Dim;
+
 /// Hue for the `NAME` column, deliberately different from [`NUM_COLOR`].
 const NAME_COLOR: StateColor = StateColor::Cyan;
+
+/// Rendered width of the `NUM` column.
+const NUM_WIDTH: usize = 5;
+
+/// Rendered width of the `ID` column — a full UUID is exactly 36 chars.
+const ID_WIDTH: usize = 36;
+
+/// Rendered width of the `NAME` column; names are truncated to match.
+const NAME_WIDTH: usize = 24;
+
+/// Rendered width of the `TASK` column; tasks are truncated to match.
+const TASK_WIDTH: usize = 30;
+
+/// Floor for the `STATE` column, preserving the pre-#4061 table shape when no
+/// row carries an annotation.
+const STATE_MIN_WIDTH: usize = 14;
 
 /// Left-align `text` in a `width`-wide column, coloring only the text itself.
 ///
@@ -77,8 +99,9 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
         return;
     }
     let use_color = super::session_picker_render::table_use_color(std::io::stdout().is_terminal());
+    let state_width = state_column_width(sessions);
     println!(
-        "{:<5}  {:<36}  {:<14}  {:<24}  {:<30}  CREATED",
+        "{:<NUM_WIDTH$}  {:<ID_WIDTH$}  {:<state_width$}  {:<NAME_WIDTH$}  {:<TASK_WIDTH$}  CREATED",
         "NUM", "ID", "STATE", "NAME", "TASK"
     );
     for s in sessions {
@@ -88,9 +111,53 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
             // now dead rather than having it vanish from the listing.
             println!("{}", format_tombstone_row(s.slot, use_color));
         } else {
-            println!("{}", format_ls_row(s, use_color));
+            println!("{}", format_ls_row(s, use_color, state_width));
         }
     }
+}
+
+/// Width the `STATE` column needs so no row's annotation overflows it.
+///
+/// Why: `STATE` used to be a hardcoded `{:<14}`, but the column's rendered
+/// value is the state PLUS any annotation — `attached [stale-assets]` is 23
+/// chars, `stopped [assets ?]` is 18. Every row wider than 14 pushed `NAME`,
+/// `TASK`, and `CREATED` right by the overflow, so a single annotated session
+/// staggered the whole table. The width has to be measured across the rows
+/// actually being printed, not guessed at compile time.
+/// What: the longest [`row_state`] value among the non-tombstone rows, floored
+/// at [`STATE_MIN_WIDTH`] so an all-plain listing keeps its historical shape.
+/// Tombstone rows are excluded — they have no `STATE` cell at all.
+/// Test: `state_column_width_absorbs_longest_annotation`,
+/// `ls_table_columns_align_when_a_row_carries_an_annotation`.
+pub(crate) fn state_column_width(sessions: &[ManagedSessionSummary]) -> usize {
+    sessions
+        .iter()
+        .filter(|s| !s.deleted)
+        .map(|s| row_state(s).chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(STATE_MIN_WIDTH)
+}
+
+/// The `STATE` cell for one live row, annotations included.
+///
+/// Why: the width pass and the render pass must agree exactly on the cell's
+/// text, so both go through this one function rather than rebuilding it.
+/// What: maps `attached` onto the base state, then delegates to
+/// [`format_state_column`].
+/// Test: `state_column_width_absorbs_longest_annotation`.
+fn row_state(s: &ManagedSessionSummary) -> String {
+    let base_state = if s.attached {
+        "attached"
+    } else {
+        s.state.as_str()
+    };
+    format_state_column(
+        base_state,
+        s.unresumable,
+        s.stale_assets,
+        s.stale_assets_unchecked,
+    )
 }
 
 /// Format one live `tm ls` row.
@@ -112,14 +179,22 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
 /// (live-tmux reconciled by the daemon) reads `attached` rather than the raw
 /// `active`, so a session the operator is connected to is distinguishable from
 /// a merely-running one.
+/// `state_width` comes from [`state_column_width`] over the whole listing, so a
+/// row whose annotation is longer than [`STATE_MIN_WIDTH`] widens the column for
+/// every row instead of shoving its own `NAME`/`TASK`/`CREATED` out of line.
 /// Test: `ls_row_colors_num_and_name_in_distinct_hues`,
-/// `ls_row_plain_when_color_disabled`,
-/// `ls_row_alignment_matches_with_and_without_color`.
-pub(crate) fn format_ls_row(s: &ManagedSessionSummary, use_color: bool) -> String {
+/// `ls_row_colors_id_column_dimmed`, `ls_row_plain_when_color_disabled`,
+/// `ls_row_alignment_matches_with_and_without_color`,
+/// `ls_table_columns_align_when_a_row_carries_an_annotation`.
+pub(crate) fn format_ls_row(
+    s: &ManagedSessionSummary,
+    use_color: bool,
+    state_width: usize,
+) -> String {
     let task = s
         .task
         .as_deref()
-        .map(|t| truncate(t, 30))
+        .map(|t| truncate(t, TASK_WIDTH))
         .unwrap_or_else(|| "(interactive)".to_string());
     let created = s
         .created_at
@@ -131,23 +206,17 @@ pub(crate) fn format_ls_row(s: &ManagedSessionSummary, use_color: bool) -> Strin
         .as_deref()
         .map(|d| format!(" [pending: {d}]"))
         .unwrap_or_default();
-    let base_state = if s.attached {
-        "attached"
-    } else {
-        s.state.as_str()
-    };
-    let state = format_state_column(
-        base_state,
-        s.unresumable,
-        s.stale_assets,
-        s.stale_assets_unchecked,
-    );
     format!(
-        "{}  {:<36}  {:<14}  {}  {:<30}  {}{}",
-        pad_visible(&s.slot.to_string(), 5, NUM_COLOR, use_color),
-        s.id,
-        state,
-        pad_visible(&truncate(&s.name, 24), 24, NAME_COLOR, use_color),
+        "{}  {}  {:<state_width$}  {}  {:<TASK_WIDTH$}  {}{}",
+        pad_visible(&s.slot.to_string(), NUM_WIDTH, NUM_COLOR, use_color),
+        pad_visible(&s.id, ID_WIDTH, ID_COLOR, use_color),
+        row_state(s),
+        pad_visible(
+            &truncate(&s.name, NAME_WIDTH),
+            NAME_WIDTH,
+            NAME_COLOR,
+            use_color
+        ),
         task,
         created,
         pending
@@ -167,7 +236,7 @@ pub(crate) fn format_ls_row(s: &ManagedSessionSummary, use_color: bool) -> Strin
 pub(crate) fn format_tombstone_row(slot: u32, use_color: bool) -> String {
     format!(
         "{}  -- deleted --",
-        pad_visible(&slot.to_string(), 5, NUM_COLOR, use_color)
+        pad_visible(&slot.to_string(), NUM_WIDTH, NUM_COLOR, use_color)
     )
 }
 

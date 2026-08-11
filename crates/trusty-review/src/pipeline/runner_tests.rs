@@ -1805,6 +1805,58 @@ diff --git a/src/db.rs b/src/db.rs
     assert_eq!(result.inline_comments[0].line, 2);
 }
 
+/// A refuted finding cannot reach the PR as an unmarked inline comment (#5312).
+///
+/// Why: verification runs before `attach_inline_comments` on both pipeline paths
+/// (`runner.rs` `maybe_verify` → `attach_inline_comments`, and the same order in
+/// `runner_mapreduce.rs`), so the `verified` outcome IS on the finding by the
+/// time the inline plan is built — it was simply never read. A reader of the PR
+/// saw a claim the verifier had disproved rendered exactly like a surviving one.
+/// What: runs the real runner-side glue over two on-diff findings — one refuted,
+/// one unjudged — and asserts the refuted one's inline body carries the
+/// verification caveat while the unjudged one does not.
+/// Test: this test itself (no network).
+#[test]
+fn attach_inline_comments_marks_refuted_finding() {
+    use crate::models::{Effort, Finding, VerifyOutcome};
+    use crate::pipeline::runner_helpers::attach_inline_comments;
+
+    let raw_diff = "\
+diff --git a/src/db.rs b/src/db.rs
+--- a/src/db.rs
++++ b/src/db.rs
+@@ -1,1 +1,3 @@
+ fn a() {}
++fn b() {}
++fn c() {}
+";
+    let mut result = crate::models::ReviewResult::new("o", "r", 1, "t", "u");
+    let mut refuted = Finding::new("src/db.rs", "bug", "desc", "fix", 0.1, Effort::High);
+    refuted.line = Some(2);
+    refuted.verified = Some(VerifyOutcome::Refuted);
+    let mut surviving = Finding::new("src/db.rs", "bug2", "desc2", "fix2", 0.9, Effort::Medium);
+    surviving.line = Some(3);
+    result.findings = vec![refuted, surviving];
+
+    attach_inline_comments(&mut result, raw_diff);
+
+    assert_eq!(
+        result.inline_comments.len(),
+        2,
+        "both findings anchor inline"
+    );
+    assert!(
+        result.inline_comments[0].body.contains("REFUTED"),
+        "a refuted finding must be marked inline: {}",
+        result.inline_comments[0].body
+    );
+    assert!(
+        !result.inline_comments[1].body.contains("Verification:"),
+        "a surviving finding must stay unqualified: {}",
+        result.inline_comments[1].body
+    );
+}
+
 /// `build_author_rationale` returns None when neither input is present (#1618).
 ///
 /// Why: with no caller context the verifier prompt must be unchanged.
@@ -1845,5 +1897,352 @@ fn build_author_rationale_single_field_only() {
     assert!(
         !only_disc.contains("## PR Description"),
         "absent description must not render a heading"
+    );
+}
+
+// ─── #5064: the dedup claim gate fails closed ────────────────────────────────
+
+/// Why: this is the arm that made #5064 dangerous. The store now refuses to
+/// start without a claim gate, but the *operation* path used to log
+/// `"dedup claim failed (proceeding without dedup)"` and review anyway — so a
+/// stuck holder produced an ungated live comment, and another on redelivery.
+/// A stuck holder is not hypothetical: a rolling upgrade where a pre-fix
+/// `serve --stdio` is still running produces exactly one.
+/// What: `Contended` must map to `Abort`, never `Proceed`.
+/// Test: this test.
+#[test]
+fn classify_claim_contended_aborts() {
+    let gate = classify_claim(Err(DedupError::Contended {
+        path: "/tmp/dedup.redb".to_string(),
+        waited_ms: 2000,
+    }));
+    match gate {
+        ClaimGate::Abort(reason) => assert!(
+            reason.contains("locked"),
+            "the abort reason must name the contention: {reason}"
+        ),
+        ClaimGate::Proceed => {
+            panic!("a contended claim must NOT proceed — that posts an ungated comment (#5064)")
+        }
+        ClaimGate::DuplicateSkip => panic!("a contended claim is not a duplicate"),
+    }
+}
+
+/// Why: every `DedupError` means the same thing operationally — the gate did
+/// not engage — so the fail-closed rule cannot be special-cased to one variant.
+/// What: `Open`, `Transaction`, and `Serde` all abort too.
+/// Test: this test.
+#[test]
+fn classify_claim_open_error_aborts() {
+    for err in [
+        DedupError::Open("no such file".to_string()),
+        DedupError::Transaction("commit failed".to_string()),
+        DedupError::Serde("bad json".to_string()),
+    ] {
+        assert!(
+            matches!(classify_claim(Err(err)), ClaimGate::Abort(_)),
+            "every store error must abort — the gate did not engage"
+        );
+    }
+}
+
+/// Why: the fail-closed rule must not break the happy path.
+/// What: `Claimed` proceeds.
+/// Test: this test.
+#[test]
+fn classify_claim_claimed_proceeds() {
+    assert!(matches!(
+        classify_claim(Ok(ClaimOutcome::Claimed)),
+        ClaimGate::Proceed
+    ));
+}
+
+/// Why: a completed review for this SHA is the case dedup exists to catch.
+/// What: `Skipped` is a duplicate, distinct from an abort.
+/// Test: this test.
+#[test]
+fn classify_claim_skipped_is_duplicate() {
+    assert!(matches!(
+        classify_claim(Ok(ClaimOutcome::Skipped)),
+        ClaimGate::DuplicateSkip
+    ));
+}
+
+/// Why: the round-1 fix routed the failed-claim path into `abort_dry`, which
+/// releases the dedup claim so a retry can re-run. That is right for every
+/// other abort — they own the claim — and wrong for this one, which never
+/// acquired it. `release` is an unconditional `table.remove(key)`, so a failed
+/// claim erased whatever record was on disk, including a `Completed` one
+/// another process wrote. The next trigger for that SHA then posts a duplicate
+/// comment: exactly the outcome the fail-closed change exists to prevent.
+/// What: another process completes a review for a SHA; this review aborts on a
+/// failed claim for the same SHA; the completed record must survive.
+/// Test: this test. Fails when `abort_dry` releases unconditionally.
+#[tokio::test]
+async fn failed_claim_abort_does_not_delete_another_processes_record() {
+    use crate::store::DedupStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dedup.redb");
+
+    // A different process owns and completes the review for this head SHA.
+    let owner_store = DedupStore::open(&path).expect("open");
+    owner_store
+        .claim_blocking("acme", "backend", 42, "sha-owned")
+        .expect("claim");
+    owner_store
+        .complete_blocking("acme", "backend", 42, "sha-owned")
+        .expect("complete");
+    drop(owner_store);
+
+    // This review holds no claim — its own `claim()` failed.
+    let mut deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+    deps.dedup = Some(Arc::new(DedupStore::open(&path).expect("open")));
+
+    let mut result = ReviewResult::new("acme", "backend", 42, "t", "u");
+    result.head_sha = "sha-owned".to_string();
+    let input = ReviewInput {
+        diff_source: DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "backend".to_string(),
+            pr: 42,
+            token: String::new(),
+        },
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Serve,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+
+    let out = abort_dry(
+        result,
+        &default_config(),
+        &input,
+        &deps,
+        DedupClaim::NotHeld,
+    )
+    .await;
+    assert!(out.dry_run, "an abort is always dry-run");
+
+    // The other process's completed claim must still suppress a re-review.
+    let checker = DedupStore::open(&path).expect("open");
+    assert_eq!(
+        checker
+            .claim_blocking("acme", "backend", 42, "sha-owned")
+            .unwrap(),
+        ClaimOutcome::Skipped,
+        "aborting on a FAILED claim deleted another process's completed record — \
+         the next trigger for this SHA would post a duplicate comment (#5064)"
+    );
+}
+
+/// Why: the owning abort must still release, or a review that dies mid-flight
+/// leaves an `InProgress` record that suppresses its own retry.
+/// What: a review that acquired the claim and then aborts leaves the SHA
+/// re-claimable.
+/// Test: this test.
+#[tokio::test]
+async fn held_claim_abort_still_releases() {
+    use crate::store::DedupStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dedup.redb");
+    let store = Arc::new(DedupStore::open(&path).expect("open"));
+    store
+        .claim_blocking("acme", "backend", 42, "sha-held")
+        .expect("claim");
+
+    let mut deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+    deps.dedup = Some(Arc::clone(&store));
+
+    let mut result = ReviewResult::new("acme", "backend", 42, "t", "u");
+    result.head_sha = "sha-held".to_string();
+    let input = ReviewInput {
+        diff_source: DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "backend".to_string(),
+            pr: 42,
+            token: String::new(),
+        },
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Serve,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+
+    abort_dry(result, &default_config(), &input, &deps, DedupClaim::Held).await;
+
+    assert_eq!(
+        store
+            .claim_blocking("acme", "backend", 42, "sha-held")
+            .unwrap(),
+        ClaimOutcome::Claimed,
+        "an owning abort must release so the retry can re-run"
+    );
+}
+
+// ── Verdict-calibration regressions (#4044, #5309) ────────────────────
+//
+// Both defects are fail-open: the pipeline reports a wrong verdict/grade/summary
+// as authoritative, so a human or agent gating merges on it is blocked on a
+// non-defect. Both fixtures are the reported evidence, near-verbatim.
+
+/// A reviewer response whose prose summary names finding #1 as a merge blocker
+/// and whose JSON self-reports BLOCK / F on that one finding — the PR #5308
+/// shape (#4044).
+fn blocks_citing_finding_one() -> FakeLlm {
+    FakeLlm {
+        response: r#"Finding #1 is a high-effort defect and must be resolved before merge.
+
+```json
+{"verdict":"BLOCK","grade":"F","summary":"blocking defect","findings":[{"title":"missing await","body":"the future is dropped","severity":"high","confidence":0.9,"file":"src/a.rs","line":1,"code_provable":true}]}
+```"#
+            .to_string(),
+        error: None,
+        output_tokens: None,
+    }
+}
+
+/// #4044: a finding the verifier REFUTED must not drive the verdict, must not
+/// leave the model's own F standing, and must not still be cited as a merge
+/// blocker by the prose summary.
+///
+/// Pre-fix this failed twice: `clamp_grade_to_verdict` left `grade: "F"` beside
+/// the relaxed APPROVE, and `review_body` still read "must be resolved before
+/// merge" about the refuted finding with nothing qualifying it.
+#[tokio::test]
+async fn run_review_refuted_finding_does_not_drive_grade_or_summary() {
+    let (source, _tmp) = local_diff_source_for_file("src/a.rs", "+fn bad() {}");
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+    let deps = ready_deps(
+        Arc::new(blocks_citing_finding_one()),
+        Some(Arc::new(FakeVerifier {
+            judgment: "REFUTED",
+        })),
+    );
+
+    let result = run_review(&default_config(), input, deps).await;
+
+    assert_eq!(
+        result.verdict,
+        Verdict::Approve,
+        "refuting the sole blocking finding must relax BLOCK"
+    );
+    assert_eq!(
+        result.grade.as_deref(),
+        Some("B-"),
+        "the model's own F rested on the refuted finding — it must not survive \
+         the relaxed verdict (#4044), got {:?}",
+        result.grade
+    );
+    assert!(
+        result.review_body.contains("Verification notice"),
+        "the summary predates verification and must be qualified (#4044):\n{}",
+        result.review_body
+    );
+    assert!(
+        result
+            .review_body
+            .contains("finding #1 — `src/a.rs`: missing await"),
+        "the qualifier must name the refuted finding by the index the prose \
+         uses (#4044):\n{}",
+        result.review_body
+    );
+    assert_eq!(
+        result.findings_count,
+        result.findings.len(),
+        "the refuted finding stays in the array for transparency (REV-606)"
+    );
+}
+
+/// A reviewer response carrying #5309's finding near-verbatim: `code_provable`,
+/// High effort, and a description that admits the diff cannot settle it.
+fn blocks_on_self_admitted_unverifiable() -> FakeLlm {
+    FakeLlm {
+        response: r#"One blocking issue.
+
+```json
+{"verdict":"BLOCK","grade":"F","summary":"un-awaited futures","findings":[{"title":"async functions called without .await","body":"incidents::run, dora::run, pr_metrics::run and report::run are invoked without .await, so half the sweep pipeline would silently no-op. The diff does not show their signatures, so this cannot be confirmed from the diff alone.","severity":"high","confidence":0.72,"file":"src/a.rs","line":1,"code_provable":true}]}
+```"#
+            .to_string(),
+        error: None,
+        output_tokens: None,
+    }
+}
+
+/// #5309: a `code_provable` finding whose own text says it cannot be confirmed
+/// from the diff must never come back `verified: "confirmed"`, and must not
+/// drive BLOCK.
+///
+/// The verifier here answers CONFIRMED — which is exactly what the live verifier
+/// did on PR #5303. Pre-fix that stamp landed on the finding and BLOCK/F stood;
+/// the four functions were in fact synchronous.
+#[tokio::test]
+async fn run_review_self_admitted_unverifiable_claim_is_not_confirmed() {
+    let (source, _tmp) = local_diff_source_for_file("src/a.rs", "+fn bad() {}");
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+    let deps = ready_deps(
+        Arc::new(blocks_on_self_admitted_unverifiable()),
+        Some(Arc::new(FakeVerifier {
+            judgment: "CONFIRMED",
+        })),
+    );
+
+    let result = run_review(&default_config(), input, deps).await;
+
+    assert_eq!(
+        result.findings.len(),
+        1,
+        "the finding must still be reported"
+    );
+    assert!(
+        !matches!(
+            result.findings[0].verified,
+            Some(crate::models::VerifyOutcome::Confirmed)
+        ),
+        "nothing read the signatures — the claim must not wear a confirmation \
+         (#5309), got {:?}",
+        result.findings[0].verified
+    );
+    assert!(
+        !result.findings[0].code_provable,
+        "a claim the finding says the diff cannot settle is not diff-provable"
+    );
+    assert_ne!(
+        result.verdict,
+        Verdict::Block,
+        "an unchecked claim must not drive BLOCK (#5309)"
+    );
+    assert!(
+        result.findings[0].description.contains("incidents::run"),
+        "the original claim must still reach the author verbatim"
     );
 }

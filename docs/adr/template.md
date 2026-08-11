@@ -1,6 +1,8 @@
 # NNNN. <Short Title of Decision>
 
 - **Status:** Proposed
+<!-- Later lifecycle targets must be links: `Superseded by [MMMM](MMMM-title.md)`
+or `Amended by [MMMM](MMMM-title.md)`. -->
 - **Date:** YYYY-MM-DD
 - **Scope:** Workspace-wide (or: crate `<name>` or subsystem `<name>`)
 - **Reversibility Cost:** (Low | Medium | High) — cost to undo this choice later

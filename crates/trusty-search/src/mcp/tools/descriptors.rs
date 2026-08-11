@@ -96,17 +96,17 @@ pub fn tool_descriptors() -> Value {
         },
         {
             "name": "search_all",
-            "description": "When in doubt, use this. Runs the full hybrid pipeline (lexical + semantic + KG expansion) and merges results via RRF. More expensive than the targeted tools but catches edge cases. Use when: your query has both literal symbols AND conceptual phrasing (\"find the `AuthValidator` that handles refresh tokens\"), or when you've tried the targeted tools and they didn't surface what you need. Always available; gracefully degrades to whatever lanes are ready. When called without `index_id`, falls back to legacy cross-project fan-out behaviour (issue #10) — provide `index_id` for the per-index hybrid path.",
+            "description": "When in doubt, use this. Runs the full hybrid pipeline (lexical + semantic + KG expansion) and merges results via RRF. More expensive than the targeted tools but catches edge cases. Use when: your query has both literal symbols AND conceptual phrasing (\"find the `AuthValidator` that handles refresh tokens\"), or when you've tried the targeted tools and they didn't surface what you need. Always available; gracefully degrades to whatever lanes are ready. Index selection has THREE tiers, in strict precedence order (issue #5213): an explicit `index_id` wins; otherwise this session's pinned index is used if one is set (issue #1373), and cross-project fan-out is NOT reached; only an unpinned session with no `index_id` fans out across every registered index. If the pinned index has not been built yet the call fails with INDEX_NOT_READY — call `list_indexes` and pass an explicit `index_id` that exists.",
             "inputSchema": {
                 "type": "object",
                 "required": ["query"],
                 "properties": {
-                    "index_id":         { "type": "string", "description": "Target index (omit for cross-project fan-out)" },
+                    "index_id":         { "type": "string", "description": "Target index id (from `list_indexes`). Omitting it falls back to this session's pinned index when one is set, and only fans out across every index when there is no pin (issue #5213)" },
                     "query":            { "type": "string" },
                     "top_k":            { "type": "integer", "default": 10 },
                     "mode":             { "type": "string", "enum": ["code", "text", "data"], "default": "code" },
                     "exclude_archived": { "type": "boolean", "default": false },
-                    "full_content":     { "type": "boolean", "default": false, "description": "Legacy fan-out only: include full chunk content in each hit" },
+                    "full_content":     { "type": "boolean", "default": false, "description": "Fan-out path only: include full chunk content in each hit" },
                     "branch_files":     { "type": "array", "items": { "type": "string" } },
                     "branch_boost":     { "type": "number" },
                     "branch":           { "type": "string" },
@@ -117,8 +117,8 @@ pub fn tool_descriptors() -> Value {
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "AuthValidator that handles refresh tokens" },
-                    { "query": "global cross-project fan-out without index_id" },
-                    { "query": "global fan-out forced serial", "serial": true }
+                    { "query": "cross-project fan-out — reached only in an UNPINNED session" },
+                    { "query": "fan-out forced serial", "serial": true }
                 ]
             }
         },
@@ -315,13 +315,15 @@ pub fn tool_descriptors() -> Value {
                             re-embedding occurs and line numbers are exact. Supports regex or fixed-string \
                             matching, case folding (-i), context windows (-A/-B/-C), include globs, \
                             multiline mode, files-with-matches (-l), invert (-v), and word-regexp (-w). \
-                            When `index_id` is omitted the daemon fans out across every registered index.",
+                            Omitting `index_id` searches the session's pinned project index; \
+                            it fans out across every registered index ONLY when the session has \
+                            no pin. Pass `index_id` explicitly to search a different project.",
             "inputSchema": {
                 "type": "object",
                 "required": ["pattern"],
                 "properties": {
                     "pattern":            { "type": "string", "description": "Regex (default) or literal when fixed_strings=true" },
-                    "index_id":           { "type": "string", "description": "Optional index id; omit to fan out across all indexes" },
+                    "index_id":           { "type": "string", "description": "Optional index id. Omitted, this resolves to the session's pinned project index (#1373) — NOT a fan-out. Only a session with no pin falls back to sweeping every registered index." },
                     "case_insensitive":   { "type": "boolean", "default": false, "description": "-i / --ignore-case" },
                     "context":            { "type": "integer", "description": "-C: equal before/after context, overrides context_before/context_after" },
                     "context_before":     { "type": "integer", "description": "-B: lines of context before each match" },
@@ -442,7 +444,15 @@ pub fn tool_descriptors_pinned(pinned: Option<&str>) -> Value {
     let Some(id) = pinned else {
         return defs;
     };
-    let note = format!("Defaults to this session's pinned project index ('{id}') when omitted.");
+    // #4715: the pin can name an index that has not been built yet. Say so in
+    // the schema so the model knows the retryable error exists before it hits
+    // one, and knows the answer is "use grep/find now", not "give up".
+    let note = format!(
+        "Defaults to this session's pinned project index ('{id}') when omitted. \
+         If that index has not been built yet the call fails with INDEX_NOT_READY \
+         (retryable) rather than an unknown-index error — fall back to grep/find \
+         and retry later."
+    );
     if let Some(tools) = defs.as_array_mut() {
         for tool in tools.iter_mut() {
             let Some(schema) = tool.get_mut("inputSchema").and_then(Value::as_object_mut) else {

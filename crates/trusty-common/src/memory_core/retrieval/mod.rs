@@ -18,6 +18,9 @@ mod embed_repair;
 mod embedder;
 mod handle;
 mod layers;
+// #5037: the minimum-score gate `layers` never had — `truncate(top_k)` was its
+// only length control.
+mod relevance;
 // ADR-0027 T9: room/wing recall scoping, shared by L2 and the list paths.
 mod scope;
 // ADR-0028 D3/D4/D5 (#4886): Tier C admission and atomic retire-on-write.
@@ -42,7 +45,8 @@ pub use embedder::{shared_embedder, shared_embedder_initialized};
 
 // Core types
 pub use types::{
-    CrossPalaceResult, L0Identity, L1Essential, RecallResult, RememberOptions, RetrievalLayers,
+    CrossPalaceResult, ForgetOutcome, L0Identity, L1Essential, RecallResult, RememberOptions,
+    RetrievalLayers,
 };
 
 // Palace handle
@@ -52,10 +56,17 @@ pub use handle::PalaceHandle;
 // public because a caller choosing to run a longer policy than the write-path
 // default is a legitimate operator decision.
 pub use deferred_embed::RetryPolicy;
-pub use embed_repair::{EmbedHealth, VectorBackfillOptions, VectorBackfillReport};
+pub use embed_repair::{
+    AliasAudit, AliasRepairOptions, AliasRepairOutcome, AliasRepairReport, EmbedHealth,
+    VectorBackfillOptions, VectorBackfillReport,
+};
 
 // Recall scoping (ADR-0027 T9)
 pub use scope::{RecallScope, list_drawers_in_wing, scope_admits};
+
+// #5037: relevance floor. Public because the consumer that must apply it —
+// trusty-memory's prompt-context injection — lives in another crate.
+pub use relevance::{DEFAULT_RELEVANCE_FLOOR, FloorOutcome, apply_relevance_floor};
 
 // ADR-0028 Tier C admission (#4886). The write half (`persist_with_retirement`)
 // stays crate-internal — every writer reaches it through

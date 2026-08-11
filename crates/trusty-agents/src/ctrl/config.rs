@@ -92,6 +92,26 @@ pub(crate) fn resolve_overridden_credentials(
     provider_override: Option<&str>,
 ) -> Result<llm::credentials::LlmCredentials> {
     use llm::credentials::LlmCredentials;
+    // #3765: the `bedrock` and `local` arms below PREPEND a routing marker to
+    // `cfg.agent.model`, which on a pinned agent both defeats the pin and
+    // produces a nonsense double-prefixed slug (`bedrock/atlascloud/…`).
+    // Unlike a MODEL override — which names a model on the pinned provider and
+    // is re-pinned by `AgentConfig::override_model` — a PROVIDER override
+    // directly contradicts the pin, so there is no coherent reading to honour.
+    // Refuse it and say which two providers disagree.
+    if let (Some(pinned), Some(requested)) = (cfg.agent.provider_id.as_deref(), provider_override)
+        && !pinned.eq_ignore_ascii_case(requested)
+    {
+        anyhow::bail!(
+            "agent '{}' pins [agent].provider_id = '{}'; a session provider \
+             override to '{}' contradicts it and is refused. Change the pin in \
+             the agent's TOML, or clear it to allow per-session provider \
+             switching.",
+            cfg.agent.name,
+            pinned,
+            requested
+        );
+    }
     match provider_override {
         Some("claude-code") => Ok(LlmCredentials::ClaudeCode),
         Some("openrouter") => Ok(LlmCredentials::OpenRouter),
@@ -475,6 +495,21 @@ pub(crate) fn apply_credential_routing(
     creds: &llm::credentials::LlmCredentials,
 ) -> bool {
     use llm::credentials::LlmCredentials;
+    // #3765: a pinned agent has already had its provider decided at load
+    // (`AgentConfig::apply_provider_pin` — validated, credential-checked, and
+    // written into the model slug and `use_anthropic_direct`). Ambient
+    // credential probing must not overwrite that: re-running it here is
+    // exactly the silent-fallback the pin exists to prevent — e.g. an agent
+    // pinned to `atlascloud` would be flipped to Anthropic-direct merely
+    // because an `ANTHROPIC_API_KEY` happens to be present.
+    if cfg.agent.provider_id.is_some() {
+        tracing::debug!(
+            agent = %cfg.agent.name,
+            provider_id = ?cfg.agent.provider_id,
+            "provider pin in effect; skipping ambient credential routing"
+        );
+        return false;
+    }
     match creds {
         LlmCredentials::AnthropicDirect => {
             cfg.llm.use_anthropic_direct = true;

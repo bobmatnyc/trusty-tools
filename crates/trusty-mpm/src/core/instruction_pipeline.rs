@@ -5,7 +5,9 @@
 //! that merge ad-hoc at each launch site invites drift in ordering and
 //! content.
 //! What: [`build_instructions`] resolves the project's agent roster, seeds a
-//! project `CLAUDE.md` stub when absent, and reports what it found;
+//! project `CLAUDE.md` stub when absent — unless git says the upstream default
+//! branch already tracks one, in which case the absence is branch staleness and
+//! the launch is refused rather than stubbed (#5228) — and reports what it found;
 //! [`compiled_prompt_path`] resolves where a session's compiled prompt lands and
 //! [`write_compiled_prompt_to`] is the one writer of it.
 //!
@@ -338,14 +340,20 @@ pub fn compiled_prompt_path(project_dir: &std::path::Path, session_id: &str) -> 
 /// Renamed from `instructions_failure_message` (round 4): it now also covers
 /// a [`build_instructions`] failure, so wording specific to the compiled prompt
 /// would have been wrong at half its call sites.
+///
+/// #5228 widened it again: the stale-`CLAUDE.md` refusal declines the write on
+/// purpose, so "could not write" was a false claim and the permissions remedy
+/// the wrong advice. It now states the condition and defers the remedy to
+/// `source`, which carries a specific one where it has it.
 /// What: names the path, the underlying cause, and the remedy.
 /// Test: `instructions_failure_message_names_the_path_and_a_remedy`.
 pub fn instructions_failure_message(path: &std::path::Path, source: &std::io::Error) -> String {
+    // See #5228.
     format!(
-        "could not write the session instructions to {}: {source}\n\
-         The session was NOT started: it depends on those instructions, and a \
-         path `tm` must write on every launch is unavailable. Check permissions \
-         and free space on that path, then retry.",
+        "could not establish the session instructions at {}: {source}\n\
+         The session was NOT started: it depends on those instructions. Resolve \
+         the cause above — for a path `tm` could not write, check permissions and \
+         free space — then retry.",
         path.display()
     )
 }
@@ -709,8 +717,15 @@ impl std::error::Error for PipelineError {
 /// the one fatal `PrepError` variant — a session refused over bytes nobody
 /// used. See the module docs.
 ///
+/// #5228: the seed is now conditional. A `CLAUDE.md` the upstream default
+/// branch tracks but this working tree lacks means the branch is stale, not
+/// that the project is new, so this returns `Err` — which
+/// [`crate::core::session_launch::prepare_session`] treats as fatal — instead
+/// of writing a stub that would stand in for every project instruction.
+///
 /// Test: `pipeline_full`, `pipeline_creates_claude_md`,
 /// `pipeline_does_not_read_the_retired_framework_instructions`,
+/// `build_instructions_refuses_a_stale_worktree_rather_than_seeding_a_stub`,
 /// `session_start_count_matches_the_delivered_delegation_roster`
 pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, PipelineError> {
     // #4588: resolved by `resolve_roster` — the SAME function that renders the
@@ -732,6 +747,174 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
     })
 }
 
+/// An upstream ref that tracks a file this working tree does not have (#5228).
+///
+/// What: the ref carrying the file (`origin/main`) and the branch checked out
+/// here, both quoted back to the operator so the diagnosis names the actual
+/// staleness rather than describing it in the abstract.
+struct UpstreamTracked {
+    /// The remote-tracking ref that has the file, e.g. `origin/main`.
+    reference: String,
+    /// Where this working tree sits, already rendered for the message:
+    /// ``branch `fix/x` `` or `detached HEAD at 1a2b3c4`.
+    position: String,
+    /// True when `HEAD` is detached. `merge --ff-only` would move HEAD and
+    /// drop the commit the operator deliberately checked out, so the refusal
+    /// offers only the file-level remedy in that state.
+    detached: bool,
+}
+
+/// Ask git whether `path` is absent only because this branch predates the
+/// commit that added it upstream (#5228).
+///
+/// Why: `NotFound` alone cannot distinguish a genuinely new project from a
+/// worktree cut before `CLAUDE.md` became tracked, and the two need opposite
+/// handling — seed the stub, or refuse. git already knows: the remote-tracking
+/// ref is local (no network, no fetch) and either carries the file or does not.
+/// What: returns `Some` only when `path`'s directory is inside a git work tree
+/// AND a candidate remote-tracking ref has a blob at `path`'s repo-relative
+/// location. Candidates are the branch's own `@{upstream}` and `origin/HEAD`;
+/// `origin/main` / `origin/master` are consulted ONLY when neither of those
+/// resolved. Every uncertain answer is `None`, so the caller keeps its
+/// pre-#5228 behaviour wherever git cannot positively confirm the staleness.
+/// Ordinary launches never reach this: the caller only probes when the file is
+/// already known to be missing.
+/// Test: `load_or_create_claude_md_refuses_to_stub_a_branch_predating_the_tracked_file`,
+/// `load_or_create_claude_md_still_seeds_when_upstream_has_no_claude_md`,
+/// `load_or_create_claude_md_still_seeds_in_a_repo_with_no_remote`.
+fn upstream_tracking(path: &std::path::Path) -> Option<UpstreamTracked> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let name = path.file_name()?.to_str()?;
+    if git_stdout(dir, &["rev-parse", "--is-inside-work-tree"])? != "true" {
+        return None;
+    }
+    let head = git_stdout(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|| "HEAD".to_string());
+    let detached = head == "HEAD";
+    let position = if detached {
+        let short =
+            git_stdout(dir, &["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+        format!("detached HEAD at {short}")
+    } else {
+        format!("branch `{head}`")
+    };
+
+    let tracked = git_stdout(
+        dir,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
+    // `origin/HEAD` is resolved to the branch it points at so the message names
+    // `origin/main`, not a symref the operator would have to dereference.
+    let default_head = git_stdout(dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"]);
+    // #5228 review: the hardcoded pair is a LAST RESORT, never an override. A
+    // repo whose default branch is `develop` can still carry an abandoned
+    // `origin/main`; consulting it when an authoritative signal already answered
+    // would refuse a launch that should proceed and then point the remedy at the
+    // abandoned branch.
+    let guessed: &[&str] = if tracked.is_none() && default_head.is_none() {
+        &["origin/main", "origin/master"]
+    } else {
+        &[]
+    };
+    let candidates = tracked
+        .into_iter()
+        .chain(default_head)
+        .chain(guessed.iter().map(|r| (*r).to_string()));
+
+    for reference in candidates {
+        // `<rev>:./<name>` resolves `name` relative to `dir` inside the repo, so
+        // this stays correct for a project that is not the repository root.
+        if git_succeeds(dir, &["cat-file", "-e", &format!("{reference}:./{name}")]) {
+            return Some(UpstreamTracked {
+                reference,
+                position,
+                detached,
+            });
+        }
+    }
+    None
+}
+
+/// The operator-facing explanation for a refused stub (#5228).
+///
+/// Why: the refusal stops a launch, so it owes the operator the diagnosis AND
+/// the command that fixes it — recovery is one fast-forward away, and a bare
+/// "file missing" would send them looking for the wrong problem.
+/// What: names the file, where this tree sits, the ref that has it, and the
+/// recovery. A branch is offered both remedies (bring the branch current, or
+/// take just the file); a detached HEAD is offered only the file-level one,
+/// because `merge --ff-only` there moves HEAD and drops the commit the operator
+/// deliberately checked out.
+/// Test: `stale_claude_md_refusal_names_the_branch_ref_and_recovery`,
+/// `stale_claude_md_refusal_offers_no_merge_on_a_detached_head`.
+fn stale_claude_md_message(path: &std::path::Path, upstream: &UpstreamTracked) -> String {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "CLAUDE.md".to_string());
+    let UpstreamTracked {
+        reference,
+        position,
+        detached,
+    } = upstream;
+    let dir = dir.display();
+    let remedy = if *detached {
+        format!(
+            "Take the file without moving HEAD:\n  \
+             git -C {dir} checkout {reference} -- {name}\n\
+             (No merge is offered: a fast-forward here would move a detached \
+             HEAD off the commit you checked out.)"
+        )
+    } else {
+        format!(
+            "Bring the real file in with either:\n  \
+             git -C {dir} merge --ff-only {reference}\n  \
+             git -C {dir} checkout {reference} -- {name}"
+        )
+    };
+    format!(
+        "{name} is absent from this working tree but tracked at {reference} — \
+         {position} predates the commit that added it. No stub was written: a \
+         stub would replace every project instruction with boilerplate, and once \
+         on disk it is indistinguishable from an authored file to every later \
+         session. {remedy}"
+    )
+}
+
+/// Run `git -C <dir> <args>`, returning trimmed stdout or `None` on any failure.
+fn git_stdout(dir: &std::path::Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Whether `git -C <dir> <args>` exited zero.
+fn git_succeeds(dir: &std::path::Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
 /// Load `CLAUDE.md`, seeding the stub (and parent directories) if it does not
 /// exist. A pre-existing `CLAUDE.md` is read back byte-identical and never
 /// written to (issue #2170 — trusty-mpm must never modify a target project's
@@ -743,11 +926,40 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
 /// What: reads the existing file and returns it unchanged; if absent, writes
 /// [`CLAUDE_MD_STUB`] (creating parent directories as needed) and returns
 /// that. Returns the final content and whether this call created the file.
-/// Test: `pipeline_creates_claude_md`, `pipeline_claude_md_left_byte_identical`.
+///
+/// #5228 — absent is not the same as new. When git says the upstream default
+/// branch already tracks this file, its absence here means the branch predates
+/// the commit that added it, and seeding the stub would hand the session
+/// boilerplate in place of the project's real instructions. That failure is
+/// invisible (the session cannot tell) and PERMANENT (every later run finds a
+/// file present and takes the read path), so this refuses instead. The refusal
+/// is fatal by the caller's own contract — `prepare_session` maps a
+/// [`PipelineError`] onto `PrepError::Instructions`, the one condition #4752
+/// rules must stop a launch — and the message carries the recovery command.
+/// Detection is conservative: anything git cannot answer (no git, not a work
+/// tree, no candidate remote-tracking ref carries the file) falls through to
+/// the ordinary stub, so a genuinely new project is unaffected. Note a missing
+/// `@{upstream}` alone does NOT fall open — `origin/HEAD` is still consulted,
+/// and a repo with no remote at all is what actually reaches the stub.
+/// Test: `pipeline_creates_claude_md`, `pipeline_claude_md_left_byte_identical`,
+/// `load_or_create_claude_md_refuses_to_stub_a_branch_predating_the_tracked_file`,
+/// `build_instructions_refuses_a_stale_worktree_rather_than_seeding_a_stub`,
+/// `load_or_create_claude_md_still_seeds_when_upstream_has_no_claude_md`,
+/// `load_or_create_claude_md_reads_a_present_file_in_a_git_worktree`.
 fn load_or_create_claude_md(path: &PathBuf) -> Result<(String, bool), PipelineError> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok((text, false)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // #5228: a stale branch's missing CLAUDE.md must never be stubbed over.
+            if let Some(upstream) = upstream_tracking(path) {
+                return Err(PipelineError::Io {
+                    path: path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        stale_claude_md_message(path, &upstream),
+                    ),
+                });
+            }
             if let Some(parent) = path.parent()
                 && !parent.as_os_str().is_empty()
             {

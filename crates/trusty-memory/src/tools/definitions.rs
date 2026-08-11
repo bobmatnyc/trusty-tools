@@ -79,6 +79,9 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     } else {
         vec!["palace", "subject"]
     };
+    // #4776: subject enumeration takes no argument of its own, so `palace` is
+    // the whole `required` list when no server default is configured.
+    let kg_list_subjects_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
     let memory_list_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
     let memory_forget_required: Vec<&str> = if has_default {
         vec!["drawer_id"]
@@ -246,6 +249,19 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                 }
             },
             {
+                "name": "kg_list_subjects",
+                "description": "List the subjects this palace's knowledge graph actually holds, alphabetically. Call this BEFORE kg_query instead of guessing a subject: kg_query needs a subject you already know, and a subject that does not exist returns the same empty result as an empty graph, so a guess tells you nothing. Subjects are namespaced by kind — `tag:<name>`, `topic:<name>`, `drawer:<uuid>`, `room:<name>` — alongside bare entity names asserted by kg_assert. Returns {palace, subjects, with_counts, truncated}. `truncated: true` means the page filled to `limit` and more subjects may exist; raise `limit` to see them.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":      {"type": "string", "description": "Palace ID (optional if server started with --palace)"},
+                        "limit":       {"type": "integer", "description": "Max subjects to return. Default 50, clamped to 1..=200.", "default": 50},
+                        "with_counts": {"type": "boolean", "description": "Return {subject, count} objects carrying each subject's active-triple count instead of bare subject strings. Use it to find the densest subjects to query first.", "default": false}
+                    },
+                    "required": kg_list_subjects_required,
+                }
+            },
+            {
                 "name": "memory_list",
                 "description": "List drawers in a palace, optionally filtered by wing, room type, or tag.",
                 "inputSchema": {
@@ -262,7 +278,10 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_forget",
-                "description": "Delete a drawer from a palace by its UUID.",
+                // #5231: the caller can only trust a delete if the tool says
+                // which of the two things happened, so the contract is in the
+                // description an LLM caller actually reads.
+                "description": "Delete a drawer from a palace by its UUID. Returns status='deleted' when a drawer was removed, or status='not_found' when no drawer with that id existed (nothing was deleted).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -296,13 +315,25 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "palace_reembed",
-                "description": "#4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. Defaults to a dry run.",
+                "description": "#4906: report drawers that have no vector (durable but unfindable), and optionally re-embed them. Defaults to a dry run. #5005: `missing: 0` does NOT mean every drawer is findable — a drawer lost to an id collision has a vector row and is still unreachable. Before treating this report as a complete account of what is retrievable — and ALWAYS before deleting a drawer on the strength of it — read `alias_audit`: act only on `is_clean: true`, and run `palace_unalias` first when it is false. Read `alias_audit.key_rows` vs `distinct_vector_ids` directly if you need the raw counts; they cannot be masked.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "palace":  {"type": "string"},
                         "dry_run": {"type": "boolean", "description": "Report only; do not embed. Default true."},
                         "limit":   {"type": "integer", "description": "Cap repairs per run."}
+                    },
+                    "required": palace_compact_required,
+                }
+            },
+            {
+                "name": "palace_unalias",
+                "description": "#5005: free drawers whose vector was destroyed by an id collision (`palace_reembed` reports these as `aliased`), so a re-embed can repair them. Defaults to a dry run. Branch on `outcome` (clean/planned/repaired/partial/unavailable), never on the id counts — `partial` and `unavailable` are not successes. Run `palace_reembed` afterwards to make the freed drawers findable again.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":  {"type": "string"},
+                        "dry_run": {"type": "boolean", "description": "Name the drawer ids that would be freed; delete nothing. Default true."}
                     },
                     "required": palace_compact_required,
                 }

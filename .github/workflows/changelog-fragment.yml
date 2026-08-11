@@ -63,7 +63,32 @@ jobs:
       - name: Fragment-validation selftest (must reject a malformed fragment)
         run: bash scripts/assemble_changelog_selftest.sh
 
+      # Stale-base selftest (#5018): replays the false failure on a synthetic
+      # repo — a branch touching crate A only, with crate B released (and B's
+      # fragments consumed) on main since the fork point. Proves the gate
+      # refuses the stale base, passes against the live branch naming only A,
+      # and still fails a genuinely missing fragment. Without it the base
+      # handling is untested code and a later edit can silently restore the
+      # blame-innocent-crates behaviour.
+      - name: Stale-base selftest (must refuse a pinned base.sha)
+        run: bash scripts/check_changelog_base_selftest.sh
+
+      # #4688: diff against the base branch AS IT IS NOW, not the frozen
+      # `base.sha` snapshot. checkout leaves refs/remotes/origin/<base> at
+      # whatever it fetched; re-fetching pins it to the live tip so the merge
+      # base cannot lag behind the merge ref's own first parent. Matches
+      # version-parity.yml and ci.yml. See the ATTRIBUTION note in
+      # scripts/check_changelog_fragment.sh for the failure this removes
+      # (PR #5018 / run 31431273762).
+      - name: Refresh the base branch ref
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+
       - name: Enforce per-PR changelog fragment
         env:
-          CHANGELOG_GATE_BASE: ${{ github.event.pull_request.base.sha }}
+          CHANGELOG_GATE_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: bash scripts/check_changelog_fragment.sh

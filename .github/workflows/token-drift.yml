@@ -24,9 +24,23 @@
 # verdict on the real crates isn't trustworthy either.
 name: Token drift
 
+# Optional and dependency-free: trigger only for the canonical tokens, the
+# seven enforced consumer stylesheets, or the checker/workflow itself.
 on:
   push:
     branches: [main]
+    paths:
+      - "docs/design/UI/design-system/tokens.css"
+      - "crates/trusty-agents/ui/src/app.css"
+      - "crates/trusty-code-gui/ui/src/app.css"
+      - "crates/trusty-mpm-gui/ui/src/app.css"
+      - "crates/trusty-console/ui/src/theme.css"
+      - "crates/trusty-analyze/ui/src/lib/styles/tokens.css"
+      - "crates/trusty-search/ui/src/lib/styles/tokens.css"
+      - "crates/trusty-memory/ui/src/lib/styles/tokens.css"
+      - "scripts/check_token_drift.mjs"
+      - "scripts/check_token_drift.test.mjs"
+      - ".github/workflows/token-drift.yml"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
     # (opened/synchronize/reopened) and is the event a base-branch RETARGET
@@ -35,6 +49,18 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+    paths:
+      - "docs/design/UI/design-system/tokens.css"
+      - "crates/trusty-agents/ui/src/app.css"
+      - "crates/trusty-code-gui/ui/src/app.css"
+      - "crates/trusty-mpm-gui/ui/src/app.css"
+      - "crates/trusty-console/ui/src/theme.css"
+      - "crates/trusty-analyze/ui/src/lib/styles/tokens.css"
+      - "crates/trusty-search/ui/src/lib/styles/tokens.css"
+      - "crates/trusty-memory/ui/src/lib/styles/tokens.css"
+      - "scripts/check_token_drift.mjs"
+      - "scripts/check_token_drift.test.mjs"
+      - ".github/workflows/token-drift.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push
@@ -46,6 +72,7 @@ concurrency:
 jobs:
   token-drift:
     name: Foundry token drift check (all 7 UI crates)
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

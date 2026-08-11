@@ -23,15 +23,19 @@ This README and the rustdoc stay in-crate; everything else lives under `docs/`.
 
 Prebuilt binaries are available for macOS (Apple Silicon) and Linux (x86_64).
 
-1. Download the latest release from [GitHub Releases](https://github.com/bobmatnyc/trusty-tools/releases):
-   - Look for assets tagged `tga-v2.7.0`
+1. Find the latest `tga` release — this repo tags every crate independently
+   (`<crate>-v<version>`), so use the
+   [filtered releases view](https://github.com/bobmatnyc/trusty-tools/releases?q=tga-v)
+   rather than the repo's overall "Latest" badge, which tracks whichever
+   crate released most recently:
+   - Look for the highest-numbered asset tagged `tga-vX.Y.Z`
    - Download the archive for your platform:
-     - **macOS arm64 (Apple Silicon)**: `tga-v2.7.0-aarch64-apple-darwin.tar.gz`
-     - **Linux x86_64**: `tga-v2.7.0-x86_64-unknown-linux-gnu.tar.gz`
+     - **macOS arm64 (Apple Silicon)**: `tga-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+     - **Linux x86_64**: `tga-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
 
 2. Extract and install:
    ```bash
-   tar xzf tga-v2.7.0-*.tar.gz
+   tar xzf tga-vX.Y.Z-*.tar.gz
    chmod +x tga
    sudo mv tga /usr/local/bin/    # or ~/.local/bin/ if you prefer user install
    ```
@@ -51,9 +55,11 @@ cargo install --git https://github.com/bobmatnyc/trusty-tools tga --locked
 
 This builds from the latest commit on `main` and installs the binary to `~/.cargo/bin/`. Make sure `~/.cargo/bin/` is on your PATH.
 
-To install a specific version:
+To install a specific version, substitute the tag you want (see the
+[filtered releases view](https://github.com/bobmatnyc/trusty-tools/releases?q=tga-v)
+above for the full list):
 ```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools --tag tga-v2.7.0 tga --locked
+cargo install --git https://github.com/bobmatnyc/trusty-tools --tag tga-vX.Y.Z tga --locked
 ```
 
 ### With Homebrew (recommended)

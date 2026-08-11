@@ -11,6 +11,7 @@
 //! - [`models`] — aggregated data structures
 //! - [`period_trends`] — N-week period roll-up for contributor profiles (#558)
 pub mod aggregator;
+pub mod dd_manifest;
 pub mod drilldown;
 pub mod errors;
 pub mod formatters;
@@ -21,6 +22,10 @@ pub mod pipeline;
 pub mod templates;
 pub mod ticketed_stats;
 
+pub use dd_manifest::{
+    build_dd_manifest, DdManifest, DdManifestError, DdManifestOptions, DdReportSection,
+    DdRepositoryEntry,
+};
 pub use errors::{ReportError, Result};
 pub use models::ReportData;
 pub use period_trends::{query_author_period_trends, AuthorPeriodSummary};

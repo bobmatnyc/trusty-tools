@@ -12,17 +12,16 @@
 //! Test: `sse_subscriber_receives_emitted_event` and
 //! `sse_route_returns_event_stream_content_type` in `service/tests.rs`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::core::{AnalyzerRegistry, FactStore, TrustySearchClient};
+use crate::core::{AnalyzerRegistry, FactStore, ScipOverlayStore, TrustySearchClient};
 use crate::embedder::{BowEmbedder, Embedder};
-use crate::types::{KgGraph, SmellThresholds};
+use crate::types::SmellThresholds;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 
 /// Live event broadcast over `/sse` for any dashboard subscribers.
 ///
@@ -68,15 +67,30 @@ pub struct AnalyzerAppState {
     pub search: TrustySearchClient,
     pub facts: FactStore,
     pub registry: Arc<AnalyzerRegistry>,
-    /// Neural / BOW embedder used by `/indexes/{id}/clusters` when the request
-    /// asks for `method=neural`. Falls back to a fresh `BowEmbedder` when the
-    /// request asks for `method=bow` (the default).
+    /// Embedder used by `/indexes/{id}/clusters`.
+    ///
+    /// Why (#5067): this used to be swapped out at boot by `run_serve` for a
+    /// fastembed model, and that swap is what stalled startup. It is now always
+    /// the `BowEmbedder` that `new` installs — construction is pure, so no
+    /// caller can make this field cost a network round trip.
+    /// Test: `analyze_declares_no_in_process_model_deps`.
     pub embedder: Arc<dyn Embedder>,
     /// Per-index SCIP-derived knowledge graph overlay, populated by
     /// `POST /indexes/{id}/scip`. Merged into the response of
     /// `GET /indexes/{id}/graph` so consumers see the union of tree-sitter
     /// extraction and any precise SCIP indexes the user has uploaded.
-    pub scip_overlays: Arc<RwLock<HashMap<String, KgGraph>>>,
+    ///
+    /// Why: this was an `Arc<RwLock<HashMap<String, KgGraph>>>` until #5049 —
+    /// pure process memory, so a restart discarded an ingest that had already
+    /// returned HTTP 200 and `/graph` then served a tree-sitter-only graph
+    /// with no way to tell it apart. A SCIP index is uploaded by the operator
+    /// and is not re-derivable from the corpus, so it must be on disk.
+    /// What: redb-backed store keyed by index id. `get` returns `Option`,
+    /// which is how `GET /indexes/{id}/scip` distinguishes "nobody ingested"
+    /// (404) from "ingested, zero symbols" (200 with `nodes: 0`).
+    /// Test: `scip_overlay_survives_state_rebuild`,
+    /// `scip_overlay_status_404_when_never_ingested`.
+    pub scip_overlays: ScipOverlayStore,
     /// Broadcast sender for live `AnalyzerEvent` pushes to `/sse` subscribers.
     ///
     /// Why: mirrors trusty-memory's `events` channel so dashboards can react
@@ -99,17 +113,6 @@ pub struct AnalyzerAppState {
     /// `core::complexity` proves that a non-default threshold fires on a chunk
     /// the defaults would ignore.
     pub smell_thresholds: SmellThresholds,
-    /// Optional GitHub webhook HMAC secret override.
-    ///
-    /// Why: `POST /webhooks/github` verifies the `X-Hub-Signature-256` HMAC.
-    /// In production the secret comes from `GITHUB_WEBHOOK_SECRET`, but env
-    /// vars are process-global and unsafe to mutate from concurrent tests.
-    /// Threading the secret through state lets tests inject it deterministically
-    /// while production still falls back to the env var.
-    /// What: `Some(secret)` forces verification; `None` falls back to the env
-    /// var (and skips verification when that is also unset).
-    /// Test: `webhook_rejects_bad_signature` injects `Some(...)` here.
-    pub webhook_secret: Option<String>,
     /// OpenRouter API key used by the `POST /analyze/deep` endpoint.
     ///
     /// Why: the deep-analysis endpoint needs an LLM provider to generate the
@@ -134,17 +137,27 @@ pub struct AnalyzerAppState {
 impl AnalyzerAppState {
     /// Construct with the default registry and a BOW embedder. Use this when
     /// neural embeddings aren't required (tests, BOW-only deployments).
-    pub fn new(search: TrustySearchClient, facts: FactStore) -> Self {
+    ///
+    /// Why (#5049): `scip_overlays` is a required constructor argument rather
+    /// than a `with_*` override precisely so no caller can end up with a
+    /// non-durable overlay store by omission — that omission was the bug.
+    /// What: builds state around the supplied search client, fact store, and
+    /// overlay store.
+    /// Test: covered by every `service::tests` case via `make_state`.
+    pub fn new(
+        search: TrustySearchClient,
+        facts: FactStore,
+        scip_overlays: ScipOverlayStore,
+    ) -> Self {
         let (events_tx, _) = broadcast::channel(128);
         Self {
             search,
             facts,
             registry: Arc::new(AnalyzerRegistry::default_registry()),
             embedder: Arc::new(BowEmbedder::default()),
-            scip_overlays: Arc::new(RwLock::new(HashMap::new())),
+            scip_overlays,
             events: events_tx,
             smell_thresholds: SmellThresholds::default(),
-            webhook_secret: None,
             api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
@@ -157,6 +170,7 @@ impl AnalyzerAppState {
         search: TrustySearchClient,
         facts: FactStore,
         registry: Arc<AnalyzerRegistry>,
+        scip_overlays: ScipOverlayStore,
     ) -> Self {
         let (events_tx, _) = broadcast::channel(128);
         Self {
@@ -164,10 +178,9 @@ impl AnalyzerAppState {
             facts,
             registry,
             embedder: Arc::new(BowEmbedder::default()),
-            scip_overlays: Arc::new(RwLock::new(HashMap::new())),
+            scip_overlays,
             events: events_tx,
             smell_thresholds: SmellThresholds::default(),
-            webhook_secret: None,
             api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
@@ -209,18 +222,6 @@ impl AnalyzerAppState {
     /// Test: covered transitively by the binary wiring tests.
     pub fn with_llm_model(mut self, model: impl Into<String>) -> Self {
         self.llm_model = model.into();
-        self
-    }
-
-    /// Override the GitHub webhook HMAC secret.
-    ///
-    /// Why: lets tests inject a deterministic secret and lets the binary pass
-    /// `GITHUB_WEBHOOK_SECRET` in once at startup instead of re-reading the
-    /// environment on every webhook request.
-    /// What: sets `webhook_secret` and returns `self` for chaining.
-    /// Test: `webhook_rejects_bad_signature` uses this to force verification.
-    pub fn with_webhook_secret(mut self, secret: Option<String>) -> Self {
-        self.webhook_secret = secret;
         self
     }
 
@@ -266,7 +267,7 @@ impl ApiError {
             message: msg.into(),
         }
     }
-    #[allow(dead_code)]
+    /// 404 — used by `GET /indexes/{id}/scip` for "no overlay ingested" (#5049).
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,

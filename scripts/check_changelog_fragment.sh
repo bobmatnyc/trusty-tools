@@ -83,6 +83,34 @@
 #   where it reports SUCCESS. A `paths:`-filtered required check never reports on
 #   the PRs it skips and leaves them permanently pending.
 #
+# ATTRIBUTION (#5018). The base must name the base BRANCH as it exists NOW
+#   (`origin/main`), never a frozen commit SHA. The base ref decides which
+#   commits count as "this PR's", so a wrong base blames the wrong author.
+#
+#   `actions/checkout` resolves a `pull_request` event to `refs/pull/N/merge`, a
+#   GitHub-built merge commit whose FIRST parent is the base branch's CURRENT
+#   tip, refreshed continuously. `github.event.pull_request.base.sha` — what
+#   this gate's workflow originally passed — is a snapshot taken when the event
+#   fired, and goes stale the moment anything else merges. The stale SHA is an
+#   ANCESTOR of the merge ref, so `git merge-base` hands it straight back
+#   instead of finding a fork point, and the diff sweeps in every commit main
+#   took in between.
+#
+#   That is what turns an unrelated crate red. A release assembles a crate's
+#   fragments into CHANGELOG.md and DELETES `changelog.d/*.md`; deletions are
+#   excluded from evidence (see PRESENT below). So any crate that both changed
+#   and shipped a release inside that window reads as "source changed, no
+#   fragment" — release-time fragment CONSUMPTION misread as this PR's
+#   OMISSION. Live instance: PR #5018 changed one crate (trusty-installer) and
+#   was failed for trusty-analyze, trusty-git-analytics and trusty-review, none
+#   of which it touches (run 31431273762). Against the live branch tip the
+#   merge base IS the merge ref's first parent, so the diff is exactly what the
+#   PR contributes — 9 paths and 1 crate, not 1279 and 16.
+#
+#   Same failure and same fix as #4688 (check-pr-version-bump.sh) and #4960
+#   (detect-docs-only.sh); this gate was the last one still pinned to base.sha.
+#   `main()` refuses the broken shape rather than guessing — see STALE BASE.
+#
 # Usage:
 #   bash scripts/check_changelog_fragment.sh                  # base: origin/main
 #   bash scripts/check_changelog_fragment.sh --base <ref>     # explicit base
@@ -91,9 +119,13 @@
 # Exit: 0 when every crate with source changes has evidence (or is exempt);
 #   non-zero with a per-crate summary on stderr when one does not.
 #
-# Test: exercised in both directions in the PR that introduced it (#4476) — a
-#   tree with fragments exits 0; the same tree with the fragments deleted fails
-#   and names the crates. Pure path/diff logic; no unit-test harness.
+# Test: scripts/check_changelog_base_selftest.sh replays the #5018 shape on a
+#   synthetic repo — a branch touching crate A only, with crate B's src/**
+#   changed and B's fragments consumed by a release on main since the fork
+#   point — and asserts the stale base is refused, the live branch base passes
+#   naming only A, and a genuinely missing fragment still fails. Fragment
+#   validation is covered by scripts/assemble_changelog_selftest.sh and the
+#   scan floor by scripts/check_scan_floor_selftest.sh.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   only — `git`, `grep`, `sed`, `sort`.
@@ -129,6 +161,49 @@ if ! MERGE_BASE="$(git merge-base "$BASE" HEAD 2>/dev/null)"; then
   echo "ERROR: cannot find a merge base between '$BASE' and HEAD." >&2
   echo "       Fetch the base ref first (CI must check out with fetch-depth: 0):" >&2
   echo "         git fetch origin main" >&2
+  exit 1
+fi
+
+# #5018 STALE BASE. A ref resolves to a symbolic full name; a bare SHA resolves
+# to empty output. That distinction is the whole test: `origin/main` tracks the
+# base branch and self-corrects as main moves, a pinned SHA cannot.
+if [[ -n "$(git rev-parse --symbolic-full-name "$BASE" 2>/dev/null)" ]]; then
+  BASE_IS_REF=1
+else
+  BASE_IS_REF=0
+fi
+
+# Refuse a bare-SHA base that lags the merge ref's own base parent. Comparing
+# (BASE, HEAD) cannot distinguish a stale base from a correct one — both are
+# ancestors of HEAD — so the gate does not try to guess which commits are the
+# PR's. It rejects the one configuration where the mis-attribution is provable
+# and names the fix, instead of silently blaming crates the PR never touched.
+#
+# All four conditions are required, and each one rules out a legitimate caller:
+#   - bare SHA: `--base origin/main` is a ref and is always allowed;
+#   - HEAD has a second parent: only the merge-ref checkout has one, so a run
+#     against a plain branch head is untouched (there the same stale SHA still
+#     resolves to the true fork point, which is correct);
+#   - BASE is an ancestor of HEAD^1: a base that is not behind the base parent
+#     is not stale;
+#   - BASE differs from HEAD^1: passing the merge ref's own base parent by SHA
+#     is exact, not stale, and stays allowed.
+if [[ "$BASE_IS_REF" -eq 0 ]] &&
+  git rev-parse --verify --quiet 'HEAD^2' >/dev/null &&
+  git merge-base --is-ancestor "$BASE" 'HEAD^1' &&
+  [[ "$(git rev-parse "$BASE")" != "$(git rev-parse 'HEAD^1')" ]]; then
+  BASE_PARENT="$(git rev-parse 'HEAD^1')"
+  BEHIND="$(git rev-list --count "${BASE}..${BASE_PARENT}")"
+  echo "FAIL: STALE BASE — '${BASE}' is a bare commit SHA ${BEHIND} commit(s) behind" >&2
+  echo "      HEAD's base parent ${BASE_PARENT:0:10}, and HEAD is a merge ref." >&2
+  echo "      The diff against it would span every commit merged in between and" >&2
+  echo "      report other authors' crates as this PR's missing fragments — a" >&2
+  echo "      release in that window CONSUMES changelog.d/*.md, which reads as an" >&2
+  echo "      omission. That is the #5018 false failure; refusing to repeat it." >&2
+  echo "      Pass the base BRANCH instead, so the merge base tracks it:" >&2
+  echo "        CHANGELOG_GATE_BASE=origin/main bash scripts/check_changelog_fragment.sh" >&2
+  echo "      In a workflow, use origin/\${{ github.event.pull_request.base.ref }}" >&2
+  echo "      after re-fetching that branch (the #4688 pattern)." >&2
   exit 1
 fi
 

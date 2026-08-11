@@ -31,7 +31,14 @@
   // so it is unit-testable; it used to be an inline `bridgeEventToWebBus`
   // here, with no automated coverage at all.
   import { bridgeEventToWebBus } from './lib/eventBridge';
-  import { invoke, isDesktop, connectEventSource, listenEvent, type AppEvent } from './lib/transport';
+  import {
+    invoke,
+    isDesktop,
+    connectEventSource,
+    listenEvent,
+    type AppEvent,
+    type EventStreamHandle,
+  } from './lib/transport';
   import { shouldRefetchCatalogs } from './lib/catalogRefetch';
   import {
     apiAuthRequired,
@@ -92,9 +99,14 @@
   // on, so existing components light up without changes. Stored at module
   // scope so it survives Svelte's hot-reload re-renders during dev.
   // What: Opens on first apiReady=true, stays open until the page is closed.
-  // The EventSource API auto-reconnects on transport failure with browser-
-  // native exponential backoff so we don't have to.
-  let eventSource: EventSource | null = null;
+  // #5052: the stream is authenticated by a short-lived ticket now, so opening
+  // it is asynchronous (mint, then connect) and `connectEventSource` owns the
+  // reconnect loop — the browser's native retry would re-use an expired ticket.
+  // `wantEventStream` guards the mint round-trip against a stop that lands
+  // while it is in flight.
+  let eventStream: EventStreamHandle | null = null;
+  let eventStreamStarting = false;
+  let wantEventStream = false;
 
   // Why: Make the active transport visible at a glance so contributors and
   // testers can tell whether they're in the Tauri desktop shell (full IPC)
@@ -249,24 +261,37 @@
   }
 
   function startEventStream() {
-    if (eventSource || isDesktop()) {
+    if (eventStream || eventStreamStarting || isDesktop()) {
       // Tauri has its own listen() bridge already; web-only path needs SSE.
       return;
     }
-    eventSource = connectEventSource(
+    wantEventStream = true;
+    eventStreamStarting = true;
+    connectEventSource(
       undefined,
       (ev) => {
         bridgeEventToWebBus(ev);
       },
       () => {
-        // The browser will reconnect automatically — nothing to tear down.
+        // `connectEventSource` re-mints and reconnects with backoff (#5052).
       },
-    );
+    )
+      .then((handle) => {
+        eventStreamStarting = false;
+        // A stop that landed while the ticket mint was in flight wins.
+        if (wantEventStream) eventStream = handle;
+        else handle.close();
+      })
+      .catch((e) => {
+        eventStreamStarting = false;
+        console.error('[App] event stream failed to start:', e);
+      });
   }
 
   function stopEventStream() {
-    eventSource?.close();
-    eventSource = null;
+    wantEventStream = false;
+    eventStream?.close();
+    eventStream = null;
   }
 
   // Re-run the start/stop logic whenever apiReady flips so we don't open

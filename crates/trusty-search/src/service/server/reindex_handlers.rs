@@ -20,7 +20,9 @@ use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::core::registry::{IndexHandle, IndexId};
-use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexProgress, ReindexStatus};
+use crate::service::reindex::{
+    root_gate, spawn_reindex_with_cleanup, ReindexProgress, ReindexStatus,
+};
 
 use super::helpers::{find_root_path_collision, validate_root_path};
 use super::state::SearchAppState;
@@ -170,8 +172,84 @@ pub(super) async fn reindex_handler(
                     })),
                 ));
             }
+            // #4951 review HIGH-1: refuse an override the reindex runner will
+            // refuse anyway. Syncing the indexer root below is only sound if
+            // the walk that re-relativizes the corpus against `new_root`
+            // actually runs. When the corpus's `indexed_root` disagrees with
+            // `new_root`, `runner.rs` re-checks `root_move_is_trusted` against
+            // the PERSISTED `indexes.toml` root and aborts before walking
+            // (#2178) — leaving chunks relative to the old root while the
+            // indexer resolves them against the new one. `file_is_within_root`
+            // is a lexical prefix test with no existence check, so every such
+            // path would pass it and `stale_index_root` would read `false`:
+            // a dangling (or wrong-file) result reported as healthy. Routing
+            // both call sites through `root_gate` keeps the two decisions
+            // identical, so an accepted override always gets its walk.
+            //
+            // #5357: a FAILED read of either input refuses here too. Both reads
+            // used to degrade to `None`, and `root_move_is_trusted(None, _)` is
+            // `true` — so a redb error or an unparseable `indexes.toml` let an
+            // untrusted override straight through the gate meant to stop it.
+            let registry_path = state.registry_path_override.clone();
+            let gate = root_gate::evaluate_root_move(
+                &index_id.0,
+                handle.read_indexed_root().await,
+                &new_root,
+                || match &registry_path {
+                    Some(path) => crate::service::persistence::load_index_registry_at(path),
+                    None => crate::service::persistence::load_index_registry(),
+                },
+            );
+            let trusted = match gate {
+                Ok(trusted) => trusted,
+                Err(refusal) => {
+                    tracing::warn!(
+                        "reindex_handler: refusing root_path override for '{}' to {} — {}",
+                        index_id.0,
+                        new_root.display(),
+                        refusal.reason,
+                    );
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": refusal.reason,
+                            "indexed_root": refusal.indexed_root,
+                            "persisted_root": refusal.persisted_root,
+                        })),
+                    ));
+                }
+            };
             if handle.root_path.as_os_str().is_empty() || handle.root_path != new_root {
                 let indexer = Arc::clone(&handle.indexer);
+                // #4951: the override rebuilds the handle around this SAME
+                // indexer Arc, so the indexer's own `root_path` — the base
+                // every root-relative chunk path is joined against to produce
+                // the absolute `CodeChunk::file` — must move with it. Left
+                // stale, materialization joined against the OLD root while
+                // `search_handler`'s `file_is_within_root` post-filter compared
+                // against the NEW one, so every candidate was discarded and
+                // search returned `results: []` with `stale_index_root: true`
+                // on an index reporting `status: ready` and 85k chunks.
+                //
+                // Review MEDIUM: the guard is held across `registry.register`
+                // below, not dropped right after the write. A search that grabs
+                // the indexer read lock in between would otherwise materialize
+                // against the NEW indexer root while `search_handler`'s
+                // post-filter still holds the OLD handle — the same divergence,
+                // narrowed to a race window instead of made permanent.
+                let indexer_for_guard = Arc::clone(&indexer);
+                let mut indexer_guard = indexer_for_guard.write().await;
+                // #5357: only when the corpus already agrees with `new_root`.
+                // A MOVE is the runner's to apply, after its own re-read of
+                // `indexes.toml` — applying it here and refusing there is what
+                // stranded the indexer on a root the corpus never matched. Until
+                // the runner's gate passes, the handle's new root and the
+                // indexer's old one disagree, which fails closed: empty results
+                // with `stale_index_root: true`, not dangling paths reported as
+                // healthy.
+                if !trusted.moved {
+                    indexer_guard.set_root_path(new_root.clone());
+                }
                 // Preserve the filter set / domain vocabulary recorded on the
                 // existing handle — only the root_path is being overridden.
                 let new_handle = IndexHandle {
@@ -230,6 +308,8 @@ pub(super) async fn reindex_handler(
                 // `relocate_index_handler`. See `mark_loaded_if` below.
                 let cold_entry_before_register = state.cold_store.entry_token(&index_id);
                 handle = state.registry.register(new_handle);
+                // Both roots are now the new one; readers may proceed.
+                drop(indexer_guard);
                 // Issue #3993 review round 3 (HIGH, applied here for
                 // consistency with create/relocate): reap any stale
                 // `state.cold_store` record parked under this SAME id. Same

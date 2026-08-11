@@ -254,7 +254,15 @@ tm session activity <id>               # what a session is doing (no attach)
 tm session send <id> "<text>"          # inject text into the pane
 tm session answer <id> "<answer>"      # resolve a pending decision
 tm session attach <id>                 # print the tmux attach command
+tm session rename <id|name> <new-name> # rename from the master list
+tm session rename <new-name>           # rename the CURRENT session (in-session form)
 ```
+
+`rename` is the only lifecycle verb with a one-arg in-session form: with no
+target it resolves the current session from `$TM_MANAGED_SESSION_ID`. A managed
+session's name IS its tmux name, so a rename also renames the live tmux session
+and `tmux attach` / `tmux ls` reflect it immediately. Collisions and invalid
+names are rejected with an actionable error.
 
 **Shared verbs** (managed-aware — auto-detect managed vs local by id/name):
 
@@ -299,6 +307,12 @@ tm session prune --state ephemeral|stopped|decommissioned|all [--dry-run] [--inc
 tm session decommission-ephemeral               # tear down all test/throwaway sessions
 tm session prune-worktrees [--force]            # remove orphaned .worktrees/ dirs (default dry-run)
 ```
+
+The `.worktrees/` path above is what `tm`'s own session provisioning writes
+today; it is NOT the canonical worktree home. Hand-provisioned and
+harness-provisioned worktrees live under `.claude/worktrees/` (see
+`tm-workflow`). Migrating tm's provisioning path is pending — until it lands,
+`prune-worktrees` only sees `.worktrees/`.
 
 `prune-worktrees` defaults to a safe preview (pass `--force` to act);
 `prune`/`prune-idle` act immediately unless you pass `--dry-run` yourself.

@@ -10,8 +10,9 @@
 //! sidecar's `/api/events`, parses frames, and re-emits each streaming delta
 //! as a Tauri `task-delta` event — exactly the payload the browser bridge
 //! emits, so `ChatView` handles both transports with identical code.
-//! What: [`start_event_bridge`] spawns a supervised background task that
-//! (re)connects to `{api_base}/api/events`, incrementally parses the SSE
+//! What: [`start_event_bridge`] spawns a supervised background task that mints
+//! a stream ticket (#5052 — `/api/events` is no longer unauthenticated) and
+//! (re)connects to `{api_base}/api/events?ticket=…`, incrementally parses the SSE
 //! `event:`/`data:` framing off `Response::chunk()` (no extra deps — reqwest's
 //! chunk reader is available without the `stream` feature), and for every
 //! `agent_message_delta` frame emits `app.emit("task-delta", DeltaPayload)`.
@@ -56,29 +57,106 @@ struct DeltaPayload {
 /// `RECONNECT_BACKOFF`, repeat. Errors are logged, never fatal.
 pub fn start_event_bridge(app: AppHandle, port: u16) {
     tauri::async_runtime::spawn(async move {
-        let url = format!("{}/api/events", api_base(port));
+        let base = api_base(port);
+        // #5052 (critic MEDIUM-2): the sidecar inherits this process's
+        // environment, so when the operator configured a token it reads the
+        // same var we do — that is the credential this bridge must present.
+        // No `.filter(|t| !t.is_empty())`: the server's own resolution
+        // (`runtime::mode_dispatch`) does not drop an empty value either, so
+        // filtering here would make an empty `TAGENT_API_TOKEN` configure a
+        // token server-side that this bridge then never presents.
+        let token = std::env::var("TAGENT_API_TOKEN")
+            .or_else(|_| std::env::var("OPEN_MPM_API_TOKEN"))
+            .ok();
         loop {
-            if let Err(e) = pump_stream(&app, &url).await {
-                tracing::debug!(?e, "event bridge stream ended; will reconnect");
+            if let Err(e) = pump_stream(&app, &base, token.as_deref()).await {
+                // #5052 (critic MEDIUM-2): `debug!` hid a PERMANENT failure —
+                // a token-guarded sidecar 401s every attempt and the desktop
+                // stream dies silently, looking like "the assistant stopped
+                // streaming". A dead stream must be visible in default logs.
+                tracing::warn!(?e, "event bridge stream failed; retrying");
             }
             tokio::time::sleep(RECONNECT_BACKOFF).await;
         }
     });
 }
 
-/// Connect to `url` and pump SSE frames until the stream ends.
-async fn pump_stream(app: &AppHandle, url: &str) -> Result<(), String> {
+/// Mint a stream ticket from the sidecar. (#5052)
+///
+/// Why: `GET /api/events` is no longer unauthenticated — it streams conversation
+/// content, and any page in the user's browser could previously read it from
+/// `127.0.0.1`. This bridge is a same-machine, server-side client, so it sends
+/// no `Origin` and the mint endpoint's same-origin write guard admits it.
+/// What: `POST /api/events/ticket` → the `ticket` field of the JSON body.
+/// Test: covered end-to-end by launching the desktop shell against a live
+/// sidecar; the server side is `trusty-agents`' `api::server::tests::event_tickets`.
+async fn mint_ticket(
+    client: &reqwest::Client,
+    base: &str,
+    token: Option<&str>,
+) -> Result<String, String> {
+    let body: serde_json::Value =
+        with_bearer(client.post(format!("{base}/api/events/ticket")), token)
+            .send()
+            .await
+            .map_err(|e| redacted("mint", e))?
+            .error_for_status()
+            .map_err(|e| redacted("mint status", e))?
+            .json()
+            .await
+            .map_err(|e| redacted("mint body", e))?;
+    body.get("ticket")
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "mint response had no ticket".to_string())
+}
+
+/// Render a `reqwest::Error` for logging WITHOUT the request URL. (#5052)
+///
+/// Why: SECURITY. The stream URL carries `?ticket=<live credential>`, and
+/// `reqwest::Error`'s `Display` appends the full URL including its query string
+/// (reqwest documents this on the type). Every error here reaches
+/// `tracing::warn!` in `start_event_bridge`, so formatting one verbatim would
+/// write a still-valid ticket into the default log on every routine stream drop
+/// — exactly the leak channel the ticket design exists to avoid, which is why
+/// #5052 rejected a `?token=<bearer>` scheme in the first place.
+/// What: prefixes the caller's label and formats `e.without_url()`, which
+/// returns the same error with its URL stripped. The failure CAUSE is
+/// unchanged, so the log keeps all of its diagnostic value.
+/// Test: `redacted_error_does_not_leak_the_ticket`.
+fn redacted(context: &str, e: reqwest::Error) -> String {
+    format!("{context}: {}", e.without_url())
+}
+
+/// Attach `Authorization: Bearer <token>` when the operator configured one.
+///
+/// Both the mint call and the stream call need it: `/api/events/ticket` is
+/// bearer-gated by `auth_middleware`, and `/api/events` accepts the bearer
+/// directly (which is why a server-side client never depends on the ticket
+/// round-trip succeeding).
+fn with_bearer(req: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+    match token {
+        Some(t) => req.bearer_auth(t),
+        None => req,
+    }
+}
+
+/// Connect to the sidecar's event stream and pump SSE frames until it ends.
+async fn pump_stream(app: &AppHandle, base: &str, token: Option<&str>) -> Result<(), String> {
     let client = reqwest::Client::new();
-    let mut resp = client
-        .get(url)
+    // #5052: a fresh ticket per connection attempt — cheaper and more robust
+    // than caching one across the reconnect backoff and discovering it expired.
+    let ticket = mint_ticket(&client, base, token).await?;
+    let url = format!("{base}/api/events?ticket={ticket}");
+    let mut resp = with_bearer(client.get(&url), token)
         .send()
         .await
-        .map_err(|e| format!("connect: {e}"))?
+        .map_err(|e| redacted("connect", e))?
         .error_for_status()
-        .map_err(|e| format!("status: {e}"))?;
+        .map_err(|e| redacted("status", e))?;
 
     let mut parser = SseParser::default();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read: {e}"))? {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| redacted("read", e))? {
         for data in parser.push(&chunk) {
             dispatch_frame(app, &data);
         }
@@ -198,6 +276,37 @@ fn field_str(value: &serde_json::Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why: SECURITY (#5052) — `reqwest::Error`'s Display appends the request
+    /// URL, and this bridge's stream URL carries a LIVE ticket in its query
+    /// string. Since these errors are logged at `warn!` on every routine stream
+    /// drop, a verbatim format would publish a working credential to the
+    /// default log. The raw assertion below is deliberate: it proves reqwest
+    /// really does embed the URL, so this test would catch a regression rather
+    /// than passing vacuously.
+    /// Test: this test.
+    #[tokio::test]
+    async fn redacted_error_does_not_leak_the_ticket() {
+        const TICKET: &str = "s3cret-ticket-value";
+        // Port 1 is privileged and unbound, so this fails to connect
+        // immediately — no server, no network, no timing dependence.
+        let err = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:1/api/events?ticket={TICKET}"))
+            .send()
+            .await
+            .expect_err("connecting to a closed port must fail");
+
+        assert!(
+            format!("{err}").contains(TICKET),
+            "precondition: reqwest embeds the URL, so redaction is load-bearing"
+        );
+        let logged = redacted("connect", err);
+        assert!(
+            !logged.contains(TICKET),
+            "a live ticket must never reach the log: {logged}"
+        );
+        assert!(logged.starts_with("connect: "), "context is kept: {logged}");
+    }
 
     #[test]
     fn parse_dispatches_agent_message_delta() {

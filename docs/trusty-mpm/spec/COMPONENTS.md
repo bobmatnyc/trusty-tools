@@ -1,7 +1,7 @@
 # trusty-mpm — Component Specifications
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
+> **Last reviewed:** 2026-08-08
 > **Derived from:** code/docs/tickets audit
 > **Crate:** `crates/trusty-mpm/` (version `0.5.0`, edition 2024, `publish = false`)
 > **Companion docs:** [PRD.md](./PRD.md) · [ARCHITECTURE.md](./ARCHITECTURE.md)
@@ -199,18 +199,22 @@ paths), **current state**, and **gaps**.
 
 ### 13. Instruction assembly — `src/core/instruction_pipeline.rs`, `assets/instructions/`
 
-- **Responsibility.** Produce the PM system prompt and the per-launch merged
-  instruction text.
-- **Key types.** `install_system_prompt` / `build_system_prompt` (compile-time
-  `include_str!` concat `PM_INSTRUCTIONS → WORKFLOW → AGENT_DELEGATION → BASE_PM`,
-  `:31-72`); `build_instructions` (runtime merge framework → delegation authority
-  → `CLAUDE.md`, `:163-204`). `BASE_PM` is the non-overridable floor.
-- **Current state.** ✅ Compile-time assembly + runtime merge; merged text stashed
-  to `<project>/.trusty-mpm/last-instructions.md`.
-- **Gaps.** 🔵 5-file project override system advertised in `BASE_PM.md:17-33` but
-  unread (FR-IN-4 — only `CLAUDE.md` is consumed); 🔵 `PM_INSTRUCTIONS_VERSION`
-  marker inert (**#384**); 🟡 first-launch stash diverges from the actual prompt
-  (**#382**) and `tm install` overwrites it with a stub (**#383**).
+- **Responsibility.** Resolve the versioned instruction package, generated
+  delegation roster, project-owned named-section overrides, and selected output
+  style into the exact prompt used by one session.
+- **Key types.** `pm-instruction-package.json` and registered section sources;
+  `instruction_overrides::resolve_pm_prompt`; `build_system_prompt_for*`;
+  `compiled_prompt_path(project_dir, session_id)`; and the fatal instruction
+  preparation path. There is no standalone `BASE_PM` floor.
+- **Current state.** ✅ Package-based composition and a required per-session
+  artifact at `<harness-root>/.trusty-mpm/sessions/<session-id>/INSTRUCTIONS-COMPILED.md`.
+  Core routes delivery policy to embedded skills; it does not own their detailed
+  procedures.
+- **Gaps.** 🔵 Compiled provenance, generated instruction catalog, semantic
+  consistency checks, and read-only `CLAUDE.md` compatibility audit (#5206).
+  🟡 Consolidation of `tm-pr-workflow` into the sole workflow skill
+  `tm-workflow`, plus ticketing/version-control boundary migration (#5202).
+  See DOC-59 §§11–12.
 
 ### 14. Overseer & coordinator — `src/core/{overseer,deterministic_overseer,llm_overseer}.rs`, `src/daemon/`
 

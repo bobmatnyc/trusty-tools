@@ -31,7 +31,7 @@ use uuid::Uuid;
 /// Why: Replaces the previous r2d2/rusqlite pool; preserves the public API
 /// (`open` / `create_session` / `list_sessions` / `get_session` /
 /// `upsert_session` / `delete_session`) so call sites in trusty-memory and
-/// open-mpm don't need to change.
+/// trusty-agents don't need to change.
 /// What: Owns an `Arc<redb::Database>` over a single `chat_sessions.redb`
 /// file. All reads run in `begin_read` transactions; writes serialise
 /// through `begin_write`.

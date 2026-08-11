@@ -840,6 +840,235 @@ fn is_plus_joined_word_phrase(token: &str) -> bool {
         .any(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).count() >= MIN_PHRASE_WORD_LEN)
 }
 
+/// Separator joining the segments of a Rust/C++ symbol path (`Type::method`).
+///
+/// Why (issue #5043) this is the one delimiter the CamelCase relaxation below can
+/// safely key on: `::` appears in NO encoder alphabet. base64 is `A–Za–z0–9+/=`,
+/// base64url is `A–Za–z0–9-_=`, a JWT is base64url plus `.`, hex and base32 are
+/// subsets of alphanumerics. Every OTHER identifier delimiter is shared with an
+/// encoder — `-` and `_` are base64url's own two symbols, `.` is the JWT
+/// separator, `+`/`/`/`=` are base64 — which is why six previous rounds could
+/// only widen those under a strict per-segment case rule. Decomposing on `::`
+/// cannot loosen any encoded-blob branch, because no encoded blob can contain it.
+/// What: the literal `"::"`, used by [`is_symbol_path`].
+/// Test: `rust_symbol_paths_are_not_flagged`,
+/// `symbol_path_keyhole_does_not_shelter_credentials`.
+const SYMBOL_PATH_SEPARATOR: &str = "::";
+
+/// Colon-segment length at or below which a segment is exempt from carrying a
+/// [`MIN_PHRASE_WORD_LEN`] word.
+///
+/// Why (issue #5043): ordinary Rust path segments are often short function or
+/// module names with no five-letter word in them — `to_str`, `as_ref`, `std`,
+/// `iter`. Requiring a five-letter word in EVERY segment rejects those.
+/// Requiring one in only SOME segment is the hole: `secretKey::<blob>` would
+/// ride in on `secretKey`. A short segment therefore keeps a word requirement,
+/// just a lower one ([`SYMBOL_SEGMENT_SHORT_WORD_LEN`]).
+/// What: inclusive maximum byte length at which the lower word floor applies.
+/// Test: `symbol_path_keyhole_does_not_shelter_credentials`.
+const SYMBOL_SEGMENT_SHORT_LEN: usize = 8;
+
+/// Word floor for a segment of at most [`SYMBOL_SEGMENT_SHORT_LEN`] bytes.
+///
+/// Why (issue #5043, review round 1, HIGH): the first cut of this PR EXEMPTED a
+/// short segment from the word requirement entirely, leaving only the digit-run
+/// and stray-letter shape checks. That let a blob chunked into short
+/// `::`-joined groups take the exemption whole — `Ab12cdEf::Gh34ijKl::Mn56opQr`
+/// went FLAG -> MISS, and a 24-character base64url blob so chunked missed
+/// 4629/3282/2521 per 20k at chunk widths 4/6/8 against a baseline of 355. The
+/// doc above already named the risk ("requiring one in only SOME segment is the
+/// hole") and the length exemption then opened it a different way. Three is what
+/// `to_str`, `as_ref`, `std` and `Sha1Hash` reach (their longest CamelCase word
+/// is 3–4) while a chunked encoder group does not: same shapes rescued,
+/// chunked misses back to 366/732/1273.
+///
+/// Note this is a floor, not an exemption — every segment answers the same
+/// question, at a length-dependent threshold. Nothing waives the word check.
+///
+/// It doubles as the boundary below which a segment is too short to hold a word
+/// at all (review round 2): `io`, `rc`, `rt` and `os` are ordinary Rust module
+/// names whose longest word is 2, so the floor flagged every symbol path through
+/// one. Those are decided on case uniformity instead — see
+/// [`is_symbol_path_segment`]. Measured cost of that arm: 37 additional misses
+/// per 20k at chunk width 11, the only width whose 24-character chunking leaves a
+/// 2-character remainder, and zero at every other width from 2 to 12.
+/// What: inclusive minimum longest-CamelCase-word length for a short segment,
+/// and the exclusive length below which case uniformity decides instead.
+/// Test: `symbol_path_keyhole_does_not_shelter_credentials`,
+/// `rust_symbol_paths_are_not_flagged`.
+const SYMBOL_SEGMENT_SHORT_WORD_LEN: usize = 3;
+
+/// Longest alphabetic CamelCase word in `seg`, and how many of its words are a
+/// single letter.
+///
+/// Why (issue #5043): [`is_human_word_segment`] asks whether a segment is
+/// case-UNIFORM, which a CamelCase identifier never is — `Bm25Index` and
+/// `queryTopK` each carry two capitals, so it declines them, and that (not the
+/// delimiter set) is what flagged the four reproductions. Deciding a CamelCase
+/// segment needs the word structure INSIDE it, which means splitting at case and
+/// alpha/digit boundaries and looking at the resulting run lengths.
+///
+/// The two statistics are what separate a composed identifier from encoder
+/// output at the same length. `Bm25Index` splits to `Bm`/`25`/`Index` and
+/// `Utf8Error` to `Utf`/`8`/`Error` — a five-letter word and no stray letters. A
+/// base64url run alternates case every one or two characters, so its longest word
+/// is 2–3 and single letters are everywhere.
+/// What: one pass, no allocation. Boundaries are lower-or-digit -> Upper
+/// (`fooBar`), Upper -> Upper-followed-by-lower (`HTTPServer` -> `HTTP`/`Server`),
+/// and any alphabetic <-> digit transition. Returns
+/// `(longest_alphabetic_word, single_letter_word_count)`.
+/// Test: `rust_symbol_paths_are_not_flagged`,
+/// `symbol_path_keyhole_does_not_shelter_credentials`.
+fn camel_word_stats(seg: &str) -> (usize, usize) {
+    fn tally(word: &[u8], longest: &mut usize, strays: &mut usize) {
+        let letters = word.iter().filter(|b| b.is_ascii_alphabetic()).count();
+        *longest = (*longest).max(letters);
+        if letters == 1 {
+            *strays += 1;
+        }
+    }
+    let b = seg.as_bytes();
+    let (mut longest, mut strays, mut start) = (0usize, 0usize, 0usize);
+    for i in 1..b.len() {
+        let (prev, cur) = (b[i - 1], b[i]);
+        let boundary = (cur.is_ascii_uppercase() && !prev.is_ascii_uppercase())
+            || (cur.is_ascii_uppercase()
+                && prev.is_ascii_uppercase()
+                && b.get(i + 1).is_some_and(|n| n.is_ascii_lowercase()))
+            || (cur.is_ascii_digit() != prev.is_ascii_digit());
+        if boundary {
+            tally(&b[start..i], &mut longest, &mut strays);
+            start = i;
+        }
+    }
+    if start < b.len() {
+        tally(&b[start..], &mut longest, &mut strays);
+    }
+    (longest, strays)
+}
+
+/// Number of maximal ASCII-digit runs in `s`.
+///
+/// Why (issue #5043): a composed identifier carries its digits in ONE group —
+/// `Bm25Index`, `Sha256Hasher`, `Utf8Error`, `OAuth2Client`, `Base64Decoder` all
+/// have exactly one. Encoder output draws digits uniformly, so a 20-character
+/// base64url run averages three digits scattered across it and almost always
+/// shows two or more runs. This is the single cheapest discriminator measured:
+/// adding it alone cut the colon-wrapped credential miss rate from 8552 to 3319
+/// per 30k.
+/// What: counts transitions into a digit run.
+/// Test: `symbol_path_keyhole_does_not_shelter_credentials`.
+fn digit_run_count(s: &str) -> usize {
+    let mut runs = 0usize;
+    let mut in_run = false;
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            runs += usize::from(!in_run);
+            in_run = true;
+        } else {
+            in_run = false;
+        }
+    }
+    runs
+}
+
+/// True when `seg` reads as one segment of a symbol path.
+///
+/// Why (issue #5043) each clause exists, measured on 30k generated base64url
+/// tokens wrapped as `secretKey::<blob>` at the seed
+/// `symbol_path_keyhole_does_not_shelter_credentials` uses (baseline miss rate
+/// 1017/30k): word floor alone 8298, plus the digit-run cap 3331, plus the
+/// stray-letter cap 2022. All three are load-bearing; dropping any one widens the
+/// exemption measurably.
+/// What: charset is alphanumerics plus [`IDENTIFIER_DELIMITERS`]; every
+/// delimiter-separated word must hold at most one digit run and at most one
+/// single-letter CamelCase word; and the segment's longest CamelCase word must
+/// reach [`MIN_PHRASE_WORD_LEN`], or [`SYMBOL_SEGMENT_SHORT_WORD_LEN`] when the
+/// segment is at most [`SYMBOL_SEGMENT_SHORT_LEN`] bytes.
+/// Test: `rust_symbol_paths_are_not_flagged`,
+/// `symbol_path_keyhole_does_not_shelter_credentials`,
+/// `recurrence_corpus_true_positives_stay_flagged`.
+fn is_symbol_path_segment(seg: &str) -> bool {
+    if seg.is_empty()
+        || !seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || IDENTIFIER_DELIMITERS.contains(&c))
+    {
+        return false;
+    }
+    // #5043 review round 2: a segment too short to hold a word is decided on
+    // case uniformity instead. Two-letter module names — `io`, `rc`, `rt`, `os`
+    // — cannot reach the word floor, and the round-1 fix flagged every path
+    // through one. Requiring single-case ALPHABETIC is what keeps a two-character
+    // encoder group out: `aB` mixes case, `9x` is not all alphabetic.
+    if seg.len() < SYMBOL_SEGMENT_SHORT_WORD_LEN {
+        return seg.chars().all(|c| c.is_ascii_lowercase())
+            || seg.chars().all(|c| c.is_ascii_uppercase());
+    }
+    let mut saw_word = false;
+    let mut longest_overall = 0usize;
+    for w in seg.split(IDENTIFIER_DELIMITERS).filter(|w| !w.is_empty()) {
+        saw_word = true;
+        let (longest, strays) = camel_word_stats(w);
+        if digit_run_count(w) > 1 || strays > 1 {
+            return false;
+        }
+        longest_overall = longest_overall.max(longest);
+    }
+    // #5043 review round 1: a graduated floor, never an exemption. A short
+    // segment answers the same question at a lower threshold.
+    let word_floor = if seg.len() <= SYMBOL_SEGMENT_SHORT_LEN {
+        SYMBOL_SEGMENT_SHORT_WORD_LEN
+    } else {
+        MIN_PHRASE_WORD_LEN
+    };
+    saw_word && longest_overall >= word_floor
+}
+
+/// True when `token` is a `::`-joined symbol path — `Bm25Index::queryTopK`,
+/// `std::str::Utf8Error::to_str`, `PalaceHandle::remember_with_options`.
+///
+/// Why (issue #5043, the SEVENTH recurrence after #1667, #1676, #2800/#4216,
+/// #4312, #4739 and #4898): a CamelCase segment carries two or more capitals, so
+/// [`is_human_word_segment`] declines it and the token satisfies the mixed-case
+/// branch of [`looks_like_secret`]. Four reproductions were confirmed by
+/// execution. The issue proposed adding `:` to [`IDENTIFIER_DELIMITERS`]; that
+/// alone fixes nothing, because the case rule rejects `Bm25Index` however the
+/// token is split.
+///
+/// Why the relaxation is keyed on `::` and not applied generally — the finding
+/// that decided this design: admitting CamelCase inside [`is_human_word_segment`]
+/// for every delimiter roughly doubles base64url misses per 30k at 15 input bytes
+/// and multiplies them several-fold at 20, on tokens with no colon at all, and
+/// still does not fix this issue. `-` and `_` ARE base64url's alphabet, so
+/// relaxing the case rule there relaxes it for encoder output too. See
+/// [`SYMBOL_PATH_SEPARATOR`] for why `::` carries no such cost.
+/// That generalises to a rule, not a carve-out: the case rule may be relaxed for
+/// a delimiter absent from every encoder alphabet, and `::` is currently the only
+/// such delimiter.
+///
+/// Known accepted bound, measured: a credential a human writes in path syntax
+/// (`secretKey::<blob>`) is the one way encoder output reaches this predicate,
+/// and this roughly doubles the miss rate there (1017 -> 2022 per 30k). Pinned in
+/// `symbol_path_keyhole_does_not_shelter_credentials` rather than left implicit.
+/// Provider-prefixed keys are unaffected — [`SECRET_PREFIXES`] and
+/// [`is_aws_access_key_id`] are checked before [`is_structural_token`].
+/// What: requires `::`, at least two non-empty `::`-separated segments, and every
+/// segment passing [`is_symbol_path_segment`].
+/// Test: `rust_symbol_paths_are_not_flagged`,
+/// `symbol_path_keyhole_does_not_shelter_credentials`,
+/// `recurrence_corpus_has_no_false_positives`.
+fn is_symbol_path(token: &str) -> bool {
+    if !token.contains(SYMBOL_PATH_SEPARATOR) {
+        return false;
+    }
+    let segments: Vec<&str> = token
+        .split(SYMBOL_PATH_SEPARATOR)
+        .filter(|s| !s.is_empty())
+        .collect();
+    segments.len() >= 2 && segments.iter().all(|s| is_symbol_path_segment(s))
+}
+
 fn is_segmented_identifier(token: &str) -> bool {
     if !token.contains(IDENTIFIER_DELIMITERS) {
         return false;
@@ -960,6 +1189,11 @@ fn is_structural_token(token: &str) -> bool {
     // Covers `verdict/grade/prose-summary`, `org/repo`, file paths.
     if token.contains('/') {
         return token.split('/').all(is_word_segment);
+    }
+    // #5043: a `::`-joined symbol path is decided before branch (c), whose
+    // case-uniformity rule a CamelCase segment can never satisfy.
+    if is_symbol_path(token) {
+        return true;
     }
     // (c) Hyphen-segmented compound identifier: no b64 syms remain at this
     // point; check whether every `-`-separated segment is uniform-case.

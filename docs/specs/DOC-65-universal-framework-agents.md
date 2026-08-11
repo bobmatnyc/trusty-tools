@@ -1,5 +1,8 @@
 ---
 spec_refs:
+  - id: SPEC-PMINSTR-12~draft
+    path: docs/specs/SPEC-PMINSTR-01-p1-p2-instruction-restructure.md
+    anchor: SPEC-PMINSTR-12~draft
   - id: SPEC-AGENTSTD-03~draft
     path: docs/specs/DOC-61-canonical-agent-standard.md
     anchor: SPEC-AGENTSTD-03~draft
@@ -14,10 +17,10 @@ spec_refs:
 **Spec ID:** `SPEC-UNIVAGENT-01~draft` … `SPEC-UNIVAGENT-06~draft` (DOC-65)
 **Subsystem:** `trusty-mpm` — bundled agent catalog (`crates/trusty-mpm/src/assets/agents/`), delegation roster (`crates/trusty-mpm/src/core/delegation_authority.rs`), language scoping (`crates/trusty-mpm/src/core/manifest/project_lang.rs`); consumed identically by `trusty-code` (`crates/trusty-code/src/assets/mod.rs`) and referenced by `trusty-agents`' sub-agent tier (ADR-0024)
 **Owner:** Engineering (trusty-mpm) / Bob Matsuoka
-**Last-updated:** 2026-08-04
+**Last-updated:** 2026-08-08
 **DOC-N claim:** `DOC-65`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md), verified free on `origin/main` (`d6e13326`): no filename or self-label claim under `docs/specs/**` (highest cataloged is `DOC-64`, README's own "next free" hint says `DOC-65`); no open pull requests at all (`gh pr list --state open` → empty); `scripts/check_doc_numbers.sh` clean (96 docs / 90 claims, 0 violations) before this file is added.
 **Builds on:** [ADR-0025](../adr/0025-collapse-agent-and-skill-tier-hierarchies.md) and its 2026-08-03 addendum ("Manifest-Based Project Configuration and the Four-Category Agent Model", §B1–B6) — the deployment/sourcing/precedence model this document maps its catalog onto, cited not restated. [DOC-61](./DOC-61-canonical-agent-standard.md) — the compose-chain source format (`extends:` inheritance, frontmatter merge, per-product builders) every agent cataloged here is built from, cited not restated. `crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md` — the hand-authored routing prose this document formalizes into a governed spec artifact without duplicating its table.
-**Related issues:** **#4755** (this spec), **#4760** (the framework manifest this document was updated for) — both milestone `1.3.5-2`
+**Related issues:** **#4755** (this spec), **#4760** (the framework manifest this document was updated for), **#5202** (workflow/ticketing/version-control ownership) — scheduled in the 1.3.5 release line
 
 ---
 
@@ -128,8 +131,8 @@ routing and boundary are genuinely undocumented.
 | `code-analyzer` | Reviewing a *proposed* solution before implementation — static analysis, correctness, architectural health | sonnet | Same reasoning-depth need as `research`, whose base (`base-research`) it extends | The **phase-2, pre-implementation** gate: `APPROVED`/`NEEDS_IMPROVEMENT`/`BLOCKED`. `agent-delegation.md` states explicitly: "`code-analyzer` and `code-critic` are separate agents, not interchangeable" | `crates/trusty-mpm/src/assets/agents/code-analyzer.md`, `extends: base-research` |
 | `code-critic` | Adversarial, independent code review after implementation — rubric-based `APPROVE`/`WARN`/`BLOCK` | sonnet | Adversarial review needs the same reasoning depth as implementation, deliberately run by a separate dispatch to avoid anchoring bias | The **post-implementation** gate, distinct from `code-analyzer` (above). Does not implement its own fixes — hands findings back to `engineer` | `crates/trusty-mpm/src/assets/agents/code-critic.md`, `extends: base-qa` |
 | `documentation` | Creating/updating docs, README, API docs, guides | **haiku** | Formulaic, pattern-following work against established conventions — no adversarial judgment call | Does not assess code correctness (→ `qa`/`code-critic`); does not write tickets (→ `ticketing`) | `crates/trusty-mpm/src/assets/agents/documentation.md`, `extends: base-agent` |
-| `ticketing` | Issue/ticket bookkeeping: create, update, close, label, triage, comment | sonnet | Scope validation and workflow-state intelligence require judgment, not just mechanical git operations | `agent-delegation.md`: "ticket bookkeeping never goes to `version-control`" — never does branch/PR mechanics, that is `version-control`'s job | `crates/trusty-mpm/src/assets/agents/ticketing.md`, `extends: base-agent` |
-| `version-control` | Creating PRs, managing branches, complex git ops | **haiku** | Git operations are mechanical/procedural once the change is decided — low reasoning need relative to deciding *what* to change | Never does issue/ticket bookkeeping (→ `ticketing`); `agent-delegation.md` requires checking git user identity before main-branch access | `crates/trusty-mpm/src/assets/agents/version-control.md`, `extends: base-ops` |
+| `ticketing` | Issue operations: promote, search/deduplicate, create, update, close/reopen, label, milestone, link, triage, and comment | sonnet | Scope validation and workflow-state intelligence require judgment, not just mechanical repository operations | Owns issue artifacts only, following `tm-ticketing`; never performs git operations or creates/edits/merges PRs (→ `version-control`) | `crates/trusty-mpm/src/assets/agents/ticketing.md`, `extends: base-agent` |
+| `version-control` | All git and PR operations: branches, commits, rebases, pushes, tags, PR creation/update/merge, title, and body | **haiku** | Repository operations are procedural once the change and lifecycle are decided by `tm-workflow` | Never does issue bookkeeping (→ `ticketing`) or defines delivery policy (→ `tm-workflow`); checks git identity before main-branch access | `crates/trusty-mpm/src/assets/agents/version-control.md`, `extends: base-ops` |
 | `security` | Pre-push credential scan, vulnerability assessment, secret scanning, compliance review | sonnet | Attack-vector reasoning needs sustained judgment | Coordinates with (does not replace) the acting `ops`/engineer agent for actual remediation — `ops.md`'s own text: "Coordinate with the security agent for secrets handling" | `crates/trusty-mpm/src/assets/agents/security.md`, `extends: base-agent` |
 | `local-ops` | Deploying apps, managing infra, starting servers, port/process management, `make`/`mise` build & release targets | sonnet | Process supervision and deployment-gate judgment | The **platform-agnostic local** ops agent — explicit successor to deprecated `ops` (§6.1); does not cover platform-specific cloud ops (`gcp-ops`, `vercel-ops`, §6.1) — no documented handoff rule exists between them (flagged §6.2) | `crates/trusty-mpm/src/assets/agents/local-ops.md`, `extends: base-ops` |
 
@@ -558,6 +561,11 @@ not an extension of an existing one.** Reasoning:
 
 ## 8. Change Log
 
+- 2026-08-08 — Aligns the ticketing/version-control artifact boundary with
+  DOC-59 §12 and #5202. Issues, including milestone/state/comment operations,
+  belong to `ticketing`; all PR operations, including title and body, belong to
+  `version-control`. `tm-workflow` owns lifecycle policy and `tm-ticketing`
+  owns issue policy; neither agent invents policy.
 - 2026-08-04 — Initial DRAFT. Claims `DOC-65` (scan-before-claim, DOC-38
   §4.1). Catalogs the universal agent roster verified against
   `crates/trusty-mpm/src/assets/agents/`,

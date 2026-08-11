@@ -474,3 +474,148 @@ fn prune_max_idle_days_zero_is_rejected() {
         "error should mention the constraint: {msg}"
     );
 }
+
+// ── #5344: cross-process registry-write integrity ────────────────────────────
+
+/// Why: `handle_prune_at` used to publish the SURVIVORS of the snapshot it
+/// loaded at the top. It runs in a separate process from the daemon, so a
+/// registration landing between that load and the save was deleted — and the
+/// command still printed "N registration(s) remain". Same mass-deregistration
+/// signature #4317 recorded, arriving from the CLI side.
+/// What: injects the concurrent write through `size_fn`, which prune calls
+/// during classification — after the load, before the write. A by-id removal
+/// keeps the newcomer; a survivors republish erases it.
+/// Test: this test. Fails on the pre-fix commit, where `newcomer` is gone.
+#[test]
+fn prune_apply_preserves_a_registration_made_after_its_snapshot() {
+    let tmp = tempdir().unwrap();
+    let toml = tmp.path().join("indexes.toml");
+    let now = 1_000 * DAY;
+    write_registry(
+        &toml,
+        &[
+            make_entry("stale", Some(now - 60 * DAY), None),
+            make_entry("keeper", Some(now - DAY), None),
+        ],
+    );
+
+    // Stands in for another process registering an index while prune decides.
+    let interleave_path = toml.clone();
+    let fired = std::cell::Cell::new(false);
+    let racing_size_fn = move |_id: &str| -> Option<u64> {
+        if !fired.replace(true) {
+            let mut current = load_index_registry_at(&interleave_path).unwrap();
+            current.push(make_entry("newcomer", Some(now), None));
+            save_index_registry_at(&interleave_path, &current).unwrap();
+        }
+        None
+    };
+
+    handle_prune_at(
+        &toml,
+        /*apply=*/ true,
+        /*yes=*/ true,
+        /*max_idle_days_override=*/ Some(30),
+        default_cfg(),
+        /*interactive=*/ false,
+        racing_size_fn,
+        now,
+    )
+    .unwrap();
+
+    let ids: Vec<String> = load_index_registry_at(&toml)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert!(
+        ids.iter().any(|id| id == "newcomer"),
+        "a registration made after prune's snapshot must survive the prune \
+         (#5344); registry now holds {ids:?}"
+    );
+    assert!(
+        ids.iter().any(|id| id == "keeper"),
+        "live entry must remain: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id == "stale"),
+        "the eligible entry must still be removed: {ids:?}"
+    );
+}
+
+/// Why: fail-closed. Every registry write must block on the cross-process
+/// advisory lock; a writer that ignores it is the #5344 defect itself. A second
+/// descriptor on the sidecar is exactly the conflict another PROCESS produces.
+/// What: holds the lock, runs `handle_prune_at` on a worker thread, and proves
+/// the registry is untouched while the lock is held — then that the prune
+/// completes once it is released.
+/// Test: this test. On the pre-fix commit the prune takes no lock at all, so
+/// `stale` is already gone before the release.
+#[test]
+fn prune_apply_blocks_on_the_cross_process_registry_lock() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let tmp = tempdir().unwrap();
+    let toml = tmp.path().join("indexes.toml");
+    let now = 1_000 * DAY;
+    write_registry(
+        &toml,
+        &[
+            make_entry("stale", Some(now - 60 * DAY), None),
+            make_entry("keeper", Some(now - DAY), None),
+        ],
+    );
+
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let worker_toml = toml.clone();
+
+    // Hold the lock the way another process would: a separate descriptor.
+    let worker = trusty_common::file_lock::with_exclusive_lock(&toml, || {
+        let worker = std::thread::spawn(move || {
+            handle_prune_at(
+                &worker_toml,
+                /*apply=*/ true,
+                /*yes=*/ true,
+                /*max_idle_days_override=*/ Some(30),
+                default_cfg(),
+                /*interactive=*/ false,
+                no_size,
+                now,
+            )
+            .unwrap();
+            let _ = done_tx.send(());
+        });
+        // The prune must make NO registry progress while blocked, so this only
+        // has to be long enough for an unlocked build to have finished.
+        std::thread::sleep(Duration::from_millis(1500));
+        let during: Vec<String> = load_index_registry_at(&toml)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert!(
+            during.iter().any(|id| id == "stale"),
+            "prune wrote the registry while another process held the \
+             cross-process lock (#5344); registry now holds {during:?}"
+        );
+        assert!(
+            done_rx.try_recv().is_err(),
+            "prune completed while the cross-process lock was held (#5344)"
+        );
+        worker
+    })
+    .expect("lock acquisition");
+
+    worker.join().expect("prune thread");
+    let after: Vec<String> = load_index_registry_at(&toml)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(
+        after,
+        vec!["keeper".to_string()],
+        "once the lock is released the prune must complete normally"
+    );
+}

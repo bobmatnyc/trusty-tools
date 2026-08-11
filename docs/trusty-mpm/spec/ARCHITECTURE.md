@@ -1,7 +1,7 @@
 # trusty-mpm — System Architecture
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
+> **Last reviewed:** 2026-08-08
 > **Derived from:** code/docs/tickets audit
 > **Crate:** `crates/trusty-mpm/` (version `0.5.0`, edition 2024, `publish = false`)
 > **Companion docs:** [PRD.md](./PRD.md) · [COMPONENTS.md](./COMPONENTS.md)
@@ -293,61 +293,34 @@ Built in `api::router` (`daemon/api.rs:72-127`). Default base
 
 ## 7. Instruction-assembly pipeline
 
-> **Stale as of 2026-08-01** (last reviewed 2026-05-29, predates #381,
-> #4183, and #4324). Three corrections to the section below, kept
-> otherwise as the historical 2026-05-29 record:
-> 1. **No generated output file.** There is no stable
->    `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` the pipeline
->    writes and rereads. The composed prompt goes to a per-launch temp file
->    ([`model_inject.rs:44-46`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/model_inject.rs#L44-L46))
->    for `claude --append-system-prompt-file`
->    ([`runtime/claude_code.rs:842`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/runtime/claude_code.rs#L842))
->    and is stashed at `<project>/.trusty-mpm/last-instructions.md` for
->    inspection
->    ([`session_launch/mod.rs:756`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/session_launch/mod.rs#L756)).
-> 2. **`PM_INSTRUCTIONS`/`WORKFLOW`/`AGENT_DELEGATION`/`BASE_PM` as
->    monolithic files are gone** (#4183, landed 2026-07-28) — replaced by
->    eight per-section files under `assets/instructions/sections/`, composed
->    from
->    [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json)
->    (schema v2). `instruction_pipeline.rs` still owns assembly; its internal
->    section sourcing changed.
-> 3. **"No Rust code reads these [override] files" (FR-IN-4) is no longer
->    true.** The five-file `.trusty-mpm/` override surface is read by
->    [`instruction_overrides.rs:52-60`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/instruction_overrides.rs#L52-L60).
->    Project customization is named sections in the root `CLAUDE.md`, added
->    by #4324 and read first
->    ([`claude_md_sections.rs:72`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72),
->    `HOST_FILES[0]` wins). The `.trusty-mpm/` files remain in the current
->    binary's read paths;
->    [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) tracks
->    their removal.
+The versioned JSON package manifest declares ordered sections whose Markdown
+sources are embedded at compile time. At session preparation,
+`instruction_overrides` resolves eligible named-section overrides from the
+project-owned `CLAUDE.md`; the deployed agent roster supplies generated
+delegation authority; and the selected output style supplies its declared
+presentation delta. There is no standalone `BASE_PM` tier or separately
+authoritative workflow file.
 
-Two layers operate (`core/instruction_pipeline.rs`):
+`instruction_pipeline::compiled_prompt_path(project_dir, session_id)` resolves
+the inspection artifact to:
 
-**(a) System-prompt assembly** (`:31-72`) — `include_str!` concat at compile time:
-
-```
-PM_INSTRUCTIONS  →  WORKFLOW  →  AGENT_DELEGATION  →  BASE_PM
+```text
+<harness-root>/.trusty-mpm/sessions/<session-id>/INSTRUCTIONS-COMPILED.md
 ```
 
-joined with `\n\n---\n\n`; `BASE_PM` is appended **last** as the non-overridable
-floor (carries the Trusty tool-priority block). `install_system_prompt()` writes
-the result to `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`;
-`build_system_prompt()` reads it back and passes it to
-`claude --append-system-prompt-file` (`session_launch.rs:541-579`).
+Composition and this write are pre-spawn requirements. The compiled file is an
+output only and MUST NOT be read as a package input. Session isolation prevents
+two concurrent sessions for one project from overwriting each other's resolved
+prompt. DOC-59 §11 additionally requires provenance identifying the binary,
+source revision, package/schema, ordered section hashes, override decisions,
+generated inputs, output style, and final digest.
 
-**(b) Runtime merge** (`build_instructions`, `:163-204`), sections **3 → 4 → 5**:
-framework `INSTRUCTIONS.md` → delegation authority generated fresh from deployed
-agents (`scan_agents` + `generate_authority`) → project `CLAUDE.md` (seeded once,
-never overwritten). The merged text is stashed to
-`<project>/.trusty-mpm/last-instructions.md`.
-
-🔵 **Designed-not-built (FR-IN-4).** `BASE_PM.md:17-33` advertises a 5-file project
-override system (`.trusty-mpm/{INSTRUCTIONS,AGENT_DELEGATION,WORKFLOW,MEMORY,
-PM_INSTRUCTIONS_DEPLOYED}.md`); no Rust code reads these — only `CLAUDE.md` is
-consumed. 🟡 Defects #382 (stash diverges from actual prompt) and #383 (`tm
-install` overwrites the prompt with a 4-line stub) live here.
+Policy ownership is intentionally narrower than composition. Core sections
+hold invariants and routing. `tm-workflow` owns the delivery lifecycle;
+`tm-ticketing` owns issue policy; and the `ticketing` and `version-control`
+agents execute tracker and git/PR operations respectively. `tm-pr-workflow` is
+a migration artifact to be absorbed into `tm-workflow` under #5202. See DOC-59
+§12 for the normative boundary and handoff.
 
 ---
 
@@ -361,8 +334,6 @@ install` overwrites the prompt with a 4-line stub) live here.
 ├── logs/                                  # rolling daemon log + overseer audit JSONL
 ├── registry/                              # 🔵 INTENDED remote-agent cache (unused stub, #388)
 └── framework/
-    ├── instructions/INSTRUCTIONS.md       # assembled system prompt (regenerated)
-    ├── instructions/CLAUDE.md             # user-editable stub
     ├── agents/                            # bundled agent SOURCE (fallback)
     ├── skills/                            # bundled skill SOURCE (fallback)
     └── hooks/{optimizer.toml,overseer.toml}  # framework-managed policy (watcher hot-reloads)
@@ -376,13 +347,14 @@ install` overwrites the prompt with a 4-line stub) live here.
 ├── services.yaml                          # tm services manifest (or embedded default)
 └── agents/                                # 🔵 INTENDED user-level agent source (3-level precedence; unread, #387)
 
-<project>/                                  # per-project, written on launch prep
-├── CLAUDE.md                              # seeded once, never overwritten
+<project>/                                  # project-owned inputs and launch configuration
+├── CLAUDE.md                              # optional project prose + named-section overrides
 ├── .claude/settings.json                  # outputStyle + spinner tips + trusty-memory hooks
 ├── .mcp.json                              # injected trusty-memory MCP server
-├── .trusty-mpm/last-instructions.md       # merged-instruction stash (inspection)
-└── .trusty-mpm/{INSTRUCTIONS,AGENT_DELEGATION,WORKFLOW,MEMORY,PM_INSTRUCTIONS_DEPLOYED}.md
-                                            #   🔵 INTENDED project overrides (unread, FR-IN-4)
+└── .trusty-mpm/last-instructions.md       # compatibility inspection stash
+
+<harness-root>/.trusty-mpm/sessions/<session-id>/
+└── INSTRUCTIONS-COMPILED.md               # exact per-session resolved prompt
 ```
 
 A source-checkout's `agents/` submodule (`<repo>/agents/{agents,skills}/`) wins
@@ -393,8 +365,9 @@ over the bundled framework directories when present (`paths.rs:181-208`).
 ## 9. Configuration & environment
 
 **Canonical config: `~/.trusty-mpm/config.toml`** (TOML, Rust/Cargo conventions).
-The `config.yaml` reference in `PM_INSTRUCTIONS.md` is a stale Python-era artifact
-to be corrected (#385/#394).
+Any `config.yaml` reference remaining in an instruction-bearing artifact is a
+stale Python-era claim to be detected by the #5206 semantic audit and corrected
+under #385/#394.
 
 | File | Read by | Status |
 |---|---|---|

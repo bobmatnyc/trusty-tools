@@ -6,8 +6,8 @@
 //! corpora from a running [trusty-search](https://github.com/bobmatnyc/trusty-tools)
 //! instance, performs static analysis, and exposes results on port 7879. It
 //! supports cyclomatic / cognitive complexity, code-smell detection, quality-grade
-//! aggregation (A–F), git-blame temporal decay, k-means concept clustering (BoW
-//! or neural via fastembed/ONNX Runtime), a facts store (redb), SCIP protobuf
+//! aggregation (A–F), git-blame temporal decay, k-means concept clustering
+//! (hashed bag-of-words), a facts store (redb), SCIP protobuf
 //! ingest for LSP-quality symbol data, and an optional deep-analysis LLM pass
 //! (OpenRouter or AWS Bedrock). Every HTTP endpoint has an MCP tool equivalent.
 //!
@@ -33,15 +33,10 @@
 //! cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze --locked
 //! ```
 //!
-//! This uses the default `bundled-ort` feature (static ONNX Runtime, glibc ≥ 2.38,
-//! macOS arm64). For older-glibc hosts (Amazon Linux 2023 / glibc 2.34), use:
-//!
-//! ```text
-//! cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze \
-//!     --locked --no-default-features --features http-server,load-dynamic
-//! ```
-//!
-//! Then set `ORT_DYLIB_PATH` to your system `libonnxruntime.so` path at runtime.
+//! The build links no ONNX Runtime and needs no model cache. #5067 removed the
+//! `bundled-ort` / `load-dynamic` / `cuda` features along with the neural
+//! clustering embedder they existed for, so there is no per-glibc install
+//! variant and no `ORT_DYLIB_PATH` to set.
 //!
 //! **Prebuilt binaries** for macOS arm64 and Linux x86_64 are published on the
 //! [GitHub Releases page](https://github.com/bobmatnyc/trusty-tools/releases)
@@ -80,3 +75,8 @@ pub mod mcp;
 #[cfg(feature = "http-server")]
 pub mod service;
 pub mod types;
+// #5182: the console->target webhook UDS listener. No feature gate — it pulls
+// in no HTTP stack, and the whole point is that the socket exists without the
+// service running resident (ADR-0034 §1, milestone criterion (c)).
+pub mod webhook_drain;
+pub mod webhook_listener;

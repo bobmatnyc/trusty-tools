@@ -5,7 +5,7 @@
 //! rusqlite + r2d2 to redb so the chat sidecar drops the heavy native
 //! dependency chain and lines up with the rest of the Memory Palace
 //! (`kg_redb.rs`, `payload_store.rs`, `palace_store.rs`). The public
-//! `ChatSessionStore` API is unchanged so `trusty-memory` and any open-mpm
+//! `ChatSessionStore` API is unchanged so `trusty-memory` and any trusty-agents
 //! consumers continue to work as drop-ins — callers still pass a path and
 //! get back a `ChatSessionStore`.
 //!

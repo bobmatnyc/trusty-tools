@@ -313,11 +313,22 @@ fn repo_status(outcomes: &[batch::BatchOutcome]) -> InvestigationStatus {
 /// so injecting a `MetricFinding` per verified finding reuses the whole reporter
 /// path with no special-casing.  Recording the investigation on the model (before
 /// synthesis) also lets the synthesis prompt read the coverage summary.
-/// What: appends a `MetricFinding {title, severity, category=dimension,
-/// component=file:line}` to each repo's metrics (creating one if absent), then
-/// sets `model.investigation`.
-/// Test: `tests/report_investigate.rs` asserts the finding renders in the band.
+/// What: scrubs a local copy of `inv` (#5323), appends a `MetricFinding {title,
+/// severity, category=dimension, component=file:line}` to each repo's metrics
+/// (creating one if absent) from that copy, then records the scrubbed copy as
+/// `model.investigation` — which is what `reporter.rs` serialises into the JSON
+/// twin and what `render.rs` renders the coverage sections from.
+/// Test: `tests/report_investigate.rs` asserts the finding renders in the band;
+/// `apply_investigation_scrubs_configured_credentials` asserts the scrub.
 pub fn apply_investigation(model: &mut ReportModel, inv: &Investigation) {
+    // #5323: verified-finding prose is LLM-authored over repository text, the
+    // likeliest producer to quote something raw. Scrub the record once here so
+    // the derived findings AND the copy stored on the model are both clean.
+    let secrets = super::redact::report_secrets();
+    let mut inv = inv.clone();
+    super::redact::scrub_investigation(&mut inv, &secrets);
+    let inv = &inv;
+
     for repo_inv in &inv.repos {
         let Some(repo) = model
             .repositories
@@ -336,10 +347,41 @@ pub fn apply_investigation(model: &mut ReportModel, inv: &Investigation) {
                 severity: f.severity,
                 category: f.dimension.clone(),
                 component: component_ref(f),
+                // #5317: a verified finding already carries its own one-line
+                // description and remediation — carrying them through means the
+                // rendered entry states something even before synthesis runs.
+                description: f.description.clone(),
+                remediation: f.remediation.clone(),
             });
         }
     }
     model.investigation = Some(inv.clone());
+}
+
+/// Scrub one verified finding's prose on its way into [`FindingProse`] (#5323).
+///
+/// Why: `merge_investigation_prose` is the second, independent route an
+/// investigation finding takes to the page, and `FindingRow::merge_prose`
+/// overwrites the metrics-derived (already scrubbed) prose with it. Without this
+/// the scrub in [`apply_investigation`] is discarded before render on every run
+/// that produces a RED/AMBER finding.
+/// What: builds the row then applies [`super::redact::scrub_prose`].
+/// Test: `investigation_credentials_never_reach_the_rendered_report`.
+fn scrubbed_prose(slug: &str, band: &str, f: &VerifiedFinding, secrets: &[String]) -> FindingProse {
+    let mut prose = FindingProse {
+        app_slug: slug.to_string(),
+        title: f.title.clone(),
+        severity: band.to_string(),
+        description: f.description.clone(),
+        evidence: f.evidence_quote.clone(),
+        component: component_ref(f),
+        business_impact: f.business_impact.clone(),
+        remediation: f.remediation.clone(),
+        cost_effort: f.cost_effort.clone(),
+        evidence_measured: true,
+    };
+    super::redact::scrub_prose(&mut prose, secrets);
+    prose
 }
 
 /// Render a finding's `component` as `file:line` (or the bare file / empty).
@@ -360,10 +402,16 @@ fn component_ref(f: &VerifiedFinding) -> String {
 /// when investigation produced findings ensures they render even if the synthesis
 /// narrative pass itself failed closed.
 /// What: for each verified RED/AMBER finding, removes any synthesis finding with
-/// the same `(slug, title)` and pushes a `FindingProse` with `evidence_measured =
-/// true`; flips the status to `Available` when any finding was added.
-/// Test: `tests/report_investigate.rs` asserts measured evidence + inferred prose.
+/// the same `(slug, title)` and pushes a credential-scrubbed `FindingProse`
+/// (#5323, see [`scrubbed_prose`]) with `evidence_measured = true`; flips the
+/// status to `Available` when any finding was added.
+/// Test: `tests/report_investigate.rs` asserts measured evidence + inferred
+/// prose; `investigation_credentials_never_reach_the_rendered_report` asserts
+/// the scrub on the rendered markdown and the JSON twin.
 pub fn merge_investigation_prose(synthesis: &mut Synthesis, inv: &Investigation) {
+    // #5323: this sink bypasses the metrics scrub entirely, and `merge_prose`
+    // overwrites the metrics prose with what lands here.
+    let secrets = super::redact::report_secrets();
     let mut added = false;
     for repo_inv in &inv.repos {
         for f in &repo_inv.findings {
@@ -378,18 +426,9 @@ pub fn merge_investigation_prose(synthesis: &mut Synthesis, inv: &Investigation)
             synthesis
                 .findings
                 .retain(|p| !(p.app_slug == repo_inv.slug && p.title == f.title));
-            synthesis.findings.push(FindingProse {
-                app_slug: repo_inv.slug.clone(),
-                title: f.title.clone(),
-                severity: band.to_string(),
-                description: f.description.clone(),
-                evidence: f.evidence_quote.clone(),
-                component: component_ref(f),
-                business_impact: f.business_impact.clone(),
-                remediation: f.remediation.clone(),
-                cost_effort: f.cost_effort.clone(),
-                evidence_measured: true,
-            });
+            synthesis
+                .findings
+                .push(scrubbed_prose(&repo_inv.slug, band, f, &secrets));
             added = true;
         }
     }

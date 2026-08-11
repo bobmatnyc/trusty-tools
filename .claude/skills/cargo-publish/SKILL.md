@@ -98,7 +98,7 @@ scripts/preflight-publish.sh trusty-mpm
 
 Reads the crate's name/version straight from `crates/trusty-mpm/Cargo.toml`
 (pass an explicit version as a second argument to check a hypothetical
-version instead). Runs four checks and fails loud on any of them:
+version instead). Runs five checks and fails loud on any of them:
 
 1. **merged-main**: current HEAD's commit SHA is EXACTLY `origin/main`'s HEAD
    SHA (stricter than `check-publish-ready.sh`'s ancestor check).
@@ -108,8 +108,19 @@ version instead). Runs four checks and fails loud on any of them:
 4. **version-not-live**: the target version is not already published on
    crates.io (queries `https://crates.io/api/v1/crates/<name>/<version>`) —
    this is the exact guard that would have caught the 0.22.0 collision.
+5. **semver** (#5149): runs `scripts/check_semver.sh --crate <pkg>`, which
+   compares the crate's public API against its latest non-yanked crates.io
+   release and fails when a break is not carried by a breaking version bump
+   (0.x crates break in the MINOR position). This is the ONLY place that can
+   block a bad publish — a crates.io upload is irreversible except by yank, and
+   #4088 is what a gate arriving afterwards costs. Requires
+   `cargo install cargo-semver-checks@0.50.0 --locked`; a missing tool is a
+   failure, not a skip. No override — the fix is to bump the breaking position,
+   which the gate then skips as an already-breaking release.
+   `.github/workflows/semver-checks.yml` runs the same check on the tag push
+   (step 4), so a red run there is visible before you reach step 6.
 
-`scripts/preflight-publish.sh --check-only <crate>` runs all four checks
+`scripts/preflight-publish.sh --check-only <crate>` runs all five checks
 unconditionally and prints a `[PASS]`/`[FAIL]` line per check without
 assuming you're mid-publish — use it to preview status. `--help` documents
 the rare, logged `PREFLIGHT_ALLOW_DETACHED=1` override for check 1 (validated
@@ -380,7 +391,7 @@ Use the **crate package name** from `Cargo.toml`, NOT the directory name.
 - `trusty-git-analytics` → `-p tga` → tag: **`tga-v1.4.2`** ✓
 - `trusty-search` → `-p trusty-search` → tag: **`trusty-search-v0.13.1`** ✓
 - `trusty-common` → `-p trusty-common` → tag: **`trusty-common-v0.8.0`** ✓
-- `open-mpm` → `-p open-mpm` → tag: **`open-mpm-v0.2.3`** ✓
+- `trusty-agents` → `-p trusty-agents` → tag: **`trusty-agents-v0.2.3`** ✓
 
 > **tga tag aliases (issue #1128):** the binary-release workflow accepts **both**
 > `tga-v<version>` and `trusty-git-analytics-v<version>` — they resolve to the
@@ -402,7 +413,6 @@ Most match (`crates/trusty-search/` → `-p trusty-search`).
 
 **Exceptions** (always verify `Cargo.toml`):
 - `crates/trusty-git-analytics/` → `name = "tga"` → `-p tga`
-- `crates/open-mpm/` → `name = "open-mpm"` → `-p open-mpm`
 
 If `cargo -p <name>` returns "package not found":
 ```bash

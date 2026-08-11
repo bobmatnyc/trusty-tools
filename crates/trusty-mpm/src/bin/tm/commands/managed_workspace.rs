@@ -17,19 +17,23 @@
 //! [`provision_for_launch`] serves `tm launch` (which has already resolved
 //! the base-clone path) and [`provision_for_fallback`] serves the guided
 //! fallback (which parses `owner/repo` itself and reports daemon-specific
-//! remediation). Each entry point reads the registry EXACTLY once, via
-//! [`trusty_mpm::project::worktree_enabled_for_origin_at`], and passes the
-//! answer down — so the operator-facing notice and the filesystem action can
+//! remediation). Each entry point resolves the decision EXACTLY once and passes
+//! the answer down — so the operator-facing notice and the filesystem action can
 //! never disagree.
-//! Known redundancy, accepted: the daemon-unreachable fallback ends by
-//! calling `launch()`, so on that composed path the registry is read twice —
-//! once by [`provision_for_fallback`] and once by [`provision_for_launch`].
-//! Collapsing it would mean threading a pre-resolved `ManagedWorkspace`
-//! through `launch()`'s signature, a restructure that buys one avoided
-//! `read_to_string` of an atomically-published file whose read path takes no
-//! lock and fails open to isolation-ON. Both reads see the same bytes; the
-//! only operator-visible symptom was a duplicated notice, and that is fixed
-//! in [`provision_for_fallback`] directly.
+//!
+//! The two entry points answer DIFFERENT questions, and #5274 separated them.
+//! [`provision_for_launch`] decides SESSION PLACEMENT, which since #5274 is the
+//! main checkout unless the operator passed `tm launch --worktree`; it takes
+//! that request as a parameter and consults no registry at all. Only
+//! [`provision_for_fallback`] still reads
+//! [`trusty_mpm::project::worktree_enabled_for_origin_at`], because it is
+//! answering #1724's question instead — may bare `tm`, with the daemon down,
+//! deploy `CLAUDE.md` / `.mcp.json` / `.claude/` into whatever checkout the
+//! operator happens to be standing in? — where the registry's `worktree: false`
+//! is the project TELLING it yes. The two paths still compose: the fallback ends
+//! by calling `launch()` with its already-provisioned worktree as the cwd, so
+//! `provision_for_launch` names that protected directory rather than the live
+//! checkout.
 //! Scope note: this deliberately does NOT change #3455's concurrency
 //! behaviour. `spawn_managed_on_main` WARNS (never refuses) on a second
 //! session against one main checkout, and that stays the rule here — nothing
@@ -48,8 +52,9 @@ use trusty_mpm::session_manager::ManagedSessionId;
 /// so callers are forced to distinguish them rather than receiving a bare
 /// `PathBuf` that hides which one they got.
 /// What: `Worktree` carries `<base>/.worktrees/<session-id>`; `MainCheckout`
-/// carries the operator's own checkout root, returned only when the project is
-/// registered with `worktree: false`.
+/// carries the checkout root the session will run in — since #5274 the default
+/// outcome for `tm launch`, and still the #4300 outcome for a project that
+/// registered `worktree: false` on the daemon-unreachable fallback.
 /// Test: `managed_workspace_tests.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ManagedWorkspace {
@@ -107,7 +112,7 @@ async fn provision(
         tracing::info!(
             origin = %origin_url,
             path = %main_checkout.display(),
-            "project has worktree isolation disabled (#3455); no base clone, no worktree"
+            "session runs in the main checkout; no base clone, no worktree (#5274)"
         );
         return Ok(ManagedWorkspace::MainCheckout(main_checkout.to_path_buf()));
     }
@@ -122,42 +127,50 @@ async fn provision(
     Ok(ManagedWorkspace::Worktree(worktree))
 }
 
-/// Provision the workspace for `tm launch` (#4300 call site 1).
+/// Provision the workspace for `tm launch` (#4300 call site 1, #5274).
 ///
-/// Why: `tm launch` runs the whole provisioning flow in-process and never
-/// asks the daemon, so it is the CLI path that most visibly ignored the
-/// opt-out before this.
-/// What: resolves the REPO ROOT of `cwd` and reads the opt-out from the
-/// registry at `registry_dir`, prints the notice for whichever branch applies,
-/// then delegates to [`provision`] with the caller-resolved `base_path`
+/// Why: `tm launch` runs the whole provisioning flow in-process and never asks
+/// the daemon, so it decides placement itself and must reach the SAME answer
+/// the daemon's `spawn_managed_routed` would. Since #5274 that answer is the
+/// project's main checkout unless the operator asked otherwise, so this takes
+/// the request as a parameter (`tm launch --worktree`) rather than reading the
+/// registry: the project's `worktree` flag governs AGENT isolation, and letting
+/// it decide session placement here would put the CLI and the daemon back on
+/// two different rules.
+/// What: resolves the REPO ROOT of `cwd`, prints the notice for whichever branch
+/// applies, then delegates to [`provision`] with the caller-resolved `base_path`
 /// (`inproject::base_clone_path(owner, repo)`). Errors are mapped to `tm
 /// launch`'s wording.
 ///
-/// The root resolution matters and is not incidental: `get_origin_url`
-/// succeeds at ANY depth, so `cd repo/src && tm launch` on an opted-out
-/// project would otherwise deploy `.claude`, the project hooks and the tmux
-/// cwd into `repo/src` rather than `repo` — landing tm's furniture exactly
-/// where the operator did not ask for it, which is the failure mode the
-/// opt-out exists to prevent. [`super::guided::find_git_root`] is the SAME
-/// helper the daemon-unreachable fallback's classifier uses, so both CLI
-/// entry points cannot disagree about which directory the project is. A `cwd`
-/// that is not inside a working tree (or a machine with no `git` on PATH)
-/// falls back to `cwd` itself — the pre-#4300 behaviour, never worse.
-/// Test: `provision_for_launch_opted_out_creates_no_clone_and_no_worktree`,
+/// The root resolution matters and is not incidental: `get_origin_url` succeeds
+/// at ANY depth, so `cd repo/src && tm launch` would otherwise deploy `.claude`,
+/// the project hooks and the tmux cwd into `repo/src` rather than `repo` —
+/// landing tm's furniture exactly where the operator did not ask for it.
+/// [`super::guided::find_git_root`] is the SAME helper the daemon-unreachable
+/// fallback's classifier uses, so both CLI entry points cannot disagree about
+/// which directory the project is. A `cwd` that is not inside a working tree (or
+/// a machine with no `git` on PATH) falls back to `cwd` itself — the pre-#4300
+/// behaviour, never worse.
+///
+/// #1724 survives the change unchanged, and by construction. The guided
+/// daemon-unreachable fallback composes onto this function: it provisions a
+/// protected worktree itself via [`provision_for_fallback`] and then calls
+/// `launch()` WITH that worktree as `cwd`, so `find_git_root` resolves to the
+/// worktree and `MainCheckout` here names the already-protected directory, never
+/// the operator's live checkout. The three `tests_behavior_b` cases cover it.
+/// Test: `provision_for_launch_without_a_request_uses_the_main_checkout`,
 /// `provision_for_launch_from_subdirectory_targets_repo_root`,
-/// `provision_for_launch_unset_creates_worktree`,
-/// `provision_for_launch_unregistered_origin_creates_worktree`.
+/// `provision_for_launch_explicit_request_creates_worktree`,
+/// `provision_for_launch_ignores_a_registered_worktree_true_project`.
 pub(crate) async fn provision_for_launch(
-    registry_dir: &Path,
     origin_url: &str,
     base_path: &Path,
     cwd: &Path,
+    worktree_requested: bool,
     session_id: &ManagedSessionId,
 ) -> anyhow::Result<ManagedWorkspace> {
     let main_checkout = super::guided::find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let isolate =
-        trusty_mpm::project::worktree_enabled_for_origin_at(registry_dir, origin_url).await;
-    if isolate {
+    if worktree_requested {
         eprintln!(
             "note: uncommitted local changes are not carried into the managed clone. \
              Use `tm connect` if you need to work from the live checkout."
@@ -165,15 +178,21 @@ pub(crate) async fn provision_for_launch(
         eprintln!("provisioning managed workspace...");
     } else {
         eprintln!(
-            "tm: worktree isolation is disabled for this project (#3455) — \
-             launching directly in {} (no managed clone, no worktree)",
+            "tm: launching in {} (no managed clone, no worktree) — \
+             pass `--worktree` to provision an isolated one instead",
             main_checkout.display()
         );
     }
 
-    provision(isolate, origin_url, base_path, &main_checkout, session_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to provision managed workspace: {e}"))
+    provision(
+        worktree_requested,
+        origin_url,
+        base_path,
+        &main_checkout,
+        session_id,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to provision managed workspace: {e}"))
 }
 
 /// Provision the workspace for the daemon-unreachable guided fallback

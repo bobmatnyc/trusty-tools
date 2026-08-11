@@ -147,7 +147,6 @@ crates/trusty-analyze/src/mcp/review.rs	tr_review_health_routes
 crates/trusty-analyze/src/service/events.rs	sse_stream_emits_fact_upserted
 crates/trusty-analyze/src/service/handlers/analysis.rs	diagnostics_endpoint_returns_empty_when_no_tools
 crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_default_strips_content
-crates/trusty-analyze/src/service/handlers/graph.rs	scip_ingest_round_trip
 crates/trusty-analyze/src/service/handlers/review.rs	github_pr_endpoint_requires_token
 crates/trusty-analyze/src/service/routes.rs	sse_stream_emits_fact_upserted
 crates/trusty-analyze/src/types/complexity.rs	custom_thresholds_change_detection_results
@@ -435,7 +434,6 @@ crates/trusty-mpm/src/core/mcp_test/mod.rs	entry_args_preserves_deeper_separator
 crates/trusty-mpm/src/core/mcp_test/mod.rs	read_bounded_line_reads_terminated_line
 crates/trusty-mpm/src/core/mcp_test/mod.rs	read_bounded_line_returns_none_at_eof
 crates/trusty-mpm/src/core/output_style.rs	detect_from_output_unparseable
-crates/trusty-mpm/src/core/session_launch/mod.rs	prepare_session_repo_url_pins_palace
 crates/trusty-mpm/src/core/session_launch/settings.rs	deploy_output_style_writes_under_project_root
 crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_defaults_to_enter
 crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_interrupt
@@ -526,7 +524,6 @@ crates/trusty-mpm/src/daemon/managed_routes/mod.rs	adopt_existing_missing_is_404
 crates/trusty-mpm/src/daemon/managed_routes/mod.rs	adopt_existing_registers_record
 crates/trusty-mpm/src/daemon/managed_routes/proxy/backend.rs	resolve_direct_backend_matches_id_name_prefix
 crates/trusty-mpm/src/daemon/managed_routes/prune.rs	prune_worktrees_route_dry_run
-crates/trusty-mpm/src/daemon/mcp_console.rs	auto_resume_set_persists_desired
 crates/trusty-mpm/src/daemon/mcp_session.rs	session_activity_unknown_id_errors
 crates/trusty-mpm/src/daemon/mcp_session.rs	session_decommission_unknown_id_errors
 crates/trusty-mpm/src/daemon/mcp_session.rs	session_delete_force_bypasses_guard
@@ -651,12 +648,7 @@ crates/trusty-review/src/integrations/context/pr_history.rs	snippet_body_truncat
 crates/trusty-review/src/integrations/github/auth/app.rs	installation_token_deserialises
 crates/trusty-review/src/integrations/github/inline.rs	code_suggestion_is_committable
 crates/trusty-review/src/integrations/github/mod.rs	github_error_display
-crates/trusty-review/src/integrations/github/outcomes.rs	acted_on_by_file_touch
-crates/trusty-review/src/integrations/github/outcomes.rs	outcome_classification_from_reactions
-crates/trusty-review/src/integrations/github/outcomes.rs	poll_review_outcomes_accepted_via_reaction
-crates/trusty-review/src/integrations/github/outcomes.rs	poll_review_outcomes_acted_on_via_commit
 crates/trusty-review/src/integrations/github/pr.rs	fetch_pr_diff_transport_error
-crates/trusty-review/src/integrations/github/webhook.rs	webhook_signature_rejects_invalid
 crates/trusty-review/src/integrations/health.rs	embedder_state_bool_false
 crates/trusty-review/src/integrations/health.rs	embedder_state_bool_true
 crates/trusty-review/src/integrations/health.rs	embedder_state_string_loading
@@ -748,15 +740,10 @@ crates/trusty-review/src/service/handlers.rs	health_returns_ok_json
 crates/trusty-review/src/service/handlers.rs	new_for_test
 crates/trusty-review/src/service/handlers.rs	review_endpoint_with_fake_deps_returns_result
 crates/trusty-review/src/service/handlers.rs	status_returns_json_with_in_flight
-crates/trusty-review/src/service/handlers.rs	webhook_closed_merged_schedules_outcome_poll
 crates/trusty-review/src/service/inference_probe.rs	probe_default_starts_unknown
 crates/trusty-review/src/service/mod.rs	health_returns_ok_json
 crates/trusty-review/src/service/mod.rs	router_builds_without_panic
 crates/trusty-review/src/service/mod.rs	serve_help_shows_default_port
-crates/trusty-review/src/service/webhook.rs	webhook_closed_merged_schedules_outcome_poll
-crates/trusty-review/src/service/webhook.rs	webhook_dispatches_review_requested
-crates/trusty-review/src/service/webhook.rs	webhook_ignores_non_review_requested
-crates/trusty-review/src/store/outcome_store.rs	record_below_threshold
 crates/trusty-search/src/allowlist/mod.rs	denylist_allows_path_with_sensitive_word_in_name
 crates/trusty-search/src/allowlist/mod.rs	upsert_appends_new
 crates/trusty-search/src/commands/hook.rs	hook_scripts_all_exit_zero
@@ -817,7 +804,6 @@ crates/trusty-search/src/core/symbol_graph/build.rs	test_update_file_drops_old_e
 crates/trusty-search/src/mcp/tools/http.rs	delete_index
 crates/trusty-search/src/mcp/tools/http.rs	list_chunks
 crates/trusty-search/src/mcp/tools/http.rs	search_health
-crates/trusty-search/src/mcp/tools/index.rs	pinned_index_status_defaults_to_pin
 crates/trusty-search/src/mcp/tools/typeahead.rs	typeahead_mcp_tool_returns_hits
 crates/trusty-search/src/mcp/tools/typeahead.rs	typeahead_tool_returns_daemon_response
 crates/trusty-search/src/service/colocated_storage.rs	colocated_dir_exists_after_create

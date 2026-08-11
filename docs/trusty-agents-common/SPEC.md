@@ -1,15 +1,15 @@
-# open-mpm-agent-api — MPM Agent API Types
+# trusty-agents-common — Agent API Types
 
-**Purpose**: Shared type definitions and RPC interfaces for MPM agents and orchestrator communication.
+**Purpose**: Shared type definitions and RPC interfaces for trusty-agents sub-agents and orchestrator communication.
 
-**License**: Elastic License 2.0
+**License**: MIT
 
 ## Design
 
-- **Cargo cycle prevention**: Intentional separation from open-mpm to avoid circular dependencies
-  - `open-mpm` imports agent-api types
-  - Agent implementations import agent-api types
-  - Agents do NOT import `open-mpm` (prevents full platform dependency)
+- **Cargo cycle prevention**: Intentional separation from trusty-agents to avoid circular dependencies
+  - `trusty-agents` imports agent-common types
+  - Agent implementations import agent-common types
+  - Agents do NOT import `trusty-agents` (prevents full platform dependency)
 - **Serialization**: serde/JSON-RPC 2.0 compatible types
 - **Async traits**: Async-trait for agent handlers
 
@@ -35,11 +35,11 @@ pub trait Agent {
 
 ## Integration Points
 
-- **open-mpm**: Orchestrator implementation (imports these types)
+- **trusty-agents**: Orchestrator implementation (imports these types)
 - **Agent implementations**: Subagents import and implement these traits
 - **RPC layer**: Types are JSON-RPC compatible for stdio transport
 
 ## See Also
 
-- `crates/open-mpm-agent-api/README.md` for full API reference
-- `crates/open-mpm/README.md` for orchestrator implementation
+- [`crates/trusty-agents-common/README.md`](../../crates/trusty-agents-common/README.md) for full API reference
+- [`crates/trusty-agents/README.md`](../../crates/trusty-agents/README.md) for orchestrator implementation

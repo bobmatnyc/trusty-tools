@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::activity::monitor::{ActivityMonitor, LlmClassifier};
 use crate::session_manager::{ManagedSessionState, SessionManager};
@@ -49,7 +49,8 @@ pub struct TickReport {
 /// testable with a [`crate::session_manager::tests`]-style fake tmux driver and a
 /// mock classifier, with zero real time elapsed.
 /// What: lists all sessions via `mgr.list()`; for each `Stopped` session, resumes
-/// it when `cfg.auto_resume` is true (counting successes / failures); for each
+/// it when `cfg.auto_resume` is true, counting successes and — on failure —
+/// marking the session `Errored` so the fleet snapshot shows it (#5208); for each
 /// `Active` session, classifies its pane through `monitor` when `cfg.classify_idle`
 /// is true and a `monitor` is supplied. Never touches `pending_decision` — the
 /// supervisor surfaces decisions via metrics but never answers them. Returns a
@@ -80,11 +81,27 @@ pub async fn run_tick<C: LlmClassifier>(
                     report.resumed.push(record.id.to_string());
                 }
                 Err(e) => {
-                    warn!(
+                    error!(
                         id = %record.id,
                         name = %record.tmux_name,
                         "supervisor: auto-resume failed: {e}"
                     );
+                    // #5208: a failed auto-resume must not degrade to a log line
+                    // while the session stays dead and `Stopped`. Marking it
+                    // `Errored` puts it in `FleetMetrics.errored` — which drives
+                    // the console's Degraded health — and stops the sweep silently
+                    // retrying the same doomed session every interval forever.
+                    // `resume` still accepts `Errored`, so a manual retry works.
+                    if let Err(mark_err) = mgr
+                        .mark_errored(&record.id, &format!("auto-resume failed: {e}"))
+                        .await
+                    {
+                        error!(
+                            id = %record.id,
+                            name = %record.tmux_name,
+                            "supervisor: could not mark failed auto-resume as errored: {mark_err}"
+                        );
+                    }
                     report.resume_failures += 1;
                 }
             },

@@ -6,13 +6,18 @@
 //! describes *what* to send, not *how* to handle the response.
 //! What: `get`, `get_text`, `post`, `delete` — all implemented as inherent
 //! methods on `McpServer` that forward to the daemon and map HTTP errors to
-//! `DispatchError` variants.
+//! `DispatchError` variants. Two statuses get structured treatment before the
+//! prose fallback: `404` via [`McpServer::classify_index_miss`] (#4715) and
+//! `503` via [`super::unavailable::classify_unavailable`] (#5350). Both are
+//! applied on EVERY verb — a verdict that arrives as data on `search` and as a
+//! string on `index_status` is the same defect with a smaller blast radius.
 //! Test: indirectly covered by the tool-dispatch tests in `tests.rs` and
 //! `tests_lane.rs` (every test that spins up a mock daemon exercises these
 //! paths).
 
 use serde_json::Value;
 
+use super::unavailable::{classify_unavailable, classify_unavailable_text};
 use super::{types::DispatchError, McpServer};
 
 impl McpServer {
@@ -27,6 +32,27 @@ impl McpServer {
     /// `DispatchError::Transport` on network, status, or decode failure.
     /// Test: `search_health` and `index_status` arms exercise this.
     pub(super) async fn get(&self, path: &str) -> Result<Value, DispatchError> {
+        self.get_scoped(path, None).await
+    }
+
+    /// GET an index-scoped JSON endpoint, translating a 404 on the session's
+    /// advertised index into `INDEX_NOT_READY` (issue #4715).
+    ///
+    /// Why: `GET /indexes/:id/status` 404s on a worktree that was never
+    /// indexed, and that 404 used to reach the caller as a plain transport
+    /// error reading "unknown index" — permanent-sounding for a transient
+    /// state. Routing index-scoped reads through here is what lets
+    /// [`McpServer::classify_index_miss`] see the id involved.
+    /// What: identical to [`Self::get`] except that a `404` is first offered to
+    /// `classify_index_miss`; every other status, and every network or decode
+    /// failure, behaves exactly as before. The classification can only turn one
+    /// error into a more specific error — it never produces `Ok`.
+    /// Test: `index_status_on_unindexed_pin_returns_index_not_ready`.
+    pub(super) async fn get_scoped(
+        &self,
+        path: &str,
+        index_id: Option<&str>,
+    ) -> Result<Value, DispatchError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .http
@@ -40,6 +66,16 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("read {url}: {e}")))?;
         if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND {
+                if let Some(e) = self.classify_index_miss(index_id) {
+                    return Err(e);
+                }
+            }
+            // #5350: a structured 503 must reach the caller as data, not as a
+            // prose string it would have to parse.
+            if let Some(e) = classify_unavailable_text(status, &text) {
+                return Err(e);
+            }
             return Err(DispatchError::Transport(format!(
                 "GET {url} returned {status}: {text}"
             )));
@@ -64,6 +100,19 @@ impl McpServer {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<Value, DispatchError> {
+        self.get_query_scoped(path, query, None).await
+    }
+
+    /// [`Self::get_query`] scoped to an index, so a 404 on the session's
+    /// advertised index becomes `INDEX_NOT_READY` (issue #4715).
+    ///
+    /// Test: `list_chunks_on_unindexed_pin_returns_index_not_ready`.
+    pub(super) async fn get_query_scoped(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        index_id: Option<&str>,
+    ) -> Result<Value, DispatchError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .http
@@ -78,6 +127,16 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("read {url}: {e}")))?;
         if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND {
+                if let Some(e) = self.classify_index_miss(index_id) {
+                    return Err(e);
+                }
+            }
+            // #5350: a structured 503 must reach the caller as data, not as a
+            // prose string it would have to parse.
+            if let Some(e) = classify_unavailable_text(status, &text) {
+                return Err(e);
+            }
             return Err(DispatchError::Transport(format!(
                 "GET {url} returned {status}: {text}"
             )));
@@ -118,6 +177,11 @@ impl McpServer {
             if status == reqwest::StatusCode::BAD_REQUEST {
                 return Err(DispatchError::InvalidParams(body));
             }
+            // #5350: `get_call_chain` is the caller here, and `503 kg_unavailable`
+            // is a structured verdict like any other.
+            if let Some(e) = classify_unavailable_text(status, &body) {
+                return Err(e);
+            }
             return Err(DispatchError::Transport(format!(
                 "GET {url} returned {status}: {body}"
             )));
@@ -135,6 +199,28 @@ impl McpServer {
     /// Test: most tool arms in `search.rs`, `index.rs`, and `misc.rs` exercise
     /// this path.
     pub(super) async fn post(&self, path: &str, body: &Value) -> Result<Value, DispatchError> {
+        self.post_scoped(path, body, None).await
+    }
+
+    /// POST to an index-scoped endpoint, translating a 404 on the session's
+    /// advertised index into `INDEX_NOT_READY` (issue #4715).
+    ///
+    /// Why: `POST /indexes/:id/search` is the call in the #4715 report — a bare
+    /// `search` against a never-indexed worktree. It must answer "too early",
+    /// not "no such thing", and it must never be mistaken for a search that
+    /// returned zero hits.
+    /// What: identical to [`Self::post`] except that a `404` is first offered
+    /// to [`McpServer::classify_index_miss`], BEFORE the response body is
+    /// decoded, so a non-JSON error body cannot mask the state. Every other
+    /// status and every failure path is unchanged, and the classification never
+    /// yields `Ok`.
+    /// Test: `tools_call_search_on_unindexed_pin_returns_structured_not_ready`.
+    pub(super) async fn post_scoped(
+        &self,
+        path: &str,
+        body: &Value,
+        index_id: Option<&str>,
+    ) -> Result<Value, DispatchError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .http
@@ -144,6 +230,11 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("POST {url}: {e}")))?;
         let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            if let Some(e) = self.classify_index_miss(index_id) {
+                return Err(e);
+            }
+        }
         let body: Value = resp
             .json()
             .await
@@ -157,6 +248,11 @@ impl McpServer {
                     .unwrap_or("bad request")
                     .to_owned();
                 return Err(DispatchError::InvalidParams(msg));
+            }
+            // #5350: the body is already decoded here, so the availability
+            // verdict is passed through as-is rather than re-parsed.
+            if let Some(e) = classify_unavailable(status, &body) {
+                return Err(e);
             }
             return Err(DispatchError::Transport(format!(
                 "POST {url} returned {status}: {body}"
@@ -188,6 +284,11 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("read {url}: {e}")))?;
         if !status.is_success() {
+            // #5350: uniform treatment across every verb — a 503 on delete is
+            // the same kind of verdict as a 503 on search.
+            if let Some(e) = classify_unavailable_text(status, &text) {
+                return Err(e);
+            }
             return Err(DispatchError::Transport(format!(
                 "DELETE {url} returned {status}: {text}"
             )));

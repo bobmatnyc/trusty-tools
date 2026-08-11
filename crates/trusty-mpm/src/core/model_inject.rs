@@ -79,8 +79,15 @@ pub fn resolve_pm_model(config: &MpmConfig, explicit: Option<&str>) -> String {
 /// settings sources, excluding `user`. This is the correct isolation lever: it
 /// does NOT touch `~/.claude.json`, so the ambient OAuth login tm relies on is
 /// preserved. It stays the flag for launch paths that do NOT inject their own
-/// `CLAUDE_CONFIG_DIR` (`tm launch`, `tm connect`), where the `user` tier still
-/// resolves to the operator's real `~/.claude` and must stay excluded.
+/// `CLAUDE_CONFIG_DIR`, where the `user` tier still resolves to the operator's
+/// real `~/.claude` and must stay excluded.
+///
+/// #4181: `tm launch` and `tm connect` are no longer on that list unconditionally.
+/// They relocate whenever
+/// [`crate::core::trusty_tools_config::managed_claude_config_dir`] resolves, and
+/// fall back to this flag when it does not (a stripped environment with no
+/// resolvable home) — so the exclusion is still what protects those sessions in
+/// exactly the case where relocation cannot.
 /// What: the literal flag string appended to those launch commands.
 /// Test: `claude_command_includes_setting_sources`.
 pub const SETTING_SOURCES_FLAG: &str = "--setting-sources project,local";
@@ -226,10 +233,13 @@ pub const PERMISSION_MODE_FLAG: &str = "--dangerously-skip-permissions";
 /// left in place rather than deleted because `trusty-mpm` is a published crate
 /// with no `publish = false`, so removing a `pub fn` is a semver-breaking change
 /// that does not belong in a bug-fix PR; removing it is filed as follow-up.
-/// There are no `NAME=VALUE` assignments on this prefix (unlike
-/// `runtime::claude_code::env_bin_prefix`, this path does not relocate
-/// `CLAUDE_CONFIG_DIR`), so the POSIX ordering constraint is satisfied trivially
-/// — but the flags still lead the line for consistency with that builder.
+/// Issue #4181 (ADR-0042 precondition): this builder now DOES relocate
+/// `CLAUDE_CONFIG_DIR` when `config_dir` is `Some`, so the POSIX ordering
+/// constraint is live rather than trivially satisfied — the `-u` scrub flags
+/// lead the line and every `NAME=VALUE` assignment follows them, exactly as
+/// `runtime::claude_code::env_bin_prefix` does. An assignment placed before a
+/// `-u` makes `env` stop parsing options and try to exec `-u` as a command
+/// (`env: -u: No such file or directory`), which kills the spawn outright.
 ///
 /// The `env` token becoming the line's PROGRAM is deliberate and safe on the two
 /// CLI callers, both of which wrap this output in
@@ -244,22 +254,102 @@ pub const PERMISSION_MODE_FLAG: &str = "--dangerously-skip-permissions";
 /// running as its own responsible process. Note also that the shim resolves its
 /// program through `PATH`, and `env` is no less resolvable than the bare
 /// `claude` this line used to emit — so this is not a new `PATH` dependency.
-/// What: always starts with `env <-u marker…> claude`; appends `--model <model>`
-/// when `model` is `Some`; appends `--append-system-prompt-file <path>` when
-/// `prompt_file` is `Some`; then ALWAYS appends [`SETTING_SOURCES_FLAG`] and
-/// [`PERMISSION_MODE_FLAG`]. Returns the composed string.
+/// What: `env <-u marker…> [CLAUDE_CONFIG_DIR='<dir>']
+/// [CLAUDE_CODE_OAUTH_TOKEN='<token>'] claude`; appends `--model <model>` when
+/// `model` is `Some`; appends `--append-system-prompt-file <path>` when
+/// `prompt_file` is `Some`; then ALWAYS appends the flag
+/// [`setting_sources_flag`] picks for `config_dir` and [`PERMISSION_MODE_FLAG`].
+/// The OAuth token is resolved by [`crate::core::oauth_token::resolve_oauth_token`]
+/// and emitted ONLY when `config_dir` is `Some` — see
+/// [`build_claude_command_with`] for why a relocated spawn needs it and a
+/// non-relocated one must not carry it. Returns the composed string.
 /// Test: `claude_command_bare`, `claude_command_with_model`,
 /// `claude_command_with_prompt`, `claude_command_with_both`,
 /// `claude_command_includes_setting_sources`,
 /// `claude_command_includes_permission_mode`,
-/// `claude_command_scrubs_inherited_session_markers`.
-pub fn build_claude_command(model: Option<&str>, prompt_file: Option<&Path>) -> String {
+/// `claude_command_scrubs_inherited_session_markers`,
+/// `claude_command_relocates_the_config_dir`.
+pub fn build_claude_command(
+    model: Option<&str>,
+    prompt_file: Option<&Path>,
+    config_dir: Option<&Path>,
+    mcp_env: &[(String, String)],
+) -> String {
+    // #4181: a relocated spawn reads its credentials from a Keychain entry keyed
+    // by a hash of CLAUDE_CONFIG_DIR, so it needs the token; a non-relocated one
+    // already resolves the operator's own login and must not be handed a token
+    // the operator did not ask this path to use (#2246).
+    let token = config_dir.and_then(|_| crate::core::oauth_token::resolve_oauth_token());
+    build_claude_command_with(model, prompt_file, config_dir, token.as_deref(), mcp_env)
+}
+
+/// Hermetic core of [`build_claude_command`], taking the OAuth token explicitly.
+///
+/// Why (issues #4181 / #2246): [`crate::core::oauth_token::resolve_oauth_token`]
+/// reads the process environment and the on-disk token file, so a builder that
+/// called it internally could not be tested against a relocated `config_dir`
+/// without the ambient machine deciding the result. Splitting the resolution out
+/// mirrors the `inject_native_trusty_mcps` / `_from` split already used
+/// elsewhere in this crate, and lets `daemon::doctor_transcript_saving` probe
+/// the REAL relocated shape (config dir AND token present) with a placeholder
+/// instead of a credential.
+///
+/// On macOS the Keychain entry Claude Code reads is keyed by a hash of
+/// `CLAUDE_CONFIG_DIR`. Relocating the config dir without also supplying
+/// `CLAUDE_CODE_OAUTH_TOKEN` therefore produces the #2246 failure — `/login`
+/// reports success and the session is immediately not-logged-in again, because
+/// the credential was written under one hash and read under another. The token
+/// bypasses the Keychain entirely. `runtime::claude_code::env_bin_prefix` closes
+/// the same hole the same way for the daemon path; this is that mechanism, not a
+/// second one.
+/// What: composes `env`, the [`crate::core::claude_env_scrub::env_unset_flags`]
+/// `-u` operands, then the optional `CLAUDE_CONFIG_DIR` and
+/// [`crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR`] assignments (both
+/// single-quoted via [`crate::core::spawn_disclaim::pane::shell_single_quote`],
+/// both AFTER the `-u` flags per POSIX `env` grammar), then `claude` and its
+/// flags.
+/// Test: `claude_command_relocates_the_config_dir`,
+/// `claude_command_relocated_never_scrubs_what_it_assigns`,
+/// `claude_command_quotes_a_config_dir_with_a_space`,
+/// `claude_command_omits_the_oauth_token_when_absent`,
+/// `claude_command_relocated_isolates_by_relocation_not_exclusion`,
+/// `claude_command_carries_a_non_empty_mcp_env`,
+/// `claude_command_scrubs_inherited_session_markers` (the non-relocated shape).
+pub fn build_claude_command_with(
+    model: Option<&str>,
+    prompt_file: Option<&Path>,
+    config_dir: Option<&Path>,
+    oauth_token: Option<&str>,
+    mcp_env: &[(String, String)],
+) -> String {
+    use crate::core::spawn_disclaim::pane::shell_single_quote;
+
     // #4467: scrub the inherited Claude Code session markers so `tm launch` /
-    // `tm connect` / delegations keep native --resume/--continue/rewind.
-    let mut cmd = format!(
-        "env{} claude",
-        crate::core::claude_env_scrub::env_unset_flags()
-    );
+    // `tm connect` / delegations keep native --resume/--continue/rewind. These
+    // `-u` flags MUST precede every assignment below (POSIX `env` grammar).
+    let mut cmd = format!("env{}", crate::core::claude_env_scrub::env_unset_flags());
+    if let Some(dir) = config_dir {
+        // #4181: point the session at the tm-owned config home so the `user`
+        // settings tier resolves there instead of the operator's `~/.claude`.
+        cmd.push_str(" CLAUDE_CONFIG_DIR=");
+        cmd.push_str(&shell_single_quote(&dir.display().to_string()));
+    }
+    if let Some(token) = oauth_token {
+        // #2246: bypass the CLAUDE_CONFIG_DIR-keyed Keychain entry.
+        cmd.push(' ');
+        cmd.push_str(crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR);
+        cmd.push('=');
+        cmd.push_str(&shell_single_quote(token));
+    }
+    // #4181: the per-project MCP pins, in place of the arguments the deleted
+    // `.mcp.json` injectors wrote. See `core::mcp_session_env`.
+    for (name, value) in mcp_env {
+        cmd.push(' ');
+        cmd.push_str(name);
+        cmd.push('=');
+        cmd.push_str(&shell_single_quote(value));
+    }
+    cmd.push_str(" claude");
     if let Some(m) = model {
         cmd.push_str(" --model ");
         cmd.push_str(m);
@@ -269,8 +359,11 @@ pub fn build_claude_command(model: Option<&str>, prompt_file: Option<&Path>) -> 
         cmd.push_str(&p.display().to_string());
     }
     // Isolation + unattended flags, always applied (issue #1269 / step 4).
+    // #4181: the isolation lever is now the RELOCATION when `config_dir` is
+    // `Some` — `setting_sources_flag` picks the matching tier list so the two
+    // can never drift.
     cmd.push(' ');
-    cmd.push_str(SETTING_SOURCES_FLAG);
+    cmd.push_str(setting_sources_flag(config_dir));
     cmd.push(' ');
     cmd.push_str(PERMISSION_MODE_FLAG);
     cmd
@@ -349,7 +442,11 @@ pub fn build_client_session_command(prompt_file: Option<&Path>) -> String {
 /// Why: agent delegations need the same model-aware command building as PM
 /// sessions, but also carry a named agent and a frontmatter model hint.
 /// What: calls [`crate::core::config::resolve_agent_model`] for the four-level
-/// precedence, then delegates to [`build_claude_command`].
+/// precedence, then delegates to [`build_claude_command`] with no `config_dir`.
+///
+/// #4181: this builder has no production caller anywhere in the workspace (see
+/// [`build_claude_command`]'s round-2 note), so it is left non-relocating rather
+/// than given a `config_dir` parameter no caller would supply.
 /// Test: `agent_command_uses_config_model`.
 pub fn build_agent_command(
     config: &MpmConfig,
@@ -363,7 +460,7 @@ pub fn build_agent_command(
         agent.model.as_deref(),
         explicit,
     );
-    build_claude_command(Some(&model), prompt_file)
+    build_claude_command(Some(&model), prompt_file, None, &[])
 }
 
 // ──────────────────────────────────────────────
@@ -393,14 +490,14 @@ mod tests {
     fn claude_command_bare() {
         // No model, no prompt file → the env-scrub head + the isolation flags.
         assert_eq!(
-            build_claude_command(None, None),
+            build_claude_command(None, None, None, &[]),
             format!("{} {FLAGS}", head())
         );
     }
 
     #[test]
     fn claude_command_with_model() {
-        let cmd = build_claude_command(Some("claude-opus-4-5"), None);
+        let cmd = build_claude_command(Some("claude-opus-4-5"), None, None, &[]);
         assert_eq!(cmd, format!("{} --model claude-opus-4-5 {FLAGS}", head()));
     }
 
@@ -410,7 +507,7 @@ mod tests {
     /// cannot go vacuous if the shared list is emptied.
     #[test]
     fn claude_command_scrubs_inherited_session_markers() {
-        let cmd = build_claude_command(None, None);
+        let cmd = build_claude_command(None, None, None, &[]);
         assert!(
             cmd.starts_with("env -u "),
             "the launch line must carry an env scrub prefix: {cmd}"
@@ -428,8 +525,10 @@ mod tests {
                 "the launch line must unset {marker}: {cmd}"
             );
         }
-        // Over-scrub guard: this path does not relocate the config dir, so it
-        // must neither set nor unset it (#4455).
+        // Over-scrub guard, unchanged by #4181: this CALL passes no config dir,
+        // so the line must neither set nor unset it (#4455). #4181 gave the
+        // builder a relocating shape as well — that shape's counterpart guard is
+        // `claude_command_relocated_never_scrubs_what_it_assigns`.
         assert!(
             !cmd.contains("CLAUDE_CONFIG_DIR"),
             "this builder must not touch CLAUDE_CONFIG_DIR at all: {cmd}"
@@ -437,6 +536,164 @@ mod tests {
         assert!(
             !cmd.contains("-u CLAUDE_CODE_OAUTH_TOKEN"),
             "must never unset the OAuth token (#2246): {cmd}"
+        );
+    }
+
+    /// #4181: the relocated line assigns exactly the two variables
+    /// `claude_env_scrub::DELIBERATE_SPAWN_ENV` names, and unsets neither.
+    ///
+    /// Why this is a distinct test rather than an inversion of the one above:
+    /// both shapes are production shapes. The non-relocated line is what
+    /// `tm launch` emits when the home is unresolvable, and its over-scrub guard
+    /// still has to hold; this covers the shape #4181 added.
+    #[test]
+    fn claude_command_relocated_never_scrubs_what_it_assigns() {
+        let dir = Path::new("/tm/claude-config");
+        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok"), &[]);
+        for name in crate::core::claude_env_scrub::DELIBERATE_SPAWN_ENV {
+            assert!(
+                cmd.contains(&format!(" {name}=")),
+                "the relocated line must ASSIGN {name}: {cmd}"
+            );
+            assert!(
+                !cmd.contains(&format!("-u {name}")),
+                "the relocated line must never unset {name} (#4455/#2246): {cmd}"
+            );
+        }
+    }
+
+    /// #4181/#2246: relocating moves which Keychain entry `claude` reads, so the
+    /// relocated line carries `CLAUDE_CODE_OAUTH_TOKEN` — and both assignments
+    /// come AFTER every `-u` flag, which POSIX `env` requires.
+    #[test]
+    fn claude_command_relocates_the_config_dir() {
+        let dir = Path::new("/tm/claude-config");
+        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok-abc"), &[]);
+        assert_eq!(
+            cmd,
+            format!(
+                "env{} CLAUDE_CONFIG_DIR='/tm/claude-config' \
+                 CLAUDE_CODE_OAUTH_TOKEN='tok-abc' claude \
+                 --setting-sources user,project,local --dangerously-skip-permissions",
+                crate::core::claude_env_scrub::env_unset_flags()
+            )
+        );
+        // POSIX `env` stops parsing options at the first NAME=VALUE, so a
+        // `-u` appearing after one would be exec'd as a command and kill the
+        // spawn. Read the ordering out of the real line, never restate it.
+        let first_assignment = cmd.find('=').expect("the line carries an assignment");
+        let last_unset = cmd.rfind("-u ").expect("the line carries scrub flags");
+        assert!(
+            last_unset < first_assignment,
+            "every -u flag must precede every NAME=VALUE assignment: {cmd}"
+        );
+    }
+
+    /// #4181: a resolvable config dir with NO token still launches — the token
+    /// is an optional bypass, not a precondition.
+    #[test]
+    fn claude_command_omits_the_oauth_token_when_absent() {
+        let dir = Path::new("/tm/claude-config");
+        let cmd = build_claude_command_with(None, None, Some(dir), None, &[]);
+        assert!(
+            cmd.contains("CLAUDE_CONFIG_DIR='/tm/claude-config'"),
+            "the config dir must still be relocated: {cmd}"
+        );
+        assert!(
+            !cmd.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+            "no token resolved → no assignment at all: {cmd}"
+        );
+        assert!(
+            cmd.contains("--setting-sources user,project,local"),
+            "the tier list follows the config dir, not the token: {cmd}"
+        );
+    }
+
+    /// #4181: a config dir containing a space survives the pane shell intact.
+    ///
+    /// An unquoted `/Users/John Doe/…` word-splits, `env` sees a truncated
+    /// assignment plus a stray argv entry, and the pane dies with nothing
+    /// surfaced — the same failure `runtime::claude_code` quotes against.
+    #[test]
+    fn claude_command_quotes_a_config_dir_with_a_space() {
+        let dir = Path::new("/Users/John Doe/.trusty-tools/claude-config");
+        let cmd = build_claude_command_with(None, None, Some(dir), None, &[]);
+        assert!(
+            cmd.contains("CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/claude-config'"),
+            "the config dir must be single-quoted: {cmd}"
+        );
+    }
+
+    /// #4181 / ADR-0042: a non-empty `mcp_env` reaches the `tm launch` /
+    /// `tm connect` command string.
+    ///
+    /// Why: with the `.mcp.json` injectors deleted, this assignment is the only
+    /// thing that pins the palace and index for a session spawned through this
+    /// builder. Every other test here passes `&[]`, so the carrier itself was
+    /// untested. The space in the palace value would break the command line if
+    /// the assignment were not single-quoted.
+    /// Test: itself.
+    #[test]
+    fn claude_command_carries_a_non_empty_mcp_env() {
+        let mcp_env = vec![
+            (
+                "TRUSTY_MEMORY_PALACE".to_owned(),
+                "owner repo slug".to_owned(),
+            ),
+            ("TRUSTY_INDEX".to_owned(), "idx-42".to_owned()),
+        ];
+        let cmd = build_claude_command_with(
+            None,
+            None,
+            Some(Path::new("/tm/claude-config")),
+            None,
+            &mcp_env,
+        );
+
+        assert!(
+            cmd.contains(" TRUSTY_MEMORY_PALACE='owner repo slug'"),
+            "the palace pin must be assigned and single-quoted: {cmd}"
+        );
+        assert!(
+            cmd.contains(" TRUSTY_INDEX='idx-42'"),
+            "the index pin must be assigned and single-quoted: {cmd}"
+        );
+        assert!(
+            cmd.find("TRUSTY_INDEX=").unwrap() < cmd.find(" claude").unwrap(),
+            "both pins must precede the binary, or they are argv rather than env: {cmd}"
+        );
+    }
+
+    /// #4181 + #1269: the relocated line loads the `user` tier, and that tier
+    /// resolves to the tm-owned config home — so the operator's own `~/.claude`
+    /// settings and hooks stay excluded, by relocation instead of by exclusion.
+    ///
+    /// This is the isolation proof the relocation rests on: a source that SHOULD
+    /// be excluded still is. Both halves must hold together — `user` in the tier
+    /// list with NO `CLAUDE_CONFIG_DIR` assignment would be the rejected
+    /// alternative (adding user scope while still reading the operator's real
+    /// `~/.claude`), which is exactly what this pins against.
+    #[test]
+    fn claude_command_relocated_isolates_by_relocation_not_exclusion() {
+        let dir = Path::new("/tm/claude-config");
+        let cmd = build_claude_command_with(None, None, Some(dir), None, &[]);
+        assert!(
+            cmd.contains("--setting-sources user,project,local"),
+            "the relocated line must load the user tier: {cmd}"
+        );
+        let tiers = setting_source_tiers_of(setting_sources_flag(Some(dir)));
+        assert!(tiers.contains(&"user"), "{tiers:?}");
+        // The `user` tier the line loads is the tm-owned dir, not `~/.claude`:
+        // the assignment that redirects it must precede the `claude` program
+        // word, or `env` passes it to `claude` as an argument instead of
+        // exporting it.
+        let assignment = cmd
+            .find("CLAUDE_CONFIG_DIR='/tm/claude-config'")
+            .expect("the relocated line must redirect the user tier");
+        let program = cmd.find(" claude ").expect("the line spawns claude");
+        assert!(
+            assignment < program,
+            "CLAUDE_CONFIG_DIR must be exported by env, not passed to claude: {cmd}"
         );
     }
 
@@ -523,7 +780,7 @@ mod tests {
     #[test]
     fn claude_command_with_prompt() {
         let path = Path::new("/tmp/prompt.txt");
-        let cmd = build_claude_command(None, Some(path));
+        let cmd = build_claude_command(None, Some(path), None, &[]);
         assert_eq!(
             cmd,
             format!(
@@ -536,7 +793,7 @@ mod tests {
     #[test]
     fn claude_command_with_both() {
         let path = Path::new("/tmp/sys.txt");
-        let cmd = build_claude_command(Some("claude-haiku-4-5"), Some(path));
+        let cmd = build_claude_command(Some("claude-haiku-4-5"), Some(path), None, &[]);
         assert_eq!(
             cmd,
             format!(
@@ -548,9 +805,14 @@ mod tests {
 
     #[test]
     fn claude_command_includes_setting_sources() {
-        // Why (#1269/step 4): every spawned session must EXCLUDE the user's
-        // global settings by loading only project,local sources.
-        let cmd = build_claude_command(None, None);
+        // Why (#1269/step 4): a session that does NOT relocate CLAUDE_CONFIG_DIR
+        // must EXCLUDE the operator's global settings by loading only
+        // project,local. #4181 narrowed the scope of this assertion from "every
+        // spawned session" to the non-relocated shape — the relocated shape's
+        // isolation is proved by
+        // `claude_command_relocated_isolates_by_relocation_not_exclusion`, which
+        // is the same guarantee reached a different way, not a weaker one.
+        let cmd = build_claude_command(None, None, None, &[]);
         assert!(
             cmd.contains("--setting-sources project,local"),
             "missing setting-sources isolation flag: {cmd}"
@@ -566,7 +828,7 @@ mod tests {
     fn claude_command_includes_permission_mode() {
         // Why: unattended orchestration sessions must not block on permission prompts;
         // bypass-permissions mode is required for fully automated multi-agent workflows.
-        let cmd = build_claude_command(Some("sonnet"), None);
+        let cmd = build_claude_command(Some("sonnet"), None, None, &[]);
         assert!(
             cmd.contains("--dangerously-skip-permissions"),
             "missing bypass-permissions flag: {cmd}"

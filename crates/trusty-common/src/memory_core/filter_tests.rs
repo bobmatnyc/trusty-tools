@@ -2076,3 +2076,421 @@ fn aws_key_ids_with_adjacent_text_are_blocked() {
         );
     }
 }
+
+// ---- Issue #5043: the consolidated recurrence corpus ----
+
+/// Every false positive reported against this detector, across all seven
+/// recurrence cycles, in one table.
+///
+/// Why (issue #5043, the SEVENTH recurrence after #1667, #1676, #2800/#4216,
+/// #4312, #4739 and #4898): each prior round shipped its own private battery, so
+/// the eighth implementer must find and read six scattered test functions before
+/// knowing what the predicate already owes. Six rounds of that produced six
+/// fixes that each narrowed one shape and none that saw the whole set. One
+/// table, walked by one test, makes the accumulated obligation visible at the
+/// point of change instead of discoverable by archaeology.
+///
+/// This does NOT replace the per-cycle batteries above — those pin the exact
+/// redacted previews and `FilterConfig::apply` behaviour their issues reported.
+/// It is the index over them: add every new false positive here as well as to
+/// its own battery.
+/// What: `(cycle, token)` pairs. Every entry must yield `None` from
+/// [`find_secret_token`].
+/// Test: `recurrence_corpus_has_no_false_positives`.
+const RECURRENCE_FALSE_POSITIVES: &[(&str, &str)] = &[
+    // #1667 — slash paths, slugs, semver-operator tokens.
+    ("#1667", "verdict/grade/prose-summary"),
+    ("#1667", "duettoresearch/duetto"),
+    ("#1667", "duettoresearch/projects/19"),
+    ("#1667", ">=2-medium->REQUEST_CHANGES"),
+    // #1676 — key=value whose value is itself a slash path.
+    (
+        "#1676",
+        "reviewer_model=openrouter/openai/gpt-5.4-mini-20260317",
+    ),
+    // #2442 — source-location references and issue/PR ledger markers.
+    (
+        "#2442",
+        "client/http_client/error.rs::response_or_body_error",
+    ),
+    ("#2442", "#2486→PR#2491(e993c18a)"),
+    // #2800 / #4216 — slash-separated issue/PR-number lists.
+    ("#2800", "#2763/#2774/#2780/#2782/#2790"),
+    ("#4216", "#4292/#4296/#4298/#4302"),
+    // #4312 — plus/hyphen prose and URL-shaped doc links.
+    ("#4312", "ticker+shutdown-channel"),
+    (
+        "#4312",
+        "https://docs.example.com/guide/getting-started/install",
+    ),
+    // #4739 — dotted filename carrying a leading capital and a timestamp.
+    ("#4739", "Agents.app.bak-20260729-000028"),
+    // #4898 — `+`-joined prose, branch names, prefix-shaped English words.
+    ("#4898", "PM+instructions+subagents"),
+    ("#4898", "fix-3696-slice1-gapA-emit"),
+    ("#4898", "Asia"),
+    ("#4898", "Asia-Pacific"),
+    ("#4898", "asia-pacific-rollout-notes"),
+    // #5043 — `::`-joined symbol paths whose segments are CamelCase.
+    ("#5043", "Bm25Index::queryTopK"),
+    ("#5043", "Sha256Hasher::finalizeInto"),
+    ("#5043", "OAuth2Client::refreshToken"),
+    ("#5043", "Utf8Error::validUpTo"),
+    ("#5043", "std::str::Utf8Error::to_str"),
+    ("#5043", "PalaceHandle::remember_with_options"),
+    ("#5043", "trusty_common::memory_core::Sha1Hash::as_ref"),
+    ("#5043", "Base64Decoder::decodeInto2Buffers"),
+    ("#5043", "Http2Client::sendRequestV3"),
+    // #5043 review round 2: two-letter module names cannot reach the word floor
+    // the round-1 HIGH fix introduced, so every path through one was flagged.
+    // `is_symbol_path_segment` decides a sub-word-length segment on case
+    // uniformity instead.
+    ("#5043", "std::io::BufReader::read_u32"),
+    ("#5043", "tokio::io::AsyncReadExt::read_u64"),
+    ("#5043", "trusty_common::io::Sha256Hasher::finalizeInto"),
+    ("#5043", "hyper::rt::Executor::execute2"),
+];
+
+/// Every credential shape the detector must still catch, in one table.
+///
+/// Why (issue #5043): every change to this module so far has been a NARROWING —
+/// it makes [`looks_like_secret`] return `false` sooner. A narrowing can only
+/// lose detection, so the true-positive side is the half that actually needs
+/// re-asserting, and it is the half that was spread thinnest across the
+/// per-cycle batteries. #4898's review found two self-inflicted regressions this
+/// way, caught only because that PR happened to re-run older batteries.
+/// What: `(label, token)` pairs. Every entry must yield `Some` from
+/// [`find_secret_token`].
+/// Test: `recurrence_corpus_true_positives_stay_flagged`.
+const RECURRENCE_TRUE_POSITIVES: &[(&str, &str)] = &[
+    ("aws key id", "AKIAIOSFODNN7EXAMPLE"), // pragma: allowlist secret
+    ("aws sts key id", "ASIAY34FZKBOKMUTVA7Q"), // pragma: allowlist secret
+    ("aws key id, suffixed", "AKIAIOSFODNN7EXAMPLE-old"), // pragma: allowlist secret
+    (
+        "aws key id + secret access key",
+        "AKIAIOSFODNN7EXAMPLE/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    ), // pragma: allowlist secret
+    // Provider-key rows reuse this file's established synthetic literals rather
+    // than realistic ones — a realistic Slack token trips GitHub push
+    // protection, which is the correct behaviour of a different scanner and no
+    // reason to weaken this one's fixtures.
+    ("openai key", "sk-abcdef0123456789abcdef01"), // pragma: allowlist secret
+    ("github pat", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"), // pragma: allowlist secret
+    ("slack bot token", "xoxb-1234-5678-abcdEFGH"), // pragma: allowlist secret
+    (
+        "base64 carrying +",
+        "A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI",
+    ), // pragma: allowlist secret
+    ("base64 urandom(15)", "j1u7nJd+tvZers+wdZyr"), // pragma: allowlist secret
+    (
+        "key= prefixed base64",
+        "token=A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI",
+    ), // pragma: allowlist secret
+    ("bare mixed-case blob", "aBc123XyZ987uvW456QrS"), // pragma: allowlist secret
+    ("segmented mixed-case blob", "AbCd1234-EfGh5678-IjKl9012"), // pragma: allowlist secret
+    (
+        "segmented mixed-case blob 2",
+        "xYzAbc123-qRsTuv456-mNoPqr789",
+    ), // pragma: allowlist secret
+    ("slug-prefixed blob", "apikey-Xy7Kp2Qm9Rt4Vw8Nz3Bc6Fj"), // pragma: allowlist secret
+    ("camel-run blob", "AbCdEfGhIjKlMnOpQrSt-1234"), // pragma: allowlist secret
+    ("colon-delimited credential", "token:aBc123XyZ987uvW456QrS"), // pragma: allowlist secret
+    (
+        "jwt",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    ), // pragma: allowlist secret
+    (
+        "mongodb+srv connection string",
+        "mongodb+srv://svcuser:hunterhunter@cluster.mongodb.net",
+    ), // pragma: allowlist secret
+    (
+        "postgres connection string",
+        "postgres://user:password@host/database",
+    ), // pragma: allowlist secret
+    // #5043 LOAD-BEARING: a credential a human wrapped in `::` path syntax must
+    // NOT inherit the symbol-path exemption. Each has a colon-segment carrying
+    // no word, or interleaving digits the way encoder output does.
+    (
+        "credential behind a `::` label",
+        "secretKey::aBc123XyZ987uvW456QrS",
+    ), // pragma: allowlist secret
+    (
+        "credential behind two `::` labels",
+        "Config::token::aBc123XyZ987uvW456QrS",
+    ), // pragma: allowlist secret
+    (
+        "base64url blob as a `::` segment",
+        "apiKey::9h6Nn6i2vJd6vmb4xEk4Qz",
+    ), // pragma: allowlist secret
+];
+
+/// Why (issue #5043): the corpus is only worth its lines if something walks it.
+/// What: asserts every recorded false positive stores clean, at the token
+/// predicate and at the `FilterConfig::apply` gate a memory write actually hits.
+/// Test: itself.
+#[test]
+fn recurrence_corpus_has_no_false_positives() {
+    let cfg = FilterConfig::default();
+    let mut failures = Vec::new();
+    for (cycle, tok) in RECURRENCE_FALSE_POSITIVES {
+        if let Some(preview) = find_secret_token(tok) {
+            failures.push(format!("  {cycle} {tok} -> {preview}"));
+            continue;
+        }
+        let prose = format!("Checkpoint: the {tok} work landed on main this morning");
+        if let Err(e) = cfg.apply(&prose, true) {
+            failures.push(format!("  {cycle} {tok} -> gate rejected the prose: {e}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "#5043 recurrence corpus: {} of {} recorded false positives are flagged \
+         again. Every entry is a shape a previous cycle already fixed — a hit \
+         means this change REGRESSED a closed issue, not that the corpus is \
+         stale.\n{}",
+        failures.len(),
+        RECURRENCE_FALSE_POSITIVES.len(),
+        failures.join("\n")
+    );
+}
+
+/// Why (issue #5043): see [`RECURRENCE_TRUE_POSITIVES`] — every change here
+/// narrows flagging, and a narrowing can only lose detection.
+/// What: asserts every recorded credential shape is still flagged.
+/// Test: itself.
+#[test]
+fn recurrence_corpus_true_positives_stay_flagged() {
+    let mut misses = Vec::new();
+    for (label, tok) in RECURRENCE_TRUE_POSITIVES {
+        if find_secret_token(tok).is_none() {
+            misses.push(format!("  {label}: {tok}"));
+        }
+    }
+    assert!(
+        misses.is_empty(),
+        "#5043 recurrence corpus: {} of {} credential shapes are no longer \
+         detected. A narrowing lost detection — tighten the exemption's guard, \
+         do not delete the row.\n{}",
+        misses.len(),
+        RECURRENCE_TRUE_POSITIVES.len(),
+        misses.join("\n")
+    );
+}
+
+/// Why (issue #5043, the SEVENTH recurrence): a 38-character Rust method path
+/// was rejected during a drawer write. The four reproductions below were
+/// confirmed by execution against `origin/main`, and their redacted previews are
+/// pinned so a change that alters the tokenizer is caught rather than silently
+/// reshaping the message.
+///
+/// Why the issue body's own suggested fix would not have worked: it proposed
+/// treating `::` as an identifier delimiter "on the same segment-based logic
+/// #4967 used for `+`/`-`/`_`/`.`". That alone changes nothing — `Bm25Index` and
+/// `queryTopK` each carry two capitals, so `is_human_word_segment` declines them
+/// however the token is split. The blocking predicate is the CamelCase rule, not
+/// the delimiter set; measured, not assumed.
+/// What: pins the four reproductions and their `origin/main` previews.
+/// Test: itself.
+#[test]
+fn rust_symbol_paths_are_not_flagged() {
+    let cfg = FilterConfig::default();
+    for (tok, pre_fix_preview) in [
+        ("Bm25Index::queryTopK", "Bm25…(20 chars)"),
+        ("Sha256Hasher::finalizeInto", "Sha2…(26 chars)"),
+        ("OAuth2Client::refreshToken", "OAut…(26 chars)"),
+        ("Utf8Error::validUpTo", "Utf8…(20 chars)"),
+    ] {
+        assert!(
+            tok.len() >= SECRET_MIN_LEN,
+            "#5043: {tok} is below the {SECRET_MIN_LEN}-char floor, so it could \
+             never have reached the mixed-case branch — this row proves nothing"
+        );
+        assert!(
+            find_secret_token(tok).is_none(),
+            "#5043: a Rust symbol path must NOT be flagged: {tok} (was \
+             {pre_fix_preview} on origin/main); got {:?}",
+            find_secret_token(tok)
+        );
+        let prose = format!("The regression is in {tok}, reached from the recall path");
+        assert!(
+            cfg.apply(&prose, true).is_ok(),
+            "#5043: the gate must ACCEPT prose carrying {tok}; got {:?}",
+            cfg.apply(&prose, true)
+        );
+    }
+}
+
+/// Why (issue #5043): [`is_symbol_path`] is an exemption, and an exemption is a
+/// hole unless something measures its width. The shape it must not shelter is a
+/// credential a human wrote in `::` path syntax — the ONLY way encoder output
+/// reaches the predicate at all, since `::` appears in no encoder alphabet.
+///
+/// Two shapes, both measured at this test's own seed against `origin/main`
+/// (`5a055380`). A credential wrapped in `::` labels, 30k tokens per row:
+///
+/// ```text
+///                                      origin/main   this branch
+///   secretKey::<base64url 20ch>            1017          2022
+///   secretKey::<base64url 27ch>             282           767
+///   Config::token::<base64url 20ch>        1017          2022
+/// ```
+///
+/// And a blob CHUNKED into `::`-joined groups, 20k tokens of 24 characters:
+///
+/// ```text
+///                     origin/main   first cut   round-1 fix   now
+///   chunk width 2         355          ~355          355       355
+///   chunk width 4         355          4629          366       366
+///   chunk width 6         355          3282          732       732
+///   chunk width 8         355          2521         1273      1273
+///   chunk width 11        355           ————          355       392
+/// ```
+///
+/// Width 2 reads flat across every column, which is the point of carrying it:
+/// it is not a measurement of this PR, it is an alarm for the two-character arm
+/// [`is_symbol_path_segment`] applies below [`SYMBOL_SEGMENT_SHORT_WORD_LEN`].
+///
+/// The two rows catch DIFFERENT widenings of that arm, which is why both are
+/// here. Measured by mutating the arm and re-running this test:
+///
+/// ```text
+///   arm widened to...          width 2 misses   width 11 misses
+///   any-alphabetic (`Ab`)         under 500           417
+///   accept unconditionally         20000             (n/a)
+/// ```
+///
+/// Relaxing single-case to any-alphabetic does NOT blow up width 2 — every one
+/// of the twelve 2-character segments must still be alphabetic, and a base64url
+/// character is alphabetic only 52/64 of the time, so the token still usually
+/// fails. Width 11 is what catches that widening, at 417 over its 400 ceiling.
+/// Dropping the charset check entirely is what width 2 catches, and it catches
+/// it total: 20000 of 20000.
+///
+/// A third tripwire covers the same ground from another direction — the
+/// `std::rc::Rc::downgrade2` assertion at the end of this test, which names the
+/// cause in its message.
+///
+/// Width 8 is the worst case, confirmed by sweeping widths 2-12. Width 11 is the
+/// one place review round 2's sub-word-length arm costs anything: 24 characters
+/// chunk to 11/11/2, and a 2-character segment is exactly what that arm decides
+/// on case uniformity rather than word length. Widths 10 and 12 leave no 2-char
+/// remainder and are unchanged, which is what identifies the arm as the cause.
+/// 37 misses per 20k buys back `io`, `rt` and every other two-letter module
+/// name; the round-1 fix flagged every symbol path through one.
+///
+/// Why the second table exists (review round 1, HIGH): the first cut of this PR
+/// EXEMPTED a segment of at most `SYMBOL_SEGMENT_SHORT_LEN` bytes from the word
+/// requirement, so a blob chunked into short groups took the exemption whole —
+/// a 7-13x loss. Nothing alarmed: this ratchet's first table, the recurrence
+/// corpus and `generated_encoder_corpus_stays_flagged` all reported healthy
+/// while it happened, because none of them generates a chunked shape. A check
+/// reporting healthy over real loss is the finding; this row is the fix.
+///
+/// The first table's baseline is not zero — those are the pre-existing
+/// `is_segmented_identifier` misses documented on [`is_human_word_segment`],
+/// reached because a base64url token carries `-`/`_`. This change roughly doubles
+/// them on colon-wrapped shapes and leaves every non-colon shape byte-identical:
+/// `generated_encoder_corpus_stays_flagged`'s eight ceilings are unmoved.
+/// What: generated tokens per configuration, asserting the miss count is at or
+/// below the pinned ceiling.
+/// Test: itself.
+#[test]
+fn symbol_path_keyhole_does_not_shelter_credentials() {
+    const SEED: u64 = 0x5043_1234_5678_9abc;
+    const N: usize = 30_000;
+    for (label, prefix, input_len, ceiling) in [
+        ("one label", "secretKey::", 15usize, 2100usize),
+        ("one label, longer blob", "secretKey::", 20, 800),
+        ("two labels", "Config::token::", 15, 2100),
+    ] {
+        let mut rng = Xorshift(SEED);
+        let alphabet = b64_alphabet(true);
+        let mut buf = vec![0u8; input_len];
+        let mut misses = 0usize;
+        for _ in 0..N {
+            rng.fill(&mut buf);
+            let tok = format!("{prefix}{}", b64_encode(&buf, &alphabet, false));
+            if find_secret_token(&tok).is_none() {
+                misses += 1;
+            }
+        }
+        assert!(
+            misses <= ceiling,
+            "#5043 ratchet: {label} at {input_len} input bytes missed {misses} of \
+             {N}, above the pinned ceiling {ceiling}. The `::` exemption widened \
+             — re-measure against origin/main before touching this number."
+        );
+    }
+
+    // Review round 1, HIGH: the chunked shape, which no other check generates.
+    // Width 8 is the measured worst case (swept 2-12). Width 11 is here for a
+    // different reason: at 24 characters it chunks to 11/11/2, and that 2-char
+    // remainder is the only place the sub-word-length arm added by review round 2
+    // costs anything — 355 -> 392. Widths 10 and 12 leave no 2-char remainder and
+    // are unchanged, which is what identifies the arm as the cause.
+    const CHUNK_N: usize = 20_000;
+    for (chunk, ceiling) in [
+        // Width 2 catches the two-character arm losing its charset check
+        // entirely: every segment is 2 chars, so an unconditional accept takes
+        // this row to 20000 of 20000. A milder widening (any-alphabetic) leaves
+        // it under 500 — width 11 is what catches that one. See the doc above.
+        (2usize, 500usize),
+        (4, 500),
+        (6, 900),
+        // Width 8 is the swept worst case across widths 2-12.
+        (8, 1400),
+        // Width 11 chunks to 11/11/2 — the only width whose remainder reaches
+        // the two-character arm. Ceiling 400 sits between the arm's current cost
+        // (392) and its unconditional-accept maximum (448), so this row can
+        // actually fire. The 450 it replaces was above that maximum: inert.
+        (11, 400),
+    ] {
+        let mut rng = Xorshift(SEED);
+        let alphabet = b64_alphabet(true);
+        let mut buf = vec![0u8; 18];
+        let mut misses = 0usize;
+        for _ in 0..CHUNK_N {
+            rng.fill(&mut buf);
+            let blob = b64_encode(&buf, &alphabet, false);
+            let joined: Vec<String> = blob
+                .as_bytes()
+                .chunks(chunk)
+                .map(|c| String::from_utf8_lossy(c).into_owned())
+                .collect();
+            if find_secret_token(&joined.join("::")).is_none() {
+                misses += 1;
+            }
+        }
+        assert!(
+            misses <= ceiling,
+            "#5043 ratchet: a 24-char blob chunked into `::`-joined groups of \
+             {chunk} missed {misses} of {CHUNK_N}, above the pinned ceiling \
+             {ceiling}. A short segment must keep a word floor, never an \
+             exemption — see `SYMBOL_SEGMENT_SHORT_WORD_LEN`."
+        );
+    }
+
+    // The literal from the review finding: FLAG on origin/main, MISS on the
+    // first cut of this PR, FLAG again now.
+    assert!(
+        find_secret_token("Ab12cdEf::Gh34ijKl::Mn56opQr").is_some(),
+        "#5043 review round 1: a blob chunked into 8-char `::` groups must be \
+         flagged; the short-segment exemption let this through"
+    );
+
+    // Review round 2, the accepted residue of the sub-word-length arm. A
+    // two-character segment must be single-case ALPHABETIC, so `Rc` —
+    // Capitalized — does not qualify and `std::rc::Rc::downgrade2` stays
+    // flagged. This is the tripwire for the mildest widening of that arm, the
+    // one the chunk rows are least sensitive to: relaxing single-case to
+    // any-alphabetic moves width 11 by 25 and width 2 not at all, but flips this
+    // assertion outright. Pinned so the trade is visible rather than
+    // rediscovered.
+    assert!(
+        find_secret_token("std::rc::Rc::downgrade2").is_some(),
+        "#5043: this is a KNOWN ACCEPTED BOUND, not a target. If it now stores \
+         clean, the two-character arm was widened to admit Capitalized — check \
+         the chunk-width-11 row above for what that costs, and note the \
+         chunk-width-2 row will NOT have caught it."
+    );
+}

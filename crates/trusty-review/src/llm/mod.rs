@@ -276,6 +276,35 @@ pub async fn build_provider(
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
+/// Build the verifier-role provider, treating a build failure as fatal.
+///
+/// Why: `serve` and the #5192 webhook drain both need the daemon-strength
+/// semantics — unlike the one-shot CLI they must NOT silently degrade to
+/// no-verification, because that failure is exactly what the liveness gate
+/// exists to catch. One implementation so the two cannot drift; `cli_verify`
+/// delegates here.
+/// What: `Ok(None)` when verification is disabled, `Ok(Some(_))` when it builds,
+/// `Err` when it is enabled and the build fails.
+///
+/// # Errors
+///
+/// When verification is enabled and the provider cannot be built.
+///
+/// Test: the build path is network-bound; the decision branch is covered by
+/// `pipeline::verify_liveness::tests` through `enforce_verifier_liveness`.
+pub async fn build_verifier_required(
+    config: &crate::config::ReviewConfig,
+) -> anyhow::Result<Option<std::sync::Arc<dyn LlmProvider>>> {
+    if !config.verification.enabled {
+        return Ok(None);
+    }
+    let role = &config.role_models.verifier;
+    let provider = build_provider(&role.model, &role.provider, config)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to build verifier provider: {e}"))?;
+    Ok(Some(provider))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

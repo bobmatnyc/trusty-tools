@@ -16,9 +16,21 @@
 # own lightweight job (matches line-cap.yml / test-pointers.yml checkout style).
 name: Doc numbers
 
+#
+# Optional and pure shell: run only when the document-number or ADR corpora,
+# their allowlist/checkers, or this workflow changes.
 on:
   push:
     branches: [main]
+    paths:
+      - "docs/specs/**"
+      - "docs/adr/**"
+      - "docs/trusty-installer/research/02-design/**"
+      - ".doc-number-allowlist.tsv"
+      - "scripts/check_doc_numbers.sh"
+      - "scripts/check_adr.sh"
+      - "scripts/check_scan_floor_selftest.sh"
+      - ".github/workflows/doc-numbers.yml"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
     # (opened/synchronize/reopened) and is the event a base-branch RETARGET
@@ -27,6 +39,15 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+    paths:
+      - "docs/specs/**"
+      - "docs/adr/**"
+      - "docs/trusty-installer/research/02-design/**"
+      - ".doc-number-allowlist.tsv"
+      - "scripts/check_doc_numbers.sh"
+      - "scripts/check_adr.sh"
+      - "scripts/check_scan_floor_selftest.sh"
+      - ".github/workflows/doc-numbers.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push
@@ -37,7 +58,8 @@ concurrency:
 
 jobs:
   doc-numbers:
-    name: DOC-N / ADR number allocation lint
+    name: DOC-N allocation and ADR consistency lint
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -60,3 +82,9 @@ jobs:
 
       - name: Enforce DOC-N / ADR number allocation (ratcheted allowlist)
         run: bash scripts/check_doc_numbers.sh
+
+      - name: Test ADR consistency checker
+        run: scripts/check_adr.sh --self-test
+
+      - name: Check ADR corpus consistency
+        run: bash scripts/check_adr.sh

@@ -52,11 +52,11 @@ fn guided_picker_bare_enter_no_sessions_launches_new() {
     // Why: bare Enter with no sessions must launch a new session, not hang.
     assert_eq!(
         parse_picker_choice("", &[], false),
-        PickerDecision::LaunchNew
+        PickerDecision::LaunchNew(None)
     );
     assert_eq!(
         parse_picker_choice("  \t", &[], false),
-        PickerDecision::LaunchNew
+        PickerDecision::LaunchNew(None)
     );
 }
 
@@ -183,7 +183,7 @@ fn guided_picker_launch_new_uses_highest_slot_with_gaps() {
     ];
     assert_eq!(
         parse_picker_choice("6", &sessions, false),
-        PickerDecision::LaunchNew
+        PickerDecision::LaunchNew(None)
     );
     // The old `len()+1` value (3) must NOT be treated as launch-new here.
     assert_eq!(
@@ -284,11 +284,11 @@ fn guided_picker_numeric_launch_new() {
     // Why: "[highest slot + 1]" must always launch a new session.
     assert_eq!(
         parse_picker_choice("1", &[], false),
-        PickerDecision::LaunchNew
+        PickerDecision::LaunchNew(None)
     );
     assert_eq!(
         parse_picker_choice("4", &picker_fixture(3, &[]), false),
-        PickerDecision::LaunchNew
+        PickerDecision::LaunchNew(None)
     );
 }
 
@@ -324,7 +324,7 @@ fn guided_picker_stale_daemon_slots_render_distinct_incrementing_choices() {
     // fixed `1` (the pre-fix `sessions.last().slot + 1 == 0 + 1` bug).
     assert_eq!(
         parse_picker_choice("4", &sessions, false),
-        PickerDecision::LaunchNew
+        PickerDecision::LaunchNew(None)
     );
 }
 
@@ -438,6 +438,177 @@ fn guided_picker_ls_does_not_shadow_launch_new_or_delete_prefix() {
     assert_eq!(
         parse_picker_choice("lsx", &picker_fixture(3, &[]), false),
         PickerDecision::Unrecognised
+    );
+}
+
+#[test]
+fn guided_picker_n_launches_new_unnamed() {
+    // #4965: bare `n` is the slot-independent alias for the numeric
+    // launch-new choice — same outcome, nothing to memorize. Case-insensitive
+    // like `d`/`r`/`q`, and a whitespace-only remainder is still "unnamed",
+    // never an empty `name_hint` the daemon would have to fall back on.
+    assert_eq!(
+        parse_picker_choice("n", &picker_fixture(3, &[]), false),
+        PickerDecision::LaunchNew(None)
+    );
+    assert_eq!(
+        parse_picker_choice("N", &picker_fixture(3, &[]), false),
+        PickerDecision::LaunchNew(None)
+    );
+    assert_eq!(
+        parse_picker_choice("n\n", &[], false),
+        PickerDecision::LaunchNew(None)
+    );
+    assert_eq!(
+        parse_picker_choice("  n  ", &picker_fixture(1, &[]), true),
+        PickerDecision::LaunchNew(None)
+    );
+    assert_eq!(
+        parse_picker_choice("n   ", &picker_fixture(3, &[]), false),
+        PickerDecision::LaunchNew(None),
+        "a whitespace-only remainder must launch unnamed, not with an empty name"
+    );
+}
+
+#[test]
+fn guided_picker_n_with_argument_carries_name_hint() {
+    // #4965: `n <name>` — the whitespace separator is REQUIRED — carries the
+    // name through as `name_hint`, already sanitized (see
+    // `guided_picker_n_sanitizes_the_name_cli_side`).
+    assert_eq!(
+        parse_picker_choice("n auth-refactor", &picker_fixture(3, &[]), false),
+        PickerDecision::LaunchNew(Some("auth-refactor".to_string()))
+    );
+    assert_eq!(
+        parse_picker_choice("N auth-refactor\n", &[], false),
+        PickerDecision::LaunchNew(Some("auth-refactor".to_string()))
+    );
+    assert_eq!(
+        parse_picker_choice("n   auth-refactor   ", &picker_fixture(3, &[]), false),
+        PickerDecision::LaunchNew(Some("auth-refactor".to_string())),
+        "extra separator whitespace must not become part of the name"
+    );
+}
+
+/// #4965 round 2: the `n` grammar is BOUNDED — `strip_prefix(['n','N'])` made
+/// every n-initial word a real, unconfirmed spawn. The menu line itself says
+/// "launch new session", so an operator typing `new` got a cloned, spawned,
+/// attached session named `tm-ew-NN`; `n` is also this tool's own "no" answer
+/// in the `[y/N]` delete confirm. The token must be exactly `n`, and a name
+/// requires a separator.
+///
+/// FAILS BEFORE THIS CHANGE: every assertion in the first block returned
+/// `LaunchNew(Some(...))`.
+#[test]
+fn guided_picker_n_grammar_is_bounded() {
+    let sessions = picker_fixture(3, &[]);
+    for input in ["new", "no", "nn", "n1", "nauth", "N0", "note", "next"] {
+        assert_eq!(
+            parse_picker_choice(input, &sessions, false),
+            PickerDecision::Unrecognised,
+            "{input:?} must not spawn a session"
+        );
+    }
+    // The exact token, with or without a whitespace-only remainder, still
+    // launches unnamed.
+    for input in ["n", "N", "n ", "  n  ", "n\t\n"] {
+        assert_eq!(
+            parse_picker_choice(input, &sessions, false),
+            PickerDecision::LaunchNew(None),
+            "{input:?} is the bare launch-new alias"
+        );
+    }
+    // And a separated name is still accepted.
+    assert_eq!(
+        parse_picker_choice("n auth-refactor", &sessions, false),
+        PickerDecision::LaunchNew(Some("auth-refactor".to_string()))
+    );
+}
+
+/// #4965 round 2: the name is kebab-cased in the PICKER, before it is sent.
+///
+/// Why: the daemon's `resolve_session_name` runs a `name_hint` through
+/// `leaf_slug_from_dir`, whose `Path::file_name()` step drops everything
+/// before the last `/` — so `n feature/auth` and `n hotfix/auth` both used to
+/// produce `tm-auth-NN`, defeating the point of naming them. And a name that
+/// sanitizes to nothing fell back to the daemon's shared `local` leaf,
+/// silently producing `tm-local-NN`.
+///
+/// FAILS BEFORE THIS CHANGE: `n feature/auth` yielded the raw
+/// `Some("feature/auth")`, which the daemon then collapsed to `auth`; `n !!!`
+/// yielded `Some("!!!")` and spawned.
+#[test]
+fn guided_picker_n_sanitizes_the_name_cli_side() {
+    let sessions = picker_fixture(3, &[]);
+    assert_eq!(
+        parse_picker_choice("n My Auth Fix!", &sessions, false),
+        PickerDecision::LaunchNew(Some("my-auth-fix".to_string())),
+        "a multi-word name must arrive kebab-cased"
+    );
+    assert_eq!(
+        parse_picker_choice("n feature/auth", &sessions, false),
+        PickerDecision::LaunchNew(Some("feature-auth".to_string())),
+        "the path-like segment must SURVIVE — the daemon's file_name() would drop it"
+    );
+    assert_eq!(
+        parse_picker_choice("n hotfix/auth", &sessions, false),
+        PickerDecision::LaunchNew(Some("hotfix-auth".to_string())),
+        "and must stay distinct from feature/auth"
+    );
+    // Unusable names refuse rather than spawning under a fallback leaf.
+    assert_eq!(
+        parse_picker_choice("n !!!", &sessions, false),
+        PickerDecision::UnusableName("!!!".to_string())
+    );
+    assert_eq!(
+        parse_picker_choice("n ---", &sessions, false),
+        PickerDecision::UnusableName("---".to_string())
+    );
+}
+
+#[test]
+fn guided_picker_n_does_not_shadow_other_commands() {
+    // #4965 is purely additive: adding the `n` command must not swallow any
+    // existing token, and none of them may swallow `n`. Every case here is a
+    // command that already worked before `n` existed.
+    let sessions = picker_fixture(3, &[]);
+    assert_eq!(
+        parse_picker_choice("ls", &sessions, false),
+        PickerDecision::ListSessions
+    );
+    assert_eq!(
+        parse_picker_choice("list", &sessions, false),
+        PickerDecision::ListSessions
+    );
+    assert_eq!(
+        parse_picker_choice("d2", &sessions, false),
+        PickerDecision::Delete(1)
+    );
+    assert_eq!(
+        parse_picker_choice("r1 tm-renamed", &sessions, false),
+        PickerDecision::Rename(0, "tm-renamed".to_string())
+    );
+    assert_eq!(
+        parse_picker_choice("q", &sessions, false),
+        PickerDecision::Quit
+    );
+    assert_eq!(
+        parse_picker_choice("2", &sessions, false),
+        PickerDecision::Resume(1)
+    );
+    assert_eq!(
+        parse_picker_choice("4", &sessions, false),
+        PickerDecision::LaunchNew(None)
+    );
+    // Bare Enter still resolves against position 0, never the new `n` branch.
+    assert_eq!(
+        parse_picker_choice("", &sessions, false),
+        PickerDecision::Resume(0)
+    );
+    // And the reverse direction: `n` is not shadowed by any of them.
+    assert_eq!(
+        parse_picker_choice("n", &sessions, false),
+        PickerDecision::LaunchNew(None)
     );
 }
 

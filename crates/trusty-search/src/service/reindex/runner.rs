@@ -32,7 +32,9 @@ use super::hash_cache;
 use super::hnsw_swap::begin_staged_hnsw_swap;
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
+use super::root_gate;
 use super::semaphore::{index_semaphore, reindex_semaphore_for, BACKGROUND_QUEUE_DEPTH};
+use super::stage_timings::StageTimings;
 use super::stages::{mark_reindex_failed, now_rfc3339, schedule_progress_cleanup};
 use super::staging;
 use super::validate;
@@ -102,59 +104,46 @@ pub(super) async fn run_reindex(
     let canonical_root = validate::canonical_walk_root(&root);
     let index_id: IndexId = handle.id.clone();
 
-    // Issue #602/#1073: detect a root move against the corpus's own
-    // persisted `indexed_root` (read from the redb `_meta` table, i.e. the
-    // root the CURRENT corpus's chunk paths are actually relative to).
-    let prior_indexed_root = handle.read_indexed_root().await.unwrap_or(None);
-    let root_moved =
-        validate::needs_path_relativization(prior_indexed_root.as_deref(), &canonical_root);
-
-    // Issue #2178 (P0 data-risk): before trusting ANY detected root move
-    // enough to walk — and, later, prune — the corpus against it, cross-check
-    // the candidate against the durably persisted `indexes.toml` entry for
-    // this index. See `validate::root_move_is_trusted` for the full incident
-    // writeup: the #402/#1073 heuristic below only checked whether the
-    // candidate root merely *had* colocated storage, not whether it was
-    // *this index's* actual registered root, and `POST /indexes/:id/reindex`
-    // can silently repoint the in-memory handle's `root_path` (issue #63)
-    // without ever touching `indexes.toml`. This gate runs BEFORE Phase 1
-    // (the walk) even starts, so an untrusted candidate never touches the
-    // filesystem walk or the finish-phase prune pass — the existing corpus is
-    // left completely untouched.
-    if root_moved {
-        let persisted_root = crate::service::persistence::load_index_registry()
-            .ok()
-            .and_then(|entries| entries.into_iter().find(|e| e.id == index_id.0))
-            .map(|e| e.root_path);
-        if !validate::root_move_is_trusted(persisted_root.as_deref(), &canonical_root) {
-            tracing::warn!(
-                "reindex[{}]: REFUSING untrusted root move — in-memory root is \
-                 {} but the corpus's last-indexed root is {:?} and the persisted \
-                 indexes.toml root_path is {:?}; these disagree, which is exactly \
-                 the #2178 root-hijack signature (an unpersisted root_path \
-                 override or a stale in-memory handle), not a legitimate \
-                 relocation. Aborting before any walk/prune — the existing \
-                 corpus is untouched. Use POST /indexes/:id/relocate for an \
-                 explicit, durable move.",
-                index_id.0,
-                canonical_root.display(),
-                prior_indexed_root,
-                persisted_root,
-            );
-            let reason = format!(
-                "reindex aborted: candidate root {} does not match this index's \
-                 persisted indexes.toml root_path — refusing to walk/prune \
-                 against an unvalidated root to protect the existing corpus \
-                 (issue #2178); use POST /indexes/:id/relocate for an explicit move",
-                canonical_root.display(),
-            );
-            mark_reindex_failed(&handle, &reason).await;
+    // Issue #602/#1073 + #2178 (P0 data-risk): detect a root move against the
+    // corpus's own persisted `indexed_root` (the redb `_meta` value, i.e. the
+    // root the CURRENT corpus's chunk paths are actually relative to), and
+    // refuse to walk — and, later, prune — against a candidate the durably
+    // persisted `indexes.toml` entry contradicts. The gate runs BEFORE Phase 1,
+    // so a refused candidate never reaches the filesystem walk or the
+    // finish-phase prune pass and the existing corpus is left untouched.
+    //
+    // #5357: the decision itself lives in `root_gate` so this path and
+    // `reindex_handler`'s request-time mirror of it can never drift, and so a
+    // FAILED read of either input refuses instead of degrading to "trusted".
+    let gate = root_gate::evaluate_root_move(
+        &index_id.0,
+        handle.read_indexed_root().await,
+        &canonical_root,
+        crate::service::persistence::load_index_registry,
+    );
+    let (root_moved, prior_indexed_root) = match gate {
+        Ok(trusted) => {
+            if trusted.moved {
+                // #5357: the indexer moves HERE, off one read of the registry,
+                // rather than at request time where a later refusal could strand
+                // it on a root the corpus never matched.
+                root_gate::sync_indexer_root_after_trusted_move(&handle).await;
+            }
+            (trusted.moved, trusted.indexed_root)
+        }
+        Err(refusal) => {
+            tracing::warn!("reindex[{}]: {}", index_id.0, refusal.reason);
+            // #5357: the handler may already have pointed the indexer at the
+            // refused root; leave it there and every chunk resolves against a
+            // tree the corpus was never relativized against.
+            root_gate::restore_indexer_root_after_refusal(&handle, &refusal).await;
+            mark_reindex_failed(&handle, &refusal.reason).await;
             progress.status.store(ReindexStatus::Failed);
             progress
                 .push(serde_json::json!({
                     "event": "error",
                     "index_id": index_id.0,
-                    "message": reason,
+                    "message": refusal.reason,
                     "fatal": true,
                 }))
                 .await;
@@ -167,7 +156,7 @@ pub(super) async fn run_reindex(
             }
             return;
         }
-    }
+    };
 
     // Issue #109, Phase 1: reset the staged-pipeline status surface.
     super::stages::reset_stages_for_reindex(&handle).await;
@@ -241,6 +230,10 @@ pub(super) async fn run_reindex(
     // move changes the root prefix only. Do NOT clear the hash cache on a
     // root move for colocated indexes.
     let is_colocated = crate::service::colocated_storage::has_colocated_storage(&canonical_root);
+    // #5024: the hash-cache load is a full redb table scan on a warm index —
+    // measure it rather than leaving it in the residual.
+    let mut stage_timings = StageTimings::default();
+    let hash_cache_started = Instant::now();
     let hashes_loaded: usize = if let Some(state) = resume.as_ref() {
         // #3979: on a resume the STAGED corpus is the authority for what is
         // already done, so the cache is replaced by its hash table rather than
@@ -284,6 +277,7 @@ pub(super) async fn run_reindex(
     } else {
         hash_cache::load_into_cache(&handle, &hashes).await
     };
+    stage_timings.hash_cache_ms = hash_cache_started.elapsed().as_millis() as u64;
 
     // Issue #317: emit `walk_complete` BEFORE `start`.
     progress
@@ -333,6 +327,10 @@ pub(super) async fn run_reindex(
     }
 
     // Issue #28, Phase 4 + #603: stage the rebuilt corpus.
+    // #5024: this is where an incremental run copies every live-corpus row into
+    // the fresh staging store — the single largest non-embed cost on a warm
+    // reindex, and the stage a corpus-reuse scheme would have to beat.
+    let carryover_started = Instant::now();
     let corpus_swap_tmp: Option<PathBuf> =
         if staging::should_stage(handle.indexer.read().await.has_corpus_store()) {
             match begin_staged_corpus_swap(
@@ -383,6 +381,7 @@ pub(super) async fn run_reindex(
             drop(resume);
             None
         };
+    stage_timings.carryover_ms = carryover_started.elapsed().as_millis() as u64;
 
     // Issue #3970: stage the periodic HNSW snapshot too, mirroring the redb
     // corpus staging above. Unlike the corpus (staged only when a durable
@@ -461,6 +460,9 @@ pub(super) async fn run_reindex(
     // Bounded channel — capacity 1 keeps memory in the same envelope as
     // the prior sequential loop (one batch in transit, one being committed).
     let (tx, mut rx) = mpsc::channel::<super::batch::ParsedReadyBatch>(1);
+    // #5024: wall time of the whole pipeline, so the gap against the summed
+    // subsystem accumulators exposes embedder warm-up and channel stalls.
+    let pipeline_started = Instant::now();
     let producer_ctx = ctx.clone();
     let producer_mem_abort = mem_abort.clone();
     let producer_index_id = index_id.0.clone();
@@ -575,6 +577,8 @@ pub(super) async fn run_reindex(
         }
     }
 
+    stage_timings.pipeline_ms = pipeline_started.elapsed().as_millis() as u64;
+
     // Delegate post-loop work: prune, KG rebuild, corpus swap, terminal event, GC.
     let finish_ctx = FinishCtx {
         handle,
@@ -617,5 +621,5 @@ pub(super) async fn run_reindex(
         chunks_dropped_by_cap: total_chunks_dropped_by_cap,
         mem_limit_hit,
     };
-    super::finish::finish_reindex(finish_ctx, batch_totals).await;
+    super::finish::finish_reindex(finish_ctx, batch_totals, stage_timings).await;
 }

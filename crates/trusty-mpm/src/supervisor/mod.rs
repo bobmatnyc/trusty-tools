@@ -25,11 +25,14 @@ pub mod http;
 mod tests;
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::activity::monitor::{ActivityMonitor, LlmClassifier};
+use crate::core::auto_resume;
+use crate::core::paths::FrameworkPaths;
 use crate::session_manager::SessionManager;
 
 pub use config::SupervisorConfig;
@@ -51,12 +54,19 @@ pub use http::{MetricsHandle, new_handle};
 pub struct Supervisor<C: LlmClassifier> {
     /// The session manager whose fleet this supervisor watches.
     mgr: Arc<SessionManager>,
-    /// Immutable run configuration (cadence + policy).
+    /// Immutable BOOT configuration (cadence + policy). `auto_resume` here is
+    /// the boot-time env / CLI value; the flag actually in force each sweep is
+    /// [`Self::resolve_auto_resume`]'s result (#5208).
     cfg: SupervisorConfig,
     /// Optional activity classifier for idle `active` sessions.
     monitor: Option<ActivityMonitor<C>>,
     /// Cumulative counters across every sweep this run.
     stats: SupervisorRunStats,
+    /// #5208: the console-written desired-state file, re-read every sweep.
+    auto_resume_path: PathBuf,
+    /// #5208: the last override read successfully, so a transient read failure
+    /// cannot silently flip auto-resume off.
+    last_override: Option<bool>,
 }
 
 impl<C: LlmClassifier> Supervisor<C> {
@@ -77,6 +87,77 @@ impl<C: LlmClassifier> Supervisor<C> {
             cfg,
             monitor,
             stats: SupervisorRunStats::default(),
+            // #5208: default to the same `~/.trusty-mpm/auto_resume` the console
+            // writes, so production wiring needs no extra call.
+            auto_resume_path: auto_resume::desired_path(&FrameworkPaths::default()),
+            last_override: None,
+        }
+    }
+
+    /// Point the supervisor at a specific auto-resume desired-state file.
+    ///
+    /// Why: `new` resolves the real `~/.trusty-mpm/auto_resume`, which would make
+    /// every supervisor test depend on the developer's own console toggle. Tests
+    /// pin a temp path instead; production keeps the default.
+    /// What: replaces [`Self::auto_resume_path`] and returns `self` for chaining.
+    /// Test: `supervisor_honours_console_desired_state_without_restart`.
+    #[must_use]
+    pub fn with_auto_resume_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.auto_resume_path = path.into();
+        self
+    }
+
+    /// Resolve the auto-resume flag in force for the sweep about to run.
+    ///
+    /// Why: #5208 — an operator toggling auto-resume in the console wrote
+    /// `~/.trusty-mpm/auto_resume` and nothing read it, so the write reported
+    /// success while the running supervisor kept its boot-time behavior. Reading
+    /// the file every sweep is what makes the console control real without a
+    /// process restart.
+    /// What: applies the documented precedence — persisted file when present >
+    /// boot-time `TRUSTY_MPM_AUTO_RESUME` / `--auto-resume` > off — logging each
+    /// transition once rather than every sweep. On a read error it holds the last
+    /// value it observed (falling back to the boot flag) and logs at `error`; it
+    /// never fails open to `false`, which would re-create the original defect one
+    /// layer out by letting an unreadable file disable an enabled supervisor.
+    /// Test: `supervisor_honours_console_desired_state_without_restart`,
+    /// `supervisor_console_disable_overrides_env_enabled`,
+    /// `supervisor_absent_desired_file_keeps_boot_flag`,
+    /// `supervisor_unreadable_desired_file_does_not_disable_resume`.
+    fn resolve_auto_resume(&mut self) -> bool {
+        match auto_resume::read_override_at(&self.auto_resume_path) {
+            Ok(Some(desired)) => {
+                if self.last_override != Some(desired) {
+                    info!(
+                        desired,
+                        path = %self.auto_resume_path.display(),
+                        "supervisor: auto-resume desired state applied from console"
+                    );
+                    self.last_override = Some(desired);
+                }
+                desired
+            }
+            Ok(None) => {
+                if self.last_override.is_some() {
+                    info!(
+                        boot_flag = self.cfg.auto_resume,
+                        path = %self.auto_resume_path.display(),
+                        "supervisor: auto-resume override removed; reverting to boot flag"
+                    );
+                    self.last_override = None;
+                }
+                self.cfg.auto_resume
+            }
+            Err(e) => {
+                let held = self.last_override.unwrap_or(self.cfg.auto_resume);
+                error!(
+                    path = %self.auto_resume_path.display(),
+                    auto_resume = held,
+                    "supervisor: cannot read auto-resume desired state: {e}; \
+                     holding the last known value (NOT failing open to off)"
+                );
+                held
+            }
         }
     }
 
@@ -95,12 +176,21 @@ impl<C: LlmClassifier> Supervisor<C> {
     /// Why: the timer loop and the tests both need "do exactly one sweep and
     /// update stats" as an atomic step; exposing it separately keeps the loop a
     /// trivial timer wrapper and lets tests advance the supervisor deterministically.
-    /// What: calls [`poller::run_tick`], increments `sweeps`, and adds the tick's
-    /// resumed / failure / classified counts into `self.stats`; returns the
-    /// [`TickReport`] for the caller to inspect.
-    /// Test: `supervisor_tick_updates_stats`, `supervisor_fleet_resume_e2e`.
+    /// What: re-resolves the auto-resume flag from the console's persisted
+    /// desired-state file (#5208 — [`Self::resolve_auto_resume`]), calls
+    /// [`poller::run_tick`] with the resulting per-sweep config, increments
+    /// `sweeps`, and adds the tick's resumed / failure / classified counts into
+    /// `self.stats`; returns the [`TickReport`] for the caller to inspect.
+    /// Test: `supervisor_tick_updates_stats`, `supervisor_fleet_resume_e2e`,
+    /// `supervisor_honours_console_desired_state_without_restart`.
     pub async fn tick(&mut self) -> TickReport {
-        let report = run_tick(&self.mgr, &self.cfg, self.monitor.as_ref()).await;
+        // #5208: the console toggle is re-read every sweep, so an operator's
+        // change takes effect within one interval instead of never.
+        let cfg = SupervisorConfig {
+            auto_resume: self.resolve_auto_resume(),
+            ..self.cfg.clone()
+        };
+        let report = run_tick(&self.mgr, &cfg, self.monitor.as_ref()).await;
         self.stats.sweeps += 1;
         self.stats.auto_resumed += report.resumed.len() as u64;
         self.stats.resume_failures += report.resume_failures as u64;
@@ -159,16 +249,23 @@ impl<C: LlmClassifier> Supervisor<C> {
         handle: http::MetricsHandle,
         shutdown: impl Future<Output = ()>,
     ) -> anyhow::Result<()> {
+        // #5208: report the flag actually in force at boot, not just the env one —
+        // the persisted console override outranks it and is consulted every sweep.
+        let boot_auto_resume = self.resolve_auto_resume();
         info!(
             interval_secs = self.cfg.interval.as_secs(),
-            auto_resume = self.cfg.auto_resume,
+            auto_resume = boot_auto_resume,
+            auto_resume_env = self.cfg.auto_resume,
+            auto_resume_path = %self.auto_resume_path.display(),
             classify_idle = self.cfg.classify_idle,
             "supervisor loop starting"
         );
-        if !self.cfg.auto_resume {
+        if !boot_auto_resume {
             warn!(
-                "supervisor: auto-resume DISABLED ({}=1 to enable); running as observe-only",
-                config::ENV_AUTO_RESUME
+                "supervisor: auto-resume DISABLED ({}=1, or the console toggle writing {}, \
+                 to enable); running as observe-only",
+                config::ENV_AUTO_RESUME,
+                self.auto_resume_path.display()
             );
         }
         let mut timer = tokio::time::interval(self.cfg.interval);

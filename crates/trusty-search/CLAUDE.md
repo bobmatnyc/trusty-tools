@@ -77,7 +77,7 @@ pub struct CodeChunk {
 
 ### HTTP API (axum, single daemon, multi-index)
 
-**Audience**: integrators (e.g. open-mpm) calling the daemon's REST API.
+**Audience**: integrators (e.g. trusty-agents) calling the daemon's REST API.
 
 **Transport conventions** (apply to every endpoint below):
 
@@ -88,10 +88,47 @@ pub struct CodeChunk {
   do **not** bind it to a non-loopback interface.
 - **Content-Type**: `application/json` for all request and response bodies (SSE
   endpoint excepted — it returns `text/event-stream`).
-- **Error response**: any 4xx / 5xx returns a JSON body of the shape
-  `{ "error": "<message>" }`. Status codes follow standard HTTP semantics
-  (`404` = unknown `index_id`, `503` = subsystem disabled / not configured,
-  `500` = internal error).
+- **Error response**: any 4xx / 5xx returns a JSON body whose `error` field is a
+  machine-readable code. Status codes follow standard HTTP semantics
+  (`404` = the index exists nowhere, `503` = exists but cannot serve this
+  request, `500` = internal error).
+
+  **Index-scoped error contract (#5061, #5068).** Every index-scoped endpoint
+  reports the same daemon state the same way, because they all render it through
+  one builder (`service/server/degraded.rs`). Two fields are present on every
+  such body and are the ones to branch on:
+
+  - `index_id` — the index the verdict is about.
+  - `retryable` — `true` when waiting or retrying can succeed, `false` when it
+    never will without operator action. Never absent; do not treat an absent
+    value as either.
+
+  | `error` | Status | `retryable` | Meaning |
+  |---|---|---|---|
+  | `unknown index: <id>` | 404 | — | Absent from the hot registry, the cold store, AND the failed set. Permanent. |
+  | `index_not_resident` | 503 | `true` | Registered and built, cold-parked by `TRUSTY_MAX_RESIDENT_INDEXES`. Carries `restore_via` — see below. |
+  | `index_restore_failed` | 503 | `false` | Restore permanently failed (blocked volume, missing `root_path`). Restart the daemon or re-register. |
+  | `index_loading` | 503 | `true` | A lazy load is in flight; also carries `retry_after_secs`. |
+  | `embedder_initializing` | 503 | `true` | Retry once `/health` reports `embedder: "ready"`. |
+  | `index_corpus_unavailable` | 503 | see `transient` | Durable corpus failed to open (#4087); carries the #4333 `failure_kind`. |
+  | `vector_unavailable` | 503 | per `reason` | Semantic lane cannot serve this query — see `POST /indexes/:id/search`. |
+
+  `restore_via` on `index_not_resident` names `POST /indexes/{id}/search`, the
+  only endpoint that reloads a cold-parked index. `status`, `chunks`, `grep`,
+  `index-file`, and `remove-file` report the state truthfully but cannot clear
+  it themselves; a search against the same id does, after which they answer
+  normally.
+
+  **The MCP surface relays this contract as data (#5350).** A `503` whose body
+  is a JSON object with an `error` field becomes a structured MCP error rather
+  than a prose string: `tools/call` puts the daemon body verbatim in `_meta`
+  under `error_code: "INDEX_UNAVAILABLE"`, and the bare-method form puts it in
+  `error.data` under JSON-RPC code `-32012`. Two fields are added and nothing
+  is removed or rewritten — `error_code` (the MCP-level family) and
+  `http_status` — so `error`, `index_id`, `retryable`, `restore_via`, `reason`,
+  `transient`, and `stages` read exactly as the HTTP table above describes
+  them. A `503` with no JSON body, or any other status, still reaches the
+  caller as the plain transport error it always did.
 - **CORS**: permissive (`*`) for browser-based admin UIs.
 - **Gzip**: responses are gzipped when `Accept-Encoding: gzip` is set.
 
@@ -100,7 +137,7 @@ pub struct CodeChunk {
 ##### `GET /health`
 
 Liveness + readiness probe. Used by `trusty-search status`, `trusty-search doctor`,
-and external process detectors (open-mpm) to decide whether to spawn their own
+and external process detectors (trusty-agents) to decide whether to spawn their own
 daemon.
 
 - **Request body**: none.
@@ -114,6 +151,17 @@ daemon.
     see `indexes_watcher_network_degraded` below).
   - `version`: `CARGO_PKG_VERSION` of the running binary.
   - `indexes`: number of indexes currently registered in the in-memory registry.
+  - `indexes_populated` / `indexes_empty` / `total_chunks` (#4839): registration
+    is not population. `indexes` and `warmboot_summary.indexes_loaded` count
+    SLOTS — a deployment where 220 of 222 indexes held zero chunks reported
+    `222/222` and `status: ok` while a consuming application returned empty
+    context for 44 days. These three count from the DURABLE corpus (the
+    in-memory map reads 0 after idle eviction). An index whose count is
+    UNKNOWN rather than zero — corpus failed to open, count unreadable, or its
+    lock was contended for this poll — is excluded from both counters, so
+    `indexes_populated + indexes_empty <= indexes`; the shortfall is the honest
+    signal. An empty-but-walked index is not itself a fault and does not force
+    `degraded` — `indexes_stuck_empty` (#4680) covers the genuinely broken case.
   - `indexes_watcher_network_degraded` (issue #3408): count of registered
     indexes whose file watcher was refused because `root_path` was detected as
     a network-mounted filesystem (NFS/EFS/SMB/CIFS). inotify/FSEvents cannot
@@ -133,7 +181,7 @@ List every registered index.
 - **Request body**: none.
 - **Response 200**:
   ```json
-  { "indexes": ["my-project", "trusty-search", "open-mpm"] }
+  { "indexes": ["my-project", "trusty-search", "trusty-agents"] }
   ```
 
 ##### `POST /indexes`
@@ -196,7 +244,24 @@ Per-index stats.
     network-mounted; `degraded_reason` then carries the full actionable
     message (names the `index-file`/`remove-file` endpoints). Both are
     `false`/`null` for a normal local-disk index.
-- **Response 404**: unknown `index_id`.
+  - `disk_bytes` (#4706): sum of all file sizes across BOTH storage layouts —
+    the legacy global `<data_dir>/indexes/<id>/` and the colocated
+    `<root_path>/.trusty-search/` of issue #403. `null` only when neither
+    exists. A `.trusty-search/` without an `index.redb` is not counted: that
+    directory name is also the daemon's own runtime directory, so an index
+    rooted at `$HOME` would otherwise report the daemon's runtime files as its
+    corpus. Same metric as `size_bytes` on `GET /indexes?details=true`.
+  - `semantic_coverage` (#4787): cumulative vector coverage, beside the
+    per-pass delta. `vectors_present` is read from the live vector store, so it
+    is ground truth rather than bookkeeping; `stages.semantic.embedded` counts
+    only what the CURRENT boot's embed pass computed and reads `0` on a
+    fully-working index whose HNSW snapshot was already current at boot.
+    `embedded_this_boot` restates that delta under a name that says what it
+    measures. When `vectors_present` is `null`,
+    `vectors_unavailable_reason` says which state produced it:
+    `no_vector_store` (BM25-only / `skip_vector` — healthy) or
+    `count_unreadable` (a store is attached but its count errored — a fault).
+- **Response 404 / 503**: see the index-scoped error contract above.
 
 ##### `POST /indexes/:id/search`
 
@@ -258,6 +323,23 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     `branch_files` or derived from `branch`). Always `false` when no branch
     context was provided. Lets clients highlight branch work in the UI
     without re-doing the lookup.
+  - `meta.vector_unavailable` / `meta.vector_disabled_by_config` (#5068): `true`
+    when no vector lane contributed to this result set — the results are
+    lexical however conceptual the query was. The second field separates "off
+    for this index" from "not built yet". Counterparts to the existing
+    `meta.bm25_lane_degraded`.
+- **Response 503** `vector_unavailable` (#5068): returned when the request
+  PINNED `"stage": "semantic"` and the vector lane cannot serve it. Returning
+  lexical rows under a `200` would answer a different question than the one
+  asked, so this mirrors the `503 kg_unavailable` contract `get_call_chain`
+  already uses for `skip_kg` indexes. `reason` is `skipped_by_config`
+  (`retryable: false` — the index was built with the vector component
+  disabled, which is the default for worktree indexes since #5060; change it
+  via `PATCH /indexes/{id}/config`) or `stage_not_ready` (`retryable: true` —
+  the embed pass has not finished). The body carries the `stages` snapshot so
+  the caller need not re-probe. An UNPINNED query is unaffected: it still
+  returns `200` and degrades to whatever lanes are ready, reporting that via
+  the `meta` flags above.
 
 ##### `POST /indexes/:id/search_similar`
 
@@ -533,27 +615,34 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 
 ### MCP Tools
 
-The MCP server registers **18 tools** (authoritative source:
-`src/mcp/tools.rs` `tool_definitions`):
+<!-- BEGIN GENERATED: mcp-tools -->
+The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+this table is generated from it, not maintained by hand.
 
-- `search` — hybrid search (BM25 + vector + KG, RRF-fused)
-- `search_lexical` — BM25-only lexical search
-- `search_semantic` — vector-only semantic search
-- `search_kg` — knowledge-graph expansion search
-- `search_all` — fan-out across every registered index
-- `search_similar` — code-to-code similarity from a seed file/function
-- `index_file` — add/update one file
-- `remove_file` — remove one file
-- `list_indexes` — enumerate registered indexes
-- `create_index` — register a new index
-- `delete_index` — delete an index
-- `reindex` — trigger full reindex
-- `index_status` — per-index stats
-- `search_health` — daemon liveness
-- `list_chunks` — paginated enumeration of an index's chunks
-- `get_call_chain` — KG caller/callee chain for a symbol
-- `grep` — literal/regex grep fallback over the corpus
-- `chat` — OpenRouter conversational Q&A
+| Tool | Arguments | Summary |
+|---|---|---|
+| `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
+| `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
+| `create_index` | `id`, `root_path`, `follow_links?` | Register a new (empty) index |
+| `delete_index` | `index_id` | Delete a registered index and all its data |
+| `get_call_chain` | `index_id`, `entry_point`, `direction?`, `include_source?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
+| `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `glob?`, `index_id?`, `invert_match?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
+| `index_file` | `index_id`, `path`, `content` | Add or update one file in an index |
+| `index_status` | `index_id` | Get stats for an index (chunk count, root path) |
+| `list_chunks` | `index_id`, `after?`, `limit?`, `offset?` | Paginated enumeration of every chunk in an index (issue #54). |
+| `list_indexes` | — | List all registered indexes on this daemon |
+| `reindex` | `index_id`, `root_path?` | Trigger a full reindex of a collection (async, returns immediately) |
+| `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
+| `search` | `index_id`, `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
+| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `full_content?`, `index_id?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
+| `search_health` | — | Probe daemon liveness and version |
+| `search_kg` | `index_id`, `query`, `mode?`, `path_prefix?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
+| `search_lexical` | `index_id`, `query`, `branch?`, `branch_boost?`, `branch_files?`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
+| `search_semantic` | `index_id`, `query`, `exclude_archived?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
+| `search_similar` | `file`, `function?`, `index?`, `top_k?` | Find chunks semantically similar to a given file/function via HNSW (issue #31) |
+| `typeahead` | `query`, `index_id?`, `limit?`, `mode?` | Fast per-keystroke autocomplete suggestions for an index. |
+| `upgrade` | `check?`, `confirm?` | Check for or install a new version of trusty-search (issue #537). |
+<!-- END GENERATED: mcp-tools -->
 
 ## Stack
 
@@ -562,7 +651,7 @@ The MCP server registers **18 tools** (authoritative source:
 - **HTTP**: axum 0.7 + tower-http (CORS, trace, gzip), HTTP/2
 - **Vector store**: usearch 2.25 (HNSW), wrapped in `Arc<RwLock<>>` for concurrent reads
 - **Embeddings**: fastembed 5.x (ONNX, all-MiniLM-L6-v2, 384-dim, SIMD/AVX2/NEON)
-- **Lexical**: BM25 (zero-dep port from open-mpm `src/context/bm25.rs`)
+- **Lexical**: BM25 (zero-dep port from trusty-agents `src/context/bm25.rs`)
 - **KV store**: redb 2.6 (chunk metadata, file→chunks mapping, `_meta` schema version)
 - **File watching**: notify 6 + notify-debouncer-mini 0.4 (500ms debounce, fsevent)
 - **Code parsing**: tree-sitter 0.24 (rust, python, js, ts, go, java, c, cpp)
@@ -633,7 +722,7 @@ Set `TRUSTY_DISABLE_MIGRATIONS=1` to skip auto-migrations.
 - `IndexHandle.indexer: Arc<RwLock<CodeIndexer>>` — reader-priority RwLock; many
   concurrent searches against the same index never block each other
 - Indexing operations use `tokio::sync::Semaphore` to prevent thread-pool starvation
-  (carry-over fix from open-mpm BUG-2)
+  (carry-over fix from trusty-agents BUG-2)
 - HTTP/2 multiplexing: a single client connection can issue many concurrent searches
 
 ## Performance Targets
@@ -823,7 +912,6 @@ trusty-search/
 ├── CLAUDE.md                        this file
 ├── CHANGELOG.md
 ├── README.md
-├── .open-mpm/agents/                pm.toml, engineer.toml
 ├── src/
 │   ├── lib.rs                       re-publishes `core`, `service`, `mcp`
 │   ├── main.rs                      CLI binary entry point
@@ -1044,7 +1132,7 @@ via `cargo install trusty-search`.
 - `EntityExtractor` Phase A structural entities (functions, classes, imports)
 - `SymbolGraph` KG expansion (callers_of / callees_of, 1–2 hop, EdgeKind multipliers)
 - `FileWatcher` with notify-debouncer-mini, 500ms debounce
-- MCP server: full JSON-RPC 2.0 stdio + HTTP/SSE transport, 18 tools (per `src/mcp/tools.rs`)
+- MCP server: full JSON-RPC 2.0 stdio + HTTP/SSE transport (see [MCP Tools](#mcp-tools))
 - Daemon: auto-port, fs4 PID lockfile, graceful shutdown, persistent model cache
 - Svelte 5 admin UI embedded in binary via `include_dir`
 - OpenRouter chat proxy with search context injection

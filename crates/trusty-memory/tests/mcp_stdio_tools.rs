@@ -38,6 +38,24 @@ use trusty_memory::AppState;
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/// Pre-seed the process-wide shared embedder with `MockEmbedder`.
+///
+/// Why: `memory_remember` / `memory_recall` resolve `retrieval::shared_embedder()`,
+/// a process-wide `OnceCell`. Whichever test seeds it first wins for the whole
+/// process, so under `cargo test` — one process per binary — a single sibling's
+/// seed silently satisfied every other test here. Under per-test process
+/// isolation (`cargo nextest run`) each test gets a virgin cell instead, reaches
+/// for the real ONNX model, and fails on the HuggingFace download (HTTP 429 in
+/// CI). Same defect class as #4413: a test that passes only because a sibling
+/// ran first.
+/// What: delegates to `seed_shared_embedder_with_mock`, which is idempotent
+/// (`OnceCell::set`, first caller wins), so calling it from every fixture is
+/// free and safe regardless of order.
+/// Test: every test in this file, via `Fixture::new` or `seed_palace`.
+fn seed_embedder() {
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+}
+
 /// Hold an `AppState` together with the tempdir that backs it so cleanup
 /// happens at the end of the test instead of on `AppState` drop.
 ///
@@ -53,6 +71,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        seed_embedder();
         let tmp = tempfile::tempdir().expect("tempdir");
         // Issue #88: bypass palace-slug enforcement so integration tests that
         // use arbitrary palace names keep passing. The env var is idempotent
@@ -424,13 +443,15 @@ async fn memory_forget_removes_drawer() {
         .iter()
         .any(|r| r["content"].as_str().unwrap_or("").contains("Capybaras")));
 
-    dispatch_tool(
+    let forget = dispatch_tool(
         fx.state(),
         "memory_forget",
         json!({"palace": "forgetful", "drawer_id": id}),
     )
     .await
     .expect("memory_forget");
+    // #5231: a real deletion is the only case that may report "deleted".
+    assert_eq!(forget["status"], "deleted", "got {forget}");
 
     let after = dispatch_tool(
         fx.state(),
@@ -511,6 +532,76 @@ async fn round_trip_remember_recall_forget_recall_empty() {
     );
 }
 
+/// Regression test for issue #5231.
+///
+/// Why: `memory_forget` returned `{"status":"deleted"}` for a well-formed
+/// `drawer_id` that had never existed, so a cleanup loop could report N
+/// deletions having made zero. Parsing the UUID was the only validation.
+/// What: forgets a syntactically valid UUID that was never stored and asserts
+/// the reported status is `not_found`, and that the drawer that *does* exist is
+/// untouched.
+/// Test: this test.
+#[tokio::test]
+async fn memory_forget_reports_not_found_for_unknown_drawer_id() {
+    let fx = Fixture::new();
+    create_palace(fx.state(), "phantom").await;
+    let live_id = remember(
+        fx.state(),
+        "phantom",
+        "Wombats produce cube-shaped droppings because of their intestinal elasticity",
+        &[],
+    )
+    .await;
+
+    let res = dispatch_tool(
+        fx.state(),
+        "memory_forget",
+        json!({"palace": "phantom", "drawer_id": "deadbeef-0000-4000-8000-000000000000"}),
+    )
+    .await
+    .expect("memory_forget dispatch");
+    assert_eq!(res["status"], "not_found", "got {res}");
+
+    // The delete that never happened must not have disturbed the real drawer.
+    let list = dispatch_tool(fx.state(), "memory_list", json!({"palace": "phantom"}))
+        .await
+        .expect("memory_list");
+    assert!(
+        list["drawers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["drawer_id"] == live_id.as_str()),
+        "live drawer disappeared: {list}"
+    );
+}
+
+/// Issue #5231 companion: the parse-time rejection must survive the fix.
+///
+/// Why: the pre-fix behaviour got *malformed* ids right and only nonexistent
+/// ids wrong; adding the existence check must not turn a malformed id into a
+/// quiet `not_found`.
+/// What: dispatches `memory_forget` with a non-UUID string and asserts the call
+/// still returns `Err`.
+/// Test: this test.
+#[tokio::test]
+async fn memory_forget_still_rejects_a_malformed_drawer_id() {
+    let fx = Fixture::new();
+    create_palace(fx.state(), "malformed").await;
+
+    let err = dispatch_tool(
+        fx.state(),
+        "memory_forget",
+        json!({"palace": "malformed", "drawer_id": "not-a-uuid"}),
+    )
+    .await
+    .expect_err("malformed drawer_id must be an error");
+    assert!(
+        err.to_string().contains("invalid drawer_id UUID"),
+        "unexpected error: {err:#}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Read-only mode (issue #59 snapshot fallback)
 // ---------------------------------------------------------------------------
@@ -536,6 +627,7 @@ where
     F: FnOnce(AppState, String) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    seed_embedder();
     // Issue #88: bypass palace-slug enforcement so these tests can use
     // arbitrary palace names without a matching project root on disk.
     // SAFETY: constant idempotent write "1"; benign across threads.

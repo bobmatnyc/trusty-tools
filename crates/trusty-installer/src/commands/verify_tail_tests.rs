@@ -465,7 +465,11 @@ impl super::super::service_bootstrap::ServiceEnv for FakeServiceEnv {
     fn plist_present(&self, _binary: &str) -> bool {
         self.present
     }
-    fn run_service_install(&self, _binary: &str) -> anyhow::Result<()> {
+    fn run_service_install(
+        &self,
+        _binary: &str,
+        _exe_path: Option<&std::path::Path>,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
     fn is_loaded(&self, _binary: &str) -> bool {

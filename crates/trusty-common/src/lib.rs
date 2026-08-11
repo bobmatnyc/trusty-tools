@@ -41,6 +41,17 @@ pub mod banner;
 pub mod chat;
 pub mod claude_config;
 
+/// Codex CLI MCP-server registration (`~/.codex/config.toml`).
+///
+/// Why: a Codex stdio registration with no argument vector launches the bare
+/// binary, which prints help and exits before MCP initialization while the
+/// connection still reads as enabled (#5264 / #5265).
+/// What: [`codex_config::codex_config_path`] and
+/// [`codex_config::patch_mcp_server`] — see the module docs.
+/// Test: `cargo test -p trusty-common --features codex-config`.
+#[cfg(feature = "codex-config")]
+pub mod codex_config;
+
 /// Canonical environment-variable name constants shared across the workspace.
 ///
 /// Why: the same credential env-var names were spelled as bare literals at ~40
@@ -220,7 +231,7 @@ pub mod embedder_client;
 /// Why: trusty-memory, trusty-search, and the per-palace
 /// `trusty-bm25-daemon` subprocess all want one shared BM25 implementation
 /// so the tokenizer's camelCase / PascalCase / alpha↔digit splits stay
-/// consistent across the workspace. Originally ported from open-mpm; now
+/// consistent across the workspace. Originally ported from trusty-agents; now
 /// the single source of truth lives here.
 /// What: Gated behind the `bm25` feature. Adds no new dependencies — pure
 /// `std` + `tracing` (already required).
@@ -264,7 +275,7 @@ pub mod bm25_client;
 
 /// Symbol-graph engine (formerly the `trusty-symgraph` crate).
 ///
-/// Why: All trusty-* tools that touch source code (open-mpm, trusty-search,
+/// Why: All trusty-* tools that touch source code (trusty-agents, trusty-search,
 /// trusty-analyze) want the same `EntityType` / `RawEntity` / `EdgeKind`
 /// data shapes and (for orchestrators) the same tree-sitter pipeline. Living
 /// here lets the workspace ship one tree-sitter `links =` slot instead of
@@ -359,7 +370,7 @@ pub mod sld;
 /// unknown-subcommand error output independently, so the formats drifted
 /// apart over time. Centralising the help model into one YAML schema, one
 /// canonical renderer, and one Jaro-Winkler suggester keeps the six binaries
-/// (search, memory, analyze, mpm-cli, tga, open-mpm) speaking with a single
+/// (search, memory, analyze, mpm-cli, tga, trusty-agents) speaking with a single
 /// user-facing voice.
 /// What: gated behind the `cli-help` feature. Pulls in `serde_yaml`, `strsim`,
 /// and `indexmap`. Exposes `HelpConfig` / `CommandDef` / `FlagDef` / `Example`
@@ -407,6 +418,24 @@ pub mod stdio_mcp_client;
 /// Test: `cargo test -p trusty-common --features update-check`.
 #[cfg(feature = "update-check")]
 pub mod update;
+
+/// Generated documentation regions — the code as the single source for the
+/// volatile facts crate READMEs state (#5205 follow-up).
+///
+/// Why: MCP tool tables and counts were hand-maintained in both `README.md`
+/// and `CLAUDE.md`, so they drifted from the descriptor functions and each
+/// wrong entry had to be fixed twice. Three crates need the same machinery, so
+/// it lives here rather than in three copies.
+/// What: Gated behind the `docgen` feature (test-facing; enable it in
+/// `[dev-dependencies]`). Exposes [`docgen::tool_rows`] and
+/// [`docgen::render_tool_section`] (deterministic, name-sorted rendering),
+/// [`docgen::assert_region`] / [`docgen::sync_region`] (check, or rewrite under
+/// `UPDATE_DOCS=1`), and the `descriptor_source!` macro that makes the cited
+/// symbol compiler-checked.
+/// Test: `cargo test -p trusty-common --features docgen`, plus
+/// `tests/generated_docs.rs` in trusty-search, trusty-memory, trusty-analyze.
+#[cfg(feature = "docgen")]
+pub mod docgen;
 
 /// Error-capture layer for the trusty-* consent-gated bug-reporting system
 /// (bug-reporting Phase 1, issue #479).
@@ -631,6 +660,22 @@ pub mod palace_alias;
 /// Test: `cargo test -p trusty-common -- github_path::tests`.
 pub mod github_path;
 
+/// The one resolver for trusty-mpm's managed workspace layout (#5203, #5204).
+///
+/// Why: the managed workspace root and the session-worktree base name are shared
+/// by four crates, three of which cannot depend on `trusty-mpm`. Each had
+/// hardcoded `~/trusty-mpm-projects` / `.worktrees` independently, so retargeting
+/// either silently broke `trusty-code`'s project picker, `trusty-search`'s
+/// ephemeral-dir exclusion, and `trusty-memory`'s workstream attribution.
+/// Centralising here — the crate all four already depend on — is CLAUDE.md's
+/// "Common entry point" rule applied to a capability that had four copies.
+/// What: exposes [`workspace_layout::workspace_root`],
+/// [`workspace_layout::worktrees_dirname`], their `resolve_*` cores (which take
+/// an already-loaded config value), [`workspace_layout::WorktreeDirNames`] for
+/// scan paths, and [`workspace_layout::WorkspaceLayoutConfig`].
+/// Test: `cargo test -p trusty-common -- workspace_layout::tests`.
+pub mod workspace_layout;
+
 /// Canonical repository identity (DOC-37) — the path-independent join key that
 /// relates the live checkout, `.base` clone, and session worktrees of one repo.
 ///
@@ -683,6 +728,17 @@ pub mod data_dir;
 pub mod test_harness;
 pub use test_harness::running_under_test_harness;
 
+/// Cross-process exclusive advisory lock around a whole-file critical section.
+///
+/// Why: the lock [`json_rmw`] needs is not JSON-specific. `trusty-search`'s
+/// `indexes.toml` has its own TOML loader and fail-closed parse contract, so it
+/// cannot route through [`json_rmw::update`], yet its writers (the daemon,
+/// `prune`, `prune-orphans`) lose each other's updates for exactly the same
+/// reason (#5344). Owning the lock here keeps ONE implementation for both.
+/// What: Exposes [`file_lock::with_exclusive_lock`] and [`file_lock::lock_path`].
+/// Test: `cargo test -p trusty-common -- file_lock::tests`.
+pub mod file_lock;
+
 /// Cross-process locked read-modify-write for whole-file JSON documents.
 ///
 /// Why: `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s `tokens.json`
@@ -726,6 +782,52 @@ pub mod daemon_addr;
 /// What: Exposes [`health_probe::probe_health`].
 /// Test: covered via daemon_addr integration tests.
 pub mod health_probe;
+
+/// Unix-domain-socket permission enforcement (issue #5099).
+///
+/// Why: ADR-0031 and ADR-0032 both argue for UDS over loopback TCP on the
+/// strength of a `0600` socket, and no production code created one — every
+/// `set_permissions` hit in the workspace was a test fixture. Four bind sites
+/// each called `UnixListener::bind` bare. This is the single entry point they
+/// now share, so the permission contract cannot drift between them.
+/// What: Exposes [`uds::bind_hardened`] (`0700` directory, `0600` socket),
+/// [`uds::prepare_socket_dir`], [`uds::scratch_socket_dir`] (the per-uid
+/// replacement for the `$TMPDIR`-with-`/tmp`-fallback convention), and
+/// [`uds::ensure_peer_is_self`] (`SO_PEERCRED` / `getpeereid`).
+/// Test: `cargo test -p trusty-common --features uds uds::` — the `--features`
+/// flag is load-bearing. `uds` is not a default feature, so the bare
+/// `-p trusty-common` form compiles the module out and reports 0 tests run
+/// while exiting 0. CI's `cargo test --workspace` enables it via feature
+/// unification from `trusty-embedderd` and `trusty-bm25-daemon`.
+#[cfg(all(unix, feature = "uds"))]
+pub mod uds;
+
+/// GitHub webhook HMAC-SHA256 verification (#5089 step 3, ADR-0034 §3).
+///
+/// Why: the check exists twice today and the two copies disagree on what an
+/// unset secret means — `trusty-review` rejects, `trusty-analyze` processes the
+/// payload anyway. ADR-0034 §3 collapses verification to one place (console)
+/// and unifies the policy to fail-closed; this module is that place.
+/// What: Exposes [`webhook_hmac::verify_github_signature`], its three-state
+/// [`webhook_hmac::SignatureVerdict`], and [`webhook_hmac::sign_github_body`]
+/// for test harnesses.
+/// Test: `cargo test -p trusty-common --features webhook-hmac webhook_hmac::`.
+#[cfg(feature = "webhook-hmac")]
+pub mod webhook_hmac;
+
+/// Console->target webhook relay wire contract (#5089 step 3, ADR-0034 §3).
+///
+/// Why: the sender (`trusty-console`) and the receivers (`trusty-review`,
+/// `trusty-analyze`) cannot depend on each other, so a method name or field
+/// list held by only one half is two copies waiting to drift.
+/// What: Exposes [`webhook_relay::RELAY_METHOD`], the borrowed
+/// [`webhook_relay::RelayFrame`] the sender writes, the owned
+/// [`webhook_relay::RelayRequest`] a receiver reads, and
+/// [`webhook_relay::RelayResponse`], whose `ack` is the only thing that
+/// licenses the sender to delete its spool entry.
+/// Test: `cargo test -p trusty-common --features webhook-relay webhook_relay::`.
+#[cfg(feature = "webhook-relay")]
+pub mod webhook_relay;
 
 /// Global tracing subscriber initialisation helpers.
 ///

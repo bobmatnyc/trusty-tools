@@ -80,26 +80,41 @@ pub struct ModelsCatalogResponse {
 /// OpenRouter endpoint, which then receives each provider's bare
 /// (un-prefixed) model-id slug. OpenRouter doesn't recognize those bare
 /// slugs as its own routes, so the call fails: the gap is a model-ID /
-/// endpoint mismatch, not a missing branch. The registry's `local` entry has
-/// a DIFFERENT gap: its `local/` slug prefix isn't recognized by
-/// `adapter_for_model` at all (only the separate `ollama/` prefix is, via
-/// `OllamaAdapter` — see the synthetic `local` object's own
-/// `reachable_today`, always `true`, below), so it falls all the way to
-/// `GenericAdapter` instead. Surfacing this distinction keeps the picker
-/// honest instead of implying every registry entry is immediately usable.
-/// What: `true` for OpenRouter, Bedrock, Anthropic, Fireworks; `false` for
-/// the remaining providers whose legacy dispatch falls through to OpenRouter
-/// with an unresolvable model-id slug. Flip an entry to `true` here once its
-/// legacy dispatch branch resolves to the correct provider-native endpoint
-/// (tracked by #2410); this function is the one place that needs to change.
-/// Test: `super::tests::models::reachable_today_matches_documented_set`.
-fn reachable_today(id: ProviderId) -> bool {
+/// endpoint mismatch, not a missing branch. Surfacing this distinction keeps
+/// the picker honest instead of implying every registry entry is immediately
+/// usable.
+///
+/// The registry's `local` entry had a DIFFERENT gap until #3765: its `local/`
+/// slug prefix isn't recognized by `adapter_for_model` at all (only the
+/// separate `ollama/` prefix is, via `OllamaAdapter` — see the synthetic
+/// `local` object's own `reachable_today`, always `true`, below), so it fell
+/// through to `GenericAdapter`. `provider_pin::pinned_model_slug` now
+/// normalises a `local` pin onto the `ollama/` marker, so the registry entry
+/// and the synthetic one finally agree: both are reachable.
+/// AtlasCloud joined that set in #3765: `adapter_for_model` now has an
+/// `atlascloud/` branch resolving to `AtlasCloudAdapter` (api.atlascloud.ai +
+/// `ATLASCLOUD_API_KEY`), so it dispatches for real rather than falling
+/// through to OpenRouter with a slug OpenRouter does not serve. OpenAI and
+/// Together still do fall through, and stay `false`.
+/// What: `true` for OpenRouter, Bedrock, Anthropic, Fireworks, AtlasCloud, and
+/// Local (`ollama/` prefix); `false` for the remaining providers whose legacy
+/// dispatch falls through to OpenRouter with an unresolvable model-id slug.
+/// Flip an entry to `true` here once its legacy dispatch branch resolves to
+/// the correct provider-native endpoint (tracked by #2410); this function is
+/// the one place that needs to change — `llm::provider_pin::PINNABLE` is
+/// asserted equal to it by `provider_pin::tests::pinnable_set_matches_reachable_today`,
+/// so the GUI can never offer a provider the loader refuses to pin.
+/// Test: `super::tests::models::reachable_today_matches_documented_set`,
+/// `crate::llm::provider_pin::tests::pinnable_set_matches_reachable_today`.
+pub(crate) fn reachable_today(id: ProviderId) -> bool {
     matches!(
         id,
         ProviderId::OpenRouter
             | ProviderId::Bedrock
             | ProviderId::Anthropic
             | ProviderId::Fireworks
+            | ProviderId::AtlasCloud
+            | ProviderId::Local
     )
 }
 

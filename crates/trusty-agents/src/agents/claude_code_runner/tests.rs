@@ -71,6 +71,8 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
             prompt_label: None,
             extends: None,
             tier: None,
+            // #3765: no provider pin on this construction path.
+            provider_id: None,
         },
         llm: LlmParams {
             temperature: 0.0,

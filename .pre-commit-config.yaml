@@ -111,6 +111,23 @@ repos:
         pass_filenames: false
         always_run: true
 
+  # Public documentation allowlist gate (issue #5096). Fails the commit when a
+  # docs/public-manifest.tsv row points at a file that no longer exists (a
+  # rename or deletion in docs/), escapes docs/, or resolves into one of the
+  # DO-NOT-PUBLISH trees (adr, specs, research, plans, prd, presentations,
+  # design, runbooks). The manifest is an ALLOWLIST: an unlisted page is never
+  # published, so the gate only ever validates what IS listed. Runs against the
+  # whole manifest (pass_filenames: false), matching the line-cap hook's
+  # holistic scan.
+  - repo: local
+    hooks:
+      - id: public-docs
+        name: "Public documentation allowlist gate"
+        entry: scripts/check_public_docs.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
   # Leaked AI-generation / tool-call artifact lint (issue #3579). Fails the
   # commit when a raw `</content>`/`</invoke>`/`</parameter>`/
   # `<function_calls>`/`</function_calls>` fragment is found bare on a line

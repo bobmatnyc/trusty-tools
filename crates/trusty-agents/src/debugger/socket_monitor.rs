@@ -50,10 +50,18 @@ impl SocketMonitor {
     /// Why: A successful connect is the cheapest reliable liveness signal;
     /// sending a status ping would require knowing the protocol. The TUI
     /// just needs alive/dead.
-    /// What: `UnixStream::connect_timeout` with a 200ms deadline.
-    /// Test: `socket_monitor_dead_when_no_listener`.
+    /// What: verifies the socket's permissions, then connects. #5089 review:
+    /// `verify_socket_for_connect` is the synchronous half of
+    /// `connect_hardened`, split out precisely so a caller that cannot await
+    /// can still run the check. Without it the TUI reports "alive" for exactly
+    /// the sockets `CtrlSocket::probe` now refuses.
+    /// Test: `socket_monitor_dead_when_no_listener`,
+    /// `socket_monitor_dead_when_socket_fails_verification`.
     pub fn check_alive(&self) -> bool {
         if !self.socket_path.exists() {
+            return false;
+        }
+        if trusty_common::uds::verify_socket_for_connect(&self.socket_path).is_err() {
             return false;
         }
         // std's UnixStream has no connect_timeout; connect_addr blocks. The
@@ -82,6 +90,30 @@ mod tests {
         assert!(
             s.ends_with("/.trusty-agents/sockets/trusty-agents.ctrl.sock"),
             "{s}"
+        );
+    }
+
+    /// #5089 review, LOW: the debug TUI must not paint a green dot for a
+    /// socket the rest of the harness refuses to dial. A bare connect succeeds
+    /// against a widened socket with a live listener; the sync verification
+    /// guard is what makes the indicator agree with `CtrlSocket::probe`.
+    #[tokio::test]
+    async fn socket_monitor_dead_when_socket_fails_verification() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("p.ctrl.sock");
+        let _listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
+        let m = SocketMonitor {
+            socket_path: sock.clone(),
+        };
+        assert!(m.check_alive(), "a hardened live socket must read as alive");
+
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666))
+            .expect("widen socket");
+        assert!(
+            !m.check_alive(),
+            "a socket that fails verification must not read as alive"
         );
     }
 

@@ -97,11 +97,9 @@ fn concurrent_seeds_preserve_every_workspace_entry() {
         for writer in 0..WRITERS {
             let claude_json = claude_json.clone();
             scope.spawn(move || {
-                let names: BTreeSet<String> =
-                    ["trusty-mpm".to_string(), "trusty-review".to_string()].into();
                 for round in 0..ROUNDS {
                     let workspace = format!("/workspace/w{writer}-s{round}");
-                    preseed_workspace_trust(&claude_json, Path::new(&workspace), &names)
+                    preseed_workspace_trust(&claude_json, Path::new(&workspace))
                         .expect("seeding a workspace must never fail");
                 }
             });
@@ -128,10 +126,14 @@ fn concurrent_seeds_preserve_every_workspace_entry() {
             serde_json::json!(true),
             "{workspace} lost its trust acceptance"
         );
+        // // #4181: `enabledMcpjsonServers` is no longer written, so the
+        // payload a lost-update would destroy is the onboarding pair. The
+        // concurrency defect this file exists for is unchanged — two writers
+        // load-mutate-storing the same file — only what they write is.
         assert_eq!(
-            entry["enabledMcpjsonServers"],
-            serde_json::json!(["trusty-mpm", "trusty-review"]),
-            "{workspace} lost its MCP approval list"
+            entry["hasCompletedProjectOnboarding"],
+            serde_json::json!(true),
+            "{workspace} lost its onboarding acceptance"
         );
     }
 }
@@ -167,10 +169,9 @@ fn concurrent_home_and_workspace_seeds_preserve_both_entries() {
             }
         });
         scope.spawn(|| {
-            let names: BTreeSet<String> = ["trusty-mpm".to_string()].into();
             for round in 0..ROUNDS {
                 let workspace = format!("/workspace/launch-seeded-{round}");
-                preseed_workspace_trust(&claude_json, Path::new(&workspace), &names)
+                preseed_workspace_trust(&claude_json, Path::new(&workspace))
                     .expect("workspace trust seed must not fail");
             }
         });

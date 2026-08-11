@@ -432,6 +432,9 @@ async fn reserve_inproject_worktree_uses_semantic_name_not_uuid() {
         inject_task: None,
         deliverable_id: None,
         force_new: false,
+        // #5274: this test drives `reserve_inproject_worktree` directly — the
+        // branch an explicit worktree request routes to.
+        worktree: true,
     };
 
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::default();
@@ -741,6 +744,9 @@ async fn spawn_managed_on_main_creates_record_without_worktree() {
         inject_task: None,
         deliverable_id: None,
         force_new: false,
+        // #5274: this test drives `spawn_managed_on_main` directly, which is
+        // the branch a spawn carrying no worktree request lands on.
+        worktree: false,
     };
 
     let record = spawn_managed_on_main(

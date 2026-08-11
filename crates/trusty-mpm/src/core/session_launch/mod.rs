@@ -14,8 +14,6 @@
 //! Test: `prepare_session_writes_claude_md_and_stash` and
 //! `prepare_session_is_idempotent` in this module's tests.
 
-mod custom_mcp;
-mod native_mcp;
 mod palace_alias;
 // #4448: the ONE wiring of the shadowing-agent quarantine, shared by
 // `prepare_session_inner` and `sync_session_assets`.
@@ -23,19 +21,11 @@ mod project_hooks;
 mod quarantine_shadows;
 mod search_index;
 mod settings;
+mod skills;
 mod sync_assets;
 #[cfg(test)]
 mod tests;
 mod workstream_label;
-// Injector-specific unit tests live in a dedicated `_tests.rs` file (1500-SLOC
-// test cap) rather than inline in `native_mcp.rs` (500-SLOC production cap).
-#[cfg(test)]
-#[path = "native_mcp_tests.rs"]
-mod native_mcp_tests;
-// Mirrors the `native_mcp_tests.rs` split (issue #2739 follow-up).
-#[cfg(test)]
-#[path = "custom_mcp_tests.rs"]
-mod custom_mcp_tests;
 mod worktree_sync;
 // Split out of `tests.rs` to keep it under the 1500-SLOC test-file cap
 // (issue #2149 roster-deploy-failure-continues coverage) — mirrors the
@@ -55,25 +45,11 @@ mod tests_scaffold_gitignore;
 #[cfg(test)]
 #[path = "tests_search_index.rs"]
 mod tests_search_index;
-// Issue #3918 follow-up (code-critic BLOCK, name-squatting exploit) — e2e
-// coverage driving the REAL `prepare_session_inner` pipeline end to end,
-// mirroring the `tests_roster.rs` split pattern above.
-#[cfg(test)]
-#[path = "tests_mcp_trust_seed_e2e.rs"]
-mod tests_mcp_trust_seed_e2e;
-// Issue #3926 — e2e coverage for the `tm launch` MCP-trust-preseed
-// name-squatting fix, mirroring the `tests_mcp_trust_seed_e2e` split pattern
-// immediately above.
+// #4181 — successor to the #3926 suite: the approval is deleted, so this file
+// now pins that NO name is pre-approved and that a stale one is stripped.
 #[cfg(test)]
 #[path = "tests_launch_trust_3926.rs"]
 mod tests_launch_trust_3926;
-// Issue #3934 — e2e coverage for the manifest-toggle name-squatting fix
-// (the `[mcp]` toggle disabling trusty-memory/trusty-search's force-overwrite
-// injector reopened the #3926/#3918 exploit class), mirroring the
-// `tests_launch_trust_3926.rs` split pattern immediately above.
-#[cfg(test)]
-#[path = "tests_manifest_toggle_trust_3934.rs"]
-mod tests_manifest_toggle_trust_3934;
 // Issue #4072 — concurrency coverage for the shared `~/.claude.json`
 // read-modify-write cycle both trust seeders perform. Its own file because
 // `settings.rs` (485/500 production SLOC) and `tests.rs` (1482/1500 test
@@ -89,19 +65,12 @@ mod tests_claude_json_concurrency_4072;
 #[path = "tests_quarantine_4448.rs"]
 mod tests_quarantine_4448;
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
-use crate::core::agent_skill_codeploy::{co_deploy_skill_set, log_declared_skills};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
-use crate::core::skill_tiers::{
-    deploy_all_skill_tiers, list_project_custom_stems, list_source_stems,
-};
-use custom_mcp::inject_custom_trusty_mcps;
-use native_mcp::inject_native_trusty_mcps;
 use settings::{
     deploy_output_style, preseed_workspace_trust_home, remove_global_trusty_memory_hooks,
     write_output_style, write_project_hooks, write_status_line,
@@ -126,47 +95,37 @@ use settings::{
 /// logic of its own).
 pub(crate) use settings::{OUTPUT_STYLE, is_stale_statusline_command, resolve_statusline_command};
 
-/// Re-export of the four framework-builtin MCP-server force-overwrite
-/// injectors, and the trusty-search index derivation they depend on, for
-/// reuse by `runtime::claude_code::prepare_managed_config` (issue #3950
-/// residual-gap fix).
+/// Re-export of the trusty-search project-index registration entry point and
+/// the trusty-memory palace-slug derivation.
 ///
-/// Why: `mod settings`/`mod search_index` above are private, so a
-/// `pub(crate)` item inside either is still unreachable from outside
-/// `session_launch` without a re-export at this (public) module boundary —
-/// mirroring the `OUTPUT_STYLE` re-export just above.
-/// `runtime::claude_code::prepare_managed_config` (the tmux daemon-spawn
-/// adapter behind `RuntimeAdapter::spawn`/`spawn_resume`) is a genuinely
-/// disjoint call chain from wherever `prepare_session_with_repo_url` last
-/// ran the injectors for a given workspace — `spawn_resume` in particular
-/// reaches it with NO corresponding `prepare_session*` call anywhere in its
-/// own request chain (see `daemon::managed_routes::lifecycle::resume_managed`'s
-/// doc). Before #3950's follow-up fix, that call site derived
-/// `enabledMcpjsonServers` membership from a hardcoded `true` (the two
-/// unconditional builtins) or a bare manifest-toggle read (the two
-/// conditional builtins) — exactly the "toggle/attempt ≠ write success"
-/// defect this issue closes everywhere else, left open on the headless
-/// resume path with no same-run evidence at all. Exposing the injectors
-/// themselves (rather than only the higher-level `prepare_session_inner`
-/// pipeline, which also redeploys agents/skills/CLAUDE.md — unwanted,
-/// heavier work for a mere resume) lets that call site run the SAME
-/// idempotent read-merge-write ([`settings::inject_mcp_server`]'s own doc:
-/// "skip the write when the entry already matches") and derive real,
-/// this-run pin results exactly like `session_launch::prepare_session_inner`
-/// and `standalone::load::load_alias` do.
-/// What: re-exports [`settings::inject_trusty_mpm_mcp`],
-/// [`settings::inject_trusty_review_mcp`], [`settings::inject_trusty_memory_mcp`],
-/// [`search_index::inject_trusty_search_mcp`], and
-/// [`search_index::register_project_index`] (the find-or-create index
-/// lookup `inject_trusty_search_mcp`'s `index_id` pin depends on).
-/// Test: covered by each injector's own unit tests in `tests_mcp_trust_seed_e2e.rs`
-/// / `native_mcp_tests.rs` / `tests.rs` (this is a plain re-export, no logic
-/// of its own); the new call site is covered by
-/// `runtime::claude_code::tests::prepare_managed_config_excludes_builtins_when_mcp_json_write_fails`.
-pub(crate) use search_index::{inject_trusty_search_mcp, register_project_index};
-pub(crate) use settings::{
-    inject_trusty_memory_mcp, inject_trusty_mpm_mcp, inject_trusty_review_mcp,
-};
+/// Why: `mod search_index` / `mod settings` above are private, so a
+/// `pub(crate)` item inside either is unreachable from outside `session_launch`
+/// without a re-export at this (public) module boundary — mirroring the
+/// `OUTPUT_STYLE` re-export just above. // #4181: both used to feed the
+/// `.mcp.json` injectors this module owned; ADR-0042 deleted those, and
+/// `core::mcp_session_env` now consumes the same two values to build the
+/// `TRUSTY_INDEX` / `TRUSTY_MEMORY_PALACE` variables the spawn exports.
+/// What: re-exports [`search_index::register_project_index`] and
+/// [`settings::resolve_palace_slug`] — plain re-exports, no logic of their own.
+/// Test: `tests_search_index.rs` and `resolve_palace_slug_*` in `tests.rs`.
+pub(crate) use search_index::register_project_index;
+pub(crate) use settings::resolve_palace_slug;
+
+/// Re-export of the #1939 palace-alias healing so it can run per launch from
+/// `core::managed_config::ensure_managed_config_dir_with_root`.
+///
+/// Why (#4181): `maybe_register_palace_alias` had exactly one call site — inside
+/// `settings::inject_trusty_memory_mcp`, immediately before the write. ADR-0042
+/// deletes that injector, and deleting it as written would stop the claude-mpm
+/// split-brain healing with no test failing to say so. The call is rehomed onto
+/// `ensure_managed_config_dir`, which every spawn, resume and in-place relaunch
+/// already reaches.
+/// What: re-exports [`palace_alias::maybe_register_palace_alias`] — a plain
+/// re-export, no logic of its own.
+/// Test: `palace_alias`'s own unit tests, plus
+/// `ensure_managed_config_dir_heals_a_bare_repo_palace_alias`, which fails if
+/// the rehomed call site is deleted.
+pub(crate) use palace_alias::maybe_register_palace_alias;
 
 /// Re-export of the resume-time worktree/upstream sync primitives (issue
 /// #2647) for reuse by `daemon::managed_routes::lifecycle::resume_managed`.
@@ -257,34 +216,6 @@ pub struct PrepReport {
     /// `false` when writing the project hooks failed; the session still
     /// launches, it just won't fire the trusty-memory hooks.
     pub hooks_written: bool,
-    /// Whether the `trusty-mpm` MCP server entry was ACTUALLY force-written
-    /// to `.mcp.json` this run (issue #3950 — fifth instance of the
-    /// name-approval/content-pinning vulnerability class).
-    ///
-    /// `false` when [`inject_trusty_mpm_mcp`] failed (disk full, permission
-    /// error, transient I/O fault) — the session still launches, but this
-    /// name must NOT enter `enabledMcpjsonServers` for it (see
-    /// `trusted_mcp_names`'s computation below), since its content was never
-    /// re-pinned to the framework-controlled command this run.
-    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
-    pub trusty_mpm_injected: bool,
-    /// Whether the `trusty-review` MCP server entry was ACTUALLY
-    /// force-written to `.mcp.json` this run — see [`Self::trusty_mpm_injected`].
-    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
-    pub trusty_review_injected: bool,
-    /// Whether the `trusty-memory` MCP server entry was ACTUALLY
-    /// force-written to `.mcp.json` this run.
-    ///
-    /// `false` when the manifest toggle disabled the injector, OR the toggle
-    /// was on but [`inject_trusty_memory_mcp`] failed — either way this name
-    /// must NOT enter `enabledMcpjsonServers` (issue #3950).
-    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
-    pub trusty_memory_injected: bool,
-    /// Whether the `trusty-search` MCP server entry was ACTUALLY
-    /// force-written to `.mcp.json` this run — see
-    /// [`Self::trusty_memory_injected`].
-    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
-    pub trusty_search_injected: bool,
     /// Incremental catch-up context to inject as seed context for this session.
     ///
     /// Populated when `config.catchup.auto` is true; `None` otherwise or when
@@ -439,8 +370,7 @@ impl PrepError {
 /// `prepare_session_stash_reflects_override`,
 /// `prepare_session_writes_the_compiled_prompt_before_returning`,
 /// `prepare_session_fails_when_the_compiled_prompt_cannot_be_written`,
-/// `prepare_session_refuses_when_the_instructions_cannot_be_built`,
-/// `compiled_write_failure_does_not_skip_the_mcp_injectors`.
+/// `prepare_session_refuses_when_the_instructions_cannot_be_built`.
 pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepReport, PrepError> {
     prepare_session_with_style(fw, project_dir, None)
 }
@@ -449,16 +379,18 @@ pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepRe
 ///
 /// Why (issue #1605): a managed session cloned from `repo_url` lives under a
 /// throwaway `<owner>/<repo>/<session-id>/` workspace whose basename is the
-/// session-id. Without the originating `repo_url`, the trusty-memory MCP
-/// injection would derive (and pin) the WRONG palace from that directory
-/// basename. The provisioner knows the `repo_url` it cloned, so threading it
-/// here lets the injector pin `env.TRUSTY_MEMORY_PALACE` to the project's
-/// canonical `owner-repo` slug. The flag-less [`prepare_session`] delegates with
-/// `None`, which falls back to the workspace's own `git remote get-url origin`.
+/// session-id, so palace derivation from that basename picks the WRONG name. The
+/// provisioner knows the `repo_url` it cloned, so threading it here supplies the
+/// canonical remote. Since ADR-0042 deleted the MCP injectors, what consumes it
+/// is [`maybe_register_palace_alias`] — the #1939 healing that decides whether
+/// the derived `owner-repo` palace should resolve to a pre-existing bare-repo
+/// one. The flag-less [`prepare_session`] delegates with `None`, which falls
+/// back to the workspace's own `git remote get-url origin`.
 /// What: identical to [`prepare_session`] except the optional `repo_url` (from
-/// `LaunchParams`/`SessionRecord`) is threaded down to the trusty-memory MCP
-/// injector for palace-slug derivation. Real native-style detection is applied.
-/// Test: `prepare_session_repo_url_pins_palace` in this module's tests.
+/// `LaunchParams`/`SessionRecord`) is threaded down as the authoritative remote.
+/// Real native-style detection is applied.
+/// Test: `creates_alias_for_split_brain` and the sibling guards in
+/// [`palace_alias`], which cover what the threaded remote decides.
 pub fn prepare_session_with_repo_url(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -637,11 +569,11 @@ pub fn prepare_session_with_style_and_native(
 /// `native_supported`, and (issue #1605) the cloned-from `repo_url`. Funnelling
 /// them through one private body keeps the long preparation sequence in a single
 /// place so the variants cannot drift. `repo_url` is the only new degree of
-/// freedom: it is threaded to the trusty-memory MCP injector for palace pinning
-/// and is `None` for the flag-less / style-only entry points (which then fall
-/// back to the workspace's own git origin remote).
+/// freedom: it is threaded to [`maybe_register_palace_alias`] as the
+/// authoritative remote and is `None` for the flag-less / style-only entry
+/// points (which then fall back to the workspace's own git origin remote).
 /// What: identical to the documented [`prepare_session_with_style_and_native`]
-/// behaviour, plus it passes `repo_url` to [`inject_trusty_memory_mcp`].
+/// behaviour, plus it passes `repo_url` to [`maybe_register_palace_alias`].
 /// Issue #2149: an agent-deploy or skill-deploy failure is captured into
 /// [`PrepReport::roster_errors`] rather than short-circuiting the function via
 /// `?` — every step after the roster deploy (CLAUDE.md/instructions, the
@@ -651,7 +583,6 @@ pub fn prepare_session_with_style_and_native(
 /// only returns `Err` for genuinely fatal failures (the instruction pipeline,
 /// or the inspection-stash IO).
 /// Test: covered by every `prepare_session_*` test plus
-/// `prepare_session_repo_url_pins_palace`,
 /// `prepare_session_continues_after_agent_deploy_failure`,
 /// `prepare_session_continues_after_skill_deploy_failure`.
 fn prepare_session_inner(
@@ -817,73 +748,13 @@ fn prepare_session_inner(
         tracing::warn!("failed to refresh skill source directory: {err}");
     }
 
-    // Surface pre-deploy skill staleness (issue #2876). Reading the deployed
-    // manifest BEFORE the refresh below tells us which bundled skills this
-    // workspace was serving STALE — a long-lived worktree that never
-    // re-provisioned keeps the old skill text (e.g. an outdated attribution
-    // footer) until this very deploy self-heals it. The deploy below fixes it;
-    // the warn makes the drift auditable so an operator can see a workspace was
-    // running behind the installed binary's assets. Non-fatal and read-only.
-    let stale =
-        crate::core::skill_staleness::stale_skills(&plan.skill_source, &fw.claude_skills_dir());
-    if !stale.is_empty() {
-        tracing::warn!(
-            project_dir = %project_dir.display(),
-            stale_skills = %stale.join(", "),
-            "deployed skills were stale relative to bundled assets — refreshing now \
-             (run `tm doctor` to audit; long-lived worktrees drift until re-provisioned)"
-        );
-    }
-
-    // DOC-42 (issue #2889): fold every deployed agent's declared `skills:`
-    // into the bundled-tier `select` predicate below, so a skill the harness
-    // manifest would otherwise exclude still deploys when an agent depends on
-    // it (§SPEC-AGENTSKILLS-02 co-deploy guarantee). Resolving the stem sets
-    // ONCE here (rather than inside `deploy_all_skill_tiers`) lets the same
-    // sets drive both the co-deploy `select` override AND the resolution
-    // logging below, without a second directory scan.
-    let bundled_stems = list_source_stems(&plan.skill_source).unwrap_or_default();
-    let user_stems = list_source_stems(&fw.user_skill_source_dir()).unwrap_or_default();
-    let project_stems = list_project_custom_stems(&fw.claude_skills_dir()).unwrap_or_default();
-    let co_deploy_skills = co_deploy_skill_set(&deploy.declared_skills);
-    log_declared_skills(
+    let skill_deploy = skills::deploy_session_skills(
+        fw,
+        &plan,
+        project_dir,
         &deploy.declared_skills,
-        &project_stems,
-        &user_stems,
-        &bundled_stems,
+        &mut roster_errors,
     );
-
-    // Deploy skill files — Claude Code reads `~/.claude/skills/` at startup.
-    // Skills carry no inheritance, so this is a manifest-tracked content copy.
-    // Three tiers merge here with precedence project-custom > user-custom >
-    // bundled (#2816): the manifest's skill-set selection restricts WHICH
-    // BUNDLED source skills deploy — OR'd with `co_deploy_skills` (DOC-42) so
-    // an agent-declared dependency still deploys even when the manifest
-    // wouldn't otherwise select it; the user-custom tier
-    // (`~/.trusty-mpm/skills/`) is deployed in full and overrides a same-named
-    // bundled skill; a skill the user hand-placed in the project's
-    // `.claude/skills/` (absent from the deploy manifest) outranks both and is
-    // never overwritten. See `core::skill_tiers`.
-    crate::core::provisioning_stage::emit(
-        crate::core::provisioning_stage::ProvisioningStage::DeployingSkills,
-    );
-    let skill_deploy = match deploy_all_skill_tiers(
-        &plan.skill_source,
-        &fw.user_skill_source_dir(),
-        &fw.claude_skills_dir(),
-        |name| plan.skill_selected(name) || co_deploy_skills.contains(name),
-    ) {
-        Ok(result) => result.stats,
-        Err(err) => {
-            tracing::error!(
-                project_dir = %project_dir.display(),
-                "skill deploy FAILED — session will launch WITHOUT the tm/mpm skill \
-                 set: {err}. Identity/output-style provisioning continues regardless."
-            );
-            roster_errors.push(format!("skill deploy failed: {err}"));
-            DeployStats::default()
-        }
-    };
 
     // Compose the effective launch instructions (framework + delegation
     // authority + project CLAUDE.md); this loads or creates the project
@@ -1012,7 +883,11 @@ fn prepare_session_inner(
     // daemon's managed launch excludes the user tier where that triad would
     // otherwise be provisioned. Non-fatal: the session still launches, it
     // just won't record memory or lifecycle events via the hooks.
-    let hooks_written = match write_project_hooks(project_dir) {
+    //
+    // #5034: `[hooks] prompt_context = false` suppresses the per-prompt
+    // `trusty-memory prompt-context` injection (and strips one a prior launch
+    // wrote). Default `true` — every other hook is written either way.
+    let hooks_written = match write_project_hooks(project_dir, config.hooks.prompt_context) {
         Ok(()) => true,
         Err(err) => {
             tracing::warn!("failed to write trusty-mpm project hooks: {err}");
@@ -1020,176 +895,52 @@ fn prepare_session_inner(
         }
     };
 
-    // Inject the `trusty-memory` MCP server into the project's `.mcp.json` so
-    // the launched `claude` process can reach the memory tools (`memory_recall`,
-    // `memory_note`, …). Gated by the manifest's `[mcp] trusty_memory` toggle
-    // (default on). Non-fatal: the session still launches, it just lacks the
-    // memory tools.
-    //
-    // `trusty_memory_injected` (issue #3950 — fifth instance of the
-    // name-approval/content-pinning vulnerability class): tracks whether the
-    // entry was ACTUALLY force-written this run, not merely whether the
-    // toggle was on. A toggle that is on but a write that fails (disk full,
-    // permission error, transient I/O fault) must NOT count as "pinned" —
-    // see this variable's use in `trusted_mcp_names` below.
+    // #4181 (ADR-0042): tm no longer writes MCP config into the workspace. The
+    // four framework builtins and every `tm mcp add` server are declared once in
+    // `<CLAUDE_CONFIG_DIR>/.claude.json`'s user-scope `mcpServers` map, seeded by
+    // `mcp_config::seed_builtin_servers` and read by the relocated spawn's
+    // `--setting-sources user,project,local`. What remains here is the one piece
+    // that cannot be shared across projects: the trusty-search index must exist
+    // before `TRUSTY_INDEX` can point at it. `core::mcp_session_env` derives that
+    // variable (and `TRUSTY_MEMORY_PALACE`) for the spawn.
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::ConfiguringMcp,
     );
-    let mut trusty_memory_injected = false;
-    if plan.inject_trusty_memory {
-        // Pin the project's palace via `env.TRUSTY_MEMORY_PALACE` (issue #1605).
-        // `repo_url` (the cloned-from URL, threaded from LaunchParams) is the
-        // authoritative identity for repo_url-cloned sessions; the injector
-        // falls back to the workspace's own git origin remote when it is `None`,
-        // and to the bare stub when no slug can be derived (fail-open).
-        match inject_trusty_memory_mcp(project_dir, repo_url) {
-            Ok(()) => trusty_memory_injected = true,
-            Err(err) => tracing::warn!("failed to inject trusty-memory MCP server: {err}"),
-        }
-    } else {
-        tracing::debug!("manifest disables trusty-memory MCP injection");
-    }
 
-    // Register + pin the project's trusty-search index (issue #1373). Derive
-    // the project's canonical index id (git-root basename, via the shared
-    // `trusty_common::derive_index_id`), best-effort find-or-create it in the
-    // running daemon, then inject the `trusty-search` MCP stub PINNED to that id
-    // (`serve --index <id>`). Pinning makes a bare `search`/`grep` resolve to
-    // the session's OWN project index instead of letting the LLM guess (and
-    // routinely pick the wrong `claude-mpm` index). The daemon-unreachable case
-    // is handled inside `register_project_index` (logged, non-fatal) and still
-    // returns the id so the stub is pinned; a `None` id (empty derivation) falls
-    // back to the unpinned stub. Either way the session launches.
-    // Gated by the manifest's `[mcp] trusty_search` toggle (default on).
-    // `trusty_search_injected` mirrors `trusty_memory_injected` above (#3950).
-    let mut trusty_search_injected = false;
+    // Find-or-create the project's trusty-search index (issues #1373, #1908) so
+    // the `TRUSTY_INDEX` the spawn exports resolves. Gated by the manifest's
+    // `[mcp] trusty_search` toggle, the same gate `mcp_session_env` applies when
+    // it builds the variable. Best-effort: an unreachable daemon yields no index
+    // and the session searches unpinned rather than failing to launch.
     if plan.inject_trusty_search {
-        let pinned_index = register_project_index(project_dir);
-        match inject_trusty_search_mcp(project_dir, pinned_index.as_deref()) {
-            Ok(()) => trusty_search_injected = true,
-            Err(err) => tracing::warn!("failed to inject trusty-search MCP server: {err}"),
-        }
+        let _ = register_project_index(project_dir);
     } else {
-        tracing::debug!("manifest disables trusty-search MCP injection");
+        tracing::debug!("manifest disables the trusty-search project index");
     }
 
-    // Force-write the canonical `trusty-mpm` / `trusty-review` MCP server
-    // entries (issue #3918 follow-up, code-critic BLOCK — name-squatting
-    // exploit). Both names are unconditionally pre-approved in a managed
-    // session's `enabledMcpjsonServers` (they are framework builtins — see
-    // `mcp_config::BUILTIN_MANAGED_MCP_SERVERS`), but that approval is
-    // NAME-based and CONTENT-BLIND: Claude Code still reads whatever command
-    // sits under the name in this file. Without an injector here, a hostile
-    // clone could squat either pre-approved name with an attacker-controlled
-    // command (no human present to decline it), and — independently — a
-    // freshly-cloned project with no committed entry got no WORKING
-    // connection to its own trusty-mpm/trusty-review servers, so #3918's
-    // actual symptom was not fixed in the general case. Unconditional (no
-    // manifest toggle, unlike the optional trusty-memory/trusty-search
-    // integrations above) and MUST run before the trust pre-seed below —
-    // same ordering reasoning as the native/custom injectors. Non-fatal.
-    //
-    // `trusty_mpm_injected`/`trusty_review_injected` (issue #3950): these two
-    // have no manifest escape hatch, but the WRITE itself can still fail —
-    // before this fix, either name was unconditionally added to
-    // `enabledMcpjsonServers` regardless of whether this force-overwrite
-    // actually succeeded, reopening the identical vulnerability for the
-    // "unconditional" pair. See `trusted_mcp_names` below.
-    let trusty_mpm_injected = match inject_trusty_mpm_mcp(project_dir) {
-        Ok(()) => true,
-        Err(err) => {
-            tracing::warn!("failed to inject trusty-mpm MCP server: {err}");
-            false
-        }
-    };
-    let trusty_review_injected = match inject_trusty_review_mcp(project_dir) {
-        Ok(()) => true,
-        Err(err) => {
-            tracing::warn!("failed to inject trusty-review MCP server: {err}");
-            false
-        }
-    };
-
-    // Inject NATIVE trusty MCP servers registered via `tm mcp add` (e.g.
-    // slack-mcp, gworkspace-mcp, trusty-analyze) into the workspace `.mcp.json`
-    // (issue #2739). Fleet sessions launch `claude --setting-sources
-    // project,local`, which never reads the managed `.claude.json` `mcpServers`
-    // map where `tm mcp` writes — so without this bridge those servers are
-    // invisible to managed sessions. Scope is the native-trusty allowlist ONLY
-    // (third-party/HTTP managed servers are handled by the custom-server bridge
-    // just below); the memory and search injectors above already own their own
-    // pinned entries and are excluded from the allowlist. MUST run BEFORE the
-    // trust pre-seed below so the injected names flow into
-    // `enabledMcpjsonServers` and skip the "new MCP servers found" dialog.
-    // Non-fatal: a failure only means those extra tools are absent from this
-    // session.
-    if let Err(err) = inject_native_trusty_mcps(project_dir) {
-        tracing::warn!("failed to inject native trusty MCP servers: {err}");
+    // Heal the claude-mpm palace split-brain before the session starts (#1939):
+    // when the derived `owner-repo` palace does not exist but the BARE repo-name
+    // one does, register an alias so the exported `TRUSTY_MEMORY_PALACE` resolves
+    // to the existing store. // #4181: this used to run inside the deleted memory
+    // injector; `ensure_managed_config_dir` carries the daemon/interactive paths,
+    // and this call carries the standalone `prepare_session` path. Best-effort
+    // and side-effect-only; never fails the launch.
+    if plan.inject_trusty_memory {
+        maybe_register_palace_alias(project_dir, repo_url);
     }
-
-    // Inject CUSTOM (non-native, non-builtin) MCP servers — issue #2739
-    // follow-up — from BOTH the user-scope managed registry (any `tm mcp add`
-    // entry not on the native allowlist) and the resolved project-scope
-    // manifest `[mcp.custom]` table (`plan.custom_mcp_servers`), project
-    // overriding user on a name collision. See `session_launch::custom_mcp`
-    // for the full scope/precedence/security model. MUST also run before the
-    // trust pre-seed below, same reasoning as the native injector. Non-fatal:
-    // a failure yields an empty project-scope-names set, which only means
-    // this run's project-scope servers (if any bridged before the failure)
-    // are conservatively left OUT of trust pre-approval rather than in it.
-    let project_scope_mcp_names =
-        match inject_custom_trusty_mcps(project_dir, &plan.custom_mcp_servers) {
-            Ok(names) => names,
-            Err(err) => {
-                tracing::warn!("failed to bridge custom MCP servers: {err}");
-                BTreeSet::new()
-            }
-        };
 
     // Pre-seed per-directory trust for this workspace in `~/.claude.json`
     // (issue #1269) so the interactive tmux Claude session does not stall on the
     // "Do you trust this folder?" dialog and the injected task prompt is
     // received. tm owns this workspace path, so marking it trusted is safe.
     //
-    // `enabledMcpjsonServers` (issue #3926 security fix): computed here, NEVER
-    // by reading the workspace's own `.mcp.json` (that file is git-tracked and
-    // travels WITH a cloned repo — see `mcp_config::mcp_server_names`'s
-    // SECURITY doc for the vulnerability this closes). `launch_trusted_mcp_names`
-    // returns each of the framework builtin four ONLY when its own
-    // `trusty_*_injected` bool is true THIS run — i.e. its force-overwrite
-    // injector actually SUCCEEDED writing the framework-controlled command,
-    // not merely that a manifest toggle was on (issue #3950 — fifth
-    // instance: a toggle on but a write that fails, e.g. disk full,
-    // permission error, or transient I/O fault, must NOT leave a spoofed or
-    // stale `.mcp.json` entry pre-approved; issue #3934's earlier fix closed
-    // the toggle-off case but still passed the toggle value directly,
-    // ignoring the injector's own `Result`) — UNION the operator's own
-    // `tm mcp add` registry (also force-overwritten above, by the
-    // native/custom injectors, whenever a registry name matches) —
-    // provenance the operator or the framework controls, mirroring
-    // `mcp_config::managed_mcp_server_names`'s already-fixed derivation for
-    // the daemon-managed path (#3918/#3924). `project_scope_mcp_names` is
-    // then subtracted (issue #2739's existing defense-in-depth, preserved
-    // unchanged): a project-scope `[mcp.custom]` entry ships with the cloned
-    // repo itself, so it still surfaces Claude Code's "new MCP servers
-    // found" consent dialog even after `tm project trust` — see
-    // `session_launch::custom_mcp`'s "Consent gate" docs. A name that
-    // reaches neither source — e.g. one a cloned repo merely committed to
-    // `.mcp.json` directly, a conditional builtin whose injector was
-    // disabled, or ANY of the four builtins whose force-overwrite write
-    // failed this run — now correctly falls through to that same dialog
-    // instead of being silently pre-approved. Non-fatal: a trust-seed
-    // failure only means the operator may see the dialog.
-    let trusted_mcp_names: BTreeSet<String> = crate::core::mcp_config::launch_trusted_mcp_names(
-        trusty_mpm_injected,
-        trusty_review_injected,
-        trusty_memory_injected,
-        trusty_search_injected,
-    )
-    .into_iter()
-    .filter(|name| !project_scope_mcp_names.contains(name))
-    .collect();
-    if let Err(err) = preseed_workspace_trust_home(project_dir, &trusted_mcp_names) {
+    // // #4181: no `enabledMcpjsonServers` is written, and any left by a prior
+    // version is stripped — see `settings::preseed_workspace_trust`. Approving a
+    // name is what lets a repo's `.mcp.json` entry displace the operator's own
+    // user-scope declaration, so removing the approval removes the
+    // name-squatting exploit #3918→#3950 kept re-opening rather than defusing it
+    // once more. Non-fatal: a failure only means the operator sees the dialog.
+    if let Err(err) = preseed_workspace_trust_home(project_dir) {
         tracing::warn!("failed to pre-seed workspace trust: {err}");
     }
 
@@ -1327,10 +1078,6 @@ fn prepare_session_inner(
         compiled_prompt: compiled,
         output_style,
         hooks_written,
-        trusty_mpm_injected,
-        trusty_review_injected,
-        trusty_memory_injected,
-        trusty_search_injected,
         catchup_context,
         roster_errors,
     })

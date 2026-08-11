@@ -1,6 +1,9 @@
 # trusty-memory — documentation
 
-Memory palace storage daemon + MCP server frontend (`crates/trusty-memory-core` + `crates/trusty-memory`).
+Memory palace storage daemon + MCP server frontend. The storage engine lives in
+`crates/trusty-common`'s `memory_core` module (behind the `memory-core` feature
+flag, absorbing the former `trusty-memory-core` crate); the frontend is
+`crates/trusty-memory`.
 
 ## Canonical specification
 

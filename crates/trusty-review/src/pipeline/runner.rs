@@ -13,11 +13,11 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::runner_coverage::load_coverage_contrib;
 use super::runner_helpers::{
-    abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
+    DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
     fetch_github_pr_meta, finalize_run, resolve_diff_token,
 };
 use crate::{
@@ -43,7 +43,7 @@ use crate::{
         verify::maybe_verify,
         voice_config::build_voice_config,
     },
-    store::{ClaimOutcome, DedupStore},
+    store::{ClaimOutcome, DedupError, DedupStore},
 };
 
 // ─── Pipeline input ───────────────────────────────────────────────────────────
@@ -132,6 +132,7 @@ pub struct ReviewInput {
 /// so tests can inject fakes without a running daemon.
 /// What: all fields are `Arc<dyn Trait>` for cheap cloning in `compare` mode.
 /// Test: `run_review_with_fake_provider_approves`.
+#[derive(Clone)]
 pub struct ReviewDeps {
     /// LLM provider for the reviewer role.
     pub llm: Arc<dyn LlmProvider>,
@@ -239,13 +240,14 @@ pub async fn run_review(
     // ── Step 2b: dedup claim (Phase 1, #582) ──────────────────────────────
     // Claim the (owner,repo,pr,head_sha) slot before doing expensive work.  A
     // completed claim for the same head SHA short-circuits the whole pipeline.
-    // Store errors are fail-safe: we log and proceed (never block a review).
+    // #5064: a store error means the gate did not engage, so the review
+    // aborts without posting rather than proceeding unguarded.
     if !is_local
         && !head_sha.is_empty()
         && let Some(store) = deps.dedup.as_ref()
     {
-        match store.claim(&owner, &repo, pr_number, &head_sha) {
-            Ok(ClaimOutcome::Skipped) => {
+        match classify_claim(store.claim(&owner, &repo, pr_number, &head_sha).await) {
+            ClaimGate::DuplicateSkip => {
                 info!(
                     owner = %owner,
                     repo = %repo,
@@ -262,11 +264,22 @@ pub async fn run_review(
                 result.findings_count = result.findings.len();
                 return result;
             }
-            Ok(ClaimOutcome::Claimed) => {
+            ClaimGate::Proceed => {
                 debug!(head_sha = %head_sha, "dedup: claimed review slot");
             }
-            Err(e) => {
-                warn!("dedup claim failed (proceeding without dedup): {e}");
+            // #5064: the claim gate did not engage — abort rather than post.
+            ClaimGate::Abort(reason) => {
+                error!(
+                    owner = %owner,
+                    repo = %repo,
+                    pr = pr_number,
+                    head_sha = %head_sha,
+                    "dedup claim failed — aborting without posting: {reason}"
+                );
+                result.error = Some(format!("dedup claim unavailable: {reason}"));
+                // #5064: NotHeld — this review never acquired the claim, so it
+                // must not delete whatever record is on disk.
+                return abort_dry(result, config, &input, &deps, DedupClaim::NotHeld).await;
             }
         }
     }
@@ -281,7 +294,7 @@ pub async fn run_review(
         Err(e) => {
             warn!("failed to resolve GitHub token for diff fetch: {e}");
             result.error = Some(format!("GitHub token resolution failed: {e}"));
-            return abort_dry(result, config, &input, &deps);
+            return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
         }
     };
 
@@ -292,7 +305,7 @@ pub async fn run_review(
         Err(e) => {
             warn!("failed to load diff: {e}");
             result.error = Some(format!("diff load failed: {e}"));
-            return abort_dry(result, config, &input, &deps);
+            return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
         }
     };
     let filtered = DiffAnalyzer::default().analyze(&raw_diff).await;
@@ -353,7 +366,7 @@ pub async fn run_review(
              may be invisible; could not review",
             orig = raw_diff.len(),
         ));
-        return abort_dry(result, config, &input, &deps);
+        return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
     }
 
     // ── Step 4: extract identifiers for context retrieval ─────────────────
@@ -383,7 +396,7 @@ pub async fn run_review(
                 result.dry_run = true;
                 // Return WITHOUT finalize_review so a skipped review is never posted.
                 // Release any dedup claim so a retry (once the dep recovers) can re-run.
-                return abort_dry(result, config, &input, &deps);
+                return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
             }
             GateOutcome::Degraded(reason) => {
                 warn!("required-context gate: proceeding DEGRADED (non-authoritative) — {reason}");
@@ -482,7 +495,7 @@ pub async fn run_review(
             warn!("LLM call failed: {e} — applying fail-safe UNKNOWN (fail-closed, #1241)");
             result.verdict = Verdict::Unknown;
             result.error = Some(format!("LLM error: {e}"));
-            return abort_dry(result, config, &input, &deps);
+            return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
         }
     };
 
@@ -528,7 +541,7 @@ pub async fn run_review(
             "review output truncated at token ceiling ({}/{} tokens) — could not review",
             llm_resp.output_tokens, requested_max_tokens
         ));
-        return abort_dry(result, config, &input, &deps);
+        return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
     }
 
     // ── Step 7: parse verdict + findings ──────────────────────────────────
@@ -649,8 +662,16 @@ pub async fn run_review(
     // Coverage-floor tightening (step 7b-post above) only drives REQUEST_CHANGES (not
     // BLOCK), and the original LLM grade for REQUEST_CHANGES is already at the D-band,
     // so the clamp is correct in the common case.
+    //
+    // #4044: `clamp_grade_to_verdict` only moves a grade that is too OPTIMISTIC
+    // for the verdict; a grade that is too SEVERE passes through untouched. So
+    // when verification refuted the blocking findings and the verdict relaxed,
+    // the model's own "F" survived verbatim next to an APPROVE — the grade was
+    // still resting on evidence the pipeline had already discarded.
+    // `reconcile_grade_with_verdict` moves it in both directions; `grade.rs`
+    // already switched to it for the #PR84 case and this call site was missed.
     result.grade = original_llm_grade.map(|g| {
-        crate::pipeline::letter_grade::clamp_grade_to_verdict(g, &result.verdict).to_string()
+        crate::pipeline::letter_grade::reconcile_grade_with_verdict(g, &result.verdict).to_string()
     });
 
     // 7d-post: flag a suspiciously "shallow" clean review (#1877) — a
@@ -794,6 +815,49 @@ fn is_truncated(finish_reason: Option<&str>, output_tokens: u32, max_tokens: u32
     }
     let threshold = (f64::from(max_tokens) * truncation_token_ratio()).ceil() as u32;
     output_tokens >= threshold
+}
+
+// ─── Dedup claim gate (#5064) ────────────────────────────────────────────────
+
+/// What the runner does with a `claim()` outcome.
+///
+/// Why: naming the three outcomes makes the fail-closed rule reviewable in one
+/// place. It used to be an inline `match` whose error arm proceeded with the
+/// review, so a store failure produced an ungated live comment — and on the
+/// next redelivery, another one.
+/// What: `Proceed` owns the slot; `DuplicateSkip` short-circuits a completed
+/// review; `Abort` carries the reason a claim could not be established.
+/// Test: `classify_claim_*` in `runner_tests.rs`.
+pub(super) enum ClaimGate {
+    /// This caller owns the review slot.
+    Proceed,
+    /// A completed review already exists for this head SHA.
+    DuplicateSkip,
+    /// The claim gate did not engage; abort without posting.
+    Abort(String),
+}
+
+/// Decide what a `claim()` result means for the review about to run.
+///
+/// Why: #5064 — every `DedupError` means the same thing operationally. The
+/// caller does not know whether this head SHA was already reviewed, and could
+/// not record that it is reviewing it now. Proceeding posts an unguarded
+/// comment; aborting drops the review. The webhook handler has already returned
+/// 202 by this point (`service::webhook`), so GitHub will NOT redeliver — the
+/// review is lost until a human re-requests it. That is still the better half
+/// of the trade: a dropped review is visible and re-requestable, a duplicate
+/// comment cannot be retracted. Every error aborts, `Contended` included, which
+/// is the variant a stuck sibling process produces during a rolling upgrade.
+/// What: maps `Ok(Claimed)` → `Proceed`, `Ok(Skipped)` → `DuplicateSkip`, and
+/// every `Err` → `Abort` carrying the error's `Display`.
+/// Test: `classify_claim_contended_aborts`, `classify_claim_open_error_aborts`,
+/// `classify_claim_claimed_proceeds`, `classify_claim_skipped_is_duplicate`.
+pub(super) fn classify_claim(outcome: Result<ClaimOutcome, DedupError>) -> ClaimGate {
+    match outcome {
+        Ok(ClaimOutcome::Claimed) => ClaimGate::Proceed,
+        Ok(ClaimOutcome::Skipped) => ClaimGate::DuplicateSkip,
+        Err(e) => ClaimGate::Abort(e.to_string()),
+    }
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@
 use anyhow::Result;
 
 use super::persistence::{
-    indexes_toml_path, load_index_registry_at, upsert_index_registry_entry_at, PersistedIndex,
+    indexes_toml_path, load_index_registry_at, patch_index_registry_entry_at, PersistedIndex,
 };
 
 /// Compute the LRU sort key for lazy warm-boot ordering (issue #993).
@@ -57,15 +57,15 @@ pub fn read_last_queried_unix(index_id: &str) -> Option<u64> {
 /// What: upserts the entry in `indexes.toml` with the updated timestamp.
 /// No-op when the index_id is not found (the entry may have been deleted).
 /// Test: `update_last_queried_unix_roundtrip` in persistence::tests.
+/// #4871 review MEDIUM: the find happens INSIDE the registry write lock now.
+/// Loading, patching a clone, and only then upserting let a concurrent
+/// `update_last_indexed_unix` on the same entry be overwritten by this one's
+/// stale copy.
 pub fn update_last_queried_unix(index_id: &str, now_unix: u64) -> Result<()> {
     let path = indexes_toml_path()?;
-    let mut entries = load_index_registry_at(&path).unwrap_or_default();
-    let Some(entry) = entries.iter_mut().find(|e| e.id == index_id) else {
-        return Ok(()); // Deleted between query and write — harmless.
-    };
-    entry.last_queried_unix = Some(now_unix);
-    let updated = entry.clone();
-    upsert_index_registry_entry_at(&path, updated)
+    patch_index_registry_entry_at(&path, index_id, |entry| {
+        entry.last_queried_unix = Some(now_unix);
+    })
 }
 
 /// Write `now_unix` into the `last_indexed_unix` field of an existing entry.
@@ -75,15 +75,12 @@ pub fn update_last_queried_unix(index_id: &str, now_unix: u64) -> Result<()> {
 /// What: upserts the entry in `indexes.toml` with the updated timestamp.
 /// No-op when the index_id is not found.
 /// Test: `update_last_indexed_unix_roundtrip` in persistence::tests.
+/// #4871 review MEDIUM: see [`update_last_queried_unix`] — same atomicity fix.
 pub fn update_last_indexed_unix(index_id: &str, now_unix: u64) -> Result<()> {
     let path = indexes_toml_path()?;
-    let mut entries = load_index_registry_at(&path).unwrap_or_default();
-    let Some(entry) = entries.iter_mut().find(|e| e.id == index_id) else {
-        return Ok(());
-    };
-    entry.last_indexed_unix = Some(now_unix);
-    let updated = entry.clone();
-    upsert_index_registry_entry_at(&path, updated)
+    patch_index_registry_entry_at(&path, index_id, |entry| {
+        entry.last_indexed_unix = Some(now_unix);
+    })
 }
 
 #[cfg(test)]

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # install.sh — Set up a clean bake-off integration test installation.
 #
-# Why: Validates the full open-mpm installation experience end-to-end,
+# Why: Validates the full trusty-agents installation experience end-to-end,
 #      separate from unit tests that run under `cargo test`.
 # What: Builds the release binary, creates a temp project directory, copies
 #       fixture CLAUDE.md + .claude/agents/python-engineer.md, stages the
-#       bundled .open-mpm/ tree, and drops in a bake-off task file.
+#       bundled .trusty-agents/ tree, and drops in a bake-off task file.
 # Test: Run `./tests/integration/install.sh`; verify it prints
 #       "Installation complete" and that the reported $TEST_DIR contains
-#       CLAUDE.md, .claude/agents/python-engineer.md, open-mpm, .open-mpm/, task.txt.
+#       CLAUDE.md, .claude/agents/python-engineer.md, tagent, .trusty-agents/, task.txt.
 
 set -euo pipefail
 
@@ -19,9 +19,9 @@ FIXTURES_DIR="$SCRIPT_DIR/fixtures"
 
 # Which bake-off level to stage (default 2 — lightweight smoke test).
 LEVEL="${LEVEL:-2}"
-TASK_SRC="$PROJECT_ROOT/.open-mpm/tasks/level-${LEVEL}.txt"
+TASK_SRC="$PROJECT_ROOT/.trusty-agents/tasks/level-${LEVEL}.txt"
 
-echo "=== open-mpm bake-off integration install ==="
+echo "=== tagent bake-off integration install ==="
 echo "Project root: $PROJECT_ROOT"
 echo "Fixtures:     $FIXTURES_DIR"
 echo "Task level:   $LEVEL"
@@ -29,9 +29,9 @@ echo ""
 
 # ─── 1. Build the release binary ──────────────────────────────────────────────
 echo "→ Building release binary (cargo build --release)…"
-(cd "$PROJECT_ROOT" && cargo build --release --bin open-mpm)
+(cd "$PROJECT_ROOT" && cargo build --release --bin tagent)
 
-BINARY="$PROJECT_ROOT/target/release/open-mpm"
+BINARY="$PROJECT_ROOT/target/release/tagent"
 if [[ ! -x "$BINARY" ]]; then
   echo "❌ Build failed: $BINARY not found or not executable" >&2
   exit 1
@@ -40,7 +40,7 @@ echo "  Built: $BINARY"
 echo ""
 
 # ─── 2. Create temp test directory ────────────────────────────────────────────
-TEST_DIR="$(mktemp -d /tmp/open-mpm-bakeoff-XXXXXX)"
+TEST_DIR="$(mktemp -d /tmp/tagent-bakeoff-XXXXXX)"
 echo "→ Created test directory: $TEST_DIR"
 
 # ─── 3. Stage project files ───────────────────────────────────────────────────
@@ -49,9 +49,9 @@ cp "$FIXTURES_DIR/CLAUDE.md" "$TEST_DIR/CLAUDE.md"
 mkdir -p "$TEST_DIR/.claude/agents"
 cp "$FIXTURES_DIR/agents/python-engineer.md" "$TEST_DIR/.claude/agents/python-engineer.md"
 
-# .open-mpm/state/ runtime dir (sessions, memory, logs). The bundled config
+# .trusty-agents/state/ runtime dir (sessions, memory, logs). The bundled config
 # tree (agents, skills, workflows, tasks, agent-templates) is copied below.
-mkdir -p "$TEST_DIR/.open-mpm/state"
+mkdir -p "$TEST_DIR/.trusty-agents/state"
 
 # ─── 4. Stage bake-off task file ──────────────────────────────────────────────
 if [[ ! -f "$TASK_SRC" ]]; then
@@ -63,18 +63,18 @@ echo "  Staged task: $TASK_SRC → task.txt"
 
 # ─── 5. Copy (or symlink) the binary ──────────────────────────────────────────
 echo "→ Installing binary into test dir…"
-cp "$BINARY" "$TEST_DIR/open-mpm"
-chmod +x "$TEST_DIR/open-mpm"
+cp "$BINARY" "$TEST_DIR/tagent"
+chmod +x "$TEST_DIR/tagent"
 
 # ─── 6. Copy bundled harness config ───────────────────────────────────────────
-# Includes: .open-mpm/agents, .open-mpm/skills, .open-mpm/workflows,
-# .open-mpm/tasks, .open-mpm/agent-templates.
-# We copy only the committed-config subdirectories, NOT .open-mpm/state/
+# Includes: .trusty-agents/agents, .trusty-agents/skills, .trusty-agents/workflows,
+# .trusty-agents/tasks, .trusty-agents/agent-templates.
+# We copy only the committed-config subdirectories, NOT .trusty-agents/state/
 # (which is runtime state and was just created empty above).
-echo "→ Copying bundled harness .open-mpm/…"
+echo "→ Copying bundled harness .trusty-agents/…"
 for sub in agents skills workflows tasks agent-templates; do
-  if [[ -d "$PROJECT_ROOT/.open-mpm/$sub" ]]; then
-    cp -R "$PROJECT_ROOT/.open-mpm/$sub" "$TEST_DIR/.open-mpm/$sub"
+  if [[ -d "$PROJECT_ROOT/.trusty-agents/$sub" ]]; then
+    cp -R "$PROJECT_ROOT/.trusty-agents/$sub" "$TEST_DIR/.trusty-agents/$sub"
   fi
 done
 
@@ -91,7 +91,7 @@ echo "✅ Installation complete: $TEST_DIR"
 echo ""
 echo "To run bake-off Level $LEVEL manually:"
 echo "    cd $TEST_DIR"
-echo "    ./open-mpm --workflow prescriptive --task-file task.txt"
+echo "    ./tagent --workflow prescriptive --task-file task.txt"
 echo ""
 echo "To run automated verification:"
 echo "    $SCRIPT_DIR/run_bakeoff.sh $TEST_DIR $LEVEL"

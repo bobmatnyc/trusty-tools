@@ -30,5 +30,5 @@ Agents that encounter an abbreviated crate name they don't recognize (e.g. `tga`
 |-------------|-------|
 | trusty-mpm-* | edition 2024, rust-version 1.88 — engineer must use compatible patterns |
 | trusty-memory-mcp | Has embedded Svelte UI in crates/trusty-memory-mcp/ui/ |
-| open-mpm | Consumes trusty-search, trusty-memory-core, trusty-memory-mcp, trusty-symgraph |
+| trusty-agents | Consumes trusty-search, trusty-memory-core, trusty-memory-mcp, trusty-symgraph |
 | tga (trusty-git-analytics) | Standalone analytics tool, minimal deps on other trusty crates |

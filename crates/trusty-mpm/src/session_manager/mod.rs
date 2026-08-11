@@ -35,6 +35,12 @@ pub mod session_guard;
 pub mod slots;
 pub mod snapshot;
 pub mod store;
+// #5007: the read-failure fallback's severity split and the `store_health`
+// accessor that makes it visible instead of silent.
+pub mod store_health;
+// #5007: corruption detection and the offline truncate-to-last-valid-document
+// repair behind `tm repair session-store`.
+pub mod store_integrity;
 pub mod task_inject;
 pub mod workspace_guard;
 mod worktree_nested;
@@ -144,7 +150,7 @@ pub use retention::{
 };
 pub use session_guard::TmuxSessionGuard;
 pub use slots::{NumberedSlot, SlotRegistry};
-pub use store::{SessionStore, StoreError};
+pub use store::{SessionStore, StoreDegradation, StoreError};
 pub use task_inject::should_inject_task;
 pub use worktree_safety::{DirtyWorktree, DirtyWorktreePolicy};
 

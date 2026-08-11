@@ -175,20 +175,89 @@ fn expected_worktree(base: &Path, session_id: &ManagedSessionId) -> PathBuf {
 }
 
 // ── Path (a): `tm launch` ────────────────────────────────────────────────────
+//
+// #5274 rewrote this group. Before it, these four tests asked "did the CLI read
+// the project's opt-out?"; that question is now wrong at the root, because the
+// project's `worktree` flag no longer decides where a SESSION runs — it decides
+// whether the AGENTS that session dispatches get isolated. What the tests ask
+// instead is the placement contract's own two rules: the project cannot move a
+// session (rows 1 and 2), and an explicit request can (row 3).
 
-/// `tm launch` against a project registered with `worktree: false` must create
-/// NEITHER a base clone NOR a worktree, and must run in the live checkout.
+/// Contract row 1 — a project registered `worktree: true` does NOT get its
+/// session moved into a worktree (#5274).
 ///
-/// Why (#4300): `tm launch` provisions in-process and never asks the daemon,
-/// so before this fix the opt-out was ignored outright on this path.
-/// What: registers `worktree: false`, calls the exact function `launch()`
-/// calls, and asserts the returned workspace is the live checkout while the
-/// caller-supplied base-clone path stays untouched.
-/// Test: itself. RED with the guard reverted (a clone + worktree appear).
+/// Why: this is the whole point of the change, and the one row that used to
+/// resolve the other way. `tm launch` read `worktree_enabled_for_origin_at`,
+/// so a `worktree: true` registration (or, before it, the built-in `true`
+/// default that 31 of 33 registered projects fall through to) provisioned a base
+/// clone plus a per-session worktree and ran the session there. The owner ruling
+/// of 2026-08-09 separates the two questions: the PM works in the project's own
+/// checkout, and `worktree: true` means the AGENTS it dispatches are isolated.
+/// A machine-global `projects.json` must not be able to relocate a human's
+/// session.
+/// What: registers the launch origin with an EXPLICIT `worktree: true` — the
+/// strongest statement the project layer can make — passes no request, and
+/// asserts the returned workspace is the live checkout with nothing provisioned
+/// at the base-clone path.
+/// Test: itself. RED before #5274: the registry lookup returned `true` and the
+/// function returned `Worktree(<base>/.worktrees/<id>)`.
 #[tokio::test]
-async fn provision_for_launch_opted_out_creates_no_clone_and_no_worktree() {
+async fn provision_for_launch_ignores_a_registered_worktree_true_project() {
+    let origin = "https://github.invalid/fixture-owner/isolated-repo";
+    // Registered, and registered the "isolating" way. Kept deliberately: the
+    // fixture is the assertion. `provision_for_launch` no longer takes a
+    // registry directory at all, so a project cannot reach this decision even
+    // in principle — this test pins that the signature stays that way.
+    let _registry = registry_with(
+        "https://github.invalid/fixture-owner/isolated-repo",
+        Some(true),
+    )
+    .await;
+
+    let repos_root = tempfile::tempdir().unwrap();
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("isolated-repo");
+    init_git_repo(&base);
+    let live = tempfile::tempdir().unwrap();
+    let session_id = ManagedSessionId::new();
+
+    let workspace = provision_for_launch(origin, &base, live.path(), false, &session_id)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        workspace,
+        ManagedWorkspace::MainCheckout(live.path().to_path_buf()),
+        "#5274 row 1: a `worktree: true` project must not relocate the session"
+    );
+    assert!(
+        !expected_worktree(&base, &session_id).exists(),
+        "#5274: no per-session worktree may be created without an explicit request: {}",
+        expected_worktree(&base, &session_id).display()
+    );
+}
+
+/// Contract row 2 — a project registered `worktree: false` also runs its
+/// session in the main checkout (#5274, preserving #4300).
+///
+/// Why: rows 1 and 2 resolve the SAME way, and that identity is the contract's
+/// substance — placement does not consult the project at all, rather than
+/// consulting it and usually agreeing. Asserting only row 1 would leave the
+/// weaker reading ("the flag still decides, we just changed its default")
+/// indistinguishable from the real one. This row also keeps #4300's original
+/// acceptance intact: an opted-out project gets neither a clone nor a worktree.
+/// What: registers `worktree: false`, passes no request, and asserts both the
+/// main-checkout outcome and that the caller-supplied base-clone path is
+/// untouched — no directory, no `.git`, no `.worktrees`.
+/// Test: itself. Green before and after by construction; it goes RED the moment
+/// `provision_for_launch` provisions unconditionally, which is the mistake it
+/// exists to catch.
+#[tokio::test]
+async fn provision_for_launch_without_a_request_uses_the_main_checkout() {
     let origin = "git@github.invalid:fixture-owner/optout-repo.git";
-    let registry = registry_with(
+    let _registry = registry_with(
         "https://github.invalid/fixture-owner/optout-repo",
         Some(false),
     )
@@ -199,17 +268,17 @@ async fn provision_for_launch_opted_out_creates_no_clone_and_no_worktree() {
     let live = tempfile::tempdir().unwrap();
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_launch(registry.path(), origin, &base, live.path(), &session_id)
+    let workspace = provision_for_launch(origin, &base, live.path(), false, &session_id)
         .await
         .expect(
-            "#4300: an opted-out project must not attempt a clone at all — a clone \
-             error here means the opt-out was never consulted",
+            "no worktree request must not attempt a clone at all — a clone error \
+             here means the request was never consulted",
         );
 
     assert_eq!(
         workspace,
         ManagedWorkspace::MainCheckout(live.path().to_path_buf()),
-        "#4300: an opted-out project must launch in its own checkout"
+        "#5274 row 2: a session with no worktree request runs in its own checkout"
     );
     assert_nothing_provisioned(&base);
     assert!(
@@ -218,31 +287,69 @@ async fn provision_for_launch_opted_out_creates_no_clone_and_no_worktree() {
     );
 }
 
-/// `tm launch` from a SUBDIRECTORY of an opted-out project must deploy into
-/// the repo ROOT, never the subdirectory.
+/// Contract row 3 — an EXPLICIT request (`tm launch --worktree`) provisions the
+/// base clone and the per-session worktree (#5274).
 ///
-/// Why (code-critic MEDIUM on PR #4303): `get_origin_url` succeeds at any
-/// depth, so `cd repo/src && tm launch` on an opted-out project passed `cwd`
-/// straight through as the workspace — `.claude`, the project hooks, the tmux
-/// cwd and the daemon's `project_path` all landed in `repo/src`. That is
-/// precisely the "tm furniture somewhere the operator did not intend" failure
-/// the opt-out exists to prevent, and it was introduced by this PR: the
-/// pre-#4300 code always redirected to a worktree, so `cwd` never became a
-/// deploy target. The daemon-unreachable fallback already resolved the root
-/// via `classify_cwd_project`; this pins that `tm launch` agrees.
+/// Why: rule 2 of the contract is only real if the request actually reaches the
+/// filesystem. The revision of this change that preceded #5274's rewrite
+/// expressed the override as a `const fn`, which no user could reach — that is
+/// the failure mode this test rules out. It is also the only remaining way to
+/// get a worktree from `tm launch`, so it guards the capability from being
+/// quietly lost along with the default.
+/// What: passes `worktree_requested = true` against a real git base clone and
+/// asserts the returned variant is `Worktree` at its exact expected path AND
+/// that the directory exists on disk.
+/// Test: itself. RED with the request ignored (the function returns
+/// `MainCheckout` and no directory is created).
+#[tokio::test]
+async fn provision_for_launch_explicit_request_creates_worktree() {
+    let origin = "https://github.invalid/fixture-owner/isolated-repo";
+
+    let repos_root = tempfile::tempdir().unwrap();
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("isolated-repo");
+    init_git_repo(&base);
+    let live = tempfile::tempdir().unwrap();
+    let session_id = ManagedSessionId::new();
+
+    let workspace = provision_for_launch(origin, &base, live.path(), true, &session_id)
+        .await
+        .unwrap();
+
+    let expected = expected_worktree(&base, &session_id);
+    assert_eq!(
+        workspace,
+        ManagedWorkspace::Worktree(expected.clone()),
+        "#5274 row 3: an explicit `--worktree` request must provision one"
+    );
+    assert!(
+        expected.is_dir(),
+        "the worktree directory must exist at {}",
+        expected.display()
+    );
+}
+
+/// `tm launch` from a SUBDIRECTORY must deploy into the repo ROOT, never the
+/// subdirectory.
+///
+/// Why (code-critic MEDIUM on PR #4303): `get_origin_url` succeeds at any depth,
+/// so `cd repo/src && tm launch` passed `cwd` straight through as the workspace
+/// — `.claude`, the project hooks, the tmux cwd and the daemon's `project_path`
+/// all landed in `repo/src`. #5274 makes the main-checkout branch the DEFAULT
+/// rather than a rarely-taken opt-out, so every launch now runs through this
+/// resolution and the consequence of getting it wrong went from two projects to
+/// all of them. The daemon-unreachable fallback already resolved the root via
+/// `classify_cwd_project`; this pins that `tm launch` agrees.
 /// What: builds a REAL git repo (so `git rev-parse --show-toplevel` has a root
-/// to find), registers it opted-out, calls `provision_for_launch` with a
-/// nested subdirectory as `cwd`, and asserts the returned workspace is the
-/// canonical repo root and explicitly NOT the subdirectory.
+/// to find), calls `provision_for_launch` with a nested subdirectory as `cwd`,
+/// and asserts the returned workspace is the canonical repo root and explicitly
+/// NOT the subdirectory.
 /// Test: itself. RED if `provision_for_launch` passes `cwd` through.
 #[tokio::test]
 async fn provision_for_launch_from_subdirectory_targets_repo_root() {
     let origin = "https://github.invalid/fixture-owner/optout-repo.git";
-    let registry = registry_with(
-        "https://github.invalid/fixture-owner/optout-repo",
-        Some(false),
-    )
-    .await;
 
     let repos_root = tempfile::tempdir().unwrap();
     let base = repos_root.path().join("fixture-owner").join("optout-repo");
@@ -257,22 +364,19 @@ async fn provision_for_launch_from_subdirectory_targets_repo_root() {
     let repo_root = live.path().canonicalize().unwrap();
     let session_id = ManagedSessionId::new();
 
-    let workspace = provision_for_launch(registry.path(), origin, &base, &subdir, &session_id)
+    let workspace = provision_for_launch(origin, &base, &subdir, false, &session_id)
         .await
-        .expect(
-            "#4300: an opted-out project must not attempt a clone at all — a clone \
-             error here means the opt-out was never consulted",
-        );
+        .expect("no worktree request must not attempt a clone at all");
 
     assert_eq!(
         workspace,
         ManagedWorkspace::MainCheckout(repo_root.clone()),
-        "#4300: `tm launch` from a subdirectory must target the repo ROOT"
+        "`tm launch` from a subdirectory must target the repo ROOT"
     );
     assert_ne!(
         workspace.path(),
         subdir.as_path(),
-        "#4300: the subdirectory must NEVER become the deploy target"
+        "the subdirectory must NEVER become the deploy target"
     );
     assert!(
         !subdir.join(".claude").exists(),
@@ -280,88 +384,6 @@ async fn provision_for_launch_from_subdirectory_targets_repo_root() {
         subdir.display()
     );
     assert_nothing_provisioned(&base);
-}
-
-/// A project with NO `worktree` key still gets a worktree — the `unwrap_or(true)`
-/// default must not regress.
-///
-/// Why: 31 of the 33 registered projects carry no `worktree` key; a fix that
-/// silently flipped them to main-checkout mode would be far worse than the bug.
-/// What: registers the project with `worktree: None`, provisions, and asserts
-/// the worktree exists at its exact expected path inside the base clone.
-/// Test: itself.
-#[tokio::test]
-async fn provision_for_launch_unset_creates_worktree() {
-    let origin = "https://github.invalid/fixture-owner/isolated-repo";
-    let registry = registry_with("https://github.invalid/fixture-owner/isolated-repo", None).await;
-
-    let repos_root = tempfile::tempdir().unwrap();
-    let base = repos_root
-        .path()
-        .join("fixture-owner")
-        .join("isolated-repo");
-    init_git_repo(&base);
-    let live = tempfile::tempdir().unwrap();
-    let session_id = ManagedSessionId::new();
-
-    let workspace = provision_for_launch(registry.path(), origin, &base, live.path(), &session_id)
-        .await
-        .unwrap();
-
-    let expected = expected_worktree(&base, &session_id);
-    assert_eq!(
-        workspace,
-        ManagedWorkspace::Worktree(expected.clone()),
-        "a project with no `worktree` key must still get a worktree"
-    );
-    assert!(
-        expected.is_dir(),
-        "the worktree directory must exist at {}",
-        expected.display()
-    );
-}
-
-/// An UNREGISTERED origin also keeps worktree isolation — the default applies
-/// to projects the registry has never heard of, not just to unset keys.
-///
-/// Why: the registry holds 33 of the machine's projects; every other repo the
-/// operator runs `tm launch` in resolves through the "no match" branch.
-/// What: builds a registry holding a DIFFERENT project's opt-out, then
-/// provisions for an unrelated origin and asserts the worktree is created.
-/// Test: itself.
-#[tokio::test]
-async fn provision_for_launch_unregistered_origin_creates_worktree() {
-    let registry = registry_with(
-        "https://github.invalid/fixture-owner/optout-repo",
-        Some(false),
-    )
-    .await;
-
-    let origin = "https://github.invalid/fixture-owner/never-registered";
-    let repos_root = tempfile::tempdir().unwrap();
-    let base = repos_root
-        .path()
-        .join("fixture-owner")
-        .join("never-registered");
-    init_git_repo(&base);
-    let live = tempfile::tempdir().unwrap();
-    let session_id = ManagedSessionId::new();
-
-    let workspace = provision_for_launch(registry.path(), origin, &base, live.path(), &session_id)
-        .await
-        .unwrap();
-
-    let expected = expected_worktree(&base, &session_id);
-    assert_eq!(
-        workspace,
-        ManagedWorkspace::Worktree(expected.clone()),
-        "another project's opt-out must not leak onto an unrelated origin"
-    );
-    assert!(
-        expected.is_dir(),
-        "worktree must exist at {}",
-        expected.display()
-    );
 }
 
 // ── Path (b): the daemon-unreachable bare-`tm` fallback ─────────────────────
