@@ -9,15 +9,21 @@
 //! What: an ordered list of markers, each a tool label, an [`AgenticMode`], a
 //! scope naming which text it is matched against, and a compiled regex. One
 //! pass yields both `commits.ai_tool` and `commits.agentic_mode`, so they can
-//! never disagree. Callers use [`detect`].
+//! never disagree. Callers use [`detect`]. Since #5414 the list is
+//! [`BUILTIN`] plus whatever [`crate::collect::ai_marker_config`] loads from
+//! disk, so a house footer is addable without a code change or a release.
 //! Test: `tests` below — including `catch_rate_on_trusty_tools_history`, which
 //! measures the set against this repo's real history.
 
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use regex::Regex;
 
 use crate::collect::ai_attribution::AgenticMode;
+use crate::collect::ai_marker_config::{
+    marker_file_path, MarkerConfig, MarkerConfigError, MarkerScope,
+};
 
 /// The three text families a commit exposes to detection.
 ///
@@ -75,13 +81,22 @@ pub struct Detection {
 /// Test: `tests::detects_trusty_mpm_footer`,
 /// `tests::full_agentic_wins_over_ide_assisted`.
 pub fn detect(signals: &CommitSignals<'_>) -> Detection {
+    detect_in(&marker_set().markers, signals)
+}
+
+/// [`detect`] against an explicit marker list.
+///
+/// The seam that lets the operator-file behaviour be tested without the
+/// process-global [`marker_set`], whose `OnceLock` can only ever observe one
+/// configuration per process.
+fn detect_in(markers: &[AiMarker], signals: &CommitSignals<'_>) -> Detection {
     let trailers: Vec<&str> = trailer_line()
         .captures_iter(signals.message)
         .filter_map(|c| c.get(1).map(|m| m.as_str()))
         .collect();
 
     let mut ide: Option<&'static str> = None;
-    for marker in markers() {
+    for marker in markers {
         if !marker.matches(signals, &trailers) {
             continue;
         }
@@ -118,44 +133,53 @@ pub fn detect(signals: &CommitSignals<'_>) -> Detection {
 /// Why: DOC-67 §8 hands an acquirer an `agentic_pct` figure. Detection is
 /// marker-based, so a target that strips or rewrites trailers reports a low
 /// share for a reason that is not "no AI assistance" — the report must say so
-/// rather than let the reader infer provenance from silence (#5249).
-/// What: the distinct tool labels in the set plus the standing caveat.
-/// `tga collect` and `tga backfill ai-detection-commits` log it once per run;
-/// the AUDIT velocity section renders it when that section ships (#5241/#5242).
-/// Test: `tests::disclosure_names_active_tools`.
+/// rather than let the reader infer provenance from silence (#5249). Since
+/// #5414 the set is also extensible at runtime, which the reader has to know
+/// too: two runs of the same tga version over the same repository can report
+/// different shares, and a bad marker file degrades to builtins rather than
+/// failing the run. The line states which of those happened.
+/// What: the distinct tool labels in the set, where the operator markers came
+/// from (loaded / absent / rejected, with the error), plus the standing
+/// caveat. `tga collect` and `tga backfill ai-detection-commits` log it once
+/// per run; the AUDIT velocity section renders it when that section ships
+/// (#5241/#5242).
+/// Test: `tests::disclosure_names_active_tools`,
+/// `tests::disclosure_reports_a_rejected_marker_file`.
 pub fn detection_disclosure() -> String {
+    disclosure_for(marker_set())
+}
+
+fn disclosure_for(set: &MarkerSet) -> String {
     let mut tools: Vec<&str> = Vec::new();
-    for m in markers() {
+    for m in &set.markers {
         if !tools.contains(&m.tool) {
             tools.push(m.tool);
         }
     }
+    let operator = match &set.source {
+        MarkerSource::Absent(path) => format!(
+            "no operator marker file at {} (set {} to add markers without a code change)",
+            path.display(),
+            crate::collect::ai_marker_config::ENV_AI_MARKERS
+        ),
+        MarkerSource::Loaded { path, count } => {
+            format!("{count} operator marker(s) loaded from {}", path.display())
+        }
+        MarkerSource::Failed { path, error } => format!(
+            "operator marker file {} was REJECTED and none of it applied ({error}) — \
+             builtin markers only",
+            path.display()
+        ),
+    };
     format!(
-        "agentic detection: {} marker(s) active for [{}]; detection is marker-based only — \
-         commits whose trailers or footers were stripped, squashed, or rewritten are \
-         indistinguishable from human commits, so a low agentic share means \"no markers \
-         emitted\", not \"no AI assistance\"",
+        "agentic detection: {} builtin marker(s) + {}; active for [{}]; detection is \
+         marker-based only — commits whose trailers or footers were stripped, squashed, or \
+         rewritten are indistinguishable from human commits, so a low agentic share means \
+         \"no markers emitted\", not \"no AI assistance\"",
         BUILTIN.len(),
+        operator,
         tools.join(", ")
     )
-}
-
-/// Which text a marker's pattern is applied to.
-///
-/// Why: the three marker families — trailers, body footers, and
-/// agent-identifying emails — need different haystacks. Matching a trailer
-/// pattern against the whole message would let a quoted mention in a commit
-/// body count as a co-author.
-/// What: `Trailer` runs against each `Co-Authored-By:` value in isolation,
-/// `Message` against the raw commit message (use `(?m)^` to anchor a trailer
-/// with a different key, e.g. `X-AI-Model:`), and `Email` against the author
-/// and committer addresses.
-/// Test: `tests::trailer_scope_does_not_match_body_prose`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MarkerScope {
-    Trailer,
-    Message,
-    Email,
 }
 
 /// One compiled marker.
@@ -211,7 +235,10 @@ const BUILTIN: &[BuiltinSpec] = &[
         tool: "claude",
         mode: AgenticMode::FullAgentic,
         scope: MarkerScope::Message,
-        pattern: r"(?i)Generated\s+with\s+Claude\s+Code",
+        // The `\[?` is not cosmetic: both house footers are emitted in a plain
+        // and a markdown-link form, and requiring the bare word missed 14 of
+        // this repo's own commits (#5414).
+        pattern: r"(?i)Generated\s+with\s+\[?Claude\s+Code",
     },
     BuiltinSpec {
         tool: "claude",
@@ -232,7 +259,7 @@ const BUILTIN: &[BuiltinSpec] = &[
         tool: "trusty-mpm",
         mode: AgenticMode::FullAgentic,
         scope: MarkerScope::Message,
-        pattern: r"(?i)Generated\s+with\s+trusty-mpm",
+        pattern: r"(?i)Generated\s+with\s+\[?trusty-mpm",
     },
     // Keyed on the bot's local part, not the word "devin": a bare `\bdevin\b`
     // classified `Co-authored-by: Devin Booker <devin@personal.example>` as an
@@ -249,11 +276,16 @@ const BUILTIN: &[BuiltinSpec] = &[
         scope: MarkerScope::Email,
         pattern: r"(?i)^devin-ai-integration(\[bot\])?@",
     },
+    // #5414: `\bopenhands\b` classified `Co-authored-by: Simon Rosenberg
+    // <simon@openhands.dev>` — a human at the vendor — as an agent. Found by
+    // running the marker against a real All-Hands-AI/OpenHands clone rather
+    // than fixtures; the bot forms it must keep catching are enumerated in
+    // `tests::openhands_trailers_from_a_real_clone`.
     BuiltinSpec {
         tool: "openhands",
         mode: AgenticMode::FullAgentic,
         scope: MarkerScope::Trailer,
-        pattern: r"(?i)\bopenhands\b",
+        pattern: r"(?i)\bopenhands@all-hands\.dev\b|\bopenhands[-_]?release-bot\b|\bopenhands\s+bot\b",
     },
     BuiltinSpec {
         tool: "openhands",
@@ -294,24 +326,125 @@ fn trailer_line() -> &'static Regex {
     })
 }
 
+/// The compiled marker list plus where its operator half came from.
+struct MarkerSet {
+    markers: Vec<AiMarker>,
+    source: MarkerSource,
+}
+
+/// What the operator marker file contributed.
+enum MarkerSource {
+    /// No file at the resolved path — the ordinary case.
+    Absent(PathBuf),
+    /// File read and applied.
+    Loaded { path: PathBuf, count: usize },
+    /// File present but unusable; none of it applied.
+    Failed { path: PathBuf, error: String },
+}
+
 /// The compiled marker set, built once per process.
 ///
-/// A pattern that fails to compile is a programmer error in [`BUILTIN`],
-/// caught by `tests::every_builtin_pattern_compiles`, never a runtime
-/// condition — nothing outside this file supplies a pattern.
-fn markers() -> &'static [AiMarker] {
-    static SET: OnceLock<Vec<AiMarker>> = OnceLock::new();
-    SET.get_or_init(|| {
-        BUILTIN
-            .iter()
-            .map(|s| AiMarker {
-                tool: s.tool,
-                mode: s.mode,
-                scope: s.scope,
-                pattern: Regex::new(s.pattern).expect("builtin marker pattern compiles"),
+/// A pattern that fails to compile is a programmer error when it comes from
+/// [`BUILTIN`] (caught by `tests::every_builtin_pattern_compiles`) and an
+/// operator mistake when it comes from the marker file, where it is reported
+/// and skipped rather than fatal.
+fn marker_set() -> &'static MarkerSet {
+    static SET: OnceLock<MarkerSet> = OnceLock::new();
+    SET.get_or_init(|| build_marker_set(&marker_file_path()))
+}
+
+/// Compile [`BUILTIN`], then append the operator markers at `path`.
+///
+/// Why: #5414 requires a marker to be addable without a code change, and
+/// requires a bad marker file not to break a collect run — a collection that
+/// aborts because a config file has a typo is a worse outcome than one that
+/// runs with the shipped set and says so.
+/// What: operator markers are APPENDED, never interleaved and never
+/// substituted. [`detect_in`] returns on the first `FullAgentic` match, so a
+/// marker's position decides which label wins when several match; appending
+/// means an operator entry can only turn an undetected commit into a detected
+/// one, never relabel a commit the shipped set already classifies. On any
+/// failure — unreadable, unparseable, or a pattern that will not compile —
+/// the whole file is rejected, logged at WARN, and recorded in
+/// [`detection_disclosure`]; a partially applied file would be the silent
+/// half-configuration this rejects.
+/// Test: `tests::operator_markers_extend_the_builtins`,
+/// `tests::a_bad_pattern_rejects_the_whole_file`.
+fn build_marker_set(path: &Path) -> MarkerSet {
+    let mut markers: Vec<AiMarker> = BUILTIN
+        .iter()
+        .map(|s| AiMarker {
+            tool: s.tool,
+            mode: s.mode,
+            scope: s.scope,
+            pattern: Regex::new(s.pattern).expect("builtin marker pattern compiles"),
+        })
+        .collect();
+
+    if !path.exists() {
+        return MarkerSet {
+            markers,
+            source: MarkerSource::Absent(path.to_path_buf()),
+        };
+    }
+
+    let source = match MarkerConfig::load_from(path).and_then(|cfg| compile_operator(&cfg)) {
+        Ok(operator) => {
+            let count = operator.len();
+            markers.extend(operator);
+            MarkerSource::Loaded {
+                path: path.to_path_buf(),
+                count,
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "operator agentic-marker file rejected; continuing with the builtin markers"
+            );
+            MarkerSource::Failed {
+                path: path.to_path_buf(),
+                error: error.to_string(),
+            }
+        }
+    };
+
+    MarkerSet { markers, source }
+}
+
+/// Compile every operator spec, or reject the file.
+///
+/// The single compile site for operator patterns, so no expression is
+/// validated once and compiled again.
+fn compile_operator(cfg: &MarkerConfig) -> Result<Vec<AiMarker>, MarkerConfigError> {
+    cfg.markers
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            if spec.tool.trim().is_empty() {
+                return Err(MarkerConfigError::EmptyTool { index });
+            }
+            let pattern =
+                Regex::new(&spec.pattern).map_err(|source| MarkerConfigError::Pattern {
+                    index,
+                    tool: spec.tool.clone(),
+                    pattern: spec.pattern.clone(),
+                    source,
+                })?;
+            Ok(AiMarker {
+                // #5414: `Detection::tool` is `Option<&'static str>` and shipped
+                // that way in 2.15.0, so widening it to an owned string is a
+                // major break. The leak is bounded by the marker file and
+                // happens once, giving the label exactly the process lifetime
+                // the compiled set already has.
+                tool: Box::leak(spec.tool.clone().into_boxed_str()),
+                mode: spec.mode.as_agentic_mode(),
+                scope: spec.scope,
+                pattern,
             })
-            .collect()
-    })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -325,11 +458,14 @@ mod tests {
     /// Why: a bad pattern literal must fail here, not mid-collection.
     #[test]
     fn every_builtin_pattern_compiles() {
-        assert_eq!(markers().len(), BUILTIN.len());
+        let set = build_marker_set(Path::new("/definitely/not/a/marker/file.yaml"));
+        assert_eq!(set.markers.len(), BUILTIN.len());
     }
 
     /// Why: this is the 41.6-point undercount in #5249 — 1058 commits in this
-    /// repo carry the footer and, before the fix, matched nothing.
+    /// repo carry the footer and, before the fix, matched nothing. The
+    /// markdown-link form is the same footer as emitted by an older template;
+    /// 14 commits here carry it and #5249's pattern missed all of them.
     #[test]
     fn detects_trusty_mpm_footer() {
         let msg = "feat: add thing\n\n🤖🤖🤖 Generated with trusty-mpm — \
@@ -337,6 +473,13 @@ mod tests {
         let d = detect(&CommitSignals::from_message(msg));
         assert_eq!(d.mode, AgenticMode::FullAgentic);
         assert_eq!(d.tool, Some("trusty-mpm"));
+
+        let linked = "fix: y\n\n🤖🤖🤖 Generated with \
+                      [trusty-mpm](https://github.com/bobmatnyc/trusty-tools)";
+        assert_eq!(mode_of(linked), AgenticMode::FullAgentic);
+        let linked_claude = "fix: z\n\n🤖 Generated with \
+                             [Claude Code](https://claude.com/claude-code)";
+        assert_eq!(mode_of(linked_claude), AgenticMode::FullAgentic);
     }
 
     /// Why: the OpenHands validation target in #5249 — 3873 of 7990 commits
@@ -445,5 +588,195 @@ mod tests {
         assert!(d.contains("claude"), "{d}");
         assert!(d.contains("trusty-mpm"), "{d}");
         assert!(d.contains("no markers emitted"), "{d}");
+    }
+
+    // ---------------------------------------------------------------------
+    // #5414 — operator-supplied markers
+    // ---------------------------------------------------------------------
+
+    fn write_marker_file(dir: &tempfile::TempDir, body: &str) -> PathBuf {
+        let path = dir.path().join("ai-markers.yaml");
+        std::fs::write(&path, body).expect("writes fixture");
+        path
+    }
+
+    /// Why: the whole point of #5414 — a house footer the shipped set has
+    /// never heard of becomes detectable with no code change and no release.
+    #[test]
+    fn operator_markers_extend_the_builtins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_marker_file(
+            &dir,
+            "markers:\n\
+             \x20 - tool: acme-copilot\n\
+             \x20   mode: full_agentic\n\
+             \x20   scope: message\n\
+             \x20   pattern: '(?i)Produced\\s+by\\s+ACME\\s+Autopilot'\n",
+        );
+        let set = build_marker_set(&path);
+        assert_eq!(set.markers.len(), BUILTIN.len() + 1);
+
+        let signals = CommitSignals::from_message("feat: x\n\nProduced by ACME Autopilot v3");
+        let d = detect_in(&set.markers, &signals);
+        assert_eq!(d.mode, AgenticMode::FullAgentic);
+        assert_eq!(d.tool, Some("acme-copilot"));
+
+        let disclosure = disclosure_for(&set);
+        assert!(
+            disclosure.contains("1 operator marker(s) loaded"),
+            "{disclosure}"
+        );
+        assert!(disclosure.contains("acme-copilot"), "{disclosure}");
+    }
+
+    /// Why: an operator marker must not be able to relabel a commit the
+    /// shipped set already classifies — appending is what guarantees that, and
+    /// a future reordering would break it silently.
+    #[test]
+    fn operator_markers_never_relabel_a_builtin_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_marker_file(
+            &dir,
+            "markers:\n  - { tool: house, mode: full_agentic, scope: message, pattern: 'feat' }\n",
+        );
+        let set = build_marker_set(&path);
+        let msg = "feat: add thing\n\n🤖🤖🤖 Generated with trusty-mpm";
+        let d = detect_in(&set.markers, &CommitSignals::from_message(msg));
+        assert_eq!(d.tool, Some("trusty-mpm"), "builtin keeps the label");
+    }
+
+    /// Why: an IDE-assisted operator marker must still lose to a builtin
+    /// full-agentic match, so the config cannot weaken a classification.
+    #[test]
+    fn operator_ide_marker_loses_to_builtin_full_agentic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_marker_file(
+            &dir,
+            "markers:\n  - { tool: house-ide, mode: ide_assisted, scope: message, pattern: 'refactor' }\n",
+        );
+        let set = build_marker_set(&path);
+        let msg = "refactor: split\n\nCo-Authored-By: Claude <noreply@anthropic.com>";
+        let d = detect_in(&set.markers, &CommitSignals::from_message(msg));
+        assert_eq!(d.mode, AgenticMode::FullAgentic);
+        assert_eq!(d.tool, Some("claude"));
+    }
+
+    /// Why: THE error arm. A marker file with a pattern the regex crate
+    /// rejects must not abort a collect run, must not apply half of itself,
+    /// and must not disappear quietly — a silently ignored bad config reports
+    /// the same number as a correct one that found nothing.
+    #[test]
+    fn a_bad_pattern_rejects_the_whole_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_marker_file(
+            &dir,
+            "markers:\n\
+             \x20 - { tool: good, mode: full_agentic, scope: message, pattern: 'Acme Bot' }\n\
+             \x20 - { tool: broken, mode: full_agentic, scope: message, pattern: '([unclosed' }\n",
+        );
+        let set = build_marker_set(&path);
+
+        assert_eq!(set.markers.len(), BUILTIN.len(), "no partial application");
+        // Detection still works, on the builtin set.
+        assert_eq!(
+            detect_in(
+                &set.markers,
+                &CommitSignals::from_message("x\n\nGenerated with trusty-mpm")
+            )
+            .mode,
+            AgenticMode::FullAgentic
+        );
+        // Even the valid sibling entry is not applied.
+        assert_eq!(
+            detect_in(
+                &set.markers,
+                &CommitSignals::from_message("chore: Acme Bot ran")
+            )
+            .mode,
+            AgenticMode::None
+        );
+
+        let disclosure = disclosure_for(&set);
+        assert!(disclosure.contains("REJECTED"), "{disclosure}");
+        assert!(
+            disclosure.contains("marker 1 (tool `broken`)"),
+            "{disclosure}"
+        );
+    }
+
+    /// Why: the other two error shapes reach the same fail-open branch.
+    #[test]
+    fn disclosure_reports_a_rejected_marker_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let malformed = write_marker_file(&dir, "markers: [ this is not: valid yaml\n");
+        let set = build_marker_set(&malformed);
+        assert_eq!(set.markers.len(), BUILTIN.len());
+        assert!(disclosure_for(&set).contains("REJECTED"));
+
+        let blank_tool = dir.path().join("blank.yaml");
+        std::fs::write(
+            &blank_tool,
+            "markers:\n  - { tool: '  ', mode: full_agentic, scope: message, pattern: 'x' }\n",
+        )
+        .expect("writes fixture");
+        let set = build_marker_set(&blank_tool);
+        assert_eq!(set.markers.len(), BUILTIN.len());
+        let disclosure = disclosure_for(&set);
+        assert!(disclosure.contains("empty `tool` label"), "{disclosure}");
+    }
+
+    /// Why: the ordinary case — no file — must read as "nothing configured",
+    /// not as a failure, and must point the reader at how to configure one.
+    #[test]
+    fn an_absent_marker_file_is_not_a_failure() {
+        let set = build_marker_set(Path::new("/definitely/not/here/ai-markers.yaml"));
+        let disclosure = disclosure_for(&set);
+        assert!(
+            disclosure.contains("no operator marker file at"),
+            "{disclosure}"
+        );
+        assert!(disclosure.contains("TGA_AI_MARKERS"), "{disclosure}");
+        assert!(!disclosure.contains("REJECTED"), "{disclosure}");
+    }
+
+    /// Why: bullet 4 of #5249 — the OpenHands markers were proven only by
+    /// invented fixtures. These six trailer lines are verbatim extracts from a
+    /// real `All-Hands-AI/OpenHands` clone (8010 commits, cloned 2026-08-11),
+    /// each cited by the commit it was taken from. The last two are the reason
+    /// the marker changed in #5414: `\bopenhands\b` classified both as agents.
+    #[test]
+    fn openhands_trailers_from_a_real_clone() {
+        // Builtins only: this asserts what the SHIPPED set does, so it must
+        // not depend on whether the machine running it has a marker file.
+        let set = build_marker_set(Path::new("/definitely/not/here/ai-markers.yaml"));
+
+        // 21f0967c — the dominant form, 3117 occurrences.
+        // d6d34956 — the CVE bot, 64 occurrences.
+        // 4d0fe498 — the release bot, 35 occurrences.
+        // b4e87121 — the contact-address bot, 29 occurrences.
+        for trailer in [
+            "Co-authored-by: openhands <openhands@all-hands.dev>",
+            "Co-authored-by: OpenHands CVE Fix Bot <openhands@all-hands.dev>",
+            "Co-authored-by: openhands-release-bot[bot] \
+             <290150379+openhands-release-bot[bot]@users.noreply.github.com>",
+            "Co-authored-by: OpenHands Bot <contact@all-hands.dev>",
+        ] {
+            let msg = format!("fix: something\n\n{trailer}");
+            let d = detect_in(&set.markers, &CommitSignals::from_message(&msg));
+            assert_eq!(d.mode, AgenticMode::FullAgentic, "{trailer}");
+            assert_eq!(d.tool, Some("openhands"), "{trailer}");
+        }
+
+        // 7b8b2626 — a human maintainer, 23 occurrences.
+        // b18ebefb — a human contributor's handle, 27 occurrences.
+        for trailer in [
+            "Co-authored-by: Simon Rosenberg <simon@openhands.dev>",
+            "Co-authored-by: aivong-openhands <ai.vong@openhands.dev>",
+        ] {
+            let msg = format!("fix: something\n\n{trailer}");
+            let d = detect_in(&set.markers, &CommitSignals::from_message(&msg));
+            assert_eq!(d.mode, AgenticMode::None, "{trailer}");
+        }
     }
 }
