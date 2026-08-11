@@ -19,6 +19,10 @@ use serde_json::{json, Value};
 use trusty_common::memory_core::store::kg::{ExpandDirection, Triple};
 
 use crate::AppState;
+// #4776: the page-size bounds moved to the service layer so the MCP
+// `kg_list_subjects` tool reads the same two literals these routes do; `tools`
+// is compiled without the `axum-server` feature that gates this module.
+use crate::service::core_kg::{DEFAULT_KG_LIST_LIMIT, MAX_KG_LIST_LIMIT};
 
 use super::error::ApiError;
 
@@ -76,18 +80,6 @@ pub(super) async fn kg_assert(
 // ---------------------------------------------------------------------------
 // KG list helpers
 // ---------------------------------------------------------------------------
-
-/// Default page size for KG explorer list endpoints when caller omits `limit`.
-///
-/// Why: 50 is large enough to feel responsive in the SPA without dumping a
-/// full graph in one request; matches the default the spec calls for.
-const DEFAULT_KG_LIST_LIMIT: usize = 50;
-
-/// Hard ceiling on `limit` for KG explorer list endpoints.
-///
-/// Why: prevent a misconfigured client from asking the daemon to materialize
-/// thousands of rows in one go; matches the spec's max=200.
-const MAX_KG_LIST_LIMIT: usize = 200;
 
 fn default_kg_list_limit() -> usize {
     DEFAULT_KG_LIST_LIMIT

@@ -194,6 +194,8 @@ fn tool_definitions_lists_all_tools() {
         "palace_unalias",
         "kg_assert",
         "kg_query",
+        // #4776: subject enumeration over MCP.
+        "kg_list_subjects",
         "memory_recall_all",
         "kg_gaps",
         "add_alias",
@@ -532,6 +534,200 @@ async fn dispatch_kg_assert_then_query() {
     assert_eq!(triples.len(), 1);
     assert_eq!(triples[0]["object"], "Acme");
     assert_eq!(triples[0]["predicate"], "works_at");
+}
+
+/// Why: #4776 — `kg_list_subjects` is the discovery read that makes `kg_query`
+/// usable without already knowing a subject, so the contract that matters is
+/// that every asserted subject comes back, once, in alphabetical order.
+/// What: asserts two triples under distinct subjects, dispatches
+/// `kg_list_subjects`, and checks the envelope plus the ordering.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_returns_distinct_subjects() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "subjects"}))
+        .await
+        .expect("palace_create");
+
+    for (subject, object) in [("zeta", "Acme"), ("alpha", "Globex")] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "subjects",
+                "subject": subject,
+                "predicate": "works_at",
+                "object": object,
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let listed = dispatch_tool(&state, "kg_list_subjects", json!({"palace": "subjects"}))
+        .await
+        .expect("kg_list_subjects");
+
+    assert_eq!(listed["palace"], "subjects");
+    assert_eq!(listed["with_counts"], false);
+    assert_eq!(listed["truncated"], false);
+    let subjects: Vec<&str> = listed["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        subjects.contains(&"alpha") && subjects.contains(&"zeta"),
+        "both asserted subjects should be listed: {subjects:?}"
+    );
+    let mut sorted = subjects.clone();
+    sorted.sort_unstable();
+    assert_eq!(subjects, sorted, "subjects should be alphabetical");
+}
+
+/// Why: #4776 — `with_counts` is what lets a caller pick the densest subject to
+/// query first, so the count has to be a real per-subject active-triple count,
+/// not a placeholder.
+/// What: asserts two triples on one subject and one on another, then checks the
+/// `{subject, count}` pairs the tool returns.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_with_counts_returns_pairs() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "counts"}))
+        .await
+        .expect("palace_create");
+
+    for (subject, predicate) in [
+        ("alpha", "works_at"),
+        ("alpha", "lives_in"),
+        ("beta", "owns"),
+    ] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "counts",
+                "subject": subject,
+                "predicate": predicate,
+                "object": "Acme",
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let listed = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "counts", "with_counts": true}),
+    )
+    .await
+    .expect("kg_list_subjects");
+
+    assert_eq!(listed["with_counts"], true);
+    let pairs: Vec<(&str, u64)> = listed["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .iter()
+        .filter_map(|v| Some((v["subject"].as_str()?, v["count"].as_u64()?)))
+        .collect();
+    assert!(
+        pairs.contains(&("alpha", 2)),
+        "alpha should carry both of its triples: {pairs:?}"
+    );
+    assert!(
+        pairs.contains(&("beta", 1)),
+        "beta should carry its single triple: {pairs:?}"
+    );
+}
+
+/// Why: #4810 — `truncated = subjects.len() == limit` cannot distinguish "the
+/// page filled and more subjects exist" from "the palace holds exactly
+/// `limit` subjects in total"; a caller that trusted the old flag would raise
+/// `limit` and get back an identical page for nothing.
+/// What: asserts three subjects, then discovers the palace's real total
+/// subject count with a wide-open `kg_list_subjects` call — `palace_create`
+/// auto-bootstraps its own `project_subject` triple (see
+/// `bootstrap::bootstrap_palace`), so the total is not simply the three
+/// asserted names. Requests `limit: <that total>` and confirms `truncated`
+/// is `false` — the case the length-equality check got wrong. Then requests
+/// `limit: 1` over the same palace and confirms `truncated` still comes back
+/// `true` there.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_exact_limit_is_not_truncated() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "exactlimit"}))
+        .await
+        .expect("palace_create");
+
+    for subject in ["alpha", "beta", "gamma"] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "exactlimit",
+                "subject": subject,
+                "predicate": "works_at",
+                "object": "Acme",
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let wide_open = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": 200}),
+    )
+    .await
+    .expect("kg_list_subjects wide-open baseline");
+    let total = wide_open["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .len();
+    assert!(
+        total >= 3,
+        "the three asserted subjects should all be present: total={total}"
+    );
+    assert_eq!(
+        wide_open["truncated"], false,
+        "a limit well above the real total is never truncated"
+    );
+
+    let listed = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": total}),
+    )
+    .await
+    .expect("kg_list_subjects");
+
+    let subjects = listed["subjects"].as_array().expect("subjects array");
+    assert_eq!(
+        subjects.len(),
+        total,
+        "every subject should come back: {subjects:?}"
+    );
+    assert_eq!(
+        listed["truncated"], false,
+        "exactly `limit` subjects total is not truncation"
+    );
+
+    let capped = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": 1}),
+    )
+    .await
+    .expect("kg_list_subjects");
+    assert_eq!(
+        capped["truncated"], true,
+        "limit below the subject count should still report truncated"
+    );
 }
 
 /// Why: Issue #53 — verify the MCP `kg_gaps` tool returns whatever was
