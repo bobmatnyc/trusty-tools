@@ -4,8 +4,8 @@
 //! (#607). Centralises the mutable in-memory graph so reads/writes are
 //! gated by a single `RwLock`.
 //! What: `Adjacency` struct (private to the crate) with `ensure_node`,
-//! `edge_from_triple`, `upsert_edge`, `remove_edges`. Also `hydrate_adjacency`
-//! free function.
+//! `edge_from_triple`, `upsert_edge`, `remove_edges`, `remove_edge_to`. Also
+//! `hydrate_adjacency` free function.
 //! Test: Indirect — exercised by every adjacency-related test in kg/tests.rs.
 
 use super::types::{KgEdge, Triple};
@@ -109,6 +109,37 @@ impl Adjacency {
             .graph
             .edges(s_idx)
             .filter(|e| e.weight().predicate == predicate)
+            .map(|e| e.id())
+            .collect();
+        let n = to_remove.len();
+        for eid in to_remove {
+            self.graph.remove_edge(eid);
+        }
+        n
+    }
+
+    /// Drop only the edge `subject --predicate--> object` (#5396).
+    ///
+    /// Why: `retract_triple` closes one row and leaves its siblings live, so
+    /// the adjacency must lose exactly one edge. [`Adjacency::remove_edges`]
+    /// drops every edge at the pair, which would leave `neighbors` reporting
+    /// fewer targets than redb still holds.
+    /// What: filters the subject's outgoing edges on predicate AND target node,
+    /// removing the matches. Nodes are preserved for the same reason
+    /// `remove_edges` preserves them — StableGraph indices stay valid and the
+    /// entity may sit on other edges. Returns the number of edges dropped; 0
+    /// when either endpoint is unknown.
+    /// Test: `retract_triple_drops_one_edge_and_keeps_the_siblings`.
+    pub(super) fn remove_edge_to(&mut self, subject: &str, predicate: &str, object: &str) -> usize {
+        let (Some(&s_idx), Some(&o_idx)) =
+            (self.node_index.get(subject), self.node_index.get(object))
+        else {
+            return 0;
+        };
+        let to_remove: Vec<_> = self
+            .graph
+            .edges(s_idx)
+            .filter(|e| e.weight().predicate == predicate && e.target() == o_idx)
             .map(|e| e.id())
             .collect();
         let n = to_remove.len();
