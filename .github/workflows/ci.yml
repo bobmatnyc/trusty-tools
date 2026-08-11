@@ -463,13 +463,12 @@ jobs:
       # natively by fastembed-rs via get_cache_dir() and also by the
       # resolve_fastembed_cache_dir() helper in trusty-common.
       FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
-      # 200+ statically-linked test binaries make debug-info generation and
-      # incremental bookkeeping pure CI overhead. nextest reports the owning
-      # crate and test, while Rust panic messages retain their source location
-      # without DWARF, so this gate does not need symbolic backtraces. Disabling
-      # both also shrinks the 42G post-build target tree observed in run
-      # 31526290386 and avoids producing incremental state that rust-cache
-      # deliberately removes before saving. See #3668 and #3672.
+      # 179+ statically-linked test binaries with full default debuginfo
+      # exhausted runner disk (~9 GB of binaries + the DWARF-driven share of
+      # ~18 GB of never-swept intermediate .rcgu.o codegen objects); Linux
+      # ELF embeds DWARF directly in the binary, unlike the macOS proxy.
+      # line-tables-only keeps file:line info in panic backtraces while
+      # dropping the bulk of debug records. See #3668.
       #
       # The workspace Cargo.toml has no [profile.test] override, so `cargo
       # test` normally inherits dev's implicit debug level — but the `test`
@@ -480,8 +479,7 @@ jobs:
       # clippy job's `--all-targets` run was checked and confirmed to build
       # under the check-only `dev` profile with zero linked executables and
       # zero .rcgu.o output, so it does not share this disk pressure.
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
         with:
