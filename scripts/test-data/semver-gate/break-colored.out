@@ -1,0 +1,59 @@
+[1m[32m    Building[0m trusty-review v0.15.0 (current)
+[1m[32m       Built[0m [ 162.750s] (current)
+[1m[32m     Parsing[0m trusty-review v0.15.0 (current)
+[1m[32m      Parsed[0m [   0.187s] (current)
+[1m[32m    Building[0m trusty-review v0.14.1 (baseline)
+[1m[32m       Built[0m [ 163.161s] (baseline)
+[1m[32m     Parsing[0m trusty-review v0.14.1 (baseline)
+[1m[32m      Parsed[0m [   0.177s] (baseline)
+[1m[32m    Checking[0m trusty-review v0.14.1 -> v0.15.0 (assume minor change)
+[1m[31m     Checked[0m [   1.197s] 196 checks: 192 pass, 4 fail, 0 warn, 58 skip
+
+--- failure enum_missing: pub enum removed or renamed ---
+
+[1mDescription:[0m
+A publicly-visible enum cannot be imported by its prior path. A `pub use` may have been removed, or the enum itself may have been renamed or removed entirely.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#item-remove
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/enum_missing.ron
+
+[1mFailed in:[0m
+  enum trusty_review::report::synthesize::SynthesisStatus, previously in file /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-review-0.14.1/src/report/synthesize.rs:74
+  enum trusty_review::report::SynthesisStatus, previously in file /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-review-0.14.1/src/report/synthesize.rs:74
+
+--- failure enum_variant_added: enum variant added on exhaustive enum ---
+
+[1mDescription:[0m
+A publicly-visible enum without #[non_exhaustive] has a new variant.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#enum-variant-new
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/enum_variant_added.ron
+
+[1mFailed in:[0m
+  variant ReportError:SynthesisRequired in /REPO/crates/trusty-review/src/report/error.rs:116
+  variant ReportError:SynthesisRequired in /REPO/crates/trusty-review/src/report/error.rs:116
+
+--- failure inherent_method_missing: pub method removed or renamed ---
+
+[1mDescription:[0m
+A publicly-visible method or associated fn is no longer available under its prior name. It may have been renamed or removed entirely.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#item-remove
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/inherent_method_missing.ron
+
+[1mFailed in:[0m
+  Synthesis::unavailable, previously in file /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-review-0.14.1/src/report/synthesize.rs:141
+  Synthesis::is_available, previously in file /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-review-0.14.1/src/report/synthesize.rs:153
+  Synthesis::unavailable, previously in file /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-review-0.14.1/src/report/synthesize.rs:141
+  Synthesis::is_available, previously in file /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-review-0.14.1/src/report/synthesize.rs:153
+
+--- failure struct_pub_field_missing: pub struct's pub field removed or renamed ---
+
+[1mDescription:[0m
+A publicly-visible struct has at least one public field that is no longer available under its prior name. It may have been renamed or removed entirely.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#item-remove
+       impl: https://github.com/obi1kenobi/cargo-semver-checks/tree/v0.50.0/src/lints/struct_pub_field_missing.ron
+
+[1mFailed in:[0m
+  field status of struct Synthesis, previously in file /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-review-0.14.1/src/report/synthesize.rs:50
+  field status of struct Synthesis, previously in file /CARGO_HOME/registry/src/index.crates.io-1949cf8c6b5b557f/trusty-review-0.14.1/src/report/synthesize.rs:50
+
+[1m[31m     Summary[0m semver requires new major version: 4 major and 0 minor checks failed
+[1m[32m    Finished[0m [ 330.534s] trusty-review

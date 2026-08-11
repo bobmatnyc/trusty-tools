@@ -193,6 +193,8 @@ fn tool_definitions_lists_all_tools() {
         "palace_reembed",
         "palace_unalias",
         "kg_assert",
+        // The inverse of `kg_assert`, on the full triple key.
+        "kg_retract_triple",
         "kg_query",
         // #4776: subject enumeration over MCP.
         "kg_list_subjects",
@@ -535,6 +537,13 @@ async fn dispatch_kg_assert_then_query() {
     assert_eq!(triples[0]["object"], "Acme");
     assert_eq!(triples[0]["predicate"], "works_at");
 }
+
+/// Why: this file is at the 3000-SLOC test cap, so a new tool's dispatch tests
+/// live in a child module rather than pushing it over.
+/// What: `kg_retract_triple`'s tests; they read `super::*` for `test_state` and
+/// the imports above.
+/// Test: the module itself.
+mod kg_retract_tests;
 
 /// Why: #4776 — `kg_list_subjects` is the discovery read that makes `kg_query`
 /// usable without already knowing a subject, so the contract that matters is

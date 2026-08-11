@@ -62,6 +62,39 @@
 #   9, 11 and 12 fail against the pre-#5296 gate, which is what makes them
 #   regression tests rather than descriptions of current behaviour.
 #
+#   Cases 16-18 (issue #5500) pin the gate against ANSI-COLOURED tool output.
+#   Every fixture
+#   above was captured by redirecting to a file on a workstation, where
+#   cargo-semver-checks emits plain text — so `Checked` was always followed by a
+#   space and the marker matched. In GitHub Actions it is not:
+#   `dtolnay/rust-toolchain` exports CARGO_TERM_COLOR=always into $GITHUB_ENV,
+#   every later step inherits it, and the summary line arrives as
+#   `ESC[1mESC[32m     CheckedESC[0m [ 0.871s] 196 checks: ...`. The reset
+#   sequence sits between `Checked` and the space, so a marker regex anchored on
+#   `Checked<space>` sees nothing and reports a completed comparison as NO
+#   VERDICT. Both new fixtures are verbatim CI captures of that shape:
+#     16. coloured clean   — the tga run of PR #5458: exit 0, 196 pass. Reported
+#                            as "exited 0 without completing a check run".
+#     17. coloured break   — the same bytes at exit 100 through the PASS/FAIL
+#                            arm. Must still be a BREAK, so the colour fix
+#                            cannot be mistaken for a weakened gate.
+#     18. coloured inventory — the trusty-review run of PR #5458: exit 100 with
+#                            4 real failures, through the already-breaking arm.
+#                            Reported as "exited 100 without completing a run".
+#   16 and 17 ride the cases 5-8 table; 18 has its own block below. All three
+#   fail against the pre-fix gate.
+#
+#     19. private-mode CSI — pins the strip to the WHOLE ECMA-48 CSI grammar
+#                            rather than the SGR shape that was observed. Its
+#                            fixture puts `ESC[?25l` (cursor hide, emitted by
+#                            spinner renderers) between `Checked` and its space,
+#                            which a `[0-9;]*[A-Za-z]` strip leaves in place —
+#                            reintroducing this very defect. Synthetic, and
+#                            labelled so: no cargo-semver-checks 0.50.0 output
+#                            carries it. It rides the cases 5-8 table at exit
+#                            100, so it also proves a private-mode-laden BREAK
+#                            is still reported as a break rather than swallowed.
+#
 #   Cases 13-15 pin pre-release handling. `key()` used to strip the pre-release
 #   suffix, so 1.0.0-rc1 and 1.0.0 both keyed to (1, 0, 0) and the tie went to
 #   whichever the index listed first — the reproduction on record picked
@@ -317,7 +350,10 @@ TAB="$(printf '\t')"
 VERDICT_CASES="real break${TAB}break.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT
 rustdoc build error${TAB}build-error.out${TAB}101${TAB}3${TAB}NO SEMVER VERDICT WAS COMPUTED${TAB}requires a matching version bump
 silent no-op at exit 0${TAB}silent-noop.out${TAB}0${TAB}3${TAB}NO SEMVER VERDICT WAS COMPUTED${TAB}requires a matching version bump
-clean${TAB}clean.out${TAB}0${TAB}0${TAB}crate(s) checked${TAB}NO SEMVER VERDICT"
+clean${TAB}clean.out${TAB}0${TAB}0${TAB}crate(s) checked${TAB}NO SEMVER VERDICT
+ANSI-coloured clean (case 16)${TAB}clean-colored.out${TAB}0${TAB}0${TAB}crate(s) checked${TAB}NO SEMVER VERDICT
+ANSI-coloured break (case 17)${TAB}break-colored.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT
+private-mode CSI break (case 19)${TAB}private-mode.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT"
 
 while IFS="$TAB" read -r name fixture stub_rc want_exit must_have must_not; do
   [[ -z "$name" ]] && continue
@@ -429,6 +465,21 @@ elif [[ "$out" == *"no breaking changes found"* ]]; then
   fail_case "inventory/blind: a run that produced nothing was reported as clean" "$out"
 else
   pass_case "an inventory that could not run says so, in the line and in the summary"
+fi
+
+# --- 18. The inventory arm over ANSI-coloured output. This is the trusty-review
+#         half of PR #5458 verbatim: a completed run with 4 real failures that
+#         the gate announced as "exited 100 without completing a run".
+rc=0
+out="$(gate_with_index "${STUB_OLD_MINOR}" "${STUB_OLD_MINOR}=break-colored.out:100")" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "inventory/coloured: an advisory run over coloured output must stay green (exit ${rc})" "$out"
+elif [[ "$out" == *"NO INVENTORY ${STUB_CRATE}"* ]]; then
+  fail_case "inventory/coloured: a completed run was reported as never having run — the marker did not survive the colour codes" "$out"
+elif [[ "$out" != *"breaking change(s) listed above"* ]]; then
+  fail_case "inventory/coloured: exit 0 but the breaks were never reported" "$out"
+else
+  pass_case "a coloured inventory run is recognised as completed"
 fi
 
 # ===========================================================================

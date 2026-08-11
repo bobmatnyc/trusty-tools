@@ -74,6 +74,9 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     } else {
         vec!["palace", "subject", "predicate", "object"]
     };
+    // Retraction takes the same full triple key as the assertion it undoes, so
+    // its `required` list is `kg_assert`'s by construction.
+    let kg_retract_triple_required: Vec<&str> = kg_assert_required.clone();
     let kg_query_required: Vec<&str> = if has_default {
         vec!["subject"]
     } else {
@@ -237,6 +240,20 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                 }
             },
             {
+                "name": "kg_retract_triple",
+                "description": "Retract one fact from the temporal knowledge graph — the inverse of kg_assert. Targets the FULL (subject, predicate, object) key, so every other object at the same (subject, predicate) pair stays active; use it to take back a single wrong assertion. Re-asserting is not a substitute: for predicates outside the functional set (is-a, works-at, uses, depends-on among them) a new object joins the wrong one rather than replacing it. Returns {closed, retracted}: `closed` is how many active triples were closed — 1 for a retraction, 0 when nothing matched that exact triple. A 0 is a real no-op, not an error, so calling twice is safe; the response carries `reason` to say so.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":    {"type": "string", "description": "Palace ID (optional if server started with --palace)"},
+                        "subject":   {"type": "string"},
+                        "predicate": {"type": "string"},
+                        "object":    {"type": "string", "description": "The exact object to retract. Required: omitting it does NOT retract the whole (subject, predicate) pair, it is an error — pair-wide retraction is deliberately not on this tool."}
+                    },
+                    "required": kg_retract_triple_required,
+                }
+            },
+            {
                 "name": "kg_query",
                 "description": "Query active knowledge-graph triples for a subject.",
                 "inputSchema": {
@@ -250,7 +267,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "kg_list_subjects",
-                "description": "List the subjects this palace's knowledge graph actually holds, alphabetically. Call this BEFORE kg_query instead of guessing a subject: kg_query needs a subject you already know, and a subject that does not exist returns the same empty result as an empty graph, so a guess tells you nothing. Subjects are namespaced by kind — `tag:<name>`, `topic:<name>`, `drawer:<uuid>`, `room:<name>` — alongside bare entity names asserted by kg_assert. Returns {palace, subjects, with_counts, truncated}. `truncated: true` means the page filled to `limit` and more subjects may exist; raise `limit` to see them.",
+                "description": "List the subjects this palace's knowledge graph actually holds, ordered by subject. Call this BEFORE kg_query instead of guessing a subject: kg_query needs a subject you already know, and a guessed name that misses costs a round trip that this call spends better. (A kg_query miss does say which miss it was — `graph_state: subject_not_found` vs `graph_empty` — so an empty result is never ambiguous.) Subjects are namespaced by kind — `tag:<name>`, `topic:<name>`, `drawer:<uuid>`, `room:<name>` — alongside bare entity names asserted by kg_assert. Returns {palace, subjects, with_counts, truncated}. `truncated: true` means a subject beyond this page was actually seen, so raising `limit` will show more; a page that exactly fills `limit` with nothing behind it reports `false`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
