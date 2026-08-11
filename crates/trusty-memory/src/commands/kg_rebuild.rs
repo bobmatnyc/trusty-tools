@@ -186,14 +186,13 @@ async fn report_purge(state: &AppState, palace_filter: Option<&str>, apply: bool
     let summaries = purge_palaces(state, palace_filter, apply).await?;
     let mut total_subjects = 0usize;
     let mut total_rows = 0usize;
-    let mut failures = 0usize;
+    let failures = count_purge_failures(&summaries);
     for s in &summaries {
         if let Some(e) = &s.error {
             eprintln!("[purge-error] palace={} error={}", s.palace_id, e);
-            // A palace that could not be opened or scanned reported no
-            // per-subject failures, so count it once here.
+            // A palace that could not be opened or scanned has nothing
+            // per-subject to print.
             if s.failed.is_empty() {
-                failures += 1;
                 continue;
             }
         }
@@ -208,7 +207,6 @@ async fn report_purge(state: &AppState, palace_filter: Option<&str>, apply: bool
                 );
             }
             total_subjects += s.deleted.len();
-            failures += s.failed.len();
         } else {
             for subject in &s.selected {
                 println!(
@@ -228,6 +226,36 @@ async fn report_purge(state: &AppState, palace_filter: Option<&str>, apply: bool
         println!("kg-rebuild purge: {total_subjects} subjects would be deleted (dry run)");
     }
     Ok(failures)
+}
+
+/// How many failures a purge run must report.
+///
+/// Why: the count drives the `anyhow::bail!` that gives the command its
+/// non-zero exit, so it is the operator-visible half of CRITICAL 1. It also
+/// carries the one piece of arithmetic that is easy to get wrong: a palace with
+/// per-subject failures ALSO has `error` set (it summarises those same
+/// failures), so counting both would report every such palace one time too many.
+/// Pulled out of `report_purge` so both arms can be tested directly — a
+/// per-subject delete failure is not reachable deterministically through the
+/// real pipeline, because an applying run opens with `Writer` intent and
+/// therefore either opens and deletes cleanly or fails at the open.
+/// What: per palace, per-subject failures when there are any, otherwise one for
+/// a palace-level `error`, otherwise zero. Never both.
+/// Test: `count_purge_failures_never_double_counts_a_palace`,
+/// `purge_counts_an_unopenable_palace_as_exactly_one_failure`.
+pub fn count_purge_failures(summaries: &[PalacePurgeSummary]) -> usize {
+    summaries
+        .iter()
+        .map(|s| {
+            if !s.failed.is_empty() {
+                s.failed.len()
+            } else if s.error.is_some() {
+                1
+            } else {
+                0
+            }
+        })
+        .sum()
 }
 
 /// Per-palace result of a `--purge-stale-subjects` pass.
@@ -739,6 +767,134 @@ mod tests {
             outcome.rows_closed, 4,
             "a failed delete must contribute no closed rows"
         );
+    }
+
+    /// Build a summary for the counting tests.
+    fn summary_of(
+        palace_id: &str,
+        selected: &[&str],
+        deleted: &[&str],
+        failed: &[(&str, &str)],
+        error: Option<&str>,
+    ) -> PalacePurgeSummary {
+        PalacePurgeSummary {
+            palace_id: palace_id.to_string(),
+            selected: selected.iter().map(|s| s.to_string()).collect(),
+            deleted: deleted.iter().map(|s| s.to_string()).collect(),
+            failed: failed
+                .iter()
+                .map(|(s, e)| (s.to_string(), e.to_string()))
+                .collect(),
+            rows_closed: deleted.len(),
+            error: error.map(|e| e.to_string()),
+        }
+    }
+
+    /// Why: a palace with per-subject failures ALSO carries a palace-level
+    /// `error` summarising those same failures. Counting both would report one
+    /// extra failure for every such palace, inflating the number the operator
+    /// sees and the one the non-zero exit is justified by.
+    /// What: per-subject failures count once each; a palace-level error counts
+    /// once ONLY when there are no per-subject failures behind it; a clean
+    /// palace counts zero.
+    /// Test: This test.
+    #[test]
+    fn count_purge_failures_never_double_counts_a_palace() {
+        let open_failed = summary_of("a", &[], &[], &[], Some("open kg for palace a: bad file"));
+        let subject_failed = summary_of(
+            "b",
+            &["them", "the"],
+            &["them"],
+            &[("the", "store is read-only")],
+            Some("1 of 2 selected subject(s) failed to delete"),
+        );
+        let clean = summary_of("c", &["it"], &["it"], &[], None);
+
+        assert_eq!(
+            count_purge_failures(std::slice::from_ref(&open_failed)),
+            1,
+            "a palace that could not be opened is one failure"
+        );
+        assert_eq!(
+            count_purge_failures(std::slice::from_ref(&subject_failed)),
+            1,
+            "the error merely summarises the one subject failure; it must not add a second"
+        );
+        assert_eq!(count_purge_failures(std::slice::from_ref(&clean)), 0);
+        assert_eq!(
+            count_purge_failures(&[open_failed, subject_failed, clean]),
+            2,
+            "aggregate must be 1 + 1 + 0"
+        );
+    }
+
+    /// Why: `report_purge` is what turns a failure into something the operator
+    /// can see — the stderr line, the count in the aggregate, and the value
+    /// that drives the non-zero exit. `apply_deletions` covers the injected
+    /// closure; this drives a REAL failure through
+    /// `purge_palaces` → `purge_one` → `report_purge`.
+    /// What: corrupts the palace's `kg.redb` so `KnowledgeGraph::open_with_intent`
+    /// fails, then asserts the summary records it as a palace-level error with
+    /// no per-subject entries, and that `report_purge` counts it exactly once.
+    /// Deterministic: the failure is a malformed file, not a lock race.
+    /// Test: This test.
+    #[tokio::test]
+    async fn purge_counts_an_unopenable_palace_as_exactly_one_failure() -> Result<()> {
+        seed_embedder();
+        let tmp = tempfile::tempdir()?;
+        let data_root = tmp.path().to_path_buf();
+        // SAFETY: idempotent constant write "1"; safe across test threads.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
+        {
+            let state = AppState::new(data_root.clone());
+            state.set_ready();
+            let _ =
+                crate::tools::dispatch_tool(&state, "palace_create", json!({"name": "a"})).await?;
+        }
+
+        // Build a SECOND palace on disk that this process never opens, by
+        // cloning the created palace's metadata. The store keeps a
+        // process-wide cache of open databases keyed by path, so a palace
+        // already opened in this test would be served from that cache and
+        // never touch the filesystem at all — an earlier version of this
+        // fixture corrupted `a/kg.redb` and the open still succeeded.
+        let mut record: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(data_root.join("a/palace.json"))?)?;
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("id".to_string(), json!("b"));
+            if obj.contains_key("name") {
+                obj.insert("name".to_string(), json!("b"));
+            }
+        }
+        let b_dir = data_root.join("b");
+        std::fs::create_dir_all(&b_dir)?;
+        std::fs::write(b_dir.join("palace.json"), serde_json::to_string(&record)?)?;
+        // A DIRECTORY where the store file belongs. Opening a directory as a
+        // database file fails at the OS layer on every platform and every redb
+        // version, and cannot be silently recreated underneath us. No lock, no
+        // race, no timing.
+        std::fs::create_dir(b_dir.join("kg.redb"))?;
+
+        let state = AppState::new(data_root.clone());
+        let summaries = purge_palaces(&state, Some("b"), true).await?;
+
+        assert!(
+            summaries[0].error.is_some(),
+            "an unopenable palace must set the palace-level error"
+        );
+        assert!(
+            summaries[0].failed.is_empty() && summaries[0].deleted.is_empty(),
+            "nothing was attempted per-subject, so both lists stay empty"
+        );
+
+        let failures = report_purge(&state, Some("b"), true).await?;
+        assert_eq!(
+            failures, 1,
+            "an unopenable palace is exactly one failure, and a non-zero count is what makes the command exit non-zero"
+        );
+        Ok(())
     }
 
     /// Why: `--dry-run` promises it writes nothing, but the scan reached the KG
