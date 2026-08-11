@@ -94,6 +94,9 @@ pub fn resolve_snapshot_for_caller(
     {
         return Some(ResolvedSnapshot::new(path, ResolutionPath::SessionId));
     }
+    // #5272: this is NOT the "latest overall" fallback that issue removed. That
+    // one answered an unidentified caller with an arbitrary session's file; this
+    // one requires the caller to be in the window that wrote the snapshot.
     let caller_window = window_id_of(tmux_window?)?;
     newest_snapshot_in_window(project_dir, caller_window)
         .map(|path| ResolvedSnapshot::new(path, ResolutionPath::TmuxWindow))

@@ -152,7 +152,7 @@ pub async fn session_context_catchup(
         merged.absorb(generate_catchup_json(&opts).await);
     }
 
-    // PR #5390: the exact-id lookup misses across a Claude Code relaunch, which
+    // PR #5386: the exact-id lookup misses across a Claude Code relaunch, which
     // mints a new harness session id inside the same tmux window.
     let resolved = resolve_snapshot_for_caller(&primary, session_id, tmux_window);
 
