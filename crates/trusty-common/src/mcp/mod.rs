@@ -10,8 +10,9 @@
 //! helper to build the `initialize` payload, and an async stdio dispatch
 //! loop that accepts any `Fn(Request) -> Future<Output=Response>`.
 //!
-//! Test: `cargo test -p trusty-mcp-core` covers Response construction +
-//! the stdio loop round-trip behaviour with an in-memory dispatcher.
+//! Test: `cargo test -p trusty-common mcp` covers Response construction +
+//! the stdio loop round-trip behaviour with an in-memory dispatcher. (The
+//! former `trusty-mcp-core` crate was absorbed into this module.)
 //!
 //! `memory_rpc` (issue #2030) additionally provides discovery-based JSON-RPC
 //! *client* access to the trusty-memory daemon — the shared "resolve address
