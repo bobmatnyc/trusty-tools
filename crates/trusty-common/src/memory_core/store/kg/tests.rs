@@ -291,7 +291,7 @@ async fn upsert_drawer_replaces_existing_row() {
 async fn count_active_triples_returns_live_only() {
     let dir = tempdir().unwrap();
     let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).unwrap();
-    assert_eq!(kg.count_active_triples(), 0);
+    assert_eq!(kg.count_active_triples().unwrap(), 0);
 
     kg.assert(Triple {
         subject: "alice".into(),
@@ -304,7 +304,7 @@ async fn count_active_triples_returns_live_only() {
     })
     .await
     .unwrap();
-    assert_eq!(kg.count_active_triples(), 1);
+    assert_eq!(kg.count_active_triples().unwrap(), 1);
 
     // Superseding triple closes the prior interval — count stays at 1.
     // #4810: only because `is_alias_for` is a functional predicate.
@@ -319,7 +319,7 @@ async fn count_active_triples_returns_live_only() {
     })
     .await
     .unwrap();
-    assert_eq!(kg.count_active_triples(), 1);
+    assert_eq!(kg.count_active_triples().unwrap(), 1);
 }
 
 /// Why: The Dreamer cycle calls `checkpoint()` to keep the WAL bounded;

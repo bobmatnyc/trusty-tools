@@ -177,42 +177,35 @@ impl KgStoreRedb {
     /// Count currently active triples (sum of ACTIVE_SUBJECT_COUNTS).
     ///
     /// Why: Dashboard tally of live facts. Maintained incrementally so it is
-    /// O(distinct subjects) rather than O(history).
-    /// What: Iterate ACTIVE_SUBJECT_COUNTS, sum values.
-    /// Test: `count_active_triples_returns_live_only`.
-    pub fn count_active_triples(&self) -> u64 {
-        let rtx = match self.db().begin_read() {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("count_active_triples: begin_read failed: {e:#}");
-                return 0;
-            }
-        };
-        let counts = match rtx.open_table(ACTIVE_SUBJECT_COUNTS) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("count_active_triples: open table failed: {e:#}");
-                return 0;
-            }
-        };
+    /// O(distinct subjects) rather than O(history). Every read step used to
+    /// log a warning and return `0` (#5384); a caller then could not tell an
+    /// empty graph from a storage read it never completed, and `kg_query`
+    /// turned that `0` into `graph_state: "graph_empty"` — the false claim
+    /// #4775 exists to prevent. The count is now fallible so each caller
+    /// decides what a failed read means for its own payload.
+    /// What: Opens a read txn, iterates ACTIVE_SUBJECT_COUNTS, and sums the
+    /// values. `begin_read`, `open_table`, `iter`, and a per-row read all
+    /// propagate — `open_table` cannot mean "not written yet" because
+    /// `open_with_intent` creates every table on open.
+    /// Test: `count_active_triples_returns_live_only`,
+    /// `count_active_triples_surfaces_read_failure`.
+    pub fn count_active_triples(&self) -> Result<u64> {
+        // #5384: propagate instead of returning 0 — a failed read must not be
+        // reportable as an empty graph.
+        let rtx = self
+            .db()
+            .begin_read()
+            .context("begin count_active_triples txn")?;
+        let counts = rtx
+            .open_table(ACTIVE_SUBJECT_COUNTS)
+            .context("open active_subject_counts table for count_active_triples")?;
         let mut total: u64 = 0;
-        let iter = match counts.iter() {
-            Ok(i) => i,
-            Err(e) => {
-                tracing::warn!("count_active_triples: iter failed: {e:#}");
-                return 0;
-            }
-        };
+        let iter = counts.iter().context("iter active_subject_counts")?;
         for entry in iter {
-            match entry {
-                Ok((_, v)) => total = total.saturating_add(decode_u64(v.value())),
-                Err(e) => {
-                    tracing::warn!("count_active_triples: row read failed: {e:#}");
-                    continue;
-                }
-            }
+            let (_, v) = entry.context("read active_subject_counts row")?;
+            total = total.saturating_add(decode_u64(v.value()));
         }
-        total
+        Ok(total)
     }
 
     /// No-op checkpoint hook.

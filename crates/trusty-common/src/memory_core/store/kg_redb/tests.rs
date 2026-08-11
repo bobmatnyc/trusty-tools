@@ -125,20 +125,51 @@ mod tests {
     #[test]
     fn count_active_triples_returns_live_only() {
         let (_d, kg) = open_kg();
-        assert_eq!(kg.count_active_triples(), 0);
+        assert_eq!(kg.count_active_triples().unwrap(), 0);
 
         kg.assert(&t("alice", "is_alias_for", "Acme")).unwrap();
-        assert_eq!(kg.count_active_triples(), 1);
+        assert_eq!(kg.count_active_triples().unwrap(), 1);
 
         // #4810: functional predicate — the supersede keeps the count at 1.
         kg.assert(&t("alice", "is_alias_for", "Beta")).unwrap();
-        assert_eq!(kg.count_active_triples(), 1);
+        assert_eq!(kg.count_active_triples().unwrap(), 1);
 
         kg.assert(&t("bob", "is_alias_for", "Gamma")).unwrap();
-        assert_eq!(kg.count_active_triples(), 2);
+        assert_eq!(kg.count_active_triples().unwrap(), 2);
 
         kg.retract("alice", "is_alias_for").unwrap();
-        assert_eq!(kg.count_active_triples(), 1);
+        assert_eq!(kg.count_active_triples().unwrap(), 1);
+    }
+
+    /// Why (#5384): a failed read used to come back as `0`, and `kg_query`
+    /// turns a whole-graph `0` into `graph_state: "graph_empty"` — so a broken
+    /// storage read claimed the graph held nothing while three live triples
+    /// sat in it. Dropping ACTIVE_SUBJECT_COUNTS is the cheapest way to make
+    /// `open_table` fail for real; before the fix this assertion read
+    /// `assert_ne!(kg.count_active_triples(), 0)` and failed with `0 == 0`.
+    #[test]
+    fn count_active_triples_surfaces_read_failure() {
+        let (_d, kg) = open_kg();
+        kg.assert(&t("alice", "is_alias_for", "Acme")).unwrap();
+        kg.assert(&t("bob", "is_alias_for", "Beta")).unwrap();
+        kg.assert(&t("carol", "is_alias_for", "Gamma")).unwrap();
+        assert_eq!(kg.count_active_triples().unwrap(), 3);
+
+        let wtx = kg.db().begin_write().unwrap();
+        assert!(
+            wtx.delete_table(crate::memory_core::store::kg_store::ACTIVE_SUBJECT_COUNTS)
+                .unwrap(),
+            "the count table must have existed to be dropped"
+        );
+        wtx.commit().unwrap();
+
+        let err = kg
+            .count_active_triples()
+            .expect_err("a failed count read must not be reported as a count");
+        assert!(
+            format!("{err:#}").contains("active_subject_counts"),
+            "error names the table it could not read: {err:#}"
+        );
     }
 
     #[test]
@@ -876,7 +907,7 @@ mod tests {
         let mut objects: Vec<_> = active.iter().map(|x| x.object.as_str()).collect();
         objects.sort_unstable();
         assert_eq!(objects, vec!["drawer:a", "drawer:b", "drawer:c"]);
-        assert_eq!(kg.count_active_triples(), 3);
+        assert_eq!(kg.count_active_triples().unwrap(), 3);
 
         // Nothing was demoted to history — no object was superseded.
         let all = kg.dump_all_triples().unwrap();
@@ -900,7 +931,7 @@ mod tests {
         let active = kg.query_active("tga").unwrap();
         assert_eq!(active.len(), 1, "functional predicate holds one object");
         assert_eq!(active[0].object, "trusty-git-analytics-v2");
-        assert_eq!(kg.count_active_triples(), 1);
+        assert_eq!(kg.count_active_triples().unwrap(), 1);
 
         let all = kg.dump_all_triples().unwrap();
         assert_eq!(all.len(), 2, "the superseded object is kept as history");
@@ -918,7 +949,7 @@ mod tests {
 
         let active = kg.query_active("room:General").unwrap();
         assert_eq!(active.len(), 1);
-        assert_eq!(kg.count_active_triples(), 1);
+        assert_eq!(kg.count_active_triples().unwrap(), 1);
         assert_eq!(kg.dump_all_triples().unwrap().len(), 2, "one history row");
     }
 
@@ -934,7 +965,7 @@ mod tests {
         }
         assert_eq!(kg.retract("room:General", "contains").unwrap(), 3);
         assert!(kg.query_active("room:General").unwrap().is_empty());
-        assert_eq!(kg.count_active_triples(), 0);
+        assert_eq!(kg.count_active_triples().unwrap(), 0);
         // Second retract is a no-op.
         assert_eq!(kg.retract("room:General", "contains").unwrap(), 0);
     }
@@ -968,7 +999,7 @@ mod tests {
             vec!["drawer:a".to_string(), "drawer:c".to_string()],
             "the good siblings must survive"
         );
-        assert_eq!(kg.count_active_triples(), 2);
+        assert_eq!(kg.count_active_triples().unwrap(), 2);
 
         // The retracted object is closed, not erased.
         let closed: Vec<_> = kg
@@ -1009,7 +1040,7 @@ mod tests {
             "unknown predicate"
         );
         assert_eq!(kg.query_active("room:General").unwrap().len(), 1);
-        assert_eq!(kg.count_active_triples(), 1);
+        assert_eq!(kg.count_active_triples().unwrap(), 1);
     }
 
     /// Why (#5396): `retract_triple` addresses one row by its full key, so a
@@ -1034,7 +1065,7 @@ mod tests {
             1
         );
         assert!(kg.query_active("tga").unwrap().is_empty());
-        assert_eq!(kg.count_active_triples(), 0);
+        assert_eq!(kg.count_active_triples().unwrap(), 0);
     }
 
     /// Why (#5396): the last object at a pair is the boundary case for the
@@ -1052,7 +1083,7 @@ mod tests {
             1
         );
         assert!(kg.query_active("room:General").unwrap().is_empty());
-        assert_eq!(kg.count_active_triples(), 0);
+        assert_eq!(kg.count_active_triples().unwrap(), 0);
 
         assert_eq!(
             kg.retract_triple("room:General", "contains", "drawer:a")
@@ -1060,7 +1091,7 @@ mod tests {
             0,
             "second call is a no-op"
         );
-        assert_eq!(kg.count_active_triples(), 0);
+        assert_eq!(kg.count_active_triples().unwrap(), 0);
     }
 
     /// Why (#4810): `delete_by_subject` collects pairs, and one pair can now
@@ -1075,7 +1106,7 @@ mod tests {
         kg.assert(&t("drawer:x", "is_alias_for", "y")).unwrap();
         assert_eq!(kg.delete_by_subject("drawer:x").unwrap(), 4);
         assert!(kg.query_active("drawer:x").unwrap().is_empty());
-        assert_eq!(kg.count_active_triples(), 0);
+        assert_eq!(kg.count_active_triples().unwrap(), 0);
     }
 
     /// Why (#4810): the write path reads the `(subject, predicate)` range and
@@ -1107,7 +1138,7 @@ mod tests {
 
         let active = primary.query_active("room:General").unwrap();
         assert_eq!(active.len(), 8, "no concurrent assert overwrote another");
-        assert_eq!(primary.count_active_triples(), 8);
+        assert_eq!(primary.count_active_triples().unwrap(), 8);
     }
 
     /// Why (#5396): `retract_triple` reads the `(subject, predicate)` range,
@@ -1135,7 +1166,11 @@ mod tests {
                 .assert(&t("room:General", "contains", &format!("drawer:{i}")))
                 .unwrap();
         }
-        assert_eq!(primary.count_active_triples(), 8, "seeded eight active");
+        assert_eq!(
+            primary.count_active_triples().unwrap(),
+            8,
+            "seeded eight active"
+        );
 
         let handles: Vec<_> = (0..8)
             .map(|i| {
@@ -1162,7 +1197,7 @@ mod tests {
             "every object closed"
         );
         assert_eq!(
-            primary.count_active_triples(),
+            primary.count_active_triples().unwrap(),
             0,
             "the counter absorbed all eight decrements"
         );
@@ -1231,7 +1266,7 @@ mod tests {
             "the asserted objects survived and the retracted ones did not"
         );
         assert_eq!(
-            primary.count_active_triples(),
+            primary.count_active_triples().unwrap(),
             8,
             "the counter agrees with the rows after eight closes and eight opens"
         );
