@@ -717,6 +717,17 @@ pub mod data_dir;
 pub mod test_harness;
 pub use test_harness::running_under_test_harness;
 
+/// Cross-process exclusive advisory lock around a whole-file critical section.
+///
+/// Why: the lock [`json_rmw`] needs is not JSON-specific. `trusty-search`'s
+/// `indexes.toml` has its own TOML loader and fail-closed parse contract, so it
+/// cannot route through [`json_rmw::update`], yet its writers (the daemon,
+/// `prune`, `prune-orphans`) lose each other's updates for exactly the same
+/// reason (#5344). Owning the lock here keeps ONE implementation for both.
+/// What: Exposes [`file_lock::with_exclusive_lock`] and [`file_lock::lock_path`].
+/// Test: `cargo test -p trusty-common -- file_lock::tests`.
+pub mod file_lock;
+
 /// Cross-process locked read-modify-write for whole-file JSON documents.
 ///
 /// Why: `trusty-mpm`'s `projects.json`, `trusty-gworkspace`'s `tokens.json`
