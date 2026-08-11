@@ -1,0 +1,8 @@
+Fixed
+
+- **`DELETE /indexes/:id` neither awaited nor cancelled in-flight work, and reported `data_deleted` from the request rather than from the disk.** The delete removed the registration and `remove_dir_all`'d the data directory while a reindex, deferred-embed, or component catch-up was still writing into it; recreating the same id immediately then let a new-epoch task interleave with the old one, because on-disk paths are keyed purely by sanitized id (closes [#3049](https://github.com/bobmatnyc/trusty-tools/issues/3049))
+  - `unregister_index` now signals a per-index cancel flag, then waits up to 30s for the per-index semaphore — the permit `runner::run_reindex`, `defer_embed_queue`, and the `PATCH /indexes/:id/config` handler already hold for the full duration of their work — and holds that permit across teardown
+  - `run_reindex` polls the cancel flag at its producer and consumer batch boundaries, so the wait costs one batch rather than one corpus
+  - on timeout the data directory is REFUSED rather than deleted under an active writer. The registration is still torn down; the response's new `quiesced: false` says data removal did not happen, so re-issuing the delete once the writer stops is worthwhile
+  - `data_deleted` is now assigned only when `remove_index_data_dir` returns `Ok`. It used to be computed as `removed && params.delete_data` — straight from the request — while a removal failure was downgraded to a `tracing::warn!`, so a delete whose data removal failed answered `data_deleted: true` and a caller recorded the corpus as reclaimed while every byte remained
+  - not covered: `embed_deferred_chunks` is a single long call with no interior checkpoint, so a delete landing during one waits for that call rather than for a batch
