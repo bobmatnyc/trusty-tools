@@ -95,10 +95,10 @@ jobs:
 
       # #5311: the `paths:` filter this replaces on the pull_request trigger.
       # Asked here, the job still reports on a PR that changes none of the
-      # lint's inputs — which is what a required context needs. Every other
-      # event (`push` is already path-filtered, `workflow_dispatch` is a
-      # deliberate manual run) resolves to `true`, so the only direction this
-      # step can take is toward running the gate.
+      # lint's inputs — which is what a required context needs. The `else` arm
+      # is the `push` trigger, the only other one this workflow has: it keeps
+      # its `paths:` filter, so a push that reaches this job already changed a
+      # lint input and the answer is `true` by construction.
       - name: Classify pointer-lint inputs from the diff
         id: detect
         env:

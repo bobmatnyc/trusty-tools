@@ -549,7 +549,11 @@ git -C "${added_repo}" commit -qm "add gamma"
 assert_eq "crate added by the branch"       "gamma" "$(bumps_of "${added_repo}")"
 
 # An inherited version declares nothing in the crate's own manifest, so there is
-# nothing here to compare — and the workspace-level bump is its own diff entry.
+# nothing here to compare. Nothing else picks the crate up either: the loop only
+# inspects `crates/*/Cargo.toml`, so a root-manifest change is never examined.
+# That gap is unreachable in this workspace — #343 removed the workspace
+# `version` field and every crate declares a literal one — and this case pins the
+# behavior in case one ever starts inheriting.
 inherit_repo="${BUMP_DIR}/inherited"
 make_bump_repo "${inherit_repo}" ""
 printf '[package]\nname = "alpha"\nversion.workspace = true\n' \
