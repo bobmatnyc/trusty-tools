@@ -246,7 +246,7 @@ pub(crate) async fn handle_kg_query(state: &AppState, args: Value) -> Result<Val
     let total_active = handle
         .kg
         .count_active_triples()
-        .context("kg.count_active_triples")?;
+        .with_context(|| format!("kg.count_active_triples for palace {palace}"))?;
     let mut response = json!({
         "subject": subject,
         "triples": payload,

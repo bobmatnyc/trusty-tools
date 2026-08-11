@@ -163,10 +163,9 @@ impl MemoryService {
     /// this feeds cannot tell those apart.
     pub async fn kg_count(&self, id: &str) -> ServiceResult<usize> {
         let handle = self.open_handle(id)?;
-        handle
-            .kg
-            .count_active_triples()
-            .map_err(|e| ServiceError::internal(format!("kg count_active_triples: {e:#}")))
+        handle.kg.count_active_triples().map_err(|e| {
+            ServiceError::internal(format!("kg count_active_triples for palace {id}: {e:#}"))
+        })
     }
 
     /// Build the per-palace visual graph payload.
@@ -210,11 +209,9 @@ impl MemoryService {
         // palace sitting exactly on the cap is not falsely flagged.
         // #5384: a failed read would come back as 0 and make `truncated` false
         // for every payload, which is the flag's exact failure mode.
-        let active_triple_count = handle
-            .kg
-            .count_active_triples()
-            .map_err(|e| ServiceError::internal(format!("kg count_active_triples: {e:#}")))?
-            as u64;
+        let active_triple_count = handle.kg.count_active_triples().map_err(|e| {
+            ServiceError::internal(format!("kg count_active_triples for palace {id}: {e:#}"))
+        })? as u64;
         let returned_triple_count = triples.len() as u64;
         Ok(KgGraphPayload {
             triples,
