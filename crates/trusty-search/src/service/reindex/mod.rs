@@ -49,6 +49,7 @@ mod checkpoint;
 mod completion;
 mod corpus_swap;
 mod finish;
+mod finish_teardown;
 mod guard;
 mod hash;
 mod hnsw_swap;
