@@ -248,9 +248,20 @@ impl CodeIndexer {
     /// `CorpusStore`, so `commit_corpus_to_redb` early-returns and
     /// `staging::should_stage` is `false` — a bulk reindex on a quarantined
     /// index writes nothing durable at all.
+    /// #3048: it is also where the per-index component flags apply to an
+    /// incremental write. [`CodeIndexer::skip_vector`] suppresses the embed
+    /// call (chunks still land in BM25 + the corpus, exactly as
+    /// `parse_files_only` produces them on the batch path) and
+    /// [`CodeIndexer::skip_kg`] suppresses the trailing symbol-graph rebuild.
+    /// Before this, both ran unconditionally, so a BM25-only index kept
+    /// embedding and kept rebuilding a graph on every file save while its own
+    /// `/health` reported those stages `Skipped`.
     /// Test: covered by every `index_file`-based test in `indexer::tests`;
     /// the quarantine branch by
-    /// `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`.
+    /// `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`;
+    /// the component gates by `skip_vector_index_file_never_embeds`,
+    /// `skip_vector_false_index_file_still_embeds`, and
+    /// `skip_kg_index_file_never_rebuilds_the_symbol_graph`.
     pub async fn index_file(&self, file_path: &str, content: &str) -> Result<()> {
         if self.refuse_incremental_write("index_file", file_path) {
             anyhow::bail!(
@@ -267,7 +278,17 @@ impl CodeIndexer {
         let chunk_contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
 
         if !chunks.is_empty() {
-            let embeddings = self.embed_chunks_in_batches(&chunks, None).await?;
+            // #3048: a vector-disabled index must not embed on the incremental
+            // path either. All-`None` embeddings are exactly what
+            // `parse_files_only` hands `commit_parsed_batch` on the batch
+            // reindex path, and `commit_parsed_batch` already treats that as
+            // the BM25-only case (including evicting any stale vector for a
+            // re-committed chunk id).
+            let embeddings = if self.skip_vector {
+                vec![None; chunks.len()]
+            } else {
+                self.embed_chunks_in_batches(&chunks, None).await?
+            };
             let parsed = ParsedBatch {
                 chunks,
                 embeddings,
@@ -287,7 +308,16 @@ impl CodeIndexer {
             .write()
             .await
             .insert(file_path.to_string(), all_entities);
-        self.rebuild_symbol_graph().await;
+        // #3048: skip_kg parity. `finish::finish_reindex` already skips KG
+        // construction for a skip_kg index; this path did not, so every
+        // watcher save rebuilt AND persisted the full graph for an index whose
+        // whole point was not to hold one. Gated here rather than inside
+        // `rebuild_symbol_graph` — that function is the shared choke point for
+        // reindex, remove_file, and the contributed-graph ingest endpoint,
+        // whose skip_kg semantics are not this issue's to change.
+        if !self.skip_kg {
+            self.rebuild_symbol_graph().await;
+        }
         Ok(())
     }
 

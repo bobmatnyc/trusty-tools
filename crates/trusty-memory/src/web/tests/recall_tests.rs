@@ -17,82 +17,109 @@ use uuid::Uuid;
 /// Why: The base64url triple-ID round-trip is the core invariant for
 /// `DELETE /kg/triples/<id>` — if encode/decode aren't inverses, the
 /// handler will always 404 on valid IDs.
-/// What: Encodes a (subject, predicate) pair, decodes the result, and
-/// asserts exact equality with the originals. Also tests URL-safety.
+/// What: Encodes a (subject, predicate, object) triple, decodes the result,
+/// and asserts exact equality with the originals. Also tests URL-safety.
 /// Test: This test.
 #[test]
 fn decode_triple_id_round_trips() {
     let cases = [
-        ("drawer:some-uuid", "has_tag"),
-        ("entity:alice", "works_at"),
-        ("entity:project/foo", "depends_on"),
-        // edge: empty predicate
-        ("subject", ""),
-        // edge: subject with slashes + predicate with colons
-        ("path/to/node", "rel:type:sub"),
+        ("drawer:some-uuid", "has_tag", "tag:rust"),
+        ("entity:alice", "works_at", "entity:acme"),
+        ("entity:project/foo", "depends_on", "entity:bar"),
+        // edge: empty predicate and empty object
+        ("subject", "", ""),
+        // edge: slashes and colons in every position
+        ("path/to/node", "rel:type:sub", "path/to/other"),
     ];
-    for (subject, predicate) in cases {
-        let encoded = encode_triple_id(subject, predicate)
+    for (subject, predicate, object) in cases {
+        let encoded = encode_triple_id(subject, predicate, object)
             .unwrap_or_else(|e| panic!("encode_triple_id failed: {e}"));
         // Must be URL-safe: no +, /, or = characters.
         assert!(
             !encoded.contains('+') && !encoded.contains('/') && !encoded.contains('='),
             "encoded triple id {encoded:?} is not URL-safe"
         );
-        let (s, p) = decode_triple_id(&encoded)
-            .unwrap_or_else(|| panic!("decode_triple_id failed for {encoded:?}"));
+        let Ok((s, p, o)) = decode_triple_id(&encoded) else {
+            panic!("decode_triple_id failed for {encoded:?}");
+        };
         assert_eq!(s, subject, "subject mismatch for ({subject}, {predicate})");
         assert_eq!(
             p, predicate,
             "predicate mismatch for ({subject}, {predicate})"
         );
+        assert_eq!(o, object, "object mismatch for ({subject}, {predicate})");
     }
 }
 
-/// Why: `decode_triple_id` must return `None` on garbage input (not panic).
-/// What: Passes invalid base64 and base64 without a null separator; asserts None.
+/// Why: `decode_triple_id` must reject garbage input (not panic).
+/// What: Passes invalid base64 and base64 without a null separator; asserts
+/// both are rejected.
 /// Test: This test.
 #[test]
 fn decode_triple_id_returns_none_for_invalid_input() {
-    assert!(decode_triple_id("not!!valid%%base64").is_none());
+    assert!(decode_triple_id("not!!valid%%base64").is_err());
     // Valid base64url but no null separator → no split possible.
     use base64::Engine as _;
     let no_sep = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"no-separator");
-    assert!(decode_triple_id(&no_sep).is_none());
+    assert!(decode_triple_id(&no_sep).is_err());
 }
 
-/// Issue #1102 — `encode_triple_id` must reject subjects or predicates that
-/// contain the null-byte separator (`\0`), not silently produce an ambiguous
+/// Why: the two-field id is the format this endpoint used to accept, and it
+/// is the reason a delete closed every object at a pair. It must decode to a
+/// distinguishable error so the handler can answer 400 with the new format
+/// rather than a 404 that reads as "already deleted".
+/// What: encodes `subject\0predicate` by hand and asserts `decode_triple_id`
+/// reports `LegacyPair`, while a three-field id decodes normally.
+/// Test: This test.
+#[test]
+fn decode_triple_id_rejects_the_legacy_pair_form() {
+    use super::super::kg_routes::TripleIdError;
+    use base64::Engine as _;
+
+    let legacy = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"alpha\0is");
+    assert!(
+        matches!(decode_triple_id(&legacy), Err(TripleIdError::LegacyPair)),
+        "a two-field id must be reported as the legacy pair form"
+    );
+
+    let four = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"a\0b\0c\0d");
+    assert!(
+        matches!(decode_triple_id(&four), Err(TripleIdError::Malformed)),
+        "a four-field id is malformed, not a legacy pair"
+    );
+}
+
+/// Issue #1102 — `encode_triple_id` must reject any component that contains
+/// the null-byte separator (`\0`), not silently produce an ambiguous
 /// (corrupt) encoded id.
 ///
-/// Why: The null byte is the separator inside the encoded payload. If either
+/// Why: The null byte is the separator inside the encoded payload. If a
 /// component itself carries a `\0`, the subsequent decode splits at the wrong
-/// position and returns incorrect `(subject, predicate)` pairs for the
-/// persisted `DELETE` path — this is a data-integrity bug, not just a
-/// correctness assertion.
-/// What: Calls `encode_triple_id` with a `\0`-containing subject and a
-/// `\0`-containing predicate, asserts both return `Err` with a message
-/// mentioning the null-byte separator.
+/// position and returns an incorrect triple for the `DELETE` path — this is a
+/// data-integrity bug, not just a correctness assertion.
+/// What: Calls `encode_triple_id` with a `\0` in each of subject, predicate
+/// and object, asserts all three return `Err` with a message mentioning the
+/// null-byte separator.
 /// Test: This test.
 #[test]
 fn encode_triple_id_rejects_null_byte() {
-    let err = encode_triple_id("sub\0ject", "predicate")
-        .expect_err("null byte in subject must return Err");
-    assert!(
-        err.contains("null-byte") || err.contains("\\0"),
-        "error message should mention null-byte separator; got {err:?}"
-    );
-
-    let err = encode_triple_id("subject", "pred\0icate")
-        .expect_err("null byte in predicate must return Err");
-    assert!(
-        err.contains("null-byte") || err.contains("\\0"),
-        "error message should mention null-byte separator; got {err:?}"
-    );
+    let cases = [
+        ("sub\0ject", "predicate", "object"),
+        ("subject", "pred\0icate", "object"),
+        ("subject", "predicate", "obj\0ect"),
+    ];
+    for (subject, predicate, object) in cases {
+        let err = encode_triple_id(subject, predicate, object)
+            .expect_err("a null byte in any component must return Err");
+        assert!(
+            err.contains("null-byte") || err.contains("\\0"),
+            "error message should mention null-byte separator; got {err:?}"
+        );
+    }
 
     // Clean inputs must still succeed.
     assert!(
-        encode_triple_id("clean-subject", "clean-predicate").is_ok(),
+        encode_triple_id("clean-subject", "clean-predicate", "clean-object").is_ok(),
         "clean inputs must encode successfully"
     );
 }
