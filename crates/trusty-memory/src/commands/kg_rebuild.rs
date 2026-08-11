@@ -533,6 +533,28 @@ mod tests {
         );
     }
 
+    /// Why: the #4678 `first_token` fix cleans tokens on the way IN, so it only
+    /// helps content extracted from now on. Subjects already in redb were
+    /// written by the old extractor with the punctuation welded on. If
+    /// `is_stop_token` stopped normalising, those would stop being recognised
+    /// and the purge would walk straight past the rows it exists to remove.
+    /// What: a stored `("the` subject is still selected.
+    /// Test: This test.
+    #[test]
+    fn purge_selects_a_legacy_subject_with_welded_punctuation() {
+        let active = vec![
+            active_triple("(\"the", Some(AUTO_PROVENANCE)),
+            active_triple("`it`", Some(AUTO_PROVENANCE)),
+            active_triple("`redb`", Some(AUTO_PROVENANCE)),
+        ];
+        assert_eq!(
+            stale_subject_candidates(&active),
+            vec!["(\"the".to_string(), "`it`".to_string()],
+            "legacy punctuated stopword subjects must still be selected, \
+             and a legacy punctuated real entity must not be"
+        );
+    }
+
     /// Why: `delete_by_subject` closes EVERY active triple under the subject,
     /// so one hand-asserted fact must protect the whole subject — a purge is
     /// not allowed to take a manual assertion with it.

@@ -601,18 +601,26 @@ const TOKEN_EDGE_PUNCT: &[char] = &[
 /// live graph. This is the single gate both the extractor and the
 /// `--purge-stale-subjects` back-fill consult, so forward extraction and
 /// historical clean-up can never disagree about what counts as garbage.
-/// What: normalises `tok` (trim whitespace, strip [`TOKEN_EDGE_PUNCT`] from
-/// both edges, lower-case) and rejects it when the result is empty, appears in
-/// [`STOPWORDS`], or is shorter than [`MIN_ENTITY_TOKEN_LEN`] without being in
-/// [`SHORT_ENTITY_ALLOWLIST`]. Length is counted in `char`s, not bytes, so a
-/// multi-byte token is not mis-measured. Purely lexical: it judges the token
-/// alone and knows nothing of the sentence, so it cannot catch a triple whose
-/// tokens are both ordinary words (see #4678 for the residue).
+/// What: normalises `tok` through [`clean_token`], lower-cases it, and rejects
+/// it when the result is empty, appears in [`STOPWORDS`], or is shorter than
+/// [`MIN_ENTITY_TOKEN_LEN`] without being in [`SHORT_ENTITY_ALLOWLIST`].
+/// Length is counted in `char`s, not bytes, so a multi-byte token is not
+/// mis-measured. Purely lexical: it judges the token alone and knows nothing of
+/// the sentence, so it cannot catch a triple whose tokens are both ordinary
+/// words (see #4678 for the residue).
+///
+/// The normalisation step is NOT redundant with `clean_token`'s use in
+/// `first_token` / `last_token`. Those clean tokens on the way IN, which only
+/// helps content extracted from now on. The `--purge-stale-subjects` path calls
+/// this on subjects read back out of redb, and those were written by the old
+/// extractor with the punctuation already welded on — normalising here is what
+/// lets a stored `("the` be recognised as the stopword it is.
 /// Test: `is_stop_token_rejects_every_stopword`,
 /// `is_stop_token_accepts_ordinary_entities`,
-/// `is_stop_token_normalises_surrounding_punctuation`.
+/// `is_stop_token_normalises_surrounding_punctuation`,
+/// `purge_selects_a_legacy_subject_with_welded_punctuation`.
 pub fn is_stop_token(tok: &str) -> bool {
-    let norm = tok.trim().trim_matches(TOKEN_EDGE_PUNCT).to_lowercase();
+    let norm = clean_token(tok).to_lowercase();
     if norm.is_empty() {
         return true;
     }
@@ -664,12 +672,14 @@ fn extract_patterns(content: &str) -> Vec<(String, String, String)> {
 ///
 /// Why: The left side of a pattern hit can contain arbitrary preamble; the
 /// entity we care about is the noun immediately before the marker.
-/// What: Trims trailing punctuation off the last whitespace-delimited token.
-/// Test: indirectly via `extract_triples_extracts_is_a_pattern`.
+/// What: Returns the last whitespace-delimited token with [`TOKEN_EDGE_PUNCT`]
+/// stripped from both edges.
+/// Test: `extract_triples_extracts_is_a_pattern`,
+/// `extract_triples_strips_punctuation_from_both_token_edges`.
 fn last_token(s: &str) -> String {
     s.split_whitespace()
         .last()
-        .map(|t| t.trim_end_matches([',', '.', ';', ':', '!', '?', '"', '\'']))
+        .map(clean_token)
         .unwrap_or("")
         .to_string()
 }
@@ -677,14 +687,31 @@ fn last_token(s: &str) -> String {
 /// Pull the first whitespace-delimited token from a fragment.
 ///
 /// Why: Mirror of `last_token` for the right side of a pattern hit.
-/// What: Trims leading punctuation off the first whitespace-delimited token.
-/// Test: indirectly via `extract_triples_extracts_is_a_pattern`.
+/// What: Returns the first whitespace-delimited token, cleaned identically.
+/// Test: `extract_triples_extracts_is_a_pattern`,
+/// `extract_triples_strips_punctuation_from_both_token_edges`.
 fn first_token(s: &str) -> String {
     s.split_whitespace()
         .next()
-        .map(|t| t.trim_end_matches([',', '.', ';', ':', '!', '?', '"', '\'']))
+        .map(clean_token)
         .unwrap_or("")
         .to_string()
+}
+
+/// Strip surrounding punctuation from one raw token.
+///
+/// Why: #4678 — `first_token` trimmed a TRAILING run while its doc promised a
+/// leading one, and both helpers used a set that omitted the characters drawer
+/// content actually wraps names in (backticks, brackets, asterisks). So
+/// `` `redb` `` reached the graph verbatim and became a second node for an
+/// entity that already had one. Which SIDE of the marker a token sits on says
+/// nothing about which edge carries punctuation, so both helpers clean both
+/// edges through this one function rather than each guessing.
+/// What: trims whitespace, then [`TOKEN_EDGE_PUNCT`] from both ends. Interior
+/// characters are untouched, so `no-op`, `c#`, and `src/main.rs` survive whole.
+/// Test: `extract_triples_strips_punctuation_from_both_token_edges`.
+fn clean_token(raw: &str) -> &str {
+    raw.trim().trim_matches(TOKEN_EDGE_PUNCT)
 }
 
 #[cfg(test)]
@@ -1033,6 +1060,58 @@ mod tests {
         }
     }
 
+    /// Why: `first_token` trimmed only a TRAILING run while its doc promised it
+    /// stripped the leading one, so an entity quoted the way drawer content
+    /// actually quotes things — markdown backticks, brackets, an opening
+    /// quote — entered the graph with the punctuation welded on: `` `redb ``
+    /// rather than `redb`. Two spellings of one entity are two nodes that never
+    /// join up.
+    /// What: pins the emitted strings. Both helpers strip punctuation from BOTH
+    /// edges, so the subject side (`last_token`) is covered too, and no emitted
+    /// token may retain an edge character.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_strips_punctuation_from_both_token_edges() {
+        let cases: &[(&str, (&str, &str, &str))] = &[
+            // Object side, markdown backticks — the common shape in drawers.
+            (
+                "trusty-memory uses `redb` for persistence",
+                ("trusty-memory", "uses", "redb"),
+            ),
+            // Object side, parenthesised.
+            (
+                "the daemon uses (tantivy) for search",
+                ("daemon", "uses", "tantivy"),
+            ),
+            // Subject side, opening quote with no closing one before the marker.
+            (
+                "he said \"rustc is a compiler for rust",
+                ("rustc", "is-a", "compiler"),
+            ),
+            // Object side, bold markdown.
+            (
+                "trusty-search depends on **trusty-common** for helpers",
+                ("trusty-search", "depends-on", "trusty-common"),
+            ),
+        ];
+        for (content, (s, p, o)) in cases {
+            let got = patterns_for(content);
+            let want = ((*s).to_string(), (*p).to_string(), (*o).to_string());
+            assert!(
+                got.contains(&want),
+                "content {content:?} must emit {want:?}, got {got:?}"
+            );
+            for (subject, _, object) in &got {
+                for tok in [subject, object] {
+                    assert!(
+                        !tok.starts_with(TOKEN_EDGE_PUNCT) && !tok.ends_with(TOKEN_EDGE_PUNCT),
+                        "emitted token {tok:?} still carries edge punctuation"
+                    );
+                }
+            }
+        }
+    }
+
     /// Why: a duplicated entry is dead weight and a sign the categories drifted
     /// apart during editing.
     /// What: every [`STOPWORDS`] entry appears exactly once and is already
@@ -1134,10 +1213,15 @@ mod tests {
     /// cannot reach the other two: `exhaustiveness`, `hard`, `squash` and
     /// `ancestor` are all ordinary content words, indistinguishable token-wise
     /// from the `rustc --is-a--> compiler` the extractor is supposed to keep.
-    /// What: pins that residue as CURRENT behaviour rather than leaving it
-    /// unstated — these two still extract. A future change that rejects them
-    /// (sentence-level context, head-noun selection) must delete this test on
-    /// purpose, not discover the gap by accident.
+    /// Rejecting them needs sentence-level context or head-noun selection,
+    /// which is a different change from this one.
+    ///
+    /// The owner has ruled that lexical filtering alone therefore does NOT
+    /// satisfy ADR-0038 precondition 3. This test is the standing record of
+    /// that open gate, tracked as its own issue — not a temporary note. Do not
+    /// delete it because it looks like it asserts a bug: it does, deliberately,
+    /// and the gate closes with the issue, not with this file.
+    /// What: pins the residue as CURRENT behaviour — these two still extract.
     /// Test: This test.
     #[test]
     fn lexical_filter_does_not_reach_the_two_content_word_regressions() {
