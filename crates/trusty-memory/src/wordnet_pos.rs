@@ -84,7 +84,7 @@ const fn data_start(bytes: &[u8]) -> usize {
 /// ASCII letters, which keeps code identifiers, paths, and hyphenated crate
 /// names off this path entirely.
 /// Test: `base_forms_cover_the_regular_inflections`,
-/// `base_forms_skip_non_words`.
+/// `base_forms_skip_non_words`, `es_and_s_are_ordered_by_the_sibilant_rule`.
 fn base_form_candidates(word: &str) -> Vec<String> {
     if word.len() < 3 || !word.bytes().all(|b| b.is_ascii_lowercase()) {
         return Vec::new();
@@ -98,13 +98,21 @@ fn base_form_candidates(word: &str) -> Vec<String> {
     if let Some(stem) = word.strip_suffix("ies") {
         push(format!("{stem}y"));
     }
-    if let Some(stem) = word.strip_suffix("es") {
+    // Both `-es` and `-s` fit a word ending in `es`, and whichever is probed
+    // first wins outright when its stem is also a WordNet word. Order therefore
+    // decides the answer, and English decides the order: `-es` is the suffix
+    // only after a sibilant. `attaches` -> `attach`, `passes` -> `pass`, but
+    // `notes` -> `note` and `sites` -> `site` (#5399). The loser stays in the
+    // list, so a stem that misses still falls through to the other reading.
+    let es_stem = word.strip_suffix("es");
+    let s_stem = word.strip_suffix('s').filter(|s| !s.ends_with('s'));
+    let (first, second) = if es_stem.is_some_and(ends_in_sibilant) {
+        (es_stem, s_stem)
+    } else {
+        (s_stem, es_stem)
+    };
+    for stem in [first, second].into_iter().flatten() {
         push(stem.to_string());
-    }
-    if let Some(stem) = word.strip_suffix('s') {
-        if !stem.ends_with('s') {
-            push(stem.to_string());
-        }
     }
     if let Some(stem) = word.strip_suffix("ing") {
         push(stem.to_string());
@@ -121,6 +129,25 @@ fn base_form_candidates(word: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether a stem ends in the sibilant that forces the `-es` spelling.
+///
+/// Why: this is the whole of the `-es` / `-s` disambiguation — English writes
+/// `-es` after a sibilant and a bare `-s` everywhere else, so a word ending in
+/// `es` whose `-es` stem is NOT a sibilant kept its own `e`.
+/// What: `ss`, `x`, `z`, `ch`, `sh`. A SINGLE final `s` is deliberately absent:
+/// `uses` and `passes` share the `-ses` surface, and the `-se` base (`use`,
+/// `case`, `release`) is the common one, so `-ses` takes the `-s` reading
+/// first. A genuine single-`s` base still resolves, because its `-s` stem is
+/// not a word and the probe falls through — `buses` -> `buse` (miss) -> `bus`.
+/// Test: `es_and_s_are_ordered_by_the_sibilant_rule`.
+fn ends_in_sibilant(stem: &str) -> bool {
+    stem.ends_with("ss")
+        || stem.ends_with('x')
+        || stem.ends_with('z')
+        || stem.ends_with("ch")
+        || stem.ends_with("sh")
 }
 
 /// Drop a doubled final consonant, so `runn` offers `run`.
@@ -429,6 +456,62 @@ mod tests {
         assert!(base_form_candidates("indexed").contains(&"index".to_string()));
         // A double-`s` ending is not a plural marker.
         assert!(!base_form_candidates("class").contains(&"clas".to_string()));
+    }
+
+    /// A plural of a word ending in `e` resolves to that word, not to the stem
+    /// left by chopping `es` off it.
+    ///
+    /// 🔴 DO NOT SIMPLIFY THIS BACK TO A FIXED ORDER. `-es` was
+    /// tried first unconditionally, so `notes` answered `not` (ADV) instead of
+    /// `note` (NOUN|VERB) and `sites` answered `sit` (VERB) instead of `site`.
+    /// Both then failed the walk's `NOUN|ADJ` check and ended the phrase, so
+    /// `notes is a drawer` and `sites is a directory` yielded nothing at all.
+    /// Flipping the order unconditionally just moves the damage: `attaches`
+    /// would answer the noun `attache` rather than the verb `attach`, and
+    /// `passes` the adjective-only `passe` rather than `pass`. The sibilant is
+    /// what separates the two cases, so it is what the order keys on.
+    #[test]
+    fn es_and_s_are_ordered_by_the_sibilant_rule() {
+        let wn = WordNetPos::shipped();
+        // Stem keeps its `e`: the plural marker is a bare `-s`.
+        for (inflected, base) in [
+            ("notes", "note"),
+            ("sites", "site"),
+            ("writes", "write"),
+            ("rides", "ride"),
+            ("envelopes", "envelope"),
+            ("uses", "use"),
+            ("houses", "house"),
+            ("releases", "release"),
+            ("cases", "case"),
+        ] {
+            assert_eq!(
+                wn.mask(inflected),
+                wn.mask(base),
+                "{inflected} must resolve to {base}"
+            );
+        }
+        // Sibilant stem: `-es` is the marker, and the `e` is not the stem's.
+        for (inflected, base) in [
+            ("attaches", "attach"),
+            ("passes", "pass"),
+            ("boxes", "box"),
+            ("dishes", "dish"),
+            ("matches", "match"),
+            ("indexes", "index"),
+            ("classes", "class"),
+            ("buses", "bus"),
+        ] {
+            assert_eq!(
+                wn.mask(inflected),
+                wn.mask(base),
+                "{inflected} must resolve to {base}"
+            );
+        }
+        // The wrong reading is a real word in each of these, which is why the
+        // order decides the answer rather than merely the probe count.
+        assert_ne!(wn.mask("not"), wn.mask("note"));
+        assert_ne!(wn.mask("attach"), wn.mask("attache"));
     }
 
     /// Anything that is not a plain lower-case word is off this path entirely,

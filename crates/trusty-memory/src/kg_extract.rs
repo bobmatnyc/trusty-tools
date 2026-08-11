@@ -805,13 +805,6 @@ fn noun_phrase_run<'a>(
         if mask != 0 && mask & (wordnet_pos::NOUN | wordnet_pos::ADJ) == 0 {
             break;
         }
-        // #5399: an unknown token may OPEN a phrase — it is usually a proper
-        // name — but it may never join one that already has a head, because
-        // `phrase_head` takes the rightmost token and an unrelated identifier
-        // would displace the real noun (`a comment inside crates/…/tests.rs`).
-        if mask == 0 && !run.is_empty() {
-            break;
-        }
         run.push(tok);
         idx += 1;
         if closes {
@@ -1860,6 +1853,10 @@ mod wordnet_eval {
 
     /// An unknown token may OPEN a phrase but never joins one that already has
     /// a head — against `8402bd8b` this asserted the whole file path as a type.
+    ///
+    /// The closed-class `inside` is what stops the run here: it is a
+    /// preposition, so the phrase ends before the path regardless of whether
+    /// WordNet has heard of the path.
     #[test]
     fn an_unknown_token_does_not_displace_an_established_head() {
         assert_one(
@@ -1867,6 +1864,46 @@ mod wordnet_eval {
             "tree",
             "is-a",
             "comment",
+        );
+    }
+
+    /// A plural subject survives, including one whose singular ends in `e`.
+    ///
+    /// Both of these yielded a triple at `8402bd8b` and nothing at `ba579925`:
+    /// `base_form_candidates` chopped `es` before `s`, so `notes` resolved to
+    /// the adverb `not` and `sites` to the verb `sit`, and a verb-or-adverb
+    /// token ends the phrase. The sibilant rule in
+    /// [`crate::wordnet_pos::base_form_candidates`] is what restores them.
+    #[test]
+    fn a_plural_subject_whose_singular_ends_in_e_still_heads_its_phrase() {
+        assert_one("notes is a drawer", "notes", "is-a", "drawer");
+        assert_one("sites is a directory", "sites", "is-a", "directory");
+    }
+
+    /// An unknown identifier still heads its phrase when the token before it is
+    /// a modifier WordNet also lists as a noun.
+    ///
+    /// 🔴 DO NOT "fix" this by stopping the walk at an unknown token once the
+    /// run is non-empty. That rule was written and then removed here, measured
+    /// over 1,277 markdown files: it changed 156 heads, and 83 of those
+    /// replaced the real head with an adjective-capable modifier —
+    /// `tcode|is-a|local`, `persistence|is-a|redb` -> `single`,
+    /// `file|is-a|no-op` -> `true`. That is the #5399 defect itself arriving by
+    /// a different route, and [`phrase_head`]'s adjective-only skip cannot
+    /// catch it, because WordNet lists every one of those words as a noun as
+    /// well. It also dropped 76 triples outright, several of them real facts
+    /// (`server|uses|rocksdb`, `codebase|uses|redb`).
+    /// Test: this is the isolating test — reintroducing the rule fails it.
+    #[test]
+    fn an_unknown_token_heads_its_phrase_over_an_adjective_capable_modifier() {
+        // `local` is NOUN|ADJ, so it passes both the POS check and the
+        // adjective-only skip; only walking on to `app` finds the real head.
+        assert_one("tcode is a local app", "tcode", "is-a", "app");
+        assert_one(
+            "persistence is a single redb",
+            "persistence",
+            "is-a",
+            "redb",
         );
     }
 
@@ -1990,11 +2027,14 @@ mod wordnet_eval {
     /// `running` is NOUN|ADJ and `clearing` is NOUN, so no base-form retry
     /// fires and both read as ordinary nouns. Stopping the run at any `-ing`
     /// word whose base is a verb WOULD fix these two, and it was measured over
-    /// this repo's 1,276 markdown files before being rejected: it repairs ~25
-    /// participles and breaks ~18 legitimate heads (`mapping` -> `field`,
-    /// `warning` -> `error`, `binding`, `indexing`, `tooling`). Telling the two
-    /// apart is syntax, not lexical membership, so it needs a tagger rather
-    /// than a wider suffix table.
+    /// this repo's markdown before being rejected. The count first recorded
+    /// here — "repairs ~25, breaks ~18" — was wrong and flattered the decision;
+    /// the break side is the larger one. Over the 1,277-file corpus the rule
+    /// reaches 71 head positions ending in `-ing` (47 distinct), and most of
+    /// them are ordinary nouns it would destroy: `running`, `mapping`,
+    /// `warning`, `tooling`, `ranking`, `understanding`. Telling a
+    /// nominalisation from a participle is syntax, not lexical membership, so
+    /// it needs a tagger rather than a wider suffix table.
     #[test]
     fn surprising_a_gerund_noun_still_takes_the_head() {
         assert_one(

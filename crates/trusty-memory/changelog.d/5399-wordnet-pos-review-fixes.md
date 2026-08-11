@@ -13,9 +13,14 @@ Fixed
   `Each skill is a directory containing:` yields `skill --is-a--> directory`
   instead of `containing`. Plurals keep their noun sense, so `parsers` is still
   a valid head (#5399).
-- An unknown token may open a noun phrase but no longer joins one that already
-  has a head, so a file path or code identifier cannot displace the real noun:
-  `tree is a comment inside crates/…/tests.rs` yields `comment` (#5399).
 - `inside` and `outside` join the closed-class preposition list; WordNet records
   both as nouns, so without it they passed the part-of-speech check and
-  continued a phrase they actually close (#5399).
+  continued a phrase they actually close. This is what ends the phrase in
+  `tree is a comment inside crates/…/tests.rs`, which yields `comment` (#5399).
+- A plural of a word ending in `e` resolves to that word rather than to the stem
+  left by chopping `es` off it. `-es` was tried unconditionally before `-s`, so
+  `notes` answered the adverb `not` and `sites` the verb `sit`, both of which
+  end a noun phrase — `notes is a drawer` and `sites is a directory` yielded
+  nothing at all. The order now follows English spelling: `-es` first only when
+  the stem ends in a sibilant, so `attaches` still answers `attach` and not the
+  noun `attache` (#5399).
