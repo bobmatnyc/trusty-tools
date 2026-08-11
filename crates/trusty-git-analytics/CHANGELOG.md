@@ -6,6 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.16.0] — 2026-08-11
+
+### Added
+
+- Agentic detection reads operator-supplied markers from a YAML file, so a target
+  org's house footer is detectable without a code change or a tga release (#5414).
+  The path comes from `TGA_AI_MARKERS`, defaulting to `~/.config/tga/ai-markers.yaml`;
+  each entry is a `tool` label, a `mode` (`full_agentic` / `ide_assisted`), a `scope`
+  (`trailer` / `message` / `email`), and a `regex` pattern.
+  - New public module `collect::ai_marker_config` (`MarkerConfig`, `MarkerSpec`,
+    `MarkerMode`, `MarkerScope`, `MarkerConfigError`, `marker_file_path`). Deliberately
+    a separate type rather than a field on `Config`, which would have forced a major bump.
+  - The shipped markers are scanned to completion first, and operator markers are
+    consulted only for a commit they left unmarked. An operator marker can therefore
+    classify a commit the shipped set missed, and can do nothing else to one it already
+    catches — including a `full_agentic` operator entry against an `ide_assisted`
+    builtin verdict, which appending alone did not prevent.
+  - A marker file that cannot be read, parsed, or compiled — or that declares more than
+    256 markers — is rejected whole, logged at `warn!`, and named in
+    `detection_disclosure()`; the run continues on the builtin markers.
+  - `detection_disclosure()` now states how many operator markers were active and where
+    they came from, so an `agentic_pct` figure can be read against the run that produced it.
+
+### Fixed
+
+- The `openhands` trailer marker no longer classifies a human at the vendor as an
+  agent. `\bopenhands\b` matched `Co-authored-by: Simon Rosenberg <simon@openhands.dev>`;
+  it now keys on `openhands@all-hands.dev`, `openhands-release-bot`, or `OpenHands Bot`.
+  Found by running the marker against a real `All-Hands-AI/OpenHands` clone rather than
+  fixtures (#5414). Of the 51 commits the narrower pattern stops matching, 50 carry only
+  a human contributor's `@openhands.dev` address; one (`06cc1ef2`) carries
+  `Co-authored-by: OH <openhands@example.com>`, which is ambiguous and is left uncaught
+  rather than anchored on a reserved placeholder domain.
+- The `trusty-mpm` and `Claude Code` footer markers now match the markdown-link form
+  (`Generated with [trusty-mpm](...)`), which 14 commits in this repo's own history use
+  and the #5249 patterns missed. Catch rate on trusty-tools' history rises from
+  91.03% to 91.35%.
+
 ## [2.15.0] — 2026-08-11
 
 ### Fixed
