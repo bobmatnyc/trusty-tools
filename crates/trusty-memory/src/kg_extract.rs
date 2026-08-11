@@ -455,6 +455,11 @@ const STOPWORDS: &[&str] = &[
     "along",
     "past",
     "throughout",
+    // #5399: WordNet lists these two as nouns ("the inside of the box"), so
+    // without the closed-class list they pass the POS check and continue a
+    // noun phrase they actually close.
+    "inside",
+    "outside",
     // Conjunctions and subordinators.
     "and",
     "or",
@@ -662,9 +667,17 @@ fn extract_patterns(content: &str, pos: &WordNetPos) -> Vec<(String, String, Str
     for (predicate, markers) in PATTERN_TABLE {
         for marker in *markers {
             if let Some(idx) = lower.find(marker) {
-                let left = lower[..idx].trim();
+                // #5399: production hands this whole multi-line drawer bodies
+                // (`auto_extract_and_assert`, `kg_rebuild`), so an unbounded
+                // walk joins two unrelated sentences across a line break. A
+                // newline closes the phrase exactly as a period does.
+                let line_start = lower[..idx].rfind('\n').map_or(0, |p| p + 1);
+                let left = lower[line_start..idx].trim();
                 let right_start = idx + marker.len();
-                let right = lower[right_start..].trim();
+                let line_end = lower[right_start..]
+                    .find('\n')
+                    .map_or(lower.len(), |p| right_start + p);
+                let right = lower[right_start..line_end].trim();
                 // #4678: a marker hit is not evidence of two entities — reject
                 // the whole triple when either side is a function word or too
                 // short, never half of it. #5399: and take the HEAD of each
@@ -792,14 +805,20 @@ fn noun_phrase_run<'a>(
         if mask != 0 && mask & (wordnet_pos::NOUN | wordnet_pos::ADJ) == 0 {
             break;
         }
+        // #5399: an unknown token may OPEN a phrase — it is usually a proper
+        // name — but it may never join one that already has a head, because
+        // `phrase_head` takes the rightmost token and an unrelated identifier
+        // would displace the real noun (`a comment inside crates/…/tests.rs`).
+        if mask == 0 && !run.is_empty() {
+            break;
+        }
         run.push(tok);
         idx += 1;
         if closes {
             terminated = true;
             break;
         }
-        // An unknown token is almost always a proper name in this corpus, and a
-        // name heads its phrase rather than modifying the next word.
+        // A name heads its phrase rather than modifying the next word.
         if mask == 0 {
             break;
         }
@@ -1751,6 +1770,106 @@ mod wordnet_eval {
         assert_none("we shipped tantivy. robust is a compiler");
     }
 
+    // ================= multi-line bodies, the production shape ==============
+    // 🔴 Every other fixture in this module is a SINGLE LINE, and so is the
+    // corpus harness (`examples/kg_dump.rs` reads one line per extraction).
+    // Production is not: `tools::helpers::auto_extract_and_assert` and
+    // `commands::kg_rebuild::rebuild_one` both pass a whole drawer body. The
+    // walk had no newline boundary, so it ran off the end of its own sentence
+    // and took a head from the next line — a correct-to-wrong regression that
+    // no single-line fixture could see. Use `--whole-file` when measuring.
+
+    /// A bare newline closes the phrase exactly as a period does.
+    ///
+    /// Against `8402bd8b` every row here produced the token from line two:
+    /// `builds`, `builds`, `runs`, `sled`.
+    #[test]
+    fn the_object_walk_stops_at_a_line_break() {
+        assert_one(
+            "trusty-search is a daemon\ncargo builds it",
+            "trusty-search",
+            "is-a",
+            "daemon",
+        );
+        assert_one(
+            "rustc is a compiler\ncargo builds it",
+            "rustc",
+            "is-a",
+            "compiler",
+        );
+        assert_one(
+            "the parser is a tool\ncargo runs fine",
+            "parser",
+            "is-a",
+            "tool",
+        );
+        assert_one(
+            "redb is a database\nsled is another one",
+            "redb",
+            "is-a",
+            "database",
+        );
+    }
+
+    /// The subject side takes the same boundary: a preceding line is a
+    /// previous sentence, whether or not it ended in punctuation.
+    #[test]
+    fn the_subject_walk_stops_at_a_line_break() {
+        assert_one(
+            "we shipped tantivy\nrobust compilers are a myth\nredb is a database",
+            "redb",
+            "is-a",
+            "database",
+        );
+    }
+
+    /// A trailing period already worked; it must keep working.
+    #[test]
+    fn a_terminated_line_is_unaffected_by_the_newline_rule() {
+        assert_one(
+            "trusty-search is a daemon.\ncargo builds it",
+            "trusty-search",
+            "is-a",
+            "daemon",
+        );
+    }
+
+    // ============ an inflected or unknown token must not take the head ======
+
+    /// A participle is not a noun, and WordNet indexes only its base form.
+    ///
+    /// Against `8402bd8b` `containing` was unknown, and "unknown" meant
+    /// "eligible to head a phrase", so this asserted
+    /// `skill --is-a--> containing`. Resolving `containing` to `contain`
+    /// (VERB-only) ends the phrase before it, as it always should have.
+    #[test]
+    fn a_participle_does_not_head_the_phrase() {
+        assert_one(
+            "each skill is a directory containing:",
+            "skill",
+            "is-a",
+            "directory",
+        );
+        assert_one(
+            "trusty-search is a daemon parsing every file",
+            "trusty-search",
+            "is-a",
+            "daemon",
+        );
+    }
+
+    /// An unknown token may OPEN a phrase but never joins one that already has
+    /// a head — against `8402bd8b` this asserted the whole file path as a type.
+    #[test]
+    fn an_unknown_token_does_not_displace_an_established_head() {
+        assert_one(
+            "tree is a comment inside crates/trusty-search/src/allowlist/tests.rs",
+            "tree",
+            "is-a",
+            "comment",
+        );
+    }
+
     #[test]
     fn stops_the_noun_phrase_run_at_a_comma() {
         assert_one(
@@ -1842,13 +1961,54 @@ mod wordnet_eval {
         );
     }
 
-    /// WordNet indexes base forms only, so every inflected word takes the
-    /// fail-open path rather than the POS-checked one.
+    /// A regular inflection is POS-checked through its base form.
+    ///
+    /// 🔴 THIS EXPECTATION WAS CHANGED, AND THE OLD ONE DESCRIBED A DEFECT.
+    /// It used to assert `mask("parsers") == 0` and file that under "known
+    /// limitations, benign" — WordNet indexes base forms, so an inflected word
+    /// simply took the fail-open path. That reading missed what fail-open
+    /// MEANS inside the walk: unknown is what makes a token eligible to head a
+    /// phrase, so every participle became a candidate head and won the slot by
+    /// sitting rightmost. `a directory containing:` asserted `containing` as
+    /// the type. So the limitation was not benign, and the fix is to resolve
+    /// the base form rather than to refuse unknown tokens — refusing them
+    /// outright would take `parsers` with it, and `parsers` is a real head.
     #[test]
-    fn surprising_inflected_forms_are_unknown_to_wordnet() {
+    fn inflected_forms_resolve_through_their_base_form() {
         let wn = WordNetPos::shipped();
-        assert_eq!(wn.mask("parsers"), 0, "WordNet indexes base forms only");
+        assert!(
+            wn.is_noun("parsers"),
+            "a regular plural keeps its noun sense"
+        );
+        assert_eq!(wn.mask("containing") & wordnet_pos::NOUN, 0);
         assert_one("librs is a fast parsers", "librs", "is-a", "parsers");
+    }
+
+    /// A gerund that WordNet lists as a noun in its own right still takes the
+    /// head, because membership cannot tell a nominalisation from a participle.
+    ///
+    /// `running` is NOUN|ADJ and `clearing` is NOUN, so no base-form retry
+    /// fires and both read as ordinary nouns. Stopping the run at any `-ing`
+    /// word whose base is a verb WOULD fix these two, and it was measured over
+    /// this repo's 1,276 markdown files before being rejected: it repairs ~25
+    /// participles and breaks ~18 legitimate heads (`mapping` -> `field`,
+    /// `warning` -> `error`, `binding`, `indexing`, `tooling`). Telling the two
+    /// apart is syntax, not lexical membership, so it needs a tagger rather
+    /// than a wider suffix table.
+    #[test]
+    fn surprising_a_gerund_noun_still_takes_the_head() {
+        assert_one(
+            "session creation depends on daemon running",
+            "creation",
+            "depends-on",
+            "running",
+        );
+        assert_one(
+            "budget_tokens is an estimate clearing a budget",
+            "budget_tokens",
+            "is-a",
+            "clearing",
+        );
     }
 
     /// Two unknown tokens in a row: the run stops at the first, so the head is

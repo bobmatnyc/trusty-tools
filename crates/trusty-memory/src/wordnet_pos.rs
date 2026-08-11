@@ -70,6 +70,69 @@ const fn data_start(bytes: &[u8]) -> usize {
     bytes.len()
 }
 
+/// Regular-inflection base forms to try when a word is not in the table.
+///
+/// Why: this is deliberately a suffix table and not a stemmer. A stemmer
+/// over-generates (`caching` -> `cach`) and its extra reach buys nothing here:
+/// the only question asked of the result is which POS bits the base form
+/// carries, and a wrong stem simply misses the table and falls back to
+/// "unknown" — the behaviour that already existed. Six rules cover the
+/// inflections that appear in drawer prose.
+/// What: yields candidates in most-likely-first order for plural `-s` / `-es` /
+/// `-ies`, participial `-ing` (bare, restored `-e`, and undoubled final
+/// consonant), and past `-ed`. Returns nothing for a word that is not entirely
+/// ASCII letters, which keeps code identifiers, paths, and hyphenated crate
+/// names off this path entirely.
+/// Test: `base_forms_cover_the_regular_inflections`,
+/// `base_forms_skip_non_words`.
+fn base_form_candidates(word: &str) -> Vec<String> {
+    if word.len() < 3 || !word.bytes().all(|b| b.is_ascii_lowercase()) {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        if s.len() >= 2 && !out.contains(&s) {
+            out.push(s);
+        }
+    };
+    if let Some(stem) = word.strip_suffix("ies") {
+        push(format!("{stem}y"));
+    }
+    if let Some(stem) = word.strip_suffix("es") {
+        push(stem.to_string());
+    }
+    if let Some(stem) = word.strip_suffix('s') {
+        if !stem.ends_with('s') {
+            push(stem.to_string());
+        }
+    }
+    if let Some(stem) = word.strip_suffix("ing") {
+        push(stem.to_string());
+        push(format!("{stem}e"));
+        if let Some(undoubled) = undouble(stem) {
+            push(undoubled);
+        }
+    }
+    if let Some(stem) = word.strip_suffix("ed") {
+        push(stem.to_string());
+        push(format!("{stem}e"));
+        if let Some(undoubled) = undouble(stem) {
+            push(undoubled);
+        }
+    }
+    out
+}
+
+/// Drop a doubled final consonant, so `runn` offers `run`.
+fn undouble(stem: &str) -> Option<String> {
+    let mut chars = stem.chars().rev();
+    let last = chars.next()?;
+    if last != chars.next()? {
+        return None;
+    }
+    Some(stem[..stem.len() - last.len_utf8()].to_string())
+}
+
 /// Lemma-to-POS membership lookup.
 ///
 /// Why: #5399 rejected a process-wide `OnceLock<HashMap>` — CLAUDE.md permits
@@ -131,15 +194,44 @@ impl WordNetPos {
     /// What: probes as given first — the extractor lower-cases its content up
     /// front, so that path allocates nothing — and retries lower-cased only
     /// when the input actually contains an upper-case character. WordNet index
-    /// lemmas are all lower-case.
-    /// Test: `mask_returns_zero_for_unknown_words`, `mask_is_case_insensitive`.
+    /// lemmas are all lower-case. A final retry strips a regular inflection
+    /// ([`base_form_candidates`]), which is what lets `containing` read as the
+    /// verb it is instead of as an unknown word eligible to head a phrase.
+    /// Test: `mask_returns_zero_for_unknown_words`, `mask_is_case_insensitive`,
+    /// `mask_resolves_regular_inflections_to_their_base_form`.
     pub fn mask(&self, word: &str) -> u8 {
         if let Some(m) = self.lookup(word.as_bytes()) {
             return m;
         }
         if word.chars().any(char::is_uppercase) {
             let lowered = word.to_lowercase();
-            return self.lookup(lowered.as_bytes()).unwrap_or(0);
+            if let Some(m) = self.lookup(lowered.as_bytes()) {
+                return m;
+            }
+            return self.inflected_mask(&lowered);
+        }
+        self.inflected_mask(word)
+    }
+
+    /// POS bitmask for `word`'s base form, or `0` when no regular inflection of
+    /// it is in the table either.
+    ///
+    /// Why: WordNet indexes base forms only, so every `-s` / `-ing` / `-ed`
+    /// token reads as unknown. #5399 made "unknown" mean "eligible to head a
+    /// noun phrase", which turned each participle into a false head — `a
+    /// directory containing:` asserted `containing` as the type. Recovering the
+    /// base form makes `containing` resolve to `contain`, a verb, so the phrase
+    /// correctly ends before it.
+    /// What: probes each candidate from [`base_form_candidates`] in order and
+    /// returns the first hit. Every miss returns `0`, so the fail-open contract
+    /// of [`Self::mask`] is unchanged.
+    /// Test: `mask_resolves_regular_inflections_to_their_base_form`,
+    /// `mask_leaves_non_words_and_names_unknown`.
+    fn inflected_mask(&self, word: &str) -> u8 {
+        for candidate in base_form_candidates(word) {
+            if let Some(m) = self.lookup(candidate.as_bytes()) {
+                return m;
+            }
         }
         0
     }
@@ -259,8 +351,95 @@ mod tests {
     fn lookup_misses_outside_the_table_range() {
         let wn = WordNetPos::from_table(TINY);
         // Before the first record, after the last, and in the gaps between.
-        for w in ["aardvark", "zulu", "carrot", "epsilon", "alph", "alphas"] {
+        // `alphas` USED TO SIT IN THIS LIST as a near-miss of `alpha`, and that
+        // expectation is now wrong rather than merely stale: `mask` resolves a
+        // regular plural to its base form, so `alphas` legitimately answers
+        // `alpha`. The near-miss this list still needs is a PREFIX, which no
+        // suffix rule can reach — `alph` covers it, and the plural moved to
+        // `mask_resolves_regular_inflections_to_their_base_form`.
+        for w in ["aardvark", "zulu", "carrot", "epsilon", "alph"] {
             assert_eq!(wn.mask(w), 0, "{w} should not be found");
+        }
+    }
+
+    /// The plural that used to read as a miss now answers its singular.
+    #[test]
+    fn lookup_retries_an_inflected_form() {
+        let wn = WordNetPos::from_table(TINY);
+        assert_eq!(wn.mask("alphas"), wn.mask("alpha"));
+        assert_eq!(wn.mask("alph"), 0, "a prefix is still a miss");
+    }
+
+    /// Why: this is the whole point of the retry — a participle must read as
+    /// the verb it inflects, so the noun-phrase walk ends before it instead of
+    /// treating it as an unknown word eligible to head the phrase.
+    #[test]
+    fn mask_resolves_regular_inflections_to_their_base_form() {
+        let wn = WordNetPos::shipped();
+        // `containing` is absent; `contain` is VERB-only, which is what stops
+        // the run in `a directory containing:`.
+        assert_eq!(wn.mask("containing"), wn.mask("contain"));
+        assert_eq!(
+            wn.mask("containing") & NOUN,
+            0,
+            "a participle is not a noun"
+        );
+        // -ing with a restored `e`, and with an undoubled final consonant.
+        // Both words are genuinely absent from the table; many other `-ing`
+        // forms (`mapping`, `shipping`, `running`) are WordNet nouns in their
+        // own right, so the direct probe answers and the retry never fires.
+        assert_eq!(wn.mask("parsing"), wn.mask("parse"));
+        assert_eq!(wn.mask("committing"), wn.mask("commit"));
+        // Plurals keep an unknown-looking token eligible as a head: this is the
+        // case a bare "refuse unknown tokens" rule would have broken.
+        assert_eq!(wn.mask("parsers"), wn.mask("parser"));
+        assert!(wn.is_noun("parsers"));
+        assert_eq!(wn.mask("libraries"), wn.mask("library"));
+        assert_eq!(wn.mask("indexed"), wn.mask("index"));
+    }
+
+    /// Why: the retry must not start inventing words. Fail-open means an
+    /// unrecognised token stays mask `0`, so widening the probe set must not
+    /// widen what counts as KNOWN for names, paths, or code identifiers.
+    #[test]
+    fn mask_leaves_non_words_and_names_unknown() {
+        let wn = WordNetPos::shipped();
+        for w in [
+            "rustc",
+            "librs",
+            "tantivy",
+            "redb",
+            "trusty-memory",
+            "crates/trusty-search/src/allowlist/tests.rs",
+            "budget_tokens",
+        ] {
+            assert_eq!(wn.mask(w), 0, "{w} must stay unknown");
+            assert!(!wn.is_adjective_only(w), "{w} must fail open");
+        }
+    }
+
+    #[test]
+    fn base_forms_cover_the_regular_inflections() {
+        assert!(base_form_candidates("parsers").contains(&"parser".to_string()));
+        assert!(base_form_candidates("libraries").contains(&"library".to_string()));
+        assert!(base_form_candidates("boxes").contains(&"box".to_string()));
+        assert!(base_form_candidates("containing").contains(&"contain".to_string()));
+        assert!(base_form_candidates("parsing").contains(&"parse".to_string()));
+        assert!(base_form_candidates("stopping").contains(&"stop".to_string()));
+        assert!(base_form_candidates("indexed").contains(&"index".to_string()));
+        // A double-`s` ending is not a plural marker.
+        assert!(!base_form_candidates("class").contains(&"clas".to_string()));
+    }
+
+    /// Anything that is not a plain lower-case word is off this path entirely,
+    /// so a path or an identifier never probes the table at all.
+    #[test]
+    fn base_forms_skip_non_words() {
+        for w in ["trusty-memory", "budget_tokens", "src/main.rs", "c#", "ab"] {
+            assert!(
+                base_form_candidates(w).is_empty(),
+                "{w} should generate no candidates"
+            );
         }
     }
 
@@ -291,15 +470,23 @@ mod tests {
     /// would quietly disable the whole filter.
     /// What: walks every data line once, asserting byte-ascending lemma order,
     /// a parseable non-zero mask, and no multi-word lemma.
+    ///
+    /// 🔴 This used to `continue` past an empty line, and `lemma_count` filters
+    /// them out, so a stray blank line satisfied BOTH guards while silently
+    /// breaking lookups: `lookup` bisects onto that line, finds no tab, and the
+    /// `?` aborts the whole probe — every needle whose search path crosses it
+    /// reads as "WordNet does not know this word". A blank line is therefore a
+    /// table defect, not something to skip, and this asserts against it.
     #[test]
     fn the_shipped_table_is_sorted_and_parseable() {
         let wn = WordNetPos::shipped();
         let mut prev: &str = "";
         let mut n = 0usize;
         for line in wn.table[wn.data_start..].lines() {
-            if line.is_empty() {
-                continue;
-            }
+            assert!(
+                !line.is_empty(),
+                "blank data line after {prev:?} — it aborts any lookup that bisects onto it"
+            );
             let (lemma, mask) = line.split_once('\t').expect("every data line has a tab");
             assert!(
                 lemma.as_bytes() > prev.as_bytes(),
