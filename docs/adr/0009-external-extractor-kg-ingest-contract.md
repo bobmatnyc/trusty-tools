@@ -1,6 +1,9 @@
 # 0009. External-Extractor KG Ingest Contract — Durable Contributed Overlay in trusty-search
 
-- **Status:** Accepted (2026-06-11 — maintainer acceptance in [#819](https://github.com/bobmatnyc/trusty-tools/issues/819); doc applied to main as `583d389`)
+- **Status:** Accepted
+- **Acceptance:** 2026-06-11 maintainer acceptance in
+  [#819](https://github.com/bobmatnyc/trusty-tools/issues/819); applied to main
+  as `583d389`.
 - **Date:** 2026-06-10
 - **Scope:** Workspace-wide (`trusty-search` storage + query surface, `trusty-analyze` spillover + enrichment bridge, external extractors)
 - **Supersedes / Superseded by:** —

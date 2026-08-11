@@ -57,3 +57,6 @@ jobs:
 
       - name: Run SLD linter (default / grandfathering mode)
         run: bash scripts/check_sld.sh
+
+      - name: Check ADR corpus consistency
+        run: bash scripts/check_adr.sh

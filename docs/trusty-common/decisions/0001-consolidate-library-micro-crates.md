@@ -1,9 +1,11 @@
 # 0001. Consolidate library micro-crates into one feature-gated crate
 
-- **Status:** Accepted
+- **Status:** Amended by [workspace ADR-0040](../../adr/0040-trusty-mcp-services-absorbs-trusty-gworkspace.md)
 - **Date:** 2026-05-29
 - **Scope:** Crate `trusty-common`
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** Workspace ADR-0040 extracts the MCP protocol
+  primitives into `trusty-mcp`; every other consolidation decision remains in
+  force.
 
 ## Context
 
