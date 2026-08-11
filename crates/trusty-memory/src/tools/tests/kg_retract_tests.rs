@@ -151,3 +151,69 @@ async fn dispatch_kg_retract_triple_requires_object() {
         "unexpected error: {err}"
     );
 }
+
+/// Why: every other test in this module retracts under `works_at`, which
+/// `is_hot_predicate` rejects — so the prompt-cache-rebuild branch in
+/// `handle_kg_retract_triple` (`kg_ops.rs:128-134`) never actually runs in
+/// this suite. The branch is correct as written, but nothing stops a later
+/// edit from inverting the condition or dropping the call while every
+/// existing test stays green, and the hazard is exactly the one the
+/// handler's own doc names: a retracted Tier S fact kept being injected
+/// into every session's prompt.
+/// What: asserts a fact under the hot predicate `is_fact`, confirms
+/// `get_prompt_context` surfaces it, retracts it, and confirms a second
+/// `get_prompt_context` call no longer contains the retracted object —
+/// which only happens if the retraction path rebuilds the cache.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_retract_triple_rebuilds_prompt_cache_for_hot_predicate() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "hot"}))
+        .await
+        .expect("palace_create");
+
+    let _ = dispatch_tool(
+        &state,
+        "kg_assert",
+        json!({
+            "palace": "hot",
+            "subject": "msrv-rule",
+            "predicate": "is_fact",
+            "object": "MSRV is 1.94",
+        }),
+    )
+    .await
+    .expect("kg_assert");
+
+    let before = dispatch_tool(&state, "get_prompt_context", json!({}))
+        .await
+        .expect("get_prompt_context after assert");
+    let before_text = before.as_str().expect("string body");
+    assert!(
+        before_text.contains("MSRV is 1.94"),
+        "hot fact should be in the prompt cache before retraction: {before_text}"
+    );
+
+    let retracted = dispatch_tool(
+        &state,
+        "kg_retract_triple",
+        json!({
+            "palace": "hot",
+            "subject": "msrv-rule",
+            "predicate": "is_fact",
+            "object": "MSRV is 1.94",
+        }),
+    )
+    .await
+    .expect("kg_retract_triple");
+    assert_eq!(retracted["closed"], 1);
+
+    let after = dispatch_tool(&state, "get_prompt_context", json!({}))
+        .await
+        .expect("get_prompt_context after retract");
+    let after_text = after.as_str().expect("string body");
+    assert!(
+        !after_text.contains("MSRV is 1.94"),
+        "retracted hot fact must not still be injected into the prompt: {after_text}"
+    );
+}

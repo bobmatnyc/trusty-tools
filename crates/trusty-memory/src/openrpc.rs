@@ -8,7 +8,7 @@
 //! discovery surface; no new transport is needed.
 //!
 //! What: A thin wrapper around `trusty_mcp_core::openrpc::discover_response`
-//! that supplies the 11 trusty-memory tools and the per-tool scope mapping.
+//! that supplies the trusty-memory tools and the per-tool scope mapping.
 //! Read-only tools (lookups, queries, info) require `memory.read`; tools
 //! that mutate palace state require `memory.write`.
 //!

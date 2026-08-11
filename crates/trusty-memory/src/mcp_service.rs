@@ -15,9 +15,9 @@
 //! functions guarantees the host-merged manifest and the standalone one
 //! stay byte-identical.
 //!
-//! Test: `tests` below assert the tool count (44), the name string, and
-//! that the read/write scope split matches what `scopes_for_tool` returns
-//! for representative tools (`memory_recall` → `memory.read`,
+//! Test: `tests` below assert the tool count, the name string, and that
+//! the read/write scope split matches what `scopes_for_tool` returns for
+//! representative tools (`memory_recall` → `memory.read`,
 //! `memory_remember` → `memory.write`).
 
 use trusty_common::mcp::ServiceDescriptor;
@@ -25,7 +25,7 @@ use trusty_common::mcp::ServiceDescriptor;
 use crate::openrpc::scopes_for_tool;
 use crate::tools::tool_definitions_with;
 
-/// `ServiceDescriptor` impl that advertises this crate's 44 memory tools.
+/// `ServiceDescriptor` impl that advertises this crate's memory tools.
 ///
 /// Why: Lets trusty-agents link trusty-memory-mcp directly and include its
 /// tools in a unified `rpc.discover` document without bespoke glue code.
