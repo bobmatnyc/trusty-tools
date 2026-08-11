@@ -296,6 +296,102 @@ pub fn add_server(config_dir: &Path, name: &str, entry: Value) -> Result<bool> {
     Ok(true)
 }
 
+/// Seed the framework builtin MCP servers into the user-scope `mcpServers`
+/// map of `<config_dir>/.claude.json`, **inserting only the names that are
+/// absent**.
+///
+/// Why (#4181, [ADR-0042]): a server declared in this map connects with no
+/// approval prompt, while the same server declared in a workspace `.mcp.json`
+/// comes up `⏸ Pending approval`. ADR-0042 moves the framework builtins' one
+/// declaration here so it is written once and persists, instead of being
+/// re-injected into every ephemeral worktree. That declaration must be seeded
+/// on a path that runs before every spawn, which is
+/// [`crate::core::standalone::global_config::ensure_global_config_dir`].
+///
+/// What: reads `<config_dir>/.claude.json`, and for each name in
+/// [`BUILTIN_MANAGED_MCP_SERVERS`] that the top-level `mcpServers` map does
+/// NOT already contain, inserts [`builtin_server_entry`]'s canonical entry.
+/// Returns the names actually inserted; an empty vector means nothing was
+/// written. Holds [`crate::core::claude_json_guard::lock`] across the whole
+/// read-mutate-write cycle, because the daemon runs other `.claude.json`
+/// seeders concurrently (#4072).
+///
+/// **Insert-if-absent is the contract, not an optimisation.** An entry already
+/// under a builtin name is the operator's — `tm mcp add` is the supported edit
+/// path (ADR-0042 decision item 3) and must win. This function never
+/// overwrites, never reorders, and never removes.
+///
+/// **It also never quarantines.** Unlike [`read_config`], a `.claude.json`
+/// that is malformed, or whose `mcpServers` is not an object, makes this
+/// function warn and return `Ok(vec![])` with the file untouched — no rename,
+/// no write. Seeding runs on every launch now, so a quarantine here would turn
+/// a convenience into a per-launch data-loss event against a file that also
+/// holds OAuth state. `standalone::trust_seed::preseed_managed_trust` still
+/// owns that decision (and still logs it at `ERROR` with a timestamped
+/// quarantine path, #4206); once it has replaced the unparseable file, the
+/// next launch seeds normally.
+///
+/// [ADR-0042]: ../../../../docs/adr/0042-mcp-configuration-is-static-and-persistent.md
+///
+/// Test: `seed_builtin_servers_inserts_every_builtin_when_absent`,
+/// `seed_builtin_servers_never_overwrites_an_existing_entry`,
+/// `seed_builtin_servers_is_idempotent`,
+/// `seed_builtin_servers_preserves_unrelated_keys`,
+/// `seed_builtin_servers_declines_a_malformed_config_without_quarantining`,
+/// `seed_builtin_servers_declines_a_non_object_mcp_servers_map`,
+/// `seed_builtin_servers_creates_the_config_when_the_dir_is_absent`,
+/// `seed_builtin_servers_errors_when_claude_json_is_unreadable`,
+/// `seeding_and_workspace_injection_coexist_without_clobbering`.
+pub fn seed_builtin_servers(config_dir: &Path) -> Result<Vec<String>> {
+    // #4181: the guard spans read → mutate → write, not just the write.
+    let _guard = crate::core::claude_json_guard::lock();
+
+    let path = config_dir.join(CLAUDE_JSON);
+    let Some(mut config) = read_config_for_seeding(&path)? else {
+        return Ok(Vec::new());
+    };
+
+    let root = config
+        .as_object_mut()
+        .expect("read_config_for_seeding only yields objects");
+
+    // #4181: a non-object `mcpServers` is operator state this function is not
+    // entitled to destroy — `mcp_servers_mut` would replace it with `{}`.
+    if let Some(existing) = root.get("mcpServers")
+        && !existing.is_object()
+    {
+        tracing::warn!(
+            "skipping builtin MCP seed: {}'s mcpServers is not an object — leaving it untouched",
+            path.display()
+        );
+        return Ok(Vec::new());
+    }
+
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .expect("mcpServers is an object — checked immediately above");
+
+    let mut seeded: Vec<String> = Vec::new();
+    for name in BUILTIN_MANAGED_MCP_SERVERS {
+        if servers.contains_key(*name) {
+            continue;
+        }
+        let Some(entry) = builtin_server_entry(name) else {
+            continue;
+        };
+        servers.insert((*name).to_string(), entry);
+        seeded.push((*name).to_string());
+    }
+
+    if seeded.is_empty() {
+        return Ok(Vec::new());
+    }
+    write(&path, &config)?;
+    Ok(seeded)
+}
+
 /// Remove a user-scope MCP server.
 ///
 /// Why: `tm mcp remove` drops a server the operator no longer wants injected
@@ -378,8 +474,16 @@ pub fn list_servers(config_dir: &Path) -> Result<Map<String, Value>> {
 /// repo's `.mcp.json` declares. (`session_launch::settings::preseed_workspace_trust`'s
 /// identical `.mcp.json`-trusting behavior for the interactive path predates
 /// this fix and was NOT in scope here — reported separately.)
+/// **Security (issue #4181, ADR-0042):** the `mcpServers` map this function
+/// unions is the same map [`seed_builtin_servers`] now writes the four
+/// builtins into, on every launch. Their keys are therefore SUBTRACTED from
+/// the registry half below — otherwise a seeded builtin would enter the
+/// approved set with no `_pinned` evidence at all, which is exactly the #3950
+/// state the four flags exist to prevent. A builtin's membership comes from
+/// its flag and nothing else.
 /// What: takes an already-parsed `.claude.json` value, collects the top-level
-/// `mcpServers` object keys, unions them with the two names in
+/// `mcpServers` object keys EXCEPT those in [`BUILTIN_MANAGED_MCP_SERVERS`],
+/// unions them with the two names in
 /// [`UNCONDITIONAL_BUILTIN_MCP_SERVERS`] (only the ones whose
 /// `trusty_mpm_pinned` / `trusty_review_pinned` flag is `true`) and
 /// [`CONDITIONAL_BUILTIN_MCP_SERVERS`] (only the names whose
@@ -435,7 +539,19 @@ pub fn managed_mcp_server_names(
         names.push(CONDITIONAL_BUILTIN_TRUSTY_SEARCH.to_string());
     }
     if let Some(servers) = config.get("mcpServers").and_then(Value::as_object) {
-        names.extend(servers.keys().cloned());
+        // #4181: a builtin name's membership is decided ONLY by its `_pinned`
+        // flag above. ADR-0042 seeds the builtins INTO this very map, so a
+        // wholesale union would re-admit a name whose force-overwrite failed
+        // this run — #3950's exploit, reopened by the seeding rather than by a
+        // code change to the trust derivation. Caught by
+        // `prepare_managed_config_excludes_builtins_when_mcp_json_write_fails`,
+        // which went red the moment seeding landed.
+        names.extend(
+            servers
+                .keys()
+                .filter(|name| !BUILTIN_MANAGED_MCP_SERVERS.contains(&name.as_str()))
+                .cloned(),
+        );
     }
     names.sort();
     names.dedup();
@@ -682,6 +798,53 @@ fn read_config(config_dir: &Path) -> Result<(PathBuf, Value)> {
                 ),
             }
             Ok((path, Value::Object(Map::new())))
+        }
+    }
+}
+
+/// Read `<config_dir>/.claude.json` for [`seed_builtin_servers`], never
+/// quarantining.
+///
+/// Why (#4181): [`read_config`] backs the operator-invoked `tm mcp` commands,
+/// where a malformed file must not permanently wedge the command and the
+/// operator is present to see the `ERROR` line. Seeding is neither — it runs
+/// unattended on every launch, so the same rename would destroy OAuth state as
+/// a side effect of a convenience. See [`seed_builtin_servers`]'s doc for why
+/// declining is the safe half of that trade.
+/// What: returns `Ok(Some(object))` for a missing file (an empty `{}`) or a
+/// well-formed JSON object; `Ok(None)` — after a warning — for a file that is
+/// malformed or is valid JSON but not an object; `Err` only for a real read
+/// error (permissions, a directory in the file's place).
+/// Test: `seed_builtin_servers_declines_a_malformed_config_without_quarantining`,
+/// `seed_builtin_servers_creates_the_config_when_the_dir_is_absent`,
+/// `seed_builtin_servers_errors_when_claude_json_is_unreadable`.
+fn read_config_for_seeding(path: &Path) -> Result<Option<Value>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(Value::Object(Map::new())));
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+
+    match serde_json::from_str::<Value>(&text) {
+        Ok(v) if v.is_object() => Ok(Some(v)),
+        Ok(_) => {
+            tracing::warn!(
+                "skipping builtin MCP seed: {} is valid JSON but not an object — \
+                 leaving it untouched",
+                path.display()
+            );
+            Ok(None)
+        }
+        Err(err) => {
+            tracing::warn!(
+                "skipping builtin MCP seed: {} is not valid JSON ({err}) — leaving it untouched",
+                path.display()
+            );
+            Ok(None)
         }
     }
 }
