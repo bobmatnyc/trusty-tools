@@ -21,10 +21,40 @@
 //!
 //! Test: `cargo test -p trusty-search --test daemon_env_precedence`
 
+use std::path::Path;
 use std::process::Command;
 
 /// Exit status clap uses for an argument-parsing failure.
 const CLAP_USAGE_EXIT: i32 = 2;
+
+/// Build the `trusty-search start --foreground` command every test here spawns.
+///
+/// Why: the daemon enforces a hard 16 GB RAM floor
+/// (`commands/start/daemon.rs`) that runs AFTER `load_daemon_env()` but BEFORE
+/// the lockfile abort these tests assert on. GitHub-hosted runners in this
+/// class report just under the floor — 15989 MB and 15993 MB observed on two
+/// independent runners — so without the documented `TRUSTY_SKIP_RAM_CHECK`
+/// bypass the process exits at the RAM check and the behaviour under test
+/// never runs. Centralised here so a new test cannot reintroduce the gap by
+/// spawning the binary without the flag.
+/// What: points `TRUSTY_DATA_DIR` at `data_dir` and pins `port`; the caller
+/// adds whatever per-test environment the case needs.
+/// Test: used by every test in this file.
+fn daemon_command(data_dir: &Path, port: &str) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_trusty-search"));
+    cmd.args(["start", "--foreground", "--port", port])
+        .env("TRUSTY_DATA_DIR", data_dir)
+        .env("TRUSTY_SKIP_RAM_CHECK", "1");
+    cmd
+}
+
+/// Run the daemon and return `(exit_code, stdout ++ stderr)`.
+fn run_to_completion(cmd: &mut Command) -> (i32, String) {
+    let out = cmd.output().expect("spawn trusty-search");
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.code().unwrap_or(-1), combined)
+}
 
 /// Run `trusty-search start --foreground` against a scratch data dir seeded
 /// with `daemon_env` and return `(exit_code, combined_output)`.
@@ -43,16 +73,7 @@ fn run_start(daemon_env: &str) -> (i32, String) {
     // after argument handling — no port bound, no index opened.
     std::fs::write(scratch.path().join("daemon.lock"), b"1").expect("write daemon.lock");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_trusty-search"))
-        .args(["start", "--foreground", "--port", "17998"])
-        .env("TRUSTY_DATA_DIR", scratch.path())
-        .env_remove("TRUSTY_NO_AUTO_DISCOVER")
-        .output()
-        .expect("spawn trusty-search");
-
-    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-    combined.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status.code().unwrap_or(-1), combined)
+    run_to_completion(daemon_command(scratch.path(), "17998").env_remove("TRUSTY_NO_AUTO_DISCOVER"))
 }
 
 /// Core regression for #4827: a value in `daemon.env` must reach clap.
@@ -135,17 +156,8 @@ fn process_env_still_beats_daemon_env() {
     .expect("write daemon.env");
     std::fs::write(scratch.path().join("daemon.lock"), b"1").expect("write daemon.lock");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_trusty-search"))
-        .args(["start", "--foreground", "--port", "17997"])
-        .env("TRUSTY_DATA_DIR", scratch.path())
-        .env("TRUSTY_NO_AUTO_DISCOVER", "1")
-        .output()
-        .expect("spawn trusty-search");
-    let code = out.status.code().unwrap_or(-1);
-    let output = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+    let (code, output) = run_to_completion(
+        daemon_command(scratch.path(), "17997").env("TRUSTY_NO_AUTO_DISCOVER", "1"),
     );
     assert_ne!(
         code, CLAP_USAGE_EXIT,
@@ -176,16 +188,7 @@ fn daemon_env_cannot_redirect_the_data_dir() {
     .expect("write daemon.env");
     std::fs::write(scratch.path().join("daemon.lock"), b"1").expect("write daemon.lock");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_trusty-search"))
-        .args(["start", "--foreground", "--port", "17996"])
-        .env("TRUSTY_DATA_DIR", scratch.path())
-        .output()
-        .expect("spawn trusty-search");
-    let output = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let (_code, output) = run_to_completion(&mut daemon_command(scratch.path(), "17996"));
     assert!(
         output.contains("already running"),
         "the scratch dir's lockfile must still be the one consulted — a \
