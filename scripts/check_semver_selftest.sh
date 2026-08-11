@@ -95,6 +95,24 @@
 #                            100, so it also proves a private-mode-laden BREAK
 #                            is still reported as a break rather than swallowed.
 #
+#   Cases 20-21 (issue #5440) pin the OTHER way a completed run says nothing.
+#   cargo-semver-checks skips its whole lint set when the baseline -> current
+#   delta already permits breakage, and prints
+#       Checked [   0.000s] 0 checks: 0 pass, 254 skip
+#       Summary no semver update required
+#   at exit 0. The gate keyed its verdict on the summary line EXISTING, so it
+#   read "254 lints declined" as "254 lints satisfied" and preflight-publish.sh
+#   CHECK 5 passed having verified nothing:
+#     20. zero checks / PASS-FAIL arm — must be NO VERDICT, exit 3, and must say
+#                            it executed no checks rather than blaming rustdoc.
+#     21. zero checks / INVENTORY arm — must be a BLIND inventory, never "no
+#                            breaking changes found".
+#   Both fail against the pre-fix gate, which exits 0 on 20 and reports an empty
+#   inventory on 21. The fixture is `all-skipped.out`, which is this file's own
+#   former `clean.out`: the case that was supposed to prove the gate can pass a
+#   crate was being satisfied by a run that checked nothing. `clean.out` is now a
+#   real 196-pass capture, so "a real pass still exits 0" is still covered.
+#
 #   Cases 13-15 pin pre-release handling. `key()` used to strip the pre-release
 #   suffix, so 1.0.0-rc1 and 1.0.0 both keyed to (1, 0, 0) and the tie went to
 #   whichever the index listed first — the reproduction on record picked
@@ -353,7 +371,8 @@ silent no-op at exit 0${TAB}silent-noop.out${TAB}0${TAB}3${TAB}NO SEMVER VERDICT
 clean${TAB}clean.out${TAB}0${TAB}0${TAB}crate(s) checked${TAB}NO SEMVER VERDICT
 ANSI-coloured clean (case 16)${TAB}clean-colored.out${TAB}0${TAB}0${TAB}crate(s) checked${TAB}NO SEMVER VERDICT
 ANSI-coloured break (case 17)${TAB}break-colored.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT
-private-mode CSI break (case 19)${TAB}private-mode.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT"
+private-mode CSI break (case 19)${TAB}private-mode.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT
+zero checks executed (case 20)${TAB}all-skipped.out${TAB}0${TAB}3${TAB}NO SEMVER VERDICT WAS COMPUTED${TAB}requires a matching version bump"
 
 while IFS="$TAB" read -r name fixture stub_rc want_exit must_have must_not; do
   [[ -z "$name" ]] && continue
@@ -379,6 +398,27 @@ while IFS="$TAB" read -r name fixture stub_rc want_exit must_have must_not; do
     pass_case "${name} -> exit ${rc}, says '${must_have}'"
   fi
 done <<<"$VERDICT_CASES"
+
+# --- 20b. The zero-check refusal must name its own cause. "it never ran" and
+#          "it ran and skipped every lint" have different remedies, and a shared
+#          message would send whoever hits #5440 hunting a rustdoc error that
+#          does not exist.
+rc=0
+out="$(cd "$REPO_ROOT" && \
+  PATH="${STUB_DIR}:${PATH}" \
+  SEMVER_GATE_TOOLCHAIN_BIN='' \
+  SEMVER_SELFTEST_REAL_CARGO="$REAL_CARGO" \
+  SEMVER_SELFTEST_FIXTURE="${FIXTURES}/all-skipped.out" \
+  SEMVER_SELFTEST_RC=0 \
+  SEMVER_GATE_INDEX_BASE="http://127.0.0.1:${PORT}/v/${STUB_PREV}" \
+  bash "$GATE" --crate "$STUB_CRATE" 2>&1)" || rc=$?
+if [[ "$out" != *"EXECUTED NO CHECKS"* ]]; then
+  fail_case "zero-checks/diagnosis: the refusal did not say the run executed no checks, so it is indistinguishable from a rustdoc failure" "$out"
+elif [[ "$out" != *"0 checks: 0 pass, 254 skip"* ]]; then
+  fail_case "zero-checks/diagnosis: the refusal did not quote the summary line it judged" "$out"
+else
+  pass_case "a zero-check refusal names the cause and quotes the summary (#5440)"
+fi
 
 # ===========================================================================
 # 9-12. Which release is the baseline, and what happens when the bump is already
@@ -465,6 +505,24 @@ elif [[ "$out" == *"no breaking changes found"* ]]; then
   fail_case "inventory/blind: a run that produced nothing was reported as clean" "$out"
 else
   pass_case "an inventory that could not run says so, in the line and in the summary"
+fi
+
+# --- 21. The inventory arm over a run that executed no checks (#5440). Exit 0
+#         with a summary, so the pre-fix gate reported "no breaking changes found
+#         against vX" from a run that examined nothing — the advisory half of the
+#         same false pass. It must land in the blind arm instead.
+rc=0
+out="$(gate_with_index "${STUB_OLD_MINOR}" "${STUB_OLD_MINOR}=all-skipped.out:0")" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "inventory/zero-checks: an advisory run must not block an already-permitted release (exit ${rc})" "$out"
+elif [[ "$out" == *"no breaking changes found"* ]]; then
+  fail_case "inventory/zero-checks: a run that executed 0 of 254 checks was reported as an empty inventory (#5440)" "$out"
+elif [[ "$out" != *"NO INVENTORY ${STUB_CRATE}"* ]]; then
+  fail_case "inventory/zero-checks: a run that examined nothing was not reported as such" "$out"
+elif [[ "$out" != *"inventory NOT computed"* ]]; then
+  fail_case "inventory/zero-checks: the summary line hid the missing inventory" "$out"
+else
+  pass_case "an inventory that executed no checks is blind, not empty (#5440)"
 fi
 
 # --- 18. The inventory arm over ANSI-coloured output. This is the trusty-review

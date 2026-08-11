@@ -159,12 +159,36 @@ checks: …`). No summary line means no comparison happened — whatever the exi
 status was, *including exit 0* — and that is reported as `NO VERDICT` on its own
 exit status.
 
+### Zero checks executed is not a pass ([#5440](https://github.com/bobmatnyc/trusty-tools/issues/5440))
+
+The summary line alone was not enough. `cargo-semver-checks` skips its whole lint
+set when the baseline → current delta already permits breakage, and prints a
+summary saying so at exit 0:
+
+```
+Checking trusty-common v0.31.0 -> v0.30.1 (major change)
+ Checked [   0.000s] 0 checks: 0 pass, 254 skip
+ Summary no semver update required
+```
+
+The leading `0 checks:` is the number of lints that **ran**; the trailing
+`254 skip` is what the tool declined to run. Keying on the line's presence read
+that as a pass, so `preflight-publish.sh` CHECK 5 approved the publish having
+verified nothing. Measured on `trusty-common` under rustc 1.94.1; the gate failed
+closed on that machine only because a newer installed toolchain crashed rustdoc
+instead, which produced no summary at all.
+
+The gate now parses the count and requires it to be at least 1. A summary whose
+count is zero, or does not parse, is `NO VERDICT` (exit 3) and says which of the
+two happened — "executed no checks" and "never completed a check run" have
+different remedies.
+
 | Exit | Meaning |
 |---|---|
 | 0 | every checked crate is clean, or is a recorded skip |
 | 1 | a verdict was computed **and it says break** — the only status that means "the API changed" |
 | 2 | usage error |
-| 3 | **no verdict** — rustdoc build failure, unreachable registry, missing tool, or a diff that scanned nothing. Nothing was compared, so nothing may be concluded. |
+| 3 | **no verdict** — rustdoc build failure, a run that executed zero checks, unreachable registry, missing tool, or a diff that scanned nothing. Nothing was compared, so nothing may be concluded. |
 
 `scripts/preflight-publish.sh` CHECK 5 and `.github/workflows/semver-checks.yml`
 both report exit 3 separately from exit 1. Both still stop the publish: a
@@ -313,6 +337,14 @@ never reach the version-bump remediation; an exit-0 run that compared nothing
 must still fail; and a genuinely clean run must exit 0, which is what proves the
 other three fail on classification rather than because the gate is broken
 outright.
+
+Cases 20-21 (#5440) pin the other way a completed run says nothing: a summary
+reporting `0 checks: 0 pass, 254 skip` at exit 0 must be `NO VERDICT` in the
+pass/fail arm and a blind inventory in the advisory one, never "no breaking
+changes found". Both fail against the pre-fix gate, which exits 0 on the first
+and reports an empty inventory on the second. Their fixture, `all-skipped.out`,
+is the former `clean.out` — the case that was supposed to prove the gate can pass
+a crate was itself being satisfied by a run that checked nothing.
 
 Those four replace only the `cargo semver-checks` subprocess, via a stub `cargo`
 on `PATH` that forwards everything else to the real one — so crate resolution,
