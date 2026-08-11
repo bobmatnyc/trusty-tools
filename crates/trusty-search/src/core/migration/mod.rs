@@ -292,6 +292,48 @@ impl Default for MigrationRegistry {
 /// Test: `test_run_migrations_no_op_when_current`,
 ///       `test_run_migrations_applies_in_sequence`,
 ///       `test_run_migrations_idempotent_after_crash`.
+/// Spawn one detached schema-migration task per registered index (#143).
+///
+/// Why: it lives here, and has a name, because of #3049 round 4. A migration is
+/// a durable writer — `M001PerPubConstRust::apply` loops `commit_parsed_batch`
+/// over 64-file batches — and it runs at every boot, detached. As an anonymous
+/// `tokio::spawn` inside `commands::start::daemon::handle_start` it took no
+/// teardown guard and sat outside the hand-derived writer table for three review
+/// rounds, so a `DELETE /indexes/:id?delete_data=true` landing on a
+/// still-unmigrated index found the lock uncontended, reported `quiesced: true`,
+/// and `remove_dir_all`'d the directory mid-commit. Naming it also puts it in
+/// the library, where the race is testable.
+///
+/// What: no-op when `TRUSTY_DISABLE_MIGRATIONS=1`. Otherwise, per registered
+/// index, spawns a task that takes the SHARED side of that index's teardown lock
+/// FIRST and holds it for the whole migration, so a concurrent delete waits or
+/// refuses. A failure is logged and leaves the index at its current schema
+/// version; the daemon keeps serving.
+///
+/// Test: `service::server::tests_3049::a_delete_cannot_destroy_an_index_mid_migration`.
+pub fn spawn_index_migrations(state: &crate::service::SearchAppState) {
+    if std::env::var("TRUSTY_DISABLE_MIGRATIONS").as_deref() == Ok("1") {
+        return;
+    }
+    let registry = std::sync::Arc::new(MigrationRegistry::new());
+    for index_id in state.registry.list() {
+        let Some(handle) = state.registry.get(&index_id) else {
+            continue;
+        };
+        let reg = std::sync::Arc::clone(&registry);
+        tokio::spawn(async move {
+            let _teardown_guard =
+                crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
+            if let Err(e) = run_migrations(&handle, &reg).await {
+                tracing::warn!(
+                    index_id = %handle.id,
+                    "schema migration failed (index kept at current schema): {e:#}"
+                );
+            }
+        });
+    }
+}
+
 pub async fn run_migrations(
     index: &IndexHandle,
     registry: &MigrationRegistry,

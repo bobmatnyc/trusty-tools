@@ -270,6 +270,14 @@ async fn handle_modified(
     // symlink form for the delete event.
     let path_str = watcher_relative_path(canonical_root, raw_root, path);
 
+    // #3049 round 4: acquired BEFORE the stale-chunk removal below, not just
+    // before `index_file`. `remove_chunk` deletes from redb via
+    // `delete_chunks_from_redb`, so the removal loop is a durable write of its
+    // own; taking the guard after it left that loop racing a delete's
+    // `remove_dir_all`. Held to the end of the function, which covers the
+    // `index_file` write too.
+    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(index_id).await;
+
     // Drop any prior chunks for this file before re-indexing.
     if let Some(stale_ids) = indexed_files
         .take(&std::path::PathBuf::from(&path_str))
@@ -285,11 +293,9 @@ async fn handle_modified(
     let (chunks, _entities) = chunk_ast(&path_str, &content);
     let new_ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
 
-    // #3049: the watcher writes redb + HNSW here, so it holds the teardown
-    // lock's shared side across the write. Without it a DELETE landing on a
-    // watched index acquired an uncontended lock and removed the data
-    // directory while this call was mid-write.
-    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(index_id).await;
+    // The teardown guard taken above is still held here — the watcher writes
+    // redb + HNSW in this call, and a DELETE that found no contention would
+    // remove the data directory mid-write (#3049).
     let idx = indexer.read().await;
     if let Err(err) = idx.index_file(&path_str, &content).await {
         tracing::warn!(?err, ?path, "index_file failed");

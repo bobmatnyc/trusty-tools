@@ -185,7 +185,7 @@ pub(super) async fn apply_component_transition(
 /// handler returning and the task being polled unguarded.
 /// Test: `service::server::tests_components::patch_vector_on_spawns_catch_up_and_reaches_ready`,
 /// `patch_kg_on_spawns_catch_up_and_reaches_ready`,
-/// `service::server::tests_3049::delete_waits_for_a_component_catch_up`.
+/// `service::server::tests_3049::patch_index_config_waits_for_an_in_flight_teardown`.
 pub(super) fn spawn_component_catch_up(
     handle: Arc<IndexHandle>,
     transition: ComponentTransition,

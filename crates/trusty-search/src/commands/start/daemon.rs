@@ -373,27 +373,7 @@ pub async fn handle_start(
                 // back to a full background reindex if the delta is too large).
                 // Gated by TRUSTY_NO_BOOT_RECONCILE=1.
                 crate::service::reconcile::reconcile_stale_indexes(&install_state).await;
-                // Schema migration: spawn a per-index background migration task.
-                if std::env::var("TRUSTY_DISABLE_MIGRATIONS").as_deref() != Ok("1") {
-                    let registry =
-                        std::sync::Arc::new(crate::core::migration::MigrationRegistry::new());
-                    for index_id in install_state.registry.list() {
-                        let Some(handle) = install_state.registry.get(&index_id) else {
-                            continue;
-                        };
-                        let reg = std::sync::Arc::clone(&registry);
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                crate::core::migration::run_migrations(&handle, &reg).await
-                            {
-                                tracing::warn!(
-                                    index_id = %handle.id,
-                                    "schema migration failed (index kept at current schema): {e:#}"
-                                );
-                            }
-                        });
-                    }
-                }
+                crate::core::migration::spawn_index_migrations(&install_state);
                 // Issue #41 Phase 1: prime the `trusty_index_count` gauge.
                 crate::service::metrics::set_index_count(install_state.registry.list().len());
                 // Issue #40: auto-discover Claude Code / git projects.
