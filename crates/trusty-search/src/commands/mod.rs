@@ -63,6 +63,8 @@ pub mod reindex;
 pub mod remove;
 pub mod search;
 pub mod serve;
+// #5264: working-directory index scoping for a bare `serve` MCP session.
+pub mod serve_scope;
 pub mod service;
 // #4823: reading/preserving an already-installed launchd unit so regeneration
 // does not silently discard deliberate operator configuration.
