@@ -190,7 +190,24 @@ pub fn persist_weekly_quality(db: &Database, data: &ReportData) -> Result<usize>
 /// 100` (full-agentic only — excludes `ide_assisted_count`). Rows with
 /// unresolvable author emails are skipped with a `warn!` to preserve
 /// grain-key integrity.
-/// Test: `report::tests::persist_weekly_engineer_upserts_rows`.
+/// Test: `report::tests::persist_weekly_engineer_upserts_rows`,
+/// `report::tests::agentic_pct_keeps_unknown_in_the_denominator`.
+///
+/// # How `agentic_pct` treats `AgenticMode::Unknown` (#5250)
+///
+/// `unknown` commits stay in the `net_commits` DENOMINATOR and contribute to
+/// neither numerator, exactly as `none` does. `agentic_pct` is therefore a
+/// LOWER BOUND on agentic share: a repository whose merge and squash commits
+/// were composed by the forge reports a smaller percentage than the work
+/// warrants, and the size of that deficit is bounded by the unknown count.
+///
+/// Excluding them from the denominator was the alternative, and was rejected:
+/// `fact_weekly_engineer` has no `unknown_count` column, so a reader of the
+/// table could no longer reproduce `agentic_pct` from the columns beside it —
+/// `net_commits` would stop being the denominator it is named for. Reporting
+/// the unknown share needs that column, which is a migration and belongs with
+/// the per-tool attribution work in
+/// [#5251](https://github.com/bobmatnyc/trusty-tools/issues/5251).
 ///
 /// # Errors
 ///
@@ -218,6 +235,8 @@ pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize
             // agentic_pct = agentic_count / net * 100 — intentionally
             // EXCLUDES ide_assisted_count (full-agentic only, per #1113 spec).
             // ide_assisted is tracked separately and must NOT inflate the numerator.
+            // #5250: `unknown` commits are in `net` and in neither numerator, so
+            // this is a lower bound — see the fn doc for why they stay there.
             let agentic_pct = if net > 0 {
                 (wa.agentic_count as f64) / (net as f64) * 100.0
             } else {

@@ -268,7 +268,10 @@ pub(super) fn accumulate_rows(rows: &[CommitRow], flags: &RowFlags) -> Accumulat
         match row.agentic_mode {
             AgenticMode::FullAgentic => w.agentic_count += 1,
             AgenticMode::IdeAssisted => w.ide_assisted_count += 1,
-            AgenticMode::None => {}
+            // #5250: `Unknown` is not a positive classification, so it counts
+            // toward neither numerator — it stays in the `net_commits`
+            // denominator exactly as `None` does. See `persist_weekly_engineer`.
+            AgenticMode::None | AgenticMode::Unknown => {}
         }
         // Issue #445 batch B (request #6): accumulate complexity sum so
         // materialize_weekly_activity can compute avg_complexity without a

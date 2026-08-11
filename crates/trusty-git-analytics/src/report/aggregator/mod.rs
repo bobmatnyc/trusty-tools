@@ -412,9 +412,13 @@ impl Aggregator {
             let complexity: Option<i64> = row.get(12).unwrap_or(None);
             // Issue #1113: agentic_mode TEXT; defaults to 'none' for pre-v21 rows.
             let agentic_mode_str: String = row.get(13).unwrap_or_else(|_| "none".to_string());
+            // #5250: an unparseable stored value means a newer tga wrote a mode
+            // this build has no name for — that is the "we cannot tell" case,
+            // not a human-work finding. Pre-v21 rows keep reading as 'none'
+            // above, so this fallback only fires on a genuinely foreign value.
             let agentic_mode = agentic_mode_str
                 .parse::<AgenticMode>()
-                .unwrap_or(AgenticMode::None);
+                .unwrap_or(AgenticMode::Unknown);
             Ok(CommitRow {
                 sha: row.get(0)?,
                 author_name: row.get(1)?,
