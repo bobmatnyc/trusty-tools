@@ -95,6 +95,19 @@ readonly MEMORY_BIN="$CARGO_BIN_DIR/trusty-memory"
 readonly BM25_BIN="$CARGO_BIN_DIR/trusty-bm25-daemon"
 readonly BRIDGE_BIN="$CARGO_BIN_DIR/trusty-memory-mcp-bridge"
 
+# The CODESIGN identifiers `tctl sign trusty-memory` applies, mirrored here only
+# to narrate the --dry-run plan. These are not launchd labels: they live in the
+# codesign namespace, keep the full binary name on purpose, and must never be
+# normalised onto `com.trusty.<stem>` — renaming one invalidates the binary's
+# designated requirement and re-triggers macOS TCC prompts (#2558). The
+# `*_IDENTIFIER=` naming is what marks them as codesign identifiers, matching
+# install-trusty-mpm-signed.sh and install-trusty-agents-signed.sh.
+# #4868: the previous inline `-> com.trusty.…` narration carried no such marker,
+# so the drift scan read all three as unowned launchd labels.
+readonly MEMORY_IDENTIFIER="com.trusty.trusty-memory"
+readonly BM25_IDENTIFIER="com.trusty.trusty-bm25-daemon"
+readonly BRIDGE_IDENTIFIER="com.trusty.trusty-memory-mcp-bridge"
+
 # Sign identity: auto-detected by `tctl sign` if not overridden. Exported so
 # the child `tctl` process honours the same override this script was given.
 TRUSTY_SIGN_IDENTITY="${TRUSTY_SIGN_IDENTITY:-}"
@@ -192,9 +205,9 @@ run_sign() {
 
     if [[ "$TRUSTY_CODESIGN_DRY_RUN" == "1" ]]; then
         info "[DRY RUN] Would run: tctl sign trusty-memory --dir $CARGO_BIN_DIR"
-        info "[DRY RUN]   trusty-memory            -> com.trusty.trusty-memory"
-        info "[DRY RUN]   trusty-bm25-daemon       -> com.trusty.trusty-bm25-daemon"
-        info "[DRY RUN]   trusty-memory-mcp-bridge -> com.trusty.trusty-memory-mcp-bridge"
+        info "[DRY RUN]   trusty-memory            -> $MEMORY_IDENTIFIER"
+        info "[DRY RUN]   trusty-bm25-daemon       -> $BM25_IDENTIFIER"
+        info "[DRY RUN]   trusty-memory-mcp-bridge -> $BRIDGE_IDENTIFIER"
         return 0
     fi
 
