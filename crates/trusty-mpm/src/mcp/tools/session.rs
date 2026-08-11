@@ -280,9 +280,14 @@ pub(super) fn session_tools() -> Vec<Value> {
              `resolved_snapshot` answer different questions (\"what paused \
              since last catch-up\" vs \"what should I resume from\") and \
              legitimately disagree under a recent watermark. \
-             `resolved_snapshot` is null unless you pass `session_id`, and it \
-             only ever names a snapshot belonging to THAT id — several sessions \
-             share one store, so there is no \"latest overall\" fallback.",
+             `resolved_snapshot` names a snapshot belonging to the `session_id` \
+             you pass; several sessions share one store, so there is no \"latest \
+             overall\" fallback. When that id owns nothing — a relaunch mints a \
+             new session id inside the same window — passing `tmux_window` \
+             resolves the newest snapshot THIS WINDOW paused in this project \
+             instead. `resolved_via` says which answered (`session_id`, \
+             `tmux_window`, or null), so do not read a window match as an exact \
+             one.",
             json!({
                 "type": "object",
                 "properties": {
@@ -292,7 +297,11 @@ pub(super) fn session_tools() -> Vec<Value> {
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Session id that `resolved_snapshot` is resolved FOR. Omit it and `resolved_snapshot` is null: an unidentified caller owns nothing in a shared store. Naming another session's id is the explicit opt-in that reads that session's state (#5272)."
+                        "description": "Session id that `resolved_snapshot` is resolved FOR. Omit it and only the `tmux_window` route can resolve anything: an unidentified caller owns nothing in a shared store. Naming another session's id is the explicit opt-in that reads that session's state (#5272)."
+                    },
+                    "tmux_window": {
+                        "type": "string",
+                        "description": "The CALLER's own `session_name:window_index:window_id` from `tmux display-message`, e.g. `tm-dogfood:0:@230`. Used only when `session_id` resolved nothing: matches the `window_id` (`@230`) component against snapshots this project paused, newest first. Session names and window indexes are not matched — they get renamed and renumbered."
                     },
                     "all_projects": {
                         "type": "boolean",

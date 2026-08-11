@@ -90,14 +90,22 @@ place and returns typed JSON instead of scraped text:
 ```
 mcp__trusty-mpm__session_context_catchup(
   project_dir: <absolute path to the current project root>,
-  session_id: <the current session id — required for a non-null resolved_snapshot>,
+  session_id: <the current session id — the first thing resolved_snapshot is tried against>,
+  tmux_window: <your own `tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'`>,
   all_projects: false,   # true also scans machine-wide registered projects
   full: false             # true ignores the watermark, returns full history
 )
 ```
 
 `project_dir` is **required** — the MCP transport forwards no cwd, so pass the
-current project's absolute path explicitly. The tool returns:
+current project's absolute path explicitly. Pass `tmux_window` whenever `$TMUX`
+is set; capture it in the same bash step you would use for realignment:
+
+```bash
+[ -n "$TMUX" ] && tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'
+```
+
+The tool returns:
 
 ```json
 {
@@ -106,6 +114,7 @@ current project's absolute path explicitly. The tool returns:
   "recent_commits": [{ "sha", "msg", "author", "ts" }],
   "recent_memory": [{ "title", "tags" }],
   "resolved_snapshot": "<path or null>",
+  "resolved_via": "session_id" | "tmux_window" | null,
   "undatable_sessions_dropped": 0,
   "watermark_advanced": false
 }
@@ -122,12 +131,24 @@ knowledge of the repo state if anything looks stale.
 > since your last catch-up", `resolved_snapshot` is "what should I resume
 > from". Resume from `resolved_snapshot`; treat `sessions` as the digest.
 
-> **`resolved_snapshot` belongs to the `session_id` you passed, and only to
-> it.** Several sessions share one `.trusty-mpm/sessions/` store, so there is
-> no "latest overall" fallback: omit `session_id`, or pass one that has never
-> paused, and you get `null`. That is the correct answer, not a failure — pick
-> a snapshot out of `sessions[]` and resume from it deliberately. To read
-> another session's state on purpose, pass that session's id (#5272).
+> **`resolved_snapshot` belongs to the `session_id` you passed, or to your
+> tmux window — nothing else.** Several sessions share one
+> `.trusty-mpm/sessions/` store, so there is still no "latest overall"
+> fallback (#5272). The tool tries your `session_id` first; only when that
+> owns nothing does it try `tmux_window`, matching the `@id` component against
+> snapshots this project paused. Pass neither, or a `session_id` that never
+> paused from a window that never paused, and you get `null` — that is the
+> correct answer, not a failure; pick a snapshot out of `sessions[]` and
+> resume from it deliberately. To read another session's state on purpose,
+> pass that session's id.
+
+> **Check `resolved_via` before you call it yours.** `"session_id"` means the
+> id you passed owns that snapshot. `"tmux_window"` means it was paused from
+> the window you are sitting in — which is why a relaunch (new harness session
+> id, same window) still resolves — but the id differs, so say so when you
+> report what you resumed from. Window ids are reused after a window is killed
+> and recreated, so a `tmux_window` match is an ownership claim, not a
+> guarantee.
 
 > **Empty is not always empty.** An empty `sessions` array means "nothing
 > paused since last catch-up" only when `undatable_sessions_dropped` is `0`.
@@ -176,9 +197,9 @@ attach sessions here; only align within the current tmux client.
 └── session-YYYYMMDD-HHMMSS.md  # human-readable snapshot (written by pause)
 ```
 
-Resolution order for "latest": the newest `pause` snapshot for the current
-session id in `sessions-log.jsonl` → the last `pause` line overall → the legacy
-`LATEST-SESSION.txt` pointer → an mtime scan of `session-*.md`. Resume reads
+Resolution order for `resolved_snapshot`: the newest `pause` snapshot recorded
+for the `session_id` you passed → the newest snapshot this project paused from
+your `tmux_window`'s `@id` → null. Resume reads
 existing snapshots only — it never creates snapshot files. It MAY append a
 `resume` line to `sessions-log.jsonl` for audit, but snapshots are kept after
 resume so you can resume more than once.
