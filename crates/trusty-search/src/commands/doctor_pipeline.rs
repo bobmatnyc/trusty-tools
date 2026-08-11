@@ -15,6 +15,10 @@
 //! pre-refactor implementation.
 
 use super::daemon_utils::daemon_base_url;
+use super::doctor_checks::mcp_registration::{
+    check_registration, claude_global_settings_paths, read_claude_registration,
+    read_codex_registration, registered_exe_version, McpRegistration,
+};
 use super::doctor_checks::{
     check_daemon_running, check_data_dir, check_lock_file, check_log_rotation, check_model_cache,
     check_port_reachable, check_python_device_note, check_python_launcher, check_python_uv,
@@ -22,6 +26,7 @@ use super::doctor_checks::{
     print_index_breakdown, probe_daemon_health, python_embedder_enabled, read_daemon_port,
     summarize_indexes, CheckResult, EmptyIndex,
 };
+use super::setup::MCP_SERVER_KEY;
 use async_trait::async_trait;
 use std::sync::Mutex;
 
@@ -250,6 +255,73 @@ impl DoctorCheck for PythonEmbedderCheck {
     }
 }
 
+/// MCP-client registration check (#5264).
+///
+/// Why: every other doctor check inspects the daemon side, so a `trusty-search`
+/// that was running perfectly and a Codex registration that could never reach
+/// it produced an all-green report. The registration is the one link in the
+/// chain nothing verified.
+/// What: reads the Codex registration and Claude Code's two global settings
+/// files, and reports each one's executable and version, effective arguments,
+/// selected project/index, daemon ownership, and remediation. Per-project
+/// Claude settings are deliberately out of scope — see the module doc on
+/// [`super::doctor_checks::mcp_registration`].
+/// Test: the verdict logic is covered by that module's inline tests; this
+/// wrapper's aggregation is covered by
+/// `mcp_registration_check_reports_one_result_per_client_file`.
+pub(crate) struct McpRegistrationCheck;
+
+#[async_trait]
+impl DoctorCheck for McpRegistrationCheck {
+    fn name(&self) -> &str {
+        "mcp_registration"
+    }
+
+    async fn run(&self, state: &DoctorState) -> Vec<CheckResult> {
+        let Some(home) = dirs::home_dir() else {
+            return vec![CheckResult::Warn(
+                "MCP registrations: skipped (no home directory)".into(),
+            )];
+        };
+
+        let codex = read_codex_registration(&home, MCP_SERVER_KEY);
+        let codex_path = trusty_common::codex_config::codex_config_path(&home);
+        let mut results = vec![check_registration(
+            codex.as_ref(),
+            "Codex",
+            &codex_path,
+            &version_of(codex.as_ref()),
+            &state.base,
+        )];
+
+        for path in claude_global_settings_paths(&home) {
+            // A global Claude settings file that does not exist is not a
+            // finding — `setup` creates one only when no others were found.
+            if !path.is_file() {
+                continue;
+            }
+            let reg = read_claude_registration(&path, MCP_SERVER_KEY);
+            results.push(check_registration(
+                reg.as_ref(),
+                "Claude Code",
+                &path,
+                &version_of(reg.as_ref()),
+                &state.base,
+            ));
+        }
+        results
+    }
+}
+
+/// Version of the executable a registration names, or a placeholder when there
+/// is no registration to interrogate.
+fn version_of(reg: Option<&McpRegistration>) -> String {
+    match reg {
+        Some(r) => registered_exe_version(&r.command),
+        None => "n/a".to_string(),
+    }
+}
+
 // ── Orchestrator ──────────────────────────────────────────────────────────
 
 fn default_checks() -> Vec<Box<dyn DoctorCheck>> {
@@ -262,6 +334,7 @@ fn default_checks() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(PortReachableCheck),
         Box::new(LogRotationCheck),
         Box::new(PythonEmbedderCheck),
+        Box::new(McpRegistrationCheck),
     ]
 }
 
@@ -358,6 +431,39 @@ mod tests {
                 assert!(msg.contains("not enabled"), "unexpected message: {msg}")
             }
             other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    /// `McpRegistrationCheck::run` must emit one verdict per client file it
+    /// can see, and never fewer than one (#5264).
+    ///
+    /// Why: the whole defect is a registration nothing inspected. A check that
+    /// silently returned an empty vector on a machine with no Codex config
+    /// would reproduce that gap exactly — the operator would see no line at
+    /// all rather than "absent, run `trusty-search setup`".
+    /// What: runs the check against the real `$HOME` (read-only) and asserts
+    /// the Codex verdict is always present, and that every result names a
+    /// client. The host's actual registration state varies, so the verdict
+    /// KIND is deliberately not asserted — only that one exists.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial]
+    async fn mcp_registration_check_reports_one_result_per_client_file() {
+        let state = DoctorState::new(reqwest::Client::new());
+        let results = McpRegistrationCheck.run(&state).await;
+
+        assert!(
+            !results.is_empty(),
+            "the Codex verdict is unconditional, so there is always at least one"
+        );
+        for r in &results {
+            let msg = match r {
+                CheckResult::Ok(m) | CheckResult::Warn(m) | CheckResult::Error(m) => m,
+            };
+            assert!(
+                msg.contains("Codex") || msg.contains("Claude Code") || msg.contains("skipped"),
+                "every verdict names the client it is about: {msg}"
+            );
         }
     }
 

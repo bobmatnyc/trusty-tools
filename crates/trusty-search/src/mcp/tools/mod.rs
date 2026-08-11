@@ -14,6 +14,8 @@
 //!   `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`
 //! - [`misc`]        — `search_health`, `chat`, `get_call_chain`, `grep`,
 //!   `upgrade`
+//! - [`health`]      — the `search_health` report (#5264): which daemon
+//!   answered, and whether it can serve this project
 //! - [`descriptors`] — static `tool_descriptors()` for `tools/list`
 //! - [`not_ready`]   — the `INDEX_NOT_READY` contract (issue #4715): a daemon
 //!   404 on the index this session ADVERTISED means "not built yet", which is
@@ -36,6 +38,7 @@ use serde_json::Value;
 pub use trusty_common::mcp::{error_codes, initialize_response, JsonRpcError, Request, Response};
 
 pub(crate) mod descriptors;
+pub(crate) mod health;
 pub(crate) mod http;
 pub(crate) mod index;
 pub(crate) mod misc;
@@ -46,6 +49,10 @@ pub(crate) mod types;
 pub(crate) mod unavailable;
 
 pub use descriptors::{tool_descriptors, tool_descriptors_pinned};
+pub use health::{
+    HEALTH_DAEMON_ERROR, HEALTH_DAEMON_UNREACHABLE, HEALTH_INDEX_EMPTY,
+    HEALTH_INDEX_NOT_REGISTERED, HEALTH_OK,
+};
 pub use not_ready::{INDEX_NOT_READY, INDEX_NOT_READY_CODE};
 pub use unavailable::{INDEX_UNAVAILABLE, INDEX_UNAVAILABLE_CODE};
 
@@ -380,3 +387,6 @@ mod tests_not_ready;
 // Issue #5350: INDEX_UNAVAILABLE (structured daemon 503) contract tests.
 #[cfg(test)]
 mod tests_unavailable;
+// #5264: structured `search_health` diagnostics.
+#[cfg(test)]
+mod tests_health;
