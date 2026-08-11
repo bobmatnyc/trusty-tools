@@ -1583,6 +1583,48 @@ fn reindex_guard_failure_reason_is_none_by_default() {
     );
 }
 
+/// Issue #1451: a guard that fires before `with_index_id` was called must emit
+/// an error frame with NO `index_id` field — not one naming the empty string.
+///
+/// Why: `index_id` was a `String` defaulting to `""` and `Drop` serialized it
+/// unconditionally, so a consumer routing an SSE error frame by `index_id`
+/// received `""` — a value it would act on, matching no index — instead of an
+/// absent field it could recognise as unattributed. Only the log message
+/// branched on emptiness; the JSON payload did not.
+///
+/// What: arms a guard WITHOUT stamping an id, drops it armed, and asserts the
+/// broadcast frame carries no `index_id` key while staying a fatal error frame.
+///
+/// Test: this test.
+#[test]
+fn reindex_guard_omits_index_id_when_never_stamped() {
+    let progress = Arc::new(ReindexProgress::new());
+    let mut rx = progress.sender.subscribe();
+
+    {
+        let _guard = ReindexTerminationGuard::new(Arc::clone(&progress));
+    }
+
+    let msg = rx.try_recv().expect("guard must broadcast on drop");
+    let frame: serde_json::Value = serde_json::from_str(&msg).expect("frame must be valid JSON");
+    assert!(
+        frame.get("index_id").is_none(),
+        "an unstamped guard must omit index_id, never send \"\"; got: {msg}"
+    );
+    assert_eq!(frame["event"], "error");
+    assert_eq!(frame["fatal"], true);
+
+    // The stamped case is unchanged: the field is present and carries the id.
+    let progress2 = Arc::new(ReindexProgress::new());
+    let mut rx2 = progress2.sender.subscribe();
+    {
+        let _guard = ReindexTerminationGuard::new(Arc::clone(&progress2)).with_index_id("idx-y");
+    }
+    let frame2: serde_json::Value =
+        serde_json::from_str(&rx2.try_recv().expect("broadcast")).expect("valid JSON");
+    assert_eq!(frame2["index_id"], "idx-y");
+}
+
 /// A disarmed `ReindexTerminationGuard` must NOT emit an error event on drop.
 ///
 /// Why: if `disarm()` were a no-op the guard would double-emit, causing CLI
@@ -2312,5 +2354,124 @@ async fn reindex_does_not_report_ready_when_the_contrib_merge_fails() {
         stages.lexical.status,
         StageStatus::Failed,
         "a contrib-merge failure must not overstate the damage to other lanes"
+    );
+}
+
+/// Issue #1451: a parse/embed producer that PANICS partway must end the reindex
+/// `Failed`, not `complete` — even when the batches that ran before the panic
+/// left the counters looking healthy.
+///
+/// Why: the #601 gate reads counters only, so a panic after one committed batch
+/// leaves `vector_count > 0` and the gate stays silent; the run reached
+/// `emit_complete_event` and `term_guard.disarm()`, and every consumer — SSE,
+/// `/health`, the status endpoint — saw a successful reindex over a file list
+/// that was never finished. The `JoinError` was logged and written to the
+/// guard's failure slot, but the slot is only read by `Drop`, which the normal
+/// path disarms.
+///
+/// What: 129 files (the walker sorts, and `REINDEX_BATCH_SIZE` is 128, so
+/// `f128.rs` is alone in the second batch) with an embedder that panics only on
+/// the marker that file carries. The first batch therefore embeds and commits
+/// normally before the producer dies. Asserts the run reports `Failed` with the
+/// producer-panic reason and emits no `complete` event, and — the part that
+/// distinguishes this from #601 — that the fatal frame carries a NONZERO
+/// `vector_count`, proving the counter gate is not what fired.
+///
+/// Test: this test. Pre-fix it fails on the first assertion with
+/// `left: Complete, right: Failed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn reindex_producer_panic_does_not_report_complete() {
+    use crate::core::embed::Embedder;
+    use crate::core::store::{UsearchStore, VectorStore};
+
+    /// Panics for the marker chunk only. The #744 concurrent warm-up embeds
+    /// `"warm"` from its own detached task; panicking there would prove nothing
+    /// about the producer path under test, so it is served normally.
+    struct PanicOnMarkerEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for PanicOnMarkerEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.1; 32])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            assert!(
+                !texts.iter().any(|t| t.contains("panic_marker_1451")),
+                "simulated embedder fault inside the parse/embed producer (#1451)"
+            );
+            Ok(texts.iter().map(|_| vec![0.1; 32]).collect())
+        }
+        fn dimension(&self) -> usize {
+            32
+        }
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    // 128 clean files fill the first batch; the 129th sorts last and carries the
+    // marker, so the producer panics only after a batch has already committed.
+    for i in 0..128 {
+        fs::write(
+            root.join(format!("f{i:03}.rs")),
+            format!("pub fn f{i:03}() {{}}\n"),
+        )
+        .unwrap();
+    }
+    fs::write(root.join("f128.rs"), "pub fn panic_marker_1451() {}\n").unwrap();
+
+    let dim = 32;
+    let embedder: Arc<dyn Embedder> = Arc::new(PanicOnMarkerEmbedder);
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch new"));
+    let mut indexer = CodeIndexer::new("panic-1451", root.clone()).with_components(embedder, store);
+    // A durable corpus makes the run take the staging path, so the partial
+    // rebuild is rolled back rather than promoted over the live corpus.
+    let corpus =
+        crate::core::corpus::CorpusStore::open(&tmp.path().join("index.redb")).expect("open");
+    indexer.set_corpus_store(Arc::new(corpus));
+
+    let mut handle_inner = IndexHandle::bare(
+        IndexId::new("panic-1451"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.clone(),
+    );
+    // The fast pass must embed, otherwise no batch produces vectors at all.
+    handle_inner.defer_embed = false;
+    let handle = Arc::new(handle_inner);
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("the reindex task itself must not panic — only its producer does");
+
+    assert_eq!(
+        progress.status.load(),
+        ReindexStatus::Failed,
+        "a producer panic leaves the file list half-indexed — reporting Complete \
+         is the false-green this issue is about"
+    );
+
+    let events = progress.events.lock().await.clone();
+    assert!(
+        !events.iter().any(|e| e.contains("\"event\":\"complete\"")),
+        "no terminal complete event may be emitted: {events:?}"
+    );
+    let fatal = events
+        .iter()
+        .find(|e| e.contains("\"event\":\"error\"") && e.contains("\"fatal\":true"))
+        .expect("a fatal error event must be emitted");
+    assert!(
+        fatal.contains("producer task panicked"),
+        "the terminal frame must name the producer panic, not a counter verdict: {fatal}"
+    );
+    let frame: serde_json::Value = serde_json::from_str(fatal).expect("frame must be valid JSON");
+    assert!(
+        frame["vector_count"].as_u64().unwrap_or(0) > 0,
+        "precondition for the bug: the committed batch left the counters healthy, \
+         so the #601 zero-vector gate is not what failed this run: {fatal}"
+    );
+
+    let stages = handle.stages.read().await.clone();
+    assert_eq!(
+        stages.lifecycle_status(),
+        "failed",
+        "anything polling status must see the failure, not just an SSE subscriber"
     );
 }
