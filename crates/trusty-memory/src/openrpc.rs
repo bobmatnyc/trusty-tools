@@ -8,7 +8,7 @@
 //! discovery surface; no new transport is needed.
 //!
 //! What: A thin wrapper around `trusty_mcp_core::openrpc::discover_response`
-//! that supplies the 11 trusty-memory tools and the per-tool scope mapping.
+//! that supplies the trusty-memory tools and the per-tool scope mapping.
 //! Read-only tools (lookups, queries, info) require `memory.read`; tools
 //! that mutate palace state require `memory.write`.
 //!
@@ -83,6 +83,9 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         // #5005: dry-run is read-only but the repair deletes vector keys.
         | "palace_unalias"
         | "kg_assert"
+        // Retraction closes an interval — a KG write, same scope as the
+        // assertion it undoes.
+        | "kg_retract_triple"
         | "add_alias"
         | "remove_prompt_fact"
         | "discover_aliases"

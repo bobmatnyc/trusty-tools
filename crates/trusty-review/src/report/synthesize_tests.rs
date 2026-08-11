@@ -25,7 +25,7 @@ use crate::report::model::{ReportModel, RepositoryReport};
 use crate::report::synthesize_guard::{allowed_numbers, numbers_in, verify_prose};
 use crate::report::synthesize_prompt::{build_synthesis_prompt, synthesis_schema};
 
-use super::{Synthesis, SynthesisStatus, Synthesizer};
+use super::{Synthesis, SynthesisError, Synthesizer};
 
 // ── Stub providers ──────────────────────────────────────────────────────────
 
@@ -400,9 +400,8 @@ fn good_response() -> String {
     .to_string()
 }
 
-/// Why: verified prose must be injected and the status marked available.
-/// What: runs synthesize with a clean response; asserts exec/risks/findings and
-/// status Available.
+/// Why: verified prose must be injected and the pass must succeed.
+/// What: runs synthesize with a clean response; asserts exec/risks/findings.
 /// Test: this test itself.
 #[tokio::test]
 async fn synthesize_happy_path_injects() {
@@ -411,9 +410,11 @@ async fn synthesize_happy_path_injects() {
         body: good_response(),
         finish_reason: Some("stop".to_string()),
     });
-    let result = Synthesizer::new(llm, "stub/model").synthesize(&model).await;
+    let result = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect("a clean response synthesizes");
 
-    assert_eq!(result.status, SynthesisStatus::Available);
     assert!(result.executive_summary.is_some());
     assert_eq!(result.top_risks.len(), 1);
     assert_eq!(result.findings.len(), 1);
@@ -421,54 +422,68 @@ async fn synthesize_happy_path_injects() {
     assert!(result.notes.is_empty(), "clean response records no notes");
 }
 
-/// Why: a malformed response must never be partial-trusted.
-/// What: returns non-JSON; asserts Unavailable("unparseable response").
+/// Why: a malformed response must never be partial-trusted. #5454 regression —
+/// this used to return `Ok(Synthesis::unavailable(..))` and the report shipped
+/// deterministic-only; it is now a hard error.
+/// What: returns non-JSON; asserts `Err(SynthesisError::Unparseable)`.
 /// Test: this test itself.
 #[tokio::test]
-async fn synthesize_malformed_json_fails_closed() {
+async fn synthesize_malformed_json_is_a_hard_error() {
     let model = fixture_model(vec![red("x")]);
     let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
         body: "this is not json at all {{{".to_string(),
         finish_reason: Some("stop".to_string()),
     });
-    let result = Synthesizer::new(llm, "stub/model").synthesize(&model).await;
-    assert_eq!(
-        result.status,
-        SynthesisStatus::Unavailable("unparseable response".to_string())
+    let err = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect_err("an unparseable response must not yield a usable synthesis");
+    assert!(
+        matches!(err, SynthesisError::Unparseable),
+        "expected Unparseable, got {err:?}"
     );
-    assert!(result.executive_summary.is_none());
-    assert!(result.findings.is_empty());
 }
 
-/// Why: provider errors fail closed to the deterministic output.
-/// What: uses ErrorLlm; asserts Unavailable with a provider-error reason.
+/// Why: #5454 — a provider failure is the single most likely way an audit loses
+/// its narrative (rate limit, bad model id, network). It used to degrade the
+/// report silently; it must now stop the run.
+/// What: uses ErrorLlm; asserts `Err(SynthesisError::Provider(..))` carrying the
+/// provider's own text.
 /// Test: this test itself.
 #[tokio::test]
-async fn synthesize_provider_error_fails_closed() {
+async fn synthesize_provider_error_is_a_hard_error() {
     let model = fixture_model(vec![red("x")]);
     let llm: Arc<dyn LlmProvider> = Arc::new(ErrorLlm);
-    let result = Synthesizer::new(llm, "stub/model").synthesize(&model).await;
-    match result.status {
-        SynthesisStatus::Unavailable(reason) => assert!(reason.contains("provider error")),
-        other => panic!("expected Unavailable, got {other:?}"),
+    let err = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect_err("a provider error must not yield a usable synthesis");
+    match err {
+        SynthesisError::Provider(reason) => {
+            assert!(!reason.is_empty(), "the provider's reason must be carried")
+        }
+        other => panic!("expected Provider, got {other:?}"),
     }
 }
 
-/// Why: a truncated response is incomplete and must fail closed.
-/// What: returns a valid body but `finish_reason = "length"`; asserts
-/// Unavailable("truncated response").
+/// Why: a truncated response is incomplete and must never be partial-trusted.
+/// What: returns a valid body but `finish_reason = "length"` on both the initial
+/// call and the retry; asserts `Err(SynthesisError::Truncated)`.
 /// Test: this test itself.
 #[tokio::test]
-async fn synthesize_truncation_fails_closed() {
+async fn synthesize_truncation_is_a_hard_error() {
     let model = fixture_model(vec![red("x")]);
     let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm {
         body: good_response(),
         finish_reason: Some("length".to_string()),
     });
-    let result = Synthesizer::new(llm, "stub/model").synthesize(&model).await;
-    assert_eq!(
-        result.status,
-        SynthesisStatus::Unavailable("truncated response".to_string())
+    let err = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect_err("a truncated response must not yield a usable synthesis");
+    assert!(
+        matches!(err, SynthesisError::Truncated),
+        "expected Truncated, got {err:?}"
     );
 }
 
@@ -489,31 +504,32 @@ async fn synthesize_retry_recovers_from_truncation() {
     ]));
     let result = Synthesizer::new(llm.clone(), "stub/model")
         .synthesize(&model)
-        .await;
+        .await
+        .expect("the retry recovers a first-call truncation");
 
-    assert_eq!(result.status, SynthesisStatus::Available);
     assert!(result.executive_summary.is_some());
     assert_eq!(llm.call_count(), 2, "exactly one retry must have occurred");
 }
 
-/// Why: a response that is STILL truncated after the one retry must fail
-/// closed — the retry is a single cheap attempt, never an open-ended loop.
-/// What: the queued stub truncates on both calls; asserts `Unavailable
-/// ("truncated response")` and exactly 2 calls (no further retries).
+/// Why: the retry is a single cheap attempt, never an open-ended loop. #5454
+/// changed only what happens when it is spent — an error, not a degraded report.
+/// What: the queued stub truncates on both calls; asserts
+/// `Err(SynthesisError::Truncated)` and exactly 2 calls (no further retries).
 /// Test: this test itself.
 #[tokio::test]
-async fn synthesize_still_truncated_after_retry_fails_closed() {
+async fn synthesize_still_truncated_after_retry_is_a_hard_error() {
     let model = fixture_model(vec![red("x")]);
     let llm = Arc::new(QueuedLlm::new(vec![
         ("{}", Some("length")),
         ("{}", Some("length")),
     ]));
-    let result = Synthesizer::new(llm.clone(), "stub/model")
+    let err = Synthesizer::new(llm.clone(), "stub/model")
         .synthesize(&model)
-        .await;
-    assert_eq!(
-        result.status,
-        SynthesisStatus::Unavailable("truncated response".to_string())
+        .await
+        .expect_err("a still-truncated retry must not yield a usable synthesis");
+    assert!(
+        matches!(err, SynthesisError::Truncated),
+        "expected Truncated, got {err:?}"
     );
     assert_eq!(
         llm.call_count(),
@@ -522,28 +538,32 @@ async fn synthesize_still_truncated_after_retry_fails_closed() {
     );
 }
 
-/// Why: a timeout must fail closed rather than hang the report.
+/// Why: a hung provider must stop the report rather than hang it — and #5454
+/// makes that stop an error rather than a narrative-free report.
 /// What: uses a 30s-sleeping provider with a 10ms timeout; asserts
-/// Unavailable("provider timeout").
+/// `Err(SynthesisError::Timeout)`.
 /// Test: this test itself.
 #[tokio::test]
-async fn synthesize_timeout_fails_closed() {
+async fn synthesize_timeout_is_a_hard_error() {
     let model = fixture_model(vec![red("x")]);
     let llm: Arc<dyn LlmProvider> = Arc::new(SleepLlm);
-    let result = Synthesizer::new(llm, "stub/model")
+    let err = Synthesizer::new(llm, "stub/model")
         .with_timeout(Duration::from_millis(10))
         .synthesize(&model)
-        .await;
-    assert_eq!(
-        result.status,
-        SynthesisStatus::Unavailable("provider timeout".to_string())
+        .await
+        .expect_err("a timeout must not yield a usable synthesis");
+    assert!(
+        matches!(err, SynthesisError::Timeout),
+        "expected Timeout, got {err:?}"
     );
 }
 
 /// Why: the numeric guardrail must drop any field citing a figure not in source.
 /// What: exec summary cites 9999 (rejected); the finding is clean (kept).
 /// Asserts exec is dropped with a `rejected (unverified figure)` note while the
-/// finding survives, and the overall status is still Available.
+/// finding survives, and the pass as a whole still succeeds — per-FIELD rejection
+/// remains a correctness property under #5454's required-inference rule, and the
+/// dropped summary falls through to the deterministic composition (#5374).
 /// Test: this test itself.
 #[tokio::test]
 async fn synthesize_rejects_unverified_figure() {
@@ -562,9 +582,11 @@ async fn synthesize_rejects_unverified_figure() {
         body: body.to_string(),
         finish_reason: Some("stop".to_string()),
     });
-    let result = Synthesizer::new(llm, "stub/model").synthesize(&model).await;
+    let result = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect("one clean finding keeps the pass successful");
 
-    assert_eq!(result.status, SynthesisStatus::Available);
     assert!(
         result.executive_summary.is_none(),
         "exec summary citing 9999 must be rejected"
@@ -580,11 +602,13 @@ async fn synthesize_rejects_unverified_figure() {
     );
 }
 
-/// Why: when nothing survives verification the whole attempt is unavailable.
-/// What: every field cites 9999; asserts Unavailable("no verifiable content").
+/// Why: when nothing survives verification there is no narrative, which #5454
+/// makes a failed report rather than a deterministic-only one.
+/// What: every field cites 9999; asserts
+/// `Err(SynthesisError::NoVerifiableContent)`.
 /// Test: this test itself.
 #[tokio::test]
-async fn synthesize_all_rejected_is_unavailable() {
+async fn synthesize_all_rejected_is_a_hard_error() {
     let model = fixture_model(vec![]);
     let body = r#"{
       "executive_summary": "Exactly 9999 issues.",
@@ -595,12 +619,14 @@ async fn synthesize_all_rejected_is_unavailable() {
         body: body.to_string(),
         finish_reason: None,
     });
-    let result = Synthesizer::new(llm, "stub/model").synthesize(&model).await;
-    assert_eq!(
-        result.status,
-        SynthesisStatus::Unavailable("no verifiable content".to_string())
+    let err = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect_err("a wholly-rejected response must not yield a usable synthesis");
+    assert!(
+        matches!(err, SynthesisError::NoVerifiableContent),
+        "expected NoVerifiableContent, got {err:?}"
     );
-    assert_eq!(result.notes.len(), 2, "both rejections recorded");
 }
 
 /// Why: this is the direct acceptance-QA regression test — a large, real finding
@@ -632,9 +658,11 @@ async fn synthesize_with_many_findings_produces_exec_summary() {
         body: body.to_string(),
         finish_reason: Some("stop".to_string()),
     });
-    let result = Synthesizer::new(llm, "stub/model").synthesize(&model).await;
+    let result = Synthesizer::new(llm, "stub/model")
+        .synthesize(&model)
+        .await
+        .expect("a clean response at scale synthesizes");
 
-    assert_eq!(result.status, SynthesisStatus::Available);
     assert!(
         result.executive_summary.is_some(),
         "executive summary must not be blank at scale: notes={:?}",
@@ -643,21 +671,17 @@ async fn synthesize_with_many_findings_produces_exec_summary() {
     assert!(!result.executive_summary.unwrap().is_empty());
 }
 
-/// Why: the status note must carry the exact `synthesis:` banners the report and
-/// its readers key on.
-/// What: asserts the available and unavailable banner strings.
+/// Why: the status note carries the `synthesis:` banner the report's readers key
+/// on, plus every guardrail rejection.
+/// What: asserts the banner line and that notes follow it in order.
 /// Test: this test itself.
 #[test]
 fn status_lines_render_banners() {
-    let avail = Synthesis {
-        status: SynthesisStatus::Available,
+    let syn = Synthesis {
+        notes: vec!["synthesis: rejected (unverified figure) in top-risk row 1: 42".to_string()],
         ..Default::default()
     };
-    assert_eq!(avail.status_lines()[0], "synthesis: available");
-
-    let unavail = Synthesis::unavailable("provider timeout");
-    assert_eq!(
-        unavail.status_lines()[0],
-        "synthesis: unavailable (provider timeout)"
-    );
+    let lines = syn.status_lines();
+    assert_eq!(lines[0], "synthesis: available");
+    assert_eq!(lines[1], syn.notes[0]);
 }

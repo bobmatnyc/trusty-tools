@@ -10288,7 +10288,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "2.16.0"
+version = "2.17.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11410,7 +11410,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.32.0"
+version = "0.33.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11776,7 +11776,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11814,7 +11814,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "anyhow",
  "arc-swap",

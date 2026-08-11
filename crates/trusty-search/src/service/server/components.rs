@@ -132,9 +132,24 @@ pub(super) async fn apply_component_transition(
     // mirrored back onto the indexer's own flag either. Both directions are
     // handled here (`transition.new_skip_kg` is the resolved target for
     // either a turn-on or a turn-off) via a single write-lock acquisition.
-    if transition.kg_turning_on || transition.kg_turning_off {
+    // #3048: the vector lane needs the identical sync. `IndexHandle` is rebuilt
+    // on every PATCH but reuses this same `indexer` `Arc`, so the indexer's own
+    // copy is what `CodeIndexer::index_file` reads — leave it unsynced and a
+    // turn-off never reaches the watcher, which keeps embedding an index the
+    // operator just disabled. Folded into the same write-lock acquisition as
+    // the KG sync so a toggle of both components takes the lock once.
+    if transition.kg_turning_on
+        || transition.kg_turning_off
+        || transition.vector_turning_on
+        || transition.vector_turning_off
+    {
         let mut indexer = handle.indexer.write().await;
-        indexer.set_skip_kg(transition.new_skip_kg);
+        if transition.kg_turning_on || transition.kg_turning_off {
+            indexer.set_skip_kg(transition.new_skip_kg);
+        }
+        if transition.vector_turning_on || transition.vector_turning_off {
+            indexer.set_skip_vector(transition.new_skip_vector);
+        }
     }
     if transition.kg_turning_off {
         let indexer = handle.indexer.read().await;

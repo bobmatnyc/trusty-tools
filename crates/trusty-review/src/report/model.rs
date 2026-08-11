@@ -85,12 +85,15 @@ pub struct ReportModel {
     /// `polish_tests.rs::declared_gaps_render_as_bullets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gaps: Vec<String>,
-    /// Optional M2 LLM synthesis result (present only under `--synthesize`).
+    /// The verified LLM synthesis result.
     ///
-    /// Why: recording the synthesis outcome on the model keeps the JSON twin a
-    /// faithful record of what the LLM produced (and what the guardrail
-    /// rejected); the reporter reads this to inject narrative prose and to render
-    /// the visible `synthesis:` status note.  `None` = deterministic M1 output.
+    /// Why: recording it on the model keeps the JSON twin a faithful record of
+    /// what the LLM produced (and what the guardrail rejected); the reporter reads
+    /// this to inject narrative prose and to render the visible `synthesis:` note.
+    /// What: `Option` only because [`ReportModel::build`] runs BEFORE the pass —
+    /// #5454 made inference required, so `cmd_report` always sets it and
+    /// [`Reporter::write`](super::Reporter::write) refuses a model where it is
+    /// still `None`. It is never a "synthesis was skipped" signal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthesis: Option<super::synthesize::Synthesis>,
     /// Optional M3 cross-repo benchmark placement (present only under `--benchmark`).

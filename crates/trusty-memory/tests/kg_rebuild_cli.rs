@@ -71,8 +71,8 @@ fn kg_rebuild_help_advertises_purge_flags() {
 /// Why: `--dry-run` on its own would read as "rebuild without writing", which
 /// this command does not offer. Letting it parse would hand an operator a
 /// silent full rebuild when they asked for a preview.
-/// What: `--dry-run` without `--purge-stale-subjects` is a clap parse error
-/// (exit code 2).
+/// What: `--dry-run` without a maintenance flag (`--purge-stale-subjects` or
+/// #5401's `--merge-punctuated-twins`) is a clap parse error (exit code 2).
 /// Test: This test.
 #[test]
 fn kg_rebuild_dry_run_requires_the_purge_flag() {
@@ -120,6 +120,49 @@ fn kg_rebuild_purge_dry_run_runs_clean() {
     assert!(
         stdout.contains("DRY RUN"),
         "purge dry run must announce itself, got:\n{stdout}"
+    );
+}
+
+/// Why: #5401's merge is the second destructive pass on this subcommand, and
+/// `--dry-run` now gates on the GROUP rather than on the purge flag alone — a
+/// preview of the merge that clap refused would send an operator straight to
+/// the applying form.
+/// What: `--help` advertises `--merge-punctuated-twins`, and
+/// `--merge-punctuated-twins --dry-run` against an empty data dir exits 0.
+/// Test: This test.
+#[test]
+fn kg_rebuild_merge_dry_run_runs_clean() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let bin = locate_binary();
+    let help = Command::new(&bin)
+        .arg("kg-rebuild")
+        .arg("--help")
+        .output()
+        .expect("spawn trusty-memory kg-rebuild --help");
+    let help_out = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        help_out.contains("--merge-punctuated-twins"),
+        "kg-rebuild --help must advertise --merge-punctuated-twins, got:\n{help_out}"
+    );
+
+    let out = Command::new(&bin)
+        .arg("kg-rebuild")
+        .arg("--merge-punctuated-twins")
+        .arg("--dry-run")
+        .env("TRUSTY_DATA_DIR_OVERRIDE", tmp.path())
+        .env("RUST_LOG", "warn")
+        .output()
+        .expect("spawn trusty-memory kg-rebuild merge dry run");
+    assert!(
+        out.status.success(),
+        "merge dry run must exit 0; status {:?}, stderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("DRY RUN"),
+        "merge dry run must announce itself, got:\n{stdout}"
     );
 }
 
