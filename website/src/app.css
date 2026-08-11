@@ -236,6 +236,38 @@
 		@apply inline-block rounded-sm border border-foundry-border-strong px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-foundry-secondary;
 	}
 
+	/* Severity modifiers for the tga audit page's RED/AMBER/GREEN stamps. The
+	   badge is 11px text, so its foreground owes the 4.5:1 AA minimum for
+	   normal text, not the 3:1 non-text one.
+
+	   Red and green carry the semantic token in the TEXT because both clear
+	   that in both themes on both grounds the badge sits on (danger 4.85 light
+	   / 5.36 dark on content-bg, 5.46 / 4.97 on card-bg; success 5.22 / 8.29
+	   and 5.87 / 7.69).
+
+	   Amber does not, and that is why it is written differently rather than
+	   consistently: `--color-warning` on the page ground is 3.18:1 in light
+	   mode — one of the three pairs `prose-contrast.test.ts` pins as
+	   KNOWN_FAILING. So amber keeps text-primary (14.39:1 / 14.45:1) and
+	   carries its colour on the border only, where 3.18:1 clears WCAG 1.4.11's
+	   3:1 non-text minimum. These three rules sit ABOVE the documentation-prose
+	   block on purpose: that test slices app.css from that block's opening
+	   comment onward and asserts the warning token appears nowhere in the
+	   slice. Do not repeat that comment's text here — the slice is found by
+	   indexOf, so quoting it verbatim moves the slice's start onto this
+	   comment and drags these rules into it. */
+	.badge-red {
+		@apply border-foundry-danger text-foundry-danger;
+	}
+
+	.badge-amber {
+		@apply border-foundry-warning text-foundry-text;
+	}
+
+	.badge-green {
+		@apply border-foundry-success text-foundry-success;
+	}
+
 	/* Foundry's mono uppercase section label. Uses text-secondary, not
 	   text-muted: at this size the light-mode muted token is 3.87:1 and fails
 	   AA (see tokens.test.ts / README). */

@@ -87,12 +87,16 @@ const STATIC = path.join(OUTPUT, 'static');
 /** Sub-pixel layout rounding, not a real overflow — see the file doc above. */
 const MAIN_TOLERANCE_PX = 1;
 
+// `/tools/trusty-git-analytics` carries the `tga audit` port: five tables and
+// three shell blocks, the two shapes that actually scroll a page sideways.
+// `/tools/trusty-search` is the plain-prose flagship and stays as the control.
 const ROUTES = [
 	'/whats-new',
 	'/',
 	'/docs',
 	'/docs/getting-started/install',
-	'/tools/trusty-search'
+	'/tools/trusty-search',
+	'/tools/trusty-git-analytics'
 ];
 const WIDTHS = [375, 320];
 
