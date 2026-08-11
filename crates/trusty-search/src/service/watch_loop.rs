@@ -75,6 +75,11 @@ impl Drop for WatcherTask {
 /// belong to which path (e.g. an explicit `remove_file` HTTP handler).
 pub fn spawn_watch_loop(
     root_path: &Path,
+    // #3049: the watcher is a WRITER (`index_file` / `remove_chunk`), so it
+    // needs the id to take this index's teardown-lock read side. Passing the id
+    // rather than the whole handle keeps the existing `Arc<RwLock<CodeIndexer>>`
+    // seam that the watcher tests construct directly.
+    index_id: crate::core::registry::IndexId,
     indexer: Arc<RwLock<CodeIndexer>>,
     indexed_files: IndexedFiles,
 ) -> Result<WatcherTask> {
@@ -100,12 +105,26 @@ pub fn spawn_watch_loop(
         while let Some(event) = rx.recv().await {
             match event {
                 WatchEvent::Modified(path) => {
-                    handle_modified(&path, &canonical_root, &raw_root, &indexer, &indexed_files)
-                        .await;
+                    handle_modified(
+                        &path,
+                        &index_id,
+                        &canonical_root,
+                        &raw_root,
+                        &indexer,
+                        &indexed_files,
+                    )
+                    .await;
                 }
                 WatchEvent::Removed(path) => {
-                    handle_removed(&path, &canonical_root, &raw_root, &indexer, &indexed_files)
-                        .await;
+                    handle_removed(
+                        &path,
+                        &index_id,
+                        &canonical_root,
+                        &raw_root,
+                        &indexer,
+                        &indexed_files,
+                    )
+                    .await;
                 }
             }
         }
@@ -178,6 +197,7 @@ pub fn watcher_relative_path(canonical_root: &Path, raw_root: &Path, event_path:
 /// dead entries on edit.
 async fn handle_modified(
     path: &Path,
+    index_id: &crate::core::registry::IndexId,
     canonical_root: &Path,
     raw_root: &Path,
     indexer: &Arc<RwLock<CodeIndexer>>,
@@ -265,6 +285,13 @@ async fn handle_modified(
     let (chunks, _entities) = chunk_ast(&path_str, &content);
     let new_ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
 
+    // #3049: the watcher writes redb + HNSW here, so it holds the teardown
+    // lock's shared side across the write. Without it a DELETE landing on a
+    // watched index acquired an uncontended lock and removed the data
+    // directory while this call was mid-write.
+    let _teardown_guard = crate::service::reindex::index_teardown_lock(index_id)
+        .read_owned()
+        .await;
     let idx = indexer.read().await;
     if let Err(err) = idx.index_file(&path_str, &content).await {
         tracing::warn!(?err, ?path, "index_file failed");
@@ -297,6 +324,7 @@ async fn handle_modified(
 /// `removed_deleted_file_dual_root_fallback` unit tests below.
 async fn handle_removed(
     path: &Path,
+    index_id: &crate::core::registry::IndexId,
     canonical_root: &Path,
     raw_root: &Path,
     indexer: &Arc<RwLock<CodeIndexer>>,
@@ -312,6 +340,10 @@ async fn handle_removed(
     else {
         return;
     };
+    // #3049: `remove_chunk` mutates the corpus — same guard as `handle_modified`.
+    let _teardown_guard = crate::service::reindex::index_teardown_lock(index_id)
+        .read_owned()
+        .await;
     let idx = indexer.read().await;
     for id in ids {
         if let Err(err) = idx.remove_chunk(&id).await {
@@ -470,8 +502,13 @@ mod tests {
         let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
         let tracker = IndexedFiles::new();
 
-        let _task = spawn_watch_loop(dir.path(), Arc::clone(&indexer), tracker.clone())
-            .expect("watch loop starts");
+        let _task = spawn_watch_loop(
+            dir.path(),
+            crate::core::registry::IndexId::new("watch-loop-test"),
+            Arc::clone(&indexer),
+            tracker.clone(),
+        )
+        .expect("watch loop starts");
 
         // Allow the OS watcher to install.
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -508,8 +545,13 @@ mod tests {
         let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
         let tracker = IndexedFiles::new();
 
-        let _task = spawn_watch_loop(dir.path(), Arc::clone(&indexer), tracker.clone())
-            .expect("watch loop starts");
+        let _task = spawn_watch_loop(
+            dir.path(),
+            crate::core::registry::IndexId::new("watch-loop-test"),
+            Arc::clone(&indexer),
+            tracker.clone(),
+        )
+        .expect("watch loop starts");
 
         tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -554,8 +596,13 @@ mod tests {
         let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
         let tracker = IndexedFiles::new();
 
-        let task = spawn_watch_loop(dir.path(), Arc::clone(&indexer), tracker.clone())
-            .expect("watch loop starts");
+        let task = spawn_watch_loop(
+            dir.path(),
+            crate::core::registry::IndexId::new("watch-loop-test"),
+            Arc::clone(&indexer),
+            tracker.clone(),
+        )
+        .expect("watch loop starts");
 
         // Stop immediately — the OS watch is dropped and the consumer aborted.
         task.stop();
@@ -592,8 +639,13 @@ mod tests {
         let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
         let tracker = IndexedFiles::new();
 
-        let _task = spawn_watch_loop(dir.path(), Arc::clone(&indexer), tracker.clone())
-            .expect("watch loop starts");
+        let _task = spawn_watch_loop(
+            dir.path(),
+            crate::core::registry::IndexId::new("watch-loop-test"),
+            Arc::clone(&indexer),
+            tracker.clone(),
+        )
+        .expect("watch loop starts");
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Minimal valid docx: a zip containing just word/document.xml with

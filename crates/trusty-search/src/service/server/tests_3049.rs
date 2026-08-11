@@ -26,7 +26,7 @@ use super::search::unregister_index;
 use super::tests_components::IsolatedDataDir;
 use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
-use crate::service::reindex::{index_cancel_flag, index_semaphore};
+use crate::service::reindex::{index_cancel_flag, index_teardown_lock};
 use crate::service::server::SearchAppState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -80,10 +80,7 @@ async fn unregister_index_waits_for_an_in_flight_writer_to_release_the_permit() 
     let (state, _data_dir) = state_with_index(isolated.path(), ID);
     let index_id = IndexId::new(ID);
 
-    let permit = index_semaphore(&index_id)
-        .acquire_owned()
-        .await
-        .expect("per-index semaphore is never closed");
+    let permit = index_teardown_lock(&index_id).read_owned().await;
     let finished = Arc::new(AtomicBool::new(false));
     let writer_finished = finished.clone();
     tokio::spawn(async move {
@@ -96,7 +93,7 @@ async fn unregister_index_waits_for_an_in_flight_writer_to_release_the_permit() 
 
     assert!(
         finished.load(Ordering::Acquire),
-        "unregister_index returned while a writer still held the per-index permit — \
+        "unregister_index returned while a writer still held the teardown lock — \
          the delete did not await in-flight work (issue #3049)"
     );
     assert!(
@@ -127,17 +124,14 @@ async fn delete_with_delete_data_refuses_removal_when_a_writer_never_quiesces() 
     let (state, data_dir) = state_with_index(isolated.path(), ID);
     let marker = data_dir.join("corpus.marker");
 
-    // Held for the duration of the call — the wait cannot succeed.
-    let _stuck_writer = index_semaphore(&IndexId::new(ID))
-        .acquire_owned()
-        .await
-        .expect("per-index semaphore is never closed");
+    // Held for the duration of the call — the exclusive wait cannot succeed.
+    let _stuck_writer = index_teardown_lock(&IndexId::new(ID)).read_owned().await;
 
     let outcome = unregister_index(&state, ID, true).await;
 
     assert!(
         !outcome.quiesced,
-        "a permit held for the whole call must expire the quiesce wait"
+        "a read guard held for the whole call must expire the quiesce wait"
     );
     assert!(
         !outcome.data_deleted,
@@ -252,5 +246,63 @@ async fn index_cancel_flag_is_evicted_so_a_recreated_index_starts_uncancelled() 
         !index_cancel_flag(&index_id).load(Ordering::Acquire),
         "after the delete the flag must be evicted, so an index recreated under the \
          same id gets a fresh uncancelled flag (issue #3049)"
+    );
+}
+
+/// #3049 round 2: a DELETE must wait for `POST /indexes/:id/index-file`, which
+/// holds NO reindex permit.
+///
+/// Why: this is the CRITICAL the first round missed. `unregister_index` waited
+/// on `index_semaphore`, which only `run_reindex`, `defer_embed_queue`, and the
+/// PATCH config handler ever acquire. `index_file_handler` writes straight to
+/// `handle.indexer` after a bare `registry.get()`, so the delete's acquire
+/// succeeded instantly against zero contention, reported `quiesced: true`, and
+/// `remove_dir_all` ran while the write was still landing in the same redb and
+/// HNSW files. Five sibling paths had the same hole — see the table on
+/// `INDEX_TEARDOWN_LOCKS`.
+///
+/// What: takes the teardown lock's SHARED side exactly as `index_file_handler`
+/// now does, and asserts the delete blocks until it is released. Against the
+/// round-1 commit this fails as a real assertion failure — the delete returned
+/// immediately because that writer held no semaphore permit.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn delete_waits_for_an_ungated_index_file_write() {
+    let isolated = IsolatedDataDir::new();
+    const ID: &str = "ungated-writer-3049";
+    let (state, data_dir) = state_with_index(isolated.path(), ID);
+    let marker = data_dir.join("corpus.marker");
+    let index_id = IndexId::new(ID);
+
+    // Exactly what `index_file_handler` holds for the span of its write.
+    let write_guard = index_teardown_lock(&index_id).read_owned().await;
+    let write_finished = Arc::new(AtomicBool::new(false));
+    let flag = write_finished.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        flag.store(true, Ordering::Release);
+        drop(write_guard);
+    });
+
+    let outcome = unregister_index(&state, ID, true).await;
+
+    assert!(
+        write_finished.load(Ordering::Acquire),
+        "DELETE returned while an index-file write was still in flight — the \
+         quiescence point does not cover writers that hold no reindex permit \
+         (issue #3049)"
+    );
+    assert!(
+        outcome.quiesced,
+        "the write completed within the timeout, so the wait must have succeeded"
+    );
+    assert!(
+        outcome.data_deleted,
+        "a quiesced delete with delete_data=true must actually remove the data"
+    );
+    assert!(
+        !marker.exists(),
+        "data removal was reported, so the marker must be gone"
     );
 }
