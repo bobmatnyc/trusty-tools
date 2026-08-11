@@ -208,7 +208,7 @@ fn parse_picker_choice_rename_deleted_slot_is_slot_deleted() {
     );
 }
 
-// ── d <glob> bulk delete parsing (#5533) ────────────────────────────────────
+// ── d <glob> bulk delete parsing (#5539) ────────────────────────────────────
 
 #[test]
 fn parse_picker_choice_glob_delete_recognised() {
@@ -474,7 +474,7 @@ fn command_legend_populated_menu_shape() {
     );
 }
 
-/// #5533: the bulk-delete row must name the pattern form AND the preview flag —
+/// #5539: the bulk-delete row must name the pattern form AND the preview flag —
 /// an operator who cannot see `--dry-run` on the menu will not discover it, and
 /// a bulk destructive command whose preview is undiscoverable is the wrong
 /// default.

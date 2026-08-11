@@ -1,4 +1,4 @@
-//! Unit tests for the picker's `d <glob>` bulk delete (#5533).
+//! Unit tests for the picker's `d <glob>` bulk delete (#5539).
 //!
 //! Why: the feature is destructive and bulk, so the tests that matter are the
 //! ones proving it does NOT delete. `decide_glob_delete` is built so that

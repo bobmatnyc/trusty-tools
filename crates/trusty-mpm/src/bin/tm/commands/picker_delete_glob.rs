@@ -1,4 +1,4 @@
-//! Bulk delete-by-name-glob for the `tm ls` picker (#5533).
+//! Bulk delete-by-name-glob for the `tm ls` picker (#5539).
 //!
 //! Why: the picker's `d<N>` deletes exactly one slot per confirmation round, so
 //! clearing a batch of throwaway sessions (`tm-tmpsywch8`, `tm-tmpomyigk`, … —
@@ -135,7 +135,7 @@ pub(crate) enum GlobDeleteOutcome {
     Confirm,
 }
 
-/// Recognise the bulk form of the picker's `d` command (#5533).
+/// Recognise the bulk form of the picker's `d` command (#5539).
 ///
 /// Why the remainder must contain a glob metacharacter: `d<N>`'s prefix strip is
 /// safe today only because the remainder has to parse as a slot number, which is
@@ -374,7 +374,7 @@ pub(crate) async fn confirm_and_delete_glob(
             return Ok(0);
         }
         GlobDeleteOutcome::NoMatch => {
-            // #5533: an empty match set is a REPORT, never a silent success —
+            // #5539: an empty match set is a REPORT, never a silent success —
             // the operator must be able to tell "deleted nothing" from
             // "matched nothing" without re-reading the list.
             eprintln!("tm: no sessions match '{pattern}' — nothing deleted.");

@@ -103,7 +103,7 @@ pub(crate) enum PickerDecision {
     /// running session, a force-confirm — before touching the store, so this
     /// variant only signals intent, never an unconditional destructive action.
     Delete(usize),
-    /// Bulk-delete every session whose NAME matches a glob (#5533). Entered as
+    /// Bulk-delete every session whose NAME matches a glob (#5539). Entered as
     /// `d <glob>` — e.g. `d tm-test-*`, `d *-01 --dry-run`. Reachable only when
     /// the remainder carries a glob metacharacter, so a mistyped `delete` still
     /// resolves to `Unrecognised` rather than a bulk destructive action. The
@@ -834,7 +834,7 @@ fn launch_new_argument(choice: &str) -> Option<&str> {
 ///     deleting. Matching a TOMBSTONED slot → `SlotDeleted(i)` (#3034 — no
 ///     double-delete, no silent no-op).
 ///   • `d <glob>` whose remainder is not a slot number but DOES contain a glob
-///     metacharacter (`*`, `?`, `[`) → `DeleteGlob` (#5533) — a bulk delete by
+///     metacharacter (`*`, `?`, `[`) → `DeleteGlob` (#5539) — a bulk delete by
 ///     session name, previewed and count-confirmed by the driver. A remainder
 ///     with no metacharacter (`delete`, an unknown name, an out-of-range
 ///     number) stays `Unrecognised`, so a typo can never start a bulk action.
@@ -926,7 +926,7 @@ pub(crate) fn parse_picker_choice(
                 false => PickerDecision::Delete(idx),
             };
         }
-        // #5533: not a slot number — accept the bulk `d <glob>` form. The
+        // #5539: not a slot number — accept the bulk `d <glob>` form. The
         // remainder must carry a glob metacharacter, which is what keeps a
         // mistyped `delete` falling through to `Unrecognised` (see
         // `picker_delete_glob::parse_glob_delete`).
@@ -1247,7 +1247,7 @@ pub(crate) async fn run_tty_picker(
             PickerDecision::Delete(i) => {
                 super::picker_delete::confirm_and_delete(client, url, &sessions[i]).await?;
             }
-            // #5533: bulk delete by name glob. The preview, the count-confirm
+            // #5539: bulk delete by name glob. The preview, the count-confirm
             // prompt, and the running-session guard live in
             // `picker_delete_glob`; deletions route through the same
             // `delete_managed_then_local` the single-slot arm above uses. Every
