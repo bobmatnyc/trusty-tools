@@ -122,7 +122,15 @@ pub(super) async fn run_reindex(
         crate::service::persistence::load_index_registry,
     );
     let (root_moved, prior_indexed_root) = match gate {
-        Ok(trusted) => (trusted.moved, trusted.indexed_root),
+        Ok(trusted) => {
+            if trusted.moved {
+                // #5357: the indexer moves HERE, off one read of the registry,
+                // rather than at request time where a later refusal could strand
+                // it on a root the corpus never matched.
+                root_gate::sync_indexer_root_after_trusted_move(&handle).await;
+            }
+            (trusted.moved, trusted.indexed_root)
+        }
         Err(refusal) => {
             tracing::warn!("reindex[{}]: {}", index_id.0, refusal.reason);
             // #5357: the handler may already have pointed the indexer at the

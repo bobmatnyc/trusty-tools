@@ -200,22 +200,25 @@ pub(super) async fn reindex_handler(
                     None => crate::service::persistence::load_index_registry(),
                 },
             );
-            if let Err(refusal) = gate {
-                tracing::warn!(
-                    "reindex_handler: refusing root_path override for '{}' to {} — {}",
-                    index_id.0,
-                    new_root.display(),
-                    refusal.reason,
-                );
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": refusal.reason,
-                        "indexed_root": refusal.indexed_root,
-                        "persisted_root": refusal.persisted_root,
-                    })),
-                ));
-            }
+            let trusted = match gate {
+                Ok(trusted) => trusted,
+                Err(refusal) => {
+                    tracing::warn!(
+                        "reindex_handler: refusing root_path override for '{}' to {} — {}",
+                        index_id.0,
+                        new_root.display(),
+                        refusal.reason,
+                    );
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": refusal.reason,
+                            "indexed_root": refusal.indexed_root,
+                            "persisted_root": refusal.persisted_root,
+                        })),
+                    ));
+                }
+            };
             if handle.root_path.as_os_str().is_empty() || handle.root_path != new_root {
                 let indexer = Arc::clone(&handle.indexer);
                 // #4951: the override rebuilds the handle around this SAME
@@ -236,7 +239,17 @@ pub(super) async fn reindex_handler(
                 // narrowed to a race window instead of made permanent.
                 let indexer_for_guard = Arc::clone(&indexer);
                 let mut indexer_guard = indexer_for_guard.write().await;
-                indexer_guard.set_root_path(new_root.clone());
+                // #5357: only when the corpus already agrees with `new_root`.
+                // A MOVE is the runner's to apply, after its own re-read of
+                // `indexes.toml` — applying it here and refusing there is what
+                // stranded the indexer on a root the corpus never matched. Until
+                // the runner's gate passes, the handle's new root and the
+                // indexer's old one disagree, which fails closed: empty results
+                // with `stale_index_root: true`, not dangling paths reported as
+                // healthy.
+                if !trusted.moved {
+                    indexer_guard.set_root_path(new_root.clone());
+                }
                 // Preserve the filter set / domain vocabulary recorded on the
                 // existing handle — only the root_path is being overridden.
                 let new_handle = IndexHandle {

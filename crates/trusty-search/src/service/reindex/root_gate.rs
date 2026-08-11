@@ -69,7 +69,8 @@ pub(crate) struct RootMoveRefusal {
 /// so the unmoved fast path still does no registry I/O.
 /// Test: `refuses_when_the_indexed_root_read_fails`,
 /// `refuses_when_the_registry_read_fails`, `refuses_an_untrusted_move`,
-/// `accepts_a_move_that_matches_the_persisted_entry`, `unmoved_root_is_accepted`.
+/// `accepts_a_move_that_matches_the_persisted_entry`,
+/// `unmoved_root_is_accepted_without_reading_the_registry`.
 pub(crate) fn evaluate_root_move(
     index_id: &str,
     indexed_root: anyhow::Result<Option<PathBuf>>,
@@ -150,20 +151,52 @@ pub(crate) fn evaluate_root_move(
     })
 }
 
+/// Move the indexer onto the candidate root now that the gate has trusted it.
+///
+/// Why: `reindex_handler` used to apply the override's `set_root_path` at
+/// request time, minutes before this gate re-read `indexes.toml` behind the
+/// reindex semaphores (#4951). A registry write landing in between let the
+/// handler accept a move the runner then refused, leaving the indexer on a root
+/// the corpus was never relativized against (#5357). Deferring the move to here
+/// means one read of the registry drives both the decision and the mutation, so
+/// that window cannot produce a half-applied override at all. The handler still
+/// syncs when NO move was detected — the corpus already agrees with the
+/// candidate there, so there is nothing for this gate to decide.
+/// What: no-op unless the indexer is somewhere other than the handle's root;
+/// otherwise takes the indexer write lock and moves it. Called only on the
+/// `moved: true` accepted path, before Phase 1 walks anything.
+/// Test: `root_hijack_tests::reindex_accepts_root_move_that_matches_persisted_config`.
+pub(crate) async fn sync_indexer_root_after_trusted_move(handle: &IndexHandle) {
+    let target = handle.root_path.clone();
+    let mut indexer = handle.indexer.write().await;
+    if indexer.root_path == target {
+        return;
+    }
+    tracing::info!(
+        "reindex[{}]: trusted root move — pointing the indexer from {} at {} so the \
+         re-relativized chunks resolve against the root this run is walking (#5357)",
+        handle.id.0,
+        indexer.root_path.display(),
+        target.display(),
+    );
+    indexer.set_root_path(target);
+}
+
 /// Point the indexer back at the root the corpus is actually relative to after
 /// a refusal.
 ///
-/// Why: `reindex_handler` applies the override's `set_root_path` at request
-/// time (#4951), minutes before the runner's own gate re-reads `indexes.toml`
-/// behind the reindex semaphores. When the runner then refuses, the indexer
-/// resolves root-relative chunk paths against the refused root while the corpus
-/// is still relative to the old one — `file_is_within_root` is a lexical prefix
-/// test, so those dangling paths pass it and `stale_index_root` reads `false`:
-/// a wrong answer reported as healthy. Restoring the indexer root makes the
-/// same state fail closed instead (empty results, `stale_index_root: true`).
-/// What: no-op when the refusal could not determine the corpus's root (the
-/// read-failure arms) or the indexer is already there; otherwise takes the
-/// indexer write lock and moves it back.
+/// Why: the deferred sync above removes the handler as a source of this
+/// divergence, but not every route to it — a stale in-memory handle, or any
+/// other path that repointed the indexer, reaches the same state. Left there,
+/// the indexer resolves root-relative chunk paths against the refused root while
+/// the corpus is still relative to the old one, and `file_is_within_root` is a
+/// lexical prefix test, so those dangling paths pass it and `stale_index_root`
+/// reads `false`: a wrong answer reported as healthy. Restoring the indexer root
+/// makes the same state fail closed (empty results, `stale_index_root: true`).
+/// What: no-op when the indexer is already there, or when the refusal could not
+/// determine the corpus's root — only the corpus-read-failure arm leaves
+/// `indexed_root: None`, since the registry-read-failure arm reuses the root it
+/// already read. Otherwise takes the indexer write lock and moves it back.
 /// Test: `root_hijack_tests::reindex_refuses_untrusted_root_move_and_preserves_corpus`.
 pub(crate) async fn restore_indexer_root_after_refusal(
     handle: &IndexHandle,

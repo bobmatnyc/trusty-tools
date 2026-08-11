@@ -29,8 +29,9 @@
 //! Test: `reindex_refuses_untrusted_root_move_and_preserves_corpus` (the core
 //! #2178 regression), `reindex_accepts_root_move_that_matches_persisted_config`
 //! (the surviving legitimate-move case),
-//! `reindex_refuses_when_the_persisted_registry_cannot_be_read` and
-//! `reindex_refuses_when_the_corpus_indexed_root_read_fails` (#5357).
+//! `reindex_refuses_when_the_persisted_registry_cannot_be_read`,
+//! `reindex_refuses_when_the_corpus_indexed_root_read_fails` and
+//! `reindex_refuses_when_the_indexed_root_value_is_corrupt` (#5357).
 
 use super::*;
 use crate::core::chunker::{ChunkType, RawChunk};
@@ -345,13 +346,66 @@ async fn reindex_refuses_when_the_corpus_indexed_root_read_fails() {
     ) {
         return;
     }
+    let fx = corpus_fault_fixture("cto-5357-corpus-unreadable").await;
+    crate::core::corpus::test_support::break_meta_table(&fx.corpus)
+        .expect("inject the _meta schema fault");
+    assert_corpus_fault_refused(&fx, "an unreadable corpus indexed_root").await;
+}
+
+/// #5357 (code-critic CRITICAL): a corpus whose stored `indexed_root` VALUE is
+/// corrupt must refuse too — the narrower sibling of the test above.
+///
+/// Why: `read_indexed_root_sync` answered `Ok(None)` when the stored bytes
+/// failed UTF-8 decode, which is the same answer it gives for an index that was
+/// never stamped. A corrupted root therefore never reached the `Err` arm the
+/// rest of this fix routes through: the gate was skipped outright, the candidate
+/// root walked, and the corpus pruned against it. The schema-fault injector in
+/// the test above cannot reach this path — it fails at `open_table`, several
+/// steps earlier.
+/// What: same fixture, but the fault is three non-UTF-8 bytes written under
+/// `META_KEY_INDEXED_ROOT` with the table's schema left intact.
+/// Test: this test.
+#[tokio::test]
+async fn reindex_refuses_when_the_indexed_root_value_is_corrupt() {
+    if !isolate_in_child_process(
+        "service::reindex::root_hijack_tests::\
+         reindex_refuses_when_the_indexed_root_value_is_corrupt",
+    ) {
+        return;
+    }
+    let fx = corpus_fault_fixture("cto-5357-corpus-corrupt-value").await;
+    crate::core::corpus::test_support::corrupt_indexed_root_value(&fx.corpus)
+        .expect("inject the corrupt indexed_root value");
+    assert_corpus_fault_refused(&fx, "a corrupt corpus indexed_root value").await;
+}
+
+/// The shared shape of the two corpus-fault tests above: a 50-chunk corpus
+/// stamped at root A, an in-memory handle hijacked to an unrelated root B that
+/// holds a real file, and an `indexes.toml` that AGREES with the corpus.
+///
+/// Why: the registry agrees deliberately — it makes the corpus read the only
+/// input under test. Pre-fix, its failure alone was enough to skip the gate.
+/// The file under root B is what makes `total_files == 0` discriminate: a gate
+/// that fails open walks it.
+/// What: returns the tempdirs (held so they outlive the run), the corpus, and
+/// the handle. Each caller then injects its own fault.
+/// Test: both `reindex_refuses_when_the_*` tests above.
+struct CorpusFaultFixture {
+    _data_dir: tempfile::TempDir,
+    _root_a: tempfile::TempDir,
+    _root_b: tempfile::TempDir,
+    corpus: Arc<CorpusStore>,
+    handle: Arc<IndexHandle>,
+}
+
+async fn corpus_fault_fixture(id: &str) -> CorpusFaultFixture {
     let data_dir = tempfile::tempdir().expect("data dir");
     let root_a = tempfile::tempdir().expect("root a");
     let root_b = tempfile::tempdir().expect("root b");
     std::fs::write(root_b.path().join("bystander.rs"), "fn bystander() {}\n").unwrap();
     std::fs::create_dir_all(root_b.path().join(".trusty-search")).unwrap();
 
-    let id = IndexId::new("cto-5357-corpus-unreadable");
+    let id = IndexId::new(id);
     let corpus =
         Arc::new(CorpusStore::open(&data_dir.path().join("cto_corpus.redb")).expect("open corpus"));
     let seed_chunks: Vec<RawChunk> = (0..50)
@@ -371,8 +425,6 @@ async fn reindex_refuses_when_the_corpus_indexed_root_read_fails() {
         .await
         .expect("stamp prior indexed_root");
 
-    // The registry agrees with the corpus — the corpus read is the input under
-    // test, and pre-fix its failure alone was enough to skip the gate.
     crate::service::persistence::upsert_index_registry_entry(PersistedIndex {
         id: id.0.clone(),
         root_path: root_a.path().to_path_buf(),
@@ -380,34 +432,41 @@ async fn reindex_refuses_when_the_corpus_indexed_root_read_fails() {
     })
     .expect("persist indexes.toml entry");
 
-    corpus
-        .break_meta_table_for_tests()
-        .expect("inject the _meta read fault");
+    CorpusFaultFixture {
+        _data_dir: data_dir,
+        _root_a: root_a,
+        _root_b: root_b,
+        corpus,
+        handle,
+    }
+}
 
+/// Run the reindex and assert it refused before touching anything.
+async fn assert_corpus_fault_refused(fx: &CorpusFaultFixture, fault: &str) {
     let progress = Arc::new(ReindexProgress::new());
-    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+    spawn_reindex_awaitable(fx.handle.clone(), progress.clone(), false)
         .await
         .expect("reindex task must not panic");
 
     assert_eq!(
         progress.status.load(),
         ReindexStatus::Failed,
-        "#5357: an unreadable corpus indexed_root must refuse the reindex — \
-         'the read failed' is not 'this index has no prior root'"
+        "#5357: {fault} must refuse the reindex — 'the read failed' is not \
+         'this index has no prior root'"
     );
     assert_eq!(
         progress.total_files.load(Ordering::Acquire),
         0,
-        "#5357: the refusal must fire before the walk starts"
+        "#5357: the refusal must fire before the walk starts ({fault})"
     );
     assert_eq!(
-        corpus
+        fx.corpus
             .load_all_chunks()
             .expect("read corpus after abort")
             .len(),
         50,
-        "#5357: the real corpus must survive — pre-fix this walked the \
-         unrelated root and pruned every chunk it did not find there"
+        "#5357: the real corpus must survive ({fault}) — pre-fix this walked \
+         the unrelated root and pruned every chunk it did not find there"
     );
 }
 

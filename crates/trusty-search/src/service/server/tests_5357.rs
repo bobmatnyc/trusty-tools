@@ -185,8 +185,7 @@ async fn reindex_override_is_refused_when_the_indexed_root_cannot_be_read() {
         }],
     )
     .expect("seed a valid registry — the corpus read is the input under test");
-    fx.corpus
-        .break_meta_table_for_tests()
+    crate::core::corpus::test_support::break_meta_table(&fx.corpus)
         .expect("inject the _meta read fault");
 
     let (status, body) = expect_refusal(
