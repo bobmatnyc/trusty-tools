@@ -373,13 +373,18 @@ jobs:
 
   # --------------------------------------------------------------------------
   # test-shard: run all unit + integration tests (stable, no --include-ignored),
-  # split four ways by nextest partition. The `test` job below aggregates these
+  # split two ways by nextest partition. The `test` job below aggregates these
   # into a single roll-up row, "Rust tests (pre-publish gate)" — see that
   # job's own comment for why, and that it is not currently a required
   # branch-protection context.
   #
   # Why sharded: the unsharded job ran 16–24 minutes and was the critical path
   # of every CI run — ~45% of it executing tests one binary at a time.
+  # Two shards preserve that wall-clock gain without paying for four identical
+  # workspace builds. In runs 31526290386 and 31526194121, each of the four
+  # shards spent 423–501s building and only 143–187s in the nextest step; two
+  # shards roughly halve build compute while keeping the predicted critical
+  # path near the measured four-shard result.
   #
   # Why partitioned rather than split by crate. Splitting by crate (`-p a -p b`
   # per shard) would also cut the build, and that was the first design here. It
@@ -390,15 +395,16 @@ jobs:
   # resolves, losing embedder, memory-core, bm25, migrations and friends — and
   # every test behind those `#[cfg(feature = …)]` gates with them. A bare
   # `cargo test -p trusty-common --lib` lists 310 tests where `--workspace`
-  # lists 2062. Four green shards, ~1750 trusty-common tests not run, nothing
-  # anywhere saying so.
+  # lists 2062. Crate-based green shards could omit ~1750 trusty-common tests,
+  # with nothing anywhere saying so.
   #
   # `--partition` cannot do that. Every shard runs the same `--workspace` build,
   # so feature resolution is byte-for-byte what it was before this change, and
   # nextest assigns each test in the resolved list to exactly one partition.
   # The split is over test EXECUTION only, and its totality is a property of
   # nextest's partitioner rather than of a crate list somebody has to maintain.
-  # The build is not sharded; it is shared instead — see the cache note below.
+  # The build remains duplicated per runner; its dependency cache is shared —
+  # see the cache note below.
   #
   # ONNX-backed tests are #[ignore]-tagged; they are intentionally skipped here
   # because they require model downloads and a running embedderd daemon.
@@ -432,7 +438,7 @@ jobs:
   # config files pulled by fastembed are also captured.
   # --------------------------------------------------------------------------
   test-shard:
-    name: Rust tests (pre-publish gate) — shard ${{ matrix.shard }} of 4
+    name: Rust tests (pre-publish gate) — shard ${{ matrix.shard }} of ${{ strategy.job-total }}
     needs: [changes]
     # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
     # GitHub reports a skipped required check as PASSING — reintroducing the
@@ -447,22 +453,23 @@ jobs:
       # Every shard runs to completion. Cancelling siblings on the first
       # failure would hide the other shards' results, which is the opposite of
       # what sharding is for: one PR usually breaks one crate, and seeing the
-      # other three shards stay green is what localises it.
+      # the other shard stays green is what localises it.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2]
     env:
       # Point fastembed (and hf-hub) at a stable, writable path so the
       # actions/cache key can target it precisely. This env var is honoured
       # natively by fastembed-rs via get_cache_dir() and also by the
       # resolve_fastembed_cache_dir() helper in trusty-common.
       FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
-      # 179+ statically-linked test binaries with full default debuginfo
-      # exhausted runner disk (~9 GB of binaries + the DWARF-driven share of
-      # ~18 GB of never-swept intermediate .rcgu.o codegen objects); Linux
-      # ELF embeds DWARF directly in the binary, unlike the macOS proxy.
-      # line-tables-only keeps file:line info in panic backtraces while
-      # dropping the bulk of debug records. See #3668.
+      # 200+ statically-linked test binaries make debug-info generation and
+      # incremental bookkeeping pure CI overhead. nextest reports the owning
+      # crate and test, while Rust panic messages retain their source location
+      # without DWARF, so this gate does not need symbolic backtraces. Disabling
+      # both also shrinks the 42G post-build target tree observed in run
+      # 31526290386 and avoids producing incremental state that rust-cache
+      # deliberately removes before saving. See #3668 and #3672.
       #
       # The workspace Cargo.toml has no [profile.test] override, so `cargo
       # test` normally inherits dev's implicit debug level — but the `test`
@@ -473,7 +480,8 @@ jobs:
       # clippy job's `--all-targets` run was checked and confirmed to build
       # under the check-only `dev` profile with zero linked executables and
       # zero .rcgu.o output, so it does not share this disk pressure.
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -483,10 +491,10 @@ jobs:
       # #3668 was a real disk-exhaustion incident in this job, on a target/
       # tree fed by onnxruntime/ort, ~a dozen tree-sitter grammars,
       # aws-sdk-bedrock and usearch. The script fires the reclamation on
-      # measured headroom instead of unconditionally; the .rcgu.o sweep below,
-      # not this step, is what actually remedied #3668. Every shard still does
-      # the full workspace build, so the disk pressure this guards against is
-      # unchanged by sharding.
+      # measured headroom instead of unconditionally. The old .rcgu.o sweep
+      # matched nothing and has been removed (#3672); debug-free,
+      # non-incremental test builds reduce the pressure at its source. Every
+      # shard still does the full workspace build, so the guard remains.
       - name: Free disk space
         if: needs.changes.outputs.docs_only != 'true'
         run: bash scripts/ci-free-disk-space.sh
@@ -523,9 +531,9 @@ jobs:
             | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
           cargo nextest --version
 
-      # ONE cache shared by all four shards. Every shard runs the same
+      # ONE cache shared by both shards. Every shard runs the same
       # `--workspace` build and differs only in which tests it executes, so the
-      # target/ trees are identical and four separate caches would be four
+      # target/ trees are identical and separate caches would be duplicate
       # copies of the same bytes against a quota that is already blown.
       #
       # `save-if` restricted to main is deliberate and is a FIX, not a
@@ -879,31 +887,18 @@ jobs:
           key: ${{ steps.fastembed-key.outputs.key }}
 
       # Build phase only (no test execution yet): links this shard's test
-      # binaries so the intermediate .rcgu.o codegen objects below can be
-      # swept once linking is done and before the (disk-heavier) test
-      # execution phase runs. See #3668.
+      # binaries before nextest starts executing them. Keeping compilation and
+      # execution separate makes their costs visible in the Actions timeline.
       #
-      # `--no-run` under nextest is `list --list-type binaries-only`; plain
-      # `cargo test --no-run` is used instead because it produces byte-identical
-      # artefacts to the doctest step below and therefore shares one build
-      # fingerprint with it. (A `cargo nextest list` here resolved a DIFFERENT
-      # fingerprint and forced a ~91s recompile — measured in #4402.)
-      - name: cargo test --workspace --no-run (build phase)
+      # Use nextest's own build command so `cargo nextest run` below consumes
+      # the binaries without changing Cargo's fingerprint. The former plain
+      # `cargo test --no-run` made nextest rebuild trusty-agents and
+      # trusty-agents-local in every shard (82s in run 31526290386). Shard 1's
+      # doctest command still uses Cargo's native fingerprint, but it runs only
+      # once and already paid that transition after nextest in the old order.
+      - name: cargo nextest list (build phase)
         if: needs.changes.outputs.docs_only != 'true'
-        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
-
-      # Sweep intermediate per-codegen-unit object files (#3668): once a
-      # test binary is linked, its .rcgu.o inputs are dead weight — cargo
-      # never reclaims them itself, and they made up ~18 GB of the runner's
-      # disk exhaustion. Verified locally that deleting them does not cause
-      # a subsequent `cargo test` invocation to relink (cargo's fingerprint
-      # tracking does not depend on these surviving).
-      - name: Sweep intermediate .rcgu.o codegen objects
-        if: needs.changes.outputs.docs_only != 'true'
-        run: |
-          echo "Before sweep:"; du -sh target/debug 2>/dev/null || true
-          find target/debug/deps -name '*.rcgu.o' -delete
-          echo "After sweep:"; du -sh target/debug 2>/dev/null || true
+        run: cargo nextest list --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --list-type binaries-only
 
       # cargo-nextest instead of `cargo test`, for two reasons measured on this
       # repo:
@@ -932,11 +927,12 @@ jobs:
       # stopped at the first failing BINARY, so a PR breaking two crates needed
       # two CI rounds to discover that.
       #
-      # The divisor is `strategy.job-total`, not a literal 4. nextest only
+      # The divisor is `strategy.job-total`, not a literal shard count. nextest
+      # only
       # rejects a partition whose numerator exceeds its denominator, so a
       # hand-written divisor left stale after the matrix changed would silently
       # stop running a quarter of the suite with every shard green. Deriving it
-      # from the matrix makes `shard: [1, 2, 3, 4]` the only place the count
+      # from the matrix makes the matrix list the only place the count
       # exists.
       #
       # `hash:N/M` rather than `count:N/M`: hash assigns a test to a partition
@@ -958,8 +954,8 @@ jobs:
       # doctest from CI, so `cargo test --doc` runs them separately.
       #
       # Shard 1 only: `--partition` splits the tests nextest owns, and doctests
-      # are not among them, so running this in all four shards would run the
-      # same doctests four times rather than a quarter of them each. There are
+      # are not among them, so running this in both shards would run the
+      # same doctests twice rather than half of them in each. There are
       # ~7 across the workspace; this is here for coverage, not for speed.
       - name: cargo test --doc
         if: needs.changes.outputs.docs_only != 'true' && matrix.shard == 1
@@ -1028,7 +1024,7 @@ jobs:
           set -euo pipefail
           echo "test-shard matrix aggregate result: ${SHARDS_RESULT}"
           if [ "${SHARDS_RESULT}" != "success" ]; then
-            echo "::error::Rust tests (pre-publish gate) is red: the test-shard matrix reported '${SHARDS_RESULT}'. Open the individual 'Rust tests (pre-publish gate) — shard N of 4' jobs — nextest names the owning crate for every failing test."
+            echo "::error::Rust tests (pre-publish gate) is red: the test-shard matrix reported '${SHARDS_RESULT}'. Open the individual shard jobs — nextest names the owning crate for every failing test."
             exit 1
           fi
           echo "every test shard succeeded"
