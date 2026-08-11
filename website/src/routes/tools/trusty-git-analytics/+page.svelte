@@ -118,4 +118,27 @@
 			crate directory's longer name.
 		</p>
 	</div>
+
+	<div>
+		<p class="eyebrow">Acquisition due diligence</p>
+		<h2 class="mt-3 font-display text-2xl font-bold sm:text-3xl">
+			<code>tga audit</code>
+		</h2>
+		<p class="mt-4 max-w-3xl text-foundry-secondary">
+			One non-interactive command runs the whole pipeline across every repository your config names
+			and hands the result to trusty-review, which renders an eight-section technical due-diligence
+			report — the deliverable someone reads while deciding whether to buy the codebase. A stage
+			that fails does not stop the sweep; it becomes a named line in the report's Gaps &amp; Caveats
+			instead of a zero in a cell.
+		</p>
+		<p class="mt-4 max-w-3xl text-foundry-secondary">
+			It has its own page: the eight stages, the six flags, what lands in the output directory, and
+			the six things it deliberately refuses to estimate.
+		</p>
+		<p class="mt-6">
+			<a href="/tools/trusty-git-analytics/audit" class="btn btn-primary"
+				>Install and run <code>tga audit</code> →</a
+			>
+		</p>
+	</div>
 </ToolPage>

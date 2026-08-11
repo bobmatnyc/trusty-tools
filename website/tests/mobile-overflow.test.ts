@@ -87,12 +87,24 @@ const STATIC = path.join(OUTPUT, 'static');
 /** Sub-pixel layout rounding, not a real overflow — see the file doc above. */
 const MAIN_TOLERANCE_PX = 1;
 
+// `/tools/trusty-git-analytics/audit` carries the wide content the `tga audit`
+// port brought in: five tables and six `<pre>` blocks — five labelled `shell`,
+// the sixth an error message quoted in the thesis card. Those are the two
+// shapes that actually scroll a page sideways. It does NOT go through
+// `ToolPage.svelte`, so it inherits none of that component's already-measured
+// containment, which is why it is measured directly.
+// `/tools/trusty-git-analytics` stays in the list even though the move left it
+// with no table and no `<pre>` at all: it is now a second plain-prose case, and
+// keeping it is what would catch wide content arriving back on it.
+// `/tools/trusty-search` is the plain-prose flagship and stays as the control.
 const ROUTES = [
 	'/whats-new',
 	'/',
 	'/docs',
 	'/docs/getting-started/install',
-	'/tools/trusty-search'
+	'/tools/trusty-search',
+	'/tools/trusty-git-analytics',
+	'/tools/trusty-git-analytics/audit'
 ];
 const WIDTHS = [375, 320];
 

@@ -187,4 +187,48 @@ describe('contrast facts the layout depends on', () => {
 		// body text.
 		expect(ratio(light('accent'), light('surface-raised'))).toBeLessThan(4.5);
 	});
+
+	/**
+	 * Why: `.badge-red` / `.badge-amber` / `.badge-green` in `app.css` are
+	 * written asymmetrically — red and green colour the LABEL, amber colours
+	 * only its BORDER — and the reason is a contrast measurement that lived
+	 * solely in a comment. A later edit to `--trusty-danger`, `--trusty-success`
+	 * or `--trusty-warning` in the canonical tokens would silently falsify it
+	 * (code-critic on #5415). These derive the ratios from the tokens and
+	 * assert the threshold each rule actually depends on.
+	 */
+	describe('the tga audit severity badges', () => {
+		// The stamps sit in a table on the page ground and, for the plain
+		// `.badge`, on a card — so both grounds are asserted.
+		const grounds = ['content-bg', 'card-bg'];
+
+		it('red and green badge labels clear AA as normal text', () => {
+			// 11px text, so 4.5:1 — not the 3:1 non-text minimum.
+			for (const token of ['danger', 'success']) {
+				for (const ground of grounds) {
+					expect(ratio(light(token), light(ground))).toBeGreaterThanOrEqual(4.5);
+					expect(ratio(dark(token), dark(ground))).toBeGreaterThanOrEqual(4.5);
+				}
+			}
+		});
+
+		it('the amber badge border clears the 3:1 non-text minimum', () => {
+			// `.badge-amber` puts warning on the border only, so WCAG 1.4.11
+			// governs it rather than the 4.5:1 text rule.
+			expect(ratio(light('warning'), light('content-bg'))).toBeGreaterThanOrEqual(3);
+			expect(ratio(dark('warning'), dark('content-bg'))).toBeGreaterThanOrEqual(3);
+		});
+
+		it('light warning still fails AA, which is why amber colours no label', () => {
+			// If this ever starts passing, `.badge-amber` can carry its colour
+			// in the text like the other two and the asymmetry can be dropped.
+			expect(ratio(light('warning'), light('content-bg'))).toBeLessThan(4.5);
+			expect(ratio(dark('warning'), dark('content-bg'))).toBeGreaterThanOrEqual(4.5);
+		});
+
+		it('the amber badge label uses text-primary, which clears AA', () => {
+			expect(ratio(light('text-primary'), light('content-bg'))).toBeGreaterThanOrEqual(4.5);
+			expect(ratio(dark('text-primary'), dark('content-bg'))).toBeGreaterThanOrEqual(4.5);
+		});
+	});
 });

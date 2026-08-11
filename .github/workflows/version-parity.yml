@@ -44,9 +44,24 @@
 #    not "loudly".
 name: Version parity
 
-# Optional workflow: PR and push events are limited to crate source/manifests
-# and the checkers themselves. The scheduled authority remains unfiltered and
-# re-asks the complete crates.io parity question every three hours.
+# `push` stays path-filtered to crate source/manifests and the checkers
+# themselves — the scheduled authority below remains unfiltered and re-asks
+# the complete crates.io parity question every three hours, so a filtered
+# push trigger can never open a coverage gap on main.
+#
+# `pull_request` carries NO path filter (issue #4421 follow-up). It used to —
+# first a `paths-ignore: [website/**, docs/**]`, later narrowed to a
+# `paths:` allowlist of crate/manifest/checker globs — but `pr-version-bump`
+# is about to become a REQUIRED branch-protection context, and a required
+# context that a path filter can skip goes permanently pending on any PR
+# that doesn't touch the allowlisted globs (proven on #5415/#5416: zero
+# `Version parity` runs against either head SHA). A required check must run
+# on every PR unconditionally, so the filter is gone rather than widened
+# again. This is cheap on unrelated PRs: `scripts/check-pr-version-bump.sh`
+# exits 0 with "[ OK ] ... none under crates/<crate>/src/**" the moment its
+# scan floor sees changed paths but zero of them under `crates/*/src/`, so a
+# docs-only or website-only PR still costs one shell scan-floor check, not a
+# skipped-forever gate.
 on:
   push:
     branches: [main]
@@ -70,17 +85,10 @@ on:
     # fires, so without it a stacked PR retargeted onto main never re-triggers
     # and can merge with zero checks — PR #3838 did exactly that.
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    #
+    # No `paths` / `paths-ignore` here — see the header comment above.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
-    paths:
-      - "crates/*/src/**"
-      - "crates/*/Cargo.toml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/check-version-parity.sh"
-      - "scripts/check-pr-version-bump.sh"
-      - "scripts/check_scan_floor_selftest.sh"
-      - ".github/workflows/version-parity.yml"
   workflow_dispatch: {}
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
