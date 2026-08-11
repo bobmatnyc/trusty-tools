@@ -333,7 +333,14 @@ enum Command {
     /// an aggregate total. Failures on individual asserts are logged but
     /// never abort the run.
     /// Test: `commands::kg_rebuild::tests::kg_rebuild_processes_all_drawers`.
-    #[command(name = "kg-rebuild")]
+    // #5401: --dry-run previews whichever maintenance pass was asked for, so it
+    // requires the GROUP rather than one named flag.
+    #[command(
+        name = "kg-rebuild",
+        group = clap::ArgGroup::new("kg_maintenance")
+            .args(["purge_stale_subjects", "merge_punctuated_twins"])
+            .multiple(true)
+    )]
     KgRebuild {
         /// Restrict the rebuild to a single palace id. When omitted, every
         /// palace under the data root is processed.
@@ -350,9 +357,20 @@ enum Command {
         #[arg(long = "purge-stale-subjects")]
         purge_stale_subjects: bool,
 
-        /// Report what --purge-stale-subjects would delete and write nothing
+        /// Also MERGE each auto-extracted triple off a punctuated entity node
+        /// (`` `redb` ``) onto its cleaned twin (`redb`), in both the subject
+        /// and the object position.
+        ///
+        /// Destructive and off by default. #4678's trim fixed extraction going
+        /// forward and left every pre-fix entity split across two nodes; a
+        /// plain rebuild only widens the split. Each move is printed. Pair with
+        /// --dry-run to see the list first.
+        #[arg(long = "merge-punctuated-twins")]
+        merge_punctuated_twins: bool,
+
+        /// Report what the selected maintenance pass would do and write nothing
         /// at all — the re-assert pass is skipped too.
-        #[arg(long = "dry-run", requires = "purge_stale_subjects")]
+        #[arg(long = "dry-run", requires = "kg_maintenance")]
         dry_run: bool,
     },
 
@@ -708,12 +726,14 @@ async fn main() -> Result<()> {
         Command::KgRebuild {
             palace,
             purge_stale_subjects,
+            merge_punctuated_twins,
             dry_run,
         } => {
             trusty_memory::commands::kg_rebuild::handle_kg_rebuild_with(
                 trusty_memory::commands::kg_rebuild::KgRebuildOptions {
                     palace,
                     purge_stale_subjects,
+                    merge_punctuated_twins,
                     dry_run,
                 },
             )
