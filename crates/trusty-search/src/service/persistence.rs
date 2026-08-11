@@ -263,6 +263,47 @@ pub struct PersistedIndex {
     /// Test: `classify_ambiguous_root_*` in `service::orphan_reaper`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ambiguous_root_since_unix: Option<u64>,
+
+    /// #4391: the git HEAD SHA this index's corpus was last built against.
+    ///
+    /// Why: `IndexHandle::indexed_head_sha` existed only in memory, and both
+    /// restore paths re-derived it from LIVE git — so boot reconcile compared
+    /// current HEAD against current HEAD and reported `up_to_date` for every
+    /// git-backed index, on every boot. Commits landing while the daemon was
+    /// down were structurally undetectable. Persisting the stamp is what makes
+    /// `reconcile_git_path` able to see pre-restore drift at all.
+    /// What: written wherever the in-memory stamp is written — `finish_reindex`
+    /// after a completed reindex and `reconcile::stamp_handle` after a delta.
+    /// `#[serde(default)]` so legacy `indexes.toml` entries load as `None`;
+    /// restore then BACKFILLS the live SHA once (see
+    /// `boot_markers::resolve_indexed_head_sha`), so the first boot after
+    /// upgrade behaves exactly as before and every later boot has a genuine
+    /// stored value.
+    /// Test: `restore_prefers_the_persisted_head_sha_over_live_git` in
+    /// `service::boot_markers_tests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_head_sha: Option<String>,
+
+    /// #4390: `true` between the moment a deferred-embed (C2) pass is queued
+    /// and the moment it commits.
+    ///
+    /// Why: C2 builds every embedding in memory and commits once at the end, so
+    /// a daemon stop anywhere inside the pass persists ZERO new vectors — and
+    /// nothing recorded that. Warm boot infers `semantic: ready` from the mere
+    /// existence of an HNSW snapshot file, so the stranded chunks (the most
+    /// recently edited code) were silently missing from the vector lane until
+    /// some unrelated reindex happened to re-queue the pass.
+    /// What: set before the pass is enqueued and cleared when it publishes a
+    /// terminal state; restore re-arms the catch-up when it loads as `true`.
+    /// The asymmetry is deliberate — a lost SET costs only the detection this
+    /// field adds, while a lost CLEAR costs one idempotent gap-filling pass, so
+    /// every write failure errs toward re-running rather than toward silence.
+    /// `#[serde(default)]` + `skip_serializing_if` keep legacy files loading as
+    /// `false` and the TOML compact.
+    /// Test: `pending_deferred_embed_is_rearmed_at_restore` in
+    /// `service::boot_markers_tests`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deferred_embed_pending: bool,
 }
 
 /// Why: serde's `default` attribute needs a free function (closures aren't
@@ -361,6 +402,8 @@ impl Default for PersistedIndex {
             last_indexed_unix: None,
             repo_identity: None,
             ambiguous_root_since_unix: None,
+            indexed_head_sha: None,
+            deferred_embed_pending: false,
         }
     }
 }

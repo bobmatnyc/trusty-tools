@@ -374,10 +374,13 @@ pub(crate) async fn restore_one_index(
         .filter(|e| !e.is_empty())
         .collect();
     indexer.set_domain_terms(entry.domain_terms.clone());
-    // Issue #75: capture the current git HEAD SHA at registration so the
-    // search response can flag staleness when the working tree advances
-    // past the indexed commit. Best-effort: `None` outside a git repo.
-    let indexed_head_sha = crate::core::git::head_sha(&entry.root_path);
+    // Issue #75: the handle carries the HEAD SHA its corpus was built against so
+    // the search response can flag staleness when the working tree advances past
+    // the indexed commit.
+    // #4391: read it from `indexes.toml`, not from live git. Re-deriving it here
+    // made `reconcile_git_path` compare current HEAD against current HEAD, so no
+    // git-backed index could ever be found stale at boot.
+    let indexed_head_sha = crate::service::boot_markers::resolve_indexed_head_sha(&entry);
     let lexical_only = entry.lexical_only;
     // Issue #313: read skip_kg from the persisted entry. When true, the
     // graph stage is forced to Skipped at warm-boot regardless of on-disk
@@ -388,6 +391,8 @@ pub(crate) async fn restore_one_index(
     let skip_vector = entry.skip_vector;
     // Issue #923: read defer_embed from the persisted entry. Default `true`.
     let defer_embed = entry.defer_embed;
+    // #4390: read the marker before `entry` is consumed by the handle below.
+    let deferred_embed_pending = entry.deferred_embed_pending;
     // Issue #135: inspect the on-disk artifacts that
     // `build_indexer_from_entry` just restored and derive the staged-pipeline
     // state from them. Before this, every warm-booted index landed with
@@ -478,9 +483,24 @@ pub(crate) async fn restore_one_index(
         )),
     };
     let registered = state.registry.register(handle);
+    // #4390: an embed pass interrupted before it committed leaves the corpus
+    // silently short its most recent vectors, and warm boot reports `Ready`
+    // regardless because an older HNSW snapshot exists on disk. Re-arm it.
+    crate::service::boot_markers::rearm_deferred_embed_if_pending(
+        &registered,
+        deferred_embed_pending,
+        chunk_count,
+    )
+    .await;
     // Issue #1621 (epic #1619 WI-2): activate the filesystem watcher for this
     // warm-booted index so subsequent saves are incrementally indexed within
     // the 500ms debounce window. No-op when the watcher is disabled
     // (`TRUSTY_DISABLE_WATCHER=1`) or already watching this index.
     state.watcher_manager.spawn_for_index(&registered).await;
 }
+
+// #4390 / #4391: end-to-end warm-boot marker tests live in a sibling file so
+// this module stays under the 500-SLOC production cap.
+#[cfg(test)]
+#[path = "start_restore_markers_tests.rs"]
+mod markers_tests;

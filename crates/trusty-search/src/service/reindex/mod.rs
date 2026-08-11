@@ -162,6 +162,15 @@ pub(crate) use semaphore::remove_index_semaphore;
 /// Test: `service::server::tests_components`.
 pub(crate) use defer_embed::run_embed_catch_up;
 
+/// Re-export the C2 enqueue entry point so `service::boot_markers` can re-arm an
+/// interrupted deferred-embed pass at restore (#4390).
+///
+/// Why: the boot re-arm must go through the same size-ordered queue
+/// `finish_reindex` uses, so re-armed passes serialise behind the single
+/// background permit instead of every restored index racing at once.
+/// Test: `service::boot_markers_tests::pending_deferred_embed_is_rearmed_at_restore`.
+pub(crate) use defer_embed::spawn_deferred_embed_pass;
+
 /// Re-export the two public entry points for kicking off a reindex task.
 ///
 /// Why: `reindex_handlers.rs` calls `spawn_reindex_with_cleanup`; a handful of

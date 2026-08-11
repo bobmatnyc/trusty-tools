@@ -241,6 +241,15 @@ pub(super) async fn relocate_index_handler(
         // ambiguity grace clock was waiting for — clear it, or a stale stamp
         // would keep aging toward a reap of a now-healthy registration.
         ambiguous_root_since_unix: None,
+        // #4391: the corpus is unchanged by a relocation — only its root moved —
+        // so the SHA it was built against still describes it. Dropping the stamp
+        // would make the next boot see "never stamped" and re-walk the tree.
+        indexed_head_sha: on_disk.as_ref().and_then(|e| e.indexed_head_sha.clone()),
+        // #4390: likewise, a pass owed before the move is still owed after it.
+        deferred_embed_pending: on_disk
+            .as_ref()
+            .map(|e| e.deferred_embed_pending)
+            .unwrap_or(false),
     };
 
     // Rebuild the indexer from the new entry so the colocated HNSW/redb at
