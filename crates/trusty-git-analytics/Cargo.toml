@@ -1,6 +1,6 @@
 [package]
 name = "tga"
-version = "2.14.0"
+version = "2.15.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for

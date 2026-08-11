@@ -138,6 +138,9 @@ pub async fn run_reporting_fetch(
     // CI scripts that set it explicitly; when present it reinforces the default.
     let effective_strict = !args.allow_stale && !args.no_fetch;
 
+    // #5249: state what agentic detection can and cannot see, once per run.
+    tracing::info!("{}", tga::collect::ai_markers::detection_disclosure());
+
     let pipeline = CollectionPipeline::new(cfg)
         .with_progress(progress.clone())
         .with_force(args.force)

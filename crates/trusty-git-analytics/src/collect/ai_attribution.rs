@@ -1,24 +1,28 @@
-//! AI co-authorship attribution from commit message trailers.
+//! AI co-authorship attribution from commit messages and identities.
 //!
 //! Why: engineering teams are increasingly using AI coding assistants
-//! (Claude, GitHub Copilot, Cursor) whose contributions appear in commits
-//! via `Co-Authored-By:` trailers. Detecting these at collection time lets
-//! reports measure AI adoption without requiring human annotation.
+//! (Claude, GitHub Copilot, Cursor, Devin, OpenHands, Aider) whose
+//! contributions appear in commits via trailers, footers, or bot identities.
+//! Detecting these at collection time lets reports measure AI adoption without
+//! requiring human annotation.
 //!
-//! What: two pure functions:
-//! - [`detect_ai_tool`] — returns the stable tool identifier string used by
-//!   the existing `ai_tool` column (unchanged for backward compatibility).
-//! - [`detect_agentic_mode`] — returns a canonical [`AgenticMode`] that
-//!   distinguishes full-agentic CLI tools (Claude Code) from IDE-assisted
-//!   tools (Cursor, Copilot inline) from plain human commits (issue #1113).
+//! What: the [`AgenticMode`] classification, plus two message-only convenience
+//! functions over the shipped marker set:
+//! - [`detect_ai_tool`] — the stable tool identifier for the `ai_tool` column.
+//! - [`detect_agentic_mode`] — the canonical [`AgenticMode`] (issue #1113).
 //!
-//! Test: unit tests in [`tests`] at the bottom of this file. Both functions
-//! are also covered by the extractor path (`collect::git::extractor`) which
-//! calls them at INSERT time for every new commit.
+//! Since #5249 the patterns themselves live in
+//! [`crate::collect::ai_markers`], which is configurable per run and also
+//! matches author/committer emails. Callers that have a commit's identities —
+//! `collect::git::extractor` and the backfill path — go through
+//! [`detect`](crate::collect::ai_markers::detect)
+//! directly; these two functions cover message-only callers and keep the
+//! pre-#5249 signatures working.
+//!
+//! Test: unit tests in [`tests`] at the bottom of this file, and
+//! `collect::ai_markers::tests` for the marker engine itself.
 
-use std::sync::OnceLock;
-
-use regex::Regex;
+use crate::collect::ai_markers::{detect, CommitSignals};
 
 /// Canonical agentic-mode classification for a commit (issue #1113).
 ///
@@ -32,15 +36,19 @@ use regex::Regex;
 /// `core::db::migrations::v21` which adds the column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgenticMode {
-    /// Full-agentic: autonomous CLI tool (e.g. Claude Code). Signals:
-    /// `Co-Authored-By: Claude…`, `Generated with Claude Code` in message
-    /// body, `X-AI-Tokens-In/Out` / `X-AI-Model` trailers (commit_cost_tracker),
-    /// or `ai_tool == "claude"` (the existing detection path maps these already).
+    /// Full-agentic: autonomous CLI agent (Claude Code, Devin, OpenHands,
+    /// Aider, or a house wrapper such as trusty-mpm). Which markers imply it
+    /// is data, not code, since #5249 — see [`crate::collect::ai_markers`].
     FullAgentic,
     /// IDE-assisted: inline AI completions from an IDE plugin
-    /// (Cursor, GitHub Copilot). Signals: `ai_tool` in {"cursor", "copilot"}.
+    /// (Cursor, GitHub Copilot).
     IdeAssisted,
-    /// Plain human commit with no detectable AI involvement.
+    /// No AI marker was found.
+    ///
+    /// This is NOT the same claim as "a human wrote it": a commit whose
+    /// trailers were stripped, squashed, or rewritten is indistinguishable
+    /// from one that never had them. #5250 proposes a distinct `unknown`
+    /// state for that case.
     None,
 }
 
@@ -77,98 +85,23 @@ impl std::str::FromStr for AgenticMode {
     }
 }
 
-/// Compiled AI-tool detection patterns.
-struct AiPatterns {
-    /// Matches the full `Co-Authored-By:` or `Co-authored-by:` trailer line.
-    trailer_line: Regex,
-    /// Matches "claude" (Anthropic Claude assistant).
-    claude: Regex,
-    /// Matches "github copilot" (GitHub Copilot assistant).
-    copilot: Regex,
-    /// Matches Cursor AI assistant by email domain (`@cursor.sh`) or standalone
-    /// tool name (`\bCursor\b`). The hyphen-suffix false-positive guard (e.g.
-    /// "Alice Cursor-Williams") is applied in [`is_cursor_match`], not here.
-    cursor: Regex,
-    /// Matches "Generated with Claude Code" in commit body (issue #1113).
-    generated_with_claude_code: Regex,
-    /// Matches `X-AI-Tokens-In:` or `X-AI-Tokens-Out:` trailer (commit_cost_tracker).
-    x_ai_tokens: Regex,
-    /// Matches `X-AI-Model:` trailer (commit_cost_tracker).
-    x_ai_model: Regex,
-}
-
-/// Why: `(?i)\bCursor\b` alone would match "Alice Cursor-Williams" (false
-/// positive); Rust's `regex` crate has no lookahead, so the guard is code-level.
-/// What: returns `true` when the cursor pattern fires AND `m.as_str()` contains
-/// `@` (email-domain form) OR the match is NOT followed by `-` (word form,
-/// rejects hyphenated surnames like "Cursor-Williams").
-/// Test: `tests::detect_agentic_mode_cursor_in_human_name_is_not_ide_assisted`
-/// and `tests::is_cursor_match_email_domain_form`.
-fn is_cursor_match(p: &AiPatterns, trailer_value: &str) -> bool {
-    if let Some(m) = p.cursor.find(trailer_value) {
-        if m.as_str().contains('@') {
-            return true; // email-domain form: @cursor.sh
-        }
-        let after = trailer_value.get(m.end()..).unwrap_or("");
-        !after.starts_with('-') // word form: reject hyphenated surnames
-    } else {
-        false
-    }
-}
-
-/// Global, lazily-initialized pattern set.
-///
-/// Why: `OnceLock` gives thread-safe one-time initialisation without a
-/// global mutex on every call.
-/// What: compiles the regexes once and reuses them for the lifetime of the
-/// process.
-/// Test: `tests::ai_patterns_compile` forces initialisation.
-fn ai_patterns() -> &'static AiPatterns {
-    static PATTERNS: OnceLock<AiPatterns> = OnceLock::new();
-    PATTERNS.get_or_init(|| AiPatterns {
-        // Capture the content after the trailer key (case-insensitive key).
-        trailer_line: Regex::new(r"(?im)^[Cc]o-[Aa]uthored-[Bb]y:\s*(.+)$")
-            .expect("trailer_line pattern compiles"),
-        claude: Regex::new(r"(?i)\bclaude\b").expect("claude pattern compiles"),
-        copilot: Regex::new(r"(?i)\bcopilot\b|GitHub\s+Copilot").expect("copilot pattern compiles"),
-        // Match Cursor by either the canonical email domain OR the standalone
-        // tool name. The word-boundary `\bCursor\b` alone would also match
-        // human surnames like "Alice Cursor-Williams"; the hyphen guard is
-        // enforced in the calling code (see `is_cursor_match`) since Rust's
-        // regex crate does not support lookahead assertions.
-        cursor: Regex::new(r"(?i)@cursor\.sh|\bCursor\b").expect("cursor pattern compiles"),
-        // "Generated with Claude Code" may appear anywhere in the message body
-        // (e.g. inside a Markdown link that Claude Code appends to PR descriptions
-        // or commit messages via its --message template). Case-insensitive.
-        generated_with_claude_code: Regex::new(r"(?i)Generated\s+with\s+Claude\s+Code")
-            .expect("generated_with_claude_code pattern compiles"),
-        // commit_cost_tracker writes X-AI-Tokens-In and X-AI-Tokens-Out trailers.
-        x_ai_tokens: Regex::new(r"(?im)^X-AI-Tokens-(?:In|Out):\s*\d")
-            .expect("x_ai_tokens pattern compiles"),
-        // commit_cost_tracker also writes an X-AI-Model trailer.
-        x_ai_model: Regex::new(r"(?im)^X-AI-Model:\s*\S").expect("x_ai_model pattern compiles"),
-    })
-}
-
-/// Detect the AI tool that co-authored a commit from its message.
+/// Detect the AI tool that produced a commit, from its message alone.
 ///
 /// Why: `commits.ai_tool` and `commits.is_ai_assisted` must be populated at
-/// collection time (issue #445). This function provides the detection logic
-/// shared between the initial `tga collect` INSERT and the retroactive
-/// `tga backfill ai-detection-commits` path.
-/// What: scans all `Co-Authored-By:` / `Co-authored-by:` trailer lines in
-/// `message` for the signatures of known AI tools. Returns the first match
-/// as a stable `&'static str` identifier, or `None` if no known AI trailer
-/// is present. Priority order: Claude → Copilot → Cursor.
+/// collection time (issue #445).
+/// What: runs the shipped marker set (the marker set) over `message`
+/// with no author or committer email, and returns the winning marker's label.
+/// Since #5249 the label can come from a body footer as well as a
+/// `Co-Authored-By:` trailer, and the recognised set is no longer limited to
+/// Claude/Copilot/Cursor. Callers holding a commit's identities should call
+/// [`detect`] instead so the email family is not skipped.
 /// Test: `tests::detect_ai_tool_*` below.
 ///
 /// # Stable identifiers
 ///
-/// | Detected tool     | Returned string |
-/// |-------------------|-----------------|
-/// | Anthropic Claude  | `"claude"`      |
-/// | GitHub Copilot    | `"copilot"`     |
-/// | Cursor            | `"cursor"`      |
+/// The shipped labels are `claude`, `trusty-mpm`, `devin`, `openhands`,
+/// `aider`, `copilot`, and `cursor`; a configured marker contributes its own
+/// `tool:` string. See [`crate::collect::ai_markers`].
 ///
 /// # Examples
 ///
@@ -182,23 +115,7 @@ fn ai_patterns() -> &'static AiPatterns {
 /// assert_eq!(detect_ai_tool(human), None);
 /// ```
 pub fn detect_ai_tool(message: &str) -> Option<&'static str> {
-    let p = ai_patterns();
-
-    for caps in p.trailer_line.captures_iter(message) {
-        let trailer_value = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-
-        if p.claude.is_match(trailer_value) {
-            return Some("claude");
-        }
-        if p.copilot.is_match(trailer_value) {
-            return Some("copilot");
-        }
-        if is_cursor_match(p, trailer_value) {
-            return Some("cursor");
-        }
-    }
-
-    None
+    detect(&CommitSignals::from_message(message)).tool
 }
 
 /// Classify a commit into one of the three canonical agentic modes.
@@ -207,16 +124,12 @@ pub fn detect_ai_tool(message: &str) -> Option<&'static str> {
 /// inline-completion commits (Cursor/Copilot) from plain human commits
 /// (issue #1113). This finer granularity is needed for DAAU and agentic-%
 /// analytics that the binary `is_ai_assisted` flag cannot express.
-/// What: applies a deterministic, trailer-based classification. Signals
-/// checked in priority order:
-///
-/// 1. `Co-Authored-By: Claude…` — full_agentic (Claude Code CLI pattern)
-/// 2. `Generated with Claude Code` anywhere in the message — full_agentic
-/// 3. `X-AI-Tokens-In/Out:` or `X-AI-Model:` trailers — full_agentic
-///    (written by commit_cost_tracker when Claude Code is used)
-/// 4. `Co-Authored-By: copilot/cursor…` — ide_assisted
-/// 5. No recognised AI signal — none
-///
+/// What: runs the shipped marker set (the marker set) over `message`
+/// with no author or committer email. A full-agentic marker (Claude Code, the
+/// trusty-mpm footer, Devin, OpenHands, Aider, the `X-AI-*` trailers) outranks
+/// an IDE marker (Copilot, Cursor); no match is `None`. Callers holding a
+/// commit's identities should call [`detect`] instead so the email
+/// family is not skipped.
 /// Test: `tests::detect_agentic_mode_*` below.
 ///
 /// # Examples
@@ -234,47 +147,23 @@ pub fn detect_ai_tool(message: &str) -> Option<&'static str> {
 /// assert_eq!(detect_agentic_mode(human), AgenticMode::None);
 /// ```
 pub fn detect_agentic_mode(message: &str) -> AgenticMode {
-    let p = ai_patterns();
-
-    // Signal 1 & 4: Co-Authored-By trailers.
-    // Check all trailer lines; Claude wins over Copilot/Cursor if both present.
-    let mut has_ide = false;
-    for caps in p.trailer_line.captures_iter(message) {
-        let trailer_value = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        if p.claude.is_match(trailer_value) {
-            return AgenticMode::FullAgentic;
-        }
-        if p.copilot.is_match(trailer_value) || is_cursor_match(p, trailer_value) {
-            has_ide = true;
-        }
-    }
-
-    // Signal 2: "Generated with Claude Code" anywhere in the message body.
-    if p.generated_with_claude_code.is_match(message) {
-        return AgenticMode::FullAgentic;
-    }
-
-    // Signal 3: X-AI-* trailers written by commit_cost_tracker.
-    if p.x_ai_tokens.is_match(message) || p.x_ai_model.is_match(message) {
-        return AgenticMode::FullAgentic;
-    }
-
-    // Signal 4 conclusion: only IDE-assisted signals found.
-    if has_ide {
-        return AgenticMode::IdeAssisted;
-    }
-
-    AgenticMode::None
+    detect(&CommitSignals::from_message(message)).mode
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Why: 1058 of this repo's 2434 commits carry the house footer and no
+    /// `Co-Authored-By:` trailer. Before #5249 every one of them was recorded
+    /// as a plain human commit.
+    /// What: the footer alone classifies as full-agentic and labels the tool.
     #[test]
-    fn ai_patterns_compile() {
-        // Force lazy init; any bad pattern literal panics here, not at runtime.
-        let _ = ai_patterns();
+    fn detect_trusty_mpm_footer_is_full_agentic() {
+        let msg = "docs: add website link to README (#5330)\n\n\
+                   🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools";
+        assert_eq!(detect_agentic_mode(msg), AgenticMode::FullAgentic);
+        assert_eq!(detect_ai_tool(msg), Some("trusty-mpm"));
     }
 
     /// Why: Claude is the primary AI tool; must be detected.

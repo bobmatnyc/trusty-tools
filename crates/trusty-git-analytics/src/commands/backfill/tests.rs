@@ -868,6 +868,47 @@ fn backfill_ai_detection_commits_repairs_agentic_mode() {
     );
 }
 
+/// Why: #5249 — a commit carrying only the house footer stored
+/// `agentic_mode = 'none'`, indistinguishable from human work. On this repo
+/// that was 1058 of 2434 commits. This test fails against the pre-#5249
+/// detector, whose body pattern required the literal "Claude Code".
+/// What: seeds a trusty-mpm-footer commit with no `Co-Authored-By:` trailer
+/// and an OpenHands co-author commit; asserts the repair pass classifies both
+/// as `full_agentic` with the right tool label.
+/// Test: this test itself.
+#[test]
+fn backfill_ai_detection_commits_repairs_house_footer_and_openhands() {
+    let mut db = Database::open_in_memory().expect("open");
+
+    seed(
+        &db,
+        "mpm1",
+        "docs: add website link to README (#5330)\n\n\
+         🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools",
+    );
+    seed(
+        &db,
+        "oh1",
+        "Fix runtime startup\n\nCo-authored-by: openhands <openhands@all-hands.dev>",
+    );
+
+    backfill_ai_detection_commits(&mut db, false, &[], None, None).expect("backfill ai-detection");
+
+    for (sha, tool) in [("mpm1", "trusty-mpm"), ("oh1", "openhands")] {
+        let (mode, ai_tool, is_ai): (String, Option<String>, i64) = db
+            .connection()
+            .query_row(
+                "SELECT agentic_mode, ai_tool, is_ai_assisted FROM commits WHERE sha = ?1",
+                params![sha],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read row");
+        assert_eq!(mode, "full_agentic", "{sha} must be full_agentic (#5249)");
+        assert_eq!(ai_tool.as_deref(), Some(tool), "{sha} tool label");
+        assert_eq!(is_ai, 1, "{sha} must be flagged AI-assisted");
+    }
+}
+
 /// Why: `backfill_top_level` must fill `top_level_category` for existing
 /// classifications where it is NULL, using the built-in taxonomy.
 /// What: seeds a classification with subcategory='bugfix' and
