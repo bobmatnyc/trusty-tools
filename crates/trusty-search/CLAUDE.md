@@ -118,6 +118,17 @@ pub struct CodeChunk {
   `index-file`, and `remove-file` report the state truthfully but cannot clear
   it themselves; a search against the same id does, after which they answer
   normally.
+
+  **The MCP surface relays this contract as data (#5350).** A `503` whose body
+  is a JSON object with an `error` field becomes a structured MCP error rather
+  than a prose string: `tools/call` puts the daemon body verbatim in `_meta`
+  under `error_code: "INDEX_UNAVAILABLE"`, and the bare-method form puts it in
+  `error.data` under JSON-RPC code `-32012`. Two fields are added and nothing
+  is removed or rewritten — `error_code` (the MCP-level family) and
+  `http_status` — so `error`, `index_id`, `retryable`, `restore_via`, `reason`,
+  `transient`, and `stages` read exactly as the HTTP table above describes
+  them. A `503` with no JSON body, or any other status, still reaches the
+  caller as the plain transport error it always did.
 - **CORS**: permissive (`*`) for browser-based admin UIs.
 - **Gzip**: responses are gzipped when `Accept-Encoding: gzip` is set.
 

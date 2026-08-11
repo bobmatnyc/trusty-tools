@@ -3,6 +3,12 @@
 - **Status:** Proposed
 - **Date:** 2026-07-19
 - **Scope:** Workspace-wide (trusty-mpm, trusty-console, integrations)
+- **Reversibility Cost:** Medium — ingress routing and public exposure are
+  localized, but changing them affects every webhook integration and its
+  security boundary.
+- **Decision Drivers:** One externally auditable ingress seam, console-owned
+  HTTP exposure, localhost containment for trusty-mpm, zero-cloud default,
+  managed TLS without inbound firewall configuration
 - **Supersedes / Superseded by:** —
 - **Related Specs:** DOC-47 (external event ingestion); ADR-0005 (event bus); ADR-0011 (console as single HTTP surface)
 

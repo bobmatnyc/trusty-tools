@@ -1,7 +1,7 @@
 # CI workflow for the trusty-tools Cargo workspace.
 #
 # Jobs:
-#   changes  – classify the diff as docs-only or not, once, for every job
+#   changes  – classify the diff as Cargo-inert or not, once, for every job
 #              below to consult (issue #4468: docs-only PRs ran the full Rust
 #              build). The exemption is applied to STEPS, never to the trigger
 #              or to the job, so required checks always report.
@@ -136,7 +136,7 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # changes: classify the diff as docs-only or not (issue #4468), once, for
+  # changes: classify the diff as Cargo-inert or not (issue #4468), once, for
   # every job below to consult.
   #
   # WHY THIS IS A JOB AND NOT A `paths:` FILTER. Five of this workflow's checks
@@ -155,15 +155,17 @@ jobs:
   # the failure mode if that is wrong is every docs PR blocked forever, so the
   # jobs are kept unconditional and only their steps are gated.
   #
-  # PUSH TO MAIN never takes the exemption: main is the branch everything is
-  # cut from, so it is verified in full regardless of what the diff touched.
+  # PUSH TO MAIN compares the pushed range too. Re-running the complete Rust
+  # suite after a Cargo-inert PR has already passed adds cost but no signal.
+  # A missing/invalid before SHA still fails closed into the full suite.
   # --------------------------------------------------------------------------
   changes:
-    name: Detect docs-only change set
+    name: Detect Cargo-inert change set
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
+      embedder_cuda_relevant: ${{ steps.detect-cuda.outputs.embedder_cuda_relevant }}
     steps:
       # fetch-depth: 0 — the detector needs `git merge-base` against the base
       # branch, which a shallow checkout cannot resolve.
@@ -206,15 +208,53 @@ jobs:
 
       - name: Classify changed paths
         id: detect
-        env:
-          DOCS_ONLY_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "push to ${{ github.ref }} — verifying in full, no docs-only exemption"
+          if [ "${{ github.event_name }}" = "pull_request" ] && \
+             [ "${{ github.event.action }}" = "edited" ] && \
+             [ "${{ toJSON(github.event.changes.base) }}" = "null" ]; then
+            echo "title/body-only PR edit — retaining required contexts without repeating Cargo"
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            DOCS_ONLY_BASE="origin/${{ github.event.pull_request.base.ref }}" \
+              bash scripts/detect-docs-only.sh > /dev/null
+            exit 0
+          fi
+
+          before="${{ github.event.before }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "push has no usable before SHA — verifying in full"
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          bash scripts/detect-docs-only.sh > /dev/null
+          DOCS_ONLY_BASE="$before" bash scripts/detect-docs-only.sh > /dev/null
+
+      - name: Classify embedder CUDA relevance
+        id: detect-cuda
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && \
+             [ "${{ github.event.action }}" = "edited" ] && \
+             [ "${{ toJSON(github.event.changes.base) }}" = "null" ]; then
+            echo "metadata-only PR edit — no CUDA-relevant change"
+            echo "embedder_cuda_relevant=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            CUDA_SCOPE_BASE="origin/${{ github.event.pull_request.base.ref }}" \
+              bash scripts/detect-embedder-cuda-relevant.sh > /dev/null
+            exit 0
+          fi
+
+          before="${{ github.event.before }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "push has no usable before SHA — running CUDA check fail closed"
+            echo "embedder_cuda_relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CUDA_SCOPE_BASE="$before" bash scripts/detect-embedder-cuda-relevant.sh > /dev/null
 
   # --------------------------------------------------------------------------
   # fmt: enforce cargo fmt --all --check (stable toolchain + rustfmt component)
@@ -304,6 +344,14 @@ jobs:
       - name: cargo clippy --workspace --all-targets -- -D warnings
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
+
+      # `codex-config` is enabled by no crate in the workspace, so the
+      # `--workspace` run above never pulls `codex_config` in via feature
+      # unification — it ships with green CI that never even compiled the
+      # module. This is the only step that lints it (#5264).
+      - name: cargo clippy -p trusty-common --features codex-config -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo clippy -p trusty-common --all-targets --features codex-config -- -D warnings
 
   # --------------------------------------------------------------------------
   # test: run all unit + integration tests (stable, no --include-ignored).
@@ -880,6 +928,14 @@ jobs:
           cargo test -p trusty-common --lib --features update-check \
             update::tests::cache_fresh_returns_some_when_newer -- --exact
 
+      # `codex-config` is enabled by no crate in the workspace, so neither
+      # `cargo test --workspace` nor `cargo clippy --workspace` ever compiles
+      # `codex_config` or runs its tests — the module could rot undetected
+      # (#5264). This is the only step that exercises it.
+      - name: cargo test -p trusty-common --features codex-config
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo test -p trusty-common --lib --features codex-config codex_config
+
   # --------------------------------------------------------------------------
   # msrv: verify the workspace compiles on the effective MSRV.
   # cargo check is used (not test) to keep this job fast: the MSRV guarantee
@@ -1062,13 +1118,10 @@ jobs:
   embedder-cuda-check:
     name: embedder-cuda compile check (#3508)
     needs: [changes]
-    # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
-    # GitHub reports a skipped required check as PASSING — reintroducing the
-    # fail-open hole this PR exists to close. `!cancelled()` overrides the
-    # implicit success() so the job still runs; `docs_only` then resolves to
-    # '' and every gated step runs, i.e. a broken classifier costs a FULL
-    # build, never a silent skip.
-    if: ${{ !cancelled() }}
+    # This is not a required branch-protection context, so unlike the five
+    # workspace-wide required jobs it can skip at job level without leaving a
+    # PR pending. An absent classifier output still runs the job (fail closed).
+    if: ${{ !cancelled() && needs.changes.outputs.embedder_cuda_relevant != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -1077,11 +1130,9 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install stable toolchain
-        if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install system dependencies
-        if: needs.changes.outputs.docs_only != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -1092,7 +1143,6 @@ jobs:
       # nvcc ONLY — see the job-level comment above for why the compiler
       # (not a GPU, not a driver) is a genuine, unavoidable requirement here.
       - name: Install nvcc (CUDA 12.8 compiler only; no driver, no GPU)
-        if: needs.changes.outputs.docs_only != 'true'
         run: |
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
@@ -1102,17 +1152,14 @@ jobs:
           echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
 
       - name: Verify nvcc is on PATH
-        if: needs.changes.outputs.docs_only != 'true'
         run: nvcc --version
 
       - name: Cache cargo artifacts
-        if: needs.changes.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           key: embedder-cuda-check
 
       - name: cargo check -p trusty-common --features embedder-cuda --all-targets
-        if: needs.changes.outputs.docs_only != 'true'
         run: cargo check -p trusty-common --features embedder-cuda --all-targets
 
   # --------------------------------------------------------------------------
@@ -1442,6 +1489,7 @@ jobs:
     if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs:
       [
+        changes,
         fmt,
         clippy,
         test,
@@ -1467,7 +1515,7 @@ jobs:
             test=${{ needs.test.result }}
             msrv=${{ needs.msrv.result }}
             agents-ui=${{ needs['agents-ui'].result }}
-            embedder-cuda-check=${{ needs['embedder-cuda-check'].result }}
+            embedder-cuda-check=${{ needs.changes.outputs.embedder_cuda_relevant != 'false' && needs['embedder-cuda-check'].result || 'success' }}
             ui-checks=${{ needs['ui-checks'].result }}
             search-daemon-smoke=${{ needs['search-daemon-smoke'].result }}
         run: bash scripts/classify-ci-results.sh > /dev/null

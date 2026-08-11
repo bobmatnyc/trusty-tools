@@ -1,0 +1,2 @@
+Added
+- `codex_config` module (behind the new `codex-config` feature): `codex_config_path` and `patch_mcp_server`, the single writer for Codex CLI stdio MCP registrations in `~/.codex/config.toml`. Idempotent, repairs empty / joined / nested-JSON-string argument vectors, and edits through `toml_edit` so the operator's comments and unrelated tables survive. Shared entry point for trusty-search ([#5264](https://github.com/bobmatnyc/trusty-tools/issues/5264)) and trusty-memory ([#5265](https://github.com/bobmatnyc/trusty-tools/issues/5265))

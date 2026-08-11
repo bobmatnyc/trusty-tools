@@ -18,6 +18,9 @@
 //! - [`not_ready`]   — the `INDEX_NOT_READY` contract (issue #4715): a daemon
 //!   404 on the index this session ADVERTISED means "not built yet", which is
 //!   retryable, not "no such index", which is permanent
+//! - [`unavailable`] — the `INDEX_UNAVAILABLE` contract (issue #5350): a daemon
+//!   503 carries a structured availability verdict, which must reach the caller
+//!   as data rather than as a flattened prose string
 //! - [`http`]        — shared HTTP transport helpers (`get`, `post`, `delete`, …)
 //! - [`types`]       — `DispatchError`, `require_str`, response-wrapping helpers
 //!
@@ -40,14 +43,17 @@ pub(crate) mod not_ready;
 pub(crate) mod search;
 pub(crate) mod typeahead;
 pub(crate) mod types;
+pub(crate) mod unavailable;
 
 pub use descriptors::{tool_descriptors, tool_descriptors_pinned};
 pub use not_ready::{INDEX_NOT_READY, INDEX_NOT_READY_CODE};
+pub use unavailable::{INDEX_UNAVAILABLE, INDEX_UNAVAILABLE_CODE};
 
 use not_ready::wrap_index_not_ready_error;
 use types::{
     wrap_stage_not_ready_error, wrap_text_content, wrap_tool_error, wrap_tool_result, DispatchError,
 };
+use unavailable::wrap_index_unavailable_error;
 
 /// Application-level JSON-RPC error code surfaced when a per-lane MCP tool
 /// (`search_semantic`, `search_kg`) is invoked but its prerequisite stage
@@ -266,6 +272,11 @@ impl McpServer {
                 Err(DispatchError::IndexNotReady { message, payload }) => {
                     Response::ok(id, wrap_index_not_ready_error(&message, &payload))
                 }
+                // #5350: the daemon's structured 503 reaches the caller as data,
+                // not as a prose string it would have to parse.
+                Err(DispatchError::IndexUnavailable { message, payload }) => {
+                    Response::ok(id, wrap_index_unavailable_error(&message, &payload))
+                }
             }
         } else {
             match outcome {
@@ -307,6 +318,16 @@ impl McpServer {
                 // an app-level code distinct from every "not found" code.
                 Err(DispatchError::IndexNotReady { message, payload }) => {
                     let mut resp = Response::err(id, INDEX_NOT_READY_CODE, message);
+                    if let Some(ref mut e) = resp.error {
+                        e.data = Some(payload);
+                    }
+                    resp
+                }
+                // #5350: same treatment for a structured 503 — the verdict rides
+                // in `error.data` under its own app-level code instead of being
+                // flattened into an INTERNAL_ERROR message string.
+                Err(DispatchError::IndexUnavailable { message, payload }) => {
+                    let mut resp = Response::err(id, INDEX_UNAVAILABLE_CODE, message);
                     if let Some(ref mut e) = resp.error {
                         e.data = Some(payload);
                     }
@@ -356,3 +377,6 @@ mod tests_empty_query;
 // Issue #4715: INDEX_NOT_READY contract tests.
 #[cfg(test)]
 mod tests_not_ready;
+// Issue #5350: INDEX_UNAVAILABLE (structured daemon 503) contract tests.
+#[cfg(test)]
+mod tests_unavailable;

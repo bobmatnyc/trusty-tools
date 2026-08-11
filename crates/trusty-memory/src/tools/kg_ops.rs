@@ -196,6 +196,21 @@ pub(crate) async fn handle_remove_prompt_fact(state: &AppState, args: Value) -> 
     }
 }
 
+/// MCP `kg_query` tool — active triples for one subject, plus an honest
+/// account of what a miss means.
+///
+/// Why (#4775): an empty result had exactly one explanation attached — "the
+/// knowledge graph is empty" — even when the graph held thousands of triples
+/// and the caller had simply named a subject it does not carry. The handler
+/// can prove that claim false, so it now says which of the two happened.
+/// What: always returns `kg_triple_count`, the whole-graph active total, on
+/// hits and misses alike. On a miss it adds `graph_state` —
+/// `"subject_not_found"` or `"graph_empty"` — and the matching `hint`; a hit
+/// carries neither, so their absence means the subject was found. See
+/// [`crate::bootstrap::KgMiss`] for the classification.
+/// Test: `kg_query_reports_subject_not_found_when_graph_has_other_subjects`,
+/// `kg_query_reports_graph_empty_when_graph_has_no_triples`,
+/// `dispatch_kg_assert_then_query`.
 pub(crate) async fn handle_kg_query(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "kg_query")?;
     let subject = args
@@ -222,14 +237,17 @@ pub(crate) async fn handle_kg_query(state: &AppState, args: Value) -> Result<Val
             })
         })
         .collect();
-    // Issue #60: surface a hint when the requested subject has no
-    // active triples so the model knows `kg_bootstrap` and
-    // `kg_assert` exist. Empty payload is the only signal we have
-    // at the per-subject query layer; that's the user-visible
-    // "nothing here" case the hint is for.
-    let mut response = json!({ "subject": subject, "triples": payload });
-    if crate::bootstrap::is_kg_empty_for_subject(&triples) {
-        response["hint"] = Value::String(crate::bootstrap::KG_EMPTY_HINT.to_string());
+    // #4775: read the whole-graph total so a miss can name which miss it is
+    // instead of asserting emptiness the handler can disprove.
+    let total_active = handle.kg.count_active_triples();
+    let mut response = json!({
+        "subject": subject,
+        "triples": payload,
+        "kg_triple_count": total_active,
+    });
+    if let Some(miss) = crate::bootstrap::KgMiss::classify(triples.len(), total_active) {
+        response["graph_state"] = Value::String(miss.wire_value().to_string());
+        response["hint"] = Value::String(miss.hint().to_string());
     }
     Ok(response)
 }

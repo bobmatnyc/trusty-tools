@@ -1,9 +1,9 @@
 # DOC-46 — Architecture Decision Records (ADR) as First-Class Documentation Artifact
 
-**Status:** DRAFT
+**Status:** ACCEPTED
 **Subsystem:** Documentation / Architecture governance
 **Owner:** Architecture / Technical Leadership
-**Last-updated:** 2026-07-19
+**Last-updated:** 2026-08-11
 **Spec ID:** `SPEC-ADR-01` (DOC-46)
 **Builds on:** `docs/adr/README.md` (existing ADR convention); DOC-38 (Spec-Linked Documentation / SLD); DOC-30 (Project Manager vision — decision vetting); the tm-adr bundled skill (`crates/trusty-mpm/src/assets/skills/tm-adr.md`)
 
@@ -13,19 +13,23 @@
 
 ### Current State
 
-The trusty-tools repository maintains a de-facto ADR practice:
-- **14 existing ADRs** (ADR-0001 through ADR-0013) document foundational architectural decisions
-- ADRs are **informally opt-in**, created ad-hoc when maintainers recognize a significant choice
-- Existing decisions live only in **memory or informal channels** (meetings, memory palace)
-- **No consistency check**: new ADRs are not systematically vetted against prior decisions; silent contradictions can arise
-- ADRs are treated as **ancillary documentation**, not peer to Specs (DOC-38 SLD) and Requirements (DOC-43 — future)
-- **No mechanical enforcement** — missing ADRs, contradictions, and linting gaps are not surfaced by CI
+The trusty-tools repository maintains a governed ADR practice:
+- **44 existing ADRs** (ADR-0001 through ADR-0044) document architectural decisions
+- ADRs are mandatory for architecturally significant, costly-to-reverse choices
+- Significant decisions that originate in meetings or memory are promoted into
+  ADRs before they become governing architecture.
+- New ADRs carry a **Related Decisions** consistency-vetting section.
+- ADRs are first-class documentation, peer to Specs (DOC-38 SLD) and
+  Requirements.
+- `scripts/check_adr.sh` mechanically enforces numbering, status, successor
+  links, required vetting sections, and index parity in CI.
 
 ### Problem
 
 **Bob's directive (2026-07-19):** "Formalize ADRs so that any decision can be vetted against previous ones for consistency. Should be a peer to Spec, and Req."
 
-The core issue: **architectural decisions are treated as optional narratives, not as a governed, first-class artifact class**. This allows:
+Before this standard, architectural decisions were treated as optional
+narratives rather than a governed, first-class artifact class. That allowed:
 - **Inconsistent future decisions** that contradict earlier accepted choices without acknowledgment
 - **Lost decision rationale** when team members leave or memories fade
 - **No audit trail** for why the system is shaped as it is — impossible to trace "did we already consider this alternative?"
@@ -70,18 +74,23 @@ Operationally: ADRs remain **high-bar** (rare). A typical quarter may produce 1�
 
 ### Required Frontmatter & Fields
 
-Every ADR must carry:
+Every ADR created after the grandfathered ADR-0001..0013 baseline must carry:
 
 ```markdown
 # NNNN. <Short Title of Decision>
 
-- **Status:** Proposed | Accepted | Rejected | Superseded by MMMM | Amended by MMMM
+- **Status:** Proposed | Accepted | Rejected | Superseded by [MMMM](MMMM-title.md) | Amended by [MMMM](MMMM-title.md)[, [NNNN](NNNN-title.md)…]
 - **Date:** YYYY-MM-DD
 - **Scope:** Workspace-wide (or: crate `<name>` or subsystem `<name>`)
 - **Reversibility Cost:** (Low | Medium | High) — cost to undo this later
 - **Decision Drivers:** (Comma-separated list of forces: e.g., "MSRV constraint, performance ceiling, cross-crate boundary")
-- **Cross-ref to related decisions:** (see "Related Decisions" section below)
+- **Supersedes / Superseded by:** (link each lifecycle relationship, or `—`)
 ```
+
+ADR-0001..0013 predate this metadata block and are structurally
+grandfathered. Their historical Context, Decision, and Consequences are not
+rewritten merely to match a later template. Their status and successor
+backlinks still participate in lifecycle and consistency checks.
 
 ### Core Sections (Nygard Format)
 
@@ -111,8 +120,10 @@ No prior decisions contradict this choice. Summary: Consistent with existing dec
 **Verdict codes:**
 - **Consistent** — aligns with prior decision; no conflict.
 - **Extends** — builds on a prior decision; compatible evolution.
-- **Supersedes** — replaces a prior decision. **Action:** flip old ADR's status to `Superseded by NNNN`.
-- **Amended by** — refines (rather than replaces) a prior decision. **Action:** old ADR status becomes `Amended by NNNN`.
+- **Supersedes** — replaces a prior decision. **Action:** flip the old ADR's
+  status to a linked `Superseded by [NNNN](NNNN-title.md)` target.
+- **Amended by** — refines (rather than replaces) a prior decision. **Action:**
+  the old ADR status becomes linked `Amended by [NNNN](NNNN-title.md)`.
 - **Conflict (resolved)** — contradicts a prior decision. **Action:** must document *how* the conflict was resolved (e.g., which takes precedence, or both are valid in different scopes). **Note:** shipping an ADR that conflicts with an accepted one without resolving the conflict is a lint failure and blocks PR merge.
 
 **Vetting scope:**
@@ -155,8 +166,10 @@ No prior decisions contradict this choice. Summary: Consistent with existing dec
 
 - **Proposed** — draft, under review. Consistency vetting is optional while Proposed, but required before acceptance.
 - **Accepted** — approved, in force. All Accepted ADRs form the current decision set; they govern system architecture and future decisions.
-- **Superseded by NNNN** — replaced by a later ADR. Links to the new ADR. Old decision is no longer in force; the new one takes precedence.
-- **Amended by NNNN** — refined (not replaced) by a later ADR. The prior decision is still in force, but qualified by the amendment.
+- **Superseded by linked NNNN** — replaced by a later ADR. The Status value
+  links to the new ADR. Old decision is no longer in force; the new one takes precedence.
+- **Amended by linked NNNN[, NNNN…]** — refined (not replaced) by one or more later
+  ADRs. The prior decision is still in force together with every amendment.
 - **Rejected** — considered but not adopted. Kept for the record so the same choice is not re-litigated.
 
 ---
@@ -168,7 +181,7 @@ No prior decisions contradict this choice. Summary: Consistent with existing dec
 The index is the **single source of truth** for the ADR corpus and the **cheap surface for vetting**.
 
 ```markdown
-# ADR Index — Accepted Decisions
+# ADR Index — All Decisions
 
 Last updated: 2026-07-19 | Format version: 1.0
 
@@ -196,27 +209,32 @@ Crates may maintain their own `docs/<crate>/decisions/` directory with independe
 
 ## 6. Mechanical Enforcement & CI Gates
 
-### Phase 1: Linting Script (Scoped, Pragmatic)
+### Phase 1: Linting Script (Implemented)
 
-Propose a new script: `scripts/check_adr.sh` (or fold into an extended `scripts/check_sld.sh`).
+`scripts/check_adr.sh` implements the structural gate and runs in the
+documentation lint workflow.
 
-**Scope — verify only these checks; implementation is a follow-up issue:**
+**Scope:**
 
 1. **Unique numbering:** each file matches pattern `docs/adr/NNNN-*.md` with NNNN in 0000–9999 range; no duplicates.
 2. **Sequential continuity:** if files are numbered 0001–0013, there are no gaps (e.g., no 0002 missing).
-3. **Status field validity:** Status is one of {Proposed, Accepted, Rejected, Superseded by NNNN, Amended by NNNN}.
+3. **Status field validity:** Status is one of {Proposed, Accepted, Rejected,
+   Superseded by linked NNNN, Amended by one or more linked NNNN targets}.
 4. **Supersedes bidirectionality:** if ADR-0003 says "Superseded by 0010", then ADR-0010 must cite ADR-0003 in its "Related Decisions" section. (Detect orphaned supersedes links.)
 5. **INDEX.md in sync:** every ADR file in `docs/adr/` with number NNNN ≥ 0001 must have an entry in `docs/adr/INDEX.md`; conversely, every index entry must have a corresponding file on disk.
+6. **Modern record shape:** ADR-0014 and later use lowercase kebab-case
+   filenames, carry the Date, Scope, Reversibility Cost, Decision Drivers, and
+   lifecycle-link fields, and have non-empty Context, Decision, and
+   Consequences sections. ADR-0001..0013 retain the grandfathering above.
 
 **Phase 2 (Human/LLM Review, NOT Mechanical Check):**
 - **Semantic consistency:** if two Accepted ADRs make mutually exclusive claims, identify the contradiction and require manual resolution in "Related Decisions" or status change. This check is advisory and requires human or LLM judgment — not automated.
 
-**Recommended command-line interface:**
+**Command-line interface:**
 
 ```bash
 bash scripts/check_adr.sh               # exit 0 if all checks pass
-bash scripts/check_adr.sh --index-only  # only verify INDEX.md sync
-bash scripts/check_adr.sh --verbose     # detailed per-ADR report
+bash scripts/check_adr_selftest.sh      # mutation-test the gate itself
 ```
 
 **CI integration:** Add to `.github/workflows/` as a gated check (fail on violation). The check runs on all PRs that touch `docs/adr/` or `docs/specs/`.
@@ -292,7 +310,10 @@ Write an ADR when:
 
 ### Existing ADRs (0001–0013)
 
-Current ADRs are **grandfathered as Accepted** without re-vetting. They form the baseline decision set.
+ADRs 0001–0013 are **grandfathered without structural backfill or retrospective
+vetting**. They form the baseline decision set while retaining the lifecycle
+status each file currently records; grandfathering does not change a rejected,
+superseded, or amended record into Accepted.
 
 **Action (Phase 1, this PR):**
 - Seed `docs/adr/INDEX.md` from existing ADR files
@@ -394,7 +415,7 @@ This spec is successful when:
 2. **Consistency is enforced** — new ADRs are vetted against priors before acceptance; "Related Decisions" section prevents silent contradictions
 3. **Discovery is cheap** — `docs/adr/INDEX.md` is the quick reference; anyone can scan for related decisions in seconds
 4. **Workflow is clear** — PMs and architects follow a consistent process: draft → vet (consistency check) → approve → accept
-5. **CI catches violations** — `scripts/check_adr.sh` runs on all ADR PRs and fails if numbering, status, or bidirectional-link rules are broken (checks 1–5 in §6)
+5. **CI catches violations** — `scripts/check_adr.sh` runs on all ADR PRs and fails if numbering, modern metadata/sections, status, or bidirectional-link rules are broken (checks 1–6 in §6)
 
 ---
 
@@ -408,7 +429,7 @@ This spec is successful when:
 | `docs/reference/documentation-layout.md` | Update: mention ADRs alongside Specs and Reqs as first-class artifacts |
 | `crates/trusty-mpm/src/assets/skills/tm-adr.md` | Update: remove "opt-in" framing; link to DOC-46 for formal standard (bundled asset v2.0.0) |
 | `CHANGELOG.md` | Entry (per CHANGELOG-per-PR convention): "docs(spec): DOC-46 — formalize ADRs as first-class artifact with consistency-vetting protocol" |
-| `scripts/check_adr.sh` | FUTURE (follow-up issue): implement linting checks |
+| `scripts/check_adr.sh` | Implemented: structural, lifecycle-link, metadata, section, numbering, and index checks |
 
 ---
 
@@ -418,4 +439,4 @@ This spec is successful when:
 - `docs/adr/README.md` — existing ADR convention for trusty-tools
 - DOC-38 — Spec-Linked Documentation (SLD) standard
 - DOC-30 — Project Manager vision & lifecycle orchestration
-- The tm-adr bundled skill — current opt-in convention
+- The tm-adr bundled skill — current formal authoring workflow

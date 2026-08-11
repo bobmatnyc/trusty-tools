@@ -3,6 +3,11 @@
 - **Status:** Proposed
 - **Date:** 2026-07-18
 - **Scope:** Workspace-wide (trusty-agents, trusty-mpm, trusty-code)
+- **Reversibility Cost:** High — the source format, inheritance semantics, and
+  cross-product composition model shape three products and their shared parser.
+- **Decision Drivers:** Eliminate parser duplication, preserve product-specific
+  composition semantics, share deterministic `extends` resolution, keep
+  cross-product delegation behind explicit proxies
 - **Supersedes / Superseded by:** — (complements DOC-37, issues #2791/#2792)
 
 ## Context

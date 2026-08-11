@@ -322,4 +322,6 @@ Vetted against prior ADRs on 2026-08-01:
 - **ADR-0024 (assistants as L0 delegators):** Consistent, orthogonal axis. Caution: its clause-4 editable sub-agent whitelist must consume this ADR's resolved roster rather than re-deriving one.
 - **Skills have no prior ADR** — this is the first.
 - **DOC-31 (`docs/specs/system-project-agents-skills.md`):** Superseded in part — §191 names committed project-tier agents in `.claude/agents/` as supported, which clause 1 removes. DOC-31 must be rewritten in the change set that lands that clause.
-- Note (not fixed here): main has an ADR-0021 numbering collision (`0021-cargo-bin-policy.md` and `0021-slack-inbound-hybrid-gateway-eventstream.md`) needing separate cleanup with `INDEX.md` reconciled.
+- Note (resolved by the ADR consistency repair): the former Cargo-policy half of
+  the ADR-0021 collision is now [ADR-0043](0043-cargo-bin-policy.md); ADR-0021
+  remains the Slack inbound decision.

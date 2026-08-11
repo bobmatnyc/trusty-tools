@@ -2,17 +2,21 @@
 //!
 //! Why: session launch pins a trusty-search index id into the project's
 //! `.mcp.json` (`trusty-search serve --index <id>`) and registers that index
-//! best-effort. Every step of the registration is fail-open —
-//! `trusty_common::search_index::ensure_project_indexed` "ALWAYS returns the
-//! derived id … even if the daemon is unreachable", and both
-//! `best_effort_create_index` and `best_effort_trigger_reindex` swallow their
-//! failures at `tracing::warn!`. So the pin advances whether or not the index
-//! was ever created, and the existing `search` probe — which asks the daemon
-//! whether it is healthy and whether the *derived* id appears in `/indexes` —
-//! keeps reporting fine. Measured on 2026-08-07: 4 of 75 live worktrees had a
-//! registered index, and `POST /indexes/<pinned-id>/search` returned
+//! best-effort, swallowing every failure at `tracing::warn!`. Until #5091 the
+//! shared helper handed the derived id back regardless, so the pin advanced
+//! whether or not the index was ever created, while the existing `search`
+//! probe — which asks the daemon whether it is healthy and whether the
+//! *derived* id appears in `/indexes` — kept reporting fine. Measured on
+//! 2026-08-07: 4 of 75 live worktrees had a registered index, and
+//! `POST /indexes/<pinned-id>/search` returned
 //! `404 Not Found: {"error":"unknown index"}` in a worktree whose `search`
 //! check was green.
+//!
+//! #5091 stops NEW pins from advancing on an unconfirmed create, and this check
+//! stays: a pin already written by an older `tm` is still on disk, and an index
+//! that existed when the pin was written can be deleted, GC'd, or lost when the
+//! daemon's registry is rebuilt. A pin is a claim about the daemon's state at
+//! one past moment; only resolving it says whether it still holds.
 //!
 //! What: [`check_search_index_pin`] reads the id the session is ACTUALLY
 //! pinned to out of `.mcp.json` and resolves it against the daemon with
@@ -270,10 +274,11 @@ pub(super) fn build_pin_check(pin: &PinState, probe: Option<&PinProbe>) -> Docto
             CheckStatus::Fail,
             format!(
                 "this session is pinned to trusty-search index `{id}` but the daemon has NO such \
-                 index — every `search`/`grep` call in this session returns 404 \"unknown index\". \
-                 Index registration is best-effort and swallows its failures, so the pin advanced \
-                 anyway and the `search` health check stays green (issue #5045). Run \
-                 `trusty-search index create` for this project, or relaunch the session"
+                 index — every `search`/`grep` call in this session returns 404 \"unknown index\", \
+                 and the `search` health check stays green because it reports the daemon, not the \
+                 pin (issue #5045). Either the index was deleted since the pin was written, or the \
+                 pin predates #5091. Run `trusty-search index create` for this project, or \
+                 relaunch the session"
             ),
         ),
         Some(PinProbe::HttpStatus(code)) => DoctorCheck::new(

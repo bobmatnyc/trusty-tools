@@ -1,7 +1,10 @@
-# 0021. ~/.cargo/bin contains registry installs only
+# 0043. `$CARGO_HOME/bin` contains sanctioned, traceable installs only
 
 - **Status:** Proposed
 - **Date:** 2026-07-26
+- **Numbering note:** This Proposed record originally collided with the accepted
+  Slack ADR at 0021 and was absent from the index. It was moved to the next free
+  number, 0043, on 2026-08-11 before acceptance; ADR-0021 remains Slack inbound.
 - **Amended:** 2026-08-06 — see [Amendment 1](#amendment-1--2026-08-06-the-prebuilt-downloader-is-a-third-provenance-class-4964)
 - **Scope:** Workspace-wide (all trusty-* crates with binary artifacts)
 - **Reversibility Cost:** Low — the policy is a constraint on what goes into `~/.cargo/bin`, not a refactor of existing code; reverting it changes permissions but requires no migrations
