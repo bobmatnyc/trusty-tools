@@ -296,10 +296,17 @@ async fn ingest_reports_503_when_the_contributed_overlay_cannot_be_merged() {
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "contrib_not_merged");
     assert_eq!(body["index_id"], "contrib-merge-fail");
-    assert_eq!(body["retryable"], true);
     assert_eq!(
         body["persisted"], true,
         "the contribution IS durable — the caller must not be told to treat it as lost"
+    );
+    assert_eq!(
+        body["blocking_producer"], "stale-producer",
+        "the response must name the row that has to be fixed"
+    );
+    assert_eq!(
+        body["retryable"], false,
+        "retrying navigatsql's ingest never clears another producer's unreadable row"
     );
 
     // Corroboration: the verdict matches what a query can actually see.
@@ -314,6 +321,42 @@ async fn ingest_reports_503_when_the_contributed_overlay_cannot_be_merged() {
         neighbors["count"], 0,
         "the contribution really is unqueryable — a 200 would have been a lie"
     );
+}
+
+/// Why: #5505 — `retryable` is a promise. It is honest only when the blocker
+/// is this producer's own row, which a re-send replaces outright; for anyone
+/// else's row the retry fails identically forever.
+/// Test: this test — same fault, planted under the INGESTING producer's key.
+#[tokio::test(flavor = "multi_thread")]
+async fn ingest_503_is_retryable_when_the_blocking_row_is_this_producers_own() {
+    let (_dir, corpus, state) = state_and_corpus("contrib-self-blocked");
+    crate::core::corpus::test_support::corrupt_contrib_row(&corpus, "navigatsql")
+        .expect("plant corrupt contrib row");
+
+    // Ingesting as the SAME producer replaces the unreadable row, so the load
+    // that follows succeeds — the end-to-end proof that `retryable: true` for
+    // this case is a promise the daemon actually keeps.
+    let Json(resp) = ingest_graph_handler(
+        State(Arc::new(state)),
+        Path("contrib-self-blocked".into()),
+        Json(request("navigatsql")),
+    )
+    .await
+    .expect("re-sending the blocked producer's own document must clear the fault");
+    assert_eq!(resp.graph_nodes, 3);
+
+    // The unattributable case (no row implicated) stays retryable: a lost
+    // worker or a table-level fault can clear on the next attempt.
+    let (code, Json(body)) = super::degraded::contrib_not_merged_response(
+        "contrib-self-blocked",
+        "navigatsql",
+        false,
+        "kg save/merge task did not complete",
+        None,
+    );
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["retryable"], true);
+    assert!(body["blocking_producer"].is_null());
 }
 
 /// Why: #5505's lesser arm at the endpoint — a derived-KG persist failure does
@@ -403,8 +446,11 @@ async fn ingest_route_answers_503_over_http_when_the_merge_fails() {
     let body: serde_json::Value = resp.json().await.expect("json body");
     assert_eq!(body["error"], "contrib_not_merged");
     assert_eq!(body["index_id"], "live-broken");
-    assert_eq!(body["retryable"], true);
     assert_eq!(body["persisted"], true);
+    // Another producer's row is the blocker, so retrying THIS ingest is futile
+    // and the response says so rather than inviting an unbounded retry loop.
+    assert_eq!(body["retryable"], false);
+    assert_eq!(body["blocking_producer"], "stale-producer");
 }
 
 #[tokio::test]

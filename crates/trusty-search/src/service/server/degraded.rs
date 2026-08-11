@@ -264,35 +264,56 @@ pub(super) fn vector_lane_unavailable(
 /// misled.
 ///
 /// What: `503`, matching the rest of this module's "registered, but cannot
-/// serve what you asked" family, and `retryable: true` because the next
-/// successful rebuild (a retried ingest, a reindex, a restart) merges the
-/// already-stored contribution with no operator action. `persisted: true` is
-/// the load-bearing field — the data is NOT lost, so a caller must not respond
-/// by re-deriving it; re-sending the same document is a safe retry only
-/// because ingest is replace-per-producer.
+/// serve what you asked" family. `persisted: true` is the load-bearing field —
+/// the data is NOT lost, so a caller must not respond by re-deriving it.
+///
+/// `retryable` is EARNED, not assumed. One unreadable `kg_contrib` row fails
+/// the whole load, so when the blocker is a DIFFERENT producer's row, retrying
+/// this ingest fails identically forever — telling that caller to retry would
+/// send it into an unbounded loop (#5505). So: retryable when no single row is
+/// implicated (a table-level fault or a lost worker can clear on the next
+/// attempt), or when the blocker is this producer's own row, which a re-send
+/// replaces outright. Otherwise `false`, with `blocking_producer` naming the
+/// row an operator must re-send or delete.
 /// Test: `ingest_reports_503_when_the_contributed_overlay_cannot_be_merged`,
+/// `ingest_503_is_not_retryable_when_another_producers_row_is_the_blocker`,
 /// `ingest_route_answers_503_over_http_when_the_merge_fails`.
 pub(super) fn contrib_not_merged_response(
     index_id: &str,
     producer: &str,
     replaced: bool,
     reason: &str,
+    blocking_producer: Option<&str>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let retryable = blocking_producer.is_none_or(|blocker| blocker == producer);
+    let remedy = match blocking_producer {
+        Some(blocker) if blocker != producer => format!(
+            "Retrying this ingest will NOT help: the blocker is producer '{blocker}'s stored \
+             row, which this ingest never touches. Re-ingest '{blocker}' with a valid \
+             document to replace that row."
+        ),
+        Some(_) => "Re-send this document: ingest is replace-per-producer, so it overwrites \
+             the unreadable row."
+            .to_string(),
+        None => "No single stored row is implicated. Retry the ingest, or reindex the index."
+            .to_string(),
+    };
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(serde_json::json!({
             "error": "contrib_not_merged",
             "index_id": index_id,
             "producer": producer,
-            "retryable": true,
+            "retryable": retryable,
             "persisted": true,
             "replaced": replaced,
             "reason": reason,
+            "blocking_producer": blocking_producer,
             "message": format!(
                 "producer '{producer}' contribution was stored durably in index \
                  '{index_id}' but could not be merged into the serving graph, so it is \
-                 not queryable yet ({reason}). Retry the ingest or reindex the index; \
-                 the stored contribution is not lost (issue #5505)."
+                 not queryable yet ({reason}). {remedy} The stored contribution is not \
+                 lost (issue #5505)."
             ),
         })),
     )

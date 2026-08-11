@@ -185,6 +185,11 @@ pub struct ContribMergeOutcome {
     pub persist_error: Option<String>,
     /// The contributed overlay was not merged; no graph was installed.
     pub merge_error: Option<String>,
+    /// Producer whose stored row blocked the load, when one row is to blame.
+    /// `None` for a table-level fault or a lost worker — no row is implicated.
+    /// The ingest endpoint branches on it: re-sending helps only the producer
+    /// named here, because ingest replaces exactly that row (#5505).
+    pub blocking_producer: Option<String>,
 }
 
 /// Rebuild-path finalizer: persist the derived graph, then merge contrib.
@@ -233,6 +238,11 @@ pub async fn save_then_merge_contrib(
                     "index '{index_id}': contrib load failed ({e}) — \
                      serving graph left unchanged, contributions not merged"
                 );
+                // #5505: recover the offending producer so the endpoint can say
+                // whose row must be re-sent instead of "retry and hope".
+                outcome.blocking_producer = e
+                    .downcast_ref::<crate::core::corpus::contrib::ContribRowError>()
+                    .map(|row| row.producer.clone());
                 outcome.merge_error = Some(format!("contrib load failed: {e}"));
                 return (None, outcome);
             }
@@ -286,6 +296,7 @@ pub(super) fn lost_task_outcome(
         ContribMergeOutcome {
             persist_error: None,
             merge_error: Some(format!("kg save/merge task did not complete: {e}")),
+            blocking_producer: None,
         },
     )
 }

@@ -341,6 +341,17 @@ async fn contrib_load_failure_installs_nothing() {
         "reason must name the failure, got {reason:?}"
     );
     assert!(outcome.persist_error.is_none(), "the persist itself worked");
+    // #5505: one bad row fails the whole load, so the error must name it —
+    // otherwise a caller cannot tell whose contribution to re-send.
+    assert_eq!(
+        outcome.blocking_producer.as_deref(),
+        Some("broken"),
+        "the offending producer must survive as structured data, not prose"
+    );
+    assert!(
+        reason.contains("broken"),
+        "the reason string must name the producer too, got {reason:?}"
+    );
 }
 
 /// Why: #5505's lesser arm — a KG-persist failure costs durability, not

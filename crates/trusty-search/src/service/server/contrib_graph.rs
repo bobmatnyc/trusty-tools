@@ -167,6 +167,7 @@ pub(super) async fn ingest_graph_handler(
             &req.producer,
             replaced,
             &reason,
+            outcome.blocking_producer.as_deref(),
         ));
     }
     let graph = {

@@ -2253,3 +2253,64 @@ async fn office_documents_are_indexed_and_lexically_searchable() {
         );
     }
 }
+
+/// Why: #5505 second-order — the graph rebuild now installs NOTHING when the
+/// contributed overlay cannot be merged, so the serving graph is the one from
+/// before this reindex. Flipping the graph stage to `Ready` and emitting
+/// `complete` with that graph's counts would report a stale graph as this
+/// run's product, which is the same fail-open shape one layer up.
+/// What: drives the KG-rebuild seam `rebuild_kg` branches on — the rebuild's
+/// reported outcome, and the stage transition taken when it is set — against an
+/// index whose `kg_contrib` table holds an unreadable row.
+/// Test: this test. Pre-fix it does not compile: `KgRebuildOutcome` had no way
+/// to say the merge failed, which is precisely why `rebuild_kg` could not tell
+/// and marked the stage `Ready` unconditionally.
+#[tokio::test(flavor = "multi_thread")]
+async fn reindex_does_not_report_ready_when_the_contrib_merge_fails() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+
+    let corpus = Arc::new(
+        crate::core::corpus::CorpusStore::open(&tmp.path().join("index.redb")).expect("open"),
+    );
+    crate::core::corpus::test_support::corrupt_contrib_row(&corpus, "stale-producer")
+        .expect("plant corrupt contrib row");
+    let mut indexer = CodeIndexer::new("contrib-reindex-5505", root.clone());
+    indexer.set_corpus_store(Arc::clone(&corpus));
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new("contrib-reindex-5505"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.clone(),
+    ));
+
+    let outcome = super::completion::rebuild_symbol_graph_for_reindex(&handle).await;
+    let reason = outcome
+        .contrib_merge_error
+        .expect("the reindex must be told the overlay was not merged (#5505)");
+    assert!(reason.contains("contrib load failed"), "got {reason:?}");
+    assert!(
+        !outcome.kg_skipped,
+        "the KG phase ran — this is a failure, not a skip, and the two must not \
+         be reported the same way"
+    );
+
+    // The transition `rebuild_kg` takes on that reason: the graph lane is stale,
+    // so it must NOT read Ready. The lexical/semantic lanes are untouched.
+    super::stages::mark_graph_failed(&handle, &reason).await;
+    let stages = handle.stages.read().await.clone();
+    assert_eq!(
+        stages.graph.status,
+        StageStatus::Failed,
+        "reporting the graph Ready would describe the pre-reindex graph as this \
+         run's product (#5505)"
+    );
+    assert!(
+        stages.graph.failure.is_some(),
+        "a failed graph stage must carry the reason"
+    );
+    assert_ne!(
+        stages.lexical.status,
+        StageStatus::Failed,
+        "a contrib-merge failure must not overstate the damage to other lanes"
+    );
+}
