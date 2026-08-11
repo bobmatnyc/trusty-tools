@@ -27,14 +27,37 @@
 #   (`acquire_index_teardown_read` / `_write`) appears EARLIER IN THE SAME SCOPE.
 #
 #   "Scope" is the innermost enclosing `fn` body OR spawned-task body
-#   (`tokio::spawn(…)`, `spawn_blocking(…)`, `spawn_local(…)`), whichever is
-#   inner. Treating a spawn as its own scope is what makes the missed shapes
-#   visible: a guard taken in the enclosing function is DROPPED when that
-#   function returns, so it does not cover work the function spawned and walked
-#   away from — the exact `commands/start/daemon.rs` shape. Requiring the guard
+#   whichever is inner. A DEFERRED BODY is a spawn call (`tokio::spawn(…)`,
+#   `spawn_blocking(…)`, `spawn_local(…)`), an `async` / `async move` block, or a
+#   closure with a braced body.
+#
+#   Treating a deferred body as its own scope is what makes the missed shapes
+#   visible: the guard is a scope guard, DROPPED when the function that took it
+#   returns, so it does not cover work that function deferred past its own
+#   return — the exact `commands/start/daemon.rs` shape. Requiring the guard
 #   EARLIER than the call is what makes an ordering bug visible — the exact
 #   `watch_loop::handle_modified` shape, where the guard was real but sat after a
 #   `remove_chunk` loop that had already deleted from redb.
+#
+#   Matching only `spawn(` was not enough, and #3049 round 4 review proved it by
+#   defeating the first version of this gate with idiomatic Rust:
+#
+#     let fut = async move { idx.commit_parsed_batch(…).await };
+#     tokio::spawn(fut);
+#
+#   The write shares neither a line nor a brace with the `spawn(`, and the block
+#   opens and closes on one line so its net brace delta is zero — the scope stack
+#   never saw it, and the gate blamed the enclosing guard, exit 0. Hence two
+#   rules rather than one: any deferred body opens a scope, AND a call textually
+#   to the right of a deferred opener on its own line is inside that body whether
+#   or not the stack ever saw it. Naming a future before spawning it is ordinary
+#   (tracing, instrumentation, a conditional spawn), so this was reachable.
+#
+#   Disclosed cost of the broader rule: a durable write inside a closure or async
+#   block that is immediately AWAITED is safe but still needs a manifest row,
+#   because the gate cannot see the await. One such row exists today
+#   (`contrib_graph.rs`). That is the intended direction — a needless row is
+#   cheap, a missed writer corrupts a corpus.
 #
 #   A call site that is not self-evidently guarded must have a row in
 #   `scripts/teardown-guard-manifest.tsv` — the one place an exemption is
@@ -63,6 +86,11 @@
 #     explicit and checkable by a human, which prose in a doc comment was not.
 #   - The seed method list is hand-maintained (see its header). This gate closes
 #     "existing method, new call site" drift, not "brand-new write method".
+#   - Deferred-body detection is textual. A body reached through a level of
+#     indirection the text does not show — a write inside a function that is
+#     itself only ever called from a spawned task, with no manifest row saying so
+#     — is attributed to wherever it is written. `CALLER:<fn>` rows are what
+#     record those chains, and they are human-checked, not proven.
 #
 # Usage:  bash scripts/check_teardown_guard.sh
 # Exit:   0 clean; 1 on any undeclared site, stale/malformed manifest row, tool
@@ -181,15 +209,42 @@ while IFS= read -r f; do
       t = s; b = gsub(/\}/, "", t)
       return a - b
     }
-    # Innermost fn name, with +spawn when a spawned body sits inside it.
-    function scope_key(   i, sawspawn, fname) {
-      sawspawn = 0; fname = ""
+    # A body whose execution is DEFERRED past the enclosing function: a spawned
+    # task, an `async` block, or a closure. The guard is a scope guard, so it is
+    # dropped when the function that took it returns — anything deferred past
+    # that point is unprotected by it. Ordered so `spawn` wins on a line that is
+    # both (`spawn_blocking(move || …)`), keeping scope names stable.
+    function deferred_kind(s) {
+      if (s ~ /spawn[A-Za-z_]*[ \t]*\(/) return "spawn"
+      if (s ~ /async[ \t]+move[ \t]*\{/ || s ~ /async[ \t]*\{/) return "async"
+      if (s ~ /\|[^|]*\|[ \t]*\{/ || s ~ /\|\|[ \t]*\{/) return "closure"
+      return ""
+    }
+    # Column at which a deferred body opens on this line, 0 when none. Used to
+    # place a call that shares a line with an opener on the correct side of it:
+    # `indexer.remove_file(…).map_err(|e| {` opens a closure AFTER the write, so
+    # the write belongs to the enclosing function, not to the closure.
+    function deferred_pos(s,   best, p) {
+      best = 0
+      if (match(s, /spawn[A-Za-z_]*[ \t]*\(/)) best = RSTART
+      if (match(s, /async[ \t]+move[ \t]*\{/) || match(s, /async[ \t]*\{/)) {
+        p = RSTART; if (best == 0 || p < best) best = p
+      }
+      if (match(s, /\|[^|]*\|[ \t]*\{/)) { p = RSTART; if (best == 0 || p < best) best = p }
+      return best
+    }
+    # Innermost fn name, suffixed with the innermost deferred body wrapping it.
+    function scope_key(   i, defer, fname) {
+      defer = ""; fname = ""
       for (i = sp; i >= 1; i--) {
-        if (kind[i] == "spawn") { sawspawn = 1; continue }
+        if (kind[i] == "spawn" || kind[i] == "async" || kind[i] == "closure") {
+          if (defer == "") defer = kind[i]
+          continue
+        }
         fname = kind[i]; break
       }
       if (fname == "") fname = "<file-scope>"
-      return sawspawn ? fname "+spawn" : fname
+      return (defer != "") ? fname "+" defer : fname
     }
     FILENAME == SKIPF   { skip[$1 + 0] = 1; next }
     FILENAME == METHODSF { methods[++nm] = $1; next }
@@ -202,16 +257,24 @@ while IFS= read -r f; do
         sub(/[^A-Za-z0-9_].*$/, "", t)
         if (t != "") pending_fn = t
       }
-      if (code ~ /spawn(_blocking|_local)?[ \t]*\(/) pending_spawn = 1
+      dk = deferred_kind(code)
+      dpos = (dk != "") ? deferred_pos(code) : 0
+      if (dk != "") pending_defer = dk
 
       d = brace_delta(code)
-      if (d > 0 && (pending_spawn || pending_fn != "")) {
+      pushed_here = 0
+      if (d > 0 && (pending_defer != "" || pending_fn != "")) {
+        # Remembered so a call to the LEFT of the opener on this line can still
+        # be attributed to the scope that was current before the push.
+        outer_key = scope_key()
+        outer_inst = (sp >= 1) ? instid[sp] : 0
         sp++
-        kind[sp] = pending_spawn ? "spawn" : pending_fn
+        kind[sp] = (pending_defer != "") ? pending_defer : pending_fn
         dbefore[sp] = depth
         instid[sp] = ++counter
-        pending_spawn = 0
+        pending_defer = ""
         pending_fn = ""
+        pushed_here = 1
       }
       depth += d
       while (sp >= 1 && depth <= dbefore[sp]) sp--
@@ -225,12 +288,30 @@ while IFS= read -r f; do
       }
 
       for (i = 1; i <= nm; i++) {
-        if (code ~ ("\\." methods[i] "[ \t]*\\(")) {
-          state = (inst in gseen) ? "OK" : "UNGUARDED"
+        if (match(code, "\\." methods[i] "[ \t]*\\(")) {
+          call_at = RSTART
+          site_inst = inst
+          site_key = scope_key()
+          # A call to the LEFT of the deferred opener on this line is not inside
+          # the body it starts. Without this, `indexer.remove_file(…)
+          # .map_err(|e| {` would be blamed on the closure.
+          if (pushed_here && dpos > 0 && call_at < dpos) {
+            site_inst = outer_inst
+            site_key = outer_key
+          }
+          state = (site_inst in gseen) ? "OK" : "UNGUARDED"
           # An undeterminable scope is never self-satisfied: file scope has no
           # fn to hold a guard across, so it must be declared.
-          if (inst == 0) state = "UNGUARDED"
-          print "SITE\t" PATHNAME "\t" methods[i] "\t" scope_key() "\t" FNR "\t" state
+          if (site_inst == 0) state = "UNGUARDED"
+          # A deferred body that OPENS AND CLOSES on one line has a net brace
+          # delta of zero, so the scope stack never sees it and the call reads as
+          # belonging to the enclosing function. That is how
+          # `let fut = async move { idx.commit_parsed_batch(…).await };` escaped
+          # the first version of this gate entirely (#3049 rd4 review). Anything
+          # to the LEFT of the call that opens a deferred body puts the call in
+          # it, whether or not the stack ever saw that body.
+          if (dpos > 0 && call_at > dpos) state = "UNGUARDED"
+          print "SITE\t" PATHNAME "\t" methods[i] "\t" site_key "\t" FNR "\t" state
         }
       }
     }
