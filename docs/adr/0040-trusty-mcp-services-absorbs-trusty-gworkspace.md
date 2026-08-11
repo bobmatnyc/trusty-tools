@@ -356,6 +356,30 @@ integration is real follow-up, not built here. `#4644` (no CI gate for
 skill byte-parity) is made more urgent by this design's copy-multiplication
 at scale — not resolved, not edited here.
 
+## Consequences
+
+**Easier / positive:**
+
+- MCP-only consumers depend on the focused `trusty-mcp` protocol crate rather
+  than pulling the full `trusty-common` feature surface.
+- Agent-consumed services gain one publishable, registry-driven host while
+  keeping service-owned dependencies and bundled skills together.
+- The agent-consumer/framework-consumer rule gives later capability work a
+  repeatable boundary test instead of deciding from crate names.
+
+**Harder / negative:**
+
+- Removing `trusty_common::mcp` is a breaking change and requires coordinated
+  import migration across ten verified consumers.
+- `trusty-mcp-services` adds registry and packaging machinery, and its skill
+  assets still need an explicit cross-crate deployment path.
+- The native future of `trusty-channels`, `trusty-kb`'s final disposition, and
+  a normative spec home for the consumer rule remain follow-up decisions.
+
+**Neutral / deferred:** WASM isolation remains deferred until a third-party
+service cannot be compiled into the host or native build-health pressure makes
+the link-time registry insufficient.
+
 ## Where the agent-consumer / framework-consumer rule lives
 
 The owner: "We should include this distinction in the spec." This makes the

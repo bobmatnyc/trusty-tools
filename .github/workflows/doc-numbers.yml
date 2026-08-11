@@ -83,5 +83,8 @@ jobs:
       - name: Enforce DOC-N / ADR number allocation (ratcheted allowlist)
         run: bash scripts/check_doc_numbers.sh
 
+      - name: Test ADR consistency checker
+        run: scripts/check_adr.sh --self-test
+
       - name: Check ADR corpus consistency
         run: bash scripts/check_adr.sh
