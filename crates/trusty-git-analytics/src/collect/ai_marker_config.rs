@@ -10,10 +10,12 @@
 //! literal from outside the crate and any change to its field set is a major
 //! break (`constructible_struct_adds_field`). A new public type is additive.
 //! What: [`MarkerConfig`] deserializes a small YAML document — a list of
-//! `tool` / `mode` / `scope` / `pattern` entries — from the path
-//! [`marker_file_path`] resolves. [`crate::collect::ai_markers`] appends the
-//! result to `BUILTIN` and compiles it once per process; nothing here touches
-//! `Config`, the CLI, or any existing signature.
+//! `tool` / `mode` / `scope` / `pattern` entries, at most [`MAX_MARKERS`] of
+//! them — from the path [`marker_file_path`] resolves.
+//! [`crate::collect::ai_markers`] appends the result to `BUILTIN` and compiles
+//! it once per process, and consults it only when the shipped markers return
+//! no verdict; nothing here touches `Config`, the CLI, or any existing
+//! signature.
 //! Test: [`tests`] below, plus `tests/ai_markers_operator_file.rs` and
 //! `tests/ai_markers_bad_file.rs`, which drive the whole path through
 //! `ai_markers::detect` in their own processes.
@@ -41,6 +43,15 @@ pub const ENV_AI_MARKERS: &str = "TGA_AI_MARKERS";
 
 /// Marker-file path used when [`ENV_AI_MARKERS`] is unset.
 pub const DEFAULT_MARKER_FILE: &str = "~/.config/tga/ai-markers.yaml";
+
+/// Most markers one file may declare.
+///
+/// `detect` runs once per commit and scans the operator markers linearly, so
+/// an unbounded file slows a whole-history walk in proportion to its size.
+/// 256 is far above any plausible house-marker list and far below where the
+/// linear scan is noticeable; a file over it is rejected like any other bad
+/// file rather than silently truncated.
+pub const MAX_MARKERS: usize = 256;
 
 /// Which text a marker's pattern is applied to.
 ///
@@ -190,6 +201,14 @@ pub enum MarkerConfigError {
         /// Zero-based position in the `markers:` list.
         index: usize,
     },
+    /// The file declares more markers than [`MAX_MARKERS`].
+    #[error("{count} markers exceeds the {max}-marker cap")]
+    TooMany {
+        /// Markers the file declared.
+        count: usize,
+        /// The cap, [`MAX_MARKERS`].
+        max: usize,
+    },
 }
 
 impl MarkerConfig {
@@ -206,9 +225,22 @@ impl MarkerConfig {
     ///
     /// # Errors
     ///
-    /// [`MarkerConfigError::Parse`] if the document does not deserialize.
+    /// [`MarkerConfigError::Parse`] if the document does not deserialize,
+    /// [`MarkerConfigError::TooMany`] if it declares more than
+    /// [`MAX_MARKERS`] entries.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, MarkerConfigError> {
-        Ok(serde_yaml::from_str(yaml)?)
+        let cfg: Self = serde_yaml::from_str(yaml)?;
+        // #5414: `detect` runs once per commit and scans the operator slice
+        // linearly, so an unbounded file is a self-inflicted slowdown over a
+        // whole history. The `regex` crate is linear-time, so this is a size
+        // bound, not a ReDoS guard.
+        if cfg.markers.len() > MAX_MARKERS {
+            return Err(MarkerConfigError::TooMany {
+                count: cfg.markers.len(),
+                max: MAX_MARKERS,
+            });
+        }
+        Ok(cfg)
     }
 
     /// Read and parse a marker file.
@@ -329,6 +361,37 @@ mod tests {
         )
         .expect_err("unknown scope rejected");
         assert!(matches!(err, MarkerConfigError::Parse(_)), "{err}");
+    }
+
+    /// Why: `detect` scans the operator slice once per commit, so file size
+    /// is a cost paid across a whole history walk.
+    #[test]
+    fn a_file_over_the_cap_is_rejected() {
+        let mut yaml = String::from("markers:\n");
+        for i in 0..=MAX_MARKERS {
+            yaml.push_str(&format!(
+                "  - {{ tool: t{i}, mode: full_agentic, scope: message, pattern: x }}\n"
+            ));
+        }
+        let err = MarkerConfig::from_yaml_str(&yaml).expect_err("over cap");
+        assert!(
+            matches!(err, MarkerConfigError::TooMany { count, max }
+                     if count == MAX_MARKERS + 1 && max == MAX_MARKERS),
+            "{err}"
+        );
+
+        // Exactly at the cap is fine — the bound is a ceiling, not a fence.
+        let at_cap: String = yaml
+            .lines()
+            .take(MAX_MARKERS + 1)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            MarkerConfig::from_yaml_str(&at_cap)
+                .expect("at cap parses")
+                .len(),
+            MAX_MARKERS
+        );
     }
 
     #[test]

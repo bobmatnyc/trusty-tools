@@ -11,7 +11,10 @@
 //! pass yields both `commits.ai_tool` and `commits.agentic_mode`, so they can
 //! never disagree. Callers use [`detect`]. Since #5414 the list is
 //! [`BUILTIN`] plus whatever [`crate::collect::ai_marker_config`] loads from
-//! disk, so a house footer is addable without a code change or a release.
+//! disk, so a house footer is addable without a code change or a release. The
+//! two halves are scanned in sequence, not merged: [`BUILTIN`] decides first,
+//! and an operator marker is consulted only for a commit [`BUILTIN`] left
+//! unmarked.
 //! Test: `tests` below — including `catch_rate_on_trusty_tools_history`, which
 //! measures the set against this repo's real history.
 
@@ -74,30 +77,50 @@ pub struct Detection {
 /// Why: the single detection entry point for the collection walk
 /// (`collect::git::extractor`) and the `tga backfill ai-detection-commits`
 /// repair pass, so a repaired row is byte-identical to a freshly walked one.
-/// What: extracts the `Co-Authored-By:` values once, then tests markers in
-/// order. The first `FullAgentic` match returns immediately, so it outranks an
-/// `IdeAssisted` match found earlier in the list; among `IdeAssisted` matches
+/// What: two scans, in strict order. The shipped [`BUILTIN`] markers are
+/// scanned to completion first; if that yields any verdict at all, it is
+/// returned and the operator markers are never consulted. Only a builtin
+/// verdict of [`AgenticMode::None`] falls through to them. Within one scan the
+/// first `FullAgentic` match returns immediately, so it outranks an
+/// `IdeAssisted` match found earlier in that slice; among `IdeAssisted` matches
 /// the earliest supplies the label.
 /// Test: `tests::detects_trusty_mpm_footer`,
-/// `tests::full_agentic_wins_over_ide_assisted`.
+/// `tests::full_agentic_wins_over_ide_assisted`,
+/// `tests::operator_full_agentic_cannot_upgrade_a_builtin_ide_match`.
 pub fn detect(signals: &CommitSignals<'_>) -> Detection {
-    detect_in(&marker_set().markers, signals)
+    detect_in(marker_set(), signals)
 }
 
-/// [`detect`] against an explicit marker list.
+/// [`detect`] against an explicit marker set.
 ///
-/// The seam that lets the operator-file behaviour be tested without the
+/// Why: the seam that lets the operator-file behaviour be tested without the
 /// process-global [`marker_set`], whose `OnceLock` can only ever observe one
 /// configuration per process.
-fn detect_in(markers: &[AiMarker], signals: &CommitSignals<'_>) -> Detection {
+/// What: #5414 — the two-phase scan that makes "an operator marker can only
+/// classify a commit the shipped set left unmarked" true by construction. A
+/// single flat scan could not deliver it: `scan` returns early on `FullAgentic`
+/// but merely records `IdeAssisted` and keeps going, so an operator
+/// `FullAgentic` entry appended after the two builtin `IdeAssisted` markers
+/// overwrote a copilot verdict with its own.
+/// Test: `tests::operator_full_agentic_cannot_upgrade_a_builtin_ide_match`.
+fn detect_in(set: &MarkerSet, signals: &CommitSignals<'_>) -> Detection {
     let trailers: Vec<&str> = trailer_line()
         .captures_iter(signals.message)
         .filter_map(|c| c.get(1).map(|m| m.as_str()))
         .collect();
 
+    let builtin = scan(&set.markers[..set.builtin_len], signals, &trailers);
+    if builtin.mode != AgenticMode::None {
+        return builtin;
+    }
+    scan(&set.markers[set.builtin_len..], signals, &trailers)
+}
+
+/// One ordered pass over a marker slice.
+fn scan(markers: &[AiMarker], signals: &CommitSignals<'_>, trailers: &[&str]) -> Detection {
     let mut ide: Option<&'static str> = None;
     for marker in markers {
-        if !marker.matches(signals, &trailers) {
+        if !marker.matches(signals, trailers) {
             continue;
         }
         match marker.mode {
@@ -280,7 +303,10 @@ const BUILTIN: &[BuiltinSpec] = &[
     // <simon@openhands.dev>` — a human at the vendor — as an agent. Found by
     // running the marker against a real All-Hands-AI/OpenHands clone rather
     // than fixtures; the bot forms it must keep catching are enumerated in
-    // `tests::openhands_trailers_from_a_real_clone`.
+    // `tests::openhands_trailers_from_a_real_clone`. One trailer form,
+    // `OH <openhands@example.com>` (commit 06cc1ef2), is genuinely ambiguous
+    // and stays uncaught: example.com is a reserved placeholder domain, and
+    // anchoring on it is how the marker got this wrong in the first place.
     BuiltinSpec {
         tool: "openhands",
         mode: AgenticMode::FullAgentic,
@@ -327,8 +353,14 @@ fn trailer_line() -> &'static Regex {
 }
 
 /// The compiled marker list plus where its operator half came from.
+///
+/// `markers[..builtin_len]` is [`BUILTIN`] and `markers[builtin_len..]` is the
+/// operator file. The split is what makes [`detect_in`]'s precedence contract
+/// structural rather than a consequence of where the operator entries happen
+/// to sit (#5414).
 struct MarkerSet {
     markers: Vec<AiMarker>,
+    builtin_len: usize,
     source: MarkerSource,
 }
 
@@ -359,19 +391,20 @@ fn marker_set() -> &'static MarkerSet {
 /// requires a bad marker file not to break a collect run — a collection that
 /// aborts because a config file has a typo is a worse outcome than one that
 /// runs with the shipped set and says so.
-/// What: operator markers are APPENDED, never interleaved and never
-/// substituted. [`detect_in`] returns on the first `FullAgentic` match, so a
-/// marker's position decides which label wins when several match; appending
-/// means an operator entry can only turn an undetected commit into a detected
-/// one, never relabel a commit the shipped set already classifies. On any
-/// failure — unreadable, unparseable, or a pattern that will not compile —
-/// the whole file is rejected, logged at WARN, and recorded in
-/// [`detection_disclosure`]; a partially applied file would be the silent
+/// What: operator markers are appended after [`BUILTIN`] and the boundary is
+/// recorded in [`MarkerSet::builtin_len`], which is what [`detect_in`] scans
+/// against — an operator entry is consulted only when the shipped set returns
+/// no verdict at all, so it can classify a commit the shipped set left
+/// unmarked and can do nothing else to one it already classifies. On any
+/// failure — unreadable, unparseable, over the entry cap, or a pattern that
+/// will not compile — the whole file is rejected, logged at WARN, and recorded
+/// in [`detection_disclosure`]; a partially applied file would be the silent
 /// half-configuration this rejects.
 /// Test: `tests::operator_markers_extend_the_builtins`,
+/// `tests::operator_full_agentic_cannot_upgrade_a_builtin_ide_match`,
 /// `tests::a_bad_pattern_rejects_the_whole_file`.
 fn build_marker_set(path: &Path) -> MarkerSet {
-    let mut markers: Vec<AiMarker> = BUILTIN
+    let markers: Vec<AiMarker> = BUILTIN
         .iter()
         .map(|s| AiMarker {
             tool: s.tool,
@@ -380,10 +413,13 @@ fn build_marker_set(path: &Path) -> MarkerSet {
             pattern: Regex::new(s.pattern).expect("builtin marker pattern compiles"),
         })
         .collect();
+    let builtin_len = markers.len();
+    let mut markers = markers;
 
     if !path.exists() {
         return MarkerSet {
             markers,
+            builtin_len,
             source: MarkerSource::Absent(path.to_path_buf()),
         };
     }
@@ -410,7 +446,11 @@ fn build_marker_set(path: &Path) -> MarkerSet {
         }
     };
 
-    MarkerSet { markers, source }
+    MarkerSet {
+        markers,
+        builtin_len,
+        source,
+    }
 }
 
 /// Compile every operator spec, or reject the file.
@@ -617,7 +657,7 @@ mod tests {
         assert_eq!(set.markers.len(), BUILTIN.len() + 1);
 
         let signals = CommitSignals::from_message("feat: x\n\nProduced by ACME Autopilot v3");
-        let d = detect_in(&set.markers, &signals);
+        let d = detect_in(&set, &signals);
         assert_eq!(d.mode, AgenticMode::FullAgentic);
         assert_eq!(d.tool, Some("acme-copilot"));
 
@@ -641,8 +681,31 @@ mod tests {
         );
         let set = build_marker_set(&path);
         let msg = "feat: add thing\n\n🤖🤖🤖 Generated with trusty-mpm";
-        let d = detect_in(&set.markers, &CommitSignals::from_message(msg));
+        let d = detect_in(&set, &CommitSignals::from_message(msg));
         assert_eq!(d.tool, Some("trusty-mpm"), "builtin keeps the label");
+    }
+
+    /// Why: the case appending alone did NOT cover, and the one that proved
+    /// the old "operator markers can never relabel a builtin match" claim was
+    /// ordering luck rather than a contract. `detect_in` returns on the first
+    /// `FullAgentic` match but only *records* an `IdeAssisted` one and keeps
+    /// scanning, so an operator `FullAgentic` entry sitting after the two
+    /// builtin `IdeAssisted` entries (copilot, cursor — last in `BUILTIN`)
+    /// used to overwrite a copilot result with its own label and mode. Fixed
+    /// by scanning `BUILTIN` to completion first and consulting the operator
+    /// slice only when the builtin verdict is `None`.
+    #[test]
+    fn operator_full_agentic_cannot_upgrade_a_builtin_ide_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_marker_file(
+            &dir,
+            "markers:\n  - { tool: house-full, mode: full_agentic, scope: message, pattern: 'copilot' }\n",
+        );
+        let set = build_marker_set(&path);
+        let msg = "feat: autocomplete\n\nCo-Authored-By: GitHub Copilot <copilot@github.com>";
+        let d = detect_in(&set, &CommitSignals::from_message(msg));
+        assert_eq!(d.tool, Some("copilot"), "the builtin verdict must survive");
+        assert_eq!(d.mode, AgenticMode::IdeAssisted, "and must not be upgraded");
     }
 
     /// Why: an IDE-assisted operator marker must still lose to a builtin
@@ -656,7 +719,7 @@ mod tests {
         );
         let set = build_marker_set(&path);
         let msg = "refactor: split\n\nCo-Authored-By: Claude <noreply@anthropic.com>";
-        let d = detect_in(&set.markers, &CommitSignals::from_message(msg));
+        let d = detect_in(&set, &CommitSignals::from_message(msg));
         assert_eq!(d.mode, AgenticMode::FullAgentic);
         assert_eq!(d.tool, Some("claude"));
     }
@@ -680,7 +743,7 @@ mod tests {
         // Detection still works, on the builtin set.
         assert_eq!(
             detect_in(
-                &set.markers,
+                &set,
                 &CommitSignals::from_message("x\n\nGenerated with trusty-mpm")
             )
             .mode,
@@ -688,11 +751,7 @@ mod tests {
         );
         // Even the valid sibling entry is not applied.
         assert_eq!(
-            detect_in(
-                &set.markers,
-                &CommitSignals::from_message("chore: Acme Bot ran")
-            )
-            .mode,
+            detect_in(&set, &CommitSignals::from_message("chore: Acme Bot ran")).mode,
             AgenticMode::None
         );
 
@@ -763,7 +822,7 @@ mod tests {
             "Co-authored-by: OpenHands Bot <contact@all-hands.dev>",
         ] {
             let msg = format!("fix: something\n\n{trailer}");
-            let d = detect_in(&set.markers, &CommitSignals::from_message(&msg));
+            let d = detect_in(&set, &CommitSignals::from_message(&msg));
             assert_eq!(d.mode, AgenticMode::FullAgentic, "{trailer}");
             assert_eq!(d.tool, Some("openhands"), "{trailer}");
         }
@@ -775,7 +834,7 @@ mod tests {
             "Co-authored-by: aivong-openhands <ai.vong@openhands.dev>",
         ] {
             let msg = format!("fix: something\n\n{trailer}");
-            let d = detect_in(&set.markers, &CommitSignals::from_message(&msg));
+            let d = detect_in(&set, &CommitSignals::from_message(&msg));
             assert_eq!(d.mode, AgenticMode::None, "{trailer}");
         }
     }
