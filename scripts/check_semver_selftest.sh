@@ -84,6 +84,17 @@
 #   16 and 17 ride the cases 5-8 table; 18 has its own block below. All three
 #   fail against the pre-fix gate.
 #
+#     19. private-mode CSI — pins the strip to the WHOLE ECMA-48 CSI grammar
+#                            rather than the SGR shape that was observed. Its
+#                            fixture puts `ESC[?25l` (cursor hide, emitted by
+#                            spinner renderers) between `Checked` and its space,
+#                            which a `[0-9;]*[A-Za-z]` strip leaves in place —
+#                            reintroducing this very defect. Synthetic, and
+#                            labelled so: no cargo-semver-checks 0.50.0 output
+#                            carries it. It rides the cases 5-8 table at exit
+#                            100, so it also proves a private-mode-laden BREAK
+#                            is still reported as a break rather than swallowed.
+#
 #   Cases 13-15 pin pre-release handling. `key()` used to strip the pre-release
 #   suffix, so 1.0.0-rc1 and 1.0.0 both keyed to (1, 0, 0) and the tie went to
 #   whichever the index listed first — the reproduction on record picked
@@ -341,7 +352,8 @@ rustdoc build error${TAB}build-error.out${TAB}101${TAB}3${TAB}NO SEMVER VERDICT 
 silent no-op at exit 0${TAB}silent-noop.out${TAB}0${TAB}3${TAB}NO SEMVER VERDICT WAS COMPUTED${TAB}requires a matching version bump
 clean${TAB}clean.out${TAB}0${TAB}0${TAB}crate(s) checked${TAB}NO SEMVER VERDICT
 ANSI-coloured clean (case 16)${TAB}clean-colored.out${TAB}0${TAB}0${TAB}crate(s) checked${TAB}NO SEMVER VERDICT
-ANSI-coloured break (case 17)${TAB}break-colored.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT"
+ANSI-coloured break (case 17)${TAB}break-colored.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT
+private-mode CSI break (case 19)${TAB}private-mode.out${TAB}100${TAB}1${TAB}VERDICT: BREAK${TAB}NO SEMVER VERDICT"
 
 while IFS="$TAB" read -r name fixture stub_rc want_exit must_have must_not; do
   [[ -z "$name" ]] && continue

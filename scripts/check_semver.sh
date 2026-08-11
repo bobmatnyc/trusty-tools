@@ -695,8 +695,25 @@ PY
 #
 #   The escapes are therefore stripped before matching. Stripping is done on a
 #   COPY: the log echoed to the operator keeps its colour, and the regex keeps
-#   the exact shape #5289 gave it. The strip is deliberately confined to CSI
-#   sequences, which is everything cargo tooling emits.
+#   the exact shape #5289 gave it.
+#
+#   The strip covers the WHOLE ECMA-48 CSI grammar, not just the SGR colour
+#   sequences observed: ESC [, parameter bytes 0x30-0x3F (`0-9:;<=>?`),
+#   intermediate bytes 0x20-0x2F (` -/`), one final byte 0x40-0x7E (`@-~`).
+#   Narrowing it to `[0-9;]*[A-Za-z]` — the observed shape — would leave a
+#   private-mode sequence like `ESC[?25l` (cursor hide, emitted by spinner
+#   renderers) unstripped, and that is the same defect again: an escape between
+#   `Checked` and its space. Pinned by self-test case 19.
+#
+#   `[ -/]`, NOT `[ -\/]`. POSIX makes the backslash literal inside a bracket
+#   expression, so `[ -\/]` is the range 0x20-0x5C and deletes digits and
+#   uppercase letters: `KEEP-ME-A` strips to the empty string under it, and to
+#   `KEEPMEA` under the correct form. An over-wide strip is the one way this
+#   function could invent a marker rather than miss one.
+#
+#   Non-CSI escape families (OSC hyperlinks, two-byte sequences) are out of
+#   scope deliberately: none appears in cargo-semver-checks 0.50.0's output,
+#   and an unhandled one fails CLOSED to NO VERDICT rather than to a pass.
 #
 #   Written to a file rather than piped into `grep -q`, because `grep -q` exits
 #   at the first match and SIGPIPEs the producer — under `set -o pipefail` that
@@ -712,7 +729,7 @@ PY
 verdict_computed() {
   # #5500: CARGO_TERM_COLOR=always splits `Checked` from its trailing space (PR #5458).
   local plain="${1}.plain"
-  LC_ALL=C sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' "$1" > "$plain" || return 1
+  LC_ALL=C sed -E $'s/\033\\[[0-9:;<=>?]*[ -/]*[@-~]//g' "$1" > "$plain" || return 1
   grep -Eq '(^|[[:space:]])Checked[[:space:]].*[0-9]+ checks:' "$plain"
 }
 

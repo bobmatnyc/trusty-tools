@@ -28,6 +28,7 @@ untouched, because those escapes are the whole point of the fixture.
 | `silent-noop.out` | 0 | **Synthetic.** No real invocation produces exit 0 with no `checks:` summary today. It pins the fail-closed rule: "the tool said nothing" must never be read as "the tool said pass". |
 | `clean-colored.out` | 0 | The `tga` 2.16.0 -> 2.17.0 run of PR #5458, [job 93874563097](https://github.com/bobmatnyc/trusty-tools/actions/runs/31520044458/job/93874563097). 196 pass, no break — and the gate announced it as "exited 0 without completing a check run". |
 | `break-colored.out` | 100 | The `trusty-review` 0.14.1 -> 0.15.0 run of the same job: 4 real major failures, announced as "exited 100 without completing a run". |
+| `private-mode.out` | 100 | **Synthetic.** A break-shaped run carrying private-mode CSI sequences — `ESC[?25l` / `ESC[?25h` (cursor hide/show, what a spinner renderer emits) plus `ESC[2K\r`. The hide sits between `Checked` and its space, where an SGR-only strip leaves it and the marker check goes blind again. No cargo-semver-checks 0.50.0 output carries these; it pins the strip to the ECMA-48 CSI grammar rather than to the shape that happened to be observed. |
 
 Both `*-colored.out` files exist (issue #5500) because every fixture above was captured by
 redirecting to a file on a workstation, where cargo-semver-checks emits plain
