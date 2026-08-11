@@ -337,7 +337,7 @@ fn investigation_credentials_never_reach_the_rendered_report() {
 
     // The cli_report.rs order: inject findings, synthesize, overlay prose.
     apply_investigation(&mut model, &inv);
-    let mut synthesis = crate::report::synthesize::Synthesis::unavailable("no provider in test");
+    let mut synthesis = crate::report::synthesize::Synthesis::default();
     merge_investigation_prose(&mut synthesis, &inv);
     model.synthesis = Some(synthesis);
 

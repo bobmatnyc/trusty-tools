@@ -64,8 +64,12 @@ fn end_to_end_two_repo_report() {
     let template = TemplateLoader::new()
         .load("report-technical-dd")
         .expect("template loads");
-    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+    let mut model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
         .expect("model builds");
+    // #5454: `write` requires a completed synthesis pass. This test is about the
+    // deterministic fill and the written file pair, so an empty pass stands in
+    // for the LLM the test deliberately does not call.
+    model.synthesis = Some(trusty_review::report::Synthesis::default());
 
     let out_dir = dir.join("reports");
     let reporter = Reporter::new(&out_dir);

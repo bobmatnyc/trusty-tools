@@ -414,6 +414,38 @@ pub struct CodeIndexer {
     /// `skip_kg_false_warm_boot_still_loads_persisted_graph`, and
     /// `skip_kg_true_skips_rebuild_fallback_when_no_corpus_wired`.
     pub skip_kg: bool,
+
+    /// #3048: mirrors `IndexHandle::skip_vector` — `true` when this index's
+    /// vector lane is disabled.
+    ///
+    /// Why: the batch reindex dispatch (`service::reindex::batch`) reads
+    /// `skip_vector` off the reindex context and routes through
+    /// `parse_files_only`, so a full reindex of a vector-disabled index never
+    /// embeds. [`CodeIndexer::index_file`] — the choke point for the file
+    /// watcher, the boot-time reconciler, and `POST /indexes/:id/index-file` —
+    /// had no such value to consult and embedded every incremental write
+    /// regardless, so an index configured BM25-only kept paying the embedder
+    /// on every save and kept growing an HNSW graph its own `/health` reports
+    /// as `Skipped`. Mirroring the flag onto the indexer is what
+    /// `skip_kg` above already does, for the same reason.
+    ///
+    /// Why an indexer field rather than reading `IndexHandle::skip_vector` at
+    /// the call site: the watch loop holds only an `Arc<RwLock<CodeIndexer>>`
+    /// and never sees a handle, and `IndexHandle` is rebuilt-and-re-registered
+    /// on every `PATCH /indexes/:id/config` — so any snapshot a long-lived
+    /// task took is permanently stale (see
+    /// `service::reindex::defer_embed`'s finding-4 note). The `indexer` `Arc`
+    /// IS preserved verbatim across every rebuild, which makes this field the
+    /// one place all three incremental callers can read a current value.
+    /// What: defaults to `false`; set by
+    /// `service::persistence_loader::build_indexer_from_entry` from
+    /// `PersistedIndex::skip_vector`, and kept in sync with runtime toggles by
+    /// [`Self::set_skip_vector`], which
+    /// `service::server::components::apply_component_transition` calls on
+    /// every vector turn-on/turn-off.
+    /// Test: `core::indexer::tests::branch_and_corpus::skip_vector_index_file_never_embeds`,
+    /// `skip_vector_false_index_file_still_embeds`.
+    pub skip_vector: bool,
 }
 
 /// Coalescing state for `spawn_incremental_persist`.
@@ -529,6 +561,7 @@ impl CodeIndexer {
             incremental_writes_refused: AtomicU64::new(0),
             hnsw_load_failed: false,
             skip_kg: false,
+            skip_vector: false,
         }
     }
 
@@ -725,6 +758,21 @@ impl CodeIndexer {
     /// Test: `service::server::tests_components::patch_kg_on_reloads_persisted_graph_for_indexer_built_with_skip_kg_true`.
     pub fn set_skip_kg(&mut self, skip_kg: bool) {
         self.skip_kg = skip_kg;
+    }
+
+    /// Synchronize [`Self::skip_vector`] with a runtime component toggle (#3048).
+    ///
+    /// Why: `PATCH /indexes/:id/config { "vector": … }` rebuilds the
+    /// `IndexHandle` but reuses the same `indexer` `Arc`, so without this the
+    /// indexer's own copy would keep whatever value construction gave it and a
+    /// turn-off would never reach [`Self::index_file`] — the watcher would go
+    /// on embedding an index the operator just disabled. The `skip_kg`
+    /// counterpart above exists for the identical reason.
+    /// What: assigns `self.skip_vector = skip_vector` directly. Callers must
+    /// call it in BOTH directions.
+    /// Test: `service::server::tests_components::patch_vector_off_stops_index_file_from_embedding`.
+    pub fn set_skip_vector(&mut self, skip_vector: bool) {
+        self.skip_vector = skip_vector;
     }
 
     /// Returns a cheap `Arc` snapshot of the current symbol graph.
