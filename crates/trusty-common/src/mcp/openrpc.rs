@@ -13,13 +13,24 @@
 //! What: A small `OpenRpcBuilder` plus the convenience `discover_response`
 //! function. Both accept the server's tool list (one JSON object per tool
 //! with `name`, `description`, and `inputSchema`) and a scope-resolver
-//! callback. Output is the exact OpenRPC 1.3.2 document already produced
-//! by `trusty-gworkspace/src/openrpc.rs` — `{ openrpc, info, methods }` —
-//! with each `methods[i]` carrying an `x-scopes` extension field so the
-//! scope vocabulary is server-defined (Google OAuth, memory.read /
-//! memory.write, search scopes, …).
+//! callback. Output is `{ openrpc, info, methods }`, with each `methods[i]`
+//! carrying an `x-scopes` extension field so the scope vocabulary is
+//! server-defined (memory.read / memory.write, search scopes, …).
 //!
-//! Test: `cargo test -p trusty-mcp-core openrpc` covers builder output,
+//! Two limits, recorded because this module's doc used to claim it emitted
+//! "the exact document already produced by `trusty-gworkspace`" and #5331
+//! measured that it does not:
+//!
+//! - The extension field name is hardcoded to `x-scopes`. A server whose
+//!   scope vocabulary is OAuth URLs rather than dotted strings needs
+//!   `x-google-scopes`, because `trusty-agents`'s discovery parser reads
+//!   `x-scopes` entries verbatim and only URL-maps the `x-google-scopes`
+//!   fallback. trusty-gworkspace is such a server, which is why it still
+//!   builds its own document.
+//! - `info` carries only `title`, `version`, and an optional `description`.
+//!   There is no `license` slot.
+//!
+//! Test: `cargo test -p trusty-common mcp::openrpc` covers builder output,
 //! the `x-scopes` extension, and a representative tool with required
 //! params being flattened into the OpenRPC `params` array.
 
