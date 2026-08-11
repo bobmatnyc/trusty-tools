@@ -10,7 +10,10 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! `no_run`: type-checks the real API without requiring a `config.yaml` on
+//! disk at doctest time. // #5460: was `ignore`, which `--include-ignored`
+//! forces to run and panics on the missing file
+//! ```no_run
 //! use std::path::Path;
 //! use tga::core::config::Config;
 //!
