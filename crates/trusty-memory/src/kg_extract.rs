@@ -661,6 +661,15 @@ pub fn is_stop_token(tok: &str) -> bool {
 /// what keeps this disjoint from `--purge-stale-subjects`: a punctuated
 /// stopword such as `("the` is garbage the purge deletes, never a twin some
 /// real node should absorb.
+///
+/// The merge therefore inherits [`clean_token`]'s normalisation whole,
+/// dotfiles included: `.env` names `env`, `--verbose` names `verbose`, and the
+/// leading punctuation that IS the identity is collapsed with the decorative
+/// kind. That is the point of reusing `clean_token` — the extractor already
+/// emits `env` for content saying `.env`, so the merge aligns stored nodes
+/// with current extraction instead of preserving a spelling nothing produces
+/// any more. `close_active_row` keeps the punctuated row under its `hist:`
+/// key, so the original spelling is not lost.
 /// Test: `canonical_entity_names_the_cleaned_twin`.
 pub fn canonical_entity(term: &str) -> Option<&str> {
     // #5401: the merge pass and the extractor must agree on one spelling.
@@ -1419,7 +1428,10 @@ mod tests {
     /// under, and its three answers are the pass's whole selection rule.
     /// What: a punctuated real entity names its cleaned twin; an already-clean
     /// term and a punctuated stopword both name nothing — the second because it
-    /// is `--purge-stale-subjects`'s to delete, not this pass's to re-point.
+    /// is `--purge-stale-subjects`'s to delete, not this pass's to re-point. A
+    /// name whose leading punctuation IS the identity — `.env`, `--verbose` —
+    /// names the same twin as decorative punctuation does, because the merge
+    /// inherits [`clean_token`] rather than re-deciding.
     /// Test: This test.
     #[test]
     fn canonical_entity_names_the_cleaned_twin() {
@@ -1442,6 +1454,17 @@ mod tests {
         );
         assert_eq!(canonical_entity("`it`"), None);
         assert_eq!(canonical_entity("---"), None);
+
+        // The dotfile class: the leading punctuation is part of the name, and
+        // it is collapsed anyway. Deliberate — today's extractor already emits
+        // `env` for a drawer that says `.env`, so the merge aligns the stored
+        // node with what extraction now produces rather than inventing a
+        // second normalisation that could drift from it.
+        assert_eq!(canonical_entity(".env"), Some("env"));
+        assert_eq!(canonical_entity(".git"), Some("git"));
+        assert_eq!(canonical_entity(".gitignore"), Some("gitignore"));
+        assert_eq!(canonical_entity("_private"), Some("private"));
+        assert_eq!(canonical_entity("--verbose"), Some("verbose"));
     }
 
     /// Why: the allowlist is the length floor's escape hatch; if an entry stops

@@ -17,7 +17,8 @@
 //! the punctuated object's correct siblings with it.
 //! Test: `twin_repoints_moves_both_positions`, `twin_repoints_skips_namespaces`,
 //! `twin_repoints_leaves_the_purge_its_stopwords`,
-//! `merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples`.
+//! `merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples`,
+//! `merge_reports_a_failed_repoint_and_leaves_the_fact_readable`.
 
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -25,7 +26,7 @@ use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
 use trusty_common::memory_core::store::OpenIntent;
 
 use super::kg_rebuild::{scan_active_triples, STRUCTURAL_PREFIXES};
-use crate::kg_extract::{canonical_entity, AUTO_PROVENANCE};
+use crate::kg_extract::{canonical_entity, is_stop_token, AUTO_PROVENANCE};
 use crate::AppState;
 
 /// One fact's move from a punctuated node onto the cleaned one.
@@ -73,12 +74,16 @@ fn canonical_term(term: &str) -> Option<&str> {
 /// Every re-point the active set calls for.
 ///
 /// Why: selection is the half worth testing without a store, and it carries the
-/// two guardrails that keep the pass from touching data it does not own — a
-/// namespaced term, and a triple a human asserted.
+/// three guardrails that keep the pass from touching data it does not own — a
+/// namespaced term, a triple a human asserted, and a stopword.
 /// What: for each active triple stamped [`AUTO_PROVENANCE`], canonicalises the
 /// subject and the object independently and emits a [`TwinRepoint`] when either
-/// moves. Sorted by the stored triple so the report and the write order are
-/// deterministic.
+/// moves. A triple is skipped when the term that would STAY is a stopword:
+/// [`canonical_entity`] rejects `("the` in whichever position it sits, so
+/// without this check `` `redb` --is-a--> ("the `` would be selected on its
+/// subject alone and hang the object garbage off the node users query — and
+/// the purge, which selects by subject, could never reach it there. Sorted by
+/// the stored triple so the report and the write order are deterministic.
 /// Test: `twin_repoints_moves_both_positions`, `twin_repoints_skips_namespaces`,
 /// `twin_repoints_spares_a_manual_triple`,
 /// `twin_repoints_leaves_the_purge_its_stopwords`.
@@ -92,6 +97,14 @@ pub fn twin_repoints(active: &[Triple]) -> Vec<TwinRepoint> {
         let subject = canonical_term(&t.subject);
         let object = canonical_term(&t.object);
         if subject.is_none() && object.is_none() {
+            continue;
+        }
+        // #5401: a stopword in EITHER position keeps the triple out of this
+        // pass, so the partition with `--purge-stale-subjects` holds for the
+        // object position too, not just the subject one.
+        if (subject.is_none() && is_stop_token(&t.subject))
+            || (object.is_none() && is_stop_token(&t.object))
+        {
             continue;
         }
         let mut new = t.clone();
@@ -198,19 +211,26 @@ pub async fn report_merge(
 
 /// Select — and optionally apply — punctuated-twin merges across palaces.
 ///
-/// Why: same per-palace error containment as `purge_palaces`.
+/// Why: same per-palace error containment as `purge_palaces`. Containment stops
+/// at the palace: a registry read that fails yields no palaces to contain, and
+/// swallowing it printed `0 triples repointed, 0 failed` over data the pass
+/// never read. A TCC denial on the data dir makes that `read_dir` return EPERM,
+/// so the clean-looking exit-0 is reachable, not theoretical.
 /// What: iterates the registry, filters to one palace when asked, and captures
-/// a failing palace as a summary carrying `error` rather than propagating.
+/// a failing palace as a summary carrying `error` rather than propagating. A
+/// failure to list the palaces at all propagates instead.
 /// Test: `merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples`,
-/// `merge_dry_run_writes_nothing`.
+/// `merge_dry_run_writes_nothing`,
+/// `merge_palaces_propagates_an_unreadable_data_root`.
 pub async fn merge_palaces(
     state: &AppState,
     palace_filter: Option<&str>,
     apply: bool,
 ) -> Result<Vec<PalaceMergeSummary>> {
     let mut out: Vec<PalaceMergeSummary> = Vec::new();
+    // #5401: an unreadable data root is a failed run, never an empty one.
     let palaces = trusty_common::memory_core::PalaceRegistry::list_palaces(&state.data_root)
-        .unwrap_or_default();
+        .with_context(|| format!("list palaces under {}", state.data_root.display()))?;
     for palace in palaces {
         let id = palace.id.0.clone();
         if palace_filter.is_some_and(|filter| filter != id) {
@@ -297,8 +317,15 @@ async fn merge_one(state: &AppState, palace_id: &str, apply: bool) -> Result<Pal
 /// take `x`'s other `uses` objects with it.
 /// What: asserts `new` unless that exact `(subject, predicate, object)` is
 /// already live, then closes the punctuated row. Naming a row that is not there
-/// is a no-op in both directions, so a re-run is idempotent.
-/// Test: `merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples`.
+/// is a no-op in both directions, so a re-run is idempotent. A retract that
+/// closes nothing is that no-op arriving one step too late — the assert has
+/// already landed, so the fact now sits on both nodes, which is the split this
+/// pass exists to remove. It becomes a per-re-point failure: the operator sees
+/// the pair on `[merge-FAILED]` and the command exits non-zero. An exclusive
+/// `OpenIntent::Writer` lock means nothing else can close the row underneath
+/// this loop, so it is unreachable today rather than merely unlikely.
+/// Test: `merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples`,
+/// `merge_reports_a_failed_repoint_and_leaves_the_fact_readable`.
 async fn repoint(
     kg: &KnowledgeGraph,
     r: &TwinRepoint,
@@ -310,9 +337,15 @@ async fn repoint(
             .await
             .with_context(|| format!("assert cleaned twin {}", render(r)))?;
     }
-    kg.retract_triple(&r.old.subject, &r.old.predicate, &r.old.object)
+    let closed = kg
+        .retract_triple(&r.old.subject, &r.old.predicate, &r.old.object)
         .await
         .with_context(|| format!("retract punctuated twin {}", render(r)))?;
+    anyhow::ensure!(
+        closed > 0,
+        "punctuated row vanished before its retract, so the fact now stands at both nodes: {}",
+        render(r)
+    );
     Ok(())
 }
 
@@ -423,21 +456,34 @@ mod tests {
 
     /// Why: the purge deletes and this merges, so a term both passes claimed
     /// would be deleted and re-pointed in the same run. `is_stop_token` is the
-    /// one gate that separates them.
+    /// one gate that separates them, and it has to hold in the object position
+    /// too: a triple selected on its subject alone once carried `("the` along
+    /// as an object and hung it off the cleaned node, where the purge — which
+    /// selects by subject — could never reach it again.
     /// What: `("the` is the purge's and not this pass's; `` `redb` `` is this
-    /// pass's and not the purge's.
+    /// pass's and not the purge's; and a triple with a stopword at either end
+    /// moves neither end.
     /// Test: This test.
     #[test]
     fn twin_repoints_leaves_the_purge_its_stopwords() {
         let active = vec![
             triple("(\"the", "is-a", "thing", Some(AUTO_PROVENANCE)),
             triple("`redb`", "is-a", "database", Some(AUTO_PROVENANCE)),
+            // The subject moves, the object is a stopword: selecting this would
+            // create `redb --is-a--> ("the`, unreachable garbage on a real node.
+            triple("`redb`", "is-a", "(\"the", Some(AUTO_PROVENANCE)),
+            // The mirror image — the purge already claims this subject.
+            triple("(\"the", "uses", "`redb`", Some(AUTO_PROVENANCE)),
         ];
-        let merged: Vec<String> = twin_repoints(&active)
+        let merged: Vec<(String, String)> = twin_repoints(&active)
             .iter()
-            .map(|r| r.old.subject.clone())
+            .map(|r| (r.new.subject.clone(), r.new.object.clone()))
             .collect();
-        assert_eq!(merged, vec!["`redb`".to_string()]);
+        assert_eq!(
+            merged,
+            vec![("redb".to_string(), "database".to_string())],
+            "a stopword in either position keeps the whole triple out of this pass"
+        );
         assert_eq!(
             stale_subject_candidates(&active),
             vec!["(\"the".to_string()],
@@ -587,6 +633,114 @@ mod tests {
             "a dry run must not create the cleaned node either"
         );
         assert_eq!(report_merge(&state, Some("a"), false).await?, 0);
+        Ok(())
+    }
+
+    /// Why: `list_palaces` was called with `unwrap_or_default()`, so a registry
+    /// read that failed became zero palaces and the run printed
+    /// `0 triples repointed, 0 failed` and exited 0 over data it never read. A
+    /// macOS TCC denial on the data dir is exactly that failure — `read_dir`
+    /// returns EPERM — and the operator's evidence that the merge ran clean
+    /// would be a pass that never opened a single palace.
+    /// What: a `data_root` whose listing fails makes the pass return `Err`.
+    /// A regular file stands in for the denial: both reach the same `read_dir`
+    /// error arm, and this one reproduces without depending on the uid the
+    /// suite runs as.
+    /// Test: This test.
+    #[tokio::test]
+    async fn merge_palaces_propagates_an_unreadable_data_root() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let data_root = tmp.path().join("not-a-directory");
+        std::fs::write(&data_root, b"")?;
+        let state = AppState::new(data_root);
+
+        let err = merge_palaces(&state, None, false)
+            .await
+            .expect_err("an unlistable data root must fail the run, not report an empty one");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("list palaces"),
+            "the error must name what could not be read, got {rendered}"
+        );
+        Ok(())
+    }
+
+    /// Why: assert-before-retract is this pass's whole crash-safety argument,
+    /// and until this test nothing ran a re-point that failed — the ordering
+    /// was verified only by reading the source. A failed write must leave the
+    /// fact readable SOMEWHERE, be reported as failed rather than merged, and
+    /// reach the non-zero exit at `kg_rebuild.rs`.
+    /// What: seeds `` `redb` --uses--> mmap ``, then hands the merge a store
+    /// whose writes are rejected — the live redb file is held open, so the
+    /// process-wide store cache is primed with a read-only snapshot and the
+    /// merge's `Writer` open picks it up. Asserts the failure is recorded, that
+    /// `report_merge` returns a non-zero count, and that the fact is still at
+    /// the punctuated node afterwards.
+    /// Test: This test.
+    #[tokio::test]
+    async fn merge_reports_a_failed_repoint_and_leaves_the_fact_readable() -> Result<()> {
+        let seed_root = tempfile::tempdir()?;
+        let seeded = palace_fixture(seed_root.path().to_path_buf()).await?;
+        let handle = seeded
+            .registry
+            .open_palace(&seeded.data_root, &PalaceId::new("a"))?;
+        handle
+            .kg
+            .assert(triple("`redb`", "uses", "mmap", Some(AUTO_PROVENANCE)))
+            .await?;
+
+        // Copy the committed palace onto a second data root the registry has
+        // never opened, so this test owns every handle on that redb file.
+        let tmp = tempfile::tempdir()?;
+        let palace_dir = tmp.path().join("a");
+        std::fs::create_dir_all(&palace_dir)?;
+        for entry in std::fs::read_dir(seeded.data_root.join("a"))? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                std::fs::copy(entry.path(), palace_dir.join(entry.file_name()))?;
+            }
+        }
+        let kg_path = palace_dir.join("kg.db");
+        let state = AppState::new(tmp.path().to_path_buf());
+        state.set_ready();
+
+        // Holding the live file makes the next open fall back to a read-only
+        // snapshot, which the store cache then hands to the merge.
+        let live = redb::Database::create(palace_dir.join("kg.redb"))
+            .context("hold the palace's redb lock")?;
+        let read_only = KnowledgeGraph::open_with_intent(&kg_path, OpenIntent::ReadOnlyClient)?;
+
+        let applied = merge_palaces(&state, Some("a"), true).await?;
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].selected.len(), 1, "the twin must still be found");
+        assert!(
+            applied[0].merged.is_empty(),
+            "a re-point that could not write must never be reported as merged"
+        );
+        assert_eq!(applied[0].failed.len(), 1, "the failure must be recorded");
+        assert!(
+            applied[0].failed[0].1.contains("read-only"),
+            "the failure must carry its error text, got {:?}",
+            applied[0].failed[0].1
+        );
+        assert!(
+            applied[0].error.is_some(),
+            "a palace with a failed re-point must carry an error"
+        );
+        assert!(
+            report_merge(&state, Some("a"), true).await? > 0,
+            "the failure must reach the count kg_rebuild bails on"
+        );
+
+        // Assert-before-retract: the fact is still where it was.
+        drop(read_only);
+        drop(live);
+        let after = KnowledgeGraph::open_with_intent(&kg_path, OpenIntent::Writer)?;
+        assert_eq!(
+            objects_of(&after, "`redb`").await?,
+            vec!["mmap".to_string()],
+            "a re-point that failed must leave the fact readable at the punctuated node"
+        );
         Ok(())
     }
 }

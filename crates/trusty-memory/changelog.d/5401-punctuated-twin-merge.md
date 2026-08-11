@@ -19,6 +19,14 @@ Added
   either maintenance flag rather than on `--purge-stale-subjects` alone) to
   report the list while writing nothing. Selection is as narrow as the purge's: a
   term under the `drawer:`/`tag:`/`topic:`/`room:` namespaces never moves, only
-  triples stamped `auto:remember` are rewritten, and a punctuated stopword is
-  left to the purge — `is_stop_token` partitions the two passes so no term is
-  both deleted and re-pointed. Re-running is a no-op.
+  triples stamped `auto:remember` are rewritten, and a triple carrying a
+  punctuated stopword at EITHER end is left alone — so `is_stop_token` partitions
+  the two passes in the object position too, and the merge cannot hang a `("the`
+  off the cleaned node where the subject-selecting purge could never reach it.
+  Re-running is a no-op.
+
+  A re-point that cannot write is reported as failed rather than merged and
+  exits non-zero, the cleaned node is written before the punctuated row is
+  closed so a failure mid-way leaves the fact readable at one node or the other,
+  and a data root that cannot be listed fails the run instead of reporting an
+  empty one.
