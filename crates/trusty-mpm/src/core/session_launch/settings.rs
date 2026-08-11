@@ -9,7 +9,6 @@
 //! global-hook cleanup.
 //! Test: each public(super) function is covered by a dedicated test in `tests.rs`.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::PrepError;
@@ -91,42 +90,6 @@ pub(super) const TRUSTY_MEMORY_HOOKS: &str = r#"{
     }
   ]
 }"#;
-
-/// Build the `trusty-memory` MCP server definition injected into a project's
-/// `.mcp.json`, optionally pinned to a project palace (issue #1605).
-///
-/// Why (issue #1270): Claude Code reads MCP servers from `<project>/.mcp.json`;
-/// a launched trusty-mpm session needs the `trusty-memory` server registered
-/// there so the memory tools (`memory_recall`, `memory_remember`, …) are
-/// available. The canonical stdio MCP invocation (per `trusty-memory setup`) is
-/// `serve --stdio`. Issue #1605: a bare stub leaves palace selection to
-/// trusty-memory's cwd-based derivation, which for a repo_url-cloned managed
-/// session resolves to the session-id directory basename — the WRONG palace.
-/// Pinning `env.TRUSTY_MEMORY_PALACE` to the project's derived `owner-repo` slug
-/// makes the spawned trusty-memory resolve the correct project-scoped palace
-/// regardless of the throwaway workspace path (the env var is the
-/// highest-precedence palace override read by `derive_palace_id`). No
-/// trusty-memory CLI/protocol change — the env var is the agreed seam.
-/// What: returns the JSON `Value` for a stdio MCP server running
-/// `trusty-memory serve --stdio` — with `"env": { "TRUSTY_MEMORY_PALACE": <slug> }`
-/// when `palace_slug` is `Some` (non-empty), else the bare stub (no `env` key,
-/// byte-identical to the pre-#1605 block). Pure: callers resolve the slug.
-/// Test: `trusty_memory_mcp_value_pins_palace`, `trusty_memory_mcp_value_bare`.
-pub(super) fn trusty_memory_mcp_value(palace_slug: Option<&str>) -> serde_json::Value {
-    let mut server = serde_json::json!({
-        "type": "stdio",
-        "command": "trusty-memory",
-        "args": ["serve", "--stdio"],
-    });
-    if let Some(slug) = palace_slug
-        && !slug.trim().is_empty()
-    {
-        server["env"] = serde_json::json!({
-            trusty_common::PALACE_OVERRIDE_ENV: slug,
-        });
-    }
-    server
-}
 
 /// Hook event types the global `trusty-memory` entries may have been registered
 /// under (across current and legacy trusty-mpm builds).
@@ -373,201 +336,7 @@ pub(super) fn pm_guard_hook_value() -> serde_json::Value {
     ])
 }
 
-/// Inject (or update) a named stdio MCP server into the project's `.mcp.json`.
-///
-/// Why: trusty-mpm needs to register multiple MCP servers (`trusty-memory`,
-/// `trusty-search`) into the workspace `.mcp.json` with identical merge/idempotency
-/// semantics. Factoring the read-merge-write logic into one helper keeps the two
-/// public wrappers thin and guarantees they behave consistently (issue #1270).
-/// What: reads an existing `<project_path>/.mcp.json` (starting from `{}` when
-/// absent or malformed), adds/updates `mcpServers.<name>` to `server`, and
-/// writes the merged JSON back pretty-printed — preserving all other MCP
-/// servers. Idempotent: if the entry already matches, the file is left
-/// untouched and no write occurs. `server` is a `serde_json::Value` object
-/// built by the caller (a const for `trusty-memory`, a dynamically-pinned value
-/// for `trusty-search`, #1373).
-/// Test: exercised via `inject_trusty_memory_mcp_*` and `inject_trusty_search_mcp_*`.
-///
-/// Visibility: `pub(super)` (rather than private) because the sibling
-/// `search_index` module's `inject_trusty_search_mcp` also calls this shared
-/// read-merge-write helper (issue #610 split).
-pub(super) fn inject_mcp_server(
-    project_path: &Path,
-    name: &str,
-    server: serde_json::Value,
-) -> Result<(), PrepError> {
-    let mcp_path = project_path.join(crate::core::mcp_config::MCP_JSON);
-
-    // Load existing config to preserve unrelated servers; tolerate a missing or
-    // malformed file by starting from an empty object.
-    let mut config = match std::fs::read_to_string(&mcp_path) {
-        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-        Err(_) => serde_json::Value::Object(serde_json::Map::new()),
-    };
-
-    // Ensure `mcpServers` is an object we can insert into.
-    let servers = config
-        .as_object_mut()
-        .expect("config starts as an object")
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    if !servers.is_object() {
-        *servers = serde_json::Value::Object(serde_json::Map::new());
-    }
-    let servers = servers
-        .as_object_mut()
-        .expect("mcpServers normalized to an object");
-
-    // Idempotent: skip the write when the entry already matches.
-    if servers.get(name) == Some(&server) {
-        return Ok(());
-    }
-    servers.insert(name.to_string(), server);
-
-    // #4181: trailing newline. Without it every rewrite of a git-tracked
-    // `.mcp.json` reports "\ No newline at end of file" on top of whatever
-    // actually changed, and a POSIX-text-expecting tool sees a malformed last
-    // line. One byte, and the diff shows only the entry that moved.
-    let serialized = serde_json::to_string_pretty(&config)
-        .map(|mut s| {
-            s.push('\n');
-            s
-        })
-        .map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(&mcp_path, serialized.as_str()).map_err(|source| PrepError::Io {
-        path: mcp_path.clone(),
-        source,
-    })?;
-
-    // The ONLY place project-scope `.mcp.json` provenance is created. Without
-    // it `tm doctor`'s stray sweep cannot tell tm's own output from a
-    // `.mcp.json` the operator wrote by hand, and refuses to touch either.
-    crate::core::mcp_provenance::record_write_best_effort(&mcp_path, &serialized);
-    Ok(())
-}
-
-/// Inject the `trusty-memory` MCP server into the project's `.mcp.json`,
-/// pinned to the project's palace when one can be derived (issue #1605).
-///
-/// Why: `prepare_session` configures hooks and instructions but, without this,
-/// the launched `claude` process has no access to the memory tools because the
-/// `trusty-memory` MCP server is never registered in `<project>/.mcp.json`.
-/// Issue #1605: the stub must additionally PIN the session to its project's
-/// palace via `env.TRUSTY_MEMORY_PALACE`, because a repo_url-cloned managed
-/// session lives under a throwaway `<owner>/<repo>/<session-id>/` workspace
-/// whose basename is the session-id — so trusty-memory's cwd-based derivation
-/// would resolve the wrong palace. The slug is derived from project identity
-/// (operator override > git `owner/repo` > parent/dir) so it matches the slug
-/// trusty-memory itself would compute for the canonical project root.
-/// What: resolves the palace slug via [`resolve_palace_slug`] (passing the
-/// explicit `git_remote` from `LaunchParams`/`SessionRecord` when known, else
-/// best-effort `git remote get-url origin` in `project_path`), builds the
-/// (optionally pinned) server value via [`trusty_memory_mcp_value`], and
-/// registers it under the key `trusty-memory`. When no slug can be derived the
-/// bare stub is injected — byte-identical to the pre-#1605 behaviour, so the
-/// session still gets the memory tools (no regression).
-/// Test: `inject_trusty_memory_mcp_adds_server`,
-/// `inject_trusty_memory_mcp_preserves_existing`,
-/// `inject_trusty_memory_mcp_is_idempotent`,
-/// `inject_trusty_memory_mcp_uses_serve_stdio`,
-/// `inject_trusty_memory_mcp_pins_palace_from_repo_url`,
-/// `inject_trusty_memory_mcp_pins_palace_from_git_remote`.
-pub(crate) fn inject_trusty_memory_mcp(
-    project_path: &Path,
-    git_remote: Option<&str>,
-) -> Result<(), PrepError> {
-    let slug = resolve_palace_slug(project_path, git_remote);
-    // Issue #1939: before pinning, heal the claude-mpm split-brain — if the
-    // derived `owner-repo` palace does not exist but the BARE repo-name palace
-    // does, register a palace-level alias so the pinned `owner-repo` name resolves
-    // to the existing bare store. Best-effort and side-effect-only; never fails
-    // the launch.
-    super::palace_alias::maybe_register_palace_alias(project_path, git_remote);
-    inject_mcp_server(
-        project_path,
-        "trusty-memory",
-        trusty_memory_mcp_value(slug.as_deref()),
-    )
-}
-
-/// Force-write the canonical `trusty-mpm` MCP server entry into the project's
-/// `.mcp.json`, unconditionally overwriting whatever (if anything) already
-/// sits under that key.
-///
-/// Why (issue #3918 follow-up, code-critic BLOCK — name-squatting exploit):
-/// `standalone::trust_seed::preseed_managed_trust` unconditionally approves
-/// the name `"trusty-mpm"` in a managed session's `enabledMcpjsonServers`
-/// (it is a framework builtin — see
-/// `crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS`) — but Claude
-/// Code's `enabledMcpjsonServers` approval is NAME-based and CONTENT-BLIND:
-/// it still reads whatever COMMAND sits under that name in
-/// `<workspace>/.mcp.json`, the project layer loaded under
-/// `--setting-sources project,local` (see `runtime::claude_code`'s module
-/// doc). Before this fix nothing ever wrote a canonical `trusty-mpm` entry
-/// into that file, so (a) a hostile clone could commit a spoofed
-/// `trusty-mpm` entry pointing at an attacker-controlled binary and have it
-/// execute with the operator's credentials on the very first `tm session
-/// new` against that clone — the name is pre-approved, nothing overwrites
-/// the entry, no human is present to notice — and (b) even a BENIGN,
-/// freshly-cloned project with no committed `trusty-mpm` entry ended up with
-/// NOTHING under that name, so issue #3918's actual symptom (the PM cannot
-/// call `mcp__trusty-mpm__*` tools, e.g. `session_context_pause`) was not
-/// fixed for the general case — only for a project that happens to already
-/// commit its own `trusty-mpm` entry (like this repo). Force-overwriting on
-/// every `prepare_session` run — mirroring [`inject_trusty_memory_mcp`]'s
-/// and `search_index::inject_trusty_search_mcp`'s existing force-write
-/// pattern — closes both defects at once: the pre-approved NAME and the
-/// on-disk ENTRY now come from the SAME pipeline (this one), so they can
-/// never diverge again.
-/// What: writes `mcp_config::builtin_server_entry("trusty-mpm")`'s canonical
-/// `{"type":"stdio","command":"trusty-mpm","args":["serve","--stdio"]}`
-/// under `mcpServers.trusty-mpm` in `<project_path>/.mcp.json`, via the
-/// shared [`inject_mcp_server`] read-merge-write helper (idempotent — a
-/// byte-identical existing entry is not rewritten). Unconditional: there is
-/// no manifest toggle to disable this injection — trusty-mpm's own MCP
-/// tools are load-bearing for the PM session itself, unlike the optional
-/// `trusty-memory`/`trusty-search` integrations.
-/// Test: `inject_trusty_mpm_mcp_overwrites_hostile_entry`,
-/// `inject_trusty_mpm_mcp_creates_entry_when_absent`,
-/// `inject_trusty_mpm_mcp_is_idempotent`.
-pub(crate) fn inject_trusty_mpm_mcp(project_path: &Path) -> Result<(), PrepError> {
-    let entry = crate::core::mcp_config::builtin_server_entry("trusty-mpm")
-        .expect("trusty-mpm is a known BUILTIN_MANAGED_MCP_SERVERS entry");
-    inject_mcp_server(project_path, "trusty-mpm", entry)
-}
-
-/// Force-write the canonical `trusty-review` MCP server entry into the
-/// project's `.mcp.json` — see [`inject_trusty_mpm_mcp`] for the full
-/// reasoning (identical exploit shape, identical fix).
-///
-/// Why: `trusty-review` has been a member of
-/// `crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS` since before the
-/// #3918 PR chain — its name has always been unconditionally approved in a
-/// managed session's `enabledMcpjsonServers` — but, like `trusty-mpm`
-/// before this fix, no injector ever wrote its canonical entry into
-/// `<workspace>/.mcp.json`. That is the identical latent exposure: a
-/// hostile clone could squat the pre-approved `trusty-review` name with an
-/// attacker-controlled command, and a benign project got no working
-/// `trusty-review` connection either. Left open while closing `trusty-mpm`
-/// would leave the same exploit shape live under a different name, so this
-/// fix closes it too.
-/// What: writes `mcp_config::builtin_server_entry("trusty-review")`'s
-/// canonical `{"type":"stdio","command":"trusty-review","args":["serve",
-/// "--stdio"]}` under `mcpServers.trusty-review`, via [`inject_mcp_server`]
-/// (idempotent). Unconditional, same as [`inject_trusty_mpm_mcp`].
-/// Test: `inject_trusty_review_mcp_overwrites_hostile_entry`,
-/// `inject_trusty_review_mcp_creates_entry_when_absent`,
-/// `inject_trusty_review_mcp_is_idempotent`.
-pub(crate) fn inject_trusty_review_mcp(project_path: &Path) -> Result<(), PrepError> {
-    let entry = crate::core::mcp_config::builtin_server_entry("trusty-review")
-        .expect("trusty-review is a known BUILTIN_MANAGED_MCP_SERVERS entry");
-    inject_mcp_server(project_path, "trusty-review", entry)
-}
-
-/// Resolve the trusty-memory palace slug to pin for a managed session (#1605).
+/// Resolve the trusty-memory palace slug for a managed session (#1605).
 ///
 /// Why: the slug must match what trusty-memory itself would derive for the
 /// project's canonical identity, so memory written/read in the managed session
@@ -578,16 +347,22 @@ pub(crate) fn inject_trusty_review_mcp(project_path: &Path) -> Result<(), PrepEr
 /// `git remote get-url origin`, exactly as trusty-memory's `cwd_palace_slug_at`
 /// does. The operator `TRUSTY_MEMORY_PALACE` override still wins over both, per
 /// `derive_palace_id` precedence.
+///
+/// // #4181: this used to feed the `.mcp.json` `env` block the memory injector
+/// wrote. ADR-0042 deleted that injector; the slug now becomes the
+/// `TRUSTY_MEMORY_PALACE` variable the spawn exports, resolved through
+/// [`crate::core::mcp_session_env::session_mcp_env`].
 /// What: reads the `TRUSTY_MEMORY_PALACE` env override (highest precedence),
 /// resolves the git remote (explicit arg, else best-effort `git -C
 /// <project_path> config --get remote.origin.url`), and returns
 /// `trusty_common::derive_palace_id(project_path, git_remote, override)`. Returns
 /// `None` when nothing usable can be derived (no override, no remote, root-less
-/// path) so the caller injects the bare stub. Best-effort and side-effect-free
+/// path), in which case the spawn exports no palace variable and trusty-memory
+/// falls back to its own cwd derivation. Best-effort and side-effect-free
 /// beyond the read-only `git config` probe; never panics.
-/// Test: covered via `inject_trusty_memory_mcp_pins_palace_from_repo_url`
-/// (explicit remote) and `resolve_palace_slug_*` (override / git-fallback / none).
-fn resolve_palace_slug(project_path: &Path, git_remote: Option<&str>) -> Option<String> {
+/// Test: `resolve_palace_slug_*` (override / git-fallback / none), plus
+/// `session_mcp_env_exports_palace_when_memory_enabled`.
+pub(crate) fn resolve_palace_slug(project_path: &Path, git_remote: Option<&str>) -> Option<String> {
     let override_value = trusty_common::palace_override_from_env();
     // Prefer the explicit (cloned-from) remote; otherwise probe the workspace's
     // own origin remote so a local-path session still pins by repo identity.
@@ -610,7 +385,7 @@ fn resolve_palace_slug(project_path: &Path, git_remote: Option<&str>) -> Option<
 /// trimmed URL on success, `None` when there is no origin remote, git is
 /// absent, or `start` is not in a repo. No network.
 /// Test: exercised indirectly via `resolve_palace_slug_falls_back_to_git_remote`
-/// (a temp git repo) and the daemon-less paths in `inject_trusty_memory_mcp_*`.
+/// (a temp git repo).
 pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -627,7 +402,8 @@ pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
     if url.is_empty() { None } else { Some(url) }
 }
 
-/// Pre-seed per-directory trust acceptance for `workspace` in `~/.claude.json`.
+/// Pre-seed per-directory trust acceptance for `workspace` in `~/.claude.json`,
+/// and strip any MCP approval a prior version left behind.
 ///
 /// Why (issue #1269): trusty-mpm launches Claude Code inside an *interactive*
 /// tmux pane (so the session can be observed and driven). For a directory it has
@@ -638,18 +414,26 @@ pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
 /// `--setting-sources` does NOT govern, so we must seed it directly. Because tm
 /// clones each repo into its OWN throwaway workspace under
 /// `~/trusty-mpm-projects/<owner>/<repo>/<id>/`, marking that path trusted is
-/// safe — no real user project is affected. Issue #1296 extends this: trust
-/// acceptance alone is not enough — a project shipping a `.mcp.json` triggers a
-/// SECOND blocking "new MCP servers found" dialog, so this also pre-approves the
-/// project's MCP servers via `enabledMcpjsonServers`.
+/// safe — no real user project is affected.
+///
+/// **#4181 / ADR-0042 — why the `enabledMcpjsonServers` key is REMOVED, not
+/// merely left unwritten.** Claude Code's `enabledMcpjsonServers` approval is
+/// name-based and content-blind, and a name that appears in it makes the
+/// workspace `.mcp.json` entry of that name WIN over the operator's own
+/// user-scope declaration. That displacement is what made the #3918→#3950
+/// name-squatting chain possible, and it is the mechanism ADR-0042 removes:
+/// tm no longer writes MCP config into a workspace, so it approves no project-
+/// scope name either. Ceasing to write would leave the key in place on every
+/// machine a prior tm ever launched, keeping the displacement alive exactly
+/// where a repo could exploit it, so the key is deleted from the entry.
 /// What: reads `~/.claude.json` (the JSON config; starts from `{}` when absent
-/// or malformed — but a malformed *existing* file is left untouched to avoid
-/// clobbering the operator's OAuth/login data), ensures
-/// `projects.<workspace>` carries `hasTrustDialogAccepted: true`,
-/// `hasCompletedProjectOnboarding: true`, `projectOnboardingSeenCount >= 1`, and
-/// `enabledMcpjsonServers` set to exactly `trusted_mcp_names`, then writes it
-/// back pretty-printed (ATOMICALLY, temp file + rename) preserving every other
-/// key. Idempotent. The OAuth fields elsewhere in the file are never touched.
+/// — but a malformed *existing* file is left untouched to avoid clobbering the
+/// operator's OAuth/login data), ensures `projects.<workspace>` carries
+/// `hasTrustDialogAccepted: true`, `hasCompletedProjectOnboarding: true` and
+/// `projectOnboardingSeenCount >= 1`, removes `enabledMcpjsonServers`, then
+/// writes it back pretty-printed (ATOMICALLY, temp file + rename) preserving
+/// every other key. Idempotent — an entry already trusted and already free of
+/// the approval key is not rewritten. The OAuth fields are never touched.
 ///
 /// **Concurrency (issue #4072):** the whole read → mutate → write cycle runs
 /// under [`crate::core::claude_json_guard::lock`], because
@@ -657,52 +441,20 @@ pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
 /// and the daemon runs both concurrently, once per session it provisions.
 /// Unsynchronised, the slower writer stored a snapshot taken before the faster
 /// writer's store, silently deleting that session's whole
-/// `projects.<workspace>` entry — including the `enabledMcpjsonServers`
-/// approval this function exists to write.
-///
-/// **Security (issue #3926):** this function does NOT read the workspace's
-/// own `.mcp.json` — `trusted_mcp_names` is the FINAL, already-computed
-/// approval set the caller passes in, derived exclusively from provenance a
-/// cloned repo's committed `.mcp.json` cannot influence. Before this fix,
-/// `enabledMcpjsonServers` was derived from the raw key set of
-/// `<workspace>/.mcp.json` (see `mcp_config::mcp_server_names`'s SECURITY
-/// doc) filtered only by a narrow project-scope exclusion (issue #2739) — so
-/// ANY server name a cloned repo declared in its tracked `.mcp.json` was
-/// silently pre-approved and, on first `tm launch` in that clone, connected
-/// with the operator's credentials. The production call site
-/// (`session_launch::mod::prepare_session_inner`) now computes
-/// `trusted_mcp_names` via `mcp_config::launch_trusted_mcp_names(trusty_mpm_injected,
-/// trusty_review_injected, trusty_memory_injected, trusty_search_injected)`
-/// (the framework builtin four, EACH included only when its own
-/// force-overwrite injector actually SUCCEEDED writing its canonical entry
-/// this run — issue #3950: a manifest toggle being on, or a builtin having
-/// no toggle at all, is not sufficient when the write itself can still fail
-/// — see [`crate::core::session_launch::PrepReport`]'s `trusty_*_injected`
-/// fields) UNION the operator's own `tm mcp add` registry, also
-/// force-overwritten when it matches, MINUS any name bridged from a
-/// project-scope `[mcp.custom]` manifest entry this run (issue #2739's
-/// existing defense-in-depth: even a `tm project trust`-ed project's entries
-/// still surface Claude Code's consent dialog). A name merely present in
-/// `.mcp.json` that is in none of those provenance-safe sources — or a
-/// framework builtin whose injector was disabled OR failed this run — now
-/// correctly falls through to that dialog instead of being silently
-/// approved. This mirrors, for the interactive path,
-/// `mcp_config::managed_mcp_server_names`'s already-fixed derivation for the
-/// daemon-managed path (issues #3918/#3924/#3934/#3950).
+/// `projects.<workspace>` entry.
 /// Test: `preseed_trust_marks_directory`, `preseed_trust_preserves_other_keys`,
 /// `preseed_trust_is_idempotent`, `preseed_trust_leaves_malformed_file`,
-/// `preseed_trust_enables_given_mcp_names`,
-/// `preseed_trust_enables_empty_when_no_names_given`,
 /// `concurrent_seeds_preserve_every_workspace_entry`,
-/// `concurrent_home_and_workspace_seeds_preserve_both_entries`, plus the full-pipeline
-/// regression coverage in `tests_mcp_trust_seed_e2e.rs`
-/// (`prepare_session_excludes_foreign_mcp_json_entry_from_trust_preseed`,
-/// `prepare_session_preseeds_enabled_mcp_servers`,
-/// `prepare_session_excludes_trusted_project_scope_custom_from_trust_preseed`).
+/// `concurrent_home_and_workspace_seeds_preserve_both_entries`. The two
+/// `enabledMcpjsonServers` claims above are proven end to end, through this
+/// function, in `tests_launch_trust_3926.rs`:
+/// `prepare_session_writes_no_approval_for_a_builtin_name_in_workspace_mcp_json`
+/// (nothing is written, even for a name a repo squats) and
+/// `prepare_session_strips_a_stale_enabled_mcp_approval` (an approval a prior
+/// version left is removed while the entry's other keys survive).
 pub(super) fn preseed_workspace_trust(
     claude_json: &Path,
     workspace: &Path,
-    trusted_mcp_names: &BTreeSet<String>,
 ) -> Result<(), PrepError> {
     use serde_json::Value;
 
@@ -712,8 +464,7 @@ pub(super) fn preseed_workspace_trust(
     // same file, and the daemon runs them concurrently (one pair per session it
     // provisions); unsynchronised, the slower writer stores a snapshot taken
     // before the faster writer's store and silently drops that session's whole
-    // `projects.<workspace>` entry — including the `enabledMcpjsonServers`
-    // approval this function exists to write. See `core::claude_json_guard`.
+    // `projects.<workspace>` entry. See `core::claude_json_guard`.
     let _guard = crate::core::claude_json_guard::lock();
 
     // Read the existing config. If the file exists but is malformed JSON we must
@@ -762,25 +513,14 @@ pub(super) fn preseed_workspace_trust(
     }
     let entry = entry.as_object_mut().expect("project entry is an object");
 
-    // The approval list is exactly what the caller determined is
-    // provenance-safe (issue #3926) — never re-derived from the workspace's
-    // own `.mcp.json` here. `BTreeSet` iteration is already sorted, giving a
-    // deterministic, idempotency-friendly result.
-    let enabled_mcp = Value::Array(
-        trusted_mcp_names
-            .iter()
-            .cloned()
-            .map(Value::String)
-            .collect(),
-    );
-
-    // Idempotent: skip the write when trust is already fully accepted AND the MCP
-    // approval list already matches `trusted_mcp_names`. The latter check is
-    // essential — without it a second prep run (after the injectors added more
-    // names) would never persist `enabledMcpjsonServers`.
+    // Idempotent: skip the write when trust is already fully accepted AND no
+    // stale MCP approval remains. The second half is what makes the #4181 strip
+    // reach machines a prior version already seeded — without it, an entry that
+    // is already trusted returns early and keeps its `enabledMcpjsonServers`
+    // forever.
     let already_trusted = entry.get("hasTrustDialogAccepted") == Some(&Value::Bool(true))
         && entry.get("hasCompletedProjectOnboarding") == Some(&Value::Bool(true))
-        && entry.get("enabledMcpjsonServers") == Some(&enabled_mcp);
+        && !entry.contains_key("enabledMcpjsonServers");
     if already_trusted {
         return Ok(());
     }
@@ -794,9 +534,10 @@ pub(super) fn preseed_workspace_trust(
     entry
         .entry("projectOnboardingSeenCount")
         .or_insert_with(|| Value::from(1));
-    // Pre-approve the project's MCP servers so the "new MCP servers found" dialog
-    // never blocks the spawned session (issue #1296).
-    entry.insert("enabledMcpjsonServers".to_string(), enabled_mcp);
+    // #4181: drop the project-scope MCP approval. A name listed here makes the
+    // workspace `.mcp.json` entry of that name override the operator's own
+    // user-scope declaration, which is the displacement ADR-0042 removes.
+    entry.remove("enabledMcpjsonServers");
 
     // Issue #4072: write through the shared ATOMIC helper (temp file + rename,
     // the same one `home_trust_seed::preseed_home_trust` already uses) rather
@@ -815,20 +556,15 @@ pub(super) fn preseed_workspace_trust(
 /// Why: thin home-resolving wrapper over [`preseed_workspace_trust`] so
 /// `prepare_session` can call it without knowing the config-dir layout; tests
 /// target a temp file via the inner function directly.
-/// What: resolves `~/.claude.json` and delegates, forwarding
-/// `trusted_mcp_names` unchanged (see [`preseed_workspace_trust`]'s doc —
-/// issue #3926 security fix). A missing home directory is a soft failure
-/// (logged, non-fatal) so launch still proceeds.
+/// What: resolves `~/.claude.json` and delegates. A missing home directory is a
+/// soft failure (logged, non-fatal) so launch still proceeds.
 /// Test: covered by the inner `preseed_trust_*` tests.
-pub(super) fn preseed_workspace_trust_home(
-    workspace: &Path,
-    trusted_mcp_names: &BTreeSet<String>,
-) -> Result<(), PrepError> {
+pub(super) fn preseed_workspace_trust_home(workspace: &Path) -> Result<(), PrepError> {
     let Some(home) = dirs::home_dir() else {
         tracing::warn!("skipping trust pre-seed: home directory unresolved");
         return Ok(());
     };
-    preseed_workspace_trust(&home.join(".claude.json"), workspace, trusted_mcp_names)
+    preseed_workspace_trust(&home.join(".claude.json"), workspace)
 }
 
 /// Remove the `trusty-memory` hook entries from `~/.claude/settings.json`.

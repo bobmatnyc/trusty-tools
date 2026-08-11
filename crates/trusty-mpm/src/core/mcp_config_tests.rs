@@ -4,9 +4,7 @@
 //! What: CRUD round-trips for the user-scope `mcpServers` map, the
 //! `BUILTIN_MANAGED_MCP_SERVERS`/`UNCONDITIONAL_BUILTIN_MCP_SERVERS`/
 //! `CONDITIONAL_BUILTIN_MCP_SERVERS` drift guard, and the trust-derivation
-//! coverage for [`super::managed_mcp_server_names`],
-//! [`super::launch_trusted_mcp_names_from`], and
-//! [`super::resolve_conditional_mcp_toggles`] — including the issue #3934
+//! coverage for [`super::managed_mcp_server_names`] — including the issue #3934
 //! regression (a conditional builtin must drop out of the trust list when its
 //! injector toggle is off) and the issue #3950 regression (either builtin —
 //! conditional OR unconditional — must drop out when its pin write fails,
@@ -238,7 +236,7 @@ fn builtin_mcp_server_split_unions_to_full_set() {
 
 #[test]
 fn managed_mcp_server_names_defaults_to_builtin() {
-    let names = managed_mcp_server_names(&serde_json::json!({}), true, true, true, true);
+    let names = managed_mcp_server_names(&serde_json::json!({}));
     assert_eq!(
         names,
         vec![
@@ -258,7 +256,7 @@ fn managed_mcp_server_names_unions_builtin_with_configured() {
             "trusty-memory": { "type": "stdio", "command": "trusty-memory", "args": [] }
         }
     });
-    let names = managed_mcp_server_names(&config, true, true, true, true);
+    let names = managed_mcp_server_names(&config);
     // Built-in four + the custom server, sorted + deduped (trusty-memory
     // appears once despite being in both the builtin list and the config).
     assert_eq!(
@@ -271,104 +269,6 @@ fn managed_mcp_server_names_unions_builtin_with_configured() {
             "trusty-search"
         ]
     );
-}
-
-#[test]
-fn managed_mcp_server_names_excludes_disabled_conditional_builtins() {
-    // Issue #3934: when a manifest disables the trusty-memory/trusty-search
-    // injector for this run, the derived trust list must NOT include the
-    // name (unrelated to the config's own `tm mcp add` registry, which is
-    // a SEPARATE, always-trusted union source — see the next test for
-    // that source's own, unrelated collision behaviour).
-    let config = serde_json::json!({
-        "mcpServers": {
-            "aaa-custom": { "type": "stdio", "command": "x", "args": [] }
-        }
-    });
-    let names = managed_mcp_server_names(&config, true, true, false, false);
-    assert!(
-        !names.contains(&"trusty-memory".to_string()),
-        "trusty-memory must be excluded when its injector did not run: {names:?}"
-    );
-    assert!(!names.contains(&"trusty-search".to_string()));
-    // The unconditional two are present when THEIR pin succeeded.
-    assert!(names.contains(&"trusty-mpm".to_string()));
-    assert!(names.contains(&"trusty-review".to_string()));
-}
-
-#[test]
-fn managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed() {
-    // Issue #3950 (fifth instance): the two UNCONDITIONAL builtins
-    // (`trusty-mpm`/`trusty-review`) have no manifest toggle, but their
-    // force-overwrite WRITE can still fail (disk full, permission error,
-    // transient I/O fault). Before this fix `managed_mcp_server_names` had
-    // no parameter for this at all — it unconditionally trusted both names
-    // regardless of whether prepare_session_inner's injectors actually
-    // succeeded this run. A failed pin must drop the name from the trust
-    // list exactly like a disabled conditional injector does.
-    let config = serde_json::json!({
-        "mcpServers": {
-            "aaa-custom": { "type": "stdio", "command": "x", "args": [] }
-        }
-    });
-    let names = managed_mcp_server_names(&config, false, false, true, true);
-    assert!(
-        !names.contains(&"trusty-mpm".to_string()),
-        "trusty-mpm must be excluded when its pin write failed this run: {names:?}"
-    );
-    assert!(
-        !names.contains(&"trusty-review".to_string()),
-        "trusty-review must be excluded when its pin write failed this run: {names:?}"
-    );
-    // The conditional two are unaffected by the unconditional pair's result.
-    assert!(names.contains(&"trusty-memory".to_string()));
-    assert!(names.contains(&"trusty-search".to_string()));
-}
-
-#[test]
-fn managed_mcp_server_names_registry_collision_does_not_bypass_the_pin_flags() {
-    // #4181 REVERSED THIS ASSERTION. It used to read: a registry entry named
-    // `trusty-memory` is unioned in regardless of the conditional toggle,
-    // because the registry is operator-controlled and therefore trusted.
-    //
-    // Two things make that wrong now. Narrowly: ADR-0042 seeds all four
-    // builtins into the registry, so under the old rule the four `_pinned`
-    // flags would become dead parameters and every builtin would be approved
-    // on every launch — #3950 with no code change to the derivation.
-    // Broadly: it was never sound anyway. This approval is content-blind and
-    // resolves against the WORKSPACE `.mcp.json`, and `custom_mcp`'s registry
-    // loop skips reserved names, so a registry entry named `trusty-memory` is
-    // never what pins the workspace entry. Only `inject_trusty_memory_mcp`
-    // does — the very injector the toggle gates.
-    let config = serde_json::json!({
-        "mcpServers": {
-            "trusty-memory": { "type": "stdio", "command": "trusty-memory", "args": [] }
-        }
-    });
-    let names = managed_mcp_server_names(&config, true, true, false, false);
-    assert!(
-        !names.contains(&"trusty-memory".to_string()),
-        "a registry entry under a builtin name must not bypass that builtin's pin flag: {names:?}"
-    );
-    // A non-builtin registry name is untouched — that union is the point.
-    let config = serde_json::json!({
-        "mcpServers": {
-            "slack-mcp": { "type": "stdio", "command": "slack-mcp", "args": [] }
-        }
-    });
-    assert!(
-        managed_mcp_server_names(&config, false, false, false, false)
-            .contains(&"slack-mcp".to_string()),
-        "an operator's non-builtin registration must still be trusted"
-    );
-}
-
-#[test]
-fn managed_mcp_server_names_partial_conditional_toggle() {
-    // Only trusty_search disabled: trusty-memory still trusted, trusty-search not.
-    let names = managed_mcp_server_names(&serde_json::json!({}), true, true, true, false);
-    assert!(names.contains(&"trusty-memory".to_string()));
-    assert!(!names.contains(&"trusty-search".to_string()));
 }
 
 #[test]
@@ -394,124 +294,6 @@ fn mcp_server_names_empty_when_absent() {
     let tmp = TempDir::new().unwrap();
     // No .mcp.json written — must not fail, must yield an empty vector.
     assert!(mcp_server_names(tmp.path()).is_empty());
-}
-
-#[test]
-fn launch_trusted_mcp_names_from_unions_registry() {
-    // Why (#3926): the interactive `tm launch` path must trust the SAME
-    // provenance-safe set as the daemon-managed path — builtin four union
-    // the operator's own `tm mcp add` registry, regardless of what a
-    // cloned repo's workspace `.mcp.json` separately declares (this
-    // function never reads a workspace's `.mcp.json` keys — the
-    // conditional-builtin toggles are supplied explicitly by the caller,
-    // issue #3934).
-    let tmp = TempDir::new().unwrap();
-    let cfg = tmp.path().join("claude-config");
-    add_server(&cfg, "slack-mcp", stdio("slack-mcp", &["serve"])).unwrap();
-
-    let names = launch_trusted_mcp_names_from(&cfg, true, true, true, true);
-    assert_eq!(
-        names,
-        vec![
-            "slack-mcp",
-            "trusty-memory",
-            "trusty-mpm",
-            "trusty-review",
-            "trusty-search"
-        ]
-    );
-}
-
-#[test]
-fn launch_trusted_mcp_names_from_defaults_to_builtin_when_absent() {
-    // Why (#3926): a fresh install with no `tm mcp add` registry yet must
-    // still trust exactly the framework builtin four — never error, never
-    // an empty list (the four builtins always launch, so they must always
-    // be pre-approved).
-    let tmp = TempDir::new().unwrap();
-    let cfg = tmp.path().join("does-not-exist");
-
-    let names = launch_trusted_mcp_names_from(&cfg, true, true, true, true);
-    assert_eq!(
-        names,
-        vec![
-            "trusty-memory",
-            "trusty-mpm",
-            "trusty-review",
-            "trusty-search"
-        ]
-    );
-}
-
-#[test]
-fn launch_trusted_mcp_names_from_excludes_disabled_conditional_builtins() {
-    // Issue #3934 (the actual attack, unit-level): a manifest disabling
-    // the trusty-memory injector for this run must drop the name from
-    // the trust list even though the operator's own registry (or, in the
-    // real attack, a spoofed workspace `.mcp.json` entry the caller does
-    // not even consult here) might otherwise suggest it belongs.
-    let tmp = TempDir::new().unwrap();
-    let cfg = tmp.path().join("claude-config");
-
-    let names = launch_trusted_mcp_names_from(&cfg, true, true, false, false);
-    assert!(!names.contains(&"trusty-memory".to_string()));
-    assert!(!names.contains(&"trusty-search".to_string()));
-    assert!(names.contains(&"trusty-mpm".to_string()));
-    assert!(names.contains(&"trusty-review".to_string()));
-}
-
-#[test]
-fn launch_trusted_mcp_names_from_excludes_unconditional_builtin_when_pin_failed() {
-    // Issue #3950 (fifth instance): mirrors
-    // `managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed`
-    // one layer up — a failed `trusty-mpm`/`trusty-review` pin write must
-    // drop the name from the interactive-path trust derivation too.
-    let tmp = TempDir::new().unwrap();
-    let cfg = tmp.path().join("claude-config");
-
-    let names = launch_trusted_mcp_names_from(&cfg, false, false, true, true);
-    assert!(!names.contains(&"trusty-mpm".to_string()));
-    assert!(!names.contains(&"trusty-review".to_string()));
-    assert!(names.contains(&"trusty-memory".to_string()));
-    assert!(names.contains(&"trusty-search".to_string()));
-}
-
-#[test]
-fn resolve_conditional_mcp_toggles_defaults_to_both_on() {
-    // No manifest at all (compiled-in default): both conditional builtins
-    // are enabled, matching today's zero-regression behaviour.
-    let tmp_home = TempDir::new().unwrap();
-    let tmp_project = TempDir::new().unwrap();
-    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
-
-    let (memory, search) = resolve_conditional_mcp_toggles(&fw, tmp_project.path());
-    assert!(memory);
-    assert!(search);
-}
-
-#[test]
-fn resolve_conditional_mcp_toggles_honors_project_manifest_toggle() {
-    // Issue #3934: a project-scope manifest.toml (the attack's vector —
-    // git-tracked, arrives WITH a cloned repo) disabling trusty_memory
-    // must resolve to `inject_trusty_memory == false`, and must NOT affect
-    // the untouched trusty_search toggle.
-    let tmp_home = TempDir::new().unwrap();
-    let tmp_project = TempDir::new().unwrap();
-    std::fs::create_dir_all(tmp_project.path().join(".trusty-mpm").join("framework")).unwrap();
-    std::fs::write(
-        tmp_project
-            .path()
-            .join(".trusty-mpm")
-            .join("framework")
-            .join("manifest.toml"),
-        "[mcp]\ntrusty_memory = false\n",
-    )
-    .unwrap();
-    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
-
-    let (memory, search) = resolve_conditional_mcp_toggles(&fw, tmp_project.path());
-    assert!(!memory, "project manifest toggle must be honored");
-    assert!(search, "untouched toggle must keep its default");
 }
 
 // ─── #4181 / ADR-0042: seed_builtin_servers ───────────────────────────────
@@ -704,71 +486,5 @@ fn seed_builtin_servers_errors_when_claude_json_is_unreadable() {
     assert!(
         tmp.path().join(".claude.json").is_dir(),
         "an unreadable path must be left alone"
-    );
-}
-
-#[test]
-fn a_seeded_builtin_is_not_approved_when_its_pin_failed() {
-    // #4181 × #3950. Seeding writes the builtins into the SAME `mcpServers`
-    // map `managed_mcp_server_names` unions for `enabledMcpjsonServers`. Union
-    // it wholesale and every builtin is approved regardless of whether its
-    // workspace `.mcp.json` force-overwrite succeeded — approving a name whose
-    // project-scope content was never verified, which is the whole exploit.
-    let tmp = TempDir::new().unwrap();
-    seed_builtin_servers(tmp.path()).unwrap();
-
-    let approved = launch_trusted_mcp_names_from(tmp.path(), false, false, false, false);
-    assert!(
-        approved.is_empty(),
-        "no builtin may be approved when every pin failed, got {approved:?}"
-    );
-
-    // An operator's own non-builtin registration is unaffected — it still
-    // enters via the registry, which is the union's actual purpose.
-    add_server(tmp.path(), "slack-mcp", stdio("slack-mcp", &["serve"])).unwrap();
-    assert_eq!(
-        launch_trusted_mcp_names_from(tmp.path(), false, false, false, false),
-        strings(&["slack-mcp"])
-    );
-    // And a successful pin still approves its builtin.
-    assert_eq!(
-        launch_trusted_mcp_names_from(tmp.path(), true, false, false, false),
-        strings(&["slack-mcp", "trusty-mpm"])
-    );
-}
-
-#[test]
-fn seeding_and_workspace_injection_coexist_without_clobbering() {
-    // Until PR C2 deletes the injectors, both provision the builtins: seeding
-    // into user scope, `inject_trusty_mpm_mcp` into the workspace `.mcp.json`.
-    // They target different files, so double-provisioning can produce neither a
-    // duplicate nor a clobber — this pins that.
-    let tmp = TempDir::new().unwrap();
-    let config_dir = tmp.path().join("claude-config");
-    let workspace = tmp.path().join("workspace");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::create_dir_all(&workspace).unwrap();
-
-    seed_builtin_servers(&config_dir).unwrap();
-    crate::core::session_launch::inject_trusty_mpm_mcp(&workspace).unwrap();
-    let after_inject = seed_builtin_servers(&config_dir).unwrap();
-    assert!(
-        after_inject.is_empty(),
-        "the injector must not have disturbed user scope"
-    );
-
-    let user_scope = read_servers(&config_dir);
-    assert_eq!(user_scope.len(), BUILTIN_MANAGED_MCP_SERVERS.len());
-    assert_eq!(
-        user_scope.get("trusty-mpm"),
-        builtin_server_entry("trusty-mpm").as_ref(),
-        "the user-scope entry must be the canonical builtin, unduplicated"
-    );
-
-    // The workspace copy is the injector's and stays intact.
-    assert_eq!(
-        mcp_server_names(&workspace),
-        strings(&["trusty-mpm"]),
-        "the workspace .mcp.json must still declare exactly what was injected"
     );
 }

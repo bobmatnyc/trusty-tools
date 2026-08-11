@@ -176,7 +176,8 @@ pub fn ensure_managed_config_dir(config_dir: &Path, project_dir: &Path) -> anyho
 /// `ensure_managed_config_dir_skips_a_frozen_skill`,
 /// `ensure_managed_config_dir_emits_the_frozen_skill_warning`,
 /// `ensure_managed_config_dir_deploys_the_project_skill_tier`,
-/// `ensure_managed_config_dir_project_tier_is_a_noop_when_unchanged`.
+/// `ensure_managed_config_dir_project_tier_is_a_noop_when_unchanged`,
+/// `ensure_managed_config_dir_heals_a_bare_repo_palace_alias`.
 ///
 /// #4880 — WHY THE PROJECT TIER IS DEPLOYED FROM HERE TOO. The user tier this
 /// function refreshes every run is OUTRANKED by `<project_dir>/.claude/skills`,
@@ -193,6 +194,16 @@ pub fn ensure_managed_config_dir_with_root(
 ) -> anyhow::Result<()> {
     // Phase 1: canonical scaffolding shared with the standalone driver.
     ensure_global_config_dir(&fw.root, config_dir)?;
+
+    // #1939 / #4181: heal the claude-mpm palace split-brain — when the derived
+    // `owner-repo` palace does not exist but the BARE repo-name one does,
+    // register a palace-level alias so the `TRUSTY_MEMORY_PALACE` the spawn
+    // exports resolves to the existing store. This ran inside
+    // `session_launch::settings::inject_trusty_memory_mcp` until ADR-0042 deleted
+    // that injector; this function is the choke point every spawn, resume and
+    // in-place relaunch already reaches, so the healing keeps running. Best-effort
+    // and side-effect-only — it never returns an error and never blocks a launch.
+    crate::core::session_launch::maybe_register_palace_alias(project_dir, None);
 
     // Phase 2: guarantee the COMPLETE roster from the resolved (submodule-aware)
     // framework source, matching `session_launch::prepare_session`. Refreshing
@@ -335,25 +346,13 @@ fn skill_skip_summary(skipped: &[String]) -> Option<String> {
 /// `runtime::claude_code::prepare_managed_config` and deliberately mirrors it
 /// step for step rather than growing a second mechanism: resolve, provision
 /// (non-fatal), seed trust into `<config_dir>/.claude.json` (NEVER
-/// `~/.claude.json`). It does NOT re-run the MCP injectors — `tm launch` and
-/// `tm connect` reach here having just run `session_launch::prepare_session`,
-/// which ran them and reported the per-run result, so the caller passes those
-/// `PrepReport` bools straight through.
+/// `~/.claude.json`).
 ///
-/// **The four `_pinned` parameters (issues #3934/#3950)** must each reflect
-/// whether that name's force-overwrite injector actually SUCCEEDED this run —
-/// never a hardcoded `true`. See [`preseed_managed_trust`]'s doc for the
-/// vulnerability that reopens.
-///
-/// One derivation difference from the pre-#4181 interactive path, stated so a
-/// reviewer does not have to find it: `prepare_session_inner` subtracts
-/// `project_scope_mcp_names` (a project's `[mcp.custom]` manifest entries, #2739)
-/// from the set it seeds, and [`preseed_managed_trust`] applies no such
-/// subtraction. A name reaching BOTH the operator's `tm mcp add` registry and a
-/// project's `[mcp.custom]` block is therefore pre-approved here where it was not
-/// before. That is the daemon path's existing posture, not a new one, and
-/// ADR-0042 removes the whole `enabledMcpjsonServers` mechanism in the change
-/// that deletes the injectors.
+/// // #4181 (ADR-0042): the four `_pinned` parameters are gone with the
+/// `enabledMcpjsonServers` approval they gated. So is the derivation difference
+/// this doc used to warn about — that this path applied no `project_scope_mcp_names`
+/// subtraction (#2739) and so pre-approved a repo `[mcp.custom]` name that
+/// collided with an operator registry name. Nothing is pre-approved now.
 /// What: `Some(dir)` when
 /// [`crate::core::trusty_tools_config::managed_claude_config_dir`] resolves —
 /// having provisioned it via [`ensure_managed_config_dir`] and seeded trust via
@@ -367,13 +366,7 @@ fn skill_skip_summary(skipped: &[String]) -> Option<String> {
 /// `interactive_config_dir_never_writes_the_home_claude_json`,
 /// `interactive_config_dir_survives_a_malformed_managed_claude_json`,
 /// `interactive_config_dir_withholds_builtins_when_a_pin_failed`.
-pub fn prepare_interactive_config_dir(
-    workspace: &Path,
-    trusty_mpm_pinned: bool,
-    trusty_review_pinned: bool,
-    trusty_memory_pinned: bool,
-    trusty_search_pinned: bool,
-) -> Option<std::path::PathBuf> {
+pub fn prepare_interactive_config_dir(workspace: &Path) -> Option<std::path::PathBuf> {
     let Some(config_dir) = crate::core::trusty_tools_config::managed_claude_config_dir() else {
         // #4181: home unresolved — nothing to relocate to. Keep the legacy
         // home-trust seed so the startup dialogs are still dismissed.
@@ -385,15 +378,7 @@ pub fn prepare_interactive_config_dir(
         }
         return None;
     };
-    prepare_interactive_config_dir_in(
-        &FrameworkPaths::default(),
-        &config_dir,
-        workspace,
-        trusty_mpm_pinned,
-        trusty_review_pinned,
-        trusty_memory_pinned,
-        trusty_search_pinned,
-    );
+    prepare_interactive_config_dir_in(&FrameworkPaths::default(), &config_dir, workspace);
     Some(config_dir)
 }
 
@@ -410,16 +395,7 @@ pub fn prepare_interactive_config_dir(
 /// partially-provisioned relocated config home is still safer for the session
 /// than not relocating.
 /// Test: see [`prepare_interactive_config_dir`].
-#[allow(clippy::too_many_arguments)]
-pub fn prepare_interactive_config_dir_in(
-    fw: &FrameworkPaths,
-    config_dir: &Path,
-    workspace: &Path,
-    trusty_mpm_pinned: bool,
-    trusty_review_pinned: bool,
-    trusty_memory_pinned: bool,
-    trusty_search_pinned: bool,
-) {
+pub fn prepare_interactive_config_dir_in(fw: &FrameworkPaths, config_dir: &Path, workspace: &Path) {
     // #4181: non-fatal — point the session at the relocated dir even when
     // provisioning was partial, mirroring `prepare_managed_config`.
     if let Err(e) = ensure_managed_config_dir_with_root(fw, config_dir, workspace) {
@@ -431,14 +407,7 @@ pub fn prepare_interactive_config_dir_in(
     // #4181: seed into `<config_dir>/.claude.json` — the file a relocated
     // session actually reads. The pre-relocation `preseed_home_trust` wrote
     // `~/.claude.json`, which such a session never opens.
-    if let Err(e) = preseed_managed_trust(
-        config_dir,
-        workspace,
-        trusty_mpm_pinned,
-        trusty_review_pinned,
-        trusty_memory_pinned,
-        trusty_search_pinned,
-    ) {
+    if let Err(e) = preseed_managed_trust(config_dir, workspace) {
         tracing::warn!(
             config_dir = %config_dir.display(),
             "managed trust pre-seed failed (non-fatal): {e}"

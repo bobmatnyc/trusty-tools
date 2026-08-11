@@ -1,84 +1,25 @@
-//! trusty-search MCP stub + project-index registration/reindex helpers.
+//! trusty-search project-index registration/reindex helper.
 //!
 //! Why: split out of `settings.rs` (issue #610 SLOC cap) — the trusty-search
-//! index lifecycle (build the pinned MCP stub, find-or-create the index, then
-//! best-effort trigger a reindex so it is actually populated) is a cohesive
-//! concern distinct from the output-style/hook/trust-preseed helpers that
-//! remain in `settings.rs`.
-//! What: [`trusty_search_mcp_value`] / [`inject_trusty_search_mcp`] build and
-//! write the `.mcp.json` stub (issue #1373); [`register_project_index`] is now a
-//! thin wrapper over the shared [`trusty_common::search_index::ensure_project_indexed`]
-//! entry point, which find-or-creates the daemon-side index and ensures it is
-//! populated (issue #1908). That register+reindex logic was PROMOTED into
-//! trusty-common so trusty-code can reuse the ONE implementation (common
-//! entry-point rule) — this module keeps only the MCP-stub concerns plus the
-//! wrapper.
-//! Test: each `pub(super)` function has a dedicated test in `tests.rs`.
+//! index lifecycle (find-or-create the index, then best-effort trigger a
+//! reindex so it is actually populated) is a cohesive concern distinct from the
+//! output-style/hook/trust-preseed helpers that remain in `settings.rs`.
+//! What: [`register_project_index`] is a thin wrapper over the shared
+//! [`trusty_common::search_index::ensure_project_indexed`] entry point, which
+//! find-or-creates the daemon-side index and ensures it is populated (issue
+//! #1908). That register+reindex logic was PROMOTED into trusty-common so
+//! trusty-code can reuse the ONE implementation (common entry-point rule) —
+//! this module keeps only the wrapper.
+//!
+//! // #4181: this module also held `trusty_search_mcp_value` /
+//! `inject_trusty_search_mcp`, which wrote a `serve --index <id>` stub into the
+//! workspace `.mcp.json`. ADR-0042 deleted both — the id this module returns is
+//! now exported as `TRUSTY_INDEX` by the spawn instead
+//! ([`crate::core::mcp_session_env`]), which `trusty-search serve` honours since
+//! #5394.
+//! Test: `register_project_index` is covered in `tests_search_index.rs`.
 
 use std::path::Path;
-
-use super::PrepError;
-use super::settings::inject_mcp_server;
-
-/// Build the `trusty-search` MCP server definition injected into a project's
-/// `.mcp.json`, optionally pinned to a project index (issue #1373).
-///
-/// Why (issue #1270 / step 4): trusty-mpm-spawned sessions need the code-search
-/// tools (`search`, `grep`, `get_call_chain`, …). Issue #1373: without pinning,
-/// the contextless `trusty-search serve` stub left index selection to the LLM,
-/// which routinely queried the WRONG index (usually the persistent `claude-mpm`
-/// one) instead of the session's own project. Passing `--index <derived-id>`
-/// pins the session to its project index so a bare `search` always resolves
-/// correctly and fan-out never sweeps every index. The canonical stdio MCP
-/// invocation is bare `serve` (stdio is the default transport; HTTP is off
-/// unless `--with-http`).
-/// What: returns the JSON `Value` for a stdio MCP server running
-/// `trusty-search serve` — with `["serve", "--index", "<id>"]` when `index_id`
-/// is `Some` (non-empty), else the unpinned `["serve"]`. Index *creation* is
-/// handled separately by [`register_project_index`].
-/// Test: `trusty_search_mcp_value_pins_index`, `trusty_search_mcp_value_unpinned`.
-pub(super) fn trusty_search_mcp_value(index_id: Option<&str>) -> serde_json::Value {
-    let args: Vec<serde_json::Value> = match index_id {
-        Some(id) if !id.trim().is_empty() => vec![
-            serde_json::Value::String("serve".to_string()),
-            serde_json::Value::String("--index".to_string()),
-            serde_json::Value::String(id.to_string()),
-        ],
-        _ => vec![serde_json::Value::String("serve".to_string())],
-    };
-    serde_json::json!({
-        "type": "stdio",
-        "command": "trusty-search",
-        "args": args,
-    })
-}
-
-/// Inject the `trusty-search` MCP server into the project's `.mcp.json`,
-/// pinned to the project's index when one is known (issue #1373).
-///
-/// Why (issue #1270 / step 4): spawned sessions must reach the code-search
-/// tools, but `trusty-search` was never registered alongside `trusty-memory`.
-/// Issue #1373: the stub must additionally PIN the session to the project's own
-/// index (`--index <id>`) so queries never resolve to the wrong index. When
-/// `index_id` is `None` (derivation failed) the unpinned stub is written so the
-/// session still gets the tools — backward-compatible with the pre-#1373 stub.
-/// What: builds the (optionally pinned) server value via
-/// [`trusty_search_mcp_value`] and registers it under the key `trusty-search`.
-/// Test: `inject_trusty_search_mcp_adds_server`,
-/// `inject_trusty_search_mcp_preserves_existing`,
-/// `inject_trusty_search_mcp_is_idempotent`,
-/// `inject_trusty_search_mcp_pins_index`,
-/// `inject_both_mcp_servers_coexist`.
-pub(crate) fn inject_trusty_search_mcp(
-    project_path: &Path,
-    index_id: Option<&str>,
-) -> Result<(), PrepError> {
-    inject_mcp_server(
-        project_path,
-        "trusty-search",
-        trusty_search_mcp_value(index_id),
-    )
-}
 
 /// Find-or-create the trusty-search index for `project_root`, best-effort
 /// trigger a reindex so it is actually populated, and return its id (issues

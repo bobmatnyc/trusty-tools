@@ -126,6 +126,7 @@ fn spawn_command_sources_gh_env_file_before_env_invocation() {
         None,
         None,
         Some(Path::new("/tmp/tm-gh-env-test.sh")),
+        &[],
     );
     assert!(
         cmd.contains(
@@ -152,6 +153,7 @@ fn spawn_command_without_gh_env_is_byte_identical_to_pre_3025() {
         None,
         None,
         None,
+        &[],
     );
     assert!(!with_none.contains("gh-env"), "cmd: {with_none}");
     assert!(!with_none.contains(". '"), "cmd: {with_none}");
@@ -173,6 +175,7 @@ fn resume_command_sources_gh_env_file_before_env_invocation() {
         None,
         None,
         Some(Path::new("/tmp/tm-gh-env-test.sh")),
+        &[],
     );
     assert!(
         cmd.contains(

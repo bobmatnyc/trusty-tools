@@ -201,7 +201,7 @@ pub(crate) async fn launch(
     //     `claude` spawned at step 13 carries `--setting-sources project,local`
     //     and would never read a `$HOME/.claude` deploy.
     let config_dir = {
-        let pins = match trusty_mpm::core::session_launch::prepare_isolated_session(
+        match trusty_mpm::core::session_launch::prepare_isolated_session(
             &managed_path,
             Some(&origin_url),
         ) {
@@ -214,7 +214,6 @@ pub(crate) async fn launch(
                         managed_path.display()
                     );
                 }
-                mcp_pins_of(&report)
             }
             // #4752: a compiled-prompt write failure is FATAL — refuse the
             // launch rather than start a session whose instructions cannot be
@@ -227,14 +226,11 @@ pub(crate) async fn launch(
                     "session prep failed for worktree {} (non-fatal): {e}",
                     managed_path.display()
                 );
-                // #3950: prep failed, so NOTHING was pinned this run — no MCP
-                // name may enter `enabledMcpjsonServers`.
-                (false, false, false, false)
             }
         };
         // #4181: relocate CLAUDE_CONFIG_DIR and seed trust into the file the
         // relocated session actually reads.
-        relocate_config_dir(&managed_path, pins)
+        relocate_config_dir(&managed_path)
     };
     let managed_workdir = managed_path.to_string_lossy().to_string();
 
@@ -329,6 +325,9 @@ pub(crate) async fn launch(
             Some(&pm_model),
             prompt_path.as_deref(),
             config_dir.as_deref(),
+            // #4181: the per-project MCP pins the shared user-scope declarations
+            // cannot carry as arguments.
+            &trusty_mpm::core::mcp_session_env::session_mcp_env(&managed_path, Some(&origin_url)),
         ),
     );
 
@@ -477,12 +476,11 @@ pub(crate) async fn connect(
     //     live checkout (the harness cwd, set at step 4) rather than `$HOME` —
     //     the `claude` spawned at step 5 carries `--setting-sources
     //     project,local` and would never read a `$HOME/.claude` deploy.
-    let pins = match trusty_mpm::core::session_launch::prepare_isolated_session(&path, None) {
+    match trusty_mpm::core::session_launch::prepare_isolated_session(&path, None) {
         Ok(report) => {
             for err in &report.roster_errors {
                 tracing::error!("roster provisioning gap for {}: {err}", path.display());
             }
-            mcp_pins_of(&report)
         }
         // #4752: fatal — refuse the connect rather than attach to a session
         // whose compiled instructions could not be written.
@@ -494,13 +492,11 @@ pub(crate) async fn connect(
                 "session prep failed for {} (non-fatal): {err}",
                 path.display()
             );
-            // #3950: nothing pinned this run — approve no MCP name.
-            (false, false, false, false)
         }
-    };
+    }
     // #4181: same relocation `tm launch` performs — `tm connect` reads the same
     // user-tier MCP declaration and needs the same #1269 isolation posture.
-    let config_dir = relocate_config_dir(&path, pins);
+    let config_dir = relocate_config_dir(&path);
 
     // 1d. Build the PM system-prompt text for the live checkout (where 1c just
     //     deployed the framework) and write it to a temp file for
@@ -590,9 +586,13 @@ pub(crate) async fn connect(
         // #2997: disclaim the pane's `claude` off the shared tmux server (same
         // wrapper the daemon + `tm launch` paths use). No-op off macOS / under
         // TM_DISABLE_SPAWN_DISCLAIM.
-        let claude_cmd = trusty_mpm::core::spawn_disclaim::disclaim_pane_command(
-            &connect_claude_cmd(prompt_path.as_deref(), config_dir.as_deref()),
-        );
+        let claude_cmd =
+            trusty_mpm::core::spawn_disclaim::disclaim_pane_command(&connect_claude_cmd(
+                prompt_path.as_deref(),
+                config_dir.as_deref(),
+                // #4181: the per-project MCP pins.
+                &trusty_mpm::core::mcp_session_env::session_mcp_env(&path, None),
+            ));
         let send = trusty_mpm::core::tmux::send_line(
             None,
             &trusty_mpm::core::tmux::TmuxTarget::session(&tmux_name),
@@ -636,36 +636,17 @@ pub(crate) async fn connect(
 pub(crate) fn connect_claude_cmd(
     prompt_file: Option<&std::path::Path>,
     config_dir: Option<&std::path::Path>,
+    mcp_env: &[(String, String)],
 ) -> String {
-    trusty_mpm::core::model_inject::build_claude_command(None, prompt_file, config_dir)
-}
-
-/// The four per-run MCP pin results a [`PrepReport`] carries, in the order
-/// `preseed_managed_trust` expects.
-///
-/// Why (issues #3934/#3950): the trust seeder must be told which of the four
-/// framework builtins were ACTUALLY force-written this run — a hardcoded `true`
-/// would pre-approve a name whose `.mcp.json` entry could be stale or spoofed.
-/// Reading them off the same run's report is what makes that evidence real.
-/// What: `(mpm, review, memory, search)`.
-/// Test: `core::managed_config`'s `interactive_config_dir_withholds_builtins_when_a_pin_failed`
-/// covers what the seeder does with these values.
-fn mcp_pins_of(report: &trusty_mpm::core::session_launch::PrepReport) -> (bool, bool, bool, bool) {
-    (
-        report.trusty_mpm_injected,
-        report.trusty_review_injected,
-        report.trusty_memory_injected,
-        report.trusty_search_injected,
-    )
+    trusty_mpm::core::model_inject::build_claude_command(None, prompt_file, config_dir, mcp_env)
 }
 
 /// Relocate `CLAUDE_CONFIG_DIR` for an interactive launch, provisioning and
 /// trust-seeding it.
 ///
 /// Why (issue #4181): thin binary-side wrapper so `tm launch` and `tm connect`
-/// share one call rather than two copies of the same four-step sequence. All the
-/// reasoning — why relocation preserves #1269, the #3950 pin contract, and the
-/// `[mcp.custom]` derivation difference — lives on the library function.
+/// share one call rather than two copies of the same sequence. Why relocation
+/// preserves #1269 lives on the library function.
 /// What: delegates to
 /// [`trusty_mpm::core::managed_config::prepare_interactive_config_dir`], then
 /// warns once when the spawn will relocate with no resolvable
@@ -673,14 +654,8 @@ fn mcp_pins_of(report: &trusty_mpm::core::session_launch::PrepReport) -> (bool, 
 /// stored under the operator's default config dir is unreadable under the
 /// relocated one.
 /// Test: `core::managed_config`'s `interactive_config_dir_*` tests.
-fn relocate_config_dir(
-    workspace: &std::path::Path,
-    pins: (bool, bool, bool, bool),
-) -> Option<std::path::PathBuf> {
-    let (mpm, review, memory, search) = pins;
-    let dir = trusty_mpm::core::managed_config::prepare_interactive_config_dir(
-        workspace, mpm, review, memory, search,
-    );
+fn relocate_config_dir(workspace: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = trusty_mpm::core::managed_config::prepare_interactive_config_dir(workspace);
     // #2246: relocating moves which Keychain entry `claude` reads. Say so once
     // rather than let the session present as "logged in, then not logged in".
     if dir.is_some() && trusty_mpm::core::oauth_token::resolve_oauth_token().is_none() {

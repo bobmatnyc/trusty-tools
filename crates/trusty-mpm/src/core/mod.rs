@@ -95,6 +95,9 @@ pub mod managed_config;
 pub mod manifest;
 pub mod mcp_config;
 pub mod mcp_provenance;
+// #4181: per-project MCP pins now travel as spawn environment variables, not as
+// arguments injected into a workspace `.mcp.json` (ADR-0042).
+pub mod mcp_session_env;
 pub mod mcp_test;
 pub mod memory;
 pub mod memory_import;

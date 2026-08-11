@@ -84,7 +84,7 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
     // Both shapes must carry the prompt and an isolation flag, so assert on both
     // rather than narrowing this to whichever one the test machine happens to
     // produce.
-    let fallback = crate::commands::launch::connect_claude_cmd(Some(path), None);
+    let fallback = crate::commands::launch::connect_claude_cmd(Some(path), None, &[]);
     assert!(
         fallback.contains("--append-system-prompt-file"),
         "connect claude_cmd must inject the PM system prompt file: {fallback}"
@@ -96,7 +96,7 @@ fn assert_connect_claude_cmd_carries_persona_flags() {
     );
 
     let dir = std::path::Path::new("/tm/claude-config");
-    let relocated = crate::commands::launch::connect_claude_cmd(Some(path), Some(dir));
+    let relocated = crate::commands::launch::connect_claude_cmd(Some(path), Some(dir), &[]);
     assert!(
         relocated.contains("--append-system-prompt-file"),
         "connect claude_cmd must inject the PM system prompt file: {relocated}"

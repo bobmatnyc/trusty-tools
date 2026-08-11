@@ -683,6 +683,7 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
 /// Test: used by the `inplace_exec_command_*` cases below.
 fn synthetic_resume(args: &[&str]) -> trusty_mpm::runtime::InPlaceResumeCommand {
     trusty_mpm::runtime::InPlaceResumeCommand {
+        mcp_env: Vec::new(),
         claude_bin: "/fake/bin/claude".to_owned(),
         args: args.iter().map(|s| (*s).to_owned()).collect(),
         config_dir: Some(std::path::PathBuf::from("/fake/config")),
@@ -726,6 +727,59 @@ fn inplace_exec_command_forwards_every_arg_in_order() {
         cmd.get_current_dir(),
         Some(std::path::Path::new("/fake/cwd")),
         "the relaunch must be rooted at the record's workspace"
+    );
+}
+
+/// #4181 / ADR-0042: a non-empty `mcp_env` reaches the exec'd `Command`.
+///
+/// Why: this path replaces the process with `claude` directly, so the `env
+/// NAME=VALUE` prefix the pane paths build never applies — the pins must be set
+/// on the `Command` itself or an in-place relaunch silently loses them while the
+/// other two spawn paths keep them. `synthetic_resume` leaves `mcp_env` empty,
+/// so nothing here covered the carrier.
+/// Test: itself.
+#[test]
+fn inplace_exec_command_carries_a_non_empty_mcp_env() {
+    let mut resume = synthetic_resume(&["--dangerously-skip-permissions"]);
+    resume.mcp_env = vec![
+        (
+            "TRUSTY_MEMORY_PALACE".to_owned(),
+            "owner repo slug".to_owned(),
+        ),
+        ("TRUSTY_INDEX".to_owned(), "idx-42".to_owned()),
+    ];
+    let cmd = build_inplace_exec_command(&resume, std::path::Path::new("/fake/cwd"));
+
+    let envs: Vec<(String, Option<String>)> = cmd
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()),
+            )
+        })
+        .collect();
+
+    // No shell parses this, so the value must arrive VERBATIM — spaces and all,
+    // with no quoting added.
+    assert!(
+        envs.contains(&(
+            "TRUSTY_MEMORY_PALACE".to_owned(),
+            Some("owner repo slug".to_owned())
+        )),
+        "the palace pin must be set on the exec'd Command verbatim: {envs:?}"
+    );
+    assert!(
+        envs.contains(&("TRUSTY_INDEX".to_owned(), Some("idx-42".to_owned()))),
+        "the index pin must be set on the exec'd Command: {envs:?}"
+    );
+    // The #4455 guard still holds alongside them.
+    assert!(
+        envs.contains(&(
+            "CLAUDE_CONFIG_DIR".to_owned(),
+            Some("/fake/config".to_owned())
+        )),
+        "the pins must not displace CLAUDE_CONFIG_DIR: {envs:?}"
     );
 }
 

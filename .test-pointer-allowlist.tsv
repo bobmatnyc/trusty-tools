@@ -434,7 +434,6 @@ crates/trusty-mpm/src/core/mcp_test/mod.rs	entry_args_preserves_deeper_separator
 crates/trusty-mpm/src/core/mcp_test/mod.rs	read_bounded_line_reads_terminated_line
 crates/trusty-mpm/src/core/mcp_test/mod.rs	read_bounded_line_returns_none_at_eof
 crates/trusty-mpm/src/core/output_style.rs	detect_from_output_unparseable
-crates/trusty-mpm/src/core/session_launch/mod.rs	prepare_session_repo_url_pins_palace
 crates/trusty-mpm/src/core/session_launch/settings.rs	deploy_output_style_writes_under_project_root
 crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_defaults_to_enter
 crates/trusty-mpm/src/core/sm/agent/chat_action_protocol.rs	inject_submit_arg_interrupt

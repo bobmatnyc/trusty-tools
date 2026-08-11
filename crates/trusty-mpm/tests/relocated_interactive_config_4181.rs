@@ -60,7 +60,7 @@ fn interactive_config_dir_seeds_trust_in_the_managed_dir() {
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
     let ws = workspace(tmp.path());
 
-    prepare_interactive_config_dir_in(&fw, &config_dir, &ws, false, false, false, false);
+    prepare_interactive_config_dir_in(&fw, &config_dir, &ws);
 
     let entry =
         managed_entry(&config_dir, &ws).expect("the workspace must be seeded in the managed file");
@@ -88,7 +88,7 @@ fn interactive_config_dir_never_writes_the_home_claude_json() {
     let decoy = r#"{"operatorOnly":true}"#;
     std::fs::write(&fake_home_json, decoy).unwrap();
 
-    prepare_interactive_config_dir_in(&fw, &config_dir, &ws, false, false, false, false);
+    prepare_interactive_config_dir_in(&fw, &config_dir, &ws);
 
     assert_eq!(
         std::fs::read_to_string(&fake_home_json).unwrap(),
@@ -112,7 +112,7 @@ fn interactive_config_dir_survives_a_malformed_managed_claude_json() {
     std::fs::create_dir_all(&config_dir).unwrap();
     std::fs::write(config_dir.join(".claude.json"), "{ not json at all").unwrap();
 
-    prepare_interactive_config_dir_in(&fw, &config_dir, &ws, false, false, false, false);
+    prepare_interactive_config_dir_in(&fw, &config_dir, &ws);
 
     assert!(
         managed_entry(&config_dir, &ws).is_some(),
@@ -137,7 +137,7 @@ fn interactive_config_dir_creates_an_absent_dir() {
     let ws = workspace(tmp.path());
     assert!(!config_dir.exists());
 
-    prepare_interactive_config_dir_in(&fw, &config_dir, &ws, false, false, false, false);
+    prepare_interactive_config_dir_in(&fw, &config_dir, &ws);
 
     assert!(
         config_dir.join(".claude.json").exists(),
@@ -158,7 +158,7 @@ fn interactive_config_dir_withholds_builtins_when_a_pin_failed() {
     let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
     let ws = workspace(tmp.path());
 
-    prepare_interactive_config_dir_in(&fw, &config_dir, &ws, false, false, false, false);
+    prepare_interactive_config_dir_in(&fw, &config_dir, &ws);
 
     let entry = managed_entry(&config_dir, &ws).unwrap();
     let enabled = entry
