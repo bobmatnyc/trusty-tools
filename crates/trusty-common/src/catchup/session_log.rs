@@ -201,6 +201,63 @@ pub fn resolve_session_snapshot(
     newest_session_file(&dir, ext)
 }
 
+/// Every existing snapshot attributable to `session_id` — not just the newest.
+///
+/// Why: #5386 — the catch-up digest has to decide, per listed session, whether
+/// the caller owns it. [`resolve_session_snapshot`] answers "which one snapshot
+/// do I resume from", which is the wrong question here: a session that paused
+/// five times owns all five files, and disclosing four of them because only the
+/// newest is attributable would leak exactly what this is meant to gate.
+/// What: the same two sources [`resolve_session_snapshot`] reads, unioned
+/// instead of short-circuited — every `pause` line in `sessions-log.jsonl` for
+/// `session_id` resolved through [`snapshot_path_in`] (covering the pre-#5272
+/// flat layout and the per-session-directory one alike), plus every
+/// `session-*.<ext>` sitting in `<sessions_dir>/<session_id>/` whose log append
+/// did not land. Paths are deduplicated; each is known to exist.
+/// Test: `snapshots_attributed_to_unions_log_and_directory`,
+/// `snapshots_attributed_to_excludes_other_sessions`.
+pub fn snapshots_attributed_to(sessions_dir: &Path, session_id: &str, ext: &str) -> Vec<PathBuf> {
+    if !sessions_dir.is_dir() {
+        return Vec::new();
+    }
+    let mut out: Vec<PathBuf> = read_log(sessions_dir)
+        .into_iter()
+        .filter(|e| e.event == EVENT_PAUSE && e.session_id == session_id)
+        .filter_map(|e| snapshot_path_in(sessions_dir, &e.snapshot, ext))
+        .collect();
+
+    if let Some(name) = session_dir_name(session_id) {
+        out.extend(session_files_in(&sessions_dir.join(name), ext));
+    }
+
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every `session-*.<ext>` directly inside `dir`.
+///
+/// Why: the all-snapshots counterpart of [`newest_session_file`], which picks
+/// one by mtime. [`snapshots_attributed_to`] needs the whole set.
+/// What: an empty vec when `dir` is absent or unreadable — a missing
+/// per-session directory means the log is the only attribution source, not an
+/// error.
+/// Test: covered by `snapshots_attributed_to_unions_log_and_directory`.
+fn session_files_in(dir: &Path, ext: &str) -> Vec<PathBuf> {
+    let suffix = format!(".{ext}");
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .filter(|e| {
+            let name = e.file_name().into_string().unwrap_or_default();
+            name.starts_with("session-") && name.ends_with(&suffix)
+        })
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect()
+}
+
 /// Resolve the latest snapshot file, applying the full session-blind fallback.
 ///
 /// Why: a project may carry snapshots from before the log existed; resume must
@@ -531,6 +588,66 @@ mod tests {
             None
         );
         assert!(resolve_session_snapshot(tmp.path(), "session-a", "md").is_some());
+    }
+
+    /// Why: #5386 — the digest gates every listed session on ownership, so the
+    /// attribution lookup must return ALL of a session's snapshots, not the one
+    /// it would resume from. Reusing `resolve_session_snapshot` here would
+    /// redact a caller's own older files.
+    /// What: a flat snapshot attributed only by the log and a per-session-
+    /// directory one with no log line both come back, deduplicated.
+    /// Test: itself.
+    #[test]
+    fn snapshots_attributed_to_unions_log_and_directory() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("session-20260809-010155.md"), b"flat").unwrap();
+        append_entry(
+            tmp.path(),
+            &entry("s1", "pause", "session-20260809-010155.md", "t1"),
+        )
+        .unwrap();
+        fs::create_dir_all(tmp.path().join("s1")).unwrap();
+        fs::write(
+            tmp.path().join("s1").join("session-20260810-120000.md"),
+            b"nested",
+        )
+        .unwrap();
+        // Also logged, to prove the two sources dedupe rather than double-count.
+        append_entry(
+            tmp.path(),
+            &entry("s1", "pause", "s1/session-20260810-120000.md", "t2"),
+        )
+        .unwrap();
+
+        let got = snapshots_attributed_to(tmp.path(), "s1", "md");
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(
+            got.iter()
+                .any(|p| p.ends_with("session-20260809-010155.md"))
+        );
+        assert!(
+            got.iter()
+                .any(|p| p.ends_with("session-20260810-120000.md"))
+        );
+    }
+
+    /// Why: the whole point is that one session's set never contains another's.
+    /// What: a snapshot attributed to `s1` is absent from `s2`'s set, and an
+    /// unattributed flat file belongs to neither.
+    /// Test: itself.
+    #[test]
+    fn snapshots_attributed_to_excludes_other_sessions() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("session-20260809-010155.md"), b"A").unwrap();
+        append_entry(
+            tmp.path(),
+            &entry("s1", "pause", "session-20260809-010155.md", "t1"),
+        )
+        .unwrap();
+        fs::write(tmp.path().join("session-20260809-020000.md"), b"orphan").unwrap();
+
+        assert_eq!(snapshots_attributed_to(tmp.path(), "s1", "md").len(), 1);
+        assert!(snapshots_attributed_to(tmp.path(), "s2", "md").is_empty());
     }
 
     #[test]

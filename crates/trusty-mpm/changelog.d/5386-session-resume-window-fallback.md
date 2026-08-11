@@ -7,3 +7,4 @@ Added
   guessing which snapshot was theirs. The response also carries `resolved_via`
   (`session_id` / `tmux_window` / null) so a window match is never read as an
   exact one.
+

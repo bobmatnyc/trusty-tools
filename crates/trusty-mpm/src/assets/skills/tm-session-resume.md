@@ -110,7 +110,7 @@ The tool returns:
 ```json
 {
   "sessions": [{ "format", "paused_at", "summary", "in_progress", "next_steps",
-                 "git_context", "tmux_window", "source_file" }],
+                 "git_context", "tmux_window", "source_file", "owned" }],
   "recent_commits": [{ "sha", "msg", "author", "ts" }],
   "recent_memory": [{ "title", "tags" }],
   "resolved_snapshot": "<path or null>",
@@ -130,6 +130,18 @@ knowledge of the repo state if anything looks stale.
 > legitimately disagree under a recent watermark: `sessions` is "what paused
 > since your last catch-up", `resolved_snapshot` is "what should I resume
 > from". Resume from `resolved_snapshot`; treat `sessions` as the digest.
+
+> **You only see a session's detail if you own it.** Each `sessions[]` entry
+> carries `owned`. It is `true` when your `session_id` paused that snapshot, or
+> when you are sitting in the tmux window that did. For a session you do NOT
+> own, the entry keeps `format`, `paused_at` and `summary` and nothing else —
+> `source_file`, `tmux_window`, `in_progress`, `next_steps` and `git_context`
+> come back null. That is the correct response, not missing data: those fields
+> are what would let you load or restore another session's state, and handing
+> them to any caller reconstructed by hand the cross-session resume #5272
+> removed (#5386). Report an unowned session as "another session paused here"
+> and move on. To read one on purpose, pass ITS `session_id` — the explicit
+> opt-in — and it becomes owned for that call.
 
 > **`resolved_snapshot` belongs to the `session_id` you passed, or to your
 > tmux window — nothing else.** Several sessions share one

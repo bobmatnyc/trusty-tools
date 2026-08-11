@@ -287,7 +287,13 @@ pub(super) fn session_tools() -> Vec<Value> {
              resolves the newest snapshot THIS WINDOW paused in this project \
              instead. `resolved_via` says which answered (`session_id`, \
              `tmux_window`, or null), so do not read a window match as an exact \
-             one.",
+             one. Each entry in `sessions` carries `owned`: true when the \
+             session is attributable to you (your `session_id` paused it, or \
+             you are in the window that did). A session you do not own is \
+             listed with `format`, `paused_at` and `summary` only — its \
+             `source_file`, `tmux_window`, `in_progress`, `next_steps` and \
+             `git_context` are withheld, so the digest cannot hand you the \
+             means to adopt another session's state (#5386).",
             json!({
                 "type": "object",
                 "properties": {
