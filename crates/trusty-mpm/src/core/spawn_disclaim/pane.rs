@@ -186,7 +186,7 @@ mod tests {
     /// in the disclaimed process instead of the shim spawning `claude` directly.
     #[test]
     fn wraps_the_scrubbed_launch_line_with_env_as_the_program() {
-        let line = crate::core::model_inject::build_claude_command(None, None, None);
+        let line = crate::core::model_inject::build_claude_command(None, None, None, &[]);
         let out = disclaim_pane_command_with(Some("/w/tm"), &line);
 
         assert!(

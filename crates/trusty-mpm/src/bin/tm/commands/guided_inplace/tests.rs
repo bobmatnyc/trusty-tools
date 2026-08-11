@@ -683,6 +683,7 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
 /// Test: used by the `inplace_exec_command_*` cases below.
 fn synthetic_resume(args: &[&str]) -> trusty_mpm::runtime::InPlaceResumeCommand {
     trusty_mpm::runtime::InPlaceResumeCommand {
+        mcp_env: Vec::new(),
         claude_bin: "/fake/bin/claude".to_owned(),
         args: args.iter().map(|s| (*s).to_owned()).collect(),
         config_dir: Some(std::path::PathBuf::from("/fake/config")),

@@ -71,8 +71,6 @@
 
 use std::path::Path;
 
-use crate::core::mcp_config::managed_mcp_server_names;
-
 /// The exact set of keys [`preseed_managed_trust`] itself writes into a
 /// `projects.<workspace>` entry.
 ///
@@ -174,66 +172,49 @@ fn prune_stale_project_entries(
     before - projects.len()
 }
 
-/// Pre-seed project trust and MCP-server approval into `<claude_config_dir>/.claude.json`.
+/// Pre-seed project trust into `<claude_config_dir>/.claude.json`, and strip any
+/// MCP approval a prior version left behind.
 ///
-/// Why (WI-3 sub-parts 2+3): Claude Code shows two blocking dialogs for unfamiliar
-/// projects — (1) "Do you trust the files in this folder?" and (2) "New MCP servers
-/// found". Both are keyed to the absolute workspace path under
-/// `projects.<workspace>` in `$CLAUDE_CONFIG_DIR/.claude.json`. Writing the trust
-/// keys before launch means managed sessions start immediately without any dialog.
+/// Why (WI-3 sub-part 2): Claude Code blocks an unfamiliar project on "Do you
+/// trust the files in this folder?", keyed to the absolute workspace path under
+/// `projects.<workspace>`. Writing the trust keys before launch means managed
+/// sessions start immediately without that dialog.
 ///
 /// ISOLATION: writes ONLY to `<claude_config_dir>/.claude.json` — never to
 /// `$HOME/.claude.json` or anything under `~/.claude/`. This is the central
 /// isolation invariant for the managed driver (WI-7 support).
 ///
-/// What: reads `<claude_config_dir>/.claude.json` (starts from `{}` when absent;
-/// when the file exists but contains malformed JSON the corrupt file is renamed
-/// to `.claude.json.corrupt` (preserving bytes for post-mortem) and seeding
-/// proceeds from a fresh `{}`), then ensures `projects.<workspace>` carries
-/// `hasTrustDialogAccepted: true`, `hasCompletedProjectOnboarding: true`,
-/// `projectOnboardingSeenCount: 1` (if not already ≥ 1), and
-/// `enabledMcpjsonServers` set to
-/// [`crate::core::mcp_config::managed_mcp_server_names`]`(&config, trusty_mpm_pinned, trusty_review_pinned, trusty_memory_pinned, trusty_search_pinned)`
-/// — the two unconditional builtins and the two conditional builtins, EACH
-/// gated by the caller-supplied per-name pin result, UNION the `tm mcp add`
-/// registry (see that function's doc for why raw `.mcp.json` content is
-/// deliberately excluded, issue #3918 follow-up). Note this list does NOT
-/// read `workspace`'s own `.mcp.json` or require `session_launch::prepare_session`
-/// to have run for it — `workspace` is used only as the
-/// `projects.<workspace>` trust key.
+/// **#4181 / ADR-0042 — why `enabledMcpjsonServers` is REMOVED, not merely left
+/// unwritten.** The approval is name-based and content-blind, and an approved
+/// name makes the workspace `.mcp.json` entry of that name WIN over the
+/// operator's own user-scope declaration — measured, and the whole hinge of the
+/// #3918→#3950 name-squatting chain. tm no longer writes MCP config into a
+/// workspace, so it approves no project-scope name either, and a repo's
+/// colliding entry falls through to Claude Code's own consent dialog. Ceasing to
+/// write would leave the key on every machine a prior tm launched, keeping the
+/// displacement alive exactly where a cloned repo could reach it.
 ///
-/// **`trusty_mpm_pinned` / `trusty_review_pinned` / `trusty_memory_pinned` /
-/// `trusty_search_pinned` (issues #3934/#3950):** each MUST reflect whether
-/// that name's force-overwrite injector actually SUCCEEDED writing the
-/// framework-controlled entry for `workspace` this run — not merely that its
-/// manifest toggle (where one exists) was on. Passing a hardcoded
-/// `true, true, true, true` reopens the exact vulnerability these parameters
-/// close: a manifest that disabled a conditional injector, OR a write that
-/// failed for any of the four (disk full, permission error, transient I/O
-/// fault — issue #3950, the fifth instance of this class), would then have
-/// its (possibly attacker-spoofed) `.mcp.json` entry pre-approved anyway.
-/// [`super::load::load_alias`] derives all four from the
-/// [`crate::core::session_launch::PrepReport`] the SAME run's
-/// `prepare_session_with_repo_url` call already produced, rather than
-/// re-deriving from the manifest toggle alone.
-/// Writes back pretty-printed; idempotent: if all fields already match, the
-/// file is NOT rewritten. All other keys in the file are preserved.
+/// This also closes the widening #5398 shipped on the owner's explicit
+/// understanding that this change removes the mechanism: this seeder applied no
+/// `project_scope_mcp_names` subtraction (#2739), so a repo `[mcp.custom]` name
+/// colliding with an operator registry name was pre-approved on `tm launch` /
+/// `tm connect`. With no approval written, there is nothing to collide with.
+///
+/// What: reads `<claude_config_dir>/.claude.json` (starts from `{}` when absent;
+/// a malformed file is quarantined to a timestamped path — #4206 — and seeding
+/// proceeds from a fresh `{}`), then ensures `projects.<workspace>` carries
+/// `hasTrustDialogAccepted: true`, `hasCompletedProjectOnboarding: true` and
+/// `projectOnboardingSeenCount >= 1`, and REMOVES `enabledMcpjsonServers`.
+/// `workspace` is used only as the `projects.<workspace>` key — this never reads
+/// the workspace's own `.mcp.json`. Writes back atomically; idempotent once the
+/// entry is trusted and the approval key is gone. All other keys are preserved.
 /// Test: `test_preseed_managed_trust_marks_directory`,
 ///   `test_preseed_managed_trust_is_idempotent`,
-///   `test_preseed_managed_trust_enables_mcp_servers`,
+///   `test_preseed_managed_trust_writes_no_mcp_approval`,
+///   `test_preseed_managed_trust_strips_a_stale_mcp_approval`,
 ///   `test_preseed_managed_trust_no_home_write`,
-///   `test_preseed_managed_trust_quarantines_malformed_json`,
-///   `test_preseed_managed_trust_excludes_conditional_builtin_when_toggle_off`,
-///   `test_preseed_managed_trust_excludes_unconditional_builtin_when_pin_failed`
-///   (issue #3950 regression).
-pub fn preseed_managed_trust(
-    claude_config_dir: &Path,
-    workspace: &Path,
-    trusty_mpm_pinned: bool,
-    trusty_review_pinned: bool,
-    trusty_memory_pinned: bool,
-    trusty_search_pinned: bool,
-) -> anyhow::Result<()> {
+///   `test_preseed_managed_trust_quarantines_malformed_json`.
+pub fn preseed_managed_trust(claude_config_dir: &Path, workspace: &Path) -> anyhow::Result<()> {
     use serde_json::Value;
 
     let claude_json = claude_config_dir.join(".claude.json");
@@ -299,30 +280,6 @@ pub fn preseed_managed_trust(
 
     let workspace_key = workspace.to_string_lossy().to_string();
 
-    // Build the expected enabledMcpjsonServers list from the two
-    // unconditional framework builtins and the two conditional builtins,
-    // EACH gated by whether its injector actually pinned the entry this run
-    // (issues #3934/#3950), UNION the operator's own `tm mcp add` registry —
-    // computed from the immutable config BEFORE the mutable navigation below
-    // borrows it. Deliberately NOT derived from `workspace`'s own
-    // `.mcp.json` — see the module doc's security note (issue #3918
-    // follow-up): that file is git-tracked content that arrives with a
-    // cloned repo, and auto-approving whatever it declares would let a
-    // hostile clone smuggle an arbitrary MCP server into a daemon-managed
-    // session with no human present to decline it.
-    let enabled_mcp = Value::Array(
-        managed_mcp_server_names(
-            &config,
-            trusty_mpm_pinned,
-            trusty_review_pinned,
-            trusty_memory_pinned,
-            trusty_search_pinned,
-        )
-        .into_iter()
-        .map(Value::String)
-        .collect(),
-    );
-
     // Navigate to (or create) projects.<workspace>.
     let projects = config
         .as_object_mut()
@@ -372,7 +329,7 @@ pub fn preseed_managed_trust(
             .get("projectOnboardingSeenCount")
             .and_then(|v| v.as_i64())
             .is_some_and(|n| n >= 1)
-        && entry.get("enabledMcpjsonServers") == Some(&enabled_mcp);
+        && !entry.contains_key("enabledMcpjsonServers");
     if already_seeded {
         return Ok(());
     }
@@ -387,7 +344,9 @@ pub fn preseed_managed_trust(
     entry
         .entry("projectOnboardingSeenCount")
         .or_insert_with(|| Value::from(1));
-    entry.insert("enabledMcpjsonServers".to_string(), enabled_mcp);
+    // #4181: drop the project-scope MCP approval, on this run and on every
+    // machine a prior version already seeded.
+    entry.remove("enabledMcpjsonServers");
 
     // Use atomic write so a crash mid-write never produces a torn .claude.json
     // (which may hold OAuth state). `write_json_atomic` also creates parent

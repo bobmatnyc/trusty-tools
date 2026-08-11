@@ -108,7 +108,8 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
     let config_dir = std::path::PathBuf::from(PROBE_CONFIG_DIR);
 
     // Shell-string builders: parse the `-u` operands out of the `env` prefix.
-    let prefix = crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN));
+    let prefix =
+        crate::runtime::env_bin_prefix("claude", Some(&config_dir), Some(PROBE_TOKEN), &[]);
     // #4181: probe the RELOCATED shape — `tm launch` / `tm connect` now emit
     // `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN` assignments, so this
     // must read a line that carries both or it stops covering the real spawn.
@@ -118,6 +119,7 @@ fn launch_lines() -> Vec<(&'static str, Vec<String>)> {
         None,
         Some(&config_dir),
         Some(PROBE_TOKEN),
+        &[],
     );
     let relaunch_line = crate::daemon::spawn_command::relaunch_command();
     // #4467 round 2: the two launch lines the anti-drift scan found uncovered.

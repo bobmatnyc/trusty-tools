@@ -1,7 +1,7 @@
 # 0042. MCP configuration is static and persistent — the declaration lives once in user scope, and nothing injects it into a workspace
 
-- **Status:** Proposed
-- **Date:** 2026-08-10
+- **Status:** Accepted
+- **Date:** 2026-08-10 (accepted 2026-08-11)
 - **Scope:** crate `trusty-mpm` (`core/session_launch/{settings,native_mcp,custom_mcp,search_index,mod}.rs`, `core/mcp_config.rs`, `core/standalone/{global_config,trust_seed}.rs`, `bin/tm/commands/mcp.rs`); crate `trusty-search` (the `serve --index` pin, which is the one declaration that cannot be shared as written)
 - **Reversibility Cost:** Medium — the deletion itself is cheap and mechanical, but it removes the mechanism that currently pins MCP *content* behind a pre-approved *name*, so restoring the old shape after the fact means re-deriving the whole #3918 → #3924 → #3926 → #3934 → #3950 chain of security fixes rather than reverting one commit
 - **Decision Drivers:** owner ruling 2026-08-10 (verbatim below); issue [#4181](https://github.com/bobmatnyc/trusty-tools/issues/4181), which gates the `tm 1.3.6` milestone and is what currently blocks the owner from using trusty-mpm at all; live measurement showing that workspace-scope declaration is what creates Claude Code's approval gate while user-scope declaration does not; the standing preference for deleting a mechanism over hardening it
@@ -110,7 +110,13 @@ Concretely:
 
    Adding the wrap would put a second writer on the one map this ADR makes authoritative, which the "common entry point" rule in `CLAUDE.md` treats as a defect rather than a convenience. An operator wanting `claude mcp add` can still run it directly — it writes the same file.
 
-6. **The interactive launch paths must relocate `CLAUDE_CONFIG_DIR` before the injectors are deleted.** `tm launch` and `tm connect` currently spawn `claude --setting-sources project,local` and do not relocate, which under a user-scope-only declaration leaves them with no MCP servers at all. This is the one measurement that resolved against the shape as first drafted; the evidence and the two candidate remedies are in Consequences under "The interactive launch paths do not load user scope". It is a precondition of the deletion, not a follow-up to it.
+6. **The interactive launch paths relocate `CLAUDE_CONFIG_DIR`.** `tm launch`
+   and `tm connect` used to spawn `claude --setting-sources project,local` and
+   not relocate, which under a user-scope-only declaration leaves them with no
+   MCP servers at all. Shipped in #5398 (PR B): both paths now relocate to
+   `managed_claude_config_dir()`, pass `--setting-sources user,project,local`,
+   call `ensure_managed_config_dir`, and mirror the OAuth token. Open question 1
+   is resolved with it — see Q4 below.
 
 ## Consequences
 
@@ -165,16 +171,30 @@ The property becomes structural rather than procedural: today safety depends on 
 
 Residual risk this accepts: user-scope `mcpServers` entries connect with no approval prompt, so `tm mcp add` becomes the single operator trust decision for MCP. That is already true today for the five non-trusty servers on this machine, and it is operator-initiated by construction — a cloned repo cannot reach that file.
 
-### `trusty-search` is the one declaration that cannot be shared as written
+### `trusty-search` needed no change — the precondition this ADR asserted was false
 
-`trusty_search_mcp_value` bakes the index pin as a positional argument, `["serve", "--index", "<id>"]` ([`search_index.rs:40-53`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/core/session_launch/search_index.rs#L40-L53)), so a single shared declaration cannot carry a per-project value. The fix is smaller than "add an env fallback," because a fallback partly exists already and is shadowed:
+This section originally claimed a `trusty-search` change was a precondition of
+the deletion: `trusty_search_mcp_value` baked the index pin as a positional
+argument, `Serve` declared its own `index` field with no `env`, and the `Serve`
+arm never consulted `cli.index`, so `TRUSTY_INDEX` was "already parsed and
+already ignored by exactly the one code path that needs it."
 
-- `trusty-search`'s **global** CLI flag already carries one: `#[arg(short = 'i', long, global = true, env = "TRUSTY_INDEX")]` at [`main.rs:49-50`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-search/src/main.rs#L49-L50).
-- The `Serve` subcommand declares its **own** `index` field with a bare `#[arg(long)]` and no `env` at [`main.rs:591-592`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-search/src/main.rs#L591-L592), and the `Serve` arm resolves the pin from that field alone, never consulting `cli.index` ([`main.rs:1414-1432`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-search/src/main.rs#L1414-L1432)). Every other subcommand reads `cli.index`.
+**That was wrong at implementation time.** `trusty-search serve` already honours
+`TRUSTY_INDEX` (#5394, PR A), so no per-project pin work was needed in
+`trusty-search` at all and the cross-crate rung-4 gate this section demanded does
+not apply. What remained was entirely on the trusty-mpm side: exporting the
+variable. `core::mcp_session_env::session_mcp_env` builds it from
+`register_project_index`'s confirmed id, gated on the same `[mcp] trusty_search`
+toggle that used to gate the injector, and every spawn path emits it —
+`env_bin_prefix` for the tmux panes, `build_claude_command_with` for
+`tm launch` / `tm connect`, and `InPlaceResumeCommand.mcp_env` for the bare-`tm`
+in-pane relaunch. `TRUSTY_MEMORY_PALACE` rides the same carrier, derived from
+`session_launch::resolve_palace_slug` — the function that outlived the memory
+injector it was written for.
 
-So `TRUSTY_INDEX` is already parsed and already ignored by exactly the one code path that needs it. Making the `Serve` arm fall back to `cli.index` (or adding `env = "TRUSTY_INDEX"` to the subcommand field) is a small diff, but it is still a `trusty-search` change that trusty-mpm's launch path then depends on — a cross-crate contract, **rung 4** of the test ladder, with `cargo check --workspace` plus `cargo test -p trusty-mpm`. It is not free and it is not optional: without it, the argless `trusty-search` declaration loses index pinning and #1373's wrong-index regression returns.
-
-The environment variable itself must be exported by the spawn. `spawn_command` ([`claude_code.rs:303`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/runtime/claude_code.rs#L303)) exports no per-project MCP variables today — [`env_bin_prefix`](https://github.com/bobmatnyc/trusty-tools/blob/364aba420214d8191408e54b024bcc5874a2d66a/crates/trusty-mpm/src/runtime/claude_code.rs#L197) sets `CLAUDE_CONFIG_DIR` and an OAuth token and scrubs inherited markers, nothing more. `TRUSTY_MEMORY_PALACE` reaches trusty-memory today only through the injected `.mcp.json` `env` block, and `TRUSTY_SEARCH_INDEX` does not exist anywhere in the workspace. Both exports are new work this ADR proposes, not existing behaviour.
+#1373's wrong-index regression and #1605's wrong-palace regression are therefore
+preserved by an environment variable rather than an injected argument, which is
+what item 4 of the Decision proposed.
 
 ### The environment carrier works — measured end to end
 
@@ -233,13 +253,20 @@ The two halves of this finding were established differently, and the distinction
 
 ## Open questions
 
-The six questions this ADR opened were investigated on 2026-08-10; five resolved and moved into Context, the Decision, or Consequences above. What is left is genuinely unsettled, and is stated here rather than guessed at.
+The six questions this ADR opened were investigated on 2026-08-10; five resolved and moved into Context, the Decision, or Consequences above. Q4 (which remedy the interactive launch paths take) resolved at implementation and is recorded below. What is left is genuinely unsettled.
 
-1. **Which remedy the interactive launch paths take.** That `tm launch` and `tm connect` lose MCP entirely under a user-scope-only declaration is settled. The fix is not: relocate `CLAUDE_CONFIG_DIR` and reuse `setting_sources_flag`, or switch those paths to `user,project,local` without relocating and accept the #1269 isolation loss. This is a design choice for the owner, not a fact to measure.
+**Q4, resolved (#5398).** The interactive paths RELOCATE `CLAUDE_CONFIG_DIR` and
+let `setting_sources_flag` pick `user,project,local` — the first of the two
+candidate remedies. The rejected alternative was adding `user` to
+`--setting-sources` while still reading the operator's real `~/.claude`, which
+re-admits the global settings tier #1269 excluded on purpose. Relocation
+preserves that isolation by the same mechanism #4451 used on the daemon path, so
+the tier contract stays single-sourced through `setting_sources_flag` rather than
+forking into two.
 
-2. **Whether palace-alias resolution still applies to an overridden slug.** `cwd_palace_slug_at` returns a set `TRUSTY_MEMORY_PALACE` immediately, ahead of the pin file and the git derivation. Whether `PalaceAliasStore` resolution then still runs against that slug downstream — which decides if an aliased palace keeps resolving once the pin moves from the `.mcp.json` `env` block to a spawn variable — was not traced to a conclusion. It affects #1939 parity, not the declaration model.
+1. **Whether palace-alias resolution still applies to an overridden slug.** `cwd_palace_slug_at` returns a set `TRUSTY_MEMORY_PALACE` immediately, ahead of the pin file and the git derivation. Whether `PalaceAliasStore` resolution then still runs against that slug downstream — which decides if an aliased palace keeps resolving once the pin moves from the `.mcp.json` `env` block to a spawn variable — was not traced to a conclusion. It affects #1939 parity, not the declaration model.
 
-3. **What to do about `.mcp.json` files already written above a workspace.** Discovery walks up from cwd, so a stale ancestor file keeps contaminating sessions after the injectors are gone; `/private/tmp/.mcp.json` is a live example on this machine. Deleting the write path does not delete what it already wrote, and nothing in this ADR cleans up. Whether that needs a `tm doctor` check, a one-shot cleanup, or nothing at all is unaddressed.
+2. **What to do about `.mcp.json` files already written above a workspace.** Discovery walks up from cwd, so a stale ancestor file keeps contaminating sessions after the injectors are gone; `/private/tmp/.mcp.json` is a live example on this machine. Deleting the write path does not delete what it already wrote, and nothing here cleans up. The implementation deliberately keeps `mcp_provenance`'s READ side and `tm doctor`'s stray sweep — only `record_write_best_effort`'s call site went with the injectors — so a follow-up has a ledger to work from. Whether that becomes a `tm doctor` check, a one-shot cleanup, or nothing at all is unaddressed.
 
 A related note, not a question: the same tree walk means any directory above a workspace is a place a `.mcp.json` can be planted. On a shared machine `/tmp` is the obvious one. The user-scope declaration this ADR adopts is unaffected — it is not reached by the walk — but the residual risk in the security section covers only cloned repos, and this widens the surface it should be read against.
 
@@ -265,6 +292,7 @@ No conflicts found. No prior ADR is superseded or amended.
 - Consent-gate design for project-scope entries: #2739.
 - Index-pin regression this must preserve: #1373.
 - `CLAUDE_CONFIG_DIR` relocation that invalidated the bridge's premise: #4451.
-- All source citations above are pinned to `364aba420214d8191408e54b024bcc5874a2d66a`, the `origin/main` tip at the time of writing.
+- All source citations above are pinned to `364aba420214d8191408e54b024bcc5874a2d66a`, the `origin/main` tip at the time of writing; the code they name is deleted by the implementation, so they read as history.
+- Implemented in three PRs: #5394 (A — `trusty-search serve` honours `TRUSTY_INDEX`), #5398 (B — the interactive paths relocate `CLAUDE_CONFIG_DIR`), #5406 (C1 — `seed_builtin_servers` seeds user scope), and the deletion itself (C2), which removes the injectors and the `enabledMcpjsonServers` approval together.
 - Measurements dated 2026-08-10 were run against `claude` 2.1.226 using a stub stdio MCP server that recorded its `argv`, `cwd`, and environment before completing a handshake, so each result reflects an observed spawn. Every run used a throwaway `CLAUDE_CONFIG_DIR` and a throwaway cwd; the operator's configuration was neither read nor written, and no daemon was restarted. What each one settled is stated where it is used: `.mcp.json` discovery in Context; precedence and environment inheritance in Consequences; the `--setting-sources` behaviour under "The interactive launch paths do not load user scope".
 - Palace-alias healing whose only call site the deletion removes: #1939.

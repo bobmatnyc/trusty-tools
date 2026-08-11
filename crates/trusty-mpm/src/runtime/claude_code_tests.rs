@@ -73,6 +73,7 @@ fn spawn_command_contains_env_scrub() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("env -u ANTHROPIC_API_KEY"),
@@ -100,6 +101,7 @@ fn spawn_command_exports_managed_session_id() {
         None,
         None,
         None,
+        &[],
     );
     let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
     // #2250: the command now starts with `cd <workdir> && { ...` — the
@@ -135,6 +137,7 @@ fn spawn_command_sets_claude_config_dir() {
         None,
         None,
         None,
+        &[],
     );
     // #4467 inserted the inherited-marker `-u` flags between the API-key scrub
     // and the assignment; both must still precede the first NAME=VALUE per POSIX
@@ -177,6 +180,7 @@ fn spawn_command_loads_the_user_tier_only_when_config_dir_is_relocated() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         relocated.contains("--setting-sources user,project,local"),
@@ -191,6 +195,7 @@ fn spawn_command_loads_the_user_tier_only_when_config_dir_is_relocated() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         ambient.contains("--setting-sources project,local"),
@@ -219,6 +224,7 @@ fn resume_command_loads_the_user_tier_when_config_dir_is_relocated() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("--setting-sources user,project,local"),
@@ -244,6 +250,7 @@ fn env_bin_prefix_orders_unset_flag_before_config_dir_assignment() {
         None,
         None,
         None,
+        &[],
     );
     let u_pos = cmd
         .find("-u ANTHROPIC_API_KEY")
@@ -271,6 +278,7 @@ fn spawn_command_without_config_dir_omits_it() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         !cmd.contains("CLAUDE_CONFIG_DIR"),
@@ -290,6 +298,7 @@ fn spawn_command_sets_oauth_token_when_available() {
         None,
         Some("sk-ant-oat01-fake-token"),
         None,
+        &[],
     );
     assert!(
         cmd.contains("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-fake-token'"),
@@ -312,6 +321,7 @@ fn spawn_command_omits_oauth_token_when_absent() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         !cmd.contains("CLAUDE_CODE_OAUTH_TOKEN"),
@@ -337,6 +347,7 @@ fn spawn_command_without_token_pins_the_exact_command() {
         None,
         None,
         None,
+        &[],
     );
     let scrub = crate::core::claude_env_scrub::env_unset_flags();
     let expected = format!(
@@ -362,6 +373,7 @@ fn spawn_command_scrubs_inherited_session_markers() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("-u CLAUDE_CODE_CHILD_SESSION"),
@@ -392,6 +404,7 @@ fn resume_command_scrubs_inherited_session_markers() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("-u CLAUDE_CODE_CHILD_SESSION"),
@@ -418,6 +431,7 @@ fn spawn_command_keeps_config_dir_out_of_the_scrub() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         !cmd.contains("-u CLAUDE_CONFIG_DIR"),
@@ -435,7 +449,7 @@ fn env_bin_prefix_orders_scrub_flags_before_assignments() {
     // appearing after an assignment is exec'd as a command
     // (`env: -u: No such file or directory`) and kills every managed spawn.
     let dir = Path::new("/tm/config");
-    let prefix = env_bin_prefix("/abs/claude", Some(dir), Some("tok"));
+    let prefix = env_bin_prefix("/abs/claude", Some(dir), Some("tok"), &[]);
     let last_unset = prefix
         .rfind("-u ")
         .expect("prefix must contain at least one -u flag");
@@ -471,6 +485,7 @@ fn spawn_command_sets_both_config_dir_and_oauth_token() {
         None,
         Some("sk-ant-oat01-fake-token"),
         None,
+        &[],
     );
     // #4467 inserted the inherited-marker `-u` flags between the API-key scrub
     // and the assignments, so the assignment run is matched on its own.
@@ -499,6 +514,7 @@ fn resume_command_sets_oauth_token_when_available() {
         None,
         Some("sk-ant-oat01-fake-token"),
         None,
+        &[],
     );
     assert!(
         cmd.contains("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-fake-token'"),
@@ -522,6 +538,7 @@ fn resume_command_omits_oauth_token_when_absent() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         !cmd.contains("CLAUDE_CODE_OAUTH_TOKEN"),
@@ -544,6 +561,7 @@ fn resume_command_without_token_pins_the_exact_command() {
         None,
         None,
         None,
+        &[],
     );
     let scrub = crate::core::claude_env_scrub::env_unset_flags();
     let expected = format!(
@@ -572,6 +590,7 @@ fn env_bin_prefix_quotes_config_dir_with_space() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains(
@@ -595,6 +614,7 @@ fn env_bin_prefix_quotes_config_dir_with_space() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         resume
@@ -628,6 +648,7 @@ fn spawn_command_contains_isolation_flags() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("--setting-sources project,local"),
@@ -657,6 +678,7 @@ fn spawn_command_uses_resolved_binary() {
         None,
         None,
         None,
+        &[],
     );
     // This test owns BINARY RESOLUTION, so it must not couple to the marker
     // list's contents or order. Matching the bare path (space-delimited on both
@@ -847,6 +869,7 @@ fn spawn_command_with_prompt_file_contains_flag() {
         Some(path),
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("--append-system-prompt-file '/tmp/trusty-mpm-system-prompt-test.txt'"),
@@ -870,6 +893,7 @@ fn spawn_command_without_prompt_file_omits_flag() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         !cmd.contains("--append-system-prompt-file"),
@@ -979,6 +1003,7 @@ fn resume_command_with_id_uses_resume_flag() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("--resume abc-123"),
@@ -1010,6 +1035,7 @@ fn resume_command_exports_managed_session_id() {
         None,
         None,
         None,
+        &[],
     );
     let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
     // #2250: the command now starts with `cd <workdir> && { ...` — the
@@ -1045,6 +1071,7 @@ fn resume_command_sets_claude_config_dir() {
         None,
         None,
         None,
+        &[],
     );
     // #4467 inserted the inherited-marker `-u` flags before the assignment.
     assert!(
@@ -1076,6 +1103,7 @@ fn resume_command_without_id_with_prior_conv_uses_continue() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("--continue"),
@@ -1102,6 +1130,7 @@ fn resume_command_without_id_no_prior_conv_uses_plain_spawn() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         !cmd.contains("--continue"),
@@ -1536,9 +1565,9 @@ fn spawn_resume_without_id_no_prior_conv_sends_plain_spawn() {
     // workspace has no prior conversation, spawn_resume must send a plain spawn
     // (no --continue, no --resume) to avoid "No conversation found to continue".
     //
-    // The command construction is tested via resume_command() directly with a fake
+    // The command construction is tested via resume_command(, &[]) directly with a fake
     // binary so assertions ALWAYS run even when the `claude` binary is absent in CI.
-    // The adapter merely calls resume_command() with the same arguments; testing the
+    // The adapter merely calls resume_command(, &[]) with the same arguments; testing the
     // function directly proves the selection logic without CI depending on claude.
     let cmd = resume_command(
         Path::new(TEST_CWD),
@@ -1550,6 +1579,7 @@ fn spawn_resume_without_id_no_prior_conv_sends_plain_spawn() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         !cmd.contains("--continue"),
@@ -1614,6 +1644,7 @@ fn spawn_command_prefixes_cd_to_workdir() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.starts_with("cd '/tmp/ws' && { "),
@@ -1640,6 +1671,7 @@ fn resume_command_prefixes_cd_to_workdir() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.starts_with("cd '/tmp/ws' && { "),
@@ -1673,6 +1705,7 @@ fn spawn_command_prints_relaunch_hint_after_claude_exits() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
@@ -1700,6 +1733,7 @@ fn resume_command_prints_relaunch_hint_after_claude_exits() {
         None,
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
@@ -1729,6 +1763,7 @@ fn resume_command_with_prompt_file_contains_flag() {
         Some(path),
         None,
         None,
+        &[],
     );
     assert!(
         cmd.contains("--append-system-prompt-file '/tmp/trusty-mpm-system-prompt-resume-test.txt'"),
@@ -1976,194 +2011,6 @@ fn build_inplace_resume_command_carries_oauth_token_when_available() {
     );
 }
 
-/// Issue #3950 residual-gap fix, critic follow-up: `prepare_managed_config`
-/// used to trust `trusty-mpm`/`trusty-review` unconditionally and
-/// `trusty-memory`/`trusty-search` off a bare manifest-toggle read — none of
-/// the four reflected whether this run's write actually succeeded. It now
-/// pins all four itself and derives `enabledMcpjsonServers` from their real
-/// `Result`s (mirroring `session_launch::prepare_session_inner`).
-///
-/// Why: this is the complementary non-regression case for
-/// `prepare_managed_config_excludes_builtins_when_mcp_json_write_fails`
-/// below — a normal, unobstructed run must still pin and approve all four,
-/// proving the fix does not over-correct into never trusting them. `HOME` is
-/// redirected (serial) so the managed `<config_dir>/.claude.json` this
-/// exercises is a throwaway tempdir, not the developer's real
-/// `~/.trusty-tools`.
-/// What: calls `prepare_managed_config` directly against a clean `cwd` and
-/// asserts (1) all four canonical entries are written to `cwd/.mcp.json`,
-/// and (2) all four names appear in the resolved config dir's
-/// `.claude.json` `enabledMcpjsonServers` for `cwd`.
-/// Test: itself; `prepare_managed_config_excludes_builtins_when_mcp_json_write_fails`
-/// covers the write-failure regression.
-#[serial_test::serial]
-#[test]
-fn prepare_managed_config_pins_all_builtins_on_success() {
-    let _home = HomeGuard::set();
-    let cwd_root = tempfile::tempdir().expect("tempdir");
-    let cwd = cwd_root.path();
-
-    let config_dir = prepare_managed_config("test-session", cwd)
-        .expect("prepare_managed_config must resolve a config dir under the redirected HOME");
-
-    let mcp: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(cwd.join(".mcp.json"))
-            .expect("prepare_managed_config must write cwd/.mcp.json"),
-    )
-    .expect("cwd/.mcp.json must be valid JSON");
-    for name in [
-        "trusty-mpm",
-        "trusty-review",
-        "trusty-memory",
-        "trusty-search",
-    ] {
-        assert_eq!(
-            mcp["mcpServers"][name]["command"],
-            serde_json::json!(name),
-            "{name} must be pinned to its canonical command on a clean run: {mcp}"
-        );
-    }
-
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(config_dir.join(".claude.json"))
-            .expect("prepare_managed_config must write <config_dir>/.claude.json"),
-    )
-    .expect("<config_dir>/.claude.json must be valid JSON");
-    let key = cwd.to_string_lossy().to_string();
-    let enabled: Vec<&str> = value["projects"][&key]["enabledMcpjsonServers"]
-        .as_array()
-        .expect("enabledMcpjsonServers is an array")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    for name in [
-        "trusty-mpm",
-        "trusty-review",
-        "trusty-memory",
-        "trusty-search",
-    ] {
-        assert!(
-            enabled.contains(&name),
-            "{name} must be approved when its pin succeeds on a clean run: {enabled:?}"
-        );
-    }
-}
-
-/// Issue #4181, code-critic HIGH on PR #5070: the SECOND `.mcp.json` write
-/// site must git-exclude the file too.
-///
-/// Why: `prepare_session_inner` is not the only place the four injectors run.
-/// `prepare_managed_config` re-runs all four on every spawn/resume, and two of
-/// its three callers reach it with no `prepare_session*` anywhere in their
-/// chain — `spawn_resume` (see `claude_code.rs`'s own doc: "NO corresponding
-/// `prepare_session*` call anywhere in its own request chain") and
-/// `build_inplace_resume_command` (`guided_inplace.rs`, "the THIRD entry
-/// point … it calls neither of those two"). Before this fix those paths wrote
-/// a machine-specific `.mcp.json` into a git workspace with no exclusion, so
-/// every resume re-dirtied a tracked file — the exact defect PR #5070 exists
-/// to close, reachable by the two paths it originally missed.
-/// What: `git init`s `cwd`, calls `prepare_managed_config` directly, and
-/// asserts `.git/info/exclude` names `.mcp.json` afterwards. Deliberately
-/// asserts on the exclude file rather than on `git status`, because the point
-/// is that the guard RAN on this path, not that a fresh tempdir happens to be
-/// clean.
-/// Test: itself; the guard's own behavior is pinned by
-/// `core::session_launch::native_mcp_tests::ensure_git_excluded_adds_mcp_json`.
-#[serial_test::serial]
-#[test]
-fn prepare_managed_config_excludes_mcp_json_from_git() {
-    let _home = HomeGuard::set();
-    let cwd_root = tempfile::tempdir().expect("tempdir");
-    let cwd = cwd_root.path();
-    let status = std::process::Command::new("git")
-        .arg("init")
-        .arg("-q")
-        .arg(cwd)
-        .status()
-        .expect("git must be on PATH to run this test");
-    assert!(status.success(), "git init failed");
-
-    prepare_managed_config("test-session", cwd)
-        .expect("prepare_managed_config must resolve a config dir under the redirected HOME");
-
-    let exclude = std::fs::read_to_string(cwd.join(".git").join("info").join("exclude"))
-        .expect("git init must create .git/info/exclude");
-    assert!(
-        exclude.lines().any(|l| l.trim() == ".mcp.json"),
-        "prepare_managed_config must git-exclude .mcp.json before the injectors write it \
-         (#4181) — the resume paths reach this function with no prepare_session; \
-         exclude file was:\n{exclude}"
-    );
-}
-
-/// Issue #3950 residual-gap fix (code-critic HIGH follow-up on PR #3951).
-///
-/// Why: the critic traced every production caller of `RuntimeAdapter::spawn`/
-/// `spawn_resume` and found `resume_managed`/`spawn_resume` reaches
-/// `prepare_managed_config` with ZERO `prepare_session*` call anywhere in
-/// that request's chain (see that function's own doc: "the broader prep
-/// pipeline … is intentionally NOT re-run here") — so the pre-fix hardcoded
-/// `true, true` (unconditional pair) and bare manifest-toggle read
-/// (conditional pair) asserted pinning with NO same-run evidence at all on
-/// the headless resume path, the sharpest case across all five instances of
-/// this vulnerability class. This test forces a REAL write failure — not a
-/// mocked boolean — by making `cwd/.mcp.json` an existing DIRECTORY before
-/// calling `prepare_managed_config`: `settings::inject_mcp_server`'s shared
-/// `std::fs::write` then fails with a genuine IO error (`Is a directory`)
-/// regardless of permission bits, exactly mirroring
-/// `session_launch::tests_mcp_trust_seed_e2e::prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`
-/// and `standalone::load::tests::load_alias_excludes_builtins_from_managed_trust_when_mcp_json_write_fails`
-/// — this is the third and last of the three call sites that derive
-/// `enabledMcpjsonServers` membership, now all covered by the identical
-/// regression shape.
-/// What: asserts none of the four builtin names appear in the resolved
-/// config dir's `.claude.json` `enabledMcpjsonServers` for `cwd` after a
-/// forced write failure — `prepare_managed_config` itself must still
-/// succeed (return `Some(config_dir)`), since a pin failure is non-fatal to
-/// launch.
-/// Test: itself; `prepare_managed_config_pins_all_builtins_on_success`
-/// covers the complementary non-regression case.
-#[serial_test::serial]
-#[test]
-fn prepare_managed_config_excludes_builtins_when_mcp_json_write_fails() {
-    let _home = HomeGuard::set();
-    let cwd_root = tempfile::tempdir().expect("tempdir");
-    let cwd = cwd_root.path();
-    // Force EVERY builtin injector's write to fail: `.mcp.json` is a
-    // directory, not a file — all four share this one file via
-    // `settings::inject_mcp_server`'s read-merge-write helper.
-    std::fs::create_dir_all(cwd.join(".mcp.json")).expect("mkdir .mcp.json");
-
-    let config_dir = prepare_managed_config("test-session", cwd).expect(
-        "prepare_managed_config must still resolve a config dir even when every pin write fails",
-    );
-
-    let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(config_dir.join(".claude.json"))
-            .expect("prepare_managed_config must write <config_dir>/.claude.json"),
-    )
-    .expect("<config_dir>/.claude.json must be valid JSON");
-    let key = cwd.to_string_lossy().to_string();
-    let enabled: Vec<&str> = value["projects"][&key]["enabledMcpjsonServers"]
-        .as_array()
-        .expect("enabledMcpjsonServers is an array")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    for name in [
-        "trusty-mpm",
-        "trusty-review",
-        "trusty-memory",
-        "trusty-search",
-    ] {
-        assert!(
-            !enabled.contains(&name),
-            "{name} must not be approved when its pin write failed this run \
-             (headless resume path, no human to decline a consent dialog): {enabled:?}"
-        );
-    }
-}
-
 // ─── issue #4206: the trust seed must stay inside the redirected $HOME ────
 
 /// RAII guard that prepends `dir` to `PATH` and restores it on drop.
@@ -2364,4 +2211,70 @@ fn spawn_resume_trust_seed_stays_within_redirected_home() {
         serde_json::Value::Bool(true),
         "the workspace must actually be trust-seeded under the redirected HOME: {text}"
     );
+}
+
+/// // #4181 (ADR-0042): the daemon spawn path writes NO workspace `.mcp.json`
+/// and NO MCP approval.
+///
+/// Why: `prepare_managed_config` was the SECOND injector call site, and the
+/// sharper one — `spawn_resume` and `build_inplace_resume_command` reach it with
+/// no `prepare_session*` anywhere in their chain, so a deletion that only gutted
+/// `prepare_session_inner` would have left every resume still injecting and
+/// still approving. This is the successor to
+/// `prepare_managed_config_pins_all_builtins_on_success` and
+/// `prepare_managed_config_excludes_builtins_when_mcp_json_write_fails`, whose
+/// subject — per-run pin evidence feeding an approval — no longer exists.
+/// What: runs the real function under a redirected `$HOME` and asserts the
+/// workspace gains no `.mcp.json` while the config dir's project entry carries
+/// the trust keys and no `enabledMcpjsonServers`.
+/// Test: itself.
+#[serial_test::serial]
+#[test]
+fn prepare_managed_config_writes_no_mcp_json_and_no_approval() {
+    let _home = HomeGuard::set();
+    let cwd_root = tempfile::tempdir().expect("tempdir");
+    let cwd = cwd_root.path();
+
+    let config_dir = prepare_managed_config("test-session", cwd)
+        .expect("prepare_managed_config must resolve a config dir under the redirected HOME");
+
+    assert!(
+        !cwd.join(".mcp.json").exists(),
+        "the daemon spawn path must not write a workspace .mcp.json"
+    );
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(config_dir.join(".claude.json"))
+            .expect("prepare_managed_config must write <config_dir>/.claude.json"),
+    )
+    .expect("<config_dir>/.claude.json must be valid JSON");
+    let key = cwd.to_string_lossy().to_string();
+    let entry = &value["projects"][&key];
+    assert_eq!(
+        entry["hasTrustDialogAccepted"],
+        serde_json::json!(true),
+        "#1269's trust half still runs: {entry}"
+    );
+    assert!(
+        entry.get("enabledMcpjsonServers").is_none(),
+        "no MCP name may be pre-approved on the daemon path: {entry}"
+    );
+
+    // The four builtins stay reachable — declared once in the user-scope map
+    // `seed_builtin_servers` writes (#5406), which is what the relocated spawn
+    // reads under `--setting-sources user,project,local`.
+    let servers = value["mcpServers"]
+        .as_object()
+        .expect("the user-scope mcpServers map is seeded");
+    for name in [
+        "trusty-mpm",
+        "trusty-review",
+        "trusty-memory",
+        "trusty-search",
+    ] {
+        assert!(
+            servers.contains_key(name),
+            "{name} must be declared in user scope: {servers:?}"
+        );
+    }
 }

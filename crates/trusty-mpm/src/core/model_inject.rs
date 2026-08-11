@@ -273,13 +273,14 @@ pub fn build_claude_command(
     model: Option<&str>,
     prompt_file: Option<&Path>,
     config_dir: Option<&Path>,
+    mcp_env: &[(String, String)],
 ) -> String {
     // #4181: a relocated spawn reads its credentials from a Keychain entry keyed
     // by a hash of CLAUDE_CONFIG_DIR, so it needs the token; a non-relocated one
     // already resolves the operator's own login and must not be handed a token
     // the operator did not ask this path to use (#2246).
     let token = config_dir.and_then(|_| crate::core::oauth_token::resolve_oauth_token());
-    build_claude_command_with(model, prompt_file, config_dir, token.as_deref())
+    build_claude_command_with(model, prompt_file, config_dir, token.as_deref(), mcp_env)
 }
 
 /// Hermetic core of [`build_claude_command`], taking the OAuth token explicitly.
@@ -318,6 +319,7 @@ pub fn build_claude_command_with(
     prompt_file: Option<&Path>,
     config_dir: Option<&Path>,
     oauth_token: Option<&str>,
+    mcp_env: &[(String, String)],
 ) -> String {
     use crate::core::spawn_disclaim::pane::shell_single_quote;
 
@@ -337,6 +339,14 @@ pub fn build_claude_command_with(
         cmd.push_str(crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR);
         cmd.push('=');
         cmd.push_str(&shell_single_quote(token));
+    }
+    // #4181: the per-project MCP pins, in place of the arguments the deleted
+    // `.mcp.json` injectors wrote. See `core::mcp_session_env`.
+    for (name, value) in mcp_env {
+        cmd.push(' ');
+        cmd.push_str(name);
+        cmd.push('=');
+        cmd.push_str(&shell_single_quote(value));
     }
     cmd.push_str(" claude");
     if let Some(m) = model {
@@ -449,7 +459,7 @@ pub fn build_agent_command(
         agent.model.as_deref(),
         explicit,
     );
-    build_claude_command(Some(&model), prompt_file, None)
+    build_claude_command(Some(&model), prompt_file, None, &[])
 }
 
 // ──────────────────────────────────────────────
@@ -479,14 +489,14 @@ mod tests {
     fn claude_command_bare() {
         // No model, no prompt file → the env-scrub head + the isolation flags.
         assert_eq!(
-            build_claude_command(None, None, None),
+            build_claude_command(None, None, None, &[]),
             format!("{} {FLAGS}", head())
         );
     }
 
     #[test]
     fn claude_command_with_model() {
-        let cmd = build_claude_command(Some("claude-opus-4-5"), None, None);
+        let cmd = build_claude_command(Some("claude-opus-4-5"), None, None, &[]);
         assert_eq!(cmd, format!("{} --model claude-opus-4-5 {FLAGS}", head()));
     }
 
@@ -496,7 +506,7 @@ mod tests {
     /// cannot go vacuous if the shared list is emptied.
     #[test]
     fn claude_command_scrubs_inherited_session_markers() {
-        let cmd = build_claude_command(None, None, None);
+        let cmd = build_claude_command(None, None, None, &[]);
         assert!(
             cmd.starts_with("env -u "),
             "the launch line must carry an env scrub prefix: {cmd}"
@@ -538,7 +548,7 @@ mod tests {
     #[test]
     fn claude_command_relocated_never_scrubs_what_it_assigns() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok"));
+        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok"), &[]);
         for name in crate::core::claude_env_scrub::DELIBERATE_SPAWN_ENV {
             assert!(
                 cmd.contains(&format!(" {name}=")),
@@ -557,7 +567,7 @@ mod tests {
     #[test]
     fn claude_command_relocates_the_config_dir() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok-abc"));
+        let cmd = build_claude_command_with(None, None, Some(dir), Some("tok-abc"), &[]);
         assert_eq!(
             cmd,
             format!(
@@ -583,7 +593,7 @@ mod tests {
     #[test]
     fn claude_command_omits_the_oauth_token_when_absent() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), None);
+        let cmd = build_claude_command_with(None, None, Some(dir), None, &[]);
         assert!(
             cmd.contains("CLAUDE_CONFIG_DIR='/tm/claude-config'"),
             "the config dir must still be relocated: {cmd}"
@@ -606,7 +616,7 @@ mod tests {
     #[test]
     fn claude_command_quotes_a_config_dir_with_a_space() {
         let dir = Path::new("/Users/John Doe/.trusty-tools/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), None);
+        let cmd = build_claude_command_with(None, None, Some(dir), None, &[]);
         assert!(
             cmd.contains("CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/claude-config'"),
             "the config dir must be single-quoted: {cmd}"
@@ -625,7 +635,7 @@ mod tests {
     #[test]
     fn claude_command_relocated_isolates_by_relocation_not_exclusion() {
         let dir = Path::new("/tm/claude-config");
-        let cmd = build_claude_command_with(None, None, Some(dir), None);
+        let cmd = build_claude_command_with(None, None, Some(dir), None, &[]);
         assert!(
             cmd.contains("--setting-sources user,project,local"),
             "the relocated line must load the user tier: {cmd}"
@@ -729,7 +739,7 @@ mod tests {
     #[test]
     fn claude_command_with_prompt() {
         let path = Path::new("/tmp/prompt.txt");
-        let cmd = build_claude_command(None, Some(path), None);
+        let cmd = build_claude_command(None, Some(path), None, &[]);
         assert_eq!(
             cmd,
             format!(
@@ -742,7 +752,7 @@ mod tests {
     #[test]
     fn claude_command_with_both() {
         let path = Path::new("/tmp/sys.txt");
-        let cmd = build_claude_command(Some("claude-haiku-4-5"), Some(path), None);
+        let cmd = build_claude_command(Some("claude-haiku-4-5"), Some(path), None, &[]);
         assert_eq!(
             cmd,
             format!(
@@ -761,7 +771,7 @@ mod tests {
         // isolation is proved by
         // `claude_command_relocated_isolates_by_relocation_not_exclusion`, which
         // is the same guarantee reached a different way, not a weaker one.
-        let cmd = build_claude_command(None, None, None);
+        let cmd = build_claude_command(None, None, None, &[]);
         assert!(
             cmd.contains("--setting-sources project,local"),
             "missing setting-sources isolation flag: {cmd}"
@@ -777,7 +787,7 @@ mod tests {
     fn claude_command_includes_permission_mode() {
         // Why: unattended orchestration sessions must not block on permission prompts;
         // bypass-permissions mode is required for fully automated multi-agent workflows.
-        let cmd = build_claude_command(Some("sonnet"), None, None);
+        let cmd = build_claude_command(Some("sonnet"), None, None, &[]);
         assert!(
             cmd.contains("--dangerously-skip-permissions"),
             "missing bypass-permissions flag: {cmd}"

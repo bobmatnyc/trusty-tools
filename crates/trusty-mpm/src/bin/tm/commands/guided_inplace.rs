@@ -666,6 +666,12 @@ pub(crate) fn build_inplace_exec_command(
     if let Some(token) = &resume.oauth_token {
         cmd.env(trusty_mpm::core::oauth_token::OAUTH_TOKEN_ENV_VAR, token);
     }
+    // #4181: the per-project MCP pins. This path execs `claude` directly, so the
+    // `env NAME=VALUE` prefix the tmux-pane paths build does not reach it — the
+    // assignments have to be set on the `Command` instead.
+    for (name, value) in &resume.mcp_env {
+        cmd.env(name, value);
+    }
     cmd
 }
 
