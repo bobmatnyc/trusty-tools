@@ -8,9 +8,10 @@
 //!
 //! What:
 //! - `staging_corpus_path` — the one place the staging path is resolved (#3979).
-//! - `begin_staged_corpus_swap` — open a fresh staging store and optionally
-//!   seed it from the live corpus for an incremental reindex (#839), or ADOPT an
-//!   interrupted run's staging store when resuming (#3979).
+//! - `begin_staged_corpus_swap` — open a fresh staging store, seed it from the
+//!   live corpus for an incremental reindex (#839), always carry the
+//!   contributed graph overlay across (ADR-0009), or ADOPT an interrupted run's
+//!   staging store when resuming (#3979).
 //! - `commit_staged_corpus_swap` — rename staging → live on success, gated on
 //!   the `PromotionRelease` token so the resume checkpoint cannot be left in a
 //!   promoted corpus by reordering the caller's statements (#4721).
@@ -68,12 +69,23 @@ pub(super) fn staging_corpus_path(handle: &IndexHandle, index_id: &IndexId) -> O
 /// writes, copy every row from the LIVE corpus into the fresh staging store
 /// so that hash-skipped (unchanged) files survive the atomic rename.
 ///
+/// The contributed graph overlay (`kg_contrib`) is carried across on BOTH
+/// paths, force included. The rename is the whole mechanism: a table the
+/// staging file does not hold ceases to exist when the swap commits, and
+/// `kg_contrib` is written only by the external `POST /indexes/{id}/graph`
+/// ingest, which a reindex never calls. Leaving it behind on the force path
+/// therefore destroyed data the daemon cannot rebuild while the run reported
+/// `Complete` (ADR-0009 §Decision 1 requires the opposite).
+///
 /// What: when the index has a durable corpus store, opens a fresh
-/// `index.redb.tmp`, conditionally seeds it from the live corpus (when
-/// `!force`), and swaps it onto the indexer. Returns `Ok(Some(path))` on
-/// success; `Ok(None)` when staging is skipped (BM25-only / unresolvable
-/// temp path); `Err(e)` when the live-corpus carryover copy failed for an
-/// incremental reindex — caller MUST abort the reindex immediately.
+/// `index.redb.tmp`, seeds it from the live corpus (whole corpus when
+/// `!force`, contributed overlay always), and swaps it onto the indexer.
+/// Returns `Ok(Some(path))` on success; `Ok(None)` when staging is skipped
+/// (BM25-only / unresolvable temp path) or, on the force path, when staging
+/// could not be opened or seeded — direct-write-to-live performs no rename, so
+/// the live corpus and its contributions stay intact; `Err(e)` when a seeding
+/// copy failed for an incremental reindex — caller MUST abort the reindex
+/// immediately.
 ///
 /// Issue #3979: `resume` is `Some` only when [`super::checkpoint::probe_resume`]
 /// already proved an existing staging corpus adoptable. In that case this
@@ -83,8 +95,10 @@ pub(super) fn staging_corpus_path(handle: &IndexHandle, index_id: &IndexId) -> O
 /// pre-#3979 path, plus a checkpoint record stamped into the fresh staging
 /// corpus so a future interruption is itself resumable.
 /// Test: `incremental_reindex_no_durable_data_loss`,
-/// `incremental_reindex_carryover_failure_aborts`, and
-/// `super::resume_tests::interrupted_reindex_resumes_to_identical_index`.
+/// `incremental_reindex_carryover_failure_aborts`,
+/// `super::resume_tests::interrupted_reindex_resumes_to_identical_index`, and
+/// `super::contrib_survival_tests` for the contributed-overlay carry on both
+/// the force and incremental paths.
 pub(super) async fn begin_staged_corpus_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
@@ -106,17 +120,17 @@ pub(super) async fn begin_staged_corpus_swap(
         if !indexer.has_corpus_store() {
             return Ok(None);
         }
-        // For incremental reindexes we need the live corpus to copy its rows
-        // into the fresh staging store.
-        if !force {
-            indexer.corpus_store()
-        } else {
-            None
-        }
+        // Captured on BOTH paths: an incremental reindex copies the whole live
+        // corpus (#839), and a force reindex — which deliberately starts with
+        // no chunks — still has to carry the contributed overlay across the
+        // swap (ADR-0009), because nothing in the pipeline can regenerate it.
+        indexer.corpus_store()
     };
     // Whether this is an incremental (carryover) reindex — tracked so the
     // error path can distinguish a copy failure from a staging-open failure.
-    let is_incremental_carryover = live_corpus.is_some();
+    // Derived from `force` rather than from `live_corpus`, which is now `Some`
+    // on both paths.
+    let is_incremental_carryover = !force;
     // Issue #403: route tmp corpus path to colocated or legacy storage
     // (extracted to `staging_corpus_path` for #3979 — the resume probe must
     // resolve the identical path).
@@ -133,14 +147,34 @@ pub(super) async fn begin_staged_corpus_swap(
     let staged_result = tokio::task::spawn_blocking(move || {
         let store = crate::core::corpus::CorpusStore::open_fresh(&tmp_for_open)?;
         if let Some(live) = live_corpus {
-            // Copy all durable rows (chunks + entities + file_hashes + _meta)
-            // from the live corpus into the fresh staging store.
-            store.copy_all_from(&live).with_context(|| {
+            if !force {
+                // Copy all durable rows (chunks + entities + file_hashes +
+                // _meta) from the live corpus into the fresh staging store.
+                store.copy_all_from(&live).with_context(|| {
+                    format!(
+                        "reindex[{index_id_str}]: failed to seed staging corpus from live corpus \
+                         — aborting incremental reindex to preserve live corpus integrity"
+                    )
+                })?;
+            }
+            // ADR-0009: the promotion is a rename, so a contribution absent
+            // from staging is destroyed by it — and nothing regenerates
+            // `kg_contrib` the way the chunk rebuild regenerates `kg_nodes` /
+            // `kg_edges`. Unconditional, because force is the path that
+            // otherwise carries nothing at all.
+            let carried = store.copy_contrib_from(&live).with_context(|| {
                 format!(
-                    "reindex[{index_id_str}]: failed to seed staging corpus from live corpus — \
-                     aborting incremental reindex to preserve live corpus integrity"
+                    "reindex[{index_id_str}]: failed to carry the contributed graph overlay into \
+                     the staging corpus — aborting rather than promoting a corpus that would \
+                     silently drop externally-supplied data no reindex can rebuild"
                 )
             })?;
+            if carried > 0 {
+                tracing::info!(
+                    "reindex[{index_id_str}]: carried {carried} contributed graph(s) into the \
+                     staging corpus (ADR-0009)"
+                );
+            }
         }
         Ok::<_, anyhow::Error>(store)
     })
@@ -168,11 +202,15 @@ pub(super) async fn begin_staged_corpus_swap(
                 }
                 return Err(e);
             }
-            // For a force reindex (no carryover), failure to open/populate staging
-            // is non-fatal: fall through to direct-write mode.
+            // For a force reindex (no carryover), failure to open or seed
+            // staging is non-fatal: fall through to direct-write mode. That is
+            // also the safe answer when the contributed-overlay carry is what
+            // failed — direct-write never renames anything over the live
+            // corpus, so its `kg_contrib` rows are exactly where they were.
             tracing::warn!(
-                "staged corpus swap: could not open staging corpus for '{}' ({e}) — \
-                 reindex will write directly to the live corpus",
+                "staged corpus swap: could not open or seed the staging corpus for '{}' ({e}) — \
+                 reindex will write directly to the live corpus, which keeps any contributed \
+                 graph overlay in place",
                 index_id.0
             );
             return Ok(None);

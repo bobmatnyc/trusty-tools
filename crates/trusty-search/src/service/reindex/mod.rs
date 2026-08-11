@@ -213,3 +213,8 @@ mod root_hijack_tests;
 // `root_hijack_tests` is — the 1500-SLOC test-file cap.
 #[cfg(test)]
 mod resume_tests;
+// ADR-0009: contributed graphs must survive a reindex. Driven through
+// `spawn_reindex_awaitable` rather than the rebuild seam — the seam already had
+// passing coverage while the swap silently discarded every contribution.
+#[cfg(test)]
+mod contrib_survival_tests;
