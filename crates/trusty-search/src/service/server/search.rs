@@ -316,28 +316,41 @@ pub(super) async fn unregister_index(
         // Keep the index-count gauge in sync.
         crate::service::metrics::set_index_count(state.registry.list().len());
     }
-    // #3049 round 3: evict WHILE STILL HOLDING the exclusive guard, and drop the
-    // guard last. Eviction is what lets a racing caller — a recreate, or a second
-    // delete — obtain a fresh, uncontended lock for this id, so every destructive
-    // step above must already have run when it happens. Round 2 dropped the guard
-    // first and evicted after, leaving a window in which a second-generation
-    // writer and this teardown were serialised by nothing at all.
+    // #3049 round 4: evicting the IDENTITY primitives is conditional on
+    // `quiesced`, and happens WHILE STILL HOLDING the exclusive guard.
     //
-    // Issue #2984 Phase 1 delta-review MEDIUM finding: `INDEX_LOCKS` (the
-    // per-index reindex/catch-up mutual-exclusion semaphore registry) never
-    // shrinks on its own. Evict this id's entry unconditionally — safe even
-    // if it was never registered (no-op) or a task is still mid-flight on it
-    // (that task holds its own `Arc<Semaphore>` clone, unaffected by removing
-    // the registry entry) — see `remove_index_semaphore`'s doc comment for
-    // the full semantics.
-    crate::service::reindex::remove_index_semaphore(&index_id);
-    // #3049: evict the cancel flag too, or an index recreated under this id
-    // would be born cancelled and abort its first reindex.
+    // Eviction is what hands a racing caller — a recreate, or a second delete —
+    // a fresh, uncontended primitive for this id. That is correct only once no
+    // writer of the previous generation is left running, which is exactly what
+    // `quiesced` means. Round 3 evicted unconditionally, so the
+    // `!quiesced && delete_data=false` branch above (the DEFAULT endpoint
+    // behaviour, reached whenever a writer outlasts the 30s wait) handed the next
+    // caller a lock disconnected from the still-running writer: a later
+    // `?delete_data=true` then found no contention, reported `quiesced: true`,
+    // and removed the directory that writer was writing into. Not evicting leaves
+    // at most one map entry per id behind until the writer stops and a delete
+    // succeeds — a bounded leak, against silent corruption.
+    if quiesced {
+        // Issue #2984 Phase 1 delta-review MEDIUM finding: `INDEX_LOCKS` (the
+        // per-index reindex/catch-up mutual-exclusion semaphore registry) never
+        // shrinks on its own. Safe here even if the id was never registered
+        // (no-op) — see `remove_index_semaphore`'s doc comment.
+        crate::service::reindex::remove_index_semaphore(&index_id);
+        // A writer already parked on the evicted teardown lock re-validates and
+        // retries against the fresh one — see
+        // `reindex::semaphore::acquire_index_teardown_read`.
+        crate::service::reindex::remove_index_teardown_lock(&index_id);
+    }
+    // The cancel flag is evicted on BOTH paths, and the asymmetry is deliberate.
+    // Reaching here at all means the deregistration went through, so the flag's
+    // `true` must keep reaching the in-flight writer — telling a writer of an
+    // index that no longer exists to stop is the outcome we want, and it already
+    // holds its own `Arc`, which eviction does not touch. What eviction adds is
+    // that an index recreated under this id gets a fresh `false` flag instead of
+    // being born cancelled. Contrast the abandon branch above, which
+    // `clear_index_cancel`s the VALUE: there the index stays registered, so the
+    // surviving writer must be told to CONTINUE.
     crate::service::reindex::remove_index_cancel_flag(&index_id);
-    // #3049: and the teardown lock, for the same growth reason. A writer already
-    // parked on the evicted instance re-validates and retries against the fresh
-    // one — see `reindex::semaphore::acquire_index_teardown_read`.
-    crate::service::reindex::remove_index_teardown_lock(&index_id);
     drop(quiesce_permit);
     UnregisterOutcome {
         removed,

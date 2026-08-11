@@ -5,7 +5,3 @@ Fixed
   - a staging file whose pid is ALIVE is left alone. Colocated snapshots sit in the project root outside every data directory, so two daemons can legitimately stage beside the same snapshot; deleting one mid-write is the cross-process corruption #4395 removed. Such a file is consumed by its own process's next successful save, since `staging_path` is deterministic per process
   - the reap is best-effort throughout — an unreadable directory or a failed unlink is logged at `debug` and skipped, never propagated, so a snapshot that loads fine is not refused because a leftover could not be tidied
   - part (b): a real `AbortHandle` abort against a real in-progress `save()`, swept across a spread of delays, now pins the "an aborted flush never reaches its rename" guarantee that was previously asserted only by inspection. The sweep straddles the rename in practice — some delays leave the old snapshot, some the new — and any torn state fails
-
-Changed
-
-- `service::daemon::pid_alive` is now `pub` and is the crate's single implementation. `commands::stop` carried a byte-identical private copy; the new staging reaper would have made a third. `pub` rather than `pub(crate)` because `commands::stop` lives in the binary crate and reaches this through the library's public `service` module. Additive only — no existing signature changed

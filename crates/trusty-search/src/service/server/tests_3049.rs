@@ -608,3 +608,133 @@ fn create_req(id: &str, root_path: std::path::PathBuf) -> super::router::CreateI
         allow_sensitive_path: false,
     }
 }
+
+/// #3049 round 4: a `delete_data=false` delete that TIMES OUT must leave the
+/// still-running writer's teardown lock reachable, so the next delete sees it.
+///
+/// Why: round 3 evicted `INDEX_LOCKS` and `INDEX_TEARDOWN_LOCKS` unconditionally,
+/// including on the `!quiesced && !delete_data` branch — and `delete_data`
+/// defaults to `false`, so that is the DEFAULT endpoint behaviour whenever a
+/// writer outlasts the wait. The eviction handed the next caller a fresh,
+/// uncontended lock disconnected from the live writer, so a subsequent
+/// `?delete_data=true` reported `quiesced: true` and `remove_dir_all`'d the
+/// directory that writer was writing into — the stale-primitive corruption
+/// round 3 fixed for the recreate race, reached through the timeout instead.
+/// `a_writer_parked_across_teardown_is_visible_to_the_next_delete` does not
+/// cover it: its gen-1 writer releases before the wait expires, so its first
+/// delete quiesces and never enters this branch.
+/// What: one writer holds the shared side for the whole test, so BOTH deletes
+/// time out. The index is re-registered between them because the first delete
+/// deregisters it — without that the second delete short-circuits on
+/// `removed=false` and never reaches the removal branch, hiding the data-loss
+/// half of the regression. Against round 3 both assertions trip: the second
+/// delete reports `quiesced: true` and the marker is gone.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn a_timed_out_delete_leaves_the_writers_lock_reachable_to_the_next_delete() {
+    let isolated = IsolatedDataDir::new();
+    const ID: &str = "timeout-evict-3049";
+    let (state, data_dir) = state_with_index(isolated.path(), ID);
+    let marker = data_dir.join("corpus.marker");
+    let index_id = IndexId::new(ID);
+
+    // A writer that never finishes: held across both deletes.
+    let _writer = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
+
+    // First delete: the DEFAULT mode. The wait expires, and round 3 deregistered
+    // and evicted anyway.
+    let first = unregister_index(&state, ID, false).await;
+    assert!(
+        !first.quiesced,
+        "the writer never released, so the first delete must report quiesced=false"
+    );
+    assert!(
+        first.removed,
+        "delete_data=false still deregisters on timeout (issue #4123 semantics)"
+    );
+
+    // The caller re-registers the id — the realistic sequence, and what puts the
+    // second delete on the path that actually removes data.
+    let root_path = isolated.path().join(format!("corpus-root-{ID}"));
+    state.registry.register(IndexHandle::bare(
+        index_id.clone(),
+        Arc::new(RwLock::new(CodeIndexer::new(ID, root_path.clone()))),
+        root_path,
+    ));
+
+    let second = unregister_index(&state, ID, true).await;
+    assert!(
+        !second.quiesced,
+        "the second delete reported quiesced=true while the first writer was STILL \
+         holding the teardown lock — the timed-out delete evicted the lock and handed \
+         this one a fresh, uncontended instance (issue #3049 round 4)"
+    );
+    assert!(
+        !second.data_deleted,
+        "a delete that never quiesced must not report data_deleted=true"
+    );
+    assert!(
+        marker.exists(),
+        "data must survive a delete raced against a writer that outlasted an earlier \
+         delete's quiesce wait; {} is gone",
+        marker.display()
+    );
+}
+
+/// #3049 round 4: a `delete_data=true` racing an in-flight startup schema
+/// migration must be refused, not destroy the corpus mid-migration.
+///
+/// Why: `spawn_index_migrations` runs at every boot, once per registered index,
+/// detached. `M001PerPubConstRust::apply` loops `commit_parsed_batch` over
+/// 64-file batches, so it is a durable writer for its whole run — but it took no
+/// teardown guard, so a delete landing on a still-unmigrated index found the lock
+/// uncontended, reported `quiesced: true`, and `remove_dir_all`'d the directory
+/// mid-commit. It sat outside the hand-derived writer table for three rounds
+/// because it lives in `src/commands`, inside an anonymous `tokio::spawn`.
+/// What: holds the indexer's WRITE lock, which blocks the spawned task inside
+/// `run_migrations` at its first `read_schema_version` — parking it
+/// deterministically while it holds the teardown guard, with no sleep-based
+/// race. The delete must then time out and change nothing. Against the pre-fix
+/// code the `quiesced` assertion trips: the spawned migration held no guard.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn a_delete_cannot_destroy_an_index_mid_migration() {
+    let isolated = IsolatedDataDir::new();
+    const ID: &str = "migration-race-3049";
+    let (state, data_dir) = state_with_index(isolated.path(), ID);
+    let marker = data_dir.join("corpus.marker");
+    let index_id = IndexId::new(ID);
+
+    let handle = state.registry.get(&index_id).expect("registered");
+    // Taken BEFORE the spawn so the migration task cannot get past
+    // `read_schema_version`, which needs the indexer read lock.
+    let indexer_write = Arc::clone(&handle.indexer).write_owned().await;
+
+    crate::core::migration::spawn_index_migrations(&state);
+    // Let the spawned task reach its teardown-guard acquire and then park on the
+    // indexer lock. Only ordering is timed here: the task cannot proceed past the
+    // indexer lock at all while `indexer_write` is alive, so a slow scheduler
+    // delays the assertion rather than changing its outcome.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let outcome = unregister_index(&state, ID, true).await;
+
+    assert!(
+        !outcome.quiesced,
+        "the delete reported quiesced=true while a schema migration was in flight — \
+         the migration task holds no teardown guard, so this delete would have \
+         removed the data directory mid-commit (issue #3049 round 4)"
+    );
+    assert!(
+        !outcome.data_deleted,
+        "a delete that never quiesced must not report data_deleted=true"
+    );
+    assert!(
+        marker.exists(),
+        "the corpus must survive a delete raced against an in-flight migration; {} is gone",
+        marker.display()
+    );
+    drop(indexer_write);
+}
