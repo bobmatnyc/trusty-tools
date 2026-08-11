@@ -108,5 +108,6 @@ the ADR.
 |-----|-------|--------|
 | [0001](./0001-sqlite-tuning.md) | SQLite Tuning Pragmas | Accepted |
 | [0002](./0002-performance-hotspots.md) | Performance Hotspots | Accepted |
+| [0003](./0003-bitbucket-pr-provider.md) | Bitbucket Cloud PR Provider | Accepted |
 
 [nygard]: https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions

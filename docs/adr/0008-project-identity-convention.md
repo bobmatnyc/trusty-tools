@@ -1,13 +1,14 @@
 # 0008. Project-identity convention: full-path slug of the nearest git root
 
-- **Status:** Accepted
+- **Status:** Amended by [0012](0012-per-instance-guid-and-marker-file-identity.md)
 - **Date:** 2026-06-08
 - **Scope:** Workspace-wide (the `trusty-controller`/`tctl` control plane and
   every project-scoped tool it manages — trusty-search, trusty-memory, and any
   future per-project state holder; consumed by the trusty-controller design set
   under `docs/trusty-controller/research/02-design/`, esp. DOC-3 §8, DOC-6
   cross-tool agreement, and DOC-8 auto-config)
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** ADR-0012 amends only point 4's worktree
+  identity rule. All other project-identity rules remain in force.
 
 ## Context
 
