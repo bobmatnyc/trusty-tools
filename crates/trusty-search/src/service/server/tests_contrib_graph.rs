@@ -54,19 +54,35 @@ fn request(producer: &str) -> IngestGraphRequest {
     }
 }
 
-/// Registry with one index backed by a real temp redb corpus.
-fn state_with_corpus(id: &str) -> (tempfile::TempDir, Arc<SearchAppState>) {
+/// Add one index backed by a real temp redb corpus to `registry`, handing back
+/// the corpus itself so a test can plant a fault in it (#5505).
+fn register_index_with_corpus(
+    registry: &IndexRegistry,
+    id: &str,
+) -> (tempfile::TempDir, Arc<CorpusStore>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let corpus = Arc::new(CorpusStore::open(&dir.path().join("corpus.redb")).expect("open corpus"));
     let mut indexer = CodeIndexer::new(id, dir.path().to_str().expect("utf8 path"));
-    indexer.set_corpus_store(corpus);
-    let registry = IndexRegistry::new();
+    indexer.set_corpus_store(Arc::clone(&corpus));
     registry.register(IndexHandle::bare(
         IndexId::new(id),
         Arc::new(RwLock::new(indexer)),
         dir.path().into(),
     ));
-    (dir, Arc::new(SearchAppState::new(registry)))
+    (dir, corpus)
+}
+
+/// Registry with one index backed by a real temp redb corpus, plus its corpus.
+fn state_and_corpus(id: &str) -> (tempfile::TempDir, Arc<CorpusStore>, SearchAppState) {
+    let registry = IndexRegistry::new();
+    let (dir, corpus) = register_index_with_corpus(&registry, id);
+    (dir, corpus, SearchAppState::new(registry))
+}
+
+/// Registry with one index backed by a real temp redb corpus.
+fn state_with_corpus(id: &str) -> (tempfile::TempDir, Arc<SearchAppState>) {
+    let (dir, _corpus, state) = state_and_corpus(id);
+    (dir, Arc::new(state))
 }
 
 fn neighbors_params(
@@ -246,6 +262,149 @@ async fn ingest_without_corpus_503() {
     .await
     .expect_err("must fail");
     assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Why: #5505 — the ingest persisted the contribution, the merge into the
+/// serving graph failed, and the endpoint still answered `200 replaced: true`
+/// with graph totals that excluded the contribution. The caller was told an
+/// ingest succeeded that no query could see.
+/// Test: this test. Fails on the pre-fix commit with the `Ok` arm's panic
+/// (`200`, `graph_nodes = 0`).
+#[tokio::test(flavor = "multi_thread")]
+async fn ingest_reports_503_when_the_contributed_overlay_cannot_be_merged() {
+    let (_dir, corpus, state) = state_and_corpus("contrib-merge-fail");
+    let state = Arc::new(state);
+    // A row from an earlier producer that no longer deserializes: this
+    // ingest's own write still succeeds, the load that follows cannot.
+    crate::core::corpus::test_support::corrupt_contrib_row(&corpus, "stale-producer")
+        .expect("plant corrupt contrib row");
+
+    let (code, Json(body)) = match ingest_graph_handler(
+        State(Arc::clone(&state)),
+        Path("contrib-merge-fail".into()),
+        Json(request("navigatsql")),
+    )
+    .await
+    {
+        Err(e) => e,
+        Ok(Json(resp)) => panic!(
+            "#5505: ingest reported success (replaced={}, graph_nodes={}, graph_edges={}) \
+             while the contribution is absent from the serving graph",
+            resp.replaced, resp.graph_nodes, resp.graph_edges
+        ),
+    };
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "contrib_not_merged");
+    assert_eq!(body["index_id"], "contrib-merge-fail");
+    assert_eq!(body["retryable"], true);
+    assert_eq!(
+        body["persisted"], true,
+        "the contribution IS durable — the caller must not be told to treat it as lost"
+    );
+
+    // Corroboration: the verdict matches what a query can actually see.
+    let Json(neighbors) = graph_neighbors_handler(
+        State(state),
+        Path("contrib-merge-fail".into()),
+        Query(neighbors_params("dbo.orders", Some("in"), None, Some(2))),
+    )
+    .await
+    .expect("neighbors ok");
+    assert_eq!(
+        neighbors["count"], 0,
+        "the contribution really is unqueryable — a 200 would have been a lie"
+    );
+}
+
+/// Why: #5505's lesser arm at the endpoint — a derived-KG persist failure does
+/// NOT make the contribution unqueryable, so the ingest still succeeds. What
+/// was wrong is that the caller never heard about it.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn ingest_succeeds_but_flags_a_derived_kg_persist_failure() {
+    let (_dir, corpus, state) = state_and_corpus("contrib-persist-degraded");
+    crate::core::corpus::test_support::break_kg_nodes_table(&corpus).expect("break kg_nodes");
+
+    let Json(resp) = ingest_graph_handler(
+        State(Arc::new(state)),
+        Path("contrib-persist-degraded".into()),
+        Json(request("navigatsql")),
+    )
+    .await
+    .expect("the contribution is queryable — this is not a 503");
+
+    assert_eq!(resp.graph_nodes, 3, "the merge still ran");
+    let reason = resp
+        .derived_graph_persist_degraded
+        .expect("a silent persist failure is what #5505 is about");
+    assert!(
+        reason.contains("kg persist failed"),
+        "reason must name the failure, got {reason:?}"
+    );
+}
+
+/// Why: the response-contract change is on an HTTP surface, so it owes
+/// evidence over the wire — routing, middleware, status line and serialized
+/// body — not only at the handler function (#5505).
+/// What: serves the real daemon router on a loopback socket and drives
+/// `POST /indexes/{id}/graph` with a real HTTP client against two indexes: one
+/// healthy, one whose contributed overlay cannot be loaded.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn ingest_route_answers_503_over_http_when_the_merge_fails() {
+    let registry = IndexRegistry::new();
+    let (_ok_dir, _ok_corpus) = register_index_with_corpus(&registry, "live-ok");
+    let (_bad_dir, bad_corpus) = register_index_with_corpus(&registry, "live-broken");
+    crate::core::corpus::test_support::corrupt_contrib_row(&bad_corpus, "stale-producer")
+        .expect("plant corrupt contrib row");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    let app = super::build_router(SearchAppState::new(registry));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let payload = serde_json::json!({
+        "schema": "navigatsql/kggraph@1",
+        "producer": "navigatsql",
+        "nodes": [
+            { "id": "dbo.usp_x", "kind": "proc" },
+            { "id": "dbo.orders", "kind": "table" },
+        ],
+        "edges": [{ "from": "dbo.usp_x", "to": "dbo.orders", "kind": "writes" }],
+    });
+    let client = reqwest::Client::new();
+    let post = |id: &str| {
+        client
+            .post(format!("http://{addr}/indexes/{id}/graph"))
+            .json(&payload)
+            .send()
+    };
+
+    // Healthy index: unchanged contract — 200, totals that include the
+    // contribution, and no degraded field.
+    let resp = post("live-ok").await.expect("healthy ingest response");
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["graph_nodes"], 2);
+    assert_eq!(body["graph_edges"], 1);
+    assert!(body.get("derived_graph_persist_degraded").is_none());
+
+    // Unmergeable index: 503, not a 200 whose totals exclude the contribution.
+    let resp = post("live-broken").await.expect("degraded ingest response");
+    assert_eq!(
+        resp.status(),
+        503,
+        "POST /indexes/{{id}}/graph must not answer 200 for an unmerged contribution"
+    );
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"], "contrib_not_merged");
+    assert_eq!(body["index_id"], "live-broken");
+    assert_eq!(body["retryable"], true);
+    assert_eq!(body["persisted"], true);
 }
 
 #[tokio::test]

@@ -29,7 +29,8 @@ use super::CorpusStore;
 /// the ingest contract is replace-per-producer (ADR-0009 + #819 discussion),
 /// so the natural unit of storage is the producer's entire contribution.
 /// Replace = one insert; delete = one remove; load = iterate producers.
-const KG_CONTRIB_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("kg_contrib");
+pub(super) const KG_CONTRIB_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("kg_contrib");
 
 /// One contributed node: extractor-minted canonical identity.
 ///

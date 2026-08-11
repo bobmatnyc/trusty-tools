@@ -16,6 +16,7 @@
 //! | not registered anywhere | `404 unknown index` | no |
 //! | vector lane off by config (#5068) | `503 vector_unavailable` | no |
 //! | vector lane not built yet (#5068) | `503 vector_unavailable` | yes |
+//! | contribution stored, not merged (#5505) | `503 contrib_not_merged` | yes |
 //!
 //! Centralising them means `search`, `index_status`, `chunks`, and `grep` can
 //! never drift into reporting the same daemon state three different ways —
@@ -26,7 +27,9 @@
 //! is the cheap predicate the global fan-out uses to exclude — and then COUNT —
 //! an unserviceable index; [`residency_miss_response`] renders the #5061
 //! not-resident / restore-failed / unknown triple; [`vector_lane_unavailable`]
-//! renders the #5068 semantic-against-a-vector-less-index verdict.
+//! renders the #5068 semantic-against-a-vector-less-index verdict;
+//! [`contrib_not_merged_response`] renders the #5505 stored-but-not-queryable
+//! contributed-graph verdict.
 //!
 //! Test: `service::server::tests_4087` covers [`corpus_failure_response`];
 //! `residency_miss_is_404_only_when_absent_everywhere`,
@@ -247,4 +250,50 @@ pub(super) fn vector_lane_unavailable(
             ),
         })),
     ))
+}
+
+/// Verdict for an ingest whose contribution is durable but not yet merged into
+/// the serving graph (#5505).
+///
+/// Why: `POST /indexes/{id}/graph` answered `200` with `replaced: true` and
+/// post-merge graph totals whenever the merge failed — totals that excluded the
+/// contribution just ingested. The caller was told its ingest succeeded while
+/// every query against it returned incomplete results. A `200` carrying a
+/// `degraded` field would not fix that: existing callers branch on the status,
+/// so the failure would stay invisible to exactly the clients the endpoint
+/// misled.
+///
+/// What: `503`, matching the rest of this module's "registered, but cannot
+/// serve what you asked" family, and `retryable: true` because the next
+/// successful rebuild (a retried ingest, a reindex, a restart) merges the
+/// already-stored contribution with no operator action. `persisted: true` is
+/// the load-bearing field — the data is NOT lost, so a caller must not respond
+/// by re-deriving it; re-sending the same document is a safe retry only
+/// because ingest is replace-per-producer.
+/// Test: `ingest_reports_503_when_the_contributed_overlay_cannot_be_merged`,
+/// `ingest_route_answers_503_over_http_when_the_merge_fails`.
+pub(super) fn contrib_not_merged_response(
+    index_id: &str,
+    producer: &str,
+    replaced: bool,
+    reason: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "contrib_not_merged",
+            "index_id": index_id,
+            "producer": producer,
+            "retryable": true,
+            "persisted": true,
+            "replaced": replaced,
+            "reason": reason,
+            "message": format!(
+                "producer '{producer}' contribution was stored durably in index \
+                 '{index_id}' but could not be merged into the serving graph, so it is \
+                 not queryable yet ({reason}). Retry the ingest or reindex the index; \
+                 the stored contribution is not lost (issue #5505)."
+            ),
+        })),
+    )
 }
