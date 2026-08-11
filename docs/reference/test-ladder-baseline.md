@@ -98,8 +98,9 @@ run to merge.
 
 **Branch protection follows from this.** The CI `Rust tests (pre-publish gate)`
 job is a pre-build / pre-publish gate, not a pre-merge one, and it is not among
-`main`'s required status contexts (`Format check`, `500-line file-size cap`,
-`Clippy`, `trusty-search daemon smoke test`, `MSRV check`). Merges proceed
+`main`'s required status contexts — the authoritative, current list is always
+`gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq
+'.required_status_checks.contexts'`, not a copy enumerated here. Merges proceed
 with `Rust tests (pre-publish gate)` still pending; a **failing** check blocks
 at every stage.
 
