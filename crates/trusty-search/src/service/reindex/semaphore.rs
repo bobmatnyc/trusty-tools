@@ -185,6 +185,91 @@ pub(crate) fn remove_index_semaphore(id: &IndexId) {
     }
 }
 
+/// Process-global registry of per-index teardown locks (issue #3049, round 2).
+///
+/// Why: the first #3049 fix used [`INDEX_LOCKS`] as the quiescence point, on the
+/// premise that every long-running writer holds that permit. Review found the
+/// premise false — `index_file_handler`, `remove_file_handler`,
+/// `ingest_graph_handler`, the filesystem watch loop, boot reconcile, and the
+/// relocate handler all write `handle.indexer` while holding NO permit. A delete
+/// racing any of them acquired the uncontended permit instantly, reported
+/// `quiesced: true`, and `remove_dir_all`'d the directory mid-write. Gating those
+/// six on [`INDEX_LOCKS`] itself was rejected: it is a 1-permit MUTUAL-EXCLUSION
+/// lock, so a single `index-file` call would then block for the entire duration
+/// of a reindex, which is a serialisation regression on the crate's supported
+/// incremental-indexing path.
+///
+/// What: a `DashMap<IndexId, Arc<RwLock<()>>>` used ONLY for teardown
+/// ordering, never for mutual exclusion. Every writer holds the READ side for
+/// the span of its write, so writers stay as concurrent with each other as they
+/// are today; `unregister_index` takes the WRITE side, which is exactly "no
+/// writer of any kind is in flight". Tokio's `RwLock` is write-preferring, so a
+/// pending delete stops admitting new readers instead of starving behind a
+/// stream of short writes.
+///
+/// This does NOT replace [`INDEX_LOCKS`], which keeps its unchanged job of
+/// serialising reindex against deferred-embed against component catch-up.
+///
+/// EVERY path that mutates `handle.indexer` or the index's on-disk data. Derived
+/// by grepping the mutating methods (`index_file`, `remove_file`,
+/// `commit_parsed_batch`, `save_contrib_graph`, `rebuild_symbol_graph_now`,
+/// `embed_deferred_chunks`, `set_root_path`, `clear_*`) across `src/service`.
+/// A new write path must be added to this table AND take the read side:
+///
+/// | Path | Entry point | Guarded by |
+/// |---|---|---|
+/// | `POST /indexes/:id/index-file` | `server::files::index_file_handler` | read side, added #3049 rd2 |
+/// | `POST /indexes/:id/remove-file` | `server::files::remove_file_handler` | read side, added #3049 rd2 |
+/// | `POST /indexes/:id/graph` | `server::contrib_graph::ingest_graph_handler` | read side, added #3049 rd2 |
+/// | `PATCH /indexes/:id` (relocate) | `server::indexes_relocate::relocate_index_handler` | read side, added #3049 rd2 |
+/// | filesystem watcher | `service::watch_loop` | read side, added #3049 rd2 |
+/// | boot reconcile | `service::reconcile` | read side, added #3049 rd2 |
+/// | full reindex | `reindex::runner::run_reindex` | read side, added #3049 rd2 (also holds [`INDEX_LOCKS`]) |
+/// | deferred embed | `reindex::defer_embed_queue` | read side, added #3049 rd2 (also holds [`INDEX_LOCKS`]) |
+/// | `PATCH /indexes/:id/config` | `server::index_config` + `server::components` | read side, added #3049 rd2 (also holds [`INDEX_LOCKS`]) |
+///
+/// Deliberately NOT guarded, with reasons:
+/// - Read-only handlers (`search`, `grep`, `typeahead`, `status`, `chunks`,
+///   `call_chain`, `graph` GETs) never mutate, so a delete racing one costs a
+///   failed read, not corruption.
+/// - `tickers` idle-eviction / memory reclaim and `shutdown_flush` operate on
+///   in-memory caches that are rebuilt from the durable corpus; they write no
+///   corpus bytes.
+/// - `create_index_handler` registers a NEW handle rather than writing an
+///   existing one. Its interaction with an in-flight delete is a separate
+///   recreate-window defect, tracked in the PR body, not closed here.
+///
+/// Test: `service::server::tests_3049::delete_waits_for_an_ungated_index_file_write`,
+/// `service::server::tests_3049::unregister_index_waits_for_an_in_flight_writer_to_release_the_permit`.
+static INDEX_TEARDOWN_LOCKS: OnceLock<DashMap<IndexId, Arc<tokio::sync::RwLock<()>>>> =
+    OnceLock::new();
+
+/// Returns (creating on first use) the teardown lock for `id`.
+///
+/// Why: one accessor so every writer and the delete reach the same `RwLock`.
+/// What: `DashMap::entry` + `or_insert_with`, same shape as [`index_semaphore`].
+/// Writers call `.read_owned()`; only `unregister_index` calls `.write_owned()`.
+/// Test: see [`INDEX_TEARDOWN_LOCKS`].
+pub(crate) fn index_teardown_lock(id: &IndexId) -> Arc<tokio::sync::RwLock<()>> {
+    INDEX_TEARDOWN_LOCKS
+        .get_or_init(DashMap::new)
+        .entry(id.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+        .clone()
+}
+
+/// Remove `id`'s teardown lock once its delete has finished (issue #3049).
+///
+/// Why: same growth argument as [`remove_index_semaphore`] — the map would
+/// otherwise only ever grow, one abandoned `Arc<RwLock>` per deleted id.
+/// What: removes the entry if present; no-op otherwise.
+/// Test: see [`INDEX_TEARDOWN_LOCKS`].
+pub(crate) fn remove_index_teardown_lock(id: &IndexId) {
+    if let Some(map) = INDEX_TEARDOWN_LOCKS.get() {
+        map.remove(id);
+    }
+}
+
 /// Process-global registry of per-index cancellation flags (issue #3049).
 ///
 /// Why: [`INDEX_LOCKS`] tells a writer when it may START, and `unregister_index`

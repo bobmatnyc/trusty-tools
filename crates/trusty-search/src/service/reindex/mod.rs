@@ -165,6 +165,17 @@ pub(crate) use semaphore::remove_index_semaphore;
 /// Test: `service::server::tests_3049`.
 pub(crate) use semaphore::{remove_index_cancel_flag, signal_index_cancel};
 
+/// Re-export the teardown-lock accessors (issue #3049, round 2).
+///
+/// Why: every path that writes `handle.indexer` holds this lock's READ side for
+/// the span of its write, and `unregister_index` takes the WRITE side. Those
+/// writers live across `service::server` (files, contrib_graph, indexes_relocate),
+/// `service::watch_loop`, and `service::reconcile` — all outside the private
+/// `semaphore` submodule.
+/// What: delegates to `semaphore::{index_teardown_lock, remove_index_teardown_lock}`.
+/// Test: `service::server::tests_3049`.
+pub(crate) use semaphore::{index_teardown_lock, remove_index_teardown_lock};
+
 /// Re-export `index_cancel_flag` for the `tests_3049` eviction test, which needs
 /// to read the flag the delete signalled. Production readers reach it through
 /// `super::semaphore`, so this is `#[cfg(test)]`-gated to avoid a dead re-export

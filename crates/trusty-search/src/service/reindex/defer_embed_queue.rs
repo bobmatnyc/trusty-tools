@@ -89,7 +89,7 @@ use std::time::{Duration, Instant};
 
 use super::defer_embed::run_embed_catch_up;
 use super::progress::ReindexProgress;
-use super::semaphore::{background_reindex_semaphore, index_semaphore};
+use super::semaphore::{background_reindex_semaphore, index_semaphore, index_teardown_lock};
 use crate::core::registry::IndexHandle;
 
 /// One pending catch-up job: an index waiting for its C2 embed pass.
@@ -362,6 +362,12 @@ async fn wait_for_turn(my_seq: u64) {
         .expect(
         "per-index semaphore is never closed — it is a fresh Semaphore per IndexId, never dropped",
     );
+
+    // #3049: hold the teardown lock's shared side across the embed pass.
+    // `embed_deferred_chunks` has no interior cancel checkpoint, so a DELETE
+    // landing here waits the full pass (or times out and refuses the data
+    // removal) rather than deleting underneath it.
+    let _teardown_guard = index_teardown_lock(&job.handle.id).read_owned().await;
 
     run_embed_catch_up(job.handle, job.progress).await;
 
