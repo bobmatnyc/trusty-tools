@@ -31,6 +31,18 @@
 # blocking-vs-independent split, and the same reasoning, as release.yml's
 # `publish-dry-run` job.
 #
+# THE TRIGGER RACES THE PUBLISH, AND NO LONGER MATTERS (#5296). The tag push
+# comes before `cargo publish` in the documented step order, but this job takes
+# minutes to reach the registry and the publish takes seconds — so by the time
+# it queried crates.io the crate's own version was usually already the latest
+# release there. The gate then compared the crate against ITSELF and reported no
+# change: observed on trusty-agents-common 0.5.0, trusty-progress 0.3.0 and tga
+# 2.12.0 during the 1.3.5 cut. The fix is in check_semver.sh, not here — the
+# baseline is now the greatest release BELOW the crate's declared version, which
+# is the same version before the publish and the correct one after it. This job
+# therefore produces a real verdict wherever in the sequence it lands, and no
+# ordering between tag and publish needs to hold for it to mean anything.
+#
 # ON-DEMAND: workflow_dispatch takes a crate name so a break can be checked
 # without cutting a release. `bash scripts/check_semver.sh --crate <crate>`
 # does the same thing locally.

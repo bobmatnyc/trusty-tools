@@ -22,6 +22,16 @@ no author's worktree path is committed.
 | `build-error.out` | 101 | The same `trusty-mpm` command under the repo MSRV 1.94.1, where the scratch resolution takes `takecell` 0.1.2 (`rust-version` 1.96) and rustdoc refuses to build. This is the defect #5289 was filed for. |
 | `silent-noop.out` | 0 | **Synthetic.** No real invocation produces exit 0 with no `checks:` summary today. It pins the fail-closed rule: "the tool said nothing" must never be read as "the tool said pass". |
 
+## Replayed by baseline (#5296)
+
+Cases 9-12 register fixtures per `--baseline-version`
+(`SEMVER_SELFTEST_BY_BASELINE="0.31.0=break.out:100;0.31.1=clean.out:0"`), so the
+stub answers according to which release the gate ASKED to compare against. That
+is what makes case 9 a regression test: the pre-#5296 gate asks for the crate's
+own version and gets `clean.out`, while the fixed gate asks for the release
+before it and gets `break.out`. A baseline with no registered fixture exits 111
+naming the version it was asked for, so a case can never pass by accident.
+
 ## Refreshing one
 
 Run the command in the table, redirect stdout+stderr to the file, and rewrite
