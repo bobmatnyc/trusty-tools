@@ -84,52 +84,6 @@
 /// the private-SPI-based spawn.
 pub const DISABLE_ENV: &str = "TM_DISABLE_SPAWN_DISCLAIM";
 
-/// How many times [`retry_on_etxtbsy`] will attempt a spawn before giving up.
-const ETXTBSY_MAX_ATTEMPTS: u32 = 3;
-
-/// Base back-off between [`retry_on_etxtbsy`] attempts; doubles each retry.
-const ETXTBSY_BACKOFF_MS: u64 = 5;
-
-/// Run `attempt` until it stops failing with `ETXTBSY` ("Text file busy"),
-/// up to [`ETXTBSY_MAX_ATTEMPTS`] times with exponential back-off.
-///
-/// Why: `execve` refuses a file with `ETXTBSY` while ANY process holds a
-/// writable fd to that inode. A sibling thread that forks between this
-/// process's `open` and `close` of a freshly written executable hands the
-/// child an inherited copy of that fd, and the exec in between is refused —
-/// a transient the caller can only wait out. Issue #5391 is the fifth
-/// recorded instance of that race in this workspace (epic #3451); #1634 and
-/// #3570 settled on this bounded retry as the fix, in `trusty-agents` and
-/// `trusty-common` respectively.
-/// What: calls `attempt`, returns its `Ok` immediately, returns any non-
-/// `ETXTBSY` `Err` immediately, and on `ETXTBSY` sleeps
-/// `ETXTBSY_BACKOFF_MS << attempt` before trying again. After
-/// `ETXTBSY_MAX_ATTEMPTS` `ETXTBSY` results it returns the last one, so a
-/// genuinely busy target still fails loudly rather than silently.
-/// Callers must only pass a closure whose `ETXTBSY` can come from the spawn
-/// itself — a retry must never re-run a child that already started.
-/// Test: `retry_on_etxtbsy_returns_first_success`,
-/// `retry_on_etxtbsy_recovers_after_two_busy_attempts`,
-/// `retry_on_etxtbsy_gives_up_after_max_attempts`,
-/// `retry_on_etxtbsy_does_not_retry_other_errors`.
-fn retry_on_etxtbsy<T>(mut attempt: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
-    let mut last_err = None;
-    for n in 0..ETXTBSY_MAX_ATTEMPTS {
-        match attempt() {
-            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                last_err = Some(e);
-                std::thread::sleep(std::time::Duration::from_millis(ETXTBSY_BACKOFF_MS << n));
-            }
-            other => return other,
-        }
-    }
-    // Unreachable unless the loop ran, and every loop iteration that does not
-    // return stores an error — so `last_err` is always `Some` here.
-    Err(last_err.unwrap_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::ExecutableFileBusy, "Text file busy")
-    }))
-}
-
 /// Spawn `program` with `args`, capture stdout/stderr, and — on macOS —
 /// disclaim TCC responsibility so the child is its own responsible process.
 ///
@@ -143,17 +97,19 @@ fn retry_on_etxtbsy<T>(mut attempt: impl FnMut() -> std::io::Result<T>) -> std::
 /// exactly ONE spawn regardless of whether the disclaim SPI is present, so a
 /// missing SPI never causes a double-run. On non-macOS it delegates straight to
 /// `Command::output`. A failure to spawn with `ETXTBSY` is retried by
-/// [`retry_on_etxtbsy`]; `ETXTBSY` cannot arrive once a child exists, so no
-/// retry ever re-runs a command that already started.
+/// [`trusty_common::spawn_retry::retry_on_etxtbsy`]; `ETXTBSY` cannot arrive
+/// once a child exists, so no retry ever re-runs a command that already
+/// started.
 /// Test: `disclaimed_output_captures_stdout`,
 /// `disclaimed_output_captures_stderr_and_nonzero_exit`,
 /// `disclaimed_output_saturates_stdout_and_stderr_without_deadlock`,
 /// `disclaimed_output_reports_spawn_error_for_missing_binary`; the retry
-/// itself by [`retry_on_etxtbsy`]'s own tests.
+/// itself by `trusty_common::spawn_retry`'s own tests.
 pub fn disclaimed_output(program: &str, args: &[String]) -> std::io::Result<std::process::Output> {
     // #5391: a sibling thread's fork can hold a writable fd to a
     // freshly-written binary, so exec it with a bounded ETXTBSY retry.
-    retry_on_etxtbsy(|| {
+    // #5446: that retry is now the workspace's single trusty-common policy.
+    trusty_common::spawn_retry::retry_on_etxtbsy(|| {
         #[cfg(target_os = "macos")]
         {
             if std::env::var_os(DISABLE_ENV).is_none() {
@@ -724,76 +680,6 @@ mod tests {
         let result = disclaimed_spawn_detached("/usr/bin/true", &[]);
         unsafe { std::env::remove_var(DISABLE_ENV) };
         assert!(result.is_ok());
-    }
-}
-
-/// #5391: pins [`retry_on_etxtbsy`]'s contract with an injected result
-/// sequence, so the retry is proven on every platform without needing to
-/// provoke a real kernel `ETXTBSY` (which only Linux raises for an inherited
-/// writable fd, and only under a race that cannot be scheduled on demand).
-#[cfg(test)]
-mod etxtbsy_retry_tests {
-    use super::*;
-    use std::cell::Cell;
-
-    fn busy() -> std::io::Error {
-        std::io::Error::from_raw_os_error(26)
-    }
-
-    /// The injected `busy()` must actually classify as `ExecutableFileBusy`,
-    /// otherwise every other test here would pass vacuously.
-    #[test]
-    fn raw_os_error_26_is_executable_file_busy() {
-        assert_eq!(busy().kind(), std::io::ErrorKind::ExecutableFileBusy);
-    }
-
-    #[test]
-    fn retry_on_etxtbsy_returns_first_success() {
-        let calls = Cell::new(0);
-        let got = retry_on_etxtbsy(|| {
-            calls.set(calls.get() + 1);
-            Ok::<_, std::io::Error>(7)
-        });
-        assert_eq!(got.unwrap(), 7);
-        assert_eq!(calls.get(), 1, "a success must not be retried");
-    }
-
-    #[test]
-    fn retry_on_etxtbsy_recovers_after_two_busy_attempts() {
-        let calls = Cell::new(0);
-        let got = retry_on_etxtbsy(|| {
-            calls.set(calls.get() + 1);
-            if calls.get() < 3 { Err(busy()) } else { Ok(7) }
-        });
-        assert_eq!(got.unwrap(), 7);
-        assert_eq!(calls.get(), 3);
-    }
-
-    #[test]
-    fn retry_on_etxtbsy_gives_up_after_max_attempts() {
-        let calls = Cell::new(0);
-        let got = retry_on_etxtbsy(|| {
-            calls.set(calls.get() + 1);
-            Err::<(), _>(busy())
-        });
-        // A permanently busy target still fails loudly — the retry hides a
-        // transient, never a real failure.
-        assert_eq!(
-            got.unwrap_err().kind(),
-            std::io::ErrorKind::ExecutableFileBusy
-        );
-        assert_eq!(calls.get(), ETXTBSY_MAX_ATTEMPTS as i32);
-    }
-
-    #[test]
-    fn retry_on_etxtbsy_does_not_retry_other_errors() {
-        let calls = Cell::new(0);
-        let got = retry_on_etxtbsy(|| {
-            calls.set(calls.get() + 1);
-            Err::<(), _>(std::io::Error::from(std::io::ErrorKind::NotFound))
-        });
-        assert_eq!(got.unwrap_err().kind(), std::io::ErrorKind::NotFound);
-        assert_eq!(calls.get(), 1, "a missing binary must fail on attempt 1");
     }
 }
 
