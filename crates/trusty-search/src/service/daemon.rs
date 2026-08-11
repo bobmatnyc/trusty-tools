@@ -151,37 +151,227 @@ pub fn save_daemon_env() {
 /// Test: write `daemon.env` with `TRUSTY_MEMORY_LIMIT_MB=512`; unset the var;
 /// call `load_daemon_env()`; assert `std::env::var("TRUSTY_MEMORY_LIMIT_MB") == "512"`.
 pub fn load_daemon_env() {
+    apply_daemon_env(&[]);
+}
+
+/// Keys the EARLY (pre-`clap`) `daemon.env` pass must never apply.
+///
+/// Why (#4827): moving the whole file ahead of argument parsing would invert
+/// precedence for the settings a CLI flag imperatively stamps into the env
+/// AFTER parsing. `--device` and `--fanout-concurrency` are both applied as
+/// "set the var if it is unset", so a file value present before the flag runs
+/// would silently beat the flag. `TRUSTY_DATA_DIR` is worse than that: it
+/// decides WHERE `daemon.env` itself lives, so applying it early would let the
+/// production data dir's file redirect a `--data-dir /tmp/isolated` run back at
+/// production data. These three keep their existing post-parse timing, where
+/// the flag still wins.
+/// What: the exact key set skipped by [`load_daemon_env_early`] and applied by
+/// the later [`load_daemon_env`] as before.
+/// Test: `early_load_skips_flag_derived_keys`.
+pub const EARLY_LOAD_EXCLUDED_ENV: &[&str] = &[
+    "TRUSTY_DATA_DIR",
+    "TRUSTY_DEVICE",
+    "TRUSTY_SEARCH_FANOUT_CONCURRENCY",
+];
+
+/// Source `daemon.env` BEFORE `clap` parses the command line.
+///
+/// Why (#4827): `load_daemon_env` ran after `Cli::try_parse()`, so every
+/// variable in the file that backs a `#[arg(long, env = "…")]` was read too
+/// late to change the already-computed value and was silently ignored. An
+/// operator could write `TRUSTY_NO_AUTO_DISCOVER=1`, see no error, and get the
+/// opposite behaviour — which is why #767's suppression never actually took
+/// effect on the reporter's machine. The file advertised itself as a working
+/// configuration mechanism and was not one for that whole class of setting.
+/// What: applies every `daemon.env` key except [`EARLY_LOAD_EXCLUDED_ENV`], and
+/// only where the process env has not already set it, so shell env still
+/// outranks the file. Called from `main` on the `start` path only — `daemon.env`
+/// is the daemon's environment, and a client subcommand must not inherit it.
+/// Test: `early_load_skips_flag_derived_keys`, and the end-to-end
+/// `tests/daemon_env_precedence.rs`, which drives the real `clap` env path
+/// through a spawned binary.
+pub fn load_daemon_env_early() {
+    apply_daemon_env(EARLY_LOAD_EXCLUDED_ENV);
+}
+
+/// Source `daemon.env` early, but only when `argv` selects the daemon.
+///
+/// Why (#4827): the file has to be applied before `clap` parses, which is
+/// before any subcommand exists to dispatch on — so the decision has to come
+/// from raw argv. Gating it keeps `daemon.env`'s blast radius at the one path
+/// it was written for: a client subcommand such as `query` or `status` must not
+/// silently inherit the daemon's `TRUSTY_INDEX` or memory caps.
+/// What: calls [`load_daemon_env_early`] when the first token that is neither
+/// the program name nor a leading global flag is `start`. Global flags taking a
+/// value (`-i` / `--index`) consume the token after them, so `-i start query`
+/// is a query against index `start`, not the daemon path.
+/// Test: `argv_selects_daemon_start_*` in `daemon_tests.rs`.
+pub fn load_daemon_env_early_for(argv: &[String]) {
+    if argv_selects_daemon_start(argv) {
+        load_daemon_env_early();
+    }
+}
+
+/// Apply every file-backed environment source before `clap` parses `argv`.
+///
+/// Why (#4827): clap resolves `#[arg(long, env = "…")]` by reading the REAL
+/// process environment during the parse, so any source applied afterwards is a
+/// silent no-op for that whole class of setting — which is exactly how
+/// `daemon.env` came to advertise itself as a working configuration mechanism
+/// while ignoring `TRUSTY_NO_AUTO_DISCOVER`. Keeping both loads in one function
+/// keeps their order (and the reason for it) in one place instead of two loose
+/// calls in `main`.
+/// What: loads `.env.local` through the shared `trusty_common` loader (#2405),
+/// then `daemon.env` via [`load_daemon_env_early_for`] — which is a no-op
+/// unless `argv` selects `start`. Neither ever overrides an already-set process
+/// env var, so shell env keeps outranking both files.
+/// Test: `tests/daemon_env_precedence.rs` drives the whole chain through a
+/// spawned binary; `argv_selects_daemon_start_for_the_daemon_path` covers the
+/// gate.
+pub fn bootstrap_process_env(argv: &[String]) {
+    trusty_common::credentials::load_env_local_once();
+    load_daemon_env_early_for(argv);
+}
+
+/// Whether `argv` invokes `trusty-search start`. See [`load_daemon_env_early_for`].
+pub(crate) fn argv_selects_daemon_start(argv: &[String]) -> bool {
+    let mut skip_next = false;
+    for arg in argv.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "-i" || arg == "--index" {
+            skip_next = true;
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        return arg == "start";
+    }
+    false
+}
+
+/// Shared body of [`load_daemon_env`] and [`load_daemon_env_early`].
+///
+/// Why: one parser, one precedence rule, one set of diagnostics — two copies
+/// would drift on exactly the ordering question #4827 is about.
+/// What: reads `daemon.env`, applies each `key=value` line whose key is absent
+/// from `skip` and unset in the process env. A read failure that is NOT
+/// "file absent" is reported at `warn` rather than swallowed, and so is any
+/// malformed line; before #4827 both degraded silently to compiled-in defaults
+/// while startup carried on, so an unreadable file looked exactly like no file.
+/// Test: `parse_daemon_env_reports_malformed_lines`,
+/// `early_load_skips_flag_derived_keys`.
+fn apply_daemon_env(skip: &[&str]) {
     let Some(path) = daemon_env_path() else {
         return;
     };
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return, // file absent is expected on first run
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            // #4827: an unreadable file is a configuration failure, not an
+            // absent one. Silently returning made a permission error
+            // indistinguishable from first-run.
+            tracing::warn!(
+                "daemon.env at {} exists but could not be read ({e}); \
+                 every setting in it is being ignored",
+                path.display()
+            );
+            return;
+        }
     };
+    let (pairs, malformed) = parse_daemon_env(&content);
+    for (lineno, line) in &malformed {
+        // #4827: a line with no `=` was dropped without a word, so a typo cost
+        // the operator the setting and told them nothing. The line itself is
+        // never logged — see `malformed_line_summary`.
+        tracing::warn!(
+            "daemon.env {}:{lineno}: ignoring malformed line (expected key=value): {}",
+            path.display(),
+            malformed_line_summary(line)
+        );
+    }
     let mut loaded = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    for (key, val) in pairs {
+        if skip.contains(&key.as_str()) {
             continue;
         }
-        if let Some((key, val)) = line.split_once('=') {
-            let key = key.trim();
-            let val = val.trim();
-            // env var takes priority: only apply file value when var is unset
-            if std::env::var(key).is_err() {
-                // SAFETY: only called at startup before any threads read these vars;
-                // `set_var` is not async-signal-safe but we are on the main thread here.
-                unsafe { std::env::set_var(key, val) };
-                loaded.push(key.to_owned());
-            }
+        // env var takes priority: only apply file value when var is unset
+        if std::env::var(&key).is_err() {
+            // SAFETY: only called at startup before any threads read these vars;
+            // `set_var` is not async-signal-safe but we are on the main thread here.
+            unsafe { std::env::set_var(&key, &val) };
+            loaded.push(key);
         }
     }
     if !loaded.is_empty() {
-        tracing::info!(
-            "sourced memory limits from daemon.env: {}",
-            loaded.join(", ")
-        );
+        tracing::info!("sourced settings from daemon.env: {}", loaded.join(", "));
     }
+}
+
+/// Describe a malformed `daemon.env` line without reproducing its contents.
+///
+/// Why: `daemon.env` is an operator file holding live credentials, and a typo'd
+/// credential assignment — a space where the `=` belongs, as in
+/// `OPENROUTER_API_KEY sk-or-v1-…` — is precisely the shape that reaches the
+/// malformed arm. Logging the raw line wrote that secret to the daemon log in
+/// cleartext. The success path has always logged loaded key NAMES and never
+/// values; this brings the failure path to the same discipline.
+/// What: reports the line's character count, plus its leading token when that
+/// token has the shape of a conventional environment-variable name
+/// (`[A-Z_][A-Z0-9_]*`) — enough to name the setting the operator fumbled. A
+/// bare secret pasted on its own line does not match that shape (real tokens
+/// carry lowercase, `-`, `.` or `/`), so it degrades to the length alone.
+/// Test: `malformed_line_summary_redacts_a_typod_credential`,
+/// `malformed_line_summary_redacts_a_bare_secret`,
+/// `malformed_line_summary_names_a_conventional_key`.
+fn malformed_line_summary(line: &str) -> String {
+    let len = line.chars().count();
+    let leading = line.split_whitespace().next().unwrap_or_default();
+    let looks_like_env_key = !leading.is_empty()
+        && leading.starts_with(|c: char| c.is_ascii_uppercase() || c == '_')
+        && leading
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if looks_like_env_key {
+        format!("{len} chars, starting with `{leading}`")
+    } else {
+        format!("{len} chars")
+    }
+}
+
+/// One accepted `daemon.env` assignment: `(key, value)`, both trimmed.
+pub type DaemonEnvPair = (String, String);
+
+/// One rejected `daemon.env` line: `(1-based line number, the offending text)`.
+pub type DaemonEnvReject = (usize, String);
+
+/// Split `daemon.env` content into `key=value` pairs and rejected lines.
+///
+/// Why: extracting the parser makes the malformed-line arm testable without
+/// touching a shared process env from a parallel test binary — the same reason
+/// `service_unit::resolve_persisted_env` is pure.
+/// What: returns `(pairs, malformed)`, where `malformed` carries the 1-based
+/// line number and the offending text for every non-blank, non-comment line
+/// with no `=`. Keys and values are trimmed.
+/// Test: `parse_daemon_env_reports_malformed_lines`.
+pub fn parse_daemon_env(content: &str) -> (Vec<DaemonEnvPair>, Vec<DaemonEnvReject>) {
+    let mut pairs = Vec::new();
+    let mut malformed = Vec::new();
+    for (i, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match line.split_once('=') {
+            Some((key, val)) => pairs.push((key.trim().to_owned(), val.trim().to_owned())),
+            None => malformed.push((i + 1, line.to_owned())),
+        }
+    }
+    (pairs, malformed)
 }
 
 /// Path to the canonical address-discovery file used by `trusty-search

@@ -290,3 +290,53 @@ async fn tools_list_reflects_session_pin() {
         "pin must reach tools/list: {required:?}"
     );
 }
+
+/// #3805: `grep`'s tool description and its `index_id` parameter description
+/// must not contradict each other about what omitting `index_id` does.
+///
+/// Why: both texts claimed an omitted `index_id` fans out across every index.
+/// The dispatcher resolves the session pin FIRST (`misc.rs` → `grep` arm →
+/// `resolve_index_id`), so a pinned session greps one index and a caller
+/// following the schema gets zero matches with no explanation — the empirical
+/// report in #3805. Two descriptions that disagree cannot both be a contract.
+/// What: asserts neither text still promises unconditional fan-out and that
+/// both name the pinned-index default.
+/// Test: this is the test.
+#[tokio::test]
+async fn grep_index_id_docs_state_the_pinned_default() {
+    let server = McpServer::new("http://127.0.0.1:1");
+    let resp = server.dispatch(req("tools/list", Value::Null)).await;
+    let tools = resp
+        .result
+        .expect("result")
+        .get("tools")
+        .cloned()
+        .expect("tools");
+    let grep = tools
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|t| t.get("name").and_then(Value::as_str) == Some("grep"))
+        .expect("grep tool missing from tools/list")
+        .clone();
+
+    let tool_desc = grep
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("grep description");
+    let param_desc = grep["inputSchema"]["properties"]["index_id"]["description"]
+        .as_str()
+        .expect("index_id description");
+
+    for (label, text) in [("tool", tool_desc), ("index_id param", param_desc)] {
+        assert!(
+            text.contains("pin"),
+            "#3805: grep {label} description must name the pinned-index default, got: {text}"
+        );
+        assert!(
+            !text.contains("omit to fan out"),
+            "#3805: grep {label} description must not promise unconditional \
+             fan-out, got: {text}"
+        );
+    }
+}

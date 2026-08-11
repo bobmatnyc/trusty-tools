@@ -1,0 +1,2 @@
+Fixed
+- `trusty-search service install` now writes `RUST_LOG=info` into the generated launchd unit. launchd exec's the daemon with no shell environment, so `RUST_LOG` arrived unset, tracing filtered at `warn`, and every `tracing::info!` the daemon writes about its own boot — including the lines that confirm auto-discovery suppression — was dropped. A `RUST_LOG` the installed unit already carried, or one exported in the installing shell, still wins over the new default (closes [#4829](https://github.com/bobmatnyc/trusty-tools/issues/4829))

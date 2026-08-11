@@ -560,3 +560,69 @@ fn build_launchd_config_omits_working_directory_by_default() {
     let xml = cfg.render_plist().expect("render_plist must succeed");
     assert!(!xml.contains("WorkingDirectory"), "got xml: {xml}");
 }
+
+/// #4829: a freshly generated unit must carry `RUST_LOG=info`.
+///
+/// Why: launchd exec's the daemon with no shell environment. With `RUST_LOG`
+/// unset, `trusty_common::tracing_init` filters at `"warn"` and every
+/// `tracing::info!` the daemon writes about its own boot is dropped — the two
+/// lines that confirm auto-discovery suppression among them, which is what made
+/// the 2026-08-04 investigation unverifiable from production logs.
+/// What: no installed unit, empty process env — the pairs still include
+/// `RUST_LOG=info`.
+/// Test: pure — the env lookup is injected, so no process env is mutated.
+#[cfg(target_os = "macos")]
+#[test]
+fn launchd_env_pairs_defaults_rust_log_to_info() {
+    use std::path::PathBuf;
+
+    let pairs = launchd_env_pairs(Some(PathBuf::from("/Users/x")), |_| None, None);
+    assert!(
+        pairs.iter().any(|(k, v)| k == "RUST_LOG" && v == "info"),
+        "#4829: a generated unit with no prior config must still log at INFO; \
+         got {pairs:?}"
+    );
+}
+
+/// #4829: the INFO default must never outrank an operator's own `RUST_LOG`.
+///
+/// Why: a default that overwrites explicit configuration is the #4868 failure
+/// in reverse — an operator who set `debug` (or narrowed the filter to one
+/// target) would silently get `info` back on every reinstall.
+/// What: drives both override paths — a value the installed unit carried, and a
+/// value exported in the installing shell — and asserts each survives, exactly
+/// once.
+/// Test: pure — the env lookup is injected.
+#[cfg(target_os = "macos")]
+#[test]
+fn launchd_env_pairs_keeps_an_operator_rust_log() {
+    use crate::commands::service_unit::parse_installed_unit;
+    use std::path::PathBuf;
+
+    let existing = parse_installed_unit(
+        "<key>EnvironmentVariables</key><dict>\
+         <key>RUST_LOG</key><string>trusty_search=debug</string>\
+         </dict>",
+    );
+    let from_unit = launchd_env_pairs(Some(PathBuf::from("/Users/x")), |_| None, Some(&existing));
+    let rust_log: Vec<&(String, String)> =
+        from_unit.iter().filter(|(k, _)| k == "RUST_LOG").collect();
+    assert_eq!(
+        rust_log.len(),
+        1,
+        "RUST_LOG must appear exactly once, got {from_unit:?}"
+    );
+    assert_eq!(rust_log[0].1, "trusty_search=debug");
+
+    let from_shell = launchd_env_pairs(
+        Some(PathBuf::from("/Users/x")),
+        |k| (k == "RUST_LOG").then(|| "warn".to_string()),
+        None,
+    );
+    assert!(
+        from_shell
+            .iter()
+            .any(|(k, v)| k == "RUST_LOG" && v == "warn"),
+        "an exported RUST_LOG must win over the INFO default; got {from_shell:?}"
+    );
+}
