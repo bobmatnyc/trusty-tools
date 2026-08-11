@@ -99,6 +99,10 @@
 #   No summary line means no comparison happened, whatever the exit status was —
 #   including exit 0 — and that is reported as NO VERDICT on its own exit code.
 #   Absence of evidence is never a pass; same rule as the scan floor below.
+#   The line is matched with ANSI colour stripped (issue #5500), because CI
+#   forces colour into the middle of the marker token and the check went blind
+#   to every run — see verdict_computed below for the bytes and for PR #5458's
+#   two casualties.
 #
 # Toolchain (issue #5289): cargo-semver-checks re-resolves the dependency graph
 #   in a scratch project that IGNORES this workspace's Cargo.lock, so it can pick
@@ -158,6 +162,9 @@
 #   inventory instead of a skip. Cases 13-15 pin pre-release handling: the
 #   reproduction on record is `["0.9.9", "1.0.0-rc1", "1.0.0", "1.0.1-beta"]`
 #   declared 1.0.1, which selected 1.0.0-rc1 before the rank element existed.
+#   Cases 16-18 (#5500) replay PR #5458's own CI bytes, where forced colour hid the
+#   summary line and both a clean run and a four-failure run were reported as
+#   never having happened.
 #   The catch itself is demonstrated in PR #5051 against #4088's real shape.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
@@ -671,12 +678,59 @@ PY
 #   that it finished comparing, so requiring it means the gate concludes only
 #   from evidence that the comparison happened.
 #
+# THE MARKER ARRIVES COLOURED IN CI, AND THE COLOUR LANDS MID-TOKEN (issue #5500).
+#   `dtolnay/rust-toolchain` writes CARGO_TERM_COLOR=always into $GITHUB_ENV
+#   when it is unset, so every step after it inherits forced colour even though
+#   this gate redirects the tool to a file. cargo-semver-checks then emits
+#
+#       ESC[1m ESC[32m     Checked ESC[0m [   0.871s] 196 checks: 196 pass, ...
+#
+#   with the reset sequence BETWEEN `Checked` and the space that follows it. A
+#   pattern anchored on `Checked<space>` therefore matches nothing, and a run
+#   that compared 196 checks is announced as one that never ran. Both halves of
+#   PR #5458 are that single defect: tga exited 0 having found no break, and
+#   trusty-review exited 100 having listed four real ones, and the gate called
+#   both "without completing a run". No exit status was misread — the exit-status
+#   handling below is correct and unchanged; only the evidence test was blind.
+#
+#   The escapes are therefore stripped before matching. Stripping is done on a
+#   COPY: the log echoed to the operator keeps its colour, and the regex keeps
+#   the exact shape #5289 gave it.
+#
+#   The strip covers the WHOLE ECMA-48 CSI grammar, not just the SGR colour
+#   sequences observed: ESC [, parameter bytes 0x30-0x3F (`0-9:;<=>?`),
+#   intermediate bytes 0x20-0x2F (` -/`), one final byte 0x40-0x7E (`@-~`).
+#   Narrowing it to `[0-9;]*[A-Za-z]` — the observed shape — would leave a
+#   private-mode sequence like `ESC[?25l` (cursor hide, emitted by spinner
+#   renderers) unstripped, and that is the same defect again: an escape between
+#   `Checked` and its space. Pinned by self-test case 19.
+#
+#   `[ -/]`, NOT `[ -\/]`. POSIX makes the backslash literal inside a bracket
+#   expression, so `[ -\/]` is the range 0x20-0x5C and deletes digits and
+#   uppercase letters: `KEEP-ME-A` strips to the empty string under it, and to
+#   `KEEPMEA` under the correct form. An over-wide strip is the one way this
+#   function could invent a marker rather than miss one.
+#
+#   Non-CSI escape families (OSC hyperlinks, two-byte sequences) are out of
+#   scope deliberately: none appears in cargo-semver-checks 0.50.0's output,
+#   and an unhandled one fails CLOSED to NO VERDICT rather than to a pass.
+#
+#   Written to a file rather than piped into `grep -q`, because `grep -q` exits
+#   at the first match and SIGPIPEs the producer — under `set -o pipefail` that
+#   turns a FOUND marker into a non-zero pipeline, i.e. a verdict reported as a
+#   non-verdict. That is the same lie in the other direction.
+#
 # Fails CLOSED by construction: if a future cargo-semver-checks renames this
 #   line, every run becomes NO VERDICT — loud and non-zero — rather than a
-#   silent green. That is the correct direction for the failure to point.
+#   silent green. That is the correct direction for the failure to point. The
+#   strip cannot manufacture a marker either: it only deletes escape sequences,
+#   so text that did not say `Checked … N checks:` still does not.
 # ---------------------------------------------------------------------------
 verdict_computed() {
-  grep -Eq '(^|[[:space:]])Checked[[:space:]].*[0-9]+ checks:' "$1"
+  # #5500: CARGO_TERM_COLOR=always splits `Checked` from its trailing space (PR #5458).
+  local plain="${1}.plain"
+  LC_ALL=C sed -E $'s/\033\\[[0-9:;<=>?]*[ -/]*[@-~]//g' "$1" > "$plain" || return 1
+  grep -Eq '(^|[[:space:]])Checked[[:space:]].*[0-9]+ checks:' "$plain"
 }
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,8 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser } from 'playwright';
 
+import { whatsNewSections } from '../src/lib/changelog/site';
+
 /**
  * Why: `tests/build-smoke.test.ts` proves the production build's HTML
  * contains the right text, but jsdom (the `unit` project's environment) has
@@ -107,6 +109,43 @@ const ROUTES = [
 	'/tools/trusty-git-analytics/audit'
 ];
 const WIDTHS = [375, 320];
+
+/** No whitespace, and none of the HTML-entity-risky characters (`<`, `>`, `&`,
+ * `"`) that would make `item.html`'s escaped form differ from the browser's
+ * unescaped `textContent` — see `longestInlineCodeIdentifier` below. */
+const SAFE_UNESCAPED_IDENTIFIER = /^[\w./:-]+$/;
+
+/**
+ * Why: pinning one specific identifier (`pipeline::citation_check::…`) broke
+ * the moment its release aged out of `/whats-new`'s `DETAILED_RELEASES`
+ * window (#5461) — trusty-review shipped past 0.11.0, and CI never runs this
+ * suite (#5200), so the drift was silent. `whatsNewSections()` is the exact
+ * data `/whats-new` renders from, so picking a probe out of it can never
+ * target content the page has stopped showing.
+ * What: the longest whitespace-free `<code>` run across every flagship
+ * crate's currently-detailed releases — standing in for "a long inline
+ * identifier", whichever one happens to be current.
+ * Test: this file (`keeps a long inline identifier on /whats-new intact`).
+ */
+function longestInlineCodeIdentifier(): string {
+	const { crates } = whatsNewSections();
+	let longest = '';
+	for (const crate of crates) {
+		for (const release of crate.detailed) {
+			for (const category of release.categories) {
+				for (const item of category.items) {
+					for (const match of item.html.matchAll(/<code>([^<]+)<\/code>/g)) {
+						const candidate = match[1];
+						if (candidate.length > longest.length && SAFE_UNESCAPED_IDENTIFIER.test(candidate)) {
+							longest = candidate;
+						}
+					}
+				}
+			}
+		}
+	}
+	return longest;
+}
 
 /**
  * `/` at 320px has its own pre-existing, unrelated overflow (#5255 — a card
@@ -241,18 +280,26 @@ describe('no page scrolls horizontally on mobile', () => {
 	// The regression this suite exists for: a long, space-free inline
 	// identifier stays on one line and legible rather than breaking
 	// mid-character — `.doc-prose :not(pre) > code` in `app.css` scrolls the
-	// SPAN instead of wrapping it arbitrarily.
+	// SPAN instead of wrapping it arbitrarily. The identifier itself is
+	// derived from the live changelog data below, never pinned — see
+	// `longestInlineCodeIdentifier`.
 	it('keeps a long inline identifier on /whats-new intact, not broken mid-character', async () => {
+		const identifier = longestInlineCodeIdentifier();
+		expect(
+			identifier.length,
+			'no long inline <code> identifier found across any flagship’s currently-detailed releases — this probe needs different content to target'
+		).toBeGreaterThan(20);
+
 		const page = await browser.newPage({ viewport: { width: 375, height: 800 } });
 		try {
 			await page.goto(baseUrl + '/whats-new', { waitUntil: 'networkidle' });
-			const text = await page.evaluate(() => {
+			const text = await page.evaluate((needle) => {
 				const code = Array.from(document.querySelectorAll('code')).find((c) =>
-					c.textContent?.includes('downgrade_uncitable_findings')
+					c.textContent?.includes(needle)
 				);
 				return code?.textContent ?? null;
-			});
-			expect(text).toContain('pipeline::citation_check::downgrade_uncitable_findings');
+			}, identifier);
+			expect(text).toContain(identifier);
 		} finally {
 			await page.close();
 		}

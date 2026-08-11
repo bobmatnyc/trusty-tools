@@ -99,8 +99,9 @@ async fn tools_list_returns_all_tools() {
     // ADR-0027 T6 (#4805) adds `room_list`, `room_create`, `room_rename`;
     // ADR-0027 T9 (#4809) adds `wing_list`, `wing_create`, `wing_rename`;
     // #4906 adds `palace_reembed`; #5005 adds `palace_unalias`;
-    // #4776 adds `kg_list_subjects`.
-    assert_eq!(tools.len(), 46);
+    // #4776 adds `kg_list_subjects`; `kg_retract_triple` adds the inverse of
+    // `kg_assert`.
+    assert_eq!(tools.len(), 47);
 }
 
 #[tokio::test]

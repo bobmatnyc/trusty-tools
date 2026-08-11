@@ -47,13 +47,21 @@ describe('the link-reference trap', () => {
 	});
 
 	it('leaves every real trusty-search version heading as plain text, not an anchor', () => {
+		// The newest heading, read straight from the untouched source — not a
+		// pinned version string, which ages out on every trusty-search release
+		// (#5417). Deriving the expectation from the same `source` that
+		// `stripped` is computed from means the assertion tracks the corpus
+		// instead of re-drifting from it on the next publish.
+		const newestHeadingText = source.match(/^## (.+)$/m)?.[1];
+		expect(newestHeadingText, 'no `## [version] — date` heading found at all').toBeDefined();
+
 		const stripped = releaseHeadingHtml(stripLinkDefinitions(source));
 		expect(stripped).not.toHaveLength(0);
 		for (const html of stripped) {
 			expect(html).not.toContain('<a ');
 			expect(html).not.toContain('trusty-search/compare');
 		}
-		expect(stripped[0]).toBe('[0.42.3] — 2026-08-05');
+		expect(stripped[0]).toBe(newestHeadingText);
 	});
 
 	/**
