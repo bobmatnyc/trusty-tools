@@ -56,10 +56,13 @@
 #     (cannot verify safety, so refuse) rather than silently passing.
 #
 #   CHECK 5 (public-API SemVer, #5149): runs `scripts/check_semver.sh --crate
-#     <pkg>`, which compares this crate's public API against its latest
-#     non-yanked crates.io release and fails when a breaking change is not
-#     carried by a breaking version bump (Cargo's 0.x rule: for 0.y.z the MINOR
-#     position is the breaking one).
+#     <pkg>`, which compares this crate's public API against its PREVIOUS
+#     crates.io release — the greatest non-yanked version below the one about to
+#     be published (#5296) — and fails when a breaking change is not carried by a
+#     breaking version bump (Cargo's 0.x rule: for 0.y.z the MINOR position is
+#     the breaking one). When the bump is already breaking there is no
+#     requirement left to violate, and the run becomes an advisory INVENTORY of
+#     what the release breaks (#5297); it reports, and cannot fail this check.
 #
 #     WHY IT LIVES HERE, and not only in CI: this script is the LAST thing that
 #     runs before `cargo publish`, and its nonzero exit is the documented
