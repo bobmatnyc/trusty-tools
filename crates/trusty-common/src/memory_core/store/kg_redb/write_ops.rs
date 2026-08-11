@@ -115,7 +115,9 @@ impl KgStoreRedb {
     /// Test: `retract_triple_closes_one_object_and_leaves_siblings_active`,
     /// `retract_triple_on_an_absent_object_is_a_noop`,
     /// `retract_triple_on_a_functional_predicate_closes_only_the_named_object`,
-    /// `retract_triple_on_the_only_object_clears_the_active_count`.
+    /// `retract_triple_on_the_only_object_clears_the_active_count`,
+    /// `concurrent_retract_triples_at_one_pair_close_every_object`,
+    /// `concurrent_retract_triple_and_assert_at_one_pair_agree_on_the_count`.
     pub fn retract_triple(&self, subject: &str, predicate: &str, object: &str) -> Result<usize> {
         // #5396: three-argument retract so object-side noise can be removed
         // without collateral loss of the good siblings at the same pair.

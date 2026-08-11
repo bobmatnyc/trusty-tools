@@ -1110,6 +1110,133 @@ mod tests {
         assert_eq!(primary.count_active_triples(), 8);
     }
 
+    /// Why (#5396): `retract_triple` reads the `(subject, predicate)` range,
+    /// closes the one row whose object matches, then folds a NEGATIVE delta into
+    /// the subject's active counter. Those are two read-modify-writes over rows
+    /// that every concurrent retract at the same pair contends for, and
+    /// `adjust_active_count` clamps with `saturating_sub` — so a lost decrement
+    /// never goes negative and panics. It leaves a phantom count standing over
+    /// zero live rows, silently and permanently.
+    /// `concurrent_asserts_to_one_pair_lose_no_object` pins only the additive
+    /// side of that counter, and closing rows takes a different path than
+    /// inserting them.
+    /// What: eight threads each retract a DIFFERENT object of one eight-valued
+    /// pair through separate (cache-shared) handles. Every call must close
+    /// exactly its own row, every row must end up in history, and the counter
+    /// must reach zero rather than drift.
+    #[test]
+    fn concurrent_retract_triples_at_one_pair_close_every_object() {
+        use std::thread;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        let primary = KgStoreRedb::open(&path).unwrap();
+        for i in 0..8 {
+            primary
+                .assert(&t("room:General", "contains", &format!("drawer:{i}")))
+                .unwrap();
+        }
+        assert_eq!(primary.count_active_triples(), 8, "seeded eight active");
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let store = KgStoreRedb::open(&path).unwrap();
+                thread::spawn(move || {
+                    store
+                        .retract_triple("room:General", "contains", &format!("drawer:{i}"))
+                        .expect("concurrent retract_triple")
+                })
+            })
+            .collect();
+        let closed: Vec<usize> = handles
+            .into_iter()
+            .map(|h| h.join().expect("retract thread panicked"))
+            .collect();
+
+        assert_eq!(
+            closed,
+            vec![1; 8],
+            "each retract closed exactly its own row — no double-close, no lost update"
+        );
+        assert!(
+            primary.query_active("room:General").unwrap().is_empty(),
+            "every object closed"
+        );
+        assert_eq!(
+            primary.count_active_triples(),
+            0,
+            "the counter absorbed all eight decrements"
+        );
+
+        // Every row was closed in place, not dropped: eight history rows remain.
+        let all = primary.dump_all_triples().unwrap();
+        assert_eq!(all.len(), 8, "no retraction lost its history row");
+        assert!(
+            all.iter().all(|tr| tr.valid_to.is_some()),
+            "no row was left active"
+        );
+    }
+
+    /// Why (#5396): the cleanup pass this method exists for runs against a live
+    /// palace, so a retract of one object races an assert of another at the same
+    /// multi-valued pair. Both fold a delta into the same counter row, in
+    /// opposite directions — the interleaving where one side's read-modify-write
+    /// overwrites the other's is exactly what leaves the count disagreeing with
+    /// the rows it counts.
+    /// What: eight threads retract the eight seeded objects while eight more
+    /// assert eight fresh ones. `contains` is multi-valued, so an assert
+    /// supersedes nothing and the two object sets stay disjoint — which makes
+    /// the outcome interleaving-independent: the seeded eight end closed, the
+    /// fresh eight end active, and the counter reads eight.
+    #[test]
+    fn concurrent_retract_triple_and_assert_at_one_pair_agree_on_the_count() {
+        use std::thread;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        let primary = KgStoreRedb::open(&path).unwrap();
+        for i in 0..8 {
+            primary
+                .assert(&t("room:General", "contains", &format!("seeded:{i}")))
+                .unwrap();
+        }
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let store = KgStoreRedb::open(&path).unwrap();
+            handles.push(thread::spawn(move || {
+                store
+                    .retract_triple("room:General", "contains", &format!("seeded:{i}"))
+                    .expect("concurrent retract_triple");
+            }));
+            let store = KgStoreRedb::open(&path).unwrap();
+            handles.push(thread::spawn(move || {
+                store
+                    .assert(&t("room:General", "contains", &format!("fresh:{i}")))
+                    .expect("concurrent assert");
+            }));
+        }
+        for h in handles {
+            h.join().expect("writer thread panicked");
+        }
+
+        let mut active: Vec<String> = primary
+            .query_active("room:General")
+            .unwrap()
+            .into_iter()
+            .map(|tr| tr.object)
+            .collect();
+        active.sort();
+        let expected: Vec<String> = (0..8).map(|i| format!("fresh:{i}")).collect();
+        assert_eq!(
+            active, expected,
+            "the asserted objects survived and the retracted ones did not"
+        );
+        assert_eq!(
+            primary.count_active_triples(),
+            8,
+            "the counter agrees with the rows after eight closes and eight opens"
+        );
+    }
+
     /// Why (#4810): a fresh palace has nothing to rewrite but must still record
     /// which key shape it uses, or every open would re-scan every triple.
     /// What: a new palace carries the marker; a second open is a no-op and
