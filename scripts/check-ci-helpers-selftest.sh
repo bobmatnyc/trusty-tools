@@ -435,6 +435,195 @@ assert_eq "ci.yml has no inlined SDK purge left" "0" \
 assert_eq "all four disk-reclaim jobs call the helper" "4" \
   "$(grep -c 'bash scripts/ci-free-disk-space.sh' "${ci_wf}" || true)"
 
+# ---------------------------------------------------------------------------
+# detect-pointer-lint-inputs.sh (#5311)
+# ---------------------------------------------------------------------------
+pointer_inputs_of() {
+  printf '%s' "$1" | bash scripts/detect-pointer-lint-inputs.sh 2>/dev/null |
+    sed -n 's/^pointer_inputs_changed=//p'
+}
+
+echo
+echo "detect-pointer-lint-inputs:"
+assert_eq "crate source"              "true"  "$(pointer_inputs_of 'crates/trusty-mpm/src/lib.rs')"
+assert_eq "integration test"          "true"  "$(pointer_inputs_of 'crates/trusty-mpm/tests/x.rs')"
+assert_eq "build script"              "true"  "$(pointer_inputs_of 'crates/trusty-mpm/build.rs')"
+assert_eq "the allowlist"             "true"  "$(pointer_inputs_of '.test-pointer-allowlist.tsv')"
+assert_eq "the gate itself"           "true"  "$(pointer_inputs_of 'scripts/check_test_pointers.sh')"
+assert_eq "the scan-floor selftest"   "true"  "$(pointer_inputs_of 'scripts/check_scan_floor_selftest.sh')"
+assert_eq "this classifier"           "true"  "$(pointer_inputs_of 'scripts/detect-pointer-lint-inputs.sh')"
+assert_eq "the workflow wiring"       "true"  "$(pointer_inputs_of '.github/workflows/test-pointers.yml')"
+assert_eq "documentation"             "false" "$(pointer_inputs_of 'docs/adr/0001-example.md')"
+assert_eq "website"                   "false" "$(pointer_inputs_of 'website/src/routes/+page.svelte')"
+assert_eq "an unrelated workflow"     "false" "$(pointer_inputs_of '.github/workflows/ci.yml')"
+assert_eq "a manifest"                "false" "$(pointer_inputs_of 'crates/trusty-mpm/Cargo.toml')"
+assert_eq "mixed docs + Rust"         "true"  "$(pointer_inputs_of 'docs/a.md
+crates/trusty-mpm/src/lib.rs')"
+assert_eq "empty diff (fail closed)"  "true"  "$(pointer_inputs_of '')"
+
+# The trap this classifier exists to avoid, asserted as a difference: the
+# Cargo-inert helper calls the lint's own inputs inert (true for a cargo build),
+# so reusing it here would skip the gate on exactly the PR that removes a fixed
+# allowlist entry — the failure mode check_test_pointers.sh is built to catch.
+assert_eq "detect-docs-only calls the allowlist inert" "true" \
+  "$(docs_only_of '.test-pointer-allowlist.tsv')"
+assert_eq "this classifier does not"                   "true" \
+  "$(pointer_inputs_of '.test-pointer-allowlist.tsv')"
+
+# ---------------------------------------------------------------------------
+# detect-version-bumps.sh (#5311)
+# ---------------------------------------------------------------------------
+# Under STUB_DIR so the EXIT trap set above still cleans it up — a second
+# `trap ... EXIT` would replace the first and leak the earlier fixtures.
+BUMP_DIR="${STUB_DIR}/versionbumps"
+mkdir -p "${BUMP_DIR}"
+
+# make_bump_repo <dir> <head-version-or-DELETE> [extra-crate-head-version]
+make_bump_repo() {
+  local dir="$1" head_version="$2" extra="${3:-}"
+  rm -rf "${dir}"
+  mkdir -p "${dir}/crates/alpha/src" "${dir}/crates/beta/src" "${dir}/docs"
+  git -C "${dir}" init -q -b base-ref
+  git -C "${dir}" config user.email ci@example.com
+  git -C "${dir}" config user.name ci
+  printf '[package]\nname = "alpha"\nversion = "1.0.0"\n' >"${dir}/crates/alpha/Cargo.toml"
+  printf '[package]\nname = "beta"\nversion = "2.0.0"\n' >"${dir}/crates/beta/Cargo.toml"
+  echo "// base" >"${dir}/crates/alpha/src/lib.rs"
+  echo "// base" >"${dir}/crates/beta/src/lib.rs"
+  echo "docs" >"${dir}/docs/readme.md"
+  git -C "${dir}" add -A
+  git -C "${dir}" commit -qm base
+  git -C "${dir}" checkout -q -b pr-branch
+
+  # Every branch changes crate source; only the version line varies. That is the
+  # whole point — "source changed" must NOT be what selects a crate here.
+  echo "// changed" >>"${dir}/crates/alpha/src/lib.rs"
+  if [ "${head_version}" = "DELETE" ]; then
+    rm -rf "${dir}/crates/alpha"
+  elif [ -n "${head_version}" ]; then
+    printf '[package]\nname = "alpha"\nversion = "%s"\n' "${head_version}" \
+      >"${dir}/crates/alpha/Cargo.toml"
+  fi
+  if [ -n "${extra}" ]; then
+    printf '[package]\nname = "beta"\nversion = "%s"\n' "${extra}" \
+      >"${dir}/crates/beta/Cargo.toml"
+  fi
+  git -C "${dir}" add -A
+  git -C "${dir}" commit -qm head
+}
+
+# bumps_of <dir> — the emitted crate list, or `ERR<exit>` when it fails closed.
+bumps_of() {
+  local dir="$1" out rc=0
+  mkdir -p "${dir}/scripts"
+  cp scripts/detect-version-bumps.sh "${dir}/scripts/detect-version-bumps.sh"
+  out="$(cd "${dir}" && VERSION_BUMP_BASE=base-ref bash scripts/detect-version-bumps.sh 2>/dev/null)" || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    echo "ERR${rc}"
+    return 0
+  fi
+  printf '%s' "${out}" | sed -n 's/^bumped_crates=//p'
+}
+
+echo
+echo "detect-version-bumps:"
+make_bump_repo "${BUMP_DIR}/unbumped" ""
+assert_eq "source changed, no version bump" "" "$(bumps_of "${BUMP_DIR}/unbumped")"
+make_bump_repo "${BUMP_DIR}/bumped" "1.0.1"
+assert_eq "version bumped"                  "alpha" "$(bumps_of "${BUMP_DIR}/bumped")"
+make_bump_repo "${BUMP_DIR}/multi" "1.0.1" "2.1.0"
+assert_eq "two crates bumped"               "alpha beta" "$(bumps_of "${BUMP_DIR}/multi")"
+make_bump_repo "${BUMP_DIR}/removed" "DELETE"
+assert_eq "crate deleted by the branch"     "" "$(bumps_of "${BUMP_DIR}/removed")"
+
+# A crate this branch ADDS has no base manifest to compare, and that is a bump:
+# check_semver.sh then records its own "never published — no baseline" skip
+# rather than this classifier guessing on its behalf.
+added_repo="${BUMP_DIR}/added"
+make_bump_repo "${added_repo}" ""
+mkdir -p "${added_repo}/crates/gamma/src"
+printf '[package]\nname = "gamma"\nversion = "0.1.0"\n' >"${added_repo}/crates/gamma/Cargo.toml"
+echo "// new" >"${added_repo}/crates/gamma/src/lib.rs"
+git -C "${added_repo}" add -A
+git -C "${added_repo}" commit -qm "add gamma"
+assert_eq "crate added by the branch"       "gamma" "$(bumps_of "${added_repo}")"
+
+# An inherited version declares nothing in the crate's own manifest, so there is
+# nothing here to compare — and the workspace-level bump is its own diff entry.
+inherit_repo="${BUMP_DIR}/inherited"
+make_bump_repo "${inherit_repo}" ""
+printf '[package]\nname = "alpha"\nversion.workspace = true\n' \
+  >"${inherit_repo}/crates/alpha/Cargo.toml"
+git -C "${inherit_repo}" add -A
+git -C "${inherit_repo}" commit -qm "inherit version"
+assert_eq "version.workspace = true"        "" "$(bumps_of "${inherit_repo}")"
+
+# SCAN FLOOR: an empty diff means the base ref is wrong or the checkout is
+# shallow. "No release under test" must never be the conclusion drawn from a
+# lookup that failed, so this exits non-zero instead of reporting a clean set.
+empty_repo="${BUMP_DIR}/empty"
+make_bump_repo "${empty_repo}" "1.0.1"
+git -C "${empty_repo}" checkout -q base-ref
+assert_eq "empty diff fails closed"         "ERR2" "$(bumps_of "${empty_repo}")"
+
+# ---------------------------------------------------------------------------
+# #5311 wiring: a required context must RUN and REPORT on every PR.
+#
+# Two ways to break that, and both are invisible in a diff review until a PR
+# hangs: a `paths:` filter on the pull_request trigger (GitHub creates no check
+# run at all, so the context stays pending forever — observed on #5415/#5416 for
+# version-parity) and a job-level `if:` (the job concludes `skipped`, which does
+# not satisfy the requirement). Assert the absence of both, structurally.
+# ---------------------------------------------------------------------------
+echo
+echo "required-context wiring (#5311):"
+
+# pr_trigger_block <workflow> — the pull_request trigger's own lines, from
+# `  pull_request:` to the next top-level `on:` key or the `concurrency:` block.
+#
+# awk, not a `sed` range: `\|` alternation is a GNU BRE extension, so a
+# sed-range end pattern silently never matches under BSD sed and the "block"
+# becomes the whole file — an assertion that passes for the wrong reason on a
+# developer's machine and a different one in CI.
+pr_trigger_block() {
+  awk '
+    /^  pull_request:/ { inblk = 1; next }
+    inblk && /^[^[:space:]]/ { exit }   # a new top-level key (concurrency:, jobs:)
+    inblk && /^  [^[:space:]]/ { exit } # a sibling trigger (push:, workflow_dispatch:)
+    inblk { print }
+  ' "$1"
+}
+
+for wf in .github/workflows/test-pointers.yml .github/workflows/semver-checks.yml; do
+  assert_eq "${wf##*/}: pull_request trigger has no paths filter" "0" \
+    "$(grep -cE '^    paths(-ignore)?:' <<<"$(pr_trigger_block "${wf}")" || true)"
+  # `    if:` at four-space indent is a JOB-level condition; step-level ones are
+  # indented six and are the prescribed mechanism, so they must not be counted.
+  assert_eq "${wf##*/}: no job-level if: can skip the gate" "0" \
+    "$(grep -cE '^    if:' "${wf}" || true)"
+  assert_eq "${wf##*/}: has a no-op step that reports success" "1" \
+    "$(grep -cE "^      - name: No .* — nothing to (lint|compare)$" "${wf}" || true)"
+done
+
+assert_eq "semver-checks runs on pull requests at all" "1" \
+  "$(grep -c '^  pull_request:' .github/workflows/semver-checks.yml || true)"
+assert_eq "semver-checks selects crates from the diff, not the event" "1" \
+  "$(grep -c 'bash scripts/detect-version-bumps.sh' .github/workflows/semver-checks.yml || true)"
+assert_eq "test-pointers classifies from the diff, not the event" "1" \
+  "$(grep -c 'bash scripts/detect-pointer-lint-inputs.sh' .github/workflows/test-pointers.yml || true)"
+# Structural, not string-matched on the old condition: the banned thing is any
+# gate verdict taken from the ACTIVITY TYPE (#5407). `concurrency:` may still
+# name it — that decides what gets cancelled, never what gets checked — so the
+# assertion is scoped to the jobs the checks report from.
+assert_eq "no gate in test-pointers branches on the activity type" "0" \
+  "$(grep -c 'github\.event\.action' <<<"$(sed -n '/^jobs:/,$p' .github/workflows/test-pointers.yml)" || true)"
+assert_eq "no gate in semver-checks branches on the activity type" "0" \
+  "$(grep -c 'github\.event\.action' <<<"$(sed -n '/^jobs:/,$p' .github/workflows/semver-checks.yml)" || true)"
+# The expensive half of the SemVer gate stays behind the diff verdict — this is
+# what keeps #5149's "not 20 minutes on every PR" true while the context reports.
+assert_eq "semver-checks gates its costly steps on there being work" "5" \
+  "$(grep -c "if: steps.crate.outputs.have_work == 'true'" .github/workflows/semver-checks.yml || true)"
+
 echo
 if [ "${FAILURES}" -gt 0 ]; then
   echo "check-ci-helpers-selftest: ${FAILURES}/${CASES} case(s) FAILED"
