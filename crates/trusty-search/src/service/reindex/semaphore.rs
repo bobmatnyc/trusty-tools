@@ -210,11 +210,7 @@ pub(crate) fn remove_index_semaphore(id: &IndexId) {
 /// This does NOT replace [`INDEX_LOCKS`], which keeps its unchanged job of
 /// serialising reindex against deferred-embed against component catch-up.
 ///
-/// EVERY path that mutates `handle.indexer` or the index's on-disk data. Derived
-/// by grepping the mutating methods (`index_file`, `remove_file`,
-/// `commit_parsed_batch`, `save_contrib_graph`, `rebuild_symbol_graph_now`,
-/// `embed_deferred_chunks`, `set_root_path`, `clear_*`) across `src/service`.
-/// A new write path must be added to this table AND take the read side:
+/// EVERY path that mutates `handle.indexer` or the index's on-disk data:
 ///
 /// | Path | Entry point | Guarded by |
 /// |---|---|---|
@@ -222,18 +218,17 @@ pub(crate) fn remove_index_semaphore(id: &IndexId) {
 /// | `POST /indexes/:id/remove-file` | `server::files::remove_file_handler` | read side, added #3049 rd2 |
 /// | `POST /indexes/:id/graph` | `server::contrib_graph::ingest_graph_handler` | read side, added #3049 rd2 |
 /// | `PATCH /indexes/:id` (relocate) | `server::indexes_relocate::relocate_index_handler` | read side, added #3049 rd2 |
-/// | filesystem watcher | `service::watch_loop` | read side, added #3049 rd2 |
+/// | filesystem watcher | `service::watch_loop::{handle_modified, handle_removed}` | read side, added #3049 rd2; `handle_modified` widened to cover its stale-chunk removal in rd4 |
 /// | boot reconcile | `service::reconcile` | read side, added #3049 rd2 |
 /// | full reindex | `reindex::runner::run_reindex` | read side, added #3049 rd2 (also holds [`INDEX_LOCKS`]) |
 /// | deferred embed | `reindex::defer_embed_queue` | read side, added #3049 rd2 (also holds [`INDEX_LOCKS`]) |
 /// | `PATCH /indexes/:id/config` catch-up | `server::components::spawn_component_catch_up` | read side, added #3049 rd3 (also holds [`INDEX_LOCKS`]) |
 /// | `POST /indexes` (recreate) | `server::indexes::create_index_handler` | read side, added #3049 rd3 |
+/// | startup schema migration | `commands::start::daemon` spawn → `core::migration::run_migrations` | read side, added #3049 rd4 |
 ///
-/// The last two rows are round 3. The config row claimed the read side in round
-/// 2 and did not hold it — round 1 covered that path through [`INDEX_LOCKS`],
-/// and moving quiescence off the semaphore silently dropped it. `create_index`
-/// is not a writer of an existing index, but it registers a SECOND generation
-/// under the same id and the same on-disk paths, so it belongs on the same lock.
+/// `create_index` is not a writer of an existing index, but it registers a
+/// SECOND generation under the same id and the same on-disk paths, so it belongs
+/// on the same lock.
 ///
 /// Deliberately NOT guarded, with reasons:
 /// - Read-only handlers (`search`, `grep`, `typeahead`, `status`, `chunks`,
@@ -242,6 +237,19 @@ pub(crate) fn remove_index_semaphore(id: &IndexId) {
 /// - `tickers` idle-eviction / memory reclaim and `shutdown_flush` operate on
 ///   in-memory caches that are rebuilt from the durable corpus; they write no
 ///   corpus bytes.
+///
+/// **This table is prose, and prose was wrong three rounds running.** It was
+/// derived by hand-grepping mutating method names across `src/service`, which is
+/// how round 2 missed the config catch-up, round 3 missed the startup migration
+/// (in `src/commands`, outside the grepped subtree), and all three rounds missed
+/// `handle_modified`'s stale-chunk removal (`remove_chunk`, a method name absent
+/// from the hand-written grep list). `scripts/check_teardown_guard.sh` now
+/// enumerates the call sites mechanically and fails when one is neither guarded
+/// in its own scope nor declared in
+/// `scripts/teardown-guard-manifest.tsv`; the seed method list lives in
+/// `scripts/teardown-guard-methods.tsv`. Add a new write path to the manifest
+/// and to this table in the same change — the gate enforces the manifest, and
+/// this table is the human-readable view of it.
 ///
 /// Test: `service::server::tests_3049::delete_waits_for_an_ungated_index_file_write`,
 /// `service::server::tests_3049::unregister_index_waits_for_an_in_flight_writer_to_release_the_permit`,
@@ -273,12 +281,27 @@ pub(crate) fn index_teardown_lock(id: &IndexId) -> Arc<tokio::sync::RwLock<()>> 
 /// round 3). `Arc::ptr_eq` against the current map entry is what tells the two
 /// apart: an orphan guard is never the entry [`index_teardown_lock`] hands out.
 /// What: acquire, then compare; on a mismatch drop the orphan guard and retry
-/// against the live entry. Terminates because a delete evicts at most once, and
-/// the retry re-inserts a fresh entry no delete has claimed.
+/// against the live entry.
 /// Test: `service::server::tests_3049::a_writer_parked_across_teardown_is_visible_to_the_next_delete`.
 pub(crate) async fn acquire_index_teardown_read(
     id: &IndexId,
 ) -> tokio::sync::OwnedRwLockReadGuard<()> {
+    // #3049 round 4 (LOW): the loop has no iteration cap or backoff, and the
+    // termination argument is not visible from the code, so it is written out
+    // here rather than re-derived each review. One retry is the designed worst
+    // case: a mismatch means `unregister_index` evicted the entry we were parked
+    // on, and eviction happens only there, only while it holds the EXCLUSIVE
+    // guard, and only when the quiesce wait succeeded — so the entry we re-fetch
+    // was inserted after that delete finished and no delete has claimed it. A
+    // second retry needs a second complete delete of the same id to land inside
+    // the few instructions between our `index_teardown_lock` call and our
+    // `read_owned`, and each such delete costs a registry write plus (for
+    // `delete_data=true`) a `remove_dir_all`. Unbounded spinning therefore needs
+    // an unbounded delete stream on one id, which is a caller pathology, not a
+    // state this function can reach on its own. Nothing in the code PROVES the
+    // bound; if a cap is ever added, it must fail the acquire rather than return
+    // an orphan guard — returning one reintroduces the false `quiesced: true`
+    // this revalidation exists to prevent.
     loop {
         let lock = index_teardown_lock(id);
         let guard = Arc::clone(&lock).read_owned().await;
@@ -311,11 +334,15 @@ pub(crate) async fn acquire_index_teardown_write(
 ///
 /// Why: same growth argument as [`remove_index_semaphore`] — the map would
 /// otherwise only ever grow, one abandoned `Arc<RwLock>` per deleted id.
-/// What: removes the entry if present; no-op otherwise. Callers MUST still hold
-/// the exclusive guard when they call this — see `unregister_index`, which
-/// evicts as its last act under the guard so no destructive step can run after a
-/// racing caller has been handed a fresh, uncontended lock.
-/// Test: see [`INDEX_TEARDOWN_LOCKS`].
+/// What: removes the entry if present; no-op otherwise. Two caller obligations,
+/// both load-bearing (#3049 rd4): hold the EXCLUSIVE guard across the call, and
+/// call it only when the quiesce wait actually SUCCEEDED. The first keeps a
+/// racing caller from being handed a fresh lock before the destructive steps
+/// have run; the second keeps a writer that outlasted the wait reachable, since
+/// evicting around it leaves the next delete unable to see it and free to
+/// `remove_dir_all` underneath it. See `unregister_index`.
+/// Test: see [`INDEX_TEARDOWN_LOCKS`], plus
+/// `service::server::tests_3049::a_timed_out_delete_leaves_the_writers_lock_reachable_to_the_next_delete`.
 pub(crate) fn remove_index_teardown_lock(id: &IndexId) {
     if let Some(map) = INDEX_TEARDOWN_LOCKS.get() {
         map.remove(id);
@@ -383,7 +410,9 @@ pub(crate) fn signal_index_cancel(id: &IndexId) {
 /// [`remove_index_cancel_flag`] only drops the map entry, so a writer that
 /// already cloned the `Arc` would keep reading `true`.
 /// What: stores `false` on the (lazily created) flag with `Release` ordering.
-/// Test: `service::server::tests_3049::a_refused_delete_leaves_the_index_registered_and_uncancelled`.
+/// Test: `service::server::tests_3049::a_second_delete_after_an_abandoned_one_reclaims_the_data`
+/// — the second delete only succeeds because the abandoned one cleared the flag
+/// it had already set.
 pub(crate) fn clear_index_cancel(id: &IndexId) {
     index_cancel_flag(id).store(false, std::sync::atomic::Ordering::Release);
 }

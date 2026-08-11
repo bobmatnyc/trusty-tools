@@ -1,0 +1,38 @@
+# scripts/teardown-guard-methods.tsv — the seed method list for
+# scripts/check_teardown_guard.sh (issue #3049 round 4).
+#
+# Every method here writes an index's DURABLE state — redb corpus, HNSW
+# snapshot, or the on-disk paths those live under. A call to one of them must
+# hold the shared side of that index's teardown lock
+# (`service::reindex::acquire_index_teardown_read`), or a
+# `DELETE /indexes/:id?delete_data=true` can `remove_dir_all` the directory
+# mid-write.
+#
+# The first eight rows are the grep terms the hand-written table in
+# `service/reindex/semaphore.rs` was built from. `remove_chunk` /
+# `remove_chunks_from_stores` are the ninth and tenth: they delete from redb via
+# `delete_chunks_from_redb` and were absent from that hand-written list, which is
+# why `watch_loop::handle_modified`'s stale-chunk removal ran unguarded through
+# three review rounds.
+#
+# Adding a method here WIDENS the gate: every call site of it must then be
+# guarded in its own scope or declared in scripts/teardown-guard-manifest.tsv.
+#
+# Format: <method><TAB><what it writes>
+# Lines starting with '#' and blank lines are ignored.
+#
+# KNOWN LIMIT, stated plainly: this list is hand-maintained. A brand-new
+# durable-write method on `CodeIndexer` is not discovered by the gate until
+# someone adds it here. The gate closes the "existing method, new call site"
+# drift (which is what happened three times); it does not close "new method".
+index_file	redb corpus + HNSW + BM25, via the full ingest path
+remove_file	deletes every chunk of a file from redb + HNSW
+commit_parsed_batch	writes a parsed/embedded batch into redb + HNSW
+save_contrib_graph	persists the contribution graph into redb
+rebuild_symbol_graph_now	rebuilds and persists the symbol graph
+embed_deferred_chunks	embeds deferred chunks and writes vectors into HNSW
+set_root_path	repoints the indexer's root; in-memory, but decides where later writes land
+clear_file_hashes	clears the redb-backed content-hash cache
+clear_reindex_checkpoint_sync	clears the redb-backed reindex checkpoint
+remove_chunk	deletes one chunk from redb (delete_chunks_from_redb) + HNSW
+remove_chunks_from_stores	deletes a batch of chunks from redb + HNSW
