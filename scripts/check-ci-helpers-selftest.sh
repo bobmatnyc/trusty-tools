@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # check-ci-helpers-selftest.sh — regression fixtures for the CI helper scripts
-# (issues #4179, #4468, #4421, #4688).
+# (issues #4179, #4468, #4421, #4688, #5407).
 #
 # Why: the three helpers this covers each encode a decision that is invisible
 #   until it is WRONG in production — a cancelled run reported as green, a
@@ -19,6 +19,9 @@
 #                        from a frozen stale base (misattributes) and once from
 #                        the live base branch (does not) — and the workflow
 #                        wiring that decides which of the two CI gets.
+#   ci.yml `changes` job: that every gate verdict comes from a diff, never from
+#                        the PR activity type, and that the push path's
+#                        no-before-SHA arms still fail closed (#5407).
 #
 # Usage: bash scripts/check-ci-helpers-selftest.sh
 # Exit: 0 when every case matches; 1 on the first mismatch, printing both sides.
@@ -335,8 +338,28 @@ assert_eq "ci.yml no longer passes the frozen base.sha" "0" \
 assert_eq "ci.yml classifies the push range instead of forcing full Cargo" "1" \
   "$(grep -c 'DOCS_ONLY_BASE="\$before" bash scripts/detect-docs-only.sh' \
     "${ci_wf}" || true)"
-assert_eq "ci.yml no-ops Cargo for title/body-only edits" "1" \
-  "$(grep -c 'title/body-only PR edit' "${ci_wf}" || true)"
+
+# #5407: the `changes` job decided from the EVENT, not the diff — activity type
+# `edited` with a null `changes.base` short-circuited to `docs_only=true` and
+# `embedder_cuda_relevant=false`, so a retitle on a Rust PR no-opped every gated
+# step and still reported `Test` SUCCESS in ~14 s. `cancel-in-progress` excludes
+# `edited`, so that run coexisted with the real one, and GitHub shows only the
+# later-completing check-run per context name: the unrun green superseded the
+# real verdict everywhere, `gh pr checks` included. The two guards below are
+# deliberately structural rather than string-matched on the old wording — the
+# short-circuit was written twice, and a third detector would inherit it.
+changes_job="$(sed -n '/^  changes:/,/^  fmt:/p' "${ci_wf}")"
+assert_eq "changes job never branches on the activity type (#5407)" "0" \
+  "$(grep -c 'github\.event\.action' <<<"${changes_job}" || true)"
+# Only the FAIL-OPEN verdicts are banned as literals: a skip must be something a
+# detector concluded from a diff. The fail-CLOSED literals on the push path
+# (docs_only=false, embedder_cuda_relevant=true) stay, and are asserted below.
+assert_eq "no hardcoded skip verdict in the changes job (#5407)" "0" \
+  "$(grep -cE 'docs_only=true|embedder_cuda_relevant=false' <<<"${changes_job}" || true)"
+assert_eq "a push with no before SHA still fails closed" "1" \
+  "$(grep -c 'echo "docs_only=false" >> "\$GITHUB_OUTPUT"' <<<"${changes_job}" || true)"
+assert_eq "a push with no before SHA still runs the CUDA check" "1" \
+  "$(grep -c 'echo "embedder_cuda_relevant=true" >> "\$GITHUB_OUTPUT"' <<<"${changes_job}" || true)"
 
 # capabilities-drift is optional, so it can use exact trigger paths instead of
 # paying for a duplicate checkout/classifier job on every PR.
