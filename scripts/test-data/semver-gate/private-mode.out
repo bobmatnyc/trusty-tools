@@ -1,0 +1,20 @@
+[?25l[1m[32m    Building[0m stub v9.9.9 (current)
+[1m[32m       Built[0m [   1.204s] (current)
+[1m[32m     Parsing[0m stub v9.9.9 (current)
+[1m[32m      Parsed[0m [   0.061s] (current)
+[1m[32m    Building[0m stub v9.9.8 (baseline)
+[1m[32m       Built[0m [   1.190s] (baseline)
+[2K[1m[32m    Checking[0m stub v9.9.8 -> v9.9.9 (minor change)
+[1m[31m     Checked[?25l[0m [   0.418s] 196 checks: 195 pass, 1 fail, 0 warn, 58 skip
+
+--- failure enum_missing: pub enum removed or renamed ---
+
+[1mDescription:[0m
+A publicly-visible enum cannot be imported by its prior path. A `pub use` may have been removed, or the enum itself may have been renamed or removed entirely.
+        ref: https://doc.rust-lang.org/cargo/reference/semver.html#item-remove
+
+[1mFailed in:[0m
+  enum stub::Removed, previously in file /REPO/src/lib.rs:12
+
+[1m[31m     Summary[0m semver requires new major version: 1 major and 0 minor checks failed
+[1m[32m    Finished[0m [   3.902s] stub[?25h
