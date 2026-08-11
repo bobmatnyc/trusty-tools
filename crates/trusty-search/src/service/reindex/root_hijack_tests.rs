@@ -26,17 +26,26 @@
 //! check these tests pin. Those two tests inject a real read failure at each
 //! input and assert the same corpus-preserving refusal.
 //!
+//! #5357 code-critic follow-up: `reindex_moves_a_stale_indexer_onto_the_trusted_new_root`
+//! covers the accepted-move side effect the other tests in this module don't —
+//! `sync_indexer_root_after_trusted_move` actually repointing a STALE indexer.
+//! `reindex_accepts_root_move_that_matches_persisted_config` builds its indexer
+//! already AT the target root, so that call is a no-op there whether or not it
+//! runs; this test starts the indexer at the OLD root, the handler's genuine
+//! pre-runner state for an accepted move, so the sync is load-bearing.
+//!
 //! Test: `reindex_refuses_untrusted_root_move_and_preserves_corpus` (the core
 //! #2178 regression), `reindex_accepts_root_move_that_matches_persisted_config`
 //! (the surviving legitimate-move case),
 //! `reindex_refuses_when_the_persisted_registry_cannot_be_read`,
-//! `reindex_refuses_when_the_corpus_indexed_root_read_fails` and
-//! `reindex_refuses_when_the_indexed_root_value_is_corrupt` (#5357).
+//! `reindex_refuses_when_the_corpus_indexed_root_read_fails`,
+//! `reindex_refuses_when_the_indexed_root_value_is_corrupt` (#5357), and
+//! `reindex_moves_a_stale_indexer_onto_the_trusted_new_root` (#5357 follow-up).
 
 use super::*;
 use crate::core::chunker::{ChunkType, RawChunk};
 use crate::core::corpus::CorpusStore;
-use crate::core::indexer::CodeIndexer;
+use crate::core::indexer::{CodeIndexer, SearchQuery, SearchStage};
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::persistence::PersistedIndex;
 use std::sync::atomic::Ordering;
@@ -550,5 +559,146 @@ async fn reindex_accepts_root_move_that_matches_persisted_config() {
         progress.total_files.load(Ordering::Acquire),
         1,
         "the trusted move must proceed to walk the new root normally"
+    );
+}
+
+/// #5357 code-critic MEDIUM: `root_gate::sync_indexer_root_after_trusted_move`
+/// is what actually repoints a STALE indexer once the gate has trusted a move
+/// — no existing test proved that call is load-bearing.
+///
+/// Why: `reindex_accepts_root_move_that_matches_persisted_config` above builds
+/// its `CodeIndexer` already AT the target root, so the sync call is a no-op
+/// there whether or not it runs — deleting it would leave that test green.
+/// This test instead reproduces `reindex_handlers.rs::reindex_handler`'s real
+/// pre-runner state for an ACCEPTED move: that handler only syncs the indexer
+/// itself on the `!trusted.moved` arm (an untouched corpus, so nothing to
+/// re-relativize); a trusted MOVE is deliberately left for the runner's own
+/// gate re-read to apply (`runner.rs`, `if trusted.moved {
+/// root_gate::sync_indexer_root_after_trusted_move(&handle).await; }`) —
+/// exactly so a later refusal there can never strand the indexer on a root
+/// the corpus was never relativized against. Without the sync, the walk (which
+/// always runs against `handle.root_path`, not the indexer's) writes chunks
+/// relative to the NEW root while every subsequent read still resolves them
+/// against the OLD one (`resolve_chunk_file` joins the stored root-relative
+/// path onto `indexer.root_path`) — so every chunk this run just wrote
+/// resolves to a path under the wrong tree, permanently, and search returns
+/// empty results forever after a reindex that reported `Complete`.
+///
+/// What: seeds a real durable corpus stamped `indexed_root = root_old`,
+/// persists an `indexes.toml` entry naming `root_new` (mirroring a completed
+/// relocate), but constructs the `CodeIndexer` still AT `root_old` — the
+/// handler's actual pre-runner state for a trusted move. Drives a real
+/// reindex via `spawn_reindex_awaitable`, then asserts (1) the indexer's
+/// `root_path` moved to `root_new` and (2) a lexical search for the freshly
+/// walked file resolves to a `file` that exists on disk under `root_new`, not
+/// `root_old`.
+/// Test: this test.
+#[tokio::test]
+async fn reindex_moves_a_stale_indexer_onto_the_trusted_new_root() {
+    if !isolate_in_child_process(
+        "service::reindex::root_hijack_tests::\
+         reindex_moves_a_stale_indexer_onto_the_trusted_new_root",
+    ) {
+        return;
+    }
+    let data_dir = tempfile::tempdir().expect("data dir");
+
+    let root_old = tempfile::tempdir().expect("old root");
+    let root_new = tempfile::tempdir().expect("new root");
+    let seeded_relative = "src/auth.rs";
+    std::fs::create_dir_all(root_new.path().join("src")).expect("create new src");
+    std::fs::write(
+        root_new.path().join(seeded_relative),
+        "fn onboarding_handler() {}\n",
+    )
+    .expect("write source file");
+
+    let id = IndexId::new("atlassian-5357-sync");
+
+    let redb_path = data_dir.path().join("sync_corpus.redb");
+    let corpus = Arc::new(CorpusStore::open(&redb_path).expect("open corpus"));
+
+    // #5357: the indexer is constructed STILL AT root_old — the handler's
+    // real pre-runner state for an accepted move (see the doc comment above).
+    let mut indexer = CodeIndexer::new(id.0.clone(), root_old.path().to_path_buf());
+    indexer.set_corpus_store(Arc::clone(&corpus));
+    let handle = Arc::new(IndexHandle::bare(
+        id.clone(),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root_new.path().to_path_buf(), // the trusted candidate the gate will accept.
+    ));
+
+    // The corpus remembers the OLD root — a genuine prior reindex happened
+    // there before the project was relocated.
+    handle
+        .write_indexed_root(root_old.path())
+        .await
+        .expect("stamp prior indexed_root");
+
+    // The durable registry entry a completed relocate would already have
+    // written — it agrees with the candidate root_new.
+    crate::service::persistence::upsert_index_registry_entry(PersistedIndex {
+        id: id.0.clone(),
+        root_path: root_new.path().to_path_buf(),
+        ..Default::default()
+    })
+    .expect("persist indexes.toml entry");
+
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
+
+    assert_eq!(
+        progress.status.load(),
+        ReindexStatus::Complete,
+        "a root move that matches the persisted indexes.toml root_path must \
+         complete normally"
+    );
+    assert_eq!(
+        progress.total_files.load(Ordering::Acquire),
+        1,
+        "the trusted move must walk the new root"
+    );
+
+    // THE assertion this test exists for: the sync call is what moves the
+    // indexer off the stale root it started at.
+    assert_eq!(
+        handle.indexer.read().await.root_path,
+        root_new.path(),
+        "#5357: sync_indexer_root_after_trusted_move must repoint a STALE \
+         indexer onto the trusted candidate root once the gate accepts the \
+         move — without it, every chunk this walk just wrote resolves \
+         against the wrong tree"
+    );
+
+    // The practical consequence: search must resolve to a file that actually
+    // exists under the NEW root, not silently drop every candidate as
+    // out-of-root forever.
+    let results = handle
+        .indexer
+        .read()
+        .await
+        .search(&SearchQuery {
+            text: "onboarding_handler".to_string(),
+            stage: Some(SearchStage::Lexical),
+            ..Default::default()
+        })
+        .await
+        .expect("search must succeed");
+    assert!(
+        !results.is_empty(),
+        "#5357: search must find the chunk this reindex just wrote"
+    );
+    assert!(
+        std::path::Path::new(&results[0].file).starts_with(root_new.path()),
+        "#5357: resolved file must sit under the NEW root {}, got {}",
+        root_new.path().display(),
+        results[0].file
+    );
+    assert!(
+        std::path::Path::new(&results[0].file).exists(),
+        "#5357: resolved file must exist on disk, got {}",
+        results[0].file
     );
 }

@@ -165,7 +165,10 @@ pub(crate) fn evaluate_root_move(
 /// What: no-op unless the indexer is somewhere other than the handle's root;
 /// otherwise takes the indexer write lock and moves it. Called only on the
 /// `moved: true` accepted path, before Phase 1 walks anything.
-/// Test: `root_hijack_tests::reindex_accepts_root_move_that_matches_persisted_config`.
+/// Test: `root_hijack_tests::reindex_moves_a_stale_indexer_onto_the_trusted_new_root`
+/// — starts the indexer at the STALE root and proves this call is what moves
+/// it; `root_hijack_tests::reindex_accepts_root_move_that_matches_persisted_config`
+/// builds the indexer already at the target root, so the call is a no-op there.
 pub(crate) async fn sync_indexer_root_after_trusted_move(handle: &IndexHandle) {
     let target = handle.root_path.clone();
     let mut indexer = handle.indexer.write().await;
