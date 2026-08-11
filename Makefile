@@ -11,7 +11,7 @@
 # they are deleted and the target exits 0.  Run it again on a clean tree
 # and assert it still exits 0 (idempotent).
 
-.PHONY: check clean-runtime e2e-docker install-search-signed install-mpm-signed install-agents-signed publish-check version-parity-check publish-dry-run-order
+.PHONY: check clean-runtime e2e-docker install-search-signed install-mpm-signed install-agents-signed install-memory-signed publish-check version-parity-check publish-dry-run-order
 
 # Remove per-crate runtime artefacts that accumulate during development.
 #
@@ -146,6 +146,33 @@ install-mpm-signed:
 #   TRUSTY_CODESIGN_DRY_RUN=1   skip cargo install + codesign, test guidance only
 install-agents-signed:
 	bash scripts/install-trusty-agents-signed.sh
+
+# Install trusty-memory (trusty-memory + trusty-bm25-daemon +
+# trusty-memory-mcp-bridge) with Developer ID signing for persistent macOS TCC
+# grants.
+#
+# Why: owner ruling 2026-08-06 — trusty-memory was missing from the
+# `SIGNABLE_BINARIES` table for no recorded reason, so every `cargo install`
+# minted a fresh cdhash and revoked its TCC grants. `trusty-memory setup` /
+# `migrate` walk $HOME to depth 8 for `.claude/settings*.json` and so touch
+# ~/Desktop, ~/Documents, and ~/Downloads — the macOS Files-and-Folders
+# categories, keyed by cdhash exactly like FDA (#873) and App Data (#2721).
+#
+# What: delegates to scripts/install-trusty-memory-signed.sh, which runs
+# `cargo install --path crates/trusty-memory --locked` then signs all three
+# installed binaries via `tctl sign trusty-memory`. No certificate present
+# degrades to an unsigned install with a clear warning — never a hard failure.
+#
+# Test: run `make install-memory-signed`; assert all three binaries are signed
+# with a Developer ID (not ad-hoc) and `codesign --verify --strict` passes for
+# each. Run with TRUSTY_CODESIGN_DRY_RUN=1 (or --dry-run) for guidance paths.
+#
+# Overrides (passed as env vars, not make vars):
+#   TRUSTY_SIGN_IDENTITY=...    override the auto-detected signing identity
+#   TRUSTY_INSTALL_PATH=...     install from an explicit repo checkout path
+#   TRUSTY_CODESIGN_DRY_RUN=1   skip cargo install + codesign, test guidance only
+install-memory-signed:
+	bash scripts/install-trusty-memory-signed.sh
 
 # Publish-only-from-merged-main preflight guard (issue #2227).
 #

@@ -501,8 +501,9 @@ fn tctl_alias_self_update() {
 }
 
 /// `trusty-installer sign trusty-search` / `sign trusty-mpm` / `sign
-/// trusty-agents` all parse and round-trip to the right `SignTargetArg`
-/// (#2558, #4277).
+/// trusty-agents` / `sign trusty-memory` / `sign trusty-analyze` all parse and
+/// round-trip to the right `SignTargetArg` (#2558, #4277, owner ruling
+/// 2026-08-06).
 #[test]
 fn parse_sign() {
     let search = Cli::try_parse_from(["trusty-installer", "sign", "trusty-search"])
@@ -533,6 +534,31 @@ fn parse_sign() {
         Commands::Sign { target, .. } => {
             assert_eq!(target, SignTargetArg::Agents);
             assert_eq!(target.as_set_name(), "trusty-agents");
+        }
+        other => panic!("expected Sign, got {other:?}"),
+    }
+
+    // Owner ruling 2026-08-06: `trusty-memory` joins as a valid `tctl sign`
+    // target. This enum is the real gate — clap rejects any value not listed
+    // here before `commands::sign::run` sees it, so a `SIGNABLE_BINARIES` row
+    // alone would leave the set unreachable from the CLI.
+    let memory = Cli::try_parse_from(["trusty-installer", "sign", "trusty-memory"])
+        .expect("sign trusty-memory parses");
+    match memory.command {
+        Commands::Sign { target, .. } => {
+            assert_eq!(target, SignTargetArg::Memory);
+            assert_eq!(target.as_set_name(), "trusty-memory");
+        }
+        other => panic!("expected Sign, got {other:?}"),
+    }
+
+    // Owner ruling 2026-08-06: `trusty-analyze` promoted in the same ruling.
+    let analyze = Cli::try_parse_from(["trusty-installer", "sign", "trusty-analyze"])
+        .expect("sign trusty-analyze parses");
+    match analyze.command {
+        Commands::Sign { target, .. } => {
+            assert_eq!(target, SignTargetArg::Analyze);
+            assert_eq!(target.as_set_name(), "trusty-analyze");
         }
         other => panic!("expected Sign, got {other:?}"),
     }

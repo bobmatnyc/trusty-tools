@@ -121,15 +121,20 @@ pub enum AnalyzeCoreArg {
 /// CLI value for `trusty-installer sign <target>` (#2558).
 ///
 /// Why: A clap-facing enum keeps the `sign` surface declarative and
-/// self-documenting (`--help` lists the two valid targets) while
+/// self-documenting (`--help` lists the valid targets) while
 /// `commands::sign::run` and `commands::macos_signing` work in terms of the
-/// plain `&str` set names (`SEARCH_SET` / `MPM_SET`) so that module stays
-/// clap-independent.
+/// plain `&str` set names (`SEARCH_SET` / `MPM_SET` / …) so that module stays
+/// clap-independent. This enum is the REAL gate on `tctl sign <target>` —
+/// clap rejects an unlisted value before `commands::sign::run` ever sees it —
+/// so a set added to `SIGNABLE_BINARIES` without a variant here is
+/// unreachable from the CLI.
 ///
 /// What: `Search` → the `trusty-search` + `trusty-embedderd` set; `Mpm` → the
 /// `trusty-mpm` set (owner-authorized scope extension, #2558); `Agents` → the
 /// `trusty-agents` set, i.e. `tagent` (owner-authorized scope extension,
-/// #4277).
+/// #4277); `Memory` → the `trusty-memory` set, i.e. `trusty-memory` +
+/// `trusty-bm25-daemon` + `trusty-memory-mcp-bridge`; `Analyze` → the
+/// `trusty-analyze` set, a single binary (both owner ruling 2026-08-06).
 ///
 /// Test: `cli_tests::parse_sign` round-trips each value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -143,6 +148,13 @@ pub enum SignTargetArg {
     /// `trusty-agents` (`tagent`). (#4277)
     #[value(name = "trusty-agents")]
     Agents,
+    /// `trusty-memory` + its bundled `trusty-bm25-daemon` and the deprecated
+    /// `trusty-memory-mcp-bridge` shim. (owner ruling 2026-08-06)
+    #[value(name = "trusty-memory")]
+    Memory,
+    /// `trusty-analyze` (single binary). (owner ruling 2026-08-06)
+    #[value(name = "trusty-analyze")]
+    Analyze,
 }
 
 impl SignTargetArg {
@@ -152,13 +164,18 @@ impl SignTargetArg {
     /// `macos_signing::binaries_for_set` / `sign_set_strict`, so that module
     /// has no clap dependency.
     /// What: `Search` → `"trusty-search"`, `Mpm` → `"trusty-mpm"`, `Agents` →
-    /// `"trusty-agents"`.
-    /// Test: `cli_tests::parse_sign` (indirectly, via the round-trip).
+    /// `"trusty-agents"`, `Memory` → `"trusty-memory"`, `Analyze` →
+    /// `"trusty-analyze"`.
+    /// Test: `cli_tests::parse_sign` (indirectly, via the round-trip),
+    /// `macos_signing::tests::every_sign_target_arg_resolves_to_a_real_set`
+    /// (every variant maps onto a non-empty `SIGNABLE_BINARIES` set).
     pub fn as_set_name(self) -> &'static str {
         match self {
             SignTargetArg::Search => "trusty-search",
             SignTargetArg::Mpm => "trusty-mpm",
             SignTargetArg::Agents => "trusty-agents",
+            SignTargetArg::Memory => "trusty-memory",
+            SignTargetArg::Analyze => "trusty-analyze",
         }
     }
 }
