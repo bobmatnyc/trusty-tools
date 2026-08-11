@@ -99,9 +99,10 @@
 #   No summary line means no comparison happened, whatever the exit status was —
 #   including exit 0 — and that is reported as NO VERDICT on its own exit code.
 #   Absence of evidence is never a pass; same rule as the scan floor below.
-#   The line is matched with ANSI colour stripped, because CI forces colour into
-#   the middle of the marker token and the check went blind to every run —
-#   see verdict_computed below for the bytes and for PR #5458's two casualties.
+#   The line is matched with ANSI colour stripped (issue #5500), because CI
+#   forces colour into the middle of the marker token and the check went blind
+#   to every run — see verdict_computed below for the bytes and for PR #5458's
+#   two casualties.
 #
 # Toolchain (issue #5289): cargo-semver-checks re-resolves the dependency graph
 #   in a scratch project that IGNORES this workspace's Cargo.lock, so it can pick
@@ -161,7 +162,7 @@
 #   inventory instead of a skip. Cases 13-15 pin pre-release handling: the
 #   reproduction on record is `["0.9.9", "1.0.0-rc1", "1.0.0", "1.0.1-beta"]`
 #   declared 1.0.1, which selected 1.0.0-rc1 before the rank element existed.
-#   Cases 16-18 replay PR #5458's own CI bytes, where forced colour hid the
+#   Cases 16-18 (#5500) replay PR #5458's own CI bytes, where forced colour hid the
 #   summary line and both a clean run and a four-failure run were reported as
 #   never having happened.
 #   The catch itself is demonstrated in PR #5051 against #4088's real shape.
@@ -677,7 +678,7 @@ PY
 #   that it finished comparing, so requiring it means the gate concludes only
 #   from evidence that the comparison happened.
 #
-# THE MARKER ARRIVES COLOURED IN CI, AND THE COLOUR LANDS MID-TOKEN.
+# THE MARKER ARRIVES COLOURED IN CI, AND THE COLOUR LANDS MID-TOKEN (issue #5500).
 #   `dtolnay/rust-toolchain` writes CARGO_TERM_COLOR=always into $GITHUB_ENV
 #   when it is unset, so every step after it inherits forced colour even though
 #   this gate redirects the tool to a file. cargo-semver-checks then emits
@@ -709,7 +710,7 @@ PY
 #   so text that did not say `Checked … N checks:` still does not.
 # ---------------------------------------------------------------------------
 verdict_computed() {
-  # PR #5458: CARGO_TERM_COLOR=always splits `Checked` from its trailing space.
+  # #5500: CARGO_TERM_COLOR=always splits `Checked` from its trailing space (PR #5458).
   local plain="${1}.plain"
   LC_ALL=C sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g' "$1" > "$plain" || return 1
   grep -Eq '(^|[[:space:]])Checked[[:space:]].*[0-9]+ checks:' "$plain"

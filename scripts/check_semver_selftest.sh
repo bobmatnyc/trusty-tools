@@ -62,7 +62,8 @@
 #   9, 11 and 12 fail against the pre-#5296 gate, which is what makes them
 #   regression tests rather than descriptions of current behaviour.
 #
-#   Cases 16-18 pin the gate against ANSI-COLOURED tool output. Every fixture
+#   Cases 16-18 (issue #5500) pin the gate against ANSI-COLOURED tool output.
+#   Every fixture
 #   above was captured by redirecting to a file on a workstation, where
 #   cargo-semver-checks emits plain text — so `Checked` was always followed by a
 #   space and the marker matched. In GitHub Actions it is not:
