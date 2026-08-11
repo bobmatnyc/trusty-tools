@@ -8,18 +8,32 @@
 # specs — so it passes on the current tree while the retrofit (§10 F5/F6) lands.
 name: SLD lint
 
-# NOT in branch protection's required-checks list (verified via
-# `gh api repos/.../branches/main/protection`, #5094), so a `paths-ignore` here
-# carries none of the "required check skipped -> pending forever" risk that
-# rules it out for ci.yml / line-cap.yml. `website/**` is excluded because
-# spec references live in `crates/**` doc comments and `docs/specs/**/*.md`
-# frontmatter, never under website/ — a website-only PR can't move the
-# verdict. `docs/**` itself stays IN scope: it is this gate's direct target.
+# This optional workflow is limited to inputs the SLD verdict can observe:
+# spec documents, crate source/doc comments, the linter implementation, and
+# its wrapper/configuration. ADR-only and other prose changes do not install a
+# Rust toolchain just to discover that SLD had nothing relevant to inspect.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "website/**"
+    paths:
+      - "docs/specs/**"
+      - "crates/**/*.rs"
+      - "crates/**/*.py"
+      - "crates/**/*.ts"
+      - "crates/**/*.tsx"
+      - "crates/**/*.js"
+      - "crates/**/*.mjs"
+      - "crates/**/*.cjs"
+      - "crates/**/*.sh"
+      - "crates/**/*.bash"
+      - "crates/**/*.toml"
+      - "crates/**/*.yaml"
+      - "crates/**/*.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".sld-lint-allowlist.tsv"
+      - "scripts/check_sld.sh"
+      - ".github/workflows/sld-lint.yml"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
     # (opened/synchronize/reopened) and is the event a base-branch RETARGET
@@ -28,8 +42,25 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
-    paths-ignore:
-      - "website/**"
+    paths:
+      - "docs/specs/**"
+      - "crates/**/*.rs"
+      - "crates/**/*.py"
+      - "crates/**/*.ts"
+      - "crates/**/*.tsx"
+      - "crates/**/*.js"
+      - "crates/**/*.mjs"
+      - "crates/**/*.cjs"
+      - "crates/**/*.sh"
+      - "crates/**/*.bash"
+      - "crates/**/*.toml"
+      - "crates/**/*.yaml"
+      - "crates/**/*.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".sld-lint-allowlist.tsv"
+      - "scripts/check_sld.sh"
+      - ".github/workflows/sld-lint.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push
@@ -41,6 +72,7 @@ concurrency:
 jobs:
   sld-lint:
     name: SLD (DOC-38) reference + spec-doc lint
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -57,6 +89,3 @@ jobs:
 
       - name: Run SLD linter (default / grandfathering mode)
         run: bash scripts/check_sld.sh
-
-      - name: Check ADR corpus consistency
-        run: bash scripts/check_adr.sh

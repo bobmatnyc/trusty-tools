@@ -1,7 +1,7 @@
 # CI workflow for the trusty-tools Cargo workspace.
 #
 # Jobs:
-#   changes  – classify the diff as docs-only or not, once, for every job
+#   changes  – classify the diff as Cargo-inert or not, once, for every job
 #              below to consult (issue #4468: docs-only PRs ran the full Rust
 #              build). The exemption is applied to STEPS, never to the trigger
 #              or to the job, so required checks always report.
@@ -136,7 +136,7 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # changes: classify the diff as docs-only or not (issue #4468), once, for
+  # changes: classify the diff as Cargo-inert or not (issue #4468), once, for
   # every job below to consult.
   #
   # WHY THIS IS A JOB AND NOT A `paths:` FILTER. Five of this workflow's checks
@@ -155,11 +155,12 @@ jobs:
   # the failure mode if that is wrong is every docs PR blocked forever, so the
   # jobs are kept unconditional and only their steps are gated.
   #
-  # PUSH TO MAIN never takes the exemption: main is the branch everything is
-  # cut from, so it is verified in full regardless of what the diff touched.
+  # PUSH TO MAIN compares the pushed range too. Re-running the complete Rust
+  # suite after a Cargo-inert PR has already passed adds cost but no signal.
+  # A missing/invalid before SHA still fails closed into the full suite.
   # --------------------------------------------------------------------------
   changes:
-    name: Detect docs-only change set
+    name: Detect Cargo-inert change set
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -206,15 +207,28 @@ jobs:
 
       - name: Classify changed paths
         id: detect
-        env:
-          DOCS_ONLY_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "push to ${{ github.ref }} — verifying in full, no docs-only exemption"
+          if [ "${{ github.event_name }}" = "pull_request" ] && \
+             [ "${{ github.event.action }}" = "edited" ] && \
+             [ "${{ toJSON(github.event.changes.base) }}" = "null" ]; then
+            echo "title/body-only PR edit — retaining required contexts without repeating Cargo"
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            DOCS_ONLY_BASE="origin/${{ github.event.pull_request.base.ref }}" \
+              bash scripts/detect-docs-only.sh > /dev/null
+            exit 0
+          fi
+
+          before="${{ github.event.before }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "push has no usable before SHA — verifying in full"
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          bash scripts/detect-docs-only.sh > /dev/null
+          DOCS_ONLY_BASE="$before" bash scripts/detect-docs-only.sh > /dev/null
 
   # --------------------------------------------------------------------------
   # fmt: enforce cargo fmt --all --check (stable toolchain + rustfmt component)
