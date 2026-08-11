@@ -79,9 +79,18 @@ impl LintOptions {
 /// Why: the CLI needs both the findings (to print) and enough counts to render a
 /// one-line summary and choose an exit code; bundling them keeps [`run`] a pure
 /// value producer.
-/// What: the surviving `diagnostics` (post-allowlist) and the number of spec docs
-/// and code files scanned.
-/// Test: `tests::run_clean_tree`.
+/// What: the surviving `diagnostics` (post-allowlist), the number of spec docs
+/// and code files DISCOVERED, and — separately — the number of references
+/// actually RESOLVED out of each tree.
+///
+/// The two pairs answer different questions and both are floored (#5440-followup,
+/// see `main.rs`). `spec_docs`/`code_files` are walkdir discovery counts: they
+/// stay at full strength even when the reference parser matches nothing, so a
+/// summary built only from them can report a healthy scan over a tree where zero
+/// checks ran. `spec_refs_checked`/`code_refs_checked` count the work — every
+/// reference put through [`checks::check_reference`] — and collapse to zero when
+/// the grammar drifts.
+/// Test: `tests::run_clean_tree`, `tests::run_counts_references_checked`.
 #[derive(Debug, Default)]
 pub struct LintReport {
     /// All findings that survived the allowlist, in scan order.
@@ -90,6 +99,10 @@ pub struct LintReport {
     pub spec_docs: usize,
     /// Number of `crates/**` code files scanned.
     pub code_files: usize,
+    /// `spec_refs:` frontmatter references resolved across `docs/specs/**`.
+    pub spec_refs_checked: usize,
+    /// Inline `# Spec References` references resolved across `crates/**`.
+    pub code_refs_checked: usize,
 }
 
 impl LintReport {
@@ -186,9 +199,10 @@ pub fn run(opts: &LintOptions) -> Result<LintReport, LintError> {
             continue;
         };
         let path = rel.to_string_lossy();
-        report
-            .diagnostics
-            .extend(checks::check_markdown_refs(&path, &content, &lookup));
+        // #5440-followup: tally the references RESOLVED, not just the file walked.
+        let scan = checks::check_markdown_refs(&path, &content, &lookup);
+        report.spec_refs_checked += scan.checked;
+        report.diagnostics.extend(scan.diagnostics);
         report.diagnostics.extend(checks::check_spec_doc(
             &path,
             &content,
@@ -203,9 +217,10 @@ pub fn run(opts: &LintOptions) -> Result<LintReport, LintError> {
         };
         let ext = rel.extension().and_then(|e| e.to_str()).unwrap_or("");
         let path = rel.to_string_lossy();
-        report
-            .diagnostics
-            .extend(checks::check_code_file(&path, &content, ext, &lookup));
+        // #5440-followup: tally the references RESOLVED, not just the file walked.
+        let scan = checks::check_code_file(&path, &content, ext, &lookup);
+        report.code_refs_checked += scan.checked;
+        report.diagnostics.extend(scan.diagnostics);
     }
 
     if opts.strict {
