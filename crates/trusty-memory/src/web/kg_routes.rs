@@ -184,7 +184,8 @@ pub(super) async fn kg_list_all(
 /// Why: The KG Explorer header shows a quick "N triples" badge; computing the
 /// count server-side avoids fetching every triple to count them.
 /// What: returns `{ "active": N }` where N is `count_active_triples()` on the
-/// palace's KG.
+/// palace's KG. A failed store read is a 500 (#5384): the badge cannot tell
+/// `{"active": 0}` apart from a count that was never read.
 /// Test: indirectly via the same palace counts surfaced on `/api/v1/status`.
 pub(super) async fn kg_count(
     State(state): State<AppState>,
@@ -202,102 +203,158 @@ pub(super) async fn kg_count(
 
 /// Separator byte sequence used inside a URL-safe base64 triple ID.
 ///
-/// Why: The triple primary key is `(subject, predicate)`. Encoding them as a
-/// single opaque ID lets the REST path look like `/kg/triples/<id>` (a
-/// resource identifier) rather than carrying both parts in the URL path, which
-/// would require double-escaping arbitrary strings. A `\0` separator is safe
-/// because neither subjects nor predicates ever contain null bytes.
+/// Why: A triple is keyed by `(subject, predicate, object)`. Encoding all
+/// three as a single opaque ID lets the REST path look like
+/// `/kg/triples/<id>` (a resource identifier) rather than carrying the parts
+/// in the URL path, which would require double-escaping arbitrary strings. A
+/// `\0` separator is safe because none of the three components ever contains
+/// a null byte.
 /// What: Used by [`encode_triple_id`] and [`decode_triple_id`].
 /// Test: `decode_triple_id_round_trips`.
 const TRIPLE_ID_SEPARATOR: u8 = 0x00;
 
-/// Encode a `(subject, predicate)` pair as a URL-safe base64 triple ID.
+/// Encode a `(subject, predicate, object)` triple as a URL-safe base64 ID.
 ///
 /// Why: Produces a single opaque string that can travel as a URL path segment
-/// without percent-encoding. The null-byte separator ensures the encoding is
-/// injective (no two distinct pairs can produce the same encoded string) —
-/// but only when neither component itself contains a null byte. Prior to
-/// issue #1102 the function silently produced an ambiguous (corrupt) id when
-/// the subject or predicate contained `\0`; now it returns an error so
-/// callers cannot persist an undecodable id.
-/// What: Validates that neither `subject` nor `predicate` contains
+/// without percent-encoding. The object is part of the payload because the
+/// id has to name the row the caller means to delete: the two-field form this
+/// replaced could only name a `(subject, predicate)` pair, so a delete closed
+/// every object at that pair. The null-byte separator keeps the encoding
+/// injective (no two distinct triples produce the same string) — but only
+/// while no component contains a null byte itself. Prior to issue #1102 the
+/// function silently produced an ambiguous (corrupt) id in that case; now it
+/// returns an error so callers cannot build an undecodable id.
+/// What: Validates that none of `subject`, `predicate`, `object` contains
 /// `TRIPLE_ID_SEPARATOR` (`\0`). On success returns
-/// `Ok(base64url(subject_bytes + "\0" + predicate_bytes))`, no padding.
+/// `Ok(base64url(subject + "\0" + predicate + "\0" + object))`, no padding.
 /// On validation failure returns `Err` with a descriptive message.
 /// Test: `decode_triple_id_round_trips`, `encode_triple_id_rejects_null_byte`.
 // Only called from tests (round-trip + null-byte rejection); suppress the
 // dead_code lint that fires in non-test builds.
 #[allow(dead_code)]
-pub(crate) fn encode_triple_id(subject: &str, predicate: &str) -> Result<String, String> {
+pub(crate) fn encode_triple_id(
+    subject: &str,
+    predicate: &str,
+    object: &str,
+) -> Result<String, String> {
     use base64::Engine as _;
-    if subject.as_bytes().contains(&TRIPLE_ID_SEPARATOR) {
-        return Err(format!(
-            "subject must not contain the null-byte separator (\\0); got {subject:?}"
-        ));
+    for (field, value) in [
+        ("subject", subject),
+        ("predicate", predicate),
+        ("object", object),
+    ] {
+        if value.as_bytes().contains(&TRIPLE_ID_SEPARATOR) {
+            return Err(format!(
+                "{field} must not contain the null-byte separator (\\0); got {value:?}"
+            ));
+        }
     }
-    if predicate.as_bytes().contains(&TRIPLE_ID_SEPARATOR) {
-        return Err(format!(
-            "predicate must not contain the null-byte separator (\\0); got {predicate:?}"
-        ));
-    }
-    let mut buf = Vec::with_capacity(subject.len() + 1 + predicate.len());
+    let mut buf = Vec::with_capacity(subject.len() + predicate.len() + object.len() + 2);
     buf.extend_from_slice(subject.as_bytes());
     buf.push(TRIPLE_ID_SEPARATOR);
     buf.extend_from_slice(predicate.as_bytes());
+    buf.push(TRIPLE_ID_SEPARATOR);
+    buf.extend_from_slice(object.as_bytes());
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&buf))
 }
 
-/// Decode a URL-safe base64 triple ID back to `(subject, predicate)`.
+/// Why a triple id failed to decode, so the handler can answer differently.
 ///
-/// Why: The handler for `DELETE /kg/triples/<id>` needs to recover the
-/// `(subject, predicate)` pair from the opaque path segment to call the
-/// service layer.
-/// What: Decodes base64url, splits on the first null byte. Returns `None`
-/// when the input is not valid base64url or contains no null separator.
-/// Test: `decode_triple_id_round_trips`.
-pub(crate) fn decode_triple_id(id: &str) -> Option<(String, String)> {
+/// Why: a two-field id is not merely unparseable — it is the previous format,
+/// and answering it with the same "not found" a garbage id gets would read as
+/// "already deleted" to a caller whose request was in fact never understood.
+/// What: [`decode_triple_id`]'s error type; `LegacyPair` is a well-formed id
+/// carrying only `(subject, predicate)`, `Malformed` is everything else.
+/// Test: `decode_triple_id_rejects_the_legacy_pair_form`.
+pub(crate) enum TripleIdError {
+    /// Not decodable as base64url, or not a three-field `\0`-separated list.
+    Malformed,
+    /// Decodes to `(subject, predicate)` — the pre-fix two-field form, which
+    /// cannot name a single triple.
+    LegacyPair,
+}
+
+/// Decode a URL-safe base64 triple ID back to `(subject, predicate, object)`.
+///
+/// Why: The handler for `DELETE /kg/triples/<id>` needs the full triple key
+/// from the opaque path segment; with only `(subject, predicate)` it could
+/// not name one row to close.
+/// What: Decodes base64url and splits on every null byte. Exactly three
+/// fields yields `Ok`; a two-field payload is reported as
+/// [`TripleIdError::LegacyPair`]; anything else — undecodable base64,
+/// non-UTF-8 bytes, no separator, more than three fields — is
+/// [`TripleIdError::Malformed`].
+/// Test: `decode_triple_id_round_trips`,
+/// `decode_triple_id_returns_none_for_invalid_input`,
+/// `decode_triple_id_rejects_the_legacy_pair_form`.
+pub(crate) fn decode_triple_id(id: &str) -> Result<(String, String, String), TripleIdError> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(id)
-        .ok()?;
-    let sep_pos = bytes.iter().position(|&b| b == TRIPLE_ID_SEPARATOR)?;
-    let subject = String::from_utf8(bytes[..sep_pos].to_vec()).ok()?;
-    let predicate = String::from_utf8(bytes[sep_pos + 1..].to_vec()).ok()?;
-    Some((subject, predicate))
+        .map_err(|_| TripleIdError::Malformed)?;
+    let parts = bytes
+        .split(|&b| b == TRIPLE_ID_SEPARATOR)
+        .map(|part| String::from_utf8(part.to_vec()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| TripleIdError::Malformed)?;
+    match <[String; 3]>::try_from(parts) {
+        Ok([subject, predicate, object]) => Ok((subject, predicate, object)),
+        Err(parts) if parts.len() == 2 => Err(TripleIdError::LegacyPair),
+        Err(_) => Err(TripleIdError::Malformed),
+    }
 }
 
-/// `DELETE /api/v1/palaces/{id}/kg/triples/{triple_id}` — surgically remove
-/// one active triple by its opaque base64url-encoded `(subject, predicate)` ID.
+/// `DELETE /api/v1/palaces/{id}/kg/triples/{triple_id}` — remove exactly one
+/// active triple by its opaque base64url-encoded
+/// `(subject, predicate, object)` ID.
 ///
-/// Why: Issue #278 — the existing `(subject, predicate)` retract via
-/// `/kg/prompt-facts` is scope-wide (retract across all palaces). This
-/// endpoint targets exactly one triple in exactly one palace, giving callers
-/// a surgical way to delete a specific edge without affecting other palaces
-/// or other predicates for the same subject.
-/// What: Decodes `triple_id` (base64url of `subject\0predicate`) back into
-/// `(subject, predicate)`, retracts the active interval via
-/// `MemoryService::kg_retract_triple`, and returns:
-///   - `204 No Content` on success
-///   - `404 Not Found` when the triple_id is malformed or no active triple
-///     matched
+/// Why: Issue #278 — the `(subject, predicate)` retract via
+/// `/kg/prompt-facts` is scope-wide (every palace). This endpoint targets one
+/// triple in one palace. It did not do that: the id encoded only
+/// `(subject, predicate)` and the service called the pair-level
+/// `KnowledgeGraph::retract`, so deleting "one triple" closed every object at
+/// that pair — with the 404 on a miss naming only subject and predicate, the
+/// endpoint could not express the row it was deleting. The id now carries the
+/// object and the retraction is keyed on all three, matching the
+/// `kg_retract_triple` MCP tool.
+/// What: Decodes `triple_id` (base64url of `subject\0predicate\0object`),
+/// closes that one row via `MemoryService::kg_retract_triple`, and returns:
+///   - `204 No Content` when a row was closed
+///   - `400 Bad Request` when the id carries only `(subject, predicate)` —
+///     the previous format, which names a pair rather than a triple
+///   - `404 Not Found` when the id is otherwise malformed, or no active
+///     triple has that exact `(subject, predicate, object)`
 ///
-/// Test: `kg_delete_triple_returns_204_on_success` and
-/// `kg_delete_triple_returns_404_for_missing`.
+/// Test: `kg_delete_triple_closes_one_object_and_keeps_siblings`,
+/// `kg_delete_triple_returns_404_for_missing`,
+/// `kg_delete_triple_rejects_a_legacy_pair_id`.
 pub(super) async fn kg_delete_triple(
     State(state): State<AppState>,
     AxumPath((id, triple_id)): AxumPath<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let (subject, predicate) = decode_triple_id(&triple_id).ok_or_else(|| {
-        ApiError::not_found("invalid triple id — expected base64url(subject\\0predicate)")
-    })?;
-    let found = crate::service::MemoryService::new(state)
-        .kg_retract_triple(&id, &subject, &predicate)
+    let (subject, predicate, object) = match decode_triple_id(&triple_id) {
+        Ok(triple) => triple,
+        Err(TripleIdError::LegacyPair) => {
+            return Err(ApiError::bad_request(
+                "triple id names only (subject, predicate) — it must encode \
+                 base64url(subject\\0predicate\\0object) so the delete targets one triple",
+            ))
+        }
+        Err(TripleIdError::Malformed) => {
+            return Err(ApiError::not_found(
+                "invalid triple id — expected base64url(subject\\0predicate\\0object)",
+            ))
+        }
+    };
+    let closed = crate::service::MemoryService::new(state)
+        .kg_retract_triple(&id, &subject, &predicate, &object)
         .await?;
-    if found {
+    if closed > 0 {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found(format!(
-            "no active triple with subject={subject:?} predicate={predicate:?} in palace {id:?}"
+            "no active triple with subject={subject:?} predicate={predicate:?} \
+             object={object:?} in palace {id:?}"
         )))
     }
 }

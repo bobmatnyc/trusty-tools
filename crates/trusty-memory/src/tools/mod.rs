@@ -20,6 +20,7 @@
 //! - `room_create(palace, label, description?)`     -> room_id (idempotent)
 //! - `room_rename(palace, room, new_label)`         -> renamed room
 //! - `kg_assert(palace, subject, predicate, object, confidence?, provenance?)` -> ()
+//! - `kg_retract_triple(palace, subject, predicate, object)` -> closed count
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
 //! - `kg_list_subjects(palace, limit?, with_counts?)` -> subjects (#4776)
 //! - `wing_list(palace)`                            -> Vec<WingSummary>
@@ -70,7 +71,8 @@ use dream_ops::{handle_dream_consolidate_room, handle_palace_dream};
 use kg_ops::{
     handle_add_alias, handle_discover_aliases, handle_get_prompt_context, handle_kg_assert,
     handle_kg_bootstrap, handle_kg_gaps, handle_kg_list_subjects, handle_kg_query,
-    handle_list_prompt_facts, handle_remove_prompt_fact, handle_upgrade_tool,
+    handle_kg_retract_triple, handle_list_prompt_facts, handle_remove_prompt_fact,
+    handle_upgrade_tool,
 };
 use memory_ops::{
     handle_memory_forget, handle_memory_list, handle_memory_note, handle_memory_recall,
@@ -107,6 +109,9 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "palace_delete" => handle_palace_delete(state, args).await,
         "palace_update" => handle_palace_update(state, args).await,
         "kg_assert" => handle_kg_assert(state, args).await,
+        // The inverse of `kg_assert`: closes one (subject, predicate, object)
+        // and leaves the pair's other objects live.
+        "kg_retract_triple" => handle_kg_retract_triple(state, args).await,
         "add_alias" => handle_add_alias(state, args).await,
         "list_prompt_facts" => handle_list_prompt_facts(state, args).await,
         "remove_prompt_fact" => handle_remove_prompt_fact(state, args).await,

@@ -82,7 +82,8 @@
 #
 #     A NON-VERDICT IS NOT A VERDICT (#5289). check_semver.sh exits 1 only when
 #     it computed a verdict that says break, and 3 when it could not compute one
-#     at all (rustdoc build failure, unreachable registry, missing tool). Both
+#     at all (rustdoc build failure, a run that executed ZERO checks (#5440),
+#     unreachable registry, missing tool). Both
 #     stop the publish; only the first is reported as "your API changed". The
 #     remedy above applies to exit 1 — for exit 3 the remedy is to fix the gate
 #     and re-run, never to bump a version on evidence that does not exist.

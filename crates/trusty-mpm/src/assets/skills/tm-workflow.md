@@ -223,6 +223,53 @@ cd .claude/worktrees/<dirname>
 Always `git fetch origin main` first and branch off `origin/main`, never local
 `main` — local `main` can be stale and branching from it has caused lost commits.
 
+**Keep the main checkout fresh.** Worktrees branch off `origin/main` and stay
+current; nothing refreshes the main checkout, so it drifts — and then every
+inspection read (`git log`, opening a file to answer a question, checking
+whether a fix already landed) silently answers from old code. At session start,
+and after a PR this session merged lands on `origin/main`:
+
+```bash
+git -C /path/to/main-checkout fetch origin
+git -C /path/to/main-checkout pull --ff-only
+```
+
+Fast-forward only — it cannot create a merge commit, cannot rewrite history, and
+fails loudly instead of resolving anything silently. A dirty tree does not block
+a fast-forward unless the incoming commits touch the same files, so the common
+case just works.
+
+🔴 **If `--ff-only` fails, never clear the way by discarding.** The usual cause
+is another session's uncommitted work. Do not `git stash` — repo-level and
+shared across every worktree, so it yanks state out from under sessions running
+right now. Do not `git checkout --`, `restore`, `reset --hard`, or `clean`: the
+main-checkout guard blocks these, correctly, and hunting for an unblocked
+equivalent is routing around a safety control. A file showing ` M` in
+`git status --porcelain` was never staged, so nothing recovers it once
+discarded.
+
+Identify the owner first — `git status --porcelain` for staged-vs-unstaged, file
+mtimes, and the session log for who was alive in that window — and ask live
+peers before assuming the work is abandoned. If it is unowned, **preserve rather
+than discard**: commit it out of the way, which is permitted and destroys
+nothing.
+
+```bash
+git checkout -b orphan/main-checkout-$(date +%Y%m%d)
+git add -u && git commit -m "wip: orphaned main-checkout changes"
+git checkout main && git pull --ff-only
+```
+
+Committing reaches the same clean tree as discarding, costs the same number of
+steps, and cannot lose anything — the guard exists to prevent loss, not to
+prevent refreshing, so the compliant path and the safe path are the same path.
+If the checkout has genuinely diverged instead, report it and stop.
+
+This is inspection hygiene only, so reads are not answered from stale code. The
+main checkout stays read-only for work; every edit still happens in a worktree.
+`git pull` is already on the PM's allowlist — no new authority, not a budgeted
+direct action.
+
 **A worktree is a writer; the branch is the workstream.** The durable unit is
 the branch — one branch per workstream, one session per workstream. A worktree
 is only the checkout that lets you write to that branch: ephemeral, disposable,
