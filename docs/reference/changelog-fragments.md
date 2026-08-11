@@ -61,6 +61,33 @@ heading between releases. At release time `scripts/bump-version.sh` calls
 fragments by category, writes one `## [<version>] — <date>` section, and deletes
 the consumed fragments in the same operation.
 
+## Recovering a Stale Section (`--merge`)
+
+Assembling is not coupled to publishing, so a `## [<version>]` section can exist
+for a cut that never shipped. PR #4824 wrote `## [1.3.5]` into trusty-mpm and
+`## [0.5.0]` into trusty-agents-common that way, consuming 40 fragments; 77 more
+accumulated behind those sections over the next six days, and the assembler
+refused every subsequent run.
+
+The assembler still refuses by default — merging rewrites a section that may
+already be published and tagged, and the script cannot tell a phantom cut from a
+shipped one. What it now does is name every stranded fragment in the refusal and
+offer the two ways out (#5298):
+
+```bash
+# 1. fold the pending fragments into the existing section
+bash scripts/assemble-changelog.sh <crate-dir> <version> --merge
+
+# 2. or cut the next version instead, leaving the stale section as history
+```
+
+`--merge` appends to the `### <Category>` subsections the section already has,
+inserts missing categories in the canonical order, deletes the consumed
+fragments in the same operation, and exits nonzero without touching anything if
+any category could not be placed. It refuses outright when there is no
+`## [<version>]` section to merge into. Hand-editing `CHANGELOG.md` remains
+banned either way.
+
 ## git-cliff No Longer Touches `CHANGELOG.md`
 
 `scripts/generate-changelog.sh` is deleted; it ran `git cliff --unreleased
