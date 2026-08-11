@@ -1522,3 +1522,131 @@ async fn test_mode_filter_all_returns_everything() {
         );
     }
 }
+
+// ---- Component gates on the incremental write path (#3048) ---------------
+
+/// Source text used by the #3048 component-gate tests. Two functions with a
+/// call between them, so the symbol graph has something real to build.
+const GATE_FIXTURE: &str = "pub fn alpha() { beta(); }\npub fn beta() {}\n";
+
+/// #3048: `index_file` on a `skip_vector` index must not embed.
+///
+/// Why: `index_file` is the choke point for the file watcher, the boot-time
+/// reconciler, and `POST /indexes/:id/index-file`. It called
+/// `embed_chunks_in_batches` unconditionally, so an index configured
+/// BM25-only kept paying the embedder on every save and kept growing an HNSW
+/// graph that `/health` reports as `Skipped` — the batch reindex path has
+/// routed `skip_vector` through `parse_files_only` since #2984 Phase 1, and
+/// this path never caught up.
+/// What: sets `skip_vector`, indexes one file, and asserts the corpus grew
+/// while the vector store stayed empty. Reverting the gate in `index_file`
+/// fails this on the `vectors == 0` assertion.
+/// Test: this IS the test.
+#[tokio::test]
+async fn skip_vector_index_file_never_embeds() {
+    let mut idx = make_indexer();
+    idx.skip_vector = true;
+
+    idx.index_file("src/gate.rs", GATE_FIXTURE)
+        .await
+        .expect("index_file must still succeed on a vector-disabled index");
+
+    assert!(
+        idx.chunk_count() > 0,
+        "the lexical lane must still ingest — skip_vector disables embedding, \
+         not indexing"
+    );
+    let vectors = idx
+        .store
+        .as_ref()
+        .expect("make_indexer wires a store")
+        .len()
+        .await
+        .expect("store len");
+    assert_eq!(
+        vectors, 0,
+        "a skip_vector index must hold zero vectors after an incremental \
+         write; got {vectors} (#3048)"
+    );
+}
+
+/// #3048 control: the gate must not over-fire on a normal index.
+///
+/// Why: a gate that suppressed embedding unconditionally would also pass the
+/// test above. This pins the other side of the branch, so the pair proves the
+/// flag — not the code path — is what decides.
+/// What: identical to the test above with `skip_vector` left `false`; asserts
+/// the vector store DID gain vectors.
+/// Test: this IS the test.
+#[tokio::test]
+async fn skip_vector_false_index_file_still_embeds() {
+    let idx = make_indexer();
+    assert!(!idx.skip_vector, "default must be false");
+
+    idx.index_file("src/gate.rs", GATE_FIXTURE)
+        .await
+        .expect("index_file");
+
+    let vectors = idx
+        .store
+        .as_ref()
+        .expect("make_indexer wires a store")
+        .len()
+        .await
+        .expect("store len");
+    assert!(
+        vectors > 0,
+        "a vector-enabled index must still embed on the incremental path"
+    );
+}
+
+/// #3048 (the skip_kg parity half): `index_file` on a `skip_kg` index must not
+/// rebuild the symbol graph.
+///
+/// Why: `finish::finish_reindex` has skipped KG construction for a skip_kg
+/// index since #313, but `index_file` ended with an unconditional
+/// `rebuild_symbol_graph`, which both builds the petgraph in memory and
+/// persists it. Every watcher save therefore paid the ~50-100 MB/index cost
+/// the flag exists to avoid.
+/// What: sets `skip_kg`, indexes a file whose chunks reference each other, and
+/// asserts the graph stayed empty; the control below proves the fixture would
+/// otherwise produce nodes.
+/// Test: this IS the test.
+#[tokio::test]
+async fn skip_kg_index_file_never_rebuilds_the_symbol_graph() {
+    let mut idx = make_indexer();
+    idx.skip_kg = true;
+
+    idx.index_file("src/gate.rs", GATE_FIXTURE)
+        .await
+        .expect("index_file");
+
+    assert_eq!(
+        idx.snapshot_symbol_graph().await.node_count(),
+        0,
+        "a skip_kg index must not build a symbol graph on an incremental \
+         write (#3048)"
+    );
+    assert!(
+        idx.chunk_count() > 0,
+        "precondition: the file really was ingested, so an empty graph is the \
+         gate and not an empty corpus"
+    );
+}
+
+/// #3048 control for the skip_kg parity gate — see the test above.
+#[tokio::test]
+async fn skip_kg_false_index_file_still_rebuilds_the_symbol_graph() {
+    let idx = make_indexer();
+    assert!(!idx.skip_kg, "default must be false");
+
+    idx.index_file("src/gate.rs", GATE_FIXTURE)
+        .await
+        .expect("index_file");
+
+    assert!(
+        idx.snapshot_symbol_graph().await.node_count() > 0,
+        "a KG-enabled index must still rebuild the graph on the incremental \
+         path — otherwise the gate above proves nothing"
+    );
+}

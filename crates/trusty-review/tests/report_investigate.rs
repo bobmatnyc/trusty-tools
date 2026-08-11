@@ -124,7 +124,7 @@ async fn investigation_renders_verified_and_rejects_unverifiable() {
     assert!(repo_inv.deps.deps.iter().any(|d| d.name == "serde"));
 
     apply_investigation(&mut model, &inv);
-    let mut synthesis = Synthesis::unavailable("narrative pass skipped in test");
+    let mut synthesis = Synthesis::default();
     merge_investigation_prose(&mut synthesis, &inv);
     model.synthesis = Some(synthesis);
 
@@ -289,7 +289,7 @@ async fn investigation_survives_one_truncated_batch_and_names_it() {
     assert!(coverage_prompt.contains("truncated/failed"));
 
     apply_investigation(&mut model, &inv);
-    let mut synthesis = Synthesis::unavailable("narrative pass skipped in test");
+    let mut synthesis = Synthesis::default();
     merge_investigation_prose(&mut synthesis, &inv);
     model.synthesis = Some(synthesis);
 

@@ -442,59 +442,11 @@ async fn hnsw_idle_demotion_reviews_clean_promoted_store() {
     );
 }
 
-/// The `TRUSTY_HNSW_REVIEW_IDLE=0` escape hatch disables demotion while
-/// leaving the store otherwise untouched (issue #2164).
-#[tokio::test]
-async fn hnsw_idle_demotion_skips_when_disabled_via_env() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("hnsw.usearch");
-    let dim = 32;
-
-    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
-    let usearch = Arc::new(UsearchStore::new(dim).expect("usearch new"));
-    let store: Arc<dyn VectorStore> = usearch.clone();
-    let idx = CodeIndexer::new(
-        "hnsw-demote-disabled-test",
-        "/tmp/hnsw-demote-disabled-test",
-    )
-    .with_components(embedder, store);
-
-    idx.add_chunk(raw("a", "src/a.rs", "fn a() {}"))
-        .await
-        .expect("add chunk a");
-    idx.save_vector_store(&path).await.expect("save hnsw");
-    tokio::time::sleep(Duration::from_millis(5)).await;
-
-    let prior = std::env::var("TRUSTY_HNSW_REVIEW_IDLE").ok();
-    // SAFETY: this test is the only reader/writer of this env var while it runs.
-    unsafe { std::env::set_var("TRUSTY_HNSW_REVIEW_IDLE", "0") };
-
-    assert!(
-        !idx.demote_vector_store_if_idle(Duration::from_nanos(1))
-            .await,
-        "TRUSTY_HNSW_REVIEW_IDLE=0 must disable demotion"
-    );
-    assert!(
-        !usearch.in_view_mode(),
-        "store must remain mutable while the gate is disabled"
-    );
-
-    // SAFETY: see above.
-    unsafe {
-        match prior {
-            Some(v) => std::env::set_var("TRUSTY_HNSW_REVIEW_IDLE", v),
-            None => std::env::remove_var("TRUSTY_HNSW_REVIEW_IDLE"),
-        }
-    }
-
-    // Re-enabled (default): demotion now proceeds.
-    assert!(
-        idx.demote_vector_store_if_idle(Duration::from_nanos(1))
-            .await,
-        "demotion must proceed once the gate is re-enabled"
-    );
-    assert!(usearch.in_view_mode());
-}
+// #3769: `hnsw_idle_demotion_skips_when_disabled_via_env` lived here and set
+// `TRUSTY_HNSW_REVIEW_IDLE=0` process-wide, which raced
+// `hnsw_idle_demotion_reviews_clean_promoted_store` above through the same
+// gate. It now lives in `tests/hnsw_review_idle_env.rs`, its own test BINARY,
+// so this binary has no writer of that variable. See that file's module docs.
 
 /// `reclaim_memory_now` force-clears chunks + BM25 + entities **regardless of
 /// idle state**, and every reader lazily rehydrates from the durable corpus.

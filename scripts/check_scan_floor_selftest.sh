@@ -20,7 +20,7 @@
 #   asserts it exits NON-ZERO naming SCAN FLOOR or TOOL ERROR. Every case is a
 #   mutation that used to exit 0.
 #
-#   Two cases are stricter than an empty set, because the tool actively FAILED
+#   Three cases are stricter than an empty set, because the tool actively FAILED
 #   and the gate still passed:
 #     - check_agent_assets.sh consumed `git ls-files` through a `< <(...)`
 #       process substitution, which is exempt from both `set -e` and `pipefail`,
@@ -28,7 +28,11 @@
 #     - check_changelog_fragment.sh probed with `git cat-file -e … || continue`,
 #       which cannot tell "the crate was deleted" (the exemption) from "git
 #       broke", so any git error granted the exemption.
-#   Both are exercised here with a `git` shim that fails the relevant subcommand.
+#     - check_generated_regions.sh ended its enumeration pipeline in `|| true`,
+#       which terminates the pipeline and collapses ANY tool failure to an empty
+#       string — read by the next line as "no generated regions found" (#5440).
+#   All three are exercised here with a `git` shim that fails the relevant
+#   subcommand.
 #
 # Usage:
 #   bash scripts/check_scan_floor_selftest.sh                     # every gate
@@ -36,7 +40,8 @@
 #   bash scripts/check_scan_floor_selftest.sh a b                 # several
 #   (names: line_cap generation_artifacts generation_artifacts_write_modes
 #    test_pointers doc_numbers changelog_fragment pr_version_bump
-#    agent_assets_tool_error changelog_fragment_tool_error)
+#    agent_assets_tool_error changelog_fragment_tool_error
+#    generated_regions generated_regions_tool_error)
 #
 # Exit: 0 when every gate rejects its vacuous scan; 1 (naming the gate) when one
 #   of them still reports success over nothing.
@@ -56,7 +61,8 @@ FAILED=0
 
 KNOWN="line_cap generation_artifacts generation_artifacts_write_modes \
 test_pointers doc_numbers changelog_fragment pr_version_bump \
-agent_assets_tool_error changelog_fragment_tool_error"
+agent_assets_tool_error changelog_fragment_tool_error \
+generated_regions generated_regions_tool_error"
 
 for requested in "$@"; do
   case " $KNOWN " in
@@ -309,6 +315,53 @@ if want changelog_fragment_tool_error; then
   install_failing_git_shim "$f" ls-tree "Cargo.toml"
   expect_rejects "check_changelog_fragment.sh (crate-existence probe exits 128)" "$f" \
     env "PATH=$f/bin:$PATH" bash scripts/check_changelog_fragment.sh --base HEAD~1
+fi
+
+# ===========================================================================
+# 8. check_generated_regions.sh — MARKER DRIFT. Full markdown discovery, but
+#    every reference block uses a marker the gate no longer matches. Pre-fix the
+#    marked set came back empty and took the `no generated regions found` early
+#    exit, printing success over a tree where zero regions were checked — the
+#    file counts alone could never see it (#5440).
+# ===========================================================================
+if want generated_regions; then
+  f="$(new_fixture)"
+  install_gate "$f" check_generated_regions.sh
+  mkdir -p "$f/crates/demo/tests"
+  : > "$f/crates/demo/tests/generated_docs.rs"
+  # Comfortably above MIN_MD_FILES so it is the MARKED floor that fires, not
+  # the enumeration floor — the arm that catches drift specifically.
+  i=0
+  while [ "$i" -lt 210 ]; do
+    printf '# Doc %s\n\n<!-- BEGIN GENERATED-DOCS: table -->\nrow\n<!-- END GENERATED-DOCS: table -->\n' \
+      "$i" > "$f/crates/demo/d$i.md"
+    i=$((i + 1))
+  done
+  git -C "$f" add -A && git -C "$f" commit -qm fixture
+  expect_rejects "check_generated_regions.sh (0 of 210 files carry a matching marker)" "$f" \
+    bash scripts/check_generated_regions.sh
+fi
+
+# ===========================================================================
+# 9. FAIL-OPEN CASE C — check_generated_regions.sh with `git ls-files` failing.
+#    Pre-fix the enumeration was `git ls-files … | xargs grep -l … || true`; the
+#    `|| true` terminates the pipeline, so a git exiting 128 became an empty
+#    string and the gate printed "no generated regions found" and exited 0 —
+#    over a repo that contains a REAL violation (#5440).
+# ===========================================================================
+if want generated_regions_tool_error; then
+  f="$(new_fixture)"
+  install_gate "$f" check_generated_regions.sh
+  # A genuine violation the gate must never report OK over: a marked file in a
+  # crate with no tests/generated_docs.rs to claim it.
+  mkdir -p "$f/crates/demo"
+  printf '# Demo\n\n<!-- BEGIN GENERATED: table -->\nrow\n<!-- END GENERATED: table -->\n' \
+    > "$f/crates/demo/README.md"
+  echo "placeholder" > "$f/README.md"
+  git -C "$f" add -A && git -C "$f" commit -qm fixture
+  install_failing_git_shim "$f" ls-files
+  expect_rejects "check_generated_regions.sh (git ls-files exits 128)" "$f" \
+    env "PATH=$f/bin:$PATH" bash scripts/check_generated_regions.sh
 fi
 
 # ===========================================================================
