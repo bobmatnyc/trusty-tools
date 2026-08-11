@@ -16,7 +16,8 @@
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::store::kg::Triple;
+use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
+use trusty_common::memory_core::store::OpenIntent;
 
 use crate::kg_extract::{
     extract_triples, is_stop_token, ExtractInput, AUTO_PROVENANCE, DRAWER_SUBJECT_PREFIX,
@@ -111,19 +112,26 @@ pub async fn handle_kg_rebuild_with(opts: KgRebuildOptions) -> Result<()> {
         .context("resolve trusty-memory data dir")?;
     let data_root = resolve_palace_registry_dir(data_dir);
     let state = AppState::new(data_root);
+    let palace = opts.palace.clone();
+
+    // #4678: the dry-run branch returns before ANY palace is hydrated.
+    // `load_palaces_from_disk` opens every palace through `PalaceHandle::open`,
+    // whose issue-#61 reclamation sweep hard-deletes expired non-Tier-C
+    // drawers — a write, and precisely the thing --dry-run promises not to do.
+    if opts.dry_run {
+        println!("kg-rebuild: DRY RUN — nothing is written: no palace is hydrated, no triple is asserted, no subject is deleted");
+        let failures = report_purge(&state, palace.as_deref(), false).await?;
+        if failures > 0 {
+            anyhow::bail!("kg-rebuild purge: {failures} palace(s) could not be scanned");
+        }
+        return Ok(());
+    }
+
     let loaded = state
         .load_palaces_from_disk()
         .await
         .context("load palaces from disk")?;
     tracing::info!(palaces_loaded = loaded, "kg-rebuild: palaces opened");
-
-    let palace = opts.palace.clone();
-    if opts.dry_run {
-        // Report-only: no re-assert pass, no deletion. Nothing is written.
-        println!("kg-rebuild: DRY RUN — no triples will be asserted or deleted");
-        report_purge(&state, palace.as_deref(), false).await?;
-        return Ok(());
-    }
 
     let summaries = rebuild_palaces(&state, palace.as_deref()).await?;
     let mut total_drawers = 0usize;
@@ -153,7 +161,12 @@ pub async fn handle_kg_rebuild_with(opts: KgRebuildOptions) -> Result<()> {
         total_errors
     );
     if opts.purge_stale_subjects {
-        report_purge(&state, palace.as_deref(), true).await?;
+        let failures = report_purge(&state, palace.as_deref(), true).await?;
+        if failures > 0 {
+            anyhow::bail!(
+                "kg-rebuild purge: {failures} subject deletion(s) failed — see the [purge-FAILED] lines above"
+            );
+        }
     }
     Ok(())
 }
@@ -163,49 +176,125 @@ pub async fn handle_kg_rebuild_with(opts: KgRebuildOptions) -> Result<()> {
 /// Why: the purge is destructive against real data, so the subject list is
 /// printed in both modes — an operator sees exactly what was (or would be)
 /// removed rather than a bare count.
-/// What: runs [`purge_palaces`] and prints one line per subject plus an
-/// aggregate. `apply` selects deletion versus report-only.
-/// Test: covered through `purge_palaces`.
-async fn report_purge(state: &AppState, palace_filter: Option<&str>, apply: bool) -> Result<()> {
+/// What: runs [`purge_palaces`] and prints DELETED and FAILED subjects on
+/// separate, differently-tagged channels — deletions on stdout, failures on
+/// stderr — then an aggregate carrying the failure count. Returns that count so
+/// the caller can exit non-zero. `apply` selects deletion versus report-only.
+/// Test: `purge_reports_a_failed_delete_as_failed_not_deleted` covers the
+/// outcome split this prints.
+async fn report_purge(state: &AppState, palace_filter: Option<&str>, apply: bool) -> Result<usize> {
     let summaries = purge_palaces(state, palace_filter, apply).await?;
-    let verb = if apply { "deleted" } else { "would delete" };
     let mut total_subjects = 0usize;
     let mut total_rows = 0usize;
+    let mut failures = 0usize;
     for s in &summaries {
         if let Some(e) = &s.error {
-            eprintln!("[error] purge palace={} error={}", s.palace_id, e);
-            continue;
+            eprintln!("[purge-error] palace={} error={}", s.palace_id, e);
+            // A palace that could not be opened or scanned reported no
+            // per-subject failures, so count it once here.
+            if s.failed.is_empty() {
+                failures += 1;
+                continue;
+            }
         }
-        for subject in &s.subjects {
-            println!(
-                "[purge] palace={} {} subject={}",
-                s.palace_id, verb, subject
-            );
+        if apply {
+            for subject in &s.deleted {
+                println!("[purge] palace={} deleted subject={}", s.palace_id, subject);
+            }
+            for (subject, err) in &s.failed {
+                eprintln!(
+                    "[purge-FAILED] palace={} subject={} error={}",
+                    s.palace_id, subject, err
+                );
+            }
+            total_subjects += s.deleted.len();
+            failures += s.failed.len();
+        } else {
+            for subject in &s.selected {
+                println!(
+                    "[purge] palace={} would delete subject={}",
+                    s.palace_id, subject
+                );
+            }
+            total_subjects += s.selected.len();
         }
-        total_subjects += s.subjects.len();
         total_rows += s.rows_closed;
     }
     if apply {
-        println!("kg-rebuild purge: {total_subjects} subjects deleted, {total_rows} rows closed");
+        println!(
+            "kg-rebuild purge: {total_subjects} subjects deleted, {total_rows} rows closed, {failures} failed"
+        );
     } else {
         println!("kg-rebuild purge: {total_subjects} subjects would be deleted (dry run)");
     }
-    Ok(())
+    Ok(failures)
 }
 
 /// Per-palace result of a `--purge-stale-subjects` pass.
 ///
 /// Why: mirrors [`PalaceRebuildSummary`] so one bad palace is reported without
 /// aborting the rest of the run.
-/// What: the subjects selected, how many triple rows were closed (always 0 in
-/// report-only mode), and any per-palace error.
-/// Test: `purge_selects_only_stopword_subjects`.
+/// What: `selected` is what the scan picked; `deleted` and `failed` split what
+/// actually happened, so a caller can never read a failure as a success.
+/// `rows_closed` counts only rows a SUCCEEDING delete closed, and `error` is
+/// set whenever anything failed — the failure is therefore visible without
+/// reading a tracing log.
+/// Test: `purge_selects_only_stopword_subjects`,
+/// `purge_reports_a_failed_delete_as_failed_not_deleted`.
 #[derive(Debug, Clone)]
 pub struct PalacePurgeSummary {
     pub palace_id: String,
-    pub subjects: Vec<String>,
+    /// Subjects the scan picked as purge candidates.
+    pub selected: Vec<String>,
+    /// Subjects whose delete returned `Ok`. Empty in report-only mode.
+    pub deleted: Vec<String>,
+    /// Subjects whose delete returned `Err`, with the error rendered.
+    pub failed: Vec<(String, String)>,
     pub rows_closed: usize,
     pub error: Option<String>,
+}
+
+/// Result of running the deletions for one palace.
+///
+/// Why: a delete that fails must not be counted, printed, or summarised as one
+/// that succeeded — the whole of CRITICAL 1. Keeping the three outputs in one
+/// value makes it impossible to update the count without also recording which
+/// side the subject landed on.
+/// What: succeeded subjects, failed subjects with their error text, and the
+/// rows closed by the successes only.
+/// Test: `purge_reports_a_failed_delete_as_failed_not_deleted`.
+#[derive(Debug, Clone, Default)]
+pub struct PurgeOutcome {
+    pub deleted: Vec<String>,
+    pub failed: Vec<(String, String)>,
+    pub rows_closed: usize,
+}
+
+/// Run `delete` over every subject, recording each outcome separately.
+///
+/// Why: the deletion loop is the one place a fail-open branch could report a
+/// failure as a success, and it needs an error-arm test. Taking the delete as a
+/// closure gives that test a seam — it can fail a chosen subject deterministically
+/// without needing a read-only store or a live lock contender.
+/// What: calls `delete` per subject; `Ok(n)` appends to `deleted` and adds `n`
+/// to `rows_closed`, `Err` appends `(subject, error)` to `failed` and adds
+/// nothing. Never short-circuits — one bad subject must not strand the rest.
+/// Test: `purge_reports_a_failed_delete_as_failed_not_deleted`.
+pub fn apply_deletions<F>(subjects: &[String], mut delete: F) -> PurgeOutcome
+where
+    F: FnMut(&str) -> Result<usize>,
+{
+    let mut out = PurgeOutcome::default();
+    for subject in subjects {
+        match delete(subject) {
+            Ok(n) => {
+                out.rows_closed += n;
+                out.deleted.push(subject.clone());
+            }
+            Err(e) => out.failed.push((subject.clone(), format!("{e:#}"))),
+        }
+    }
+    out
 }
 
 /// Select — and optionally delete — stale auto-extracted subjects.
@@ -237,7 +326,9 @@ pub async fn purge_palaces(
             .await
             .unwrap_or_else(|e| PalacePurgeSummary {
                 palace_id: id.clone(),
-                subjects: Vec::new(),
+                selected: Vec::new(),
+                deleted: Vec::new(),
+                failed: Vec::new(),
                 rows_closed: 0,
                 error: Some(format!("{e:#}")),
             });
@@ -250,23 +341,36 @@ pub async fn purge_palaces(
 ///
 /// Why: keeps the per-palace work in one focused function, matching
 /// `rebuild_one`.
-/// What: pages `list_active` into one vec, runs [`stale_subject_candidates`],
-/// then deletes each match through `KgStoreRedb::delete_by_subject` on the
-/// blocking pool. The in-memory adjacency is not resynced — this runs in a
-/// one-shot CLI process that exits immediately afterwards.
-/// Test: `purge_selects_only_stopword_subjects`.
+/// What: opens the palace's `kg.db` DIRECTLY rather than through
+/// `PalaceRegistry::open_palace`, pages `list_active`, runs
+/// [`stale_subject_candidates`], then (when `apply`) hands the matches to
+/// [`apply_deletions`] on the blocking pool. The in-memory adjacency is not
+/// resynced — this runs in a one-shot CLI process that exits immediately after.
+///
+/// The direct open is the #4678 fix for the dry run that wrote:
+/// `PalaceHandle::open` runs the issue-#61 expired-drawer sweep, which
+/// hard-deletes every expired non-Tier-C row before the caller ever sees the
+/// handle. `KnowledgeGraph::open_with_intent` only opens, runs the (no-op)
+/// legacy migration, and hydrates the adjacency, so a scan cannot mutate what
+/// it is reporting on. Intent follows the mode: a report-only pass asks for
+/// `ReadOnlyClient`, an applying pass asks for `Writer` so it fails loud
+/// against a running daemon rather than silently deleting from a snapshot.
+/// Test: `purge_selects_only_stopword_subjects`,
+/// `purge_dry_run_does_not_prune_expired_drawers`.
 async fn purge_one(state: &AppState, palace_id: &str, apply: bool) -> Result<PalacePurgeSummary> {
-    let pid = PalaceId::new(palace_id);
-    let handle = state
-        .registry
-        .open_palace(&state.data_root, &pid)
-        .with_context(|| format!("open palace {palace_id}"))?;
+    let kg_path = state.data_root.join(palace_id).join("kg.db");
+    let intent = if apply {
+        OpenIntent::Writer
+    } else {
+        OpenIntent::ReadOnlyClient
+    };
+    let kg = KnowledgeGraph::open_with_intent(&kg_path, intent)
+        .with_context(|| format!("open kg for palace {palace_id}"))?;
 
     let mut active: Vec<Triple> = Vec::new();
     let mut offset = 0usize;
     loop {
-        let page = handle
-            .kg
+        let page = kg
             .list_active(PURGE_SCAN_PAGE, offset)
             .await
             .with_context(|| format!("scan active triples in {palace_id}"))?;
@@ -278,32 +382,35 @@ async fn purge_one(state: &AppState, palace_id: &str, apply: bool) -> Result<Pal
         offset += n;
     }
 
-    let subjects = stale_subject_candidates(&active);
-    let mut rows_closed = 0usize;
-    if apply {
-        for subject in &subjects {
-            let store = handle.kg.store();
-            let s = subject.clone();
-            match tokio::task::spawn_blocking(move || store.delete_by_subject(&s)).await {
-                Ok(Ok(n)) => rows_closed += n,
-                Ok(Err(e)) => tracing::warn!(
-                    palace = %palace_id,
-                    subject = %subject,
-                    "kg-rebuild purge: delete failed (non-fatal): {e:#}",
-                ),
-                Err(e) => tracing::warn!(
-                    palace = %palace_id,
-                    subject = %subject,
-                    "kg-rebuild purge: delete task join error: {e:#}",
-                ),
-            }
-        }
-    }
+    let selected = stale_subject_candidates(&active);
+    let outcome = if apply {
+        let store = kg.store();
+        let subjects = selected.clone();
+        tokio::task::spawn_blocking(move || {
+            apply_deletions(&subjects, |s| store.delete_by_subject(s))
+        })
+        .await
+        .with_context(|| format!("purge delete task for palace {palace_id}"))?
+    } else {
+        PurgeOutcome::default()
+    };
+
+    let error = if outcome.failed.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{} of {} selected subject(s) failed to delete",
+            outcome.failed.len(),
+            selected.len()
+        ))
+    };
     Ok(PalacePurgeSummary {
         palace_id: palace_id.to_string(),
-        subjects,
-        rows_closed,
-        error: None,
+        selected,
+        deleted: outcome.deleted,
+        failed: outcome.failed,
+        rows_closed: outcome.rows_closed,
+        error,
     })
 }
 
@@ -596,6 +703,104 @@ mod tests {
         assert!(!opts.dry_run);
     }
 
+    /// Why: the deletion loop downgraded a failed `delete_by_subject` to a
+    /// `tracing::warn!` and carried on, then returned the unfiltered candidate
+    /// list as the result with `error: None`. The report printed
+    /// `deleted subject=X` for a subject still in the graph and counted it in
+    /// the total, so the only trace of a failure was a log line an operator had
+    /// no reason to read. A purge that cannot delete must not claim it did.
+    /// What: with one subject's delete failing, that subject appears in
+    /// `failed` with its error text and NOT in `deleted`, and its rows are not
+    /// added to `rows_closed`. The loop still completes the other subjects.
+    /// Test: This test.
+    #[test]
+    fn purge_reports_a_failed_delete_as_failed_not_deleted() {
+        let subjects = vec!["them".to_string(), "the".to_string(), "it".to_string()];
+        let outcome = apply_deletions(&subjects, |s| {
+            if s == "the" {
+                anyhow::bail!("store is read-only")
+            } else {
+                Ok(2)
+            }
+        });
+        assert_eq!(
+            outcome.deleted,
+            vec!["them".to_string(), "it".to_string()],
+            "only subjects whose delete returned Ok may be reported as deleted"
+        );
+        assert_eq!(outcome.failed.len(), 1, "the failing subject must be kept");
+        assert_eq!(outcome.failed[0].0, "the");
+        assert!(
+            outcome.failed[0].1.contains("store is read-only"),
+            "the failure must carry its error text, got {:?}",
+            outcome.failed[0].1
+        );
+        assert_eq!(
+            outcome.rows_closed, 4,
+            "a failed delete must contribute no closed rows"
+        );
+    }
+
+    /// Why: `--dry-run` promises it writes nothing, but the scan reached the KG
+    /// through `PalaceHandle::open`, whose issue-#61 reclamation sweep
+    /// hard-deletes every expired non-Tier-C drawer before the caller sees the
+    /// handle. `SessionEvent` drawers carry a 7-day TTL, so a live palace
+    /// always has candidates — a careful operator previewing a destructive flag
+    /// with the daemon stopped got an uncontended read-write open and lost
+    /// drawer rows to the preview itself.
+    /// What: seeds an expired non-Tier-C drawer, runs the dry-run purge from a
+    /// COLD `AppState` (the registry's warm-handle fast path skips the sweep,
+    /// so a shared state would not reproduce it), and asserts the drawer row
+    /// count is unchanged.
+    /// Test: This test.
+    #[tokio::test]
+    async fn purge_dry_run_does_not_prune_expired_drawers() -> Result<()> {
+        use trusty_common::memory_core::palace::{Drawer, DrawerType};
+        use trusty_common::memory_core::store::kg::KnowledgeGraph;
+
+        seed_embedder();
+        let tmp = tempfile::tempdir()?;
+        let data_root = tmp.path().to_path_buf();
+        // SAFETY: idempotent constant write "1"; safe across test threads.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
+
+        let before = {
+            let state = AppState::new(data_root.clone());
+            state.set_ready();
+            let _ =
+                crate::tools::dispatch_tool(&state, "palace_create", json!({"name": "a"})).await?;
+            let handle = state
+                .registry
+                .open_palace(&state.data_root, &PalaceId::new("a"))?;
+            let mut drawer = Drawer::new(uuid::Uuid::new_v4(), "an expired session event");
+            drawer.drawer_type = DrawerType::SessionEvent;
+            drawer.expires_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+            drawer.fact_key = None; // not Tier C, so the sweep considers it
+            handle.kg.upsert_drawer(&drawer).await?;
+            let n = handle.kg.load_drawers()?.len();
+            drop(handle);
+            n
+        };
+        assert!(before > 0, "fixture must seed at least one drawer");
+
+        // Cold state: this is the CLI's own situation with the daemon stopped.
+        {
+            let state = AppState::new(data_root.clone());
+            let summaries = purge_palaces(&state, Some("a"), false).await?;
+            assert_eq!(summaries.len(), 1, "palace 'a' must be scanned");
+        }
+
+        let kg = KnowledgeGraph::open(&data_root.join("a").join("kg.db"))?;
+        let after = kg.load_drawers()?.len();
+        assert_eq!(
+            before, after,
+            "a dry run must not delete drawer rows; {before} before, {after} after"
+        );
+        Ok(())
+    }
+
     /// Why: the selection tests are pure; this one proves the purge actually
     /// reaches `delete_by_subject` and that `--dry-run` writes nothing — the
     /// two claims that matter when the flag is pointed at a real palace.
@@ -632,7 +837,8 @@ mod tests {
         // Dry run: reports the stale subject, deletes nothing.
         let dry = purge_palaces(&state, Some("a"), false).await?;
         assert_eq!(dry.len(), 1);
-        assert_eq!(dry[0].subjects, vec!["them".to_string()]);
+        assert_eq!(dry[0].selected, vec!["them".to_string()]);
+        assert!(dry[0].deleted.is_empty(), "a dry run deletes nothing");
         assert_eq!(dry[0].rows_closed, 0, "a dry run must not close any row");
         assert!(
             !handle.kg.query_active("them").await?.is_empty(),
@@ -641,7 +847,10 @@ mod tests {
 
         // Applied: closes the stale subject and spares the real one.
         let applied = purge_palaces(&state, Some("a"), true).await?;
-        assert_eq!(applied[0].subjects, vec!["them".to_string()]);
+        assert_eq!(applied[0].selected, vec!["them".to_string()]);
+        assert_eq!(applied[0].deleted, vec!["them".to_string()]);
+        assert!(applied[0].failed.is_empty(), "no delete should have failed");
+        assert!(applied[0].error.is_none(), "a clean purge sets no error");
         assert!(
             applied[0].rows_closed > 0,
             "applied purge must close at least one row"

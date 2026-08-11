@@ -9,4 +9,9 @@ Added
   all. Selection is deliberately narrow — a subject is skipped if it sits under
   the `drawer:`/`tag:`/`topic:`/`room:` namespaces, or if any of its active
   triples was not stamped `auto:remember`, so one hand-asserted fact protects
-  the whole subject.
+  the whole subject. A subject whose delete fails is reported as `[purge-FAILED]`
+  on stderr, kept out of the deleted count, and makes the command exit non-zero —
+  a failure is never printed as a deletion. `--dry-run` reaches the graph without
+  hydrating any palace, so the preview cannot trigger the issue-#61 expired-drawer
+  reclamation sweep that `PalaceHandle::open` performs; it genuinely writes
+  nothing.
