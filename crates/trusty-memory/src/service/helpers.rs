@@ -328,9 +328,10 @@ fn wing_registry_count(handle: &Arc<PalaceHandle>) -> Option<usize> {
 /// the degrade in one named helper is what stops it from sinking back into the
 /// store where no caller can see it.
 /// What: logs the error at warn with the palace id and returns 0.
-/// Test: `status_does_not_open_uncached_palaces`,
-/// `trusty_common::…::count_active_triples_surfaces_read_failure` (the error
-/// this converts).
+/// Test: `status_does_not_open_uncached_palaces` covers this degrade; the
+/// read failure it converts is exercised in trusty-common by
+/// count_active_triples_surfaces_read_failure (crate-local citation would
+/// misresolve — that test lives outside this crate).
 pub(crate) fn kg_triple_count_or_zero(handle: &Arc<PalaceHandle>) -> usize {
     match handle.kg.count_active_triples() {
         Ok(n) => n,
