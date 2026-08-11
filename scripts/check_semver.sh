@@ -95,7 +95,10 @@
 #   requires a matching version bump" remediation below, so a rustdoc error was
 #   presented as a SemVer verdict and the two were indistinguishable from the
 #   output. The gate now classifies on POSITIVE EVIDENCE instead: a verdict
-#   exists only when the tool printed its own per-crate `N checks:` summary line.
+#   exists only when the tool printed its own per-crate `N checks:` summary line
+#   AND that line says at least one check RAN (issue #5440 — a summary reporting
+#   `0 checks: 0 pass, 254 skip` is the tool declining to compare, and the gate
+#   used to read it as a pass).
 #   No summary line means no comparison happened, whatever the exit status was —
 #   including exit 0 — and that is reported as NO VERDICT on its own exit code.
 #   Absence of evidence is never a pass; same rule as the scan floor below.
@@ -164,7 +167,9 @@
 #   declared 1.0.1, which selected 1.0.0-rc1 before the rank element existed.
 #   Cases 16-18 (#5500) replay PR #5458's own CI bytes, where forced colour hid the
 #   summary line and both a clean run and a four-failure run were reported as
-#   never having happened.
+#   never having happened. Cases 20-21 (#5440) pin the zero-check false pass:
+#   a summary that says `0 checks: 0 pass, 254 skip` at exit 0 is NO VERDICT in
+#   the PASS/FAIL arm and a BLIND inventory in the advisory one.
 #   The catch itself is demonstrated in PR #5051 against #4088's real shape.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
@@ -393,6 +398,15 @@ PY
 # versions are equal, or current is older than baseline; since #5296 the caller
 # selects a baseline STRICTLY BELOW the declared version, so `none` is now
 # unreachable from the gate and survives only as a total function's zero case.
+#
+# 0.0.z IS ALWAYS MAJOR (#5440, code-critic on PR #5522). Cargo gives a 0.0.z
+# crate NO compatible range at all — every 0.0.z bump is breaking. Classified
+# `minor`, such a crate lands in the PASS/FAIL arm, where cargo-semver-checks
+# reads the same pair as a permitted break, runs 0 of 254 checks, and the gate
+# correctly refuses the non-verdict — a publish blocked by an exit 3 that nothing
+# can clear. `major` routes it to the advisory INVENTORY arm instead, which is
+# what every other permitted break gets. Latent today: the lowest declared
+# version in this workspace is 0.1.0.
 # ---------------------------------------------------------------------------
 release_type() {
   python3 - "$1" "$2" <<'PY'
@@ -408,7 +422,11 @@ c = parse(sys.argv[2])
 if c <= b:
     print("none")
 elif b[0] == 0 and c[0] == 0:
-    print("major" if c[1] != b[1] else ("minor" if c[2] != b[2] else "none"))
+    # #5440: a 0.0.z baseline has no compatible range, so any bump off it breaks.
+    if b[1] == 0:
+        print("major")
+    else:
+        print("major" if c[1] != b[1] else ("minor" if c[2] != b[2] else "none"))
 elif c[0] != b[0]:
     print("major")
 elif c[1] != b[1]:
@@ -666,9 +684,33 @@ PY
 
 # ---------------------------------------------------------------------------
 # verdict_computed <output-file> — succeed only when cargo-semver-checks printed
-# its own per-crate check summary, e.g.
-#     Checked [   0.388s] 223 checks: 214 pass, 9 fail, 0 warn, 31 skip
-#     Checked [   0.000s] 0 checks: 0 pass, 254 skip
+# its own per-crate check summary AND that summary says it actually EXECUTED at
+# least one check, e.g.
+#     Checked [   0.388s] 223 checks: 214 pass, 9 fail, 0 warn, 31 skip   <- verdict
+#     Checked [   0.000s] 0 checks: 0 pass, 254 skip                      <- NOT one
+#
+# ZERO CHECKS EXECUTED IS NOT A PASS (issue #5440). The leading `N checks:` count
+#   is the number of lints the tool RAN; the trailing `N skip` is what it declined
+#   to run. When the version delta is one that permits breakage — a major bump
+#   under Cargo's rules, which for a 0.y.z crate is any change to the MINOR
+#   position — every lint is skipped, the tool prints
+#
+#       Checked [   0.000s] 0 checks: 0 pass, 254 skip
+#       Summary no semver update required
+#
+#   and exits 0. Until this fix the presence of that summary line WAS the verdict
+#   test, so the gate read "the tool declined to check anything" as "the tool
+#   found nothing wrong" and preflight-publish.sh CHECK 5 passed having verified
+#   nothing. Measured on trusty-common under rustc 1.94.1: 0 of 254 checks run,
+#   gate exit 0. It failed closed on this machine only by accident — under the
+#   newest installed toolchain the same crate crashed rustdoc, printed no summary
+#   at all, and was correctly classified NO VERDICT. Removing that toolchain
+#   would have turned the gate green for every publish.
+#
+#   Same family as `cargo test -- <name> --exact` printing `running 0 tests` and
+#   exiting 0: work not done must never read as work passed. So the count is
+#   asserted, not merely the marker. A summary whose count does not parse is also
+#   NO VERDICT — this fails closed, like every other branch here.
 #
 # Why a MARKER and not the exit status: the tool's statuses are not a contract
 #   the gate can lean on, and observation shows they collide. 101 is a rustdoc
@@ -726,11 +768,50 @@ PY
 #   strip cannot manufacture a marker either: it only deletes escape sequences,
 #   so text that did not say `Checked … N checks:` still does not.
 # ---------------------------------------------------------------------------
+# Set by verdict_computed on every refusal, read by no_verdict_because. Three
+# shapes: `no-summary`, `zero-checks:<the line>`, `unparsable-count:<the line>`.
+VERDICT_REASON=""
+
 verdict_computed() {
   # #5500: CARGO_TERM_COLOR=always splits `Checked` from its trailing space (PR #5458).
-  local plain="${1}.plain"
+  local plain="${1}.plain" summary executed
+  VERDICT_REASON="no-summary"
   LC_ALL=C sed -E $'s/\033\\[[0-9:;<=>?]*[ -/]*[@-~]//g' "$1" > "$plain" || return 1
-  grep -Eq '(^|[[:space:]])Checked[[:space:]].*[0-9]+ checks:' "$plain"
+
+  # `tail -1` and not `grep -q`: the header explains why a short-circuiting
+  # reader is wrong here, and the LAST summary is the conservative one to judge.
+  summary="$(grep -E '(^|[[:space:]])Checked[[:space:]].*[0-9]+ checks:' "$plain" | tail -1 || true)"
+  [[ -z "$summary" ]] && return 1
+
+  # #5440: assert on the CHECK COUNT, not merely on the summary's presence.
+  executed="$(printf '%s\n' "$summary" | sed -E 's/.*[^0-9]([0-9]+) checks:.*/\1/')"
+  if ! printf '%s\n' "$executed" | grep -Eq '^[0-9]+$'; then
+    VERDICT_REASON="unparsable-count:${summary}"
+    return 1
+  fi
+  if [[ "$executed" -lt 1 ]]; then
+    VERDICT_REASON="zero-checks:${summary}"
+    return 1
+  fi
+  VERDICT_REASON=""
+  return 0
+}
+
+# no_verdict_because — one clause naming why verdict_computed refused, so the two
+# causes never share a message. "it never ran" and "it ran and skipped every
+# lint" have different remedies, and #5440 is the second one.
+no_verdict_because() {
+  case "${VERDICT_REASON%%:*}" in
+    zero-checks)
+      printf '%s\n' "completed a run that EXECUTED NO CHECKS — '$(printf '%s' "${VERDICT_REASON#*:}" | sed 's/^[[:space:]]*//')'"
+      ;;
+    unparsable-count)
+      printf '%s\n' "printed a summary whose check count did not parse — '$(printf '%s' "${VERDICT_REASON#*:}" | sed 's/^[[:space:]]*//')'"
+      ;;
+    *)
+      printf '%s\n' "never completed a check run"
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -937,7 +1018,7 @@ while IFS= read -r crate; do
       # Loud, and counted. The release still proceeds — the permitted-break fact
       # is decided by the version numbers, not by this run — but "no inventory"
       # must never read as "inventory clean".
-      echo "NO INVENTORY ${crate}: cargo semver-checks exited ${rc} without completing a run." >&2
+      echo "NO INVENTORY ${crate}: cargo semver-checks exited ${rc} and $(no_verdict_because)." >&2
       echo "             The release is still permitted (${baseline} -> ${current} already carries the break)," >&2
       echo "             but WHAT it breaks is unknown. Fix the run above to get the list." >&2
       inventory_blind=$((inventory_blind + 1))
@@ -968,7 +1049,7 @@ while IFS= read -r crate; do
   # An exit 0 with no summary line is a no-op, not a pass, and must not reach the
   # clean branch — that is the fail-closed half of this check.
   if ! verdict_computed "$RUN_LOG"; then
-    echo "NO VERDICT ${crate}: cargo semver-checks exited ${rc} without completing a check run." >&2
+    echo "NO VERDICT ${crate}: cargo semver-checks exited ${rc} and $(no_verdict_because)." >&2
     echo "           No public API comparison against baseline ${baseline} was performed." >&2
     noverdict=$((noverdict + 1))
     continue
@@ -1014,6 +1095,20 @@ known either way about this crate's public API.
 
 The tool's own output is above. The usual causes:
 
+  * IT RAN AND CHECKED NOTHING — `0 checks: 0 pass, N skip` (issue #5440). The
+    tool skips its whole lint set when IT reads the baseline -> current delta as
+    already permitting breakage. Exit 0 and "no semver update required" there
+    mean "nothing was examined", not "nothing is wrong".
+    A NORMAL 0.x MINOR BUMP DOES NOT LAND HERE. The gate classifies 0.28.1 ->
+    0.29.0 as major itself and sends it to the advisory INVENTORY arm, which
+    passes --release-type minor and gets a full lint run. Do not weaken this
+    check on the theory that a routine bump tripped it.
+    What reaches this arm is a BASELINE AT OR ABOVE the declared version: the
+    gate reads that pair as no change while the tool reads it by position and
+    calls it a permitted break. Read the baseline off the `CHECK` line above. If
+    it is not below the version you are publishing, the declared version is
+    behind the registry — preflight-publish.sh CHECK 4 is the check that says
+    so — and that is what to fix.
   * rustdoc failed to build. cargo-semver-checks resolves dependencies in a
     scratch project that IGNORES this workspace's Cargo.lock, so it can pick a
     newer transitive dependency whose `rust-version` exceeds the rustc running

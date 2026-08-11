@@ -326,13 +326,15 @@ fn wing_registry_count(handle: &Arc<PalaceHandle>) -> Option<usize> {
 /// status/metrics roll-ups have no field to carry "unknown", and #4637 already
 /// fixed 0 as "unknown, never empty" for those totals, so they degrade. Keeping
 /// the degrade in one named helper is what stops it from sinking back into the
-/// store where no caller can see it. The error being converted is produced,
-/// and pinned, upstream in trusty-common by its
-/// count_active_triples_surfaces_read_failure test.
+/// store where no caller can see it. The read error this converts is raised,
+/// and pinned, cross-crate in
+/// `crates/trusty-common/src/memory_core/store/kg_redb/tests.rs` by
+/// `count_active_triples_surfaces_read_failure`.
 /// What: performs the read and hands it to [`triple_count_or_zero`], which
 /// owns the degrade.
-/// Test: `status_does_not_open_uncached_palaces` (success path, via the status
-/// roll-up).
+/// Test: `status_does_not_open_uncached_palaces` (success path, through the
+/// status roll-up), `triple_count_or_zero_degrades_a_failed_read_to_zero` (the
+/// error arm).
 pub(crate) fn kg_triple_count_or_zero(handle: &Arc<PalaceHandle>) -> usize {
     triple_count_or_zero(&handle.id, handle.kg.count_active_triples())
 }
