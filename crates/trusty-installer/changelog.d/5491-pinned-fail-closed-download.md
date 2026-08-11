@@ -29,8 +29,6 @@ Added
   already occupied by a directory, are both rejected before anything is copied
   (#5517)
 
-Note
-
 - Check 5 EXECUTES the downloaded binary to read its `--version`, so a pinned
   install runs a freshly downloaded, not-independently-signed artifact in the
   installer's own process and user context during an unattended install. The

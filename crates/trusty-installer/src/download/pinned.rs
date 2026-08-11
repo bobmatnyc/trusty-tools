@@ -348,12 +348,17 @@ pub async fn install_pinned(
     install_dir: &Path,
 ) -> Result<PinnedInstall, PinnedError> {
     let mut installed = install_pinned_set(client, std::slice::from_ref(tool), install_dir).await?;
-    // Postcondition of install_pinned_set: exactly one install per input tool.
-    installed.pop().ok_or_else(|| PinnedError::Io {
-        crate_name: tool.crate_name.clone(),
-        version: tool.version.clone(),
-        source: anyhow::anyhow!("internal: no install reported for a single pinned tool"),
-    })
+    // install_pinned_set's postcondition: on Ok, the returned vector has one
+    // entry per input tool, and this call always passes exactly one. An empty
+    // vector here would mean install_pinned_set violated its own documented
+    // postcondition — a bug in that function, not a state any caller input can
+    // reach — so this is a programmer-error invariant, not a typed error: a
+    // `PinnedError` here could only fire after install_pinned_set already
+    // returned `Ok`, making its "nothing was installed" text false in the one
+    // case it could occupy.
+    Ok(installed
+        .pop()
+        .expect("install_pinned_set must return exactly one entry for a one-element input"))
 }
 
 /// Install every tool at its exact pinned version, or install NONE.
