@@ -16,9 +16,12 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 
+use anyhow::Context as _;
 use tga::audit::{
-    require_inference_credential, resolve_review_binary, run_full_sweep, run_review_report,
-    sweep_gap_lines, AuditSweepStats, SweepOptions, SweepStage, DATA_HANDLING_NOTE,
+    require_inference_credential, require_rendered_report_carries_synthesis,
+    require_review_supports_required_inference, resolve_review_binary, run_full_sweep,
+    run_review_report, sweep_gap_lines, AuditSweepStats, SweepOptions, SweepStage,
+    DATA_HANDLING_NOTE,
 };
 use tga::core::config::Config;
 use tga::core::db::Database;
@@ -130,6 +133,12 @@ pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::
     // command a single shot with nobody watching to re-run it with a flag.
     require_inference_credential()?;
 
+    // #5454 review: the other whole-run precondition knowable up front. tga and
+    // trusty-review are installed separately, so a new tga beside a pre-0.15
+    // renderer is ordinary — and that renderer produces exactly the report this
+    // ticket abolished, while exiting 0.
+    require_review_supports_required_inference()?;
+
     let output = args
         .output
         .clone()
@@ -193,12 +202,15 @@ const MANIFEST_FILE: &str = "manifest.toml";
 /// they carry the per-repository analyze warnings an operator needs, and its
 /// artifact paths are printed last (step 5) so the run ends with the thing the
 /// reader was promised.
-/// What: spawns the renderer, echoes stderr, prints the artifact paths, and
-/// turns a failed render into an error — the sweep's own results are already
-/// printed by then, so nothing is lost by exiting non-zero.
+/// What: spawns the renderer, echoes stderr, requires the report it wrote to
+/// carry a written analysis, and prints the artifact paths — turning either
+/// failure into an error, since the sweep's own results are already printed by
+/// then and nothing is lost by exiting non-zero.
 /// Test: `crate::audit::tests::missing_binary_is_a_named_actionable_error`
-/// covers the not-installed path; the rendered output is covered by the
-/// end-to-end smoke run.
+/// covers the not-installed path and
+/// `exit_zero_over_a_narrative_free_report_is_a_failure` the exit-0-but-
+/// deterministic one; the rendered output is covered by the end-to-end smoke
+/// run.
 async fn render_report(manifest_path: &Path, output: &Path) -> anyhow::Result<()> {
     println!("Rendering: {} report --manifest …", resolve_review_binary());
     let run = run_review_report(manifest_path, output).await?;
@@ -223,6 +235,21 @@ async fn render_report(manifest_path: &Path, output: &Path) -> anyhow::Result<()
             out = output.display(),
         );
     }
+
+    // #5454 review: exit 0 is not evidence a synthesis pass happened. A pre-0.15
+    // renderer takes `--synthesize`, degrades to a narrative-free report when the
+    // model call fails, and exits 0 — so the delivered artifact is what gets
+    // checked, not the child's status.
+    require_rendered_report_carries_synthesis(&run).with_context(|| {
+        format!(
+            "no due-diligence report was delivered. Everything collected is intact — the manifest \
+             at {manifest} survives this, so once the renderer is upgraded re-run just the \
+             render:\n\n    {bin} report --manifest {manifest} --analyze --out {out}",
+            bin = resolve_review_binary(),
+            manifest = manifest_path.display(),
+            out = output.display(),
+        )
+    })?;
 
     println!("\nReport artifacts:");
     for path in &run.artifacts {

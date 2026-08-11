@@ -23,8 +23,10 @@
 	 * `crates/trusty-git-analytics/src/audit/review.rs` spawns
 	 * `trusty-review report --manifest … --analyze --synthesize --out …` and
 	 * hard-errors on `BinaryNotFound`; `commands/audit.rs` calls
-	 * `require_inference_credential()` before stage 1 (#5454), so the key card is a
-	 * real precondition; and `crates/trusty-review/src/report/analyze_adapter.rs`
+	 * `require_inference_credential()` and
+	 * `require_review_supports_required_inference()` before stage 1 (#5454), so
+	 * both the key card and the renderer card describe real preconditions; and
+	 * `crates/trusty-review/src/report/analyze_adapter.rs`
 	 * is fail-open against the analyze daemon — not against a README.
 	 *
 	 * No version number appears in the copy, for the reason
@@ -181,7 +183,9 @@ tctl install trusty-review</pre>
 				<p class="mt-2 text-sm text-foundry-secondary">
 					Without it the sweep still runs and still writes
 					<code class="text-xs">manifest.toml</code>, then stops with an error naming that file.
-					Nothing collected is lost — see the recovery command below.
+					Nothing collected is lost — see the recovery command below. A copy too old to
+					require inference is rejected before stage 1, with the upgrade command, rather
+					than delivering a report with no written analysis.
 				</p>
 			</div>
 			<div class="card bg-foundry-card">

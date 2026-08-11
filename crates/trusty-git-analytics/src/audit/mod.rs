@@ -36,9 +36,10 @@ mod tests;
 pub(crate) use gaps::MAX_REASON_CHARS;
 pub use gaps::{sweep_gap_lines, DATA_HANDLING_NOTE};
 pub use review::{
-    artifact_paths, require_inference_credential, resolve_review_binary, run_review_report,
-    MissingInferenceCredential, ReviewRun, ReviewRunError, DEFAULT_REVIEW_BIN,
-    ENV_INFERENCE_CREDENTIAL, ENV_REVIEW_BIN,
+    artifact_paths, require_inference_credential, require_rendered_report_carries_synthesis,
+    require_review_supports_required_inference, resolve_review_binary, run_review_report,
+    MissingInferenceCredential, ReviewBinaryTooOld, ReviewRun, ReviewRunError, UnverifiedReport,
+    DEFAULT_REVIEW_BIN, ENV_INFERENCE_CREDENTIAL, ENV_REVIEW_BIN, MIN_REVIEW_VERSION,
 };
 pub use stage::{AuditSweepStats, StageOutcome, StageStatus, StaleFetch, SweepStage};
 pub use sweep::{run_full_sweep, SweepOptions};
