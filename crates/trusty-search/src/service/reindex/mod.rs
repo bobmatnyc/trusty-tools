@@ -154,6 +154,25 @@ pub(crate) use semaphore::index_semaphore;
 /// Test: `semaphore::tests_index_lock_eviction`.
 pub(crate) use semaphore::remove_index_semaphore;
 
+/// Re-export the cancel-signal accessors `service::server::search` needs (#3049).
+///
+/// Why: `unregister_index` signals a cancel before waiting on the index permit
+/// and evicts the flag once teardown finishes. It lives outside the private
+/// `semaphore` submodule, so these two are re-exported rather than widening that
+/// submodule. `runner::run_reindex` reads the flag through `super::semaphore`
+/// directly and needs no re-export.
+/// What: delegates to `semaphore::{remove_index_cancel_flag, signal_index_cancel}`.
+/// Test: `service::server::tests_3049`.
+pub(crate) use semaphore::{remove_index_cancel_flag, signal_index_cancel};
+
+/// Re-export `index_cancel_flag` for the `tests_3049` eviction test, which needs
+/// to read the flag the delete signalled. Production readers reach it through
+/// `super::semaphore`, so this is `#[cfg(test)]`-gated to avoid a dead re-export
+/// — same pattern as `background_reindex_semaphore` above.
+/// Test: `service::server::tests_3049::index_cancel_flag_is_evicted_so_a_recreated_index_starts_uncancelled`.
+#[cfg(test)]
+pub(crate) use semaphore::index_cancel_flag;
+
 /// Re-export `run_embed_catch_up` (issue #2984 Phase 1) so
 /// `service::server::components` can drive the same vector-catch-up logic
 /// `spawn_deferred_embed_pass` uses, without re-acquiring the background
