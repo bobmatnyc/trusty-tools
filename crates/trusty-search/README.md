@@ -476,18 +476,9 @@ cannot be overridden:
 | `$HOME` itself, `~/Desktop`, `~/Downloads`, `~/Documents`, `~/Library` | Home top-level dirs |
 
 The daemon returns HTTP 403 with a `{"error": "..."}` body when a denylist
-pattern matches. The error message names the matched pattern.
-
-### Operator bypass (for automation / CI)
-
-Set `TRUSTY_ALLOW_UNLISTED=1` in the daemon's environment to disable the
-allowlist check entirely. Use this only in fully controlled, network-isolated
-environments where you trust every `POST /indexes` caller. Never set this on a
-shared or production host.
-
-```bash
-TRUSTY_ALLOW_UNLISTED=1 trusty-search start
-```
+pattern matches. The error message names the matched pattern. There is no
+environment-variable override for either the allowlist or the denylist — a
+path is registerable only by adding it to `allowlist.toml`.
 
 ## CLI
 

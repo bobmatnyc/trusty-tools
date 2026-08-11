@@ -70,6 +70,92 @@ fn binary_refuses_a_vacuous_scan() {
     );
 }
 
+/// A root with FULL file discovery but a reference grammar that matches nothing.
+///
+/// This is the #5440 shape, and the reason [`binary_refuses_a_vacuous_scan`]
+/// cannot catch it: that test drives an EMPTY root, so the file counts and the
+/// reference counts fall to zero together and either floor would fire. Here the
+/// walk finds every file at full strength while zero references resolve —
+/// exactly what renaming the `# Spec References` block marker in
+/// `trusty_common::sld::inline` produces against the real tree.
+///
+/// The drift is modelled in the FIXTURE rather than by mutating the parser: each
+/// code file declares its references under `# Specification References` and each
+/// spec doc under a `specification_refs:` frontmatter key, so both grammars miss
+/// and neither emits a diagnostic. The result is a run that reports 0 errors
+/// over a tree it never checked.
+fn discovered_but_unparseable_root() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("docs/specs")).expect("docs/specs");
+    std::fs::write(root.join("docs/specs/README.md"), "# Spec catalog\n").expect("write catalog");
+
+    // Comfortably above MIN_SPEC_DOCS (20): real spec documents that each
+    // declare a reference under a frontmatter key the reader does not know.
+    for i in 0..25 {
+        let body = format!(
+            "---\nspecification_refs:\n  - id: SPEC-X-{i:02}~draft\n    \
+             path: docs/specs/x.md\n    anchor: SPEC-X-{i:02}~draft\n---\n\n# DOC-{i} — X\n\nbody\n"
+        );
+        std::fs::write(root.join(format!("docs/specs/spec-{i:02}.md")), body).expect("write spec");
+    }
+
+    // Comfortably above MIN_CODE_FILES (200): real source files that each
+    // declare a reference under a marker the inline scanner does not match.
+    std::fs::create_dir_all(root.join("crates/demo/src")).expect("crates/demo/src");
+    for i in 0..210 {
+        let body = format!(
+            "//! # Specification References\n//!\n//! - [`SPEC-X-{i:02}~draft`]\
+             (docs/specs/x.md#SPEC-X-{i:02}~draft)\n\npub fn unit_{i}() {{}}\n"
+        );
+        std::fs::write(root.join(format!("crates/demo/src/m{i:03}.rs")), body).expect("write code");
+    }
+    dir
+}
+
+/// Full discovery with zero references resolved must fail, not report clean.
+///
+/// Pre-fix this exits 0: the floors only knew `spec_docs` and `code_files`,
+/// both of which are healthy here, so the gate passed over a tree where not one
+/// reference was checked (#5440-followup).
+#[test]
+fn binary_refuses_full_discovery_with_zero_references() {
+    let root = discovered_but_unparseable_root();
+    let out = Command::new(env!("CARGO_BIN_EXE_sld-lint"))
+        .arg("--root")
+        .arg(root.path())
+        .output()
+        .expect("sld-lint runs");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Discovery is at full strength AND the run found nothing wrong — the two
+    // facts that together make this a vacuous pass rather than an early abort.
+    assert!(
+        stdout.contains("scanned 25 spec doc(s) + 210 code file(s)"),
+        "expected healthy discovery counts\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("resolved 0 frontmatter + 0 inline reference(s)"),
+        "expected the summary to PRINT the zeroed reference counts\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("0 error(s)"),
+        "the drifted grammar must emit no diagnostics — that is what makes the \
+         pass vacuous\nstdout: {stdout}"
+    );
+    assert!(
+        !out.status.success(),
+        "a run that walked 235 files and resolved 0 references exited 0 — a floor \
+         that counts discovery instead of work is back\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("SCAN FLOOR"),
+        "the failure must name the scan floor\nstderr: {stderr}"
+    );
+}
+
 /// The floor must not fire on the real tree — otherwise the test above would
 /// pass even with a floor set so high the gate can never go green.
 #[test]
