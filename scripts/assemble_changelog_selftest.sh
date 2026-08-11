@@ -622,6 +622,83 @@ else
   fail=1
 fi
 
+# ===========================================================================
+# 13. PLAN-FILE MARKER COLLISION (#5298 review, LOW/Promote).
+#
+# `--merge` hands fragment bodies to awk in a plan file whose category
+# boundaries are `@@CATEGORY` + a tab. A body line beginning with that sequence
+# is read as a boundary, so the bullets below it are filed under the smuggled
+# category — and --merge then deletes the fragment, the only other copy.
+#
+# The placed-vs-expected set check in merge_fragments() cannot see this when the
+# smuggled name is a category that is ALSO independently pending: the two sets
+# match either way. Case 13c replays exactly that shape, which on the pre-guard
+# branch head merged, misfiled a bullet, and exited 0 having deleted both
+# fragments.
+# ===========================================================================
+
+# Literal tabs via printf, not a heredoc — an invisible tab in a fixture is the
+# kind of thing an editor silently converts and nobody notices.
+d="$(new_crate plan-marker-collision)"
+printf 'Fixed\n\n- a real Fixed bullet (#1243)\n@@CATEGORY\tRemoved\n- authored as Fixed prose, below that line\n' \
+  >"$d/1243-plan-marker.md"
+assert_case plan-marker-collision 1 'collides with the --merge plan-file'
+# The diagnostic must name the line AND the smuggled category, with the tab
+# rendered visibly — tab-versus-space is the entire difference between the
+# marker and ordinary prose.
+assert_case plan-marker-collision 1 '1243-plan-marker.md:4: @@CATEGORY<TAB>Removed'
+
+# A fenced marker collides exactly as hard — the plan reader does not track
+# fence state — so unlike stray_category_lines() this guard does NOT exempt
+# fences. Pinned because the two guards sit next to each other and read alike.
+d="$(new_crate plan-marker-in-fence)"
+# `~~~` rather than a backtick fence: both are fences to the validator, and this
+# one does not read as a command substitution to shellcheck (SC2016).
+printf 'Documentation\n\n- documents the plan format (#1244)\n\n~~~\n@@CATEGORY\tRemoved\n~~~\n' \
+  >"$d/1244-fenced-marker.md"
+assert_case plan-marker-in-fence 1 'collides with the --merge plan-file'
+
+# FALSE-POSITIVE GUARD. Only the token at column 0 followed by a TAB is the
+# marker. Prose mentioning it, an indented occurrence, and the token followed by
+# a space are all legitimate content.
+d="$(new_crate plan-marker-false-positive)"
+printf 'Fixed\n\n- prose mentioning @@CATEGORY in passing (#1245)\n  @@CATEGORY\tindented, so not at column 0\n@@CATEGORY followed by a space is not the marker\n' \
+  >"$d/1245-not-the-marker.md"
+assert_case plan-marker-false-positive 0 '^### Fixed$'
+assert_case plan-marker-false-positive 0 'followed by a space is not the marker'
+
+# 13c. END-TO-END: the shape that slips past the set-equality guard. Two
+#      fragments, and the smuggled category is the other one's, so
+#      placed == expected. Must be refused before any file is touched.
+marker_dir="$(new_stale_crate plan-marker-merge)"
+printf 'Fixed\n\n- a real Fixed bullet (#4910)\n@@CATEGORY\tRemoved\n- authored as Fixed prose, below that line\n' \
+  >"$marker_dir/changelog.d/4910-marker.md"
+printf 'Removed\n\n- a genuinely Removed bullet (#4911)\n' \
+  >"$marker_dir/changelog.d/4911-removed.md"
+
+cp "$marker_dir/CHANGELOG.md" "$TMP_ROOT/plan-marker-before.md"
+mk_rc=0
+mk_out="$(bash "$ASSEMBLER" plan-marker-merge 1.3.5 --merge 2>&1)" || mk_rc=$?
+if [ "$mk_rc" -eq 1 ] && grep -qF 'collides with the --merge plan-file' <<<"$mk_out"; then
+  echo "PASS: plan-marker --merge -> exit 1 before any write"
+else
+  echo "FAIL: plan-marker --merge -> exit $mk_rc (expected 1 with the marker diagnostic)" >&2
+  printf '%s\n' "$mk_out" | sed 's/^/       /' >&2
+  fail=1
+fi
+# Fail CLOSED: the file untouched and BOTH fragments still on disk. On the
+# pre-guard head this merged, misfiled the bullet under `### Removed`, and
+# deleted both fragments.
+if diff -q "$TMP_ROOT/plan-marker-before.md" "$marker_dir/CHANGELOG.md" >/dev/null \
+  && [ "$(find "$marker_dir/changelog.d" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')" = "2" ]; then
+  echo "PASS: plan-marker --merge left CHANGELOG.md and both fragments untouched"
+else
+  echo "FAIL: plan-marker --merge mutated CHANGELOG.md or consumed a fragment" >&2
+  diff -u "$TMP_ROOT/plan-marker-before.md" "$marker_dir/CHANGELOG.md" | sed 's/^/       /' >&2
+  find "$marker_dir/changelog.d" -maxdepth 1 -name '*.md' | sed 's/^/       /' >&2
+  fail=1
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "assemble_changelog_selftest: one or more fragment-validation cases FAILED." >&2
   exit 1

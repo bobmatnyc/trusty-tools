@@ -82,7 +82,8 @@
 # empty, nested, and the bullet-starting-with-a-category-word false-positive
 # guard) against a throwaway workspace copy, plus the #5298 stale-section cases
 # (refusal names the stranded fragments; `--merge` appends to an existing
-# category, inserts a missing one in order, and never duplicates a heading).
+# category, inserts a missing one in order, never duplicates a heading, and
+# rejects a fragment body line that forges the plan-file marker).
 # `bash -n` for syntax. Functionally,
 # `scripts/assemble-changelog.sh <crate-dir> --stdout` renders the pending
 # fragments without touching any file, and `--check` also validates the target
@@ -111,6 +112,13 @@ WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Omitting them would have made the assembler reject real, already-written
 # content.
 CATEGORY_ORDER="Breaking Added Fixed Performance Changed Removed Security Documentation"
+
+# The --merge plan file's category-boundary marker: this token, a tab, then the
+# category name. Defined once so the writer (render_merge_plan), the reader (the
+# awk in merge_into_section) and the fragment guard (plan_marker_lines) cannot
+# drift apart — a guard that stopped matching the marker it protects would be
+# worse than no guard.
+PLAN_MARKER="@@CATEGORY"
 
 usage() {
   echo "Usage: scripts/assemble-changelog.sh <crate-dir> <version> [--check|--merge]" >&2
@@ -235,6 +243,53 @@ stray_category_lines() {
   ' "${path}"
 }
 
+# Why: --merge hands fragment bodies to awk in a plan file whose category
+# boundaries are lines beginning with PLAN_MARKER + a tab. A body line that
+# begins with that same 11-byte sequence is read as a boundary, so every bullet
+# below it is filed under the smuggled category instead of the fragment's own —
+# and --merge then DELETES the fragment, which is the only other copy.
+#
+# The placed-vs-expected set check in merge_fragments() does not catch this on
+# its own: when the smuggled name is a category that is ALSO independently
+# pending, the placed set and the expected set are the same either way. The
+# misfiled bullets are written and the fragments removed, exit 0.
+#
+# Rejected in EVERY mode, not only --merge, because whether a given release runs
+# --merge is unknowable when the fragment is authored; catching it at --stdout
+# and --check costs the author one edit, catching it at release time costs the
+# operator their inputs. Rejected inside code fences too — unlike
+# stray_category_lines(), which may exempt fences because a HUMAN reads the
+# rendered markdown, the plan reader is line-based awk that does not track fence
+# state, so a fenced marker collides exactly as hard as a bare one.
+#
+# What: prints "<file-line-number>\t<text>" for every line after the category
+# line that begins with PLAN_MARKER + a tab. A line where the token is followed
+# by a space, or one where it appears anywhere but column 0, is not the marker
+# and is not flagged.
+# Test: the `plan-marker-*` cases in scripts/assemble_changelog_selftest.sh.
+plan_marker_lines() {
+  local path="$1"
+  awk -v marker="${PLAN_MARKER}" '
+    BEGIN { mark = marker "\t"; n = length(mark) }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+    }
+    !seen && line ~ /[^[:space:]]/ { seen = 1; next }   # the category line
+    !seen { next }                                       # leading blank lines
+    substr(line, 1, n) == mark {
+      text = line
+      sub(/[[:space:]]+$/, "", text)
+      # Render the tab as <TAB>. It is the whole reason the line is the marker
+      # rather than ordinary prose, and a raw tab is indistinguishable from
+      # spaces in a terminal — it would also split the caller`s tab-delimited
+      # report field and swallow the smuggled category name.
+      gsub(/\t/, "<TAB>", text)
+      printf "%d\t%s\n", NR, text
+    }
+  ' "${path}"
+}
+
 # Why: fragments must emit in a deterministic order so two people assembling the
 # same set get byte-identical output.
 # What: prints the fragment's leading issue/PR number, or 0 when the name has no
@@ -277,6 +332,21 @@ parse_fragment() {
   if ! grep -qE '^-[[:space:]]' <<<"${body}"; then
     echo "ERROR: ${base} has a category but no bullet — expected at least one" >&2
     echo "       line starting with '- ' after the category line." >&2
+    return 1
+  fi
+
+  local marked
+  marked="$(plan_marker_lines "${path}")"
+  if [[ -n "${marked}" ]]; then
+    echo "ERROR: ${base} has a line that collides with the --merge plan-file" >&2
+    echo "       marker '${PLAN_MARKER}' + tab:" >&2
+    printf '%s\n' "${marked}" \
+      | awk -F'\t' -v b="${base}" '{ printf "         %s:%s: %s\n", b, $1, $2 }' >&2
+    echo "       A --merge run would read that line as a category boundary and file" >&2
+    echo "       every bullet below it under the smuggled category, then DELETE this" >&2
+    echo "       fragment. Rejected in every mode, and inside code fences too — the" >&2
+    echo "       plan reader is line-based and does not track fences." >&2
+    echo "       Indent the line by two spaces, or break up the token." >&2
     return 1
   fi
 
@@ -355,15 +425,16 @@ render_section() {
 }
 
 # Why: awk cannot take a multi-line value per category through -v, so --merge
-# hands it the new bullets as a file.
-# What: prints the plan — a `@@CATEGORY<TAB><name>` marker line followed by that
+# hands it the new bullets as a file. A fragment body cannot forge a boundary
+# here — parse_fragment() has already rejected any body line carrying the marker.
+# What: prints the plan — a `<PLAN_MARKER><TAB><name>` line followed by that
 # category's verbatim bullet lines, for every category with pending fragments.
 render_merge_plan() {
   local parsed="$1" cat body
   for cat in ${CATEGORY_ORDER}; do
     body="$(category_body "${cat}" "${parsed}")"
     [[ -z "${body}" ]] && continue
-    printf '@@CATEGORY\t%s\n' "${cat}"
+    printf '%s\t%s\n' "${PLAN_MARKER}" "${cat}"
     printf '%s\n' "${body}"
   done
 }
@@ -392,7 +463,7 @@ merge_into_section() {
   local changelog="$1" version="$2" plan="$3" out="$4" report="$5"
   : >"${report}"
   awk -v planfile="${plan}" -v want="## [${version}]" -v cats="${CATEGORY_ORDER}" \
-    -v repfile="${report}" '
+    -v repfile="${report}" -v marker="${PLAN_MARKER}" '
     function record(c) { done[c] = 1; printf "PLACED\t%s\n", c > repfile }
     function emit_new(c) {
       print ""
@@ -453,13 +524,15 @@ merge_into_section() {
     BEGIN {
       nc = split(cats, order, " ")
       for (i = 1; i <= nc; i++) rank[order[i]] = i
+      mark = marker "\t"
+      marklen = length(mark)
       phase = 0
       cur = ""
       nb = 0
       pass = 0
     }
     FILENAME == planfile {
-      if (index($0, "@@CATEGORY\t") == 1) { pc = substr($0, length("@@CATEGORY\t") + 1); next }
+      if (substr($0, 1, marklen) == mark) { pc = substr($0, marklen + 1); next }
       if (pc != "") pend[pc] = pend[pc] $0 "\n"
       next
     }
