@@ -104,6 +104,17 @@ pub enum ReportError {
         source: std::io::Error,
     },
 
+    /// A report was handed to the writer with no synthesis attached (#5454).
+    ///
+    /// Why: inference is required, so a synthesis-free model reaching disk would
+    /// be the deterministic-only report the writer exists to prevent. Reaching
+    /// this is a caller bug, not an operator mistake — the CLI runs synthesis
+    /// unconditionally and propagates its failure.
+    #[error(
+        "internal: the report model carries no synthesis; report rendering requires a completed inference pass"
+    )]
+    SynthesisRequired,
+
     /// A metrics JSON file exists but could not be parsed against the v0 schema.
     #[error("failed to parse metrics JSON at {path}: {source}")]
     Metrics {

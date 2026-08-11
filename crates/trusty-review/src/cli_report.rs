@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use clap::Parser;
 
-use trusty_review::config::ReviewConfig;
-use trusty_review::llm::build_provider;
+use trusty_review::config::{Provider, ReviewConfig};
+use trusty_review::llm::{build_provider, resolve_provider_and_model};
 use trusty_review::report::{
     Budget, CorpusSnapshot, Instructions, Reporter, TemplateLoader, benchmark,
     investigate::{apply_investigation, merge_investigation_prose},
@@ -60,11 +60,13 @@ pub struct ReportArgs {
     #[arg(long, value_name = "DIR", default_value = "./reports")]
     pub out: PathBuf,
 
-    /// Opt in to M2 LLM synthesis of the narrative sections (executive summary,
-    /// top-risk rationale, RED/AMBER finding prose).  OFF by default: the report
-    /// is deterministic (M1) unless this flag is set, because synthesis spends
-    /// LLM tokens.  Fails closed — any provider/parse/guardrail failure keeps the
-    /// deterministic output and records a visible `synthesis:` note.
+    /// Deprecated and ignored (#5454): synthesis is now unconditional.
+    ///
+    /// It is still accepted so that scripts, the `tga audit` invocation, and the
+    /// recovery command printed on a failed render keep parsing against both the
+    /// old and the new binary — `tga` resolves `trusty-review` from PATH, so the
+    /// two versions are not released together and either may be installed.
+    /// Passing it prints one deprecation line to stderr and changes nothing.
     #[arg(long)]
     pub synthesize: bool,
 
@@ -129,6 +131,17 @@ pub struct ReportArgs {
 /// Test: arg parsing via `tests::report_args_parse_defaults`; full render via
 /// `tests/report_e2e.rs`.
 pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
+    // #5454: the credential is checked FIRST, before the manifest is read or a
+    // single repository is walked. A DD render takes minutes, and discovering an
+    // unset key at the end of it wastes all of them.
+    preflight_inference_credential(&config)?;
+
+    if args.synthesize {
+        eprintln!(
+            "[trusty-review report] --synthesize is deprecated and ignored: synthesis is always on"
+        );
+    }
+
     eprintln!(
         "[trusty-review report] Loading manifest: {}",
         args.manifest.display()
@@ -229,23 +242,32 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
         }
     }
 
-    // M2 + wave-3: opt-in LLM synthesis plus the repo-evidence investigation.
-    // Fails closed — on any provider/parse/guardrail failure the deterministic
-    // output stands and the reason is recorded on the model.
-    if args.synthesize {
-        eprintln!("[trusty-review report] Synthesis enabled — calling LLM provider...");
-        let budget = resolve_budget(&args, &manifest);
-        let synthesis = run_synthesis(&config, &mut model, budget).await;
-        eprintln!(
-            "[trusty-review report] {}",
-            synthesis
-                .status_lines()
-                .first()
-                .cloned()
-                .unwrap_or_default()
-        );
-        model.synthesis = Some(synthesis);
-    }
+    // LLM synthesis plus the repo-evidence investigation. #5454: required, so a
+    // failure here ends the run — no report is written and the manifest the
+    // caller passed in is untouched, which is what makes re-running this exact
+    // command the recovery path.
+    eprintln!("[trusty-review report] Synthesis — calling LLM provider...");
+    let budget = resolve_budget(&args, &manifest);
+    let synthesis = run_synthesis(&config, &mut model, budget)
+        .await
+        .with_context(|| {
+            format!(
+                "inference is required for a due-diligence report, and this run produced none. \
+                 Nothing collected is lost — re-run `trusty-review report --manifest {} --analyze \
+                 --out {}` once the cause is addressed",
+                args.manifest.display(),
+                args.out.display()
+            )
+        })?;
+    eprintln!(
+        "[trusty-review report] {}",
+        synthesis
+            .status_lines()
+            .first()
+            .cloned()
+            .unwrap_or_default()
+    );
+    model.synthesis = Some(synthesis);
 
     // M3: resolve the corpus directory once (shared by --benchmark and
     // --corpus-add).  A `--corpus` flag with neither consumer is a no-op — warn.
@@ -411,31 +433,81 @@ fn resolve_budget(args: &ReportArgs, manifest: &Manifest) -> Budget {
     }
 }
 
+/// Fail before any work when the required inference credential is absent.
+///
+/// Why: DOC-67 binds `tga audit` to one shot with no prompts, and an audit sweep
+/// runs for minutes before it reaches this binary. #5454 made inference required,
+/// so the one failure that IS knowable up front — no credential — must be raised
+/// up front rather than after a full render's worth of work.
+/// What: OpenRouter is the only provider this preflights, per the #5454 owner
+/// decision that it is the only inference path for a DD report. A reviewer role
+/// resolved to Bedrock or Fireworks is left to fail at the provider-build site,
+/// which is also fatal now — this check narrows the window, it does not open a
+/// second path. The key's VALUE is never read, printed, or compared here; only
+/// whether it is blank.
+/// Test: the rule itself, via [`credential_rule`].
+fn preflight_inference_credential(config: &ReviewConfig) -> Result<()> {
+    let role = &config.role_models.reviewer;
+    let (provider, _) = resolve_provider_and_model(&role.model, &role.provider);
+    credential_rule(provider, &config.openrouter_api_key)
+}
+
+/// The preflight rule itself, as a pure function.
+///
+/// Why: taking the resolved provider and the key as parameters keeps the decision
+/// testable without loading a `ReviewConfig` — which reads the real process
+/// environment, so a test of it would pass or fail depending on whether the
+/// machine running it happens to have a key exported.
+/// What: `Err` only for OpenRouter with a blank key. The key is inspected for
+/// emptiness and never copied into the message.
+/// Test: `tests::{preflight_rejects_a_blank_openrouter_key,
+/// preflight_accepts_a_present_openrouter_key,
+/// preflight_leaves_non_openrouter_providers_to_the_build_site,
+/// preflight_message_never_echoes_the_key}`.
+fn credential_rule(provider: Provider, openrouter_api_key: &str) -> Result<()> {
+    if provider != Provider::OpenRouter {
+        return Ok(());
+    }
+    if openrouter_api_key.trim().is_empty() {
+        anyhow::bail!(
+            "{key} is not set, and a due-diligence report requires inference. Set it before \
+             starting the run:\n\n    export {key}=<your OpenRouter API key>\n\nKeys are issued at \
+             https://openrouter.ai/keys.",
+            key = trusty_common::env_vars::ENV_OPENROUTER_API_KEY,
+        );
+    }
+    Ok(())
+}
+
 /// Build the LLM provider, run the repo-evidence investigation, then synthesis.
 ///
-/// Why: keeps `cmd_report` readable and isolates the provider-build failure path
-/// — a build error (missing API key, bad model id) must NOT abort the report; it
-/// degrades to the deterministic output with an `Unavailable` synthesis.  The
-/// investigation (#2357) runs FIRST so its verified findings are injected into the
-/// model before synthesis, and synthesis sees the coverage summary; its verified
-/// (measured-evidence) prose then wins over any synthesis prose for the same
-/// finding.
+/// Why: keeps `cmd_report` readable and isolates the provider-build failure path.
+/// #5454 turned that path fatal: a build error (a key rejected at construction, a
+/// bad model id) used to degrade the report to deterministic output, which is the
+/// mode the owner decision removed. The investigation (#2357) runs FIRST so its
+/// verified findings are injected into the model before synthesis, and synthesis
+/// sees the coverage summary; its verified (measured-evidence) prose then wins
+/// over any synthesis prose for the same finding.
 /// What: resolves the reviewer role's provider/model (the same construction path
-/// the review pipeline uses); on success runs `run_investigation` (local repos
-/// only), `apply_investigation`, `synthesize`, and `merge_investigation_prose`; a
-/// build error returns `Synthesis::unavailable(reason)`.
-/// Test: build path is network-bound; the fail-closed decisions are covered by
+/// the review pipeline uses), then runs `run_investigation` (local repos only),
+/// `apply_investigation`, `synthesize`, and `merge_investigation_prose`.
+///
+/// # Errors
+///
+/// When the provider cannot be built, or when the synthesis pass produces no
+/// verified prose ([`trusty_review::report::SynthesisError`]).
+///
+/// Test: the build path is network-bound; the failure decisions are covered by
 /// `report::synthesize::tests` and `tests/report_investigate.rs` with stubs.
 async fn run_synthesis(
     config: &ReviewConfig,
     model: &mut ReportModel,
     budget: Budget,
-) -> Synthesis {
+) -> Result<Synthesis> {
     let role = &config.role_models.reviewer;
-    let provider = match build_provider(&role.model, &role.provider, config).await {
-        Ok(p) => p,
-        Err(e) => return Synthesis::unavailable(format!("provider build failed: {e}")),
-    };
+    let provider = build_provider(&role.model, &role.provider, config)
+        .await
+        .map_err(|e| anyhow::anyhow!("could not build the LLM provider: {e}"))?;
 
     // Wave-3 investigation (local checkouts only): select → LLM → verify, then
     // inject verified findings so synthesis and the reporter render them.
@@ -448,13 +520,13 @@ async fn run_synthesis(
         apply_investigation(model, &inv);
         let mut synthesis = Synthesizer::new(provider, role.model.clone())
             .synthesize(model)
-            .await;
+            .await?;
         merge_investigation_prose(&mut synthesis, &inv);
-        synthesis
+        Ok(synthesis)
     } else {
-        Synthesizer::new(provider, role.model.clone())
+        Ok(Synthesizer::new(provider, role.model.clone())
             .synthesize(model)
-            .await
+            .await?)
     }
 }
 
@@ -557,5 +629,69 @@ mod tests {
     fn load_manifest_from_str(toml: &str) -> Manifest {
         trusty_review::report::manifest::parse_manifest(toml, Path::new("m.toml"))
             .expect("manifest parses")
+    }
+
+    // ── #5454: the credential preflight ──────────────────────────────────────
+
+    /// Why: #5454 — this is the failure that is knowable BEFORE a multi-minute
+    /// sweep, and letting it surface at the end (as the provider-build error it
+    /// used to be) wastes the whole one-shot run DOC-67 allows.
+    /// What: a blank OpenRouter key is rejected, and the message names the
+    /// variable and how to set it.
+    /// Test: this test itself.
+    #[test]
+    fn preflight_rejects_a_blank_openrouter_key() {
+        for blank in ["", "   ", "\n"] {
+            let err = credential_rule(Provider::OpenRouter, blank)
+                .expect_err("a blank key must not pass the preflight");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("OPENROUTER_API_KEY") && msg.contains("export OPENROUTER_API_KEY="),
+                "the message must name the variable and how to set it: {msg}"
+            );
+        }
+    }
+
+    /// Why: the preflight must not stand between an operator with a key and a run.
+    /// What: any non-blank key passes.
+    /// Test: this test itself.
+    #[test]
+    fn preflight_accepts_a_present_openrouter_key() {
+        credential_rule(Provider::OpenRouter, "sk-or-v1-example")
+            .expect("a present key passes the preflight");
+    }
+
+    /// Why: OpenRouter is the only path #5454 preflights; Bedrock resolves its
+    /// credentials through the AWS chain and Fireworks through its own key, so
+    /// neither can be judged from `openrouter_api_key`. They stay the
+    /// provider-build site's business — which is fatal now too.
+    /// What: a non-OpenRouter provider passes even with no OpenRouter key.
+    /// Test: this test itself.
+    #[test]
+    fn preflight_leaves_non_openrouter_providers_to_the_build_site() {
+        credential_rule(Provider::Bedrock, "").expect("Bedrock is not preflighted here");
+        credential_rule(Provider::Fireworks, "").expect("Fireworks is not preflighted here");
+    }
+
+    /// Why: an operator's terminal, their shell history, and any log scraping it
+    /// are all places a key must never appear.
+    /// What: a run with a real-looking key produces no error at all; a run with a
+    /// blank one produces a message containing no key material.
+    /// Test: this test itself.
+    #[test]
+    fn preflight_message_never_echoes_the_key() {
+        let secret = "sk-or-v1-DEADBEEFdeadbeef";
+        // The accepting path emits nothing.
+        credential_rule(Provider::OpenRouter, secret).expect("present key passes");
+        // The rejecting path has no key to echo, and must not invent one.
+        let msg = format!(
+            "{}",
+            credential_rule(Provider::OpenRouter, "").expect_err("blank key fails")
+        );
+        assert!(!msg.contains(secret), "no key material may appear: {msg}");
+        assert!(
+            !msg.contains("sk-or"),
+            "no key-shaped text may appear: {msg}"
+        );
     }
 }

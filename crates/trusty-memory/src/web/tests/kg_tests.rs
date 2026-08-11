@@ -740,3 +740,339 @@ async fn kg_graph_signals_truncation() {
         "a complete payload must not claim truncation"
     );
 }
+
+// ---------------------------------------------------------------------------
+// DELETE /api/v1/palaces/{id}/kg/triples/{triple_id}
+// ---------------------------------------------------------------------------
+
+/// Create a palace named `name` and assert `(subject, predicate, object)` for
+/// every object given, so a delete test starts from siblings at one pair.
+async fn seed_pair(
+    app: &axum::Router,
+    name: &str,
+    subject: &str,
+    predicate: &str,
+    objects: &[&str],
+) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "name": name }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "create palace {name}");
+
+    for object in objects {
+        let body = json!({
+            "subject": subject,
+            "predicate": predicate,
+            "object": object,
+        })
+        .to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/palaces/{name}/kg"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT, "assert {object}");
+    }
+}
+
+/// Return every active triple in `name` as `(subject, predicate, object)`.
+async fn active_triples(app: &axum::Router, name: &str) -> Vec<(String, String, String)> {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/palaces/{name}/kg/all?limit=50&offset=0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 16_384).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    v.as_array()
+        .expect("triples must be array")
+        .iter()
+        .map(|t| {
+            (
+                t["subject"].as_str().unwrap_or_default().to_string(),
+                t["predicate"].as_str().unwrap_or_default().to_string(),
+                t["object"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Why: THE bug. The triple id encoded only `(subject, predicate)` and the
+/// service called the pair-level `KnowledgeGraph::retract`, so deleting "one
+/// triple" over the HTTP surface closed every object at that pair — an
+/// `alpha is thing-a` delete also took `alpha is thing-b`, which the caller
+/// never named and the 404 message could not even express. Against the
+/// pre-fix code this test reports `left: 0, right: 1` at the surviving-sibling
+/// assertion.
+/// What: seeds two objects at one `(subject, predicate)` pair, DELETEs the id
+/// for exactly one of them, and asserts `204` plus that the sibling is still
+/// the one and only active triple. Then deletes the sibling too, to show the
+/// pair can still be emptied one row at a time.
+/// Test: this test.
+#[tokio::test]
+async fn kg_delete_triple_closes_one_object_and_keeps_siblings() {
+    use super::super::kg_routes::encode_triple_id;
+
+    let state = test_state();
+    let app = router().with_state(state);
+    seed_pair(&app, "kg-del", "alpha", "is", &["thing-a", "thing-b"]).await;
+
+    let triple_id = encode_triple_id("alpha", "is", "thing-a").expect("encode triple id");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/palaces/kg-del/kg/triples/{triple_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    assert_eq!(
+        active_triples(&app, "kg-del").await,
+        vec![("alpha".to_string(), "is".to_string(), "thing-b".to_string())],
+        "deleting one object must leave its sibling at the same pair active"
+    );
+
+    // The pair can still be emptied — one named row at a time.
+    let sibling_id = encode_triple_id("alpha", "is", "thing-b").expect("encode triple id");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/palaces/kg-del/kg/triples/{sibling_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(active_triples(&app, "kg-del").await.is_empty());
+}
+
+/// Why: a delete that names an object nobody asserted must not be reported as
+/// a success, and — since retraction is idempotent — repeating a delete that
+/// already landed must answer the same way rather than closing something else.
+/// What: seeds one object, deletes a different object at the same pair
+/// (expect 404 with the object in the message, and the seeded row untouched),
+/// then deletes the real one twice: 204 then 404.
+/// Test: this test.
+#[tokio::test]
+async fn kg_delete_triple_returns_404_for_missing() {
+    use super::super::kg_routes::encode_triple_id;
+
+    let state = test_state();
+    let app = router().with_state(state);
+    seed_pair(&app, "kg-miss", "alpha", "is", &["thing-a"]).await;
+
+    let wrong_object = encode_triple_id("alpha", "is", "thing-zzz").expect("encode triple id");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/palaces/kg-miss/kg/triples/{wrong_object}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(
+        body.contains("thing-zzz"),
+        "the 404 must name the object it looked for; got {body}"
+    );
+    assert_eq!(
+        active_triples(&app, "kg-miss").await.len(),
+        1,
+        "a miss must not close the sibling that does exist"
+    );
+
+    let real = encode_triple_id("alpha", "is", "thing-a").expect("encode triple id");
+    for expected in [StatusCode::NO_CONTENT, StatusCode::NOT_FOUND] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/palaces/kg-miss/kg/triples/{real}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), expected, "repeat delete must be idempotent");
+    }
+}
+
+/// Why: an id in the old two-field form cannot name a triple, and answering
+/// it with 404 would read as "already deleted" to a caller whose request was
+/// never understood. It must fail closed and say what the id now needs.
+/// What: hand-encodes `subject\0predicate`, DELETEs with it, and asserts 400
+/// with the new format in the message and both seeded objects still active.
+/// Test: this test.
+#[tokio::test]
+async fn kg_delete_triple_rejects_a_legacy_pair_id() {
+    use base64::Engine as _;
+
+    let state = test_state();
+    let app = router().with_state(state);
+    seed_pair(&app, "kg-legacy", "alpha", "is", &["thing-a", "thing-b"]).await;
+
+    let legacy_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"alpha\0is");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/palaces/kg-legacy/kg/triples/{legacy_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(
+        body.contains("object"),
+        "the 400 must say the id needs an object; got {body}"
+    );
+    assert_eq!(
+        active_triples(&app, "kg-legacy").await.len(),
+        2,
+        "a rejected legacy id must close nothing"
+    );
+}
+
+/// Return the body of `GET /api/v1/kg/prompt-context`, which serves the
+/// in-memory prompt cache verbatim.
+async fn prompt_context(app: &axum::Router) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/kg/prompt-context")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 16_384).await.unwrap();
+    String::from_utf8(bytes.to_vec()).expect("prompt context is utf-8")
+}
+
+/// Why: the other three delete tests all run under the predicate `is`, which
+/// `is_hot_predicate` rejects, so the prompt-cache rebuild in
+/// `MemoryService::kg_retract_triple` (`service/core_kg.rs:132-138`) never
+/// runs in this suite — the same gap that shipped on the MCP side of this
+/// change and is guarded there by
+/// `dispatch_kg_retract_triple_rebuilds_prompt_cache_for_hot_predicate`.
+/// Nothing else stops a later edit from inverting the condition or dropping
+/// the call while every existing test stays green, and the hazard is the one
+/// the method's own doc names: a retracted Tier S fact keeps being injected
+/// into every session's prompt.
+/// What: writes an alias — the one HTTP write that populates the prompt cache
+/// — under the hot predicate `is_alias_for`, confirms
+/// `GET /kg/prompt-context` serves it, DELETEs that triple, and confirms the
+/// endpoint no longer serves it. The cache is only re-read, never re-derived,
+/// so the second read can only change if the delete rebuilt it.
+/// Test: this test.
+#[tokio::test]
+async fn kg_delete_triple_rebuilds_prompt_cache_for_hot_predicate() {
+    use super::super::kg_routes::encode_triple_id;
+
+    let state = test_state();
+    let app = router().with_state(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "name": "kg-hot" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "create palace kg-hot");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/kg/aliases")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "palace": "kg-hot",
+                        "short": "tmhot",
+                        "full": "trusty-memory-hot-fact",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "seed the hot alias");
+
+    let before = prompt_context(&app).await;
+    assert!(
+        before.contains("tmhot → trusty-memory-hot-fact"),
+        "the hot fact must be cached before the delete; got: {before}"
+    );
+
+    let triple_id = encode_triple_id("tmhot", "is_alias_for", "trusty-memory-hot-fact")
+        .expect("encode triple id");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/palaces/kg-hot/kg/triples/{triple_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let after = prompt_context(&app).await;
+    assert!(
+        !after.contains("trusty-memory-hot-fact"),
+        "a retracted hot fact must not still be injected into the prompt; got: {after}"
+    );
+}
