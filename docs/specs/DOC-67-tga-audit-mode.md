@@ -434,9 +434,20 @@ per run; the section renders it verbatim rather than presenting a bare
 percentage. #5250 proposes a distinct `unknown` state so a stripped-marker
 commit stops sharing a bucket with a genuinely human one.
 
-The marker set is a fixed list in `collect::ai_markers::BUILTIN`. Detecting a
-target org's own house footer therefore needs a tga release, and an audit of a
-repository with an unrecognised footer under-reports for that reason alone.
+The marker set is `collect::ai_markers::BUILTIN` plus whatever operator markers
+`collect::ai_marker_config` loads from disk (#5414). A target org's own house
+footer is therefore addable per audit — write it into the marker file named by
+`TGA_AI_MARKERS` (default `~/.config/tga/ai-markers.yaml`) — without a tga
+release. Two consequences the section must carry rather than assume:
+
+- The disclosure states which markers were active for THAT run, including how
+  many came from a marker file and where it lives. Two runs of the same tga
+  version over the same repository can legitimately report different shares, so
+  the number is only interpretable next to the line.
+- A marker file that cannot be read, parsed, or compiled is rejected whole and
+  the run continues on `BUILTIN`. The disclosure says so explicitly; an audit
+  whose share looks low must be checked against that line before it is read as
+  a fact about the target.
 
 **This is new work, not a reuse of the existing pipeline — call this out
 plainly.** §5's architecture claimed trusty-review's rendering layer is
