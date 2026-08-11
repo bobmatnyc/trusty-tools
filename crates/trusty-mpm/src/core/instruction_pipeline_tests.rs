@@ -620,7 +620,10 @@ fn pm_instructions_is_its_three_sections() {
         assert!(body.contains(expected), "a section source went missing");
     }
     assert!(body.contains("### Clickable References"));
-    assert!(body.contains("### Banned Word"));
+    // The "honest" ban now lives only in the output styles' `Communication —
+    // Write Plainly` section, the one channel a manual `claude` launch keeps.
+    // A copy here is the second statement that move exists to prevent.
+    assert!(!body.contains("### Banned Word"));
 
     // The paragraph break is `Join::Blank`'s literal, which is what makes
     // this string byte-identical to what the packaged composer emits.
@@ -706,11 +709,7 @@ fn the_installed_prompt_carries_the_manifest_authored_rules() {
     // manifest-authored rule missing here is a rule half the launch paths never
     // see.
     let prompt = assemble_system_prompt();
-    for marker in [
-        "### Clickable References",
-        "### Banned Word",
-        "## Opportunistic Fixes",
-    ] {
+    for marker in ["### Clickable References", "## Opportunistic Fixes"] {
         assert!(
             prompt.contains(marker),
             "the installed prompt must carry {marker:?}"
