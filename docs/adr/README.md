@@ -19,6 +19,12 @@ ADR; its Context, Decision, and Consequences remain historical. We use the
 (Title, Status, Context, Decision, Consequences) plus a **"Related Decisions"**
 section documenting consistency vetting (see DOC-46 §3).
 
+ADR-0001..0013 predate DOC-46's modern metadata and Related Decisions
+template. They are structurally grandfathered: their historical sections are
+not rewritten for template conformity, while their statuses, successor links,
+numbering, and index entries remain governed. ADR-0014 and later must satisfy
+the current template fields and core-section checks.
+
 ## When to write one (the bar)
 
 Write an ADR when a decision is **architecturally significant *and* costly to
@@ -51,7 +57,7 @@ maintain **independent** numbering sequences. Never renumber an existing ADR.
 ## Status lifecycle
 
 ```
-Proposed ──► Accepted ──► Superseded by NNNN
+Proposed ──► Accepted ──► Superseded by linked NNNN
        └────► Rejected
 
        ┌────────────────┐
@@ -63,8 +69,9 @@ Proposed ──► Accepted ──► Superseded by NNNN
 - **Proposed** — drafted, under discussion. Consistency vetting is optional while Proposed, but required before acceptance.
 - **Accepted** — agreed and in force. All Accepted ADRs form the current decision set.
 - **Rejected** — considered but not adopted (kept for the record).
-- **Superseded by NNNN** — replaced by a later ADR; links to the new ADR. Old decision no longer in force.
-- **Amended by NNNN[, NNNN…]** — refined (not replaced) by one or more later
+- **Superseded by linked NNNN** — replaced by a later ADR; the Status value
+  links to the new ADR. Old decision no longer in force.
+- **Amended by linked NNNN[, NNNN…]** — refined (not replaced) by one or more later
   ADRs. The prior decision remains in force together with every listed amendment.
 
 ## Writing a new ADR

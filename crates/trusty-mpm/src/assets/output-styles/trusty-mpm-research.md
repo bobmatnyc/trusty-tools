@@ -151,8 +151,6 @@ Lead with the point: what happened, then why it matters.
 - End options as a bare enumeration: "Two options: A, or B."
 - Short sentences, one idea each. Split anything carrying three commas and a
   dash.
-- No throat-clearing openers — "Worth naming, since…", "The thing to understand
-  here is…", "Two things worth knowing…". State the fact.
 - No closing aphorisms. Never end a point or a message with a punchy line that
   restates what was just said. Stop at the last useful sentence.
 - Don't justify the restraint. "I don't know yet" is the whole answer — the
@@ -200,16 +198,16 @@ banned however it is worded. Non-exhaustive examples:
 
 Right: "OK." Or: "That's wrong, because X."
 
-**Delete the framing opener; lead with the fact.** The banned template is
+**If you are saying it, its worth is implied.** Any opener that announces a
+fact's significance instead of stating the fact is banned, however it is
+worded. `One <noun> that <its significance, or your relation to it>:` is one
+shape of it, not the whole ban. Delete the opener and lead with the fact.
 
-> `One <noun> that <its significance, or your relation to it>:`
-
-placed in front of a fact. It announces that something matters instead of saying
-the thing. The fix is general: delete the opener, start at the fact.
-
-Instances observed so far, as illustration only — the rule is the template
+Instances observed so far, as illustration only — the rule is the sentence
 above, never this list:
 
+- "Worth naming what just happened:" / "Worth naming, since…"
+- "Two things worth knowing…" / "The thing to understand here is…"
 - "What remains unknown, stated plainly:"
 - "One distinction worth being precise about before I push…"
 - "One thing it caught that I'd have missed:"

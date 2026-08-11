@@ -41,6 +41,17 @@ pub mod banner;
 pub mod chat;
 pub mod claude_config;
 
+/// Codex CLI MCP-server registration (`~/.codex/config.toml`).
+///
+/// Why: a Codex stdio registration with no argument vector launches the bare
+/// binary, which prints help and exits before MCP initialization while the
+/// connection still reads as enabled (#5264 / #5265).
+/// What: [`codex_config::codex_config_path`] and
+/// [`codex_config::patch_mcp_server`] — see the module docs.
+/// Test: `cargo test -p trusty-common --features codex-config`.
+#[cfg(feature = "codex-config")]
+pub mod codex_config;
+
 /// Canonical environment-variable name constants shared across the workspace.
 ///
 /// Why: the same credential env-var names were spelled as bare literals at ~40
@@ -716,6 +727,17 @@ pub mod data_dir;
 /// Test: `cargo test -p trusty-common -- test_harness::tests`.
 pub mod test_harness;
 pub use test_harness::running_under_test_harness;
+
+/// Cross-process exclusive advisory lock around a whole-file critical section.
+///
+/// Why: the lock [`json_rmw`] needs is not JSON-specific. `trusty-search`'s
+/// `indexes.toml` has its own TOML loader and fail-closed parse contract, so it
+/// cannot route through [`json_rmw::update`], yet its writers (the daemon,
+/// `prune`, `prune-orphans`) lose each other's updates for exactly the same
+/// reason (#5344). Owning the lock here keeps ONE implementation for both.
+/// What: Exposes [`file_lock::with_exclusive_lock`] and [`file_lock::lock_path`].
+/// Test: `cargo test -p trusty-common -- file_lock::tests`.
+pub mod file_lock;
 
 /// Cross-process locked read-modify-write for whole-file JSON documents.
 ///

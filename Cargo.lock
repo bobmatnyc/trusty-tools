@@ -11460,6 +11460,7 @@ dependencies = [
  "tokenizers 0.21.4",
  "tokio",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -11801,7 +11802,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "anyhow",
  "arc-swap",

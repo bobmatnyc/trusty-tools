@@ -1656,16 +1656,24 @@ fn inject_trusty_search_mcp_pins_index() {
     );
 }
 
+/// Nothing registered means nothing to pin (#5091; was
+/// `register_project_index_returns_derived_id`).
+///
+/// Why: this test used to assert the opposite — that with no daemon the id came
+/// back anyway "so the stub can be pinned". That is the defect #5091 reports:
+/// `.mcp.json` then pins `trusty-search serve --index <id>` for an index nothing
+/// created, and every `search` in that session answers `404 unknown index` while
+/// the `search` health check stays green. The launch caller already handles
+/// `None` by writing the unpinned stub, so the honest outcome costs nothing.
+/// What: points the data dir at an empty temp dir so no `http_addr` file exists
+/// and no POST is issued, then asserts `register_project_index` returns `None`
+/// while the shared reporting entry point still derives the git-root basename
+/// from a nested directory — the derivation this test has always covered.
+/// `#[serial]` because the override env var is process-global.
+/// Test: this test.
 #[test]
 #[serial_test::serial]
-fn register_project_index_returns_derived_id() {
-    // Why (#1373): registration must derive the project's index id (git-root
-    // basename, via the shared `trusty_common::derive_index_id`) AND remain
-    // graceful when the trusty-search daemon is unreachable — it still returns
-    // the id so the stub can be pinned. We force the daemon-down path by
-    // pointing the data dir at an empty temp dir so `read_daemon_addr` finds no
-    // `http_addr` file (and thus issues no HTTP POST). `#[serial]` because the
-    // override env var is process-global.
+fn register_project_index_withholds_id_when_registration_is_unconfirmed() {
     let data_dir = tempdir().unwrap();
     // Panic-safe restore: the guard restores/removes the override env var in its
     // `Drop`, so a panic in the assertions below never leaks it to sibling
@@ -1681,9 +1689,21 @@ fn register_project_index_returns_derived_id() {
     let nested = project.path().join("crates/inner");
     std::fs::create_dir_all(&nested).unwrap();
 
-    let id = register_project_index(&nested);
+    let report = trusty_common::search_index::ensure_project_indexed_reporting(
+        &nested,
+        trusty_common::search_index::IndexOptions::default(),
+    );
     let expected = trusty_common::derive_index_id(project.path());
-    assert_eq!(id, Some(expected), "id is the git-root basename");
+    assert_eq!(
+        report.index_id,
+        Some(expected),
+        "id is the git-root basename"
+    );
+    assert_eq!(
+        register_project_index(&nested),
+        None,
+        "no registration was confirmed, so the stub must not be pinned (#5091)"
+    );
 }
 
 // Issue #2914 regression (`register_project_index_never_bypasses_sensitive_path_denylist`)

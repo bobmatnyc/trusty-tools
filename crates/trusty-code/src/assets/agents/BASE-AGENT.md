@@ -397,16 +397,16 @@ banned however it is worded. Non-exhaustive examples:
 
 Right: "OK." Or: "That's wrong, because X."
 
-**Delete the framing opener; lead with the fact.** The banned template is
+**If you are saying it, its worth is implied.** Any opener that announces a
+fact's significance instead of stating the fact is banned, however it is
+worded. `One <noun> that <its significance, or your relation to it>:` is one
+shape of it, not the whole ban. Delete the opener and lead with the fact.
 
-> `One <noun> that <its significance, or your relation to it>:`
-
-placed in front of a fact. It announces that something matters instead of saying
-the thing. The fix is general: delete the opener, start at the fact.
-
-Instances observed so far, as illustration only — the rule is the template
+Instances observed so far, as illustration only — the rule is the sentence
 above, never this list:
 
+- "Worth naming what just happened:" / "Worth naming, since…"
+- "Two things worth knowing…" / "The thing to understand here is…"
 - "What remains unknown, stated plainly:"
 - "One distinction worth being precise about before I push…"
 - "One thing it caught that I'd have missed:"

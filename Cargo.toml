@@ -217,6 +217,10 @@ clap = { version = "4", features = ["derive", "env"] }
 # secret from the TTY without echoing it so keys never land in shell history.
 rpassword = "7"
 toml = "0.8"
+# Format-preserving TOML editing for `trusty-common::codex_config` (#5264):
+# the Codex CLI config is a hand-maintained file, so a registration repair must
+# not reflow the operator's comments and unrelated tables.
+toml_edit = "0.22"
 libc = "0.2"
 unicode-width = "0.2"
 # `.env.local` loader for the trusty-common `credentials` resolver

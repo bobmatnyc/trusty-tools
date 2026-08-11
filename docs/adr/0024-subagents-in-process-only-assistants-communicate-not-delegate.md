@@ -6,9 +6,9 @@
   three-tool-call router and assistant-to-assistant communication primitive;
   acceptance records the architectural choice, not implementation completion.
   See "Implementation status" for the clause-by-clause state.
-- **Date:** 2026-07-28 (ratification of the L0-assistant clause recorded
-  2026-07-28; ratification of the editable-whitelist clause recorded
-  2026-07-29)
+- **Date:** 2026-07-28
+- **Ratification:** L0-assistant clause recorded 2026-07-28;
+  editable-whitelist clause recorded 2026-07-29
 - **Scope:** crate `trusty-agents` (the `delegate_to_agent` / `dispatch_task` boundary; the L0/L1 tier model, #4167/#4200; touches the `trusty-code` cross-product bridge target and the Sub-agents API/pane, `#4029`/`#4211`)
 - **Reversibility Cost:** High — reverses/re-scopes shipped, tested, owner-directed machinery from epic #4021 (#4026/#4027/#4028/#4211, merged within 48 hours of this ADR), INVERTS the population assignment of the L0/L1 tier model merged the SAME DAY as this decision (PR #4200, squash `ada4d351`), and requires new, currently nonexistent machinery (an editable sub-agent whitelist, an assistant-to-assistant messaging primitive, and a tool-call-counted skill/delegate router)
 - **Decision Drivers:** Product framing clarity (the Sub-agents pane could not honestly present a name that means two different things), the owner's rejection of a UI-only fix, the owner's explicit generalization of the YOLO risk posture to every assistant, a documentation gap (DOC-57 does not yet cover Sub-agents at all, #4182), the owner's own PM/trusty-mpm prior art as an explicit analogy with an owner-named limit, and — underlying all of the above — the owner's virtual-twin authority principle (see "Rationale" below): each assistant must take authority over its own actions, and that authority is not transferable between assistants
