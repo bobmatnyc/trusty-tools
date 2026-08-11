@@ -130,6 +130,40 @@ crates/trusty-mpm/src/lib.rs')"
 assert_eq "empty (fail closed)"   "false" "$(docs_only_of '')"
 
 # ---------------------------------------------------------------------------
+# detect-embedder-cuda-relevant.sh
+# ---------------------------------------------------------------------------
+cuda_relevant_of() {
+  printf '%s' "$1" | bash scripts/detect-embedder-cuda-relevant.sh 2>/dev/null |
+    sed -n 's/^embedder_cuda_relevant=//p'
+}
+
+echo
+echo "detect-embedder-cuda-relevant:"
+assert_eq "trusty-common source"     "true"  "$(cuda_relevant_of 'crates/trusty-common/src/embedder/mod.rs')"
+assert_eq "trusty-common manifest"   "true"  "$(cuda_relevant_of 'crates/trusty-common/Cargo.toml')"
+assert_eq "workspace manifest"       "true"  "$(cuda_relevant_of 'Cargo.toml')"
+assert_eq "workspace lockfile"       "true"  "$(cuda_relevant_of 'Cargo.lock')"
+assert_eq "Cargo configuration"      "true"  "$(cuda_relevant_of '.cargo/config.toml')"
+assert_eq "CI workflow"              "true"  "$(cuda_relevant_of '.github/workflows/ci.yml')"
+assert_eq "scope detector"           "true"  "$(cuda_relevant_of 'scripts/detect-embedder-cuda-relevant.sh')"
+assert_eq "unrelated Rust crate"     "false" "$(cuda_relevant_of 'crates/trusty-mpm/src/main.rs')"
+assert_eq "trusty-search CUDA code"  "false" "$(cuda_relevant_of 'crates/trusty-search/src/main.rs')"
+assert_eq "documentation"            "false" "$(cuda_relevant_of 'docs/adr/0001-example.md')"
+assert_eq "mixed relevant changes"   "true"  "$(cuda_relevant_of 'docs/adr/0001-example.md
+crates/trusty-common/src/lib.rs')"
+assert_eq "empty diff (fail closed)" "true"  "$(cuda_relevant_of '')"
+
+cuda_job="$(sed -n '/^  embedder-cuda-check:/,/^  # ui-checks:/p' .github/workflows/ci.yml)"
+assert_eq "CI exports CUDA relevance" "1" \
+  "$(grep -c '^      embedder_cuda_relevant:.*steps.detect-cuda' .github/workflows/ci.yml || true)"
+assert_eq "CUDA job is gated by crate relevance" "1" \
+  "$(grep -c "needs.changes.outputs.embedder_cuda_relevant != 'false'" <<<"$cuda_job" || true)"
+assert_eq "CUDA job no longer uses broad docs-only gate" "0" \
+  "$(grep -c 'needs.changes.outputs.docs_only' <<<"$cuda_job" || true)"
+assert_eq "main notifier treats an intentional CUDA skip as green" "1" \
+  "$(grep -c "embedder-cuda-check=.*embedder_cuda_relevant != 'false'" .github/workflows/ci.yml || true)"
+
+# ---------------------------------------------------------------------------
 # check-pr-version-bump.sh — decision branches with the registry stubbed.
 # ---------------------------------------------------------------------------
 echo
