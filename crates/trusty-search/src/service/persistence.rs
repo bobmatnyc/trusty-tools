@@ -702,19 +702,36 @@ pub fn load_index_registry_at(path: &Path) -> Result<Vec<PersistedIndex>> {
 static REGISTRY_WRITE_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
-/// Run `f` holding the process-wide registry write lock (#4871).
+/// Run `f` holding BOTH registry write locks — in-process and cross-process
+/// (#4871, #5344).
 ///
-/// Why: see [`REGISTRY_WRITE_LOCK`]. Callers must hold it across BOTH the load
-/// and the save, never just the save — the discarded-write window is between
-/// them.
-/// What: acquires the lock (recovering a poisoned guard, since the data is a
-/// unit and a panicking holder cannot have corrupted it) and runs `f`.
-/// Test: `concurrent_upserts_lose_no_entries`.
-fn with_registry_write_lock<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+/// Why: [`REGISTRY_WRITE_LOCK`] orders this process's own writers and nothing
+/// else. `trusty-search prune`, `trusty-search prune-orphans` and
+/// `trusty-search migrate storage` run as SEPARATE processes against the same
+/// `indexes.toml` while a daemon is writing it — a session on 2026-08-05
+/// observed five daemons doing so concurrently, last-writer-wins. An
+/// in-process `Mutex` cannot see any of them, so #5344 adds the advisory
+/// `indexes.toml.lock` sidecar that every writer, in every process, blocks on.
+/// Callers must hold both across BOTH the load and the save, never just the
+/// save — the discarded-write window is between them.
+/// What: takes the process mutex first (recovering a poisoned guard, since the
+/// data is a unit and a panicking holder cannot have corrupted it), then the
+/// cross-process advisory lock via the shared
+/// [`trusty_common::file_lock::with_exclusive_lock`] entry point, then runs
+/// `f`. The acquisition order is the same at every call site, so the pair
+/// cannot deadlock. A lock that cannot be acquired is an error — never a
+/// bypass, because proceeding unlocked is the defect itself.
+/// Test: `concurrent_upserts_lose_no_entries`; cross-process blocking is
+/// exercised indirectly via
+/// `commands::prune::tests::prune_apply_blocks_on_the_cross_process_registry_lock`
+/// and
+/// `commands::prune_orphans::tests::prune_orphans_blocks_on_the_cross_process_registry_lock`.
+fn with_registry_write_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let _guard = REGISTRY_WRITE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    f()
+    trusty_common::file_lock::with_exclusive_lock(path, f)
+        .with_context(|| format!("acquire cross-process lock for {}", path.display()))?
 }
 
 /// Persist the registry atomically (write-tmp + rename) so a crash mid-write
@@ -725,12 +742,36 @@ pub fn save_index_registry(entries: &[PersistedIndex]) -> Result<()> {
 
 /// Path-injectable variant of [`save_index_registry`].
 ///
-/// #4317: the staging file is now unique per write (pid + a monotonic counter)
+/// #5344: takes the registry write lock (in-process AND cross-process) around
+/// the publish, so a whole-file overwrite can no longer land in the middle of
+/// another process's read-modify-write. Note what this does and does not buy:
+/// the WRITE is now serialised, but a caller that loaded `entries` earlier is
+/// still publishing a snapshot, so anything registered since that load is
+/// erased. Prefer [`upsert_index_registry_entry_at`],
+/// [`remove_index_registry_entries_at`] or [`patch_index_registry_entry_at`],
+/// which re-read under the lock and mutate only what they own.
+pub fn save_index_registry_at(path: &Path, entries: &[PersistedIndex]) -> Result<()> {
+    with_registry_write_lock(path, || publish_registry_unlocked(path, entries))
+}
+
+/// Publish `entries` as the whole registry file — caller MUST already hold the
+/// registry write lock.
+///
+/// Why: the locked read-modify-write helpers below call this from INSIDE their
+/// critical section, and the cross-process lock (#5344) is not reentrant — a
+/// nested acquisition on a second descriptor self-deadlocks. Splitting the
+/// publish from the locking keeps `save_index_registry_at` safe for outside
+/// callers without wedging the internal ones.
+/// What: serialises to TOML, writes a per-write staging file, renames it over
+/// `path`.
+///
+/// #4317: the staging file is unique per write (pid + a monotonic counter)
 /// instead of the single shared `indexes.toml.tmp`. Two writers racing on one
 /// fixed tmp path interleave their `write` calls, and the rename then publishes
 /// a spliced, unparseable registry — which, before the fail-closed load above,
 /// read back as an empty registry and took every real index with it.
-pub fn save_index_registry_at(path: &Path, entries: &[PersistedIndex]) -> Result<()> {
+/// Test: `registry_roundtrip` and every locked helper's test.
+fn publish_registry_unlocked(path: &Path, entries: &[PersistedIndex]) -> Result<()> {
     let file = IndexRegistryFile {
         indexes: entries.to_vec(),
     };
@@ -813,7 +854,7 @@ pub fn upsert_index_registry_entry(entry: PersistedIndex) -> Result<()> {
 pub fn upsert_index_registry_entry_at(path: &Path, entry: PersistedIndex) -> Result<()> {
     // #4871: load and save must be one critical section — a registration that
     // lands between them is otherwise overwritten out of existence, silently.
-    with_registry_write_lock(|| {
+    with_registry_write_lock(path, || {
         let mut entries = load_index_registry_at(path)?;
         if let Some(existing) = entries.iter_mut().find(|e| e.id == entry.id) {
             // Overwrite the whole record (not just root_path) so updated
@@ -823,7 +864,7 @@ pub fn upsert_index_registry_entry_at(path: &Path, entry: PersistedIndex) -> Res
         } else {
             entries.push(entry);
         }
-        save_index_registry_at(path, &entries)
+        publish_registry_unlocked(path, &entries)
     })
 }
 
@@ -866,14 +907,14 @@ pub fn remove_index_registry_entries_at(path: &Path, ids: &[&str]) -> Result<()>
     if ids.is_empty() {
         return Ok(());
     }
-    with_registry_write_lock(|| {
+    with_registry_write_lock(path, || {
         let mut entries = load_index_registry_at(path)?;
         let before = entries.len();
         entries.retain(|e| !ids.iter().any(|id| *id == e.id));
         if entries.len() == before {
             return Ok(());
         }
-        save_index_registry_at(path, &entries)
+        publish_registry_unlocked(path, &entries)
     })
 }
 
@@ -904,13 +945,13 @@ pub fn patch_index_registry_entry_at(
     id: &str,
     patch: impl FnOnce(&mut PersistedIndex),
 ) -> Result<()> {
-    with_registry_write_lock(|| {
+    with_registry_write_lock(path, || {
         let mut entries = load_index_registry_at(path)?;
         let Some(entry) = entries.iter_mut().find(|e| e.id == id) else {
             return Ok(());
         };
         patch(entry);
-        save_index_registry_at(path, &entries)
+        publish_registry_unlocked(path, &entries)
     })
 }
 
