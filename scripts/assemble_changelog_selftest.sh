@@ -36,6 +36,18 @@
 #     - wrapped-continuation: pinned as a deliberate KNOWN LIMITATION (still
 #       rejected), including the assertion that the error states the remedy.
 #
+#   Issue #5298 adds the stale-section family, replayed from PR #4824 — a
+#   `## [1.3.5]` section assembled for a cut that never published, with newer
+#   fragments accumulating behind it. Against the pre-#5298 script the refusal
+#   named neither the stranded fragments nor a way forward, and `--merge` did
+#   not exist, so every case below FAILS on that script. Covered: the refusal
+#   enumerates the pending fragments and points at `--merge`; `--merge` appends
+#   to a category the section already has; `--merge` inserts a missing category
+#   in CATEGORY_ORDER position without duplicating an existing heading; sections
+#   above and below are untouched; fragments are consumed; and `--merge` against
+#   a section that does not exist is refused rather than silently downgraded to
+#   a fresh insert.
+#
 # Test: this IS the test. Run directly:
 #   bash scripts/assemble_changelog_selftest.sh
 #
@@ -292,6 +304,323 @@ Removed
 Changed
 EOF
 assert_case readme-placeholder-only 0 'no changelog fragments pending'
+
+# ===========================================================================
+# ISSUE #5298 — a stale `## [<version>]` section must never strand fragments.
+#
+# Replays PR #4824: `## [1.3.5]` was assembled for a cut that never published,
+# consuming its fragments, and newer fragments then accumulated behind it. The
+# fixture below carries all three placement shapes in one section — a category
+# the section already has (Fixed, appended to), one that sorts BEFORE an
+# existing heading (Breaking), and one that sorts after every existing heading
+# (Security, appended at the section end).
+# ===========================================================================
+
+# Creates crates/<name>/ carrying the stale [1.3.5] section plus an already
+# released [1.3.4] section below it, and prints the crate directory.
+new_stale_crate() {
+  local name="$1" dir="$TMP_ROOT/crates/$1"
+  mkdir -p "$dir/changelog.d"
+  cat >"$dir/CHANGELOG.md" <<'EOF'
+# Changelog
+
+---
+
+## [1.3.5] — 2026-08-04
+
+### Added
+
+- an entry consumed by the cut that never published (#4824)
+
+### Fixed
+
+- another entry consumed by that cut (#4824)
+
+## [1.3.4] — 2026-08-03
+
+### Breaking
+
+- a heading that belongs to a DIFFERENT section; the scan for "which headings
+  does the target section already have" must not see it, or `### Breaking`
+  would be deferred to the end of [1.3.5] instead of leading it
+
+### Fixed
+
+- older, already released and tagged
+EOF
+  echo "$dir"
+}
+
+# Same stale [1.3.5] section, but it is the LAST thing in the file — the shape a
+# crate's first release has. The merger reaches it through END rather than
+# through the next `## ` heading.
+new_stale_eof_crate() {
+  local name="$1" dir="$TMP_ROOT/crates/$1"
+  mkdir -p "$dir/changelog.d"
+  cat >"$dir/CHANGELOG.md" <<'EOF'
+# Changelog
+
+---
+
+## [1.3.5] — 2026-08-04
+
+### Added
+
+- an entry consumed by the cut that never published (#4824)
+EOF
+  echo "$dir"
+}
+
+seed_stale_fragments() {
+  local d="$1/changelog.d"
+  cat >"$d/4900-later-fixed.md" <<'EOF'
+Fixed
+
+- a bullet that accumulated AFTER the stale section was written (#4900)
+EOF
+  cat >"$d/4901-later-security.md" <<'EOF'
+Security
+
+- a category the stale section does not carry at all (#4901)
+EOF
+  cat >"$d/4902-later-breaking.md" <<'EOF'
+Breaking
+
+- a category that sorts ahead of every heading the section has (#4902)
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# 9. The default refusal must ENUMERATE the stranded fragments and name the way
+#    forward. A bare "refusing to insert a second one" is the dead end that made
+#    #4824 cost a manual reverse-apply of a merged commit.
+# ---------------------------------------------------------------------------
+stale_dir="$(new_stale_crate stale-refusal)"
+seed_stale_fragments "$stale_dir"
+
+stale_rc=0
+stale_out="$(bash "$ASSEMBLER" stale-refusal 1.3.5 2>&1)" || stale_rc=$?
+if [ "$stale_rc" -ne 1 ]; then
+  echo "FAIL: stale-refusal -> exit $stale_rc (expected 1)" >&2
+  fail=1
+else
+  echo "PASS: stale-refusal -> exit 1"
+fi
+for want in \
+  'changelog.d/4900-later-fixed.md' \
+  'changelog.d/4901-later-security.md' \
+  'changelog.d/4902-later-breaking.md' \
+  '--merge'; do
+  if grep -qF -- "$want" <<<"$stale_out"; then
+    echo "PASS: stale-refusal diagnostic names $want"
+  else
+    echo "FAIL: stale-refusal diagnostic does not name $want" >&2
+    printf '%s\n' "$stale_out" | sed 's/^/       /' >&2
+    fail=1
+  fi
+done
+
+# The refusal must also change nothing — neither the file nor the fragments.
+if [ "$(find "$stale_dir/changelog.d" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')" = "3" ]; then
+  echo "PASS: stale-refusal leaves all 3 fragments in place"
+else
+  echo "FAIL: stale-refusal consumed or lost fragments" >&2
+  fail=1
+fi
+
+# `--check` is what bump-version.sh runs as its pre-flight, so it owes the same
+# diagnostic rather than a bare refusal.
+check_rc=0
+check_out="$(bash "$ASSEMBLER" stale-refusal 1.3.5 --check 2>&1)" || check_rc=$?
+if [ "$check_rc" -eq 1 ] && grep -qF -- '--merge' <<<"$check_out"; then
+  echo "PASS: stale-refusal --check -> exit 1 and points at --merge"
+else
+  echo "FAIL: stale-refusal --check -> exit $check_rc without the --merge remedy" >&2
+  printf '%s\n' "$check_out" | sed 's/^/       /' >&2
+  fail=1
+fi
+
+# ---------------------------------------------------------------------------
+# 10. `--merge` folds the pending fragments INTO the existing section. The whole
+#     file is diffed against the expected result: appending to `### Fixed` must
+#     not duplicate that heading, `### Breaking` must land ahead of `### Added`,
+#     `### Security` at the section end, and the already-released [1.3.4]
+#     section below must come through byte-identical.
+# ---------------------------------------------------------------------------
+stale_dir="$(new_stale_crate stale-merge)"
+seed_stale_fragments "$stale_dir"
+
+merge_rc=0
+merge_out="$(bash "$ASSEMBLER" stale-merge 1.3.5 --merge 2>&1)" || merge_rc=$?
+if [ "$merge_rc" -ne 0 ]; then
+  echo "FAIL: stale-merge -> exit $merge_rc (expected 0)" >&2
+  printf '%s\n' "$merge_out" | sed 's/^/       /' >&2
+  fail=1
+else
+  echo "PASS: stale-merge -> exit 0"
+fi
+
+cat >"$TMP_ROOT/expected-merge.md" <<'EOF'
+# Changelog
+
+---
+
+## [1.3.5] — 2026-08-04
+
+### Breaking
+
+- a category that sorts ahead of every heading the section has (#4902)
+
+### Added
+
+- an entry consumed by the cut that never published (#4824)
+
+### Fixed
+
+- another entry consumed by that cut (#4824)
+- a bullet that accumulated AFTER the stale section was written (#4900)
+
+### Security
+
+- a category the stale section does not carry at all (#4901)
+
+## [1.3.4] — 2026-08-03
+
+### Breaking
+
+- a heading that belongs to a DIFFERENT section; the scan for "which headings
+  does the target section already have" must not see it, or `### Breaking`
+  would be deferred to the end of [1.3.5] instead of leading it
+
+### Fixed
+
+- older, already released and tagged
+EOF
+
+if diff -u "$TMP_ROOT/expected-merge.md" "$stale_dir/CHANGELOG.md" >"$TMP_ROOT/merge.diff" 2>&1; then
+  echo "PASS: stale-merge produces the expected CHANGELOG.md byte-for-byte"
+else
+  echo "FAIL: stale-merge CHANGELOG.md differs from expected" >&2
+  sed 's/^/       /' "$TMP_ROOT/merge.diff" >&2
+  fail=1
+fi
+
+# The fragments must be consumed in the SAME operation, exactly as the fresh
+# insert path does — a merge that leaves them pending would strand them again.
+if [ "$(find "$stale_dir/changelog.d" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')" = "0" ]; then
+  echo "PASS: stale-merge consumed all 3 fragments"
+else
+  echo "FAIL: stale-merge left fragments in changelog.d/" >&2
+  find "$stale_dir/changelog.d" -maxdepth 1 -name '*.md' | sed 's/^/       /' >&2
+  fail=1
+fi
+
+# And a second --merge is a clean no-op rather than a duplicate write.
+rerun_rc=0
+rerun_out="$(bash "$ASSEMBLER" stale-merge 1.3.5 --merge 2>&1)" || rerun_rc=$?
+if [ "$rerun_rc" -eq 0 ] && grep -qF 'no changelog fragments pending' <<<"$rerun_out" \
+  && diff -q "$TMP_ROOT/expected-merge.md" "$stale_dir/CHANGELOG.md" >/dev/null; then
+  echo "PASS: a second --merge is a no-op"
+else
+  echo "FAIL: a second --merge was not a no-op (exit $rerun_rc)" >&2
+  printf '%s\n' "$rerun_out" | sed 's/^/       /' >&2
+  fail=1
+fi
+
+# ---------------------------------------------------------------------------
+# 10b. The target section as the LAST section in the file — a crate's first
+#      release. The merger reaches the end of the section through END, not
+#      through a following `## ` heading.
+# ---------------------------------------------------------------------------
+eof_dir="$(new_stale_eof_crate stale-merge-eof)"
+cat >"$eof_dir/changelog.d/4903-eof-fixed.md" <<'EOF'
+Fixed
+
+- a bullet merged into the last section in the file (#4903)
+EOF
+
+eof_rc=0
+eof_out="$(bash "$ASSEMBLER" stale-merge-eof 1.3.5 --merge 2>&1)" || eof_rc=$?
+cat >"$TMP_ROOT/expected-eof.md" <<'EOF'
+# Changelog
+
+---
+
+## [1.3.5] — 2026-08-04
+
+### Added
+
+- an entry consumed by the cut that never published (#4824)
+
+### Fixed
+
+- a bullet merged into the last section in the file (#4903)
+EOF
+# The diff runs unconditionally so the failure branch always has a file to
+# print — short-circuiting it behind $eof_rc left `sed` reading a missing file
+# and, under `set -e`, aborted the whole selftest before its summary line.
+diff -u "$TMP_ROOT/expected-eof.md" "$eof_dir/CHANGELOG.md" >"$TMP_ROOT/eof.diff" 2>&1 || true
+if [ "$eof_rc" -eq 0 ] && [ ! -s "$TMP_ROOT/eof.diff" ]; then
+  echo "PASS: --merge into the last section in the file"
+else
+  echo "FAIL: --merge into the last section in the file (exit $eof_rc)" >&2
+  printf '%s\n' "$eof_out" | sed 's/^/       /' >&2
+  sed 's/^/       /' "$TMP_ROOT/eof.diff" >&2
+  fail=1
+fi
+
+# ---------------------------------------------------------------------------
+# 11. `--merge` against a version that has NO section is refused, never
+#     downgraded to a fresh insert. Silently doing something other than what was
+#     asked is the same fail-open shape this issue is about.
+# ---------------------------------------------------------------------------
+d="$(new_crate merge-without-section)"
+cat >"$d/1250-nothing-to-merge.md" <<'EOF'
+Added
+
+- a bullet with no existing section to merge into (#1250)
+EOF
+noseg_rc=0
+noseg_out="$(bash "$ASSEMBLER" merge-without-section 9.9.9 --merge 2>&1)" || noseg_rc=$?
+if [ "$noseg_rc" -eq 1 ] && grep -qF "has no '## [9.9.9]' section to merge into" <<<"$noseg_out"; then
+  echo "PASS: --merge without a target section -> exit 1"
+else
+  echo "FAIL: --merge without a target section -> exit $noseg_rc" >&2
+  printf '%s\n' "$noseg_out" | sed 's/^/       /' >&2
+  fail=1
+fi
+if [ -f "$d/1250-nothing-to-merge.md" ]; then
+  echo "PASS: --merge without a target section left the fragment in place"
+else
+  echo "FAIL: --merge without a target section deleted the fragment" >&2
+  fail=1
+fi
+
+# ---------------------------------------------------------------------------
+# 12. The fresh-insert path is unchanged by the #5298 refactor: a crate with no
+#     matching section still gets one written below the `---` separator, and its
+#     fragments consumed.
+# ---------------------------------------------------------------------------
+d="$(new_crate fresh-insert)"
+cat >"$d/1251-fresh.md" <<'EOF'
+Added
+
+- a bullet for a version that has no section yet (#1251)
+EOF
+fresh_rc=0
+fresh_out="$(bash "$ASSEMBLER" fresh-insert 2.0.0 2>&1)" || fresh_rc=$?
+fresh_log="$TMP_ROOT/crates/fresh-insert/CHANGELOG.md"
+if [ "$fresh_rc" -eq 0 ] \
+  && grep -qE '^## \[2\.0\.0\] — [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$fresh_log" \
+  && grep -qF -- '- a bullet for a version that has no section yet (#1251)' "$fresh_log" \
+  && [ ! -f "$d/1251-fresh.md" ]; then
+  echo "PASS: fresh insert still writes the section and consumes the fragment"
+else
+  echo "FAIL: fresh insert regressed (exit $fresh_rc)" >&2
+  printf '%s\n' "$fresh_out" | sed 's/^/       /' >&2
+  sed 's/^/       /' "$fresh_log" >&2
+  fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo "assemble_changelog_selftest: one or more fragment-validation cases FAILED." >&2
