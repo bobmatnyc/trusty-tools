@@ -11318,6 +11318,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-audit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "trusty-bm25-daemon"
 version = "0.2.0"
 dependencies = [
