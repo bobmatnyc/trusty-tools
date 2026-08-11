@@ -758,7 +758,14 @@ fn select_object(right: &str, wn: &wordnet_pos::WordNetPos) -> Option<String> {
         }
     }
     let first = *run.first()?;
-    if wn.is_adjective_only(first) {
+    // #5399 PROTOTYPE ONLY — delete before merge. The eval set's row 1 rules
+    // that `is a hard requirement` yields nothing, while row 4 rules that `is a
+    // fast parser` re-walks to `parser`. The two are the same grammar and the
+    // only thing separating them is whether WordNet gave the modifier a noun
+    // sense. This switch measures the cost of that ruling: set
+    // TRUSTY_KG_REWALK_ADJ_ONLY=1 to re-walk in both cases instead.
+    let rewalk_adj_only = std::env::var_os("TRUSTY_KG_REWALK_ADJ_ONLY").is_some();
+    if !rewalk_adj_only && wn.is_adjective_only(first) {
         return None;
     }
     if !terminated {

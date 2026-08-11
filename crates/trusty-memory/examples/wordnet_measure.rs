@@ -67,7 +67,10 @@ fn main() {
     // text (the first load faults in all 6.3 MB of it).
     let t1 = Instant::now();
     let again = trusty_memory::wordnet_pos::WordNetPos::load();
-    println!("load_ms_warm         {:.2}", t1.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "load_ms_warm         {:.2}",
+        t1.elapsed().as_secs_f64() * 1e3
+    );
     drop(again);
 
     // ---- per-extraction latency --------------------------------------------
