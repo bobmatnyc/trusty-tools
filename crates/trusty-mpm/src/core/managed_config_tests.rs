@@ -735,3 +735,140 @@ fn ensure_managed_config_dir_project_tier_is_a_noop_when_unchanged() {
         "an unchanged version and selection must take the stamp no-op path"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1939 palace-alias healing, driven through this function's call site (#4181).
+// ---------------------------------------------------------------------------
+
+/// The #1939 split-brain pair: a GitHub remote whose derived owner-repo slug is
+/// `bobmatnyc-trusty-tools` and whose bare claude-mpm-era name is `trusty-tools`.
+const SPLIT_BRAIN_REMOTE: &str = "git@github.com:bobmatnyc/trusty-tools.git";
+const OWNER_REPO_PALACE: &str = "bobmatnyc-trusty-tools";
+const BARE_PALACE: &str = "trusty-tools";
+
+/// Set or clear a process-global env var for the duration of a `#[serial]` test,
+/// restoring the prior value on drop.
+///
+/// Why: the alias case below must pin `TRUSTY_DATA_DIR_OVERRIDE` at a temp
+/// registry and run with no ambient `TRUSTY_MEMORY_PALACE` override, which would
+/// otherwise suppress registration. Restoring in `Drop` keeps a panicking test
+/// from leaking that state into siblings.
+/// What: snapshots the current value on construction; `Drop` restores it.
+/// Test: `ensure_managed_config_dir_heals_a_bare_repo_palace_alias`.
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &Path) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: every user of this guard is tagged `#[serial]`, so no other
+        // thread races the set/restore.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, prev }
+    }
+
+    fn clear(key: &'static str) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: serialised by `#[serial]`; restored in `Drop`.
+        unsafe { std::env::remove_var(key) };
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: see `set`.
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+/// `git init` a workspace and give it an `origin` remote, so the alias probe's
+/// `git config --get remote.origin.url` resolves without a network call.
+fn git_init_with_origin(dir: &Path, remote: &str) {
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .expect("git must be on PATH to run this test");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    run(&["init", "-q"]);
+    run(&["config", "remote.origin.url", remote]);
+}
+
+/// Create `<registry_dir>/<id>/palace.json` — existence is all the alias gate reads.
+fn make_palace(registry_dir: &Path, id: &str) {
+    let dir = registry_dir.join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("palace.json"), b"{}").unwrap();
+}
+
+/// #1939 / #4181: provisioning heals the claude-mpm palace split-brain, so the
+/// palace name the spawn exports resolves to the store that holds the history.
+///
+/// Why this test exists at THIS call site: the healing used to run inside
+/// `session_launch::settings::inject_trusty_memory_mcp`, which ADR-0042 deleted.
+/// It was rehomed onto `ensure_managed_config_dir_with_root` — the choke point
+/// every spawn, resume and in-place relaunch reaches — and ADR-0042 named that
+/// rehome as the change that would silently stop working with no test failing.
+/// The unit cases in `session_launch::palace_alias` prove the function's own
+/// guards; only a test driven through this function proves it is still CALLED.
+/// Delete the `maybe_register_palace_alias` line from
+/// `ensure_managed_config_dir_with_root` and this fails.
+///
+/// What: seeds the bare `trusty-tools` palace with no `bobmatnyc-trusty-tools`
+/// counterpart — the exact #1939 condition — provisions a workspace whose
+/// `origin` is the matching remote, then asserts the slug
+/// [`crate::core::mcp_session_env::session_mcp_env`] exports as
+/// `TRUSTY_MEMORY_PALACE` (via `resolve_palace_slug`, the same derivation) now
+/// resolves through the alias store to the bare palace. Asserting the derived
+/// slug rather than a hardcoded string is what ties the healing to the name the
+/// session is actually pinned to.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn ensure_managed_config_dir_heals_a_bare_repo_palace_alias() {
+    let tmp = TempDir::new().unwrap();
+    let fw = seed_framework(tmp.path());
+    let config_dir = tmp.path().join(".trusty-tools/trusty-mpm/claude-config");
+    let workspace = project_dir(tmp.path());
+    git_init_with_origin(&workspace, SPLIT_BRAIN_REMOTE);
+
+    let data = TempDir::new().unwrap();
+    let _no_override = EnvGuard::clear("TRUSTY_MEMORY_PALACE");
+    let _data_dir = EnvGuard::set("TRUSTY_DATA_DIR_OVERRIDE", data.path());
+    let registry = data.path().join("trusty-memory");
+    make_palace(&registry, BARE_PALACE);
+
+    // The name the spawn pins, derived exactly as `session_mcp_env` derives it.
+    let pinned = crate::core::session_launch::resolve_palace_slug(&workspace, None)
+        .expect("the workspace remote must yield an owner-repo palace slug");
+    assert_eq!(
+        pinned, OWNER_REPO_PALACE,
+        "precondition: the pinned slug is the owner-repo name, not the bare one"
+    );
+    assert!(
+        !registry.join(&pinned).join("palace.json").exists(),
+        "precondition: the pinned palace must NOT exist — that is the split-brain"
+    );
+
+    ensure_managed_config_dir_with_root(&fw, &config_dir, &workspace).unwrap();
+
+    assert_eq!(
+        trusty_common::palace_alias::PalaceAliasStore::resolve_alias(&registry, &pinned)
+            .unwrap()
+            .as_deref(),
+        Some(BARE_PALACE),
+        "provisioning must register {pinned} -> {BARE_PALACE} so the pinned palace \
+         resolves to the claude-mpm-era store instead of failing with missing metadata"
+    );
+}

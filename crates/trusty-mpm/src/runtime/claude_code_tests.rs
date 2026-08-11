@@ -472,6 +472,47 @@ fn env_bin_prefix_orders_scrub_flags_before_assignments() {
     );
 }
 
+/// #4181 / ADR-0042: a non-empty `mcp_env` reaches the tmux-pane command string.
+///
+/// Why: the injectors that used to write `env` arguments into a workspace
+/// `.mcp.json` are deleted, so this prefix is now the ONLY thing that carries
+/// `TRUSTY_MEMORY_PALACE` / `TRUSTY_INDEX` to the MCP servers Claude Code spawns
+/// — the mechanism the whole ADR relies on to keep #1373/#1605 fixed. Every
+/// other test of this function passes `&[]`, which proves nothing about the
+/// carrier. A value containing a space is used deliberately: an unquoted
+/// assignment would split into an argument `env` then execs as a command.
+/// Test: itself.
+#[test]
+fn env_bin_prefix_carries_a_non_empty_mcp_env() {
+    let mcp_env = vec![
+        (
+            "TRUSTY_MEMORY_PALACE".to_owned(),
+            "owner repo slug".to_owned(),
+        ),
+        ("TRUSTY_INDEX".to_owned(), "idx-42".to_owned()),
+    ];
+    let prefix = env_bin_prefix("/abs/claude", Some(Path::new("/tm/config")), None, &mcp_env);
+
+    assert!(
+        prefix.contains(" TRUSTY_MEMORY_PALACE='owner repo slug'"),
+        "the palace pin must be assigned and single-quoted: {prefix}"
+    );
+    assert!(
+        prefix.contains(" TRUSTY_INDEX='idx-42'"),
+        "the index pin must be assigned and single-quoted: {prefix}"
+    );
+
+    // POSIX `env` grammar: every `-u` must still precede the first assignment,
+    // and the assignments must precede the binary or they are argv, not env.
+    let last_unset = prefix.rfind("-u ").expect("prefix carries -u flags");
+    let first_pin = prefix.find("TRUSTY_MEMORY_PALACE=").unwrap();
+    let bin = prefix.find("/abs/claude").unwrap();
+    assert!(
+        last_unset < first_pin && first_pin < bin,
+        "pins must sit between the -u flags and the binary: {prefix}"
+    );
+}
+
 #[test]
 fn spawn_command_sets_both_config_dir_and_oauth_token() {
     // Both assignments must coexist, config dir first (matching the

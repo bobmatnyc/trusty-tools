@@ -370,8 +370,7 @@ impl PrepError {
 /// `prepare_session_stash_reflects_override`,
 /// `prepare_session_writes_the_compiled_prompt_before_returning`,
 /// `prepare_session_fails_when_the_compiled_prompt_cannot_be_written`,
-/// `prepare_session_refuses_when_the_instructions_cannot_be_built`,
-/// `compiled_write_failure_does_not_skip_the_mcp_injectors`.
+/// `prepare_session_refuses_when_the_instructions_cannot_be_built`.
 pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepReport, PrepError> {
     prepare_session_with_style(fw, project_dir, None)
 }
@@ -380,16 +379,18 @@ pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepRe
 ///
 /// Why (issue #1605): a managed session cloned from `repo_url` lives under a
 /// throwaway `<owner>/<repo>/<session-id>/` workspace whose basename is the
-/// session-id. Without the originating `repo_url`, the trusty-memory MCP
-/// injection would derive (and pin) the WRONG palace from that directory
-/// basename. The provisioner knows the `repo_url` it cloned, so threading it
-/// here lets the injector pin `env.TRUSTY_MEMORY_PALACE` to the project's
-/// canonical `owner-repo` slug. The flag-less [`prepare_session`] delegates with
-/// `None`, which falls back to the workspace's own `git remote get-url origin`.
+/// session-id, so palace derivation from that basename picks the WRONG name. The
+/// provisioner knows the `repo_url` it cloned, so threading it here supplies the
+/// canonical remote. Since ADR-0042 deleted the MCP injectors, what consumes it
+/// is [`maybe_register_palace_alias`] — the #1939 healing that decides whether
+/// the derived `owner-repo` palace should resolve to a pre-existing bare-repo
+/// one. The flag-less [`prepare_session`] delegates with `None`, which falls
+/// back to the workspace's own `git remote get-url origin`.
 /// What: identical to [`prepare_session`] except the optional `repo_url` (from
-/// `LaunchParams`/`SessionRecord`) is threaded down to the trusty-memory MCP
-/// injector for palace-slug derivation. Real native-style detection is applied.
-/// Test: `prepare_session_repo_url_pins_palace` in this module's tests.
+/// `LaunchParams`/`SessionRecord`) is threaded down as the authoritative remote.
+/// Real native-style detection is applied.
+/// Test: `creates_alias_for_split_brain` and the sibling guards in
+/// [`palace_alias`], which cover what the threaded remote decides.
 pub fn prepare_session_with_repo_url(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -568,11 +569,11 @@ pub fn prepare_session_with_style_and_native(
 /// `native_supported`, and (issue #1605) the cloned-from `repo_url`. Funnelling
 /// them through one private body keeps the long preparation sequence in a single
 /// place so the variants cannot drift. `repo_url` is the only new degree of
-/// freedom: it is threaded to the trusty-memory MCP injector for palace pinning
-/// and is `None` for the flag-less / style-only entry points (which then fall
-/// back to the workspace's own git origin remote).
+/// freedom: it is threaded to [`maybe_register_palace_alias`] as the
+/// authoritative remote and is `None` for the flag-less / style-only entry
+/// points (which then fall back to the workspace's own git origin remote).
 /// What: identical to the documented [`prepare_session_with_style_and_native`]
-/// behaviour, plus it passes `repo_url` to [`inject_trusty_memory_mcp`].
+/// behaviour, plus it passes `repo_url` to [`maybe_register_palace_alias`].
 /// Issue #2149: an agent-deploy or skill-deploy failure is captured into
 /// [`PrepReport::roster_errors`] rather than short-circuiting the function via
 /// `?` — every step after the roster deploy (CLAUDE.md/instructions, the
@@ -582,7 +583,6 @@ pub fn prepare_session_with_style_and_native(
 /// only returns `Err` for genuinely fatal failures (the instruction pipeline,
 /// or the inspection-stash IO).
 /// Test: covered by every `prepare_session_*` test plus
-/// `prepare_session_repo_url_pins_palace`,
 /// `prepare_session_continues_after_agent_deploy_failure`,
 /// `prepare_session_continues_after_skill_deploy_failure`.
 fn prepare_session_inner(

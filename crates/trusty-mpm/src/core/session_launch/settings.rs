@@ -444,12 +444,14 @@ pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
 /// `projects.<workspace>` entry.
 /// Test: `preseed_trust_marks_directory`, `preseed_trust_preserves_other_keys`,
 /// `preseed_trust_is_idempotent`, `preseed_trust_leaves_malformed_file`,
-/// `preseed_trust_writes_no_mcp_approval`,
-/// `preseed_trust_strips_a_stale_mcp_approval`,
 /// `concurrent_seeds_preserve_every_workspace_entry`,
-/// `concurrent_home_and_workspace_seeds_preserve_both_entries`, plus the
-/// full-pipeline regression coverage in `tests_mcp_trust_seed_e2e.rs` and
-/// `tests_launch_trust_3926.rs`.
+/// `concurrent_home_and_workspace_seeds_preserve_both_entries`. The two
+/// `enabledMcpjsonServers` claims above are proven end to end, through this
+/// function, in `tests_launch_trust_3926.rs`:
+/// `prepare_session_writes_no_approval_for_a_builtin_name_in_workspace_mcp_json`
+/// (nothing is written, even for a name a repo squats) and
+/// `prepare_session_strips_a_stale_enabled_mcp_approval` (an approval a prior
+/// version left is removed while the entry's other keys survive).
 pub(super) fn preseed_workspace_trust(
     claude_json: &Path,
     workspace: &Path,

@@ -181,6 +181,7 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// `spawn_command_without_config_dir_omits_it`,
 /// `env_bin_prefix_quotes_config_dir_with_space`,
 /// `env_bin_prefix_orders_unset_flag_before_config_dir_assignment`,
+/// `env_bin_prefix_carries_a_non_empty_mcp_env`,
 /// `spawn_command_sets_oauth_token_when_available`,
 /// `spawn_command_omits_oauth_token_when_absent`,
 /// `spawn_command_without_token_pins_the_exact_command`,

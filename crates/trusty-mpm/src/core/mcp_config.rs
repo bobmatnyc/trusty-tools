@@ -340,8 +340,7 @@ pub fn add_server(config_dir: &Path, name: &str, entry: Value) -> Result<bool> {
 /// `seed_builtin_servers_declines_a_malformed_config_without_quarantining`,
 /// `seed_builtin_servers_declines_a_non_object_mcp_servers_map`,
 /// `seed_builtin_servers_creates_the_config_when_the_dir_is_absent`,
-/// `seed_builtin_servers_errors_when_claude_json_is_unreadable`,
-/// `seeding_and_workspace_injection_coexist_without_clobbering`.
+/// `seed_builtin_servers_errors_when_claude_json_is_unreadable`.
 pub fn seed_builtin_servers(config_dir: &Path) -> Result<Vec<String>> {
     // #4181: the guard spans read → mutate → write, not just the write.
     let _guard = crate::core::claude_json_guard::lock();

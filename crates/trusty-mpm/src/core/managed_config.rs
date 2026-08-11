@@ -176,7 +176,8 @@ pub fn ensure_managed_config_dir(config_dir: &Path, project_dir: &Path) -> anyho
 /// `ensure_managed_config_dir_skips_a_frozen_skill`,
 /// `ensure_managed_config_dir_emits_the_frozen_skill_warning`,
 /// `ensure_managed_config_dir_deploys_the_project_skill_tier`,
-/// `ensure_managed_config_dir_project_tier_is_a_noop_when_unchanged`.
+/// `ensure_managed_config_dir_project_tier_is_a_noop_when_unchanged`,
+/// `ensure_managed_config_dir_heals_a_bare_repo_palace_alias`.
 ///
 /// #4880 — WHY THE PROJECT TIER IS DEPLOYED FROM HERE TOO. The user tier this
 /// function refreshes every run is OUTRANKED by `<project_dir>/.claude/skills`,

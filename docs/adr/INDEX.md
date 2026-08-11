@@ -52,7 +52,7 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0039](0039-operator-named-sessions-unique-by-construction.md) | Unique operator-named sessions | Accepted | Operator names are unique and unsuffixed; serials remain for automatic creation. | `trusty-mpm` |
 | [0040](0040-trusty-mcp-services-absorbs-trusty-gworkspace.md) | Split MCP framework and services | Accepted | `trusty-mcp` holds protocol primitives and `trusty-mcp-services` initially absorbs gworkspace only. | Workspace |
 | [0041](0041-trusty-okg-native-crate-search-absorbs-okf-indexing.md) | Native trusty-okg with search indexing | Accepted | trusty-okg stays native, trusty-search owns OKF indexing, and an MCP service fronts agent reads. | Workspace |
-| [0042](0042-mcp-configuration-is-static-and-persistent.md) | Static persistent MCP configuration | Proposed | MCP declarations live once in user scope and are not injected into workspaces. | `trusty-mpm`, `trusty-search` |
+| [0042](0042-mcp-configuration-is-static-and-persistent.md) | Static persistent MCP configuration | Accepted | MCP declarations live once in user scope and are not injected into workspaces. | `trusty-mpm`, `trusty-search` |
 | [0043](0043-cargo-bin-policy.md) | Traceable `$CARGO_HOME/bin` provenance | Proposed | Registry installs, prebuilt placements, and user-managed files are classified explicitly; path installs are forbidden. | Workspace |
 | [0044](0044-main-checkout-write-boundary-and-agent-worktree-ownership.md) | Main-checkout write boundary | Accepted | Main-checkout sessions write only docs/config, and the harness—not trusty-mpm—owns agent worktree creation. | `trusty-mpm` |
 

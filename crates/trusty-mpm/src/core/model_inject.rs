@@ -313,6 +313,7 @@ pub fn build_claude_command(
 /// `claude_command_quotes_a_config_dir_with_a_space`,
 /// `claude_command_omits_the_oauth_token_when_absent`,
 /// `claude_command_relocated_isolates_by_relocation_not_exclusion`,
+/// `claude_command_carries_a_non_empty_mcp_env`,
 /// `claude_command_scrubs_inherited_session_markers` (the non-relocated shape).
 pub fn build_claude_command_with(
     model: Option<&str>,
@@ -620,6 +621,46 @@ mod tests {
         assert!(
             cmd.contains("CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/claude-config'"),
             "the config dir must be single-quoted: {cmd}"
+        );
+    }
+
+    /// #4181 / ADR-0042: a non-empty `mcp_env` reaches the `tm launch` /
+    /// `tm connect` command string.
+    ///
+    /// Why: with the `.mcp.json` injectors deleted, this assignment is the only
+    /// thing that pins the palace and index for a session spawned through this
+    /// builder. Every other test here passes `&[]`, so the carrier itself was
+    /// untested. The space in the palace value would break the command line if
+    /// the assignment were not single-quoted.
+    /// Test: itself.
+    #[test]
+    fn claude_command_carries_a_non_empty_mcp_env() {
+        let mcp_env = vec![
+            (
+                "TRUSTY_MEMORY_PALACE".to_owned(),
+                "owner repo slug".to_owned(),
+            ),
+            ("TRUSTY_INDEX".to_owned(), "idx-42".to_owned()),
+        ];
+        let cmd = build_claude_command_with(
+            None,
+            None,
+            Some(Path::new("/tm/claude-config")),
+            None,
+            &mcp_env,
+        );
+
+        assert!(
+            cmd.contains(" TRUSTY_MEMORY_PALACE='owner repo slug'"),
+            "the palace pin must be assigned and single-quoted: {cmd}"
+        );
+        assert!(
+            cmd.contains(" TRUSTY_INDEX='idx-42'"),
+            "the index pin must be assigned and single-quoted: {cmd}"
+        );
+        assert!(
+            cmd.find("TRUSTY_INDEX=").unwrap() < cmd.find(" claude").unwrap(),
+            "both pins must precede the binary, or they are argv rather than env: {cmd}"
         );
     }
 

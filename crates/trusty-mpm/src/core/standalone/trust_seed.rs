@@ -1,73 +1,41 @@
-//! Project trust + MCP-server pre-seeding for the managed CLAUDE_CONFIG_DIR.
+//! Project-trust seeding and stale-entry pruning for the managed CLAUDE_CONFIG_DIR.
 //!
-//! Why: WI-3 (sub-parts 2+3) requires that the managed Claude Code session never
-//! sees a blocking "Do you trust this folder?" or "New MCP servers found" dialog.
-//! Claude Code reads per-directory trust from `$CLAUDE_CONFIG_DIR/.claude.json` when
-//! `CLAUDE_CONFIG_DIR` is set — NOT from `$HOME/.claude.json`.  All trust seeding
-//! for the managed path MUST target `<claude_config_dir>/.claude.json`.
+//! Why: a managed Claude Code session must not block on "Do you trust the files
+//! in this folder?". Claude Code reads per-directory trust from
+//! `$CLAUDE_CONFIG_DIR/.claude.json` when `CLAUDE_CONFIG_DIR` is set — NOT from
+//! `$HOME/.claude.json` — so managed-path seeding must target
+//! `<claude_config_dir>/.claude.json` (WI-3 sub-part 2).
 //!
 //! ISOLATION INVARIANT: this module NEVER writes to `~/.claude.json` or
-//! `~/.claude/`.  It only writes to files under `<claude_config_dir>` (the
-//! managed CLAUDE_CONFIG_DIR — typically `~/.trusty-mpm/claude-config/`).
+//! `~/.claude/`. It writes only under `<claude_config_dir>` (the managed
+//! CLAUDE_CONFIG_DIR — typically `~/.trusty-mpm/claude-config/`).
 //!
-//! What: [`preseed_managed_trust`] merges `projects.<workspace>` trust keys and
-//! `enabledMcpjsonServers` into `<claude_config_dir>/.claude.json`. The MCP
-//! server list is derived via
-//! [`crate::core::mcp_config::managed_mcp_server_names`] — the two
-//! UNCONDITIONAL framework builtins (`trusty-mpm`, `trusty-review`) and the
-//! two CONDITIONAL framework builtins (`trusty-memory`, `trusty-search`),
-//! EACH gated by its own `_pinned` parameter below, UNION any user-scope
-//! servers registered via `tm mcp add` (read from the same file's top-level
-//! `mcpServers`) — so a `tm mcp add`-ed server is trusted on the next
-//! session start with no per-project bookkeeping.
+//! What: [`preseed_managed_trust`] sets the three trust keys on
+//! `projects.<workspace>` and REMOVES `enabledMcpjsonServers` from that entry.
+//! [`prune_stale_project_entries`] deletes `projects` entries that are pure
+//! seeder droppings for directories that are definitively gone (#4206).
 //!
-//! **Security note (issue #3918 follow-up):** this derivation deliberately
-//! does NOT read the target workspace's own `<workspace>/.mcp.json`. That
-//! file is git-tracked content that arrives WITH a cloned repo — an earlier
-//! version of this fix read it directly (mirroring
-//! `session_launch::settings::preseed_workspace_trust`, the interactive `tm
-//! launch` path) and a code-critic review caught that this let a hostile or
-//! compromised repo's `.mcp.json` get silently auto-approved and connected in
-//! a DAEMON-managed session, with no human present to decline it. See
-//! [`crate::core::mcp_config::managed_mcp_server_names`]'s doc for the full
-//! reasoning on why its remaining sources (the two unconditional builtins and
-//! the operator's own `tm mcp add` registry) are safe against that vector.
+//! **#4181 / ADR-0042 — this module no longer derives an MCP approval.** It used
+//! to write `enabledMcpjsonServers`, computed from the framework builtins gated
+//! on four per-run `_pinned` results plus the operator's `tm mcp add` registry.
+//! Those four parameters and that derivation went with the injectors that fed
+//! them: MCP servers are now declared once in user scope, and a project-scope
+//! approval is exactly what lets a workspace `.mcp.json` entry displace that
+//! declaration. So the #3918 → #3934 → #3950 hardening chain — excluding a
+//! cloned repo's own `.mcp.json` from the approval set, gating the conditional
+//! builtins on their manifest toggle, then gating every builtin on its actual
+//! per-run write result — hardened a mechanism this module no longer has. The
+//! key is REMOVED from the entry rather than merely left unwritten, because
+//! ceasing to write it would leave it in place on every machine a prior tm
+//! launched; see [`preseed_managed_trust`]'s own doc.
 //!
-//! **Security note (issue #3934 follow-up):** the two CONDITIONAL builtins
-//! looked safe to trust unconditionally too, on the assumption their
-//! force-overwrite injector always ran this session — but that assumption is
-//! controlled by a manifest `[mcp]` toggle that is itself untrusted,
-//! project-scope, cloned-with-the-repo content (see
-//! [`crate::core::mcp_config::CONDITIONAL_BUILTIN_MCP_SERVERS`]'s doc for the
-//! full exploit). [`preseed_managed_trust`] takes the resolved toggle values
-//! as explicit parameters instead of assuming them.
-//!
-//! **Security note (issue #3950 follow-up — fifth instance):** a toggle
-//! being on is necessary but not sufficient — the force-overwrite injector's
-//! WRITE can itself fail (disk full, permission error, transient I/O fault)
-//! while a spoofed or stale `.mcp.json` entry is already present, in which
-//! case the name must NOT be approved either, even though its toggle was on.
-//! [`preseed_managed_trust`] now takes each of the four builtins' actual
-//! per-run pin RESULT (toggle AND write success) — callers MUST supply the
-//! value the SAME run's injectors actually observed
-//! ([`super::load::load_alias`] reads it off the
-//! [`crate::core::session_launch::PrepReport`] its own
-//! `prepare_session_with_repo_url` call already produced), never a value
-//! re-derived purely from the manifest toggle in isolation.
 //! Test: `test_preseed_managed_trust_marks_directory`,
 //!   `test_preseed_managed_trust_is_idempotent`,
-//!   `test_preseed_managed_trust_enables_mcp_servers`,
-//!   `test_preseed_managed_trust_includes_trusty_mpm` (#3918),
-//!   `test_preseed_managed_trust_excludes_foreign_mcp_json_entries` (#3918 follow-up,
-//!   hostile-clone regression),
+//!   `test_preseed_managed_trust_writes_no_mcp_approval` (#4181),
+//!   `test_preseed_managed_trust_strips_a_stale_mcp_approval` (#4181 migration),
+//!   `test_preseed_managed_trust_preserves_other_keys`,
 //!   `test_preseed_managed_trust_no_home_write` (isolation guard),
-//!   `test_preseed_managed_trust_quarantines_malformed_json` (corrupt-file quarantine),
-//!   `test_preseed_managed_trust_excludes_conditional_builtin_when_toggle_off`
-//!   (#3934 regression — attack reproduction),
-//!   `test_preseed_managed_trust_legitimate_toggle_disable_is_harmless`
-//!   (#3934 — legitimate operator toggle still launches cleanly),
-//!   `test_preseed_managed_trust_excludes_unconditional_builtin_when_pin_failed`
-//!   (#3950 regression — write-failure reproduction).
+//!   `test_preseed_managed_trust_quarantines_malformed_json` (corrupt-file quarantine).
 
 use std::path::Path;
 
@@ -83,9 +51,12 @@ use std::path::Path;
 /// carried 15–33 — so "the entry's key set is a subset of what the seeder
 /// writes" is a precise, non-heuristic test for "nothing but this function has
 /// ever touched this entry".
-/// What: the four keys written below (`hasTrustDialogAccepted`,
-/// `hasCompletedProjectOnboarding`, `projectOnboardingSeenCount`,
-/// `enabledMcpjsonServers`). MUST be kept in sync with the writes at the end
+/// What: the three keys [`preseed_managed_trust`] writes
+/// (`hasTrustDialogAccepted`, `hasCompletedProjectOnboarding`,
+/// `projectOnboardingSeenCount`), plus `enabledMcpjsonServers`, which #4181
+/// stopped writing but which a dropping left by an older tm still carries — so
+/// dropping it from this list would make those legacy entries stop looking pure
+/// and never be pruned. MUST be kept in sync with the writes at the end
 /// of [`preseed_managed_trust`] — adding a key there without adding it here
 /// only makes the prune MORE conservative (entries stop looking pure and are
 /// kept), never more destructive, so the failure mode of drift is safe.

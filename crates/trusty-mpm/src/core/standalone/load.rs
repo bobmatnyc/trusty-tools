@@ -160,14 +160,16 @@ fn pull_ff_only(repo_dir: &Path) {
 /// cloned-from `repo_url` (issue #1651).
 ///
 /// Why: `prepare_session` deploys composed agents, skills, and CLAUDE.md so the
-/// project-local half of the managed configuration is complete — and (issue
-/// #1605/#1651) injects the per-project `repo/.mcp.json` trusty-memory stub.
-/// Threading the registry clone URL as the authoritative git remote makes the
-/// injector pin `env.TRUSTY_MEMORY_PALACE` to the repo's canonical `owner-repo`
-/// slug (the highest-precedence `derive_palace_id` source after the operator
-/// override), so the managed session lands in the SAME palace a non-tm Claude
-/// session in that repo would use. `None` falls back to probing the checkout's
-/// own `git remote get-url origin`, then to the directory-basename slug.
+/// project-local half of the managed configuration is complete. The registry
+/// clone URL is threaded through as the authoritative git remote because a
+/// managed checkout's own `git remote get-url origin` is not always the repo the
+/// session belongs to. Since ADR-0042 deleted the `.mcp.json` injectors, the
+/// remote no longer feeds a pin written into the workspace: the palace is
+/// exported at spawn by [`crate::core::mcp_session_env::session_mcp_env`], and
+/// the remote's remaining job here is the #1939 alias healing
+/// ([`crate::core::session_launch::maybe_register_palace_alias`]), which uses it
+/// to decide whether the derived `owner-repo` palace should resolve to a
+/// pre-existing bare-repo one. `None` falls back to probing the checkout.
 ///
 /// Issue #1927 (DOC-24 SPEC-STANDALONE-MPM-04): this previously resolved
 /// `FrameworkPaths::default()`, which always deploys composed agents/skills
@@ -191,12 +193,10 @@ fn pull_ff_only(repo_dir: &Path) {
 // #4181: this used to return the four per-run `.mcp.json` pin results so the
 /// caller could gate `enabledMcpjsonServers` on them. Both the injectors and the
 /// approval are gone (ADR-0042), so it returns nothing but success or failure.
-/// Test: `run_prepare_session_pins_palace_from_clone_url`,
-/// `run_prepare_session_bare_stub_when_no_identity`,
-/// `run_prepare_session_never_writes_real_home_claude_dirs`,
-/// `run_prepare_session_reports_all_pins_true_on_success`,
-/// `load_alias_excludes_builtins_from_managed_trust_when_mcp_json_write_fails`;
-/// `prepare_session` itself is covered in session_launch/tests.rs.
+/// Test: `run_prepare_session_never_writes_real_home_claude_dirs`;
+/// `prepare_session` itself is covered in session_launch/tests.rs, and the
+/// remote-driven alias healing in `session_launch::palace_alias`'s own tests
+/// plus `ensure_managed_config_dir_heals_a_bare_repo_palace_alias`.
 fn run_prepare_session(
     repo_dir: &Path,
     repo_url: Option<&str>,
@@ -253,13 +253,13 @@ mod tests {
     /// RAII guard that clears an env var for the duration of a test and restores
     /// the prior value on drop.
     ///
-    /// Why: the palace-pin test must be hermetic against an ambient
-    /// `TRUSTY_MEMORY_PALACE` override (which `derive_palace_id` honours at
-    /// highest precedence and would otherwise mask the URL-derived slug).
+    /// Why: the isolation test below runs the whole `prepare_session` pipeline,
+    /// which reaches palace derivation; an ambient `TRUSTY_MEMORY_PALACE`
+    /// override would make that step non-hermetic.
     /// What: snapshots the prior value, removes the var, and restores it on drop.
     /// Pairs with `#[serial_test::serial]` so concurrent tests never race on the
     /// shared process environment.
-    /// Test: used by `run_prepare_session_pins_palace_from_clone_url`.
+    /// Test: used by `run_prepare_session_never_writes_real_home_claude_dirs`.
     struct EnvClearGuard {
         key: &'static str,
         prior: Option<String>,

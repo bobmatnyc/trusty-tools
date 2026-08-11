@@ -648,6 +648,7 @@ pub(crate) async fn run_inplace_relaunch(
 /// Test: `inplace_exec_command_forwards_every_arg_in_order`,
 /// `inplace_exec_command_scrubs_api_key_and_sets_auth_env`,
 /// `inplace_exec_command_scrubs_inherited_session_markers`,
+/// `inplace_exec_command_carries_a_non_empty_mcp_env`,
 /// `inplace_exec_command_carries_isolation_flags_and_persona_end_to_end`.
 pub(crate) fn build_inplace_exec_command(
     resume: &trusty_mpm::runtime::InPlaceResumeCommand,

@@ -1,7 +1,8 @@
 # 0042. MCP configuration is static and persistent — the declaration lives once in user scope, and nothing injects it into a workspace
 
 - **Status:** Accepted
-- **Date:** 2026-08-10 (accepted 2026-08-11)
+- **Date:** 2026-08-10
+- **Accepted:** 2026-08-11
 - **Scope:** crate `trusty-mpm` (`core/session_launch/{settings,native_mcp,custom_mcp,search_index,mod}.rs`, `core/mcp_config.rs`, `core/standalone/{global_config,trust_seed}.rs`, `bin/tm/commands/mcp.rs`); crate `trusty-search` (the `serve --index` pin, which is the one declaration that cannot be shared as written)
 - **Reversibility Cost:** Medium — the deletion itself is cheap and mechanical, but it removes the mechanism that currently pins MCP *content* behind a pre-approved *name*, so restoring the old shape after the fact means re-deriving the whole #3918 → #3924 → #3926 → #3934 → #3950 chain of security fixes rather than reverting one commit
 - **Decision Drivers:** owner ruling 2026-08-10 (verbatim below); issue [#4181](https://github.com/bobmatnyc/trusty-tools/issues/4181), which gates the `tm 1.3.6` milestone and is what currently blocks the owner from using trusty-mpm at all; live measurement showing that workspace-scope declaration is what creates Claude Code's approval gate while user-scope declaration does not; the standing preference for deleting a mechanism over hardening it
