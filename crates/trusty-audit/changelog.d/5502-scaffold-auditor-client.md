@@ -1,0 +1,2 @@
+Added
+- New crate: the auditor client, a headless library with a thin `taudit` CLI over it. Scaffold only — the capability set (`session::Command`), the working-directory layout (`workdir`), the engagement config and its non-serializable `SecretKey`, a reader for tga's `manifest.toml`, and the tool-install seam that fails closed pending `trusty-installer`'s pinned entry point. A bare invocation enters the guided flow. Every capability has a CLI invocation, enforced by an exhaustive match rather than by review ([#5502](https://github.com/bobmatnyc/trusty-tools/issues/5502))

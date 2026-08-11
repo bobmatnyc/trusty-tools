@@ -55,6 +55,7 @@ default-members = [
     "crates/trusty-agents-common",
     "crates/trusty-agents-local",
     "crates/trusty-analyze",
+    "crates/trusty-audit",
     "crates/trusty-bm25-daemon",
     "crates/trusty-channels",
     "crates/trusty-code",
