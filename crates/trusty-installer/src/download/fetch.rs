@@ -204,6 +204,49 @@ pub fn extract_binaries(tarball: &Path, dest_dir: &Path) -> anyhow::Result<Vec<S
     Ok(extracted)
 }
 
+/// Copy one extracted binary into `dest_dir` under a hidden temporary name and
+/// mark it executable, WITHOUT publishing it under its final name.
+///
+/// Why: A caller placing several binaries as one unit needs every fallible copy
+/// to finish before the first file appears under a name anything can resolve —
+/// see `download::pinned`'s copy-then-commit phase 2 (#5517). `place_binaries`
+/// is the single-binary shape of the same two steps.
+///
+/// # Postconditions
+/// On `Ok(Some(p))`, `p` is `dest_dir/.<name>.tmp.<pid>`, holding a copy of
+/// `src_dir/<name>` with mode 0755, awaiting a rename. `Ok(None)` means the
+/// source does not exist and nothing was written. On `Err`, the temporary file
+/// may exist and is the caller's to remove.
+///
+/// Test: `tests::place_binaries_atomic`,
+/// `super::pinned::tests::a_set_places_nothing_when_a_later_tool_cannot_be_placed`.
+pub(crate) fn stage_binary(
+    src_dir: &Path,
+    dest_dir: &Path,
+    name: &str,
+) -> anyhow::Result<Option<PathBuf>> {
+    let src = src_dir.join(name);
+    if !src.exists() {
+        // Silently skip non-existent sources (e.g. optional alias binaries).
+        return Ok(None);
+    }
+    let tmp_path = dest_dir.join(format!(".{name}.tmp.{}", std::process::id()));
+
+    // Copy to the temp path first (stays in the same filesystem → rename is atomic).
+    std::fs::copy(&src, &tmp_path).with_context(|| format!("copying {name} to temp path"))?;
+
+    // Set executable permissions (0755).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&tmp_path, perms)
+            .with_context(|| format!("setting permissions on {}", tmp_path.display()))?;
+    }
+
+    Ok(Some(tmp_path))
+}
+
 /// Atomically place extracted binaries into the install directory.
 ///
 /// Why: A temp-file + rename pattern ensures either the old or new binary is
@@ -223,29 +266,13 @@ pub fn place_binaries(
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("creating install dir {}", dest_dir.display()))?;
 
-    let pid = std::process::id();
     let mut placed = Vec::new();
 
     for name in binary_names {
-        let src = src_dir.join(name);
-        if !src.exists() {
-            // Silently skip non-existent sources (e.g. optional alias binaries).
+        let Some(tmp_path) = stage_binary(src_dir, dest_dir, name)? else {
             continue;
-        }
-        let tmp_path = dest_dir.join(format!(".{name}.tmp.{pid}"));
+        };
         let dest_path = dest_dir.join(name);
-
-        // Copy to the temp path first (stays in the same filesystem → rename is atomic).
-        std::fs::copy(&src, &tmp_path).with_context(|| format!("copying {name} to temp path"))?;
-
-        // Set executable permissions (0755).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(&tmp_path, perms)
-                .with_context(|| format!("setting permissions on {}", tmp_path.display()))?;
-        }
 
         // Atomic rename — propagate errors so a failed rename never silently
         // reports success when a stale binary already exists at dest_path.

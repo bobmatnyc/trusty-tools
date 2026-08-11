@@ -12,12 +12,27 @@
 //! artifact against both the published checksum and (optionally) a
 //! caller-supplied digest, verifies the binary itself reports the pinned
 //! version, and installs ALL tools or NONE. Every failure is a typed
-//! [`PinnedError`] naming what was pinned, what arrived, and that nothing was
-//! installed. There is no fallback path — `cargo install` is never reachable
+//! [`PinnedError`] naming what was pinned, what arrived, and what the install
+//! directory now holds — "nothing was installed" for every variant but
+//! [`PinnedError::PlacementInterrupted`], which lists the files it could not
+//! avoid leaving. There is no fallback path — `cargo install` is never reachable
 //! from this module.
 //!
 //! This is ADDITIVE: `try_install_prebuilt`'s latest-plus-fallback semantics are
 //! untouched, because its existing callers depend on them.
+//!
+//! ACCEPTED TRADE-OFF — check 5 executes the downloaded binary. Proving a pin by
+//! reading the binary's own `--version` means running a freshly downloaded,
+//! not-independently-signed artifact inside the installer's process and user
+//! context, unattended. `try_install_prebuilt` never does this: it places what it
+//! downloads without executing it. The checksum that gates the execution is
+//! self-published by the same release pipeline that would be compromised in the
+//! attack this worries about, so it is not an independent check — a pipeline that
+//! can serve a malicious tarball can serve a matching `.sha256` beside it. We
+//! accept it because a mis-tagged or mis-built asset passes every URL-level and
+//! digest-level check, and executing the binary is the only way to catch it; a
+//! caller wanting a second, independent gate supplies its own digest via
+//! [`PinnedTool::with_sha256`].
 //!
 //! Test: `tests` drives the whole pipeline against a loopback fixture server
 //! (the crate's established stub-server pattern — no live network, no new
@@ -104,15 +119,18 @@ pub struct PinnedInstall {
     pub paths: Vec<PathBuf>,
 }
 
-/// Why a pinned install failed. Every variant means NOTHING was installed.
+/// Why a pinned install failed, and what it left on disk.
 ///
 /// Why: A GUI has to render these, and an operator has to act on them, so the
 /// pin and the thing that arrived must both survive as structured fields rather
 /// than being flattened into one string. The `Display` text states explicitly
-/// that nothing was installed, because the defect this type exists to prevent is
-/// a caller treating a failure as a degraded success.
+/// what happened to the install directory, because the defect this type exists
+/// to prevent is a caller treating a failure as a degraded success.
 ///
-/// What: One variant per failure the pipeline can distinguish.
+/// What: One variant per failure the pipeline can distinguish. Every variant
+/// except [`PinnedError::PlacementInterrupted`] means no tool was placed, and
+/// says so; `PlacementInterrupted` is the one case where files remain, and it
+/// names them rather than claiming a clean directory.
 /// `#[non_exhaustive]` so later variants stay a non-breaking addition.
 ///
 /// Test: One test per variant in `tests`.
@@ -248,13 +266,42 @@ pub enum PinnedError {
         found: Vec<String>,
     },
 
-    /// A filesystem step failed.
+    /// A filesystem step failed before any file was published under its final
+    /// name.
     #[error("installing {crate_name} {version} failed; nothing was installed: {source}")]
     Io {
         /// The crate that was pinned.
         crate_name: String,
         /// The version that was pinned.
         version: String,
+        /// Underlying failure.
+        #[source]
+        source: anyhow::Error,
+    },
+
+    /// The commit phase failed PART-WAY. The install directory is NOT clean.
+    ///
+    /// Why: Every other variant can honestly say nothing was installed because
+    /// the failure happened before the first commit rename. This one cannot, so
+    /// it says the opposite and names what survives — a false "nothing was
+    /// installed" in a supply-chain path is worse than the failure itself.
+    #[error(
+        "installing {crate_name} {version} failed while committing files into the \
+         install directory, AFTER other files had already been placed. \
+         THE INSTALL DIRECTORY IS NOT CLEAN — these files remain and must be \
+         removed before retrying: {}. Crates left on disk: {}: {source}",
+        placed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
+        crates_on_disk.join(", ")
+    )]
+    PlacementInterrupted {
+        /// The crate whose commit rename failed.
+        crate_name: String,
+        /// The version that was pinned.
+        version: String,
+        /// Every crate with at least one file left in the install directory.
+        crates_on_disk: Vec<String>,
+        /// Every file this call left in the install directory, in commit order.
+        placed: Vec<PathBuf>,
         /// Underlying failure.
         #[source]
         source: anyhow::Error,
@@ -286,7 +333,11 @@ impl Default for Endpoints<'_> {
 ///
 /// # Postconditions
 /// On `Ok`, `install_dir` holds the pinned version and the installed binary has
-/// been observed reporting it. On `Err`, nothing was placed in `install_dir`.
+/// been observed reporting it. On `Err`, the guarantee is
+/// [`install_pinned_set`]'s: no file was placed, EXCEPT for
+/// [`PinnedError::PlacementInterrupted`], which names what survives. A one-tool
+/// set can still reach that variant when its archive ships several binaries and
+/// a later one fails to commit.
 ///
 /// What: Delegates to [`install_pinned_set`] with a one-element slice.
 ///
@@ -319,17 +370,32 @@ pub async fn install_pinned(
 /// # Postconditions
 /// On `Ok`, every tool was downloaded, checksum-verified, and observed reporting
 /// its pinned version BEFORE any file entered `install_dir`; the returned vector
-/// has one entry per input tool, in order. On `Err`, `install_dir` is untouched
-/// by this call — no tool from the set was placed, including tools that verified
-/// successfully.
+/// has one entry per input tool, in order.
 ///
-/// What: Stages every tool into a temp dir (resolve exact tag → download →
-/// verify checksums → extract → probe `--version`), and only once ALL tools pass
-/// does it place any binary. `cargo install` is never invoked on any path.
+/// On `Err`, exactly one of two states holds, and the error says which:
+/// - Every variant except [`PinnedError::PlacementInterrupted`] — no file from
+///   this call exists under its final name in `install_dir`, including files
+///   from tools that verified successfully. A hidden `.<name>.tmp.<pid>` scratch
+///   file can survive if the cleanup that removes it itself fails; nothing
+///   executes or resolves under that name.
+/// - [`PinnedError::PlacementInterrupted`] — commit renames had already begun
+///   and the directory is NOT clean. The variant lists every file left behind
+///   and every crate they belong to. It says so instead of claiming a clean
+///   directory.
+///
+/// What: Phase 1 stages every tool into a temp dir (resolve exact tag → download
+/// → verify checksums → extract → probe `--version`). Phase 2 is copy-then-
+/// commit: every binary of every tool is first copied into `install_dir` under a
+/// hidden temporary name, and only after ALL copies succeed is anything renamed
+/// to its final name. That reduces the window in which a partial set can exist
+/// to a sequence of same-directory renames. `cargo install` is never invoked on
+/// any path.
 ///
 /// Test: `tests::a_set_installs_every_tool_when_all_verify`,
-/// `tests::a_set_installs_nothing_when_any_tool_fails` (the all-or-nothing
-/// guarantee), plus one test per [`PinnedError`] arm.
+/// `tests::a_set_installs_nothing_when_any_tool_fails` (a phase-1 failure),
+/// `tests::a_set_places_nothing_when_a_later_tool_cannot_be_placed` (a phase-2
+/// failure), `tests::an_interrupted_commit_names_the_files_it_left_behind`, plus
+/// one test per [`PinnedError`] arm.
 pub async fn install_pinned_set(
     client: &reqwest::Client,
     tools: &[PinnedTool],
@@ -372,12 +438,11 @@ pub(crate) async fn install_pinned_set_at(
         staged.push(stage_one(client, endpoints, tool, &dir).await?);
     }
 
-    // Phase 2 — every tool verified; place them.
-    let mut installed = Vec::with_capacity(staged.len());
-    for s in staged {
-        installed.push(place_staged(&s, install_dir)?);
-    }
-    Ok(installed)
+    // Phase 2 — every tool verified. Copy the whole set into place under
+    // temporary names first, then commit. #5517: a bare per-tool place loop
+    // could leave tool 1 installed while the error said nothing was.
+    let pending = copy_set_into_install_dir(&staged, install_dir)?;
+    commit_set(pending)
 }
 
 /// A tool downloaded, verified, and proved to report its pinned version, sitting
@@ -523,6 +588,9 @@ async fn stage_one(
     // Check 5 — the binary itself reports the pinned version. This is what
     // catches a mis-tagged or mis-built asset that passed every URL-level check.
     // Probed in the STAGING dir, so a mismatch installs nothing.
+    // This EXECUTES the downloaded artifact; see the module doc's accepted
+    // trade-off. Do not remove the check to avoid it — removing it removes the
+    // only gate that catches a mis-built asset.
     let staged_binary = extract_dir.join(&tool.binary);
     if !staged_binary.exists() {
         return Err(PinnedError::BinaryMissing {
@@ -555,27 +623,182 @@ async fn stage_one(
     })
 }
 
-/// Place an already-verified staged tool into the install directory.
+/// One staged tool copied into the install directory under temporary names,
+/// awaiting its commit renames.
+#[derive(Debug)]
+struct Pending {
+    crate_name: String,
+    version: String,
+    binary_path: PathBuf,
+    /// `(temporary path, final path)` per binary, in commit order.
+    renames: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Copy every binary of every staged tool into `install_dir` under a hidden
+/// temporary name, publishing nothing.
 ///
-/// Why: Placement is deliberately the last thing that happens and does no
-/// verification of its own — every gate ran in [`stage_one`].
+/// Why: The copy is the step that can plausibly fail — source unreadable, disk
+/// full, `install_dir` not writable. Doing all of them before the first commit
+/// rename is what keeps a mid-set failure from leaving one tool installed while
+/// the error claims none was.
 ///
-/// What: Delegates to `fetch::place_binaries` (atomic temp-file + rename).
+/// # Postconditions
+/// On `Ok`, one [`Pending`] per input tool, in order, every temporary file
+/// written and executable. On `Err`, every temporary file this call created has
+/// been removed (best effort) and no file exists under a final name.
 ///
-/// Test: `tests::pinned_install_places_and_reports_the_pinned_version`.
-fn place_staged(staged: &Staged, install_dir: &Path) -> Result<PinnedInstall, PinnedError> {
-    let paths = fetch::place_binaries(&staged.extract_dir, install_dir, &staged.binary_names)
-        .map_err(|e| PinnedError::Io {
-            crate_name: staged.tool.crate_name.clone(),
-            version: staged.tool.version.clone(),
-            source: e.context("placing binaries into the install directory"),
+/// What: Rejects a final path already occupied by a directory and a final path
+/// two tools in the set both claim — both would surface later as a confusing
+/// mid-commit failure. Then copies via `fetch::stage_binary`.
+///
+/// Test: `tests::a_set_places_nothing_when_a_later_tool_cannot_be_placed`,
+/// `tests::a_set_is_rejected_when_two_tools_claim_the_same_binary_name`.
+fn copy_set_into_install_dir(
+    staged: &[Staged],
+    install_dir: &Path,
+) -> Result<Vec<Pending>, PinnedError> {
+    let io = |s: &Staged, e: anyhow::Error| PinnedError::Io {
+        crate_name: s.tool.crate_name.clone(),
+        version: s.tool.version.clone(),
+        source: e,
+    };
+    if let Some(first) = staged.first() {
+        std::fs::create_dir_all(install_dir).map_err(|e| {
+            io(
+                first,
+                anyhow::Error::new(e).context(format!(
+                    "creating the install directory {}",
+                    install_dir.display()
+                )),
+            )
         })?;
-    Ok(PinnedInstall {
-        crate_name: staged.tool.crate_name.clone(),
-        version: staged.tool.version.clone(),
-        binary_path: install_dir.join(&staged.tool.binary),
-        paths,
-    })
+    }
+
+    let mut pending: Vec<Pending> = Vec::with_capacity(staged.len());
+    let mut claimed: Vec<PathBuf> = Vec::new();
+    for s in staged {
+        let mut renames = Vec::new();
+        for name in &s.binary_names {
+            let dest = install_dir.join(name);
+            let problem = if dest.is_dir() {
+                Some(format!(
+                    "a directory already occupies {}, so `{name}` cannot be placed there",
+                    dest.display()
+                ))
+            } else if claimed.contains(&dest) {
+                Some(format!(
+                    "two tools in this set both install `{name}` to {}",
+                    dest.display()
+                ))
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                discard(temporaries(&pending).chain(temporaries_of(&renames)));
+                return Err(io(s, anyhow::anyhow!(problem)));
+            }
+
+            match fetch::stage_binary(&s.extract_dir, install_dir, name) {
+                Ok(None) => continue,
+                Ok(Some(tmp)) => {
+                    claimed.push(dest.clone());
+                    renames.push((tmp, dest));
+                }
+                Err(e) => {
+                    discard(temporaries(&pending).chain(temporaries_of(&renames)));
+                    return Err(io(
+                        s,
+                        e.context("copying binaries into the install directory"),
+                    ));
+                }
+            }
+        }
+        pending.push(Pending {
+            crate_name: s.tool.crate_name.clone(),
+            version: s.tool.version.clone(),
+            binary_path: install_dir.join(&s.tool.binary),
+            renames,
+        });
+    }
+    Ok(pending)
+}
+
+/// Remove temporary files that will never be committed, best effort. A leftover
+/// is a hidden scratch name nothing resolves, not an installed tool.
+fn discard<'a>(tmps: impl Iterator<Item = &'a PathBuf>) {
+    for tmp in tmps {
+        let _ = std::fs::remove_file(tmp);
+    }
+}
+
+/// The temporary halves of a rename list.
+fn temporaries_of(renames: &[(PathBuf, PathBuf)]) -> impl Iterator<Item = &PathBuf> {
+    renames.iter().map(|(tmp, _)| tmp)
+}
+
+/// The temporary halves of every rename across several pending tools.
+fn temporaries(pending: &[Pending]) -> impl Iterator<Item = &PathBuf> {
+    pending.iter().flat_map(|p| temporaries_of(&p.renames))
+}
+
+/// Rename every copied binary from its temporary name to its final one.
+///
+/// Why: Same-directory renames are the cheapest and least failure-prone step
+/// available, which is why every fallible operation was moved ahead of them.
+/// They are still not infallible, so a failure part-way reports what it left
+/// rather than the "nothing was installed" text the other variants carry.
+///
+/// # Postconditions
+/// On `Ok`, one [`PinnedInstall`] per input, in order. On `Err`, either the very
+/// first rename failed and nothing was committed ([`PinnedError::Io`], with the
+/// remaining temporaries removed), or renames had already succeeded and
+/// [`PinnedError::PlacementInterrupted`] names every file left behind.
+///
+/// Test: `tests::an_interrupted_commit_names_the_files_it_left_behind`,
+/// `tests::a_set_installs_every_tool_when_all_verify`.
+fn commit_set(pending: Vec<Pending>) -> Result<Vec<PinnedInstall>, PinnedError> {
+    let mut installed: Vec<PinnedInstall> = Vec::with_capacity(pending.len());
+    let mut placed: Vec<PathBuf> = Vec::new();
+    let mut crates_on_disk: Vec<String> = Vec::new();
+
+    for (idx, p) in pending.iter().enumerate() {
+        let mut paths = Vec::with_capacity(p.renames.len());
+        for (n, (tmp, dest)) in p.renames.iter().enumerate() {
+            if let Err(e) = std::fs::rename(tmp, dest) {
+                discard(temporaries_of(&p.renames[n..]).chain(temporaries(&pending[idx + 1..])));
+                let source = anyhow::Error::new(e)
+                    .context(format!("renaming into place: {}", dest.display()));
+                if placed.is_empty() {
+                    return Err(PinnedError::Io {
+                        crate_name: p.crate_name.clone(),
+                        version: p.version.clone(),
+                        source,
+                    });
+                }
+                return Err(PinnedError::PlacementInterrupted {
+                    crate_name: p.crate_name.clone(),
+                    version: p.version.clone(),
+                    crates_on_disk,
+                    placed,
+                    source,
+                });
+            }
+            // Record the crate as on-disk the moment its FIRST file commits, so
+            // a failure part-way through one tool still names it.
+            if crates_on_disk.last() != Some(&p.crate_name) {
+                crates_on_disk.push(p.crate_name.clone());
+            }
+            placed.push(dest.clone());
+            paths.push(dest.clone());
+        }
+        installed.push(PinnedInstall {
+            crate_name: p.crate_name.clone(),
+            version: p.version.clone(),
+            binary_path: p.binary_path.clone(),
+            paths,
+        });
+    }
+    Ok(installed)
 }
 
 // The fixture-server suite lives in its own file: it is ~550 lines, and an

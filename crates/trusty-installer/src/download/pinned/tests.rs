@@ -497,6 +497,188 @@ async fn a_set_installs_nothing_when_any_tool_fails() {
     assert_nothing_installed(dir.path());
 }
 
+/// Why: The all-or-nothing postcondition covers PLACEMENT too, not just
+/// verification. A phase-2 failure used to return `Io` reading "nothing was
+/// installed" while an earlier tool's binary sat in the install directory — a
+/// false statement about on-disk state in a supply-chain path.
+/// What: Two tools that both verify; a pre-existing DIRECTORY at the second
+/// tool's destination makes its placement fail. Asserts the first tool's binary
+/// is absent afterwards and the error still truthfully says nothing was
+/// installed.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_set_places_nothing_when_a_later_tool_cannot_be_placed() {
+    let Some(target) = tier1() else { return };
+    let base = Fixture::new(target)
+        .publish("good-tool", "1.0.0", Flaw::None)
+        .publish("bad-place-tool", "2.0.0", Flaw::None)
+        .start()
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    // A directory cannot be replaced by `rename`, so the second tool's
+    // placement fails while the first tool's has already succeeded.
+    std::fs::create_dir(dir.path().join("bad-place-tool")).unwrap();
+
+    let err = run(
+        &base,
+        &[
+            PinnedTool::new("good-tool", "1.0.0"),
+            PinnedTool::new("bad-place-tool", "2.0.0"),
+        ],
+        dir.path(),
+    )
+    .await
+    .expect_err("an unplaceable tool must fail the whole set");
+
+    assert!(
+        !dir.path().join("good-tool").exists(),
+        "all-or-nothing violated in phase 2: {err}"
+    );
+    assert!(
+        err.to_string().contains("nothing was installed"),
+        "an unplaceable set must report the truth: {err}"
+    );
+}
+
+/// A `Staged` whose extraction dir holds one file per name in `binaries`.
+fn staged_fixture(crate_name: &str, version: &str, binaries: &[&str], root: &Path) -> Staged {
+    let extract_dir = root.join(crate_name);
+    std::fs::create_dir_all(&extract_dir).unwrap();
+    for b in binaries {
+        std::fs::write(extract_dir.join(b), b"#!/bin/sh\nexit 0\n").unwrap();
+    }
+    Staged {
+        tool: PinnedTool::new(crate_name, version),
+        extract_dir,
+        binary_names: binaries.iter().map(|b| (*b).to_owned()).collect(),
+    }
+}
+
+/// Why: Same-directory renames are near-atomic but not infallible, so the
+/// residual mid-commit failure must report the truth. The old code reused the
+/// `Io` variant here, whose text says "nothing was installed" — false whenever an
+/// earlier rename already succeeded.
+/// What: Commits two tools where the second's temporary file does not exist, so
+/// its rename fails after the first has committed. Asserts the distinct variant,
+/// the files and crates it names, and that it never claims a clean directory.
+/// Test: This is the test.
+#[test]
+fn an_interrupted_commit_names_the_files_it_left_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let install = dir.path();
+    let good_tmp = install.join(".tool-a.tmp.test");
+    std::fs::write(&good_tmp, b"binary").unwrap();
+
+    let pending = vec![
+        Pending {
+            crate_name: "tool-a".to_owned(),
+            version: "1.0.0".to_owned(),
+            binary_path: install.join("tool-a"),
+            renames: vec![(good_tmp, install.join("tool-a"))],
+        },
+        Pending {
+            crate_name: "tool-b".to_owned(),
+            version: "2.0.0".to_owned(),
+            binary_path: install.join("tool-b"),
+            // Never copied, so the rename fails with ENOENT.
+            renames: vec![(install.join(".tool-b.tmp.missing"), install.join("tool-b"))],
+        },
+    ];
+
+    let err = commit_set(pending).expect_err("a failed commit rename must be an error");
+
+    match &err {
+        PinnedError::PlacementInterrupted {
+            crate_name,
+            crates_on_disk,
+            placed,
+            ..
+        } => {
+            assert_eq!(crate_name, "tool-b");
+            assert_eq!(crates_on_disk, &vec!["tool-a".to_owned()]);
+            assert_eq!(placed, &vec![install.join("tool-a")]);
+        }
+        other => panic!("expected PlacementInterrupted, got {other:?}"),
+    }
+    let text = err.to_string();
+    assert!(
+        !text.contains("nothing was installed"),
+        "a partial placement must not claim a clean install dir: {text}"
+    );
+    assert!(
+        text.contains("tool-a"),
+        "the survivor must be named: {text}"
+    );
+    assert!(
+        install.join("tool-a").exists(),
+        "the test only proves anything if the first file really committed"
+    );
+}
+
+/// Why: Two tools writing the same binary name would otherwise race for one
+/// temporary path and surface as a confusing mid-commit ENOENT, when the real
+/// problem is the set itself.
+/// What: Copies a set whose two tools both ship `shared`; asserts it is rejected
+/// before anything is placed, and that the install dir is left empty.
+/// Test: This is the test.
+#[test]
+fn a_set_is_rejected_when_two_tools_claim_the_same_binary_name() {
+    let src = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let staged = [
+        staged_fixture("tool-a", "1.0.0", &["shared"], src.path()),
+        staged_fixture("tool-b", "2.0.0", &["shared"], src.path()),
+    ];
+
+    let err = copy_set_into_install_dir(&staged, dir.path())
+        .expect_err("a colliding binary name must fail closed");
+
+    assert!(matches!(err, PinnedError::Io { .. }), "got {err:?}");
+    assert!(err.to_string().contains("nothing was installed"));
+    assert_nothing_installed(dir.path());
+}
+
+/// Why: The copy phase creates hidden temporaries inside the install directory;
+/// if a failure left them there, "nothing was installed" would be a half-truth
+/// and the next run would find litter.
+/// What: Copies a valid set, then discards it, and asserts the directory is
+/// empty — the same assertion every fail-closed test makes.
+/// Test: This is the test.
+#[test]
+fn a_discarded_copy_phase_leaves_no_temporary_files() {
+    let src = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let staged = [staged_fixture(
+        "tool-a",
+        "1.0.0",
+        &["tool-a", "alias"],
+        src.path(),
+    )];
+
+    let pending = copy_set_into_install_dir(&staged, dir.path()).expect("copies must succeed");
+    assert_eq!(pending[0].renames.len(), 2);
+    assert_nothing_installed_under_final_names(dir.path());
+
+    discard(temporaries(&pending));
+    assert_nothing_installed(dir.path());
+}
+
+/// Assert no file exists under a FINAL name — hidden temporaries are allowed.
+fn assert_nothing_installed_under_final_names(install_dir: &Path) {
+    let published: Vec<String> = std::fs::read_dir(install_dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| !n.starts_with('.'))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        published.is_empty(),
+        "copy phase published {published:?} before the commit phase"
+    );
+}
+
 /// Why: The set path must install every tool when all of them verify — the
 /// positive half of all-or-nothing.
 /// What: Two valid tools; asserts both land at their pinned versions.
