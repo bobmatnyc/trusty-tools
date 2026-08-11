@@ -53,6 +53,11 @@ pub(super) async fn index_file_handler(
             ))
         }
     };
+    // #3049: hold the teardown lock's shared side across the write so a
+    // concurrent DELETE cannot remove_dir_all this index's data mid-write.
+    let _teardown_guard = crate::service::reindex::index_teardown_lock(&index_id)
+        .read_owned()
+        .await;
     let indexer = handle.indexer.read().await;
     indexer
         .index_file(&req.path, &req.content)
@@ -105,6 +110,10 @@ pub(super) async fn remove_file_handler(
             ))
         }
     };
+    // #3049: see the sibling handler — same guard, same reason.
+    let _teardown_guard = crate::service::reindex::index_teardown_lock(&index_id)
+        .read_owned()
+        .await;
     let indexer = handle.indexer.read().await;
     let removed = indexer.remove_file(&req.path).await.map_err(|e| {
         // #5061: see the sibling handler — a silent 500 leaves the caller

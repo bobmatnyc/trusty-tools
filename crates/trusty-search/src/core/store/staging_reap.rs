@@ -56,6 +56,16 @@ pub(super) fn is_reapable_staging(name: &str, live: &str) -> bool {
     };
     // A live pid means another daemon is mid-save on a colocated snapshot.
     // Deleting that file is the cross-process corruption #4395 removed.
+    //
+    // Accepted residual (#2936 review): `pid_alive` is a bare `kill(pid, 0)`
+    // with no process-start-time cross-check, so if the OS recycles a dead
+    // daemon's pid onto an unrelated process, that daemon's staging file reads
+    // as live and is never reaped. The consequence is one leaked file — exactly
+    // the pre-#2936 status quo for that file, not a new failure mode — and the
+    // alternative (comparing start times) means parsing `/proc/<pid>/stat` or
+    // `proc_pidinfo`, per platform, to protect a best-effort tidy-up. The same
+    // unguarded `kill(pid, 0)` already decides stale-lockfile removal, where
+    // the consequence is larger. Not worth the platform-specific code here.
     !pid_alive(pid)
 }
 

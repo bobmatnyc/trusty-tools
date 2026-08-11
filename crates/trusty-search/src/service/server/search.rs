@@ -161,16 +161,21 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// cold-parked-only index was never removed from `indexes.toml` at all, so the
 /// next warm boot resurrected it. A cold record now counts as "an index was
 /// removed" for the durable-cleanup half below.
-/// #3049: the delete now QUIESCES the index before tearing it down. It signals
-/// this id's cancel flag, then waits up to [`DELETE_QUIESCE_TIMEOUT`] for the
-/// per-index semaphore — the permit every long-running writer already holds
-/// (`runner::run_reindex`, `defer_embed_queue`, and the PATCH config handler) —
-/// and holds that permit across teardown. Before this, a delete that landed
-/// mid-reindex removed the registration and `remove_dir_all`'d the data
-/// directory while a live writer was still writing into it; recreating the same
-/// id immediately then let a new-epoch task interleave with the old one on
-/// identical on-disk paths. On timeout the data directory is REFUSED rather
-/// than destroyed under an active writer, and the outcome says so.
+/// #3049: the delete QUIESCES the index before tearing it down. It signals this
+/// id's cancel flag, then waits up to [`DELETE_QUIESCE_TIMEOUT`] for the
+/// EXCLUSIVE side of `index_teardown_lock`, and holds it across teardown. Before
+/// this, a delete landing mid-write removed the registration and
+/// `remove_dir_all`'d the data directory while a live writer was still writing
+/// into it; recreating the same id immediately then let a new-epoch task
+/// interleave with the old one on identical on-disk paths. On timeout the data
+/// directory is REFUSED rather than destroyed under an active writer.
+///
+/// Every writer must hold the SHARED side for the span of its write. The
+/// complete set, and why each entry is or is not guarded, is the table in
+/// `service::reindex::semaphore`'s [`INDEX_TEARDOWN_LOCKS`] docs — add a new
+/// write path there and here in the same change, or this guard silently stops
+/// covering it. Round 1 of this fix waited on `index_semaphore` instead and
+/// missed six paths that hold no permit.
 /// Test: delete-path handler tests; reaper behaviour covered by `orphan_reaper`
 /// unit tests plus the `spawn_orphan_reaper_ticker` wiring; the quiesce and
 /// refusal behaviour by `service::server::tests_3049`.
@@ -183,16 +188,19 @@ pub(super) async fn unregister_index(
     // #3049: signal BEFORE waiting so a writer that is between batches stops at
     // its next checkpoint instead of running the whole corpus to completion.
     crate::service::reindex::signal_index_cancel(&index_id);
-    // #3049: the permit is the existing quiescence point — all three
-    // long-running writers already hold it for the full duration of their work,
-    // so acquiring it means none of them is mid-flight. Held across teardown.
+    // #3049: take the EXCLUSIVE side of this index's teardown lock. Every write
+    // path holds its SHARED side for the span of its write, so acquiring it means
+    // no writer of any kind is in flight. Round 1 of this fix waited on
+    // `index_semaphore` instead, which covers only the three long-running
+    // writers — `index_file_handler`, `remove_file_handler`, `ingest_graph_handler`,
+    // the watch loop, boot reconcile, and relocate hold no permit, so that wait
+    // returned instantly and reported a false `quiesced: true`. Held across teardown.
     let quiesce_permit = tokio::time::timeout(
         DELETE_QUIESCE_TIMEOUT,
-        crate::service::reindex::index_semaphore(&index_id).acquire_owned(),
+        crate::service::reindex::index_teardown_lock(&index_id).write_owned(),
     )
     .await
-    .ok()
-    .and_then(|r| r.ok());
+    .ok();
     let quiesced = quiesce_permit.is_some();
     if !quiesced {
         tracing::warn!(
@@ -281,6 +289,8 @@ pub(super) async fn unregister_index(
     // #3049: evict the cancel flag too, or an index recreated under this id
     // would be born cancelled and abort its first reindex.
     crate::service::reindex::remove_index_cancel_flag(&index_id);
+    // #3049: and the teardown lock, for the same growth reason.
+    crate::service::reindex::remove_index_teardown_lock(&index_id);
     UnregisterOutcome {
         removed,
         data_deleted,
