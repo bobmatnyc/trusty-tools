@@ -148,7 +148,7 @@ impl ClaudeCodeAgentRunner {
 
         // Build the command inside a closure so the ETXTBSY retry wrapper can
         // reconstruct it on each attempt (`Command` is not `Clone`). See
-        // `spawn_with_etxtbsy_retry` for why the retry exists (#1634 / #1528).
+        // `trusty_common::spawn_retry` for why the retry exists (#1634 / #1528).
         let build_cmd = || {
             let mut cmd = Command::new(&self.claude_bin);
             cmd.args([
@@ -220,7 +220,8 @@ impl ClaudeCodeAgentRunner {
         // Spawn with a bounded ETXTBSY retry (#1634): freshly written, just
         // chmod'd mock scripts (and the real `claude` CLI under load) can
         // transiently return "Text file busy" from `execve`.
-        let mut child = super::spawn_with_etxtbsy_retry(build_cmd)
+        // #5446: the retry policy is trusty-common's, and wraps `.spawn()` alone.
+        let mut child = trusty_common::spawn_retry::retry_on_etxtbsy_async(|| build_cmd().spawn())
             .await
             .with_context(|| {
                 format!(
