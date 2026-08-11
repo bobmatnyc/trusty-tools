@@ -398,6 +398,15 @@ PY
 # versions are equal, or current is older than baseline; since #5296 the caller
 # selects a baseline STRICTLY BELOW the declared version, so `none` is now
 # unreachable from the gate and survives only as a total function's zero case.
+#
+# 0.0.z IS ALWAYS MAJOR (#5440, code-critic on PR #5522). Cargo gives a 0.0.z
+# crate NO compatible range at all — every 0.0.z bump is breaking. Classified
+# `minor`, such a crate lands in the PASS/FAIL arm, where cargo-semver-checks
+# reads the same pair as a permitted break, runs 0 of 254 checks, and the gate
+# correctly refuses the non-verdict — a publish blocked by an exit 3 that nothing
+# can clear. `major` routes it to the advisory INVENTORY arm instead, which is
+# what every other permitted break gets. Latent today: the lowest declared
+# version in this workspace is 0.1.0.
 # ---------------------------------------------------------------------------
 release_type() {
   python3 - "$1" "$2" <<'PY'
@@ -413,7 +422,11 @@ c = parse(sys.argv[2])
 if c <= b:
     print("none")
 elif b[0] == 0 and c[0] == 0:
-    print("major" if c[1] != b[1] else ("minor" if c[2] != b[2] else "none"))
+    # #5440: a 0.0.z baseline has no compatible range, so any bump off it breaks.
+    if b[1] == 0:
+        print("major")
+    else:
+        print("major" if c[1] != b[1] else ("minor" if c[2] != b[2] else "none"))
 elif c[0] != b[0]:
     print("major")
 elif c[1] != b[1]:
@@ -1083,12 +1096,19 @@ known either way about this crate's public API.
 The tool's own output is above. The usual causes:
 
   * IT RAN AND CHECKED NOTHING — `0 checks: 0 pass, N skip` (issue #5440). The
-    tool skips its whole lint set when the baseline -> current delta already
-    permits breakage, which under Cargo's 0.x rules is ANY change to the MINOR
-    position of a 0.y.z crate. Exit 0 and "no semver update required" there mean
-    "nothing was examined", not "nothing is wrong". Check the baseline on the
-    `CHECK`/`INVENTORY` line above: if it is not the release you meant to compare
-    against, fix that first.
+    tool skips its whole lint set when IT reads the baseline -> current delta as
+    already permitting breakage. Exit 0 and "no semver update required" there
+    mean "nothing was examined", not "nothing is wrong".
+    A NORMAL 0.x MINOR BUMP DOES NOT LAND HERE. The gate classifies 0.28.1 ->
+    0.29.0 as major itself and sends it to the advisory INVENTORY arm, which
+    passes --release-type minor and gets a full lint run. Do not weaken this
+    check on the theory that a routine bump tripped it.
+    What reaches this arm is a BASELINE AT OR ABOVE the declared version: the
+    gate reads that pair as no change while the tool reads it by position and
+    calls it a permitted break. Read the baseline off the `CHECK` line above. If
+    it is not below the version you are publishing, the declared version is
+    behind the registry — preflight-publish.sh CHECK 4 is the check that says
+    so — and that is what to fix.
   * rustdoc failed to build. cargo-semver-checks resolves dependencies in a
     scratch project that IGNORES this workspace's Cargo.lock, so it can pick a
     newer transitive dependency whose `rust-version` exceeds the rustc running

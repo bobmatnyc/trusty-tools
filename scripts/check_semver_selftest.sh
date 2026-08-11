@@ -107,6 +107,13 @@
 #                            it executed no checks rather than blaming rustdoc.
 #     21. zero checks / INVENTORY arm — must be a BLIND inventory, never "no
 #                            breaking changes found".
+#   Case 22 pins the classification that decides WHICH arm a crate reaches:
+#   every 0.0.z bump is breaking under Cargo's rules, so `release_type` must
+#   call it major and route it to the advisory INVENTORY arm. Called `minor` it
+#   lands in the PASS/FAIL arm, where the tool runs 0 of 254 checks and the gate
+#   — correctly, per cases 20-21 — blocks the publish with an exit 3 that nothing
+#   can clear.
+#
 #   Both fail against the pre-fix gate, which exits 0 on 20 and reports an empty
 #   inventory on 21. The fixture is `all-skipped.out`, which is this file's own
 #   former `clean.out`: the case that was supposed to prove the gate can pass a
@@ -598,6 +605,43 @@ elif [[ "$out" == *"CHECK ${STUB_CRATE}:"* ]]; then
 else
   pass_case "the only-a-pre-release skip names what it refused"
 fi
+
+# ===========================================================================
+# 22. release_type() over a 0.0.z crate (#5440, code-critic on PR #5522).
+#
+# Cargo gives a 0.0.z crate no compatible range, so every 0.0.z bump is
+# breaking. Classified `minor`, such a crate lands in the PASS/FAIL arm, where
+# cargo-semver-checks reads the same pair as a permitted break and runs 0 of 254
+# checks — and since #5440 that is a correct NO VERDICT, i.e. a publish blocked
+# by an exit 3 nothing can clear. `major` routes it to the advisory INVENTORY
+# arm like every other permitted break.
+#
+# No crate in this workspace declares 0.0.z, so the end-to-end arms cannot reach
+# it. The function is lifted out of the gate BY PATTERN rather than copied here,
+# so this case exercises the shipped definition and not a stale duplicate of it.
+# ===========================================================================
+eval "$(awk '/^release_type\(\) \{/,/^\}/' "$GATE")"
+
+# baseline  current  expected
+RELEASE_TYPE_CASES="0.0.5 0.0.6 major
+0.0.5 0.1.0 major
+0.30.1 0.31.0 major
+0.31.0 0.31.1 minor
+1.3.4 2.0.0 major
+1.3.4 1.4.0 minor
+1.3.4 1.3.5 patch"
+
+rt_failed=0
+while read -r rt_base rt_cur rt_want; do
+  [[ -z "$rt_base" ]] && continue
+  rt_got="$(release_type "$rt_base" "$rt_cur")"
+  if [[ "$rt_got" != "$rt_want" ]]; then
+    fail_case "release_type/${rt_base}->${rt_cur}: expected ${rt_want}, got ${rt_got}" \
+      "A 0.0.z bump classified anything but 'major' lands in the PASS/FAIL arm, where the tool runs 0 checks and the gate blocks the publish with a NO VERDICT nothing can clear (#5440)."
+    rt_failed=1
+  fi
+done <<<"$RELEASE_TYPE_CASES"
+[[ "$rt_failed" -eq 0 ]] && pass_case "release_type calls every 0.0.z bump major, and still ranks 0.x/1.x correctly (#5440)"
 
 rm -rf "$STUB_DIR"
 
