@@ -98,9 +98,19 @@ pub(super) const SEARCH_MESSAGES: &str = "search.messages";
 pub(super) const REACTIONS_ADD: &str = "reactions.add";
 /// Bot-scope: reads the reactions on a message/file (issue #3614).
 pub(super) const REACTIONS_GET: &str = "reactions.get";
-/// Bot-scope, requires `canvases:write`: creates a standalone or
-/// channel-tabbed canvas (issue #3612).
+/// Bot-scope, requires `canvases:write`: creates a **standalone** canvas owned
+/// by the acting identity (issue #3612). Its `channel_id` argument only tabs
+/// the canvas into a channel cosmetically — the canvas stays owned by the
+/// caller and confers no edit rights on anyone else, which is why
+/// [`CONVERSATIONS_CANVASES_CREATE`] is used whenever a channel is named
+/// (issue #5155).
 pub(super) const CANVASES_CREATE: &str = "canvases.create";
+/// Bot-scope, requires `canvases:write`: creates a **channel** canvas, whose
+/// access is tied to channel membership rather than to the creating identity —
+/// every channel member can edit it with no separate share step (issue #5155).
+/// A channel has at most one channel canvas; a second call for the same channel
+/// returns `channel_canvas_already_exists`.
+pub(super) const CONVERSATIONS_CANVASES_CREATE: &str = "conversations.canvases.create";
 /// Bot-scope, requires `canvases:write`: replaces a canvas's document content
 /// (issue #3612).
 pub(super) const CANVASES_EDIT: &str = "canvases.edit";

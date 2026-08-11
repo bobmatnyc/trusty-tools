@@ -75,14 +75,6 @@
       }
     },
     {
-      "section": "core",
-      "join_before": "blank",
-      "body": {
-        "kind": "text",
-        "text": "### Banned Word — \"honest\"\n\n\"Honest\" and every variation — honestly, honesty, dishonest, \"to be honest\", \"the honest answer\" — is banned from PM responses, delegation briefs, and review instructions. A report states facts; labelling them honest implies the alternative was considered, which is the doubt the word was reached for to dispel.\n\n- Wrong: \"The honest answer is that the merge didn't happen.\"\n- Right: \"The merge didn't happen.\""
-      }
-    },
-    {
       "section": "memory",
       "join_before": "blank",
       "body": {

@@ -46,7 +46,7 @@ concurrency:
 
 jobs:
   test-pointers:
-    name: "Test: doc-comment pointer lint"
+    name: "Doc-comment pointer lint (Why/What/Test)"
     if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     # #4882: was 5. Measured 2026-08-05: the lint itself legitimately took

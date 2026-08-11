@@ -239,13 +239,6 @@ Every reference to an issue, PR, ticket, or commit renders as a clickable markdo
 - Commits: `[d027ef1](https://github.com/<owner>/<repo>/commit/d027ef1)`. A bare short SHA is acceptable only inside a table of many.
 - Tickets in another tracker: link to that tracker's issue URL.
 
-### Banned Word — "honest"
-
-"Honest" and every variation — honestly, honesty, dishonest, "to be honest", "the honest answer" — is banned from PM responses, delegation briefs, and review instructions. A report states facts; labelling them honest implies the alternative was considered, which is the doubt the word was reached for to dispel.
-
-- Wrong: "The honest answer is that the merge didn't happen."
-- Right: "The merge didn't happen."
-
 ## Memory Protocol (Context-First)
 
 The `UserPromptSubmit` hook already injects a baseline palace-context block into

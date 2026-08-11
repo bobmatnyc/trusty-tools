@@ -31,8 +31,14 @@ pub(super) fn canvas_tools() -> Vec<Value> {
     vec![
         tool(
             "slack_create_canvas",
-            "Create a standalone canvas, optionally tabbed into a channel and/or \
-             seeded with markdown content. Requires scope canvases:write.",
+            "Create a canvas, optionally seeded with markdown content. With \
+             channel_id, creates that channel's canvas via \
+             conversations.canvases.create — every channel member can edit it, no \
+             sharing step needed, and a channel has at most one (a second call \
+             returns channel_canvas_already_exists; edit the existing canvas \
+             instead). Without channel_id, creates a standalone canvas via \
+             canvases.create that only the calling identity can edit. Requires \
+             scope canvases:write.",
             json!({
                 "title": { "type": "string", "description": "Optional canvas title." },
                 "markdown": {
@@ -41,7 +47,9 @@ pub(super) fn canvas_tools() -> Vec<Value> {
                 },
                 "channel_id": {
                     "type": "string",
-                    "description": "Optional channel ID to tab the new canvas into.",
+                    "description": "Optional channel ID. Pass it whenever a human \
+                        needs to edit the canvas — it binds the canvas to the \
+                        channel so members inherit edit access.",
                 },
             }),
             &[],
@@ -74,15 +82,20 @@ pub(super) fn canvas_tools() -> Vec<Value> {
         ),
         tool(
             "slack_canvas_create",
-            "Create a standalone canvas, optionally tabbed into a channel and/or \
-             seeded with markdown content. Thin wrapper over canvases.create — no \
-             markdown-to-canvas translation beyond Slack's own markdown ingestion. \
-             `channel_id` is optional per Slack's API, but free-tier (non-Business+) \
-             workspaces reject a non-tabbed canvas (error \
-             free_teams_cannot_create_non_tabbed_canvases), so pass `channel_id` on \
-             those teams. Requires scope canvases:write; other Slack errors surfaced \
-             as-is include canvas_creation_failed, canvas_disabled_user_team, and \
-             missing_scope.",
+            "Create a canvas seeded with markdown content. No markdown-to-canvas \
+             translation beyond Slack's own markdown ingestion. With channel_id, \
+             creates that channel's canvas via conversations.canvases.create — \
+             every channel member can edit it, no sharing step needed, and a \
+             channel has at most one (a second call returns \
+             channel_canvas_already_exists; edit the existing canvas instead). \
+             Without channel_id, creates a standalone canvas via canvases.create \
+             that only the calling identity can edit, and which free-tier \
+             (non-Business+) workspaces reject outright with \
+             free_teams_cannot_create_non_tabbed_canvases. Requires scope \
+             canvases:write; other Slack errors surfaced as-is include \
+             canvas_creation_failed, canvas_disabled_user_team, \
+             team_tier_cannot_create_channel_canvases, and missing_scope — each \
+             tagged with the endpoint it came from.",
             json!({
                 "title": { "type": "string", "description": "Optional canvas title." },
                 "markdown": {
@@ -92,9 +105,10 @@ pub(super) fn canvas_tools() -> Vec<Value> {
                 },
                 "channel_id": {
                     "type": "string",
-                    "description": "Optional channel ID to tab the new canvas into. \
-                        Effectively required on free-tier Slack teams — see the tool \
-                        description.",
+                    "description": "Optional channel ID. Pass it whenever a human \
+                        needs to edit the canvas — it binds the canvas to the \
+                        channel so members inherit edit access. Also required on \
+                        free-tier Slack teams; see the tool description.",
                 },
             }),
             &["markdown"],

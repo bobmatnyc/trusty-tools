@@ -1,0 +1,4473 @@
+{
+  "info": {
+    "description": "Google Workspace tools (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks) exposed as JSON-RPC 2.0 methods over stdio.",
+    "license": {
+      "name": "Elastic-2.0",
+      "url": "https://www.elastic.co/licensing/elastic-license"
+    },
+    "title": "gworkspace-mcp",
+    "version": "<CARGO_PKG_VERSION>"
+  },
+  "methods": [
+    {
+      "description": "List configured Google Workspace account profiles available on this machine, including which OAuth client each one uses (\"global\" or a per-profile client path).",
+      "name": "list_accounts",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "list_accounts_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/userinfo.profile"
+      ]
+    },
+    {
+      "description": "Set which configured Google Workspace account profile is used by default when a tool call omits `account`.",
+      "name": "set_default_account",
+      "params": [
+        {
+          "description": "The profile name to make the default (must already exist — see list_accounts).",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "description": "The profile name to make the default (must already exist — see list_accounts).",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "set_default_account_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/userinfo.profile"
+      ]
+    },
+    {
+      "description": "Remove a configured Google Workspace account profile from local storage. Does not revoke Google's grant. If the removed profile was the default, another remaining profile is automatically promoted to default.",
+      "name": "remove_account",
+      "params": [
+        {
+          "description": "The profile name to remove.",
+          "name": "name",
+          "required": true,
+          "schema": {
+            "description": "The profile name to remove.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "remove_account_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/userinfo.profile"
+      ]
+    },
+    {
+      "description": "Authorize a new Google Workspace account profile (or re-authorize an existing one) via OAuth consent. Returns a consent URL the user must open in a browser; this call blocks briefly waiting for that consent to complete and reports whether it succeeded or timed out (safe to retry either way — no partial state is ever stored).",
+      "name": "add_account",
+      "params": [
+        {
+          "description": "Explicitly make this profile the default, displacing any existing one. Mutually exclusive with no_default.",
+          "name": "make_default",
+          "required": false,
+          "schema": {
+            "description": "Explicitly make this profile the default, displacing any existing one. Mutually exclusive with no_default.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "Do NOT mark this profile as the default, even if none exists yet. Mutually exclusive with make_default.",
+          "name": "no_default",
+          "required": false,
+          "schema": {
+            "description": "Do NOT mark this profile as the default, even if none exists yet. Mutually exclusive with make_default.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "Optional path to a JSON file holding THIS profile's own OAuth client (flat {client_id,client_secret}, or Google's downloaded installed/web shape). When given, this profile authorizes and refreshes with that client instead of the shared global one — never pass raw client_id/secret values here, only a file path.",
+          "name": "oauth_client_path",
+          "required": false,
+          "schema": {
+            "description": "Optional path to a JSON file holding THIS profile's own OAuth client (flat {client_id,client_secret}, or Google's downloaded installed/web shape). When given, this profile authorizes and refreshes with that client instead of the shared global one — never pass raw client_id/secret values here, only a file path.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Profile name to store the token under (default: the shared default profile name).",
+          "name": "profile",
+          "required": false,
+          "schema": {
+            "description": "Profile name to store the token under (default: the shared default profile name).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "How long to wait for the user to complete browser consent, in seconds (clamped to 10-90; default 60).",
+          "name": "timeout_secs",
+          "required": false,
+          "schema": {
+            "description": "How long to wait for the user to complete browser consent, in seconds (clamped to 10-90; default 60).",
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "add_account_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/userinfo.profile"
+      ]
+    },
+    {
+      "description": "Create, read, update, or delete Google Calendars.",
+      "name": "manage_calendars",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "list",
+              "create",
+              "update",
+              "delete"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Calendar ID (required for update/delete).",
+          "name": "calendar_id",
+          "required": false,
+          "schema": {
+            "description": "Calendar ID (required for update/delete).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "description",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Calendar title (create).",
+          "name": "summary",
+          "required": false,
+          "schema": {
+            "description": "Calendar title (create).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "time_zone",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Patch body for update.",
+          "name": "updates",
+          "required": false,
+          "schema": {
+            "description": "Patch body for update.",
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_calendars_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/calendar"
+      ]
+    },
+    {
+      "description": "Create, read, update, or delete events within a Google Calendar.",
+      "name": "manage_events",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "list",
+              "create",
+              "update",
+              "delete"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Attendees (create/update): email strings or raw attendee objects.",
+          "name": "attendees",
+          "required": false,
+          "schema": {
+            "description": "Attendees (create/update): email strings or raw attendee objects.",
+            "items": {
+              "oneOf": [
+                {
+                  "description": "Attendee email address; maps to {email}.",
+                  "type": "string"
+                },
+                {
+                  "description": "Raw attendee object (e.g. {email, optional, responseStatus}), passed through unchanged.",
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          }
+        },
+        {
+          "description": "Calendar ID. Defaults to 'primary'.",
+          "name": "calendar_id",
+          "required": false,
+          "schema": {
+            "description": "Calendar ID. Defaults to 'primary'.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Event end, RFC3339 (create/update). Maps to end.dateTime.",
+          "name": "end_time",
+          "required": false,
+          "schema": {
+            "description": "Event end, RFC3339 (create/update). Maps to end.dateTime.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Raw event resource (create). Escape hatch; typed fields below take precedence.",
+          "name": "event",
+          "required": false,
+          "schema": {
+            "description": "Raw event resource (create). Escape hatch; typed fields below take precedence.",
+            "type": "object"
+          }
+        },
+        {
+          "description": "",
+          "name": "event_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Event location (create/update).",
+          "name": "location",
+          "required": false,
+          "schema": {
+            "description": "Event location (create/update).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Free-text search (list).",
+          "name": "query",
+          "required": false,
+          "schema": {
+            "description": "Free-text search (list).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Recurrence rule(s) (create/update). Bare FREQ=... strings are normalised to an RRULE: line.",
+          "name": "recurrence",
+          "required": false,
+          "schema": {
+            "description": "Recurrence rule(s) (create/update). Bare FREQ=... strings are normalised to an RRULE: line.",
+            "oneOf": [
+              {
+                "description": "A single recurrence rule, e.g. 'FREQ=WEEKLY;COUNT=10' or 'RRULE:FREQ=...'.",
+                "type": "string"
+              },
+              {
+                "description": "Multiple recurrence/exclusion lines, e.g. RRULE/RDATE/EXDATE/EXRULE.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          }
+        },
+        {
+          "description": "Event start, RFC3339 (create/update). Maps to start.dateTime.",
+          "name": "start_time",
+          "required": false,
+          "schema": {
+            "description": "Event start, RFC3339 (create/update). Maps to start.dateTime.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "RFC3339 upper bound (list).",
+          "name": "time_max",
+          "required": false,
+          "schema": {
+            "description": "RFC3339 upper bound (list).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "RFC3339 lower bound (list).",
+          "name": "time_min",
+          "required": false,
+          "schema": {
+            "description": "RFC3339 lower bound (list).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "IANA timezone (e.g. 'America/Los_Angeles') applied to start/end (create/update).",
+          "name": "timezone",
+          "required": false,
+          "schema": {
+            "description": "IANA timezone (e.g. 'America/Los_Angeles') applied to start/end (create/update).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Raw patch body (update). Escape hatch; typed fields below take precedence.",
+          "name": "updates",
+          "required": false,
+          "schema": {
+            "description": "Raw patch body (update). Escape hatch; typed fields below take precedence.",
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_events_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/calendar.events"
+      ]
+    },
+    {
+      "description": "Query free/busy status across calendars for a time range.",
+      "name": "query_free_busy",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "calendar_ids",
+          "required": false,
+          "schema": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        {
+          "description": "RFC3339 end.",
+          "name": "time_max",
+          "required": true,
+          "schema": {
+            "description": "RFC3339 end.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "RFC3339 start.",
+          "name": "time_min",
+          "required": true,
+          "schema": {
+            "description": "RFC3339 start.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "query_free_busy_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/calendar"
+      ]
+    },
+    {
+      "description": "Search Gmail messages using Gmail query syntax (e.g. 'from:foo subject:bar').",
+      "name": "search_gmail_messages",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "query",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "search_gmail_messages_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/gmail.modify"
+      ]
+    },
+    {
+      "description": "Fetch the full content of a Gmail message by ID.",
+      "name": "get_gmail_message_content",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "message_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "get_gmail_message_content_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/gmail.modify"
+      ]
+    },
+    {
+      "description": "Download a Gmail attachment by message + attachment ID, optionally writing to disk.",
+      "name": "download_gmail_attachment",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "attachment_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "message_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "If true, returns the base64 body inline.",
+          "name": "return_content",
+          "required": false,
+          "schema": {
+            "description": "If true, returns the base64 body inline.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "If set, decoded bytes are written here.",
+          "name": "save_path",
+          "required": false,
+          "schema": {
+            "description": "If set, decoded bytes are written here.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "download_gmail_attachment_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/gmail.modify"
+      ]
+    },
+    {
+      "description": "Enumerate attachments on a Gmail message.",
+      "name": "list_message_attachments",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "message_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "list_message_attachments_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/gmail.modify"
+      ]
+    },
+    {
+      "description": "Send, draft, send-an-existing-draft, or reply to email via Gmail, with attachments and HTML.",
+      "name": "compose_email",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": false,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "send",
+              "draft",
+              "send_draft",
+              "reply"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Attachments: a local path string, or an object {path|local_path}, {content(base64), filename}, or {driveFileId, filename?}.",
+          "name": "attachments",
+          "required": false,
+          "schema": {
+            "description": "Attachments: a local path string, or an object {path|local_path}, {content(base64), filename}, or {driveFileId, filename?}.",
+            "items": {
+              "type": [
+                "string",
+                "object"
+              ]
+            },
+            "type": "array"
+          }
+        },
+        {
+          "description": "",
+          "name": "bcc",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Plain-text body.",
+          "name": "body",
+          "required": false,
+          "schema": {
+            "description": "Plain-text body.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "cc",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Required when action=send_draft.",
+          "name": "draft_id",
+          "required": false,
+          "schema": {
+            "description": "Required when action=send_draft.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Legacy: if true and no html_body, `body` is treated as HTML.",
+          "name": "html",
+          "required": false,
+          "schema": {
+            "description": "Legacy: if true and no html_body, `body` is treated as HTML.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "HTML body; sent as a text/html alternative alongside `body` when both are present.",
+          "name": "html_body",
+          "required": false,
+          "schema": {
+            "description": "HTML body; sent as a text/html alternative alongside `body` when both are present.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Required when action=reply: the message being replied to.",
+          "name": "message_id",
+          "required": false,
+          "schema": {
+            "description": "Required when action=reply: the message being replied to.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Optional for reply (defaults to 'Re: <original subject>').",
+          "name": "subject",
+          "required": false,
+          "schema": {
+            "description": "Optional for reply (defaults to 'Re: <original subject>').",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Recipient(s). Optional for reply (defaults to the original sender).",
+          "name": "to",
+          "required": false,
+          "schema": {
+            "description": "Recipient(s). Optional for reply (defaults to the original sender).",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "compose_email_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.modify"
+      ]
+    },
+    {
+      "description": "Batch-add or remove labels across a set of Gmail messages.",
+      "name": "modify_gmail_messages",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "add_label_ids",
+          "required": false,
+          "schema": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        {
+          "description": "",
+          "name": "message_ids",
+          "required": true,
+          "schema": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        {
+          "description": "",
+          "name": "remove_label_ids",
+          "required": false,
+          "schema": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "modify_gmail_messages_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/gmail.modify"
+      ]
+    },
+    {
+      "description": "Convert markdown-flavoured text to a simple HTML body suitable for compose_email.",
+      "name": "format_email_content",
+      "params": [
+        {
+          "description": "",
+          "name": "body",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "mode",
+          "required": false,
+          "schema": {
+            "enum": [
+              "auto",
+              "passthrough"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "format_email_content_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": []
+    },
+    {
+      "description": "CRUD Gmail labels.",
+      "name": "manage_gmail_labels",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "list",
+              "create",
+              "update",
+              "delete"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "label_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "label_list_visibility",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "message_list_visibility",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "name",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "updates",
+          "required": false,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_gmail_labels_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/gmail.labels",
+        "https://www.googleapis.com/auth/gmail.modify"
+      ]
+    },
+    {
+      "description": "List, create, or delete Gmail filters.",
+      "name": "manage_gmail_filters",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "list",
+              "create",
+              "delete"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Filter resource (create).",
+          "name": "filter",
+          "required": false,
+          "schema": {
+            "description": "Filter resource (create).",
+            "type": "object"
+          }
+        },
+        {
+          "description": "",
+          "name": "filter_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_gmail_filters_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/gmail.settings.basic"
+      ]
+    },
+    {
+      "description": "Get or update Gmail account settings (vacation, autoForwarding, imap, pop, language).",
+      "name": "manage_gmail_settings",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": false,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "get",
+              "update"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "setting",
+          "required": true,
+          "schema": {
+            "enum": [
+              "vacation",
+              "auto_forwarding",
+              "imap",
+              "pop",
+              "language"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "value",
+          "required": false,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_gmail_settings_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/gmail.settings.basic"
+      ]
+    },
+    {
+      "description": "List the contents of a Drive folder (defaults to root).",
+      "name": "list_drive_contents",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "folder_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "list_drive_contents_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Search Drive using v3 query syntax.",
+      "name": "search_drive_files",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "query",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "search_drive_files_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Fetch a Drive file's content (auto-exports Google native docs). Text is returned inline; binary files are base64-encoded, or written to disk when save_path is set.",
+      "name": "get_drive_file_content",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Override export MIME for Google native files.",
+          "name": "export_mime_type",
+          "required": false,
+          "schema": {
+            "description": "Override export MIME for Google native files.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "file_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "auto: text inline / binary base64 (default). raw: always treat as bytes (base64 or save_path).",
+          "name": "output_format",
+          "required": false,
+          "schema": {
+            "description": "auto: text inline / binary base64 (default). raw: always treat as bytes (base64 or save_path).",
+            "enum": [
+              "auto",
+              "raw"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "If set, the raw bytes are written to this local path (required for large binaries).",
+          "name": "save_path",
+          "required": false,
+          "schema": {
+            "description": "If set, the raw bytes are written to this local path (required for large binaries).",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "get_drive_file_content_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "List shared drives the account has access to.",
+      "name": "list_shared_drives",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "list_shared_drives_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Create folders, rename/move/copy/trash/delete, or upload files in Drive.",
+      "name": "manage_drive_file",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "create_folder",
+              "rename",
+              "trash",
+              "delete",
+              "copy",
+              "move",
+              "upload"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "upload: inline text content (alternative to local_path).",
+          "name": "content",
+          "required": false,
+          "schema": {
+            "description": "upload: inline text content (alternative to local_path).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "file_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "upload: read bytes from this local file.",
+          "name": "local_path",
+          "required": false,
+          "schema": {
+            "description": "upload: read bytes from this local file.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "upload: MIME type of the content (guessed from local_path extension, else text/plain).",
+          "name": "mime_type",
+          "required": false,
+          "schema": {
+            "description": "upload: MIME type of the content (guessed from local_path extension, else text/plain).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "New/target file or folder name (required for create_folder, rename, upload).",
+          "name": "name",
+          "required": false,
+          "schema": {
+            "description": "New/target file or folder name (required for create_folder, rename, upload).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Parent folder id (target for move/upload, optional for create_folder).",
+          "name": "parent_id",
+          "required": false,
+          "schema": {
+            "description": "Parent folder id (target for move/upload, optional for create_folder).",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_drive_file_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "List, create, update, or delete sharing permissions on a Drive file.",
+      "name": "manage_file_permissions",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "list",
+              "create",
+              "update",
+              "delete"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "domain",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "email_address",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "file_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "permission_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "reader|commenter|writer|owner|organizer",
+          "name": "role",
+          "required": false,
+          "schema": {
+            "description": "reader|commenter|writer|owner|organizer",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "send_notification_email",
+          "required": false,
+          "schema": {
+            "enum": [
+              "true",
+              "false"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "user|group|domain|anyone",
+          "name": "type",
+          "required": false,
+          "schema": {
+            "description": "user|group|domain|anyone",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_file_permissions_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Create a new empty Google Doc with the given title.",
+      "name": "create_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "title",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "create_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Append text to the end of a Google Doc.",
+      "name": "append_to_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "text",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "append_to_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Fetch the full Google Doc JSON.",
+      "name": "get_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "get_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Return the structural outline of a Google Doc (headings, paragraphs, tables) without inline runs.",
+      "name": "get_document_structure",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "get_document_structure_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Replace every occurrence of `find` with `replace` in a Google Doc.",
+      "name": "replace_text_in_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "find",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "replace",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "replace_text_in_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Insert text at a specific index in a Google Doc.",
+      "name": "insert_text_in_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "index",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "text",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "insert_text_in_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Delete a content range from a Google Doc.",
+      "name": "delete_range_in_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "end_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "start_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "delete_range_in_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "List/create/reply/resolve/delete comments on a Google Doc.",
+      "name": "manage_document_comments",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "list",
+              "create",
+              "reply",
+              "resolve",
+              "delete"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "comment_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "content",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_document_comments_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Apply bold/italic/underline/font size/named style to a range in a Google Doc.",
+      "name": "format_document_range",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "bold",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "end_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "font_size",
+          "required": false,
+          "schema": {
+            "type": "number"
+          }
+        },
+        {
+          "description": "",
+          "name": "italic",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "e.g. HEADING_1, NORMAL_TEXT",
+          "name": "named_style",
+          "required": false,
+          "schema": {
+            "description": "e.g. HEADING_1, NORMAL_TEXT",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "start_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "underline",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "format_document_range_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Update document-level style properties (page size, margins, etc.).",
+      "name": "set_document_style",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Field mask, defaults to '*'.",
+          "name": "fields",
+          "required": false,
+          "schema": {
+            "description": "Field mask, defaults to '*'.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "style",
+          "required": false,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "set_document_style_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Insert a table at the given index in a Google Doc.",
+      "name": "insert_table_in_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "columns",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "index",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "rows",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "insert_table_in_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Enumerate tables in a Google Doc.",
+      "name": "find_tables_in_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "find_tables_in_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Insert or delete a row or column in a Google Doc table.",
+      "name": "manage_table_structure",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "insert_row",
+              "insert_column",
+              "delete_row",
+              "delete_column"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "below",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "",
+          "name": "column",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "right",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "",
+          "name": "row",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "table_start_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_table_structure_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Manage tabs in a Google Doc: list, get_content, create, update (title/icon), or move (reparent/reorder).",
+      "name": "manage_document_tabs",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "list",
+              "get_content",
+              "create",
+              "update",
+              "move"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Icon emoji (create/update, optional).",
+          "name": "icon_emoji",
+          "required": false,
+          "schema": {
+            "description": "Icon emoji (create/update, optional).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Position index (create).",
+          "name": "index",
+          "required": false,
+          "schema": {
+            "description": "Position index (create).",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Move target position index.",
+          "name": "new_index",
+          "required": false,
+          "schema": {
+            "description": "Move target position index.",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Move target parent; empty string = root.",
+          "name": "new_parent_tab_id",
+          "required": false,
+          "schema": {
+            "description": "Move target parent; empty string = root.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Parent tab for nesting (create).",
+          "name": "parent_tab_id",
+          "required": false,
+          "schema": {
+            "description": "Parent tab for nesting (create).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Required for get_content, update, move.",
+          "name": "tab_id",
+          "required": false,
+          "schema": {
+            "description": "Required for get_content, update, move.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Tab title (create; optional for update).",
+          "name": "title",
+          "required": false,
+          "schema": {
+            "description": "Tab title (create; optional for update).",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_document_tabs_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Create a new tab in a Google Doc with a title and optional icon/parent/index.",
+      "name": "create_document_tab",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "icon_emoji",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "index",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "parent_tab_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "title",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "create_document_tab_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Move a paragraph (cut-and-paste) from a source index range to a destination index in a Google Doc.",
+      "name": "move_paragraph_in_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "destination_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "source_end_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "source_start_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "move_paragraph_in_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Apply paragraph-level formatting (named/heading style, alignment, indentation, spacing) to a range.",
+      "name": "format_paragraph_in_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "alignment",
+          "required": false,
+          "schema": {
+            "enum": [
+              "START",
+              "CENTER",
+              "END",
+              "JUSTIFIED"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "end_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "NORMAL_TEXT, HEADING_1..6, TITLE, SUBTITLE.",
+          "name": "heading_style",
+          "required": false,
+          "schema": {
+            "description": "NORMAL_TEXT, HEADING_1..6, TITLE, SUBTITLE.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "indent_first_line_pt",
+          "required": false,
+          "schema": {
+            "type": "number"
+          }
+        },
+        {
+          "description": "",
+          "name": "indent_start_pt",
+          "required": false,
+          "schema": {
+            "type": "number"
+          }
+        },
+        {
+          "description": "",
+          "name": "space_above_pt",
+          "required": false,
+          "schema": {
+            "type": "number"
+          }
+        },
+        {
+          "description": "",
+          "name": "space_below_pt",
+          "required": false,
+          "schema": {
+            "type": "number"
+          }
+        },
+        {
+          "description": "",
+          "name": "start_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "format_paragraph_in_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Create a bulleted or numbered list at a given index in a Google Doc.",
+      "name": "create_list_in_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "insert_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "items",
+          "required": true,
+          "schema": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        {
+          "description": "",
+          "name": "list_type",
+          "required": true,
+          "schema": {
+            "enum": [
+              "BULLETED",
+              "NUMBERED"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "create_list_in_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Insert an inline image (from a public https URL) at a given index, with optional width/height in points.",
+      "name": "insert_image_in_document",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "height_pt",
+          "required": false,
+          "schema": {
+            "type": "number"
+          }
+        },
+        {
+          "description": "Publicly accessible image URL.",
+          "name": "image_uri",
+          "required": true,
+          "schema": {
+            "description": "Publicly accessible image URL.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "insert_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "width_pt",
+          "required": false,
+          "schema": {
+            "type": "number"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "insert_image_in_document_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Apply padding/border/background/content-alignment to a cell range. Use row_index=-1 or column_index=-1 to target all rows/columns.",
+      "name": "format_table_cells",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "{red,green,blue} 0..1.",
+          "name": "background_color",
+          "required": false,
+          "schema": {
+            "description": "{red,green,blue} 0..1.",
+            "type": "object"
+          }
+        },
+        {
+          "description": "",
+          "name": "border",
+          "required": false,
+          "schema": {
+            "properties": {
+              "color": {
+                "description": "{red,green,blue} 0..1.",
+                "type": "object"
+              },
+              "dash_style": {
+                "enum": [
+                  "SOLID",
+                  "DOT",
+                  "DASH"
+                ],
+                "type": "string"
+              },
+              "sides": {
+                "items": {
+                  "enum": [
+                    "top",
+                    "bottom",
+                    "left",
+                    "right"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "width": {
+                "type": "number"
+              }
+            },
+            "type": "object"
+          }
+        },
+        {
+          "description": "0-based; -1 = all columns.",
+          "name": "column_index",
+          "required": true,
+          "schema": {
+            "description": "0-based; -1 = all columns.",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "content_alignment",
+          "required": false,
+          "schema": {
+            "enum": [
+              "TOP",
+              "MIDDLE",
+              "BOTTOM"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Required when column_index=-1.",
+          "name": "num_columns",
+          "required": false,
+          "schema": {
+            "description": "Required when column_index=-1.",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Required when row_index=-1.",
+          "name": "num_rows",
+          "required": false,
+          "schema": {
+            "description": "Required when row_index=-1.",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "padding",
+          "required": false,
+          "schema": {
+            "properties": {
+              "bottom": {
+                "type": "number"
+              },
+              "left": {
+                "type": "number"
+              },
+              "right": {
+                "type": "number"
+              },
+              "top": {
+                "type": "number"
+              }
+            },
+            "type": "object"
+          }
+        },
+        {
+          "description": "0-based; -1 = all rows.",
+          "name": "row_index",
+          "required": true,
+          "schema": {
+            "description": "0-based; -1 = all rows.",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "table_start_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "format_table_cells_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Set explicit column widths (PT; null = evenly distributed) or auto-balance from cell data.",
+      "name": "set_table_column_widths",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "algorithm",
+          "required": false,
+          "schema": {
+            "enum": [
+              "equalize",
+              "sqrt",
+              "proportional"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "auto_balance",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "Usable page width in PT (default 468).",
+          "name": "available_width",
+          "required": false,
+          "schema": {
+            "description": "Usable page width in PT (default 468).",
+            "type": "number"
+          }
+        },
+        {
+          "description": "",
+          "name": "column_widths",
+          "required": false,
+          "schema": {
+            "items": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": "array"
+          }
+        },
+        {
+          "description": "Required when auto_balance=true.",
+          "name": "data",
+          "required": false,
+          "schema": {
+            "description": "Required when auto_balance=true.",
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Font size in PT for the balance algorithm (default 11).",
+          "name": "font_size",
+          "required": false,
+          "schema": {
+            "description": "Font size in PT for the balance algorithm (default 11).",
+            "type": "number"
+          }
+        },
+        {
+          "description": "Minimum column width in PT (default 60).",
+          "name": "min_col_width",
+          "required": false,
+          "schema": {
+            "description": "Minimum column width in PT (default 60).",
+            "type": "number"
+          }
+        },
+        {
+          "description": "",
+          "name": "table_start_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "set_table_column_widths_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Apply a named style preset (minimal, bordered, striped, professional, plain) or custom overrides to an entire table.",
+      "name": "apply_table_style",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Override preset fields (header_background, header_text_bold, odd/even_row_background, border_color, border_width, border_dash_style, cell_padding).",
+          "name": "custom",
+          "required": false,
+          "schema": {
+            "description": "Override preset fields (header_background, header_text_bold, odd/even_row_background, border_color, border_width, border_dash_style, cell_padding).",
+            "type": "object"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "header_row",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "",
+          "name": "num_columns",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "num_rows",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "preset",
+          "required": false,
+          "schema": {
+            "enum": [
+              "minimal",
+              "bordered",
+              "striped",
+              "professional",
+              "plain"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "table_start_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "apply_table_style_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Post-processing pass: apply borders, a styled header row, and content-aware column widths to ALL tables in a Google Doc.",
+      "name": "format_document_tables",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "format_document_tables_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Manage headers/footers: get, create_header, create_footer, update_header, update_footer, delete_header, delete_footer. NOTE: update_header/update_footer always insert at the start of the segment, so repeated calls PREPEND rather than append.",
+      "name": "manage_document_header_footer",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "get",
+              "create_header",
+              "create_footer",
+              "update_header",
+              "update_footer",
+              "delete_header",
+              "delete_footer"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Required for update_footer/delete_footer.",
+          "name": "footer_id",
+          "required": false,
+          "schema": {
+            "description": "Required for update_footer/delete_footer.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Required for update_header/delete_header.",
+          "name": "header_id",
+          "required": false,
+          "schema": {
+            "description": "Required for update_header/delete_header.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Required for update_header/update_footer. Inserted at segment index 0 — repeated calls prepend, they do not append.",
+          "name": "text",
+          "required": false,
+          "schema": {
+            "description": "Required for update_header/update_footer. Inserted at segment index 0 — repeated calls prepend, they do not append.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_document_header_footer_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Create a Google Doc by copying a template, replacing {{PLACEHOLDER}} strings from a replacements map.",
+      "name": "create_document_from_template",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "destination_folder_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Map of placeholder name (without braces) to value; each KEY is matched as {{KEY}}.",
+          "name": "replacements",
+          "required": false,
+          "schema": {
+            "description": "Map of placeholder name (without braces) to value; each KEY is matched as {{KEY}}.",
+            "type": "object"
+          }
+        },
+        {
+          "description": "",
+          "name": "template_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "title",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "create_document_from_template_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Get the named style definitions (NORMAL_TEXT, TITLE, SUBTITLE, HEADING_1..6) for a Google Doc.",
+      "name": "get_document_named_styles",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "get_document_named_styles_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Update one or more named style definitions (text and/or paragraph formatting) in a Google Doc.",
+      "name": "update_document_named_styles",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "document_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "List of {named_style_type, text_style?, paragraph_style?} updates.",
+          "name": "styles",
+          "required": true,
+          "schema": {
+            "description": "List of {named_style_type, text_style?, paragraph_style?} updates.",
+            "items": {
+              "properties": {
+                "named_style_type": {
+                  "enum": [
+                    "NORMAL_TEXT",
+                    "TITLE",
+                    "SUBTITLE",
+                    "HEADING_1",
+                    "HEADING_2",
+                    "HEADING_3",
+                    "HEADING_4",
+                    "HEADING_5",
+                    "HEADING_6"
+                  ],
+                  "type": "string"
+                },
+                "paragraph_style": {
+                  "description": "alignment, line_spacing, space_above, space_below.",
+                  "type": "object"
+                },
+                "text_style": {
+                  "description": "bold, italic, underline, font_size, font_family, text_color{red,green,blue}.",
+                  "type": "object"
+                }
+              },
+              "required": [
+                "named_style_type"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "update_document_named_styles_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Fetch a spreadsheet's metadata (and optionally grid data).",
+      "name": "get_spreadsheet",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "include_grid_data",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "",
+          "name": "spreadsheet_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "get_spreadsheet_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Create a spreadsheet or add/delete sheets within one.",
+      "name": "manage_spreadsheet",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "create",
+              "add_sheet",
+              "delete_sheet"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "sheet_id",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "spreadsheet_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "title",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_spreadsheet_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Read, write, append, or clear cell values in a sheet range.",
+      "name": "modify_sheet_values",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": false,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "read",
+              "write",
+              "update",
+              "append",
+              "clear"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "A1 notation, e.g. 'Sheet1!A1:C10'",
+          "name": "range",
+          "required": true,
+          "schema": {
+            "description": "A1 notation, e.g. 'Sheet1!A1:C10'",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "spreadsheet_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "values",
+          "required": false,
+          "schema": {
+            "items": {
+              "type": "array"
+            },
+            "type": "array"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "modify_sheet_values_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Format a range via a discrete action (format_cells, set_number_format, merge, set_column_width) or 'raw' to pass batchUpdate requests directly. format_cells, set_number_format, and merge REQUIRE all four of start_row_index/end_row_index/start_column_index/end_column_index — an omitted bound is rejected rather than silently applied to the rest of the sheet (this matters most for merge, which would otherwise merge the entire tab into one cell and discard the other cells' values).",
+      "name": "format_sheet",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": false,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "format_cells",
+              "set_number_format",
+              "merge",
+              "set_column_width",
+              "raw"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "RGB(A) array [r,g,b(,a)] (0..1) or {red,green,blue,alpha} object.",
+          "name": "background_color",
+          "required": false,
+          "schema": {
+            "description": "RGB(A) array [r,g,b(,a)] (0..1) or {red,green,blue,alpha} object.",
+            "oneOf": [
+              {
+                "type": "array"
+              },
+              {
+                "type": "object"
+              }
+            ]
+          }
+        },
+        {
+          "description": "",
+          "name": "bold",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "",
+          "name": "dimension",
+          "required": false,
+          "schema": {
+            "enum": [
+              "COLUMNS",
+              "ROWS"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "end_column_index",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "end_index",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "end_row_index",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "font_size",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "horizontal_alignment",
+          "required": false,
+          "schema": {
+            "enum": [
+              "LEFT",
+              "CENTER",
+              "RIGHT"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "italic",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "",
+          "name": "merge_type",
+          "required": false,
+          "schema": {
+            "enum": [
+              "MERGE_ALL",
+              "MERGE_COLUMNS",
+              "MERGE_ROWS"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "number_format_type",
+          "required": false,
+          "schema": {
+            "enum": [
+              "TEXT",
+              "NUMBER",
+              "PERCENT",
+              "CURRENCY",
+              "DATE",
+              "TIME",
+              "DATE_TIME",
+              "SCIENTIFIC"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Number/date format pattern.",
+          "name": "pattern",
+          "required": false,
+          "schema": {
+            "description": "Number/date format pattern.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "pixel_size",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "requests",
+          "required": false,
+          "schema": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        {
+          "description": "Sheet (tab) id the range lives in.",
+          "name": "sheet_id",
+          "required": false,
+          "schema": {
+            "description": "Sheet (tab) id the range lives in.",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "spreadsheet_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "start_column_index",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "start_index",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "start_row_index",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "RGB(A) array [r,g,b(,a)] (0..1) or {red,green,blue,alpha} object.",
+          "name": "text_color",
+          "required": false,
+          "schema": {
+            "description": "RGB(A) array [r,g,b(,a)] (0..1) or {red,green,blue,alpha} object.",
+            "oneOf": [
+              {
+                "type": "array"
+              },
+              {
+                "type": "object"
+              }
+            ]
+          }
+        },
+        {
+          "description": "",
+          "name": "vertical_alignment",
+          "required": false,
+          "schema": {
+            "enum": [
+              "TOP",
+              "MIDDLE",
+              "BOTTOM"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "wrap_strategy",
+          "required": false,
+          "schema": {
+            "enum": [
+              "OVERFLOW_CELL",
+              "LEGACY_WRAP",
+              "CLIP",
+              "WRAP"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "format_sheet_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Add a bar/column/line/area/pie chart over a data grid (first column = labels/domain, remaining columns = series).",
+      "name": "create_chart",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "anchor_column",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "anchor_row",
+          "required": false,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "chart_type",
+          "required": true,
+          "schema": {
+            "enum": [
+              "column",
+              "bar",
+              "line",
+              "area",
+              "scatter",
+              "pie"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "end_column_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "end_row_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "First data row is a header (default true).",
+          "name": "has_headers",
+          "required": false,
+          "schema": {
+            "description": "First data row is a header (default true).",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "LABELED_LEGEND (labels drawn next to each slice) is only valid for pie charts.",
+          "name": "legend_position",
+          "required": false,
+          "schema": {
+            "description": "LABELED_LEGEND (labels drawn next to each slice) is only valid for pie charts.",
+            "enum": [
+              "BOTTOM_LEGEND",
+              "LEFT_LEGEND",
+              "RIGHT_LEGEND",
+              "TOP_LEGEND",
+              "NO_LEGEND",
+              "LABELED_LEGEND"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Place chart on a new sheet (default true).",
+          "name": "new_sheet",
+          "required": false,
+          "schema": {
+            "description": "Place chart on a new sheet (default true).",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "Overlay target sheet when new_sheet=false.",
+          "name": "position_sheet_id",
+          "required": false,
+          "schema": {
+            "description": "Overlay target sheet when new_sheet=false.",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Sheet id holding the source data.",
+          "name": "source_sheet_id",
+          "required": true,
+          "schema": {
+            "description": "Sheet id holding the source data.",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "spreadsheet_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "start_column_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "start_row_index",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "description": "",
+          "name": "title",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "x_axis_title",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "y_axis_title",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "create_chart_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Read Google Slides: list presentations, fetch a whole deck, a single slide by index, or all text.",
+      "name": "get_slides",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": false,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "list",
+              "get_presentation",
+              "get_slide",
+              "get_text"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Max presentations to return for `list` (default 20).",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "description": "Max presentations to return for `list` (default 20).",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Presentation id (required for all actions except `list`).",
+          "name": "presentation_id",
+          "required": false,
+          "schema": {
+            "description": "Presentation id (required for all actions except `list`).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Name substring to filter by for the `list` action.",
+          "name": "query",
+          "required": false,
+          "schema": {
+            "description": "Name substring to filter by for the `list` action.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Zero-based slide index for the `get_slide` action.",
+          "name": "slide_index",
+          "required": false,
+          "schema": {
+            "description": "Zero-based slide index for the `get_slide` action.",
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "get_slides_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Create a presentation, create/delete a slide, or replace an element's text.",
+      "name": "manage_slides",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "create_presentation",
+              "create_slide",
+              "delete_slide",
+              "update_text"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Zero-based position for a new slide (`create_slide`).",
+          "name": "insertion_index",
+          "required": false,
+          "schema": {
+            "description": "Zero-based position for a new slide (`create_slide`).",
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Predefined slide layout for `create_slide` (default BLANK).",
+          "name": "layout",
+          "required": false,
+          "schema": {
+            "description": "Predefined slide layout for `create_slide` (default BLANK).",
+            "enum": [
+              "BLANK",
+              "CAPTION_ONLY",
+              "TITLE",
+              "TITLE_AND_BODY",
+              "TITLE_AND_TWO_COLUMNS",
+              "TITLE_ONLY",
+              "SECTION_HEADER",
+              "SECTION_TITLE_AND_DESCRIPTION",
+              "ONE_COLUMN_TEXT",
+              "MAIN_POINT",
+              "BIG_NUMBER"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Target element id for `update_text`.",
+          "name": "object_id",
+          "required": false,
+          "schema": {
+            "description": "Target element id for `update_text`.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "presentation_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "slide_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Replacement text for `update_text`.",
+          "name": "text",
+          "required": false,
+          "schema": {
+            "description": "Replacement text for `update_text`.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "title",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_slides_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "Add content to a slide: a plain or formatted text box, an image from a URL, or a new bulleted-list slide.",
+      "name": "add_slide_content",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "bold",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "Hex color `#RRGGBB` for `formatted_text_box`.",
+          "name": "font_color",
+          "required": false,
+          "schema": {
+            "description": "Hex color `#RRGGBB` for `formatted_text_box`.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Point size for `formatted_text_box`.",
+          "name": "font_size",
+          "required": false,
+          "schema": {
+            "description": "Point size for `formatted_text_box`.",
+            "type": "number"
+          }
+        },
+        {
+          "description": "Publicly fetchable image URL for `type=image`.",
+          "name": "image_url",
+          "required": false,
+          "schema": {
+            "description": "Publicly fetchable image URL for `type=image`.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "italic",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "Bullet lines for `type=bulleted_list`.",
+          "name": "items",
+          "required": false,
+          "schema": {
+            "description": "Bullet lines for `type=bulleted_list`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        {
+          "description": "Layout for the new slide created by `bulleted_list` (default BLANK).",
+          "name": "layout",
+          "required": false,
+          "schema": {
+            "description": "Layout for the new slide created by `bulleted_list` (default BLANK).",
+            "enum": [
+              "BLANK",
+              "CAPTION_ONLY",
+              "TITLE",
+              "TITLE_AND_BODY",
+              "TITLE_AND_TWO_COLUMNS",
+              "TITLE_ONLY",
+              "SECTION_HEADER",
+              "SECTION_TITLE_AND_DESCRIPTION",
+              "ONE_COLUMN_TEXT",
+              "MAIN_POINT",
+              "BIG_NUMBER"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "presentation_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "Target slide id (text_box/formatted_text_box/image).",
+          "name": "slide_id",
+          "required": false,
+          "schema": {
+            "description": "Target slide id (text_box/formatted_text_box/image).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Text for a text box, or newline-delimited bullet items.",
+          "name": "text",
+          "required": false,
+          "schema": {
+            "description": "Text for a text box, or newline-delimited bullet items.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Content kind to add (default text_box).",
+          "name": "type",
+          "required": false,
+          "schema": {
+            "description": "Content kind to add (default text_box).",
+            "enum": [
+              "text_box",
+              "formatted_text_box",
+              "image",
+              "bulleted_list"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "add_slide_content_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/presentations",
+        "https://www.googleapis.com/auth/drive"
+      ]
+    },
+    {
+      "description": "CRUD Google Tasks lists (list, get one by id, create, update, delete).",
+      "name": "manage_task_lists",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "list",
+              "get",
+              "create",
+              "update",
+              "delete"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "Required for get/update/delete.",
+          "name": "tasklist_id",
+          "required": false,
+          "schema": {
+            "description": "Required for get/update/delete.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "title",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "updates",
+          "required": false,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_task_lists_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/tasks"
+      ]
+    },
+    {
+      "description": "CRUD, complete/move, get one, or search tasks within Google Tasks lists.",
+      "name": "manage_tasks",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Operation to perform.",
+          "name": "action",
+          "required": true,
+          "schema": {
+            "description": "Operation to perform.",
+            "enum": [
+              "list",
+              "get",
+              "create",
+              "update",
+              "delete",
+              "complete",
+              "move",
+              "search"
+            ],
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "parent",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "previous",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "search: case-insensitive substring matched against task title/notes across all lists.",
+          "name": "query",
+          "required": false,
+          "schema": {
+            "description": "search: case-insensitive substring matched against task title/notes across all lists.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "search: include completed tasks (default true).",
+          "name": "show_completed",
+          "required": false,
+          "schema": {
+            "description": "search: include completed tasks (default true).",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "",
+          "name": "task",
+          "required": false,
+          "schema": {
+            "type": "object"
+          }
+        },
+        {
+          "description": "Required for get/update/delete/complete/move.",
+          "name": "task_id",
+          "required": false,
+          "schema": {
+            "description": "Required for get/update/delete/complete/move.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "tasklist_id",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "description": "",
+          "name": "updates",
+          "required": false,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "manage_tasks_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/tasks"
+      ]
+    },
+    {
+      "description": "List tasks from the default Google Tasks list (id, title, due, status, notes).",
+      "name": "list_tasks",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Maximum number of tasks to return (default 20).",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "description": "Maximum number of tasks to return (default 20).",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "description": "Include completed tasks (default false).",
+          "name": "show_completed",
+          "required": false,
+          "schema": {
+            "description": "Include completed tasks (default false).",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "Optional task list ID; defaults to the user's @default list.",
+          "name": "tasklist_id",
+          "required": false,
+          "schema": {
+            "description": "Optional task list ID; defaults to the user's @default list.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "list_tasks_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/tasks"
+      ]
+    },
+    {
+      "description": "Mark a single Google Task as completed.",
+      "name": "complete_task",
+      "params": [
+        {
+          "description": "The Google account profile to use. Defaults to the default profile.",
+          "name": "account",
+          "required": false,
+          "schema": {
+            "description": "The Google account profile to use. Defaults to the default profile.",
+            "type": "string"
+          }
+        },
+        {
+          "description": "The task ID (from list_tasks).",
+          "name": "task_id",
+          "required": true,
+          "schema": {
+            "description": "The task ID (from list_tasks).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "Optional task list ID; defaults to @default.",
+          "name": "tasklist_id",
+          "required": false,
+          "schema": {
+            "description": "Optional task list ID; defaults to @default.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "description": "Tool result envelope; structure varies by tool.",
+        "name": "complete_task_result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "x-google-scopes": [
+        "https://www.googleapis.com/auth/tasks"
+      ]
+    }
+  ],
+  "openrpc": "1.3.2"
+}

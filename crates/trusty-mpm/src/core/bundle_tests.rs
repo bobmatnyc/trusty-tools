@@ -1281,7 +1281,7 @@ fn output_styles_mirror_the_pm_prose_rules() {
         "**No praise for the user.**",
         "**If you are saying it, its worth is implied.**",
         "**Do not embellish.**",
-        "the banned word \"honest\"",
+        "**Banned word — \"honest\", and every variation.**",
         "**Ticket and PR bodies**",
         "never whether it is said",
     ];
@@ -1340,6 +1340,46 @@ fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
         assert!(
             composed.contains(needle),
             "composed agent is missing the borrowed-metaphor ban {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn the_honest_ban_reaches_both_prose_channels() {
+    // The word ban used to live only in the manifest block the composed prompt
+    // carries, so a manual `claude` launch never received it and the output
+    // styles pointed at a rule they did not state. It now states the rule, in
+    // every position the word can take — the owner's flagged instance was the
+    // heading modifier "Distribution, stated honestly", not a bare "honest".
+    use crate::core::agent_builder::compose_agent;
+    use std::path::Path;
+
+    const REQUIRED: &[&str] = &[
+        "**Banned word — \"honest\", and every variation.**",
+        "adjective, adverb, heading modifier, parenthetical",
+        "\"Distribution, stated honestly:\"",
+    ];
+
+    for style in OUTPUT_STYLES {
+        for needle in REQUIRED {
+            assert!(
+                style.content.contains(needle),
+                "{} is missing the \"honest\" ban {needle:?}",
+                style.id
+            );
+        }
+    }
+
+    let assets_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("assets")
+        .join("agents");
+    let composed =
+        compose_agent("version-control", &assets_dir).expect("compose_agent must succeed");
+    for needle in REQUIRED {
+        assert!(
+            composed.contains(needle),
+            "composed agent is missing the \"honest\" ban {needle:?}"
         );
     }
 }
