@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::collect::ai_attribution::AgenticMode;
+use crate::collect::ai_attribution::{provenance_possibly_stripped, AgenticMode};
 
 /// The three text families a commit exposes to detection.
 ///
@@ -52,8 +52,9 @@ impl<'a> CommitSignals<'a> {
 ///
 /// Why: `ai_tool`, `is_ai_assisted` and `agentic_mode` are written from the
 /// same scan so they cannot disagree about whether a commit was AI-assisted.
-/// What: `tool` is the winning marker's label; `mode` is
-/// [`AgenticMode::None`] when nothing matched.
+/// What: `tool` is the winning marker's label; when nothing matched, `mode` is
+/// [`AgenticMode::None`], or [`AgenticMode::Unknown`] if the message shows a
+/// rewrite fingerprint (#5250).
 /// Test: `tests::detects_trusty_mpm_footer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Detection {
@@ -71,9 +72,12 @@ pub struct Detection {
 /// What: extracts the `Co-Authored-By:` values once, then tests markers in
 /// order. The first `FullAgentic` match returns immediately, so it outranks an
 /// `IdeAssisted` match found earlier in the list; among `IdeAssisted` matches
-/// the earliest supplies the label.
+/// the earliest supplies the label. With no match at all the verdict splits on
+/// [`provenance_possibly_stripped`] (#5250) — the equivalence above is why that
+/// predicate reads the message only, never the identities the backfill lacks.
 /// Test: `tests::detects_trusty_mpm_footer`,
-/// `tests::full_agentic_wins_over_ide_assisted`.
+/// `tests::full_agentic_wins_over_ide_assisted`,
+/// `tests::merge_summary_is_unknown_not_none`.
 pub fn detect(signals: &CommitSignals<'_>) -> Detection {
     let trailers: Vec<&str> = trailer_line()
         .captures_iter(signals.message)
@@ -97,7 +101,7 @@ pub fn detect(signals: &CommitSignals<'_>) -> Detection {
                     ide = Some(marker.tool);
                 }
             }
-            AgenticMode::None => {}
+            AgenticMode::None | AgenticMode::Unknown => {}
         }
     }
 
@@ -105,6 +109,12 @@ pub fn detect(signals: &CommitSignals<'_>) -> Detection {
         Some(tool) => Detection {
             tool: Some(tool),
             mode: AgenticMode::IdeAssisted,
+        },
+        // #5250: a message git or the forge composed never had room for the
+        // author's marker, so "no marker" is not a human-work finding there.
+        None if provenance_possibly_stripped(signals.message) => Detection {
+            tool: None,
+            mode: AgenticMode::Unknown,
         },
         None => Detection {
             tool: None,
@@ -436,6 +446,28 @@ mod tests {
             mode_of("fix: x\n\nCo-authored-by: openhands <openhands@all-hands.dev>"),
             AgenticMode::FullAgentic
         );
+    }
+
+    /// Why: #5250 — the fingerprint split happens inside `detect`, not only in
+    /// the predicate, and the email family must not change the verdict. The
+    /// backfill path sees empty emails, so a merge summary has to classify
+    /// identically with and without them or a repaired row stops matching a
+    /// freshly walked one.
+    #[test]
+    fn merge_summary_is_unknown_not_none() {
+        let msg = "Merge branch 'feat/x' into main";
+        let by_message = detect(&CommitSignals::from_message(msg));
+        assert_eq!(by_message.mode, AgenticMode::Unknown);
+        assert_eq!(by_message.tool, None);
+
+        let with_identities = detect(&CommitSignals {
+            message: msg,
+            author_email: "engineer@example.com",
+            committer_email: "noreply@github.com",
+        });
+        assert_eq!(with_identities, by_message);
+
+        assert_eq!(mode_of("feat: add button"), AgenticMode::None);
     }
 
     /// Why: the disclosure is the answer to "does a low share mean no AI?".

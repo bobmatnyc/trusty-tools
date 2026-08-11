@@ -431,8 +431,13 @@ indistinguishable from human work — so a low share means "no markers
 emitted", not "no AI assistance". `collect::ai_markers::detection_disclosure()`
 returns the active tool list plus that caveat, and `tga collect` logs it once
 per run; the section renders it verbatim rather than presenting a bare
-percentage. #5250 proposes a distinct `unknown` state so a stripped-marker
-commit stops sharing a bucket with a genuinely human one.
+percentage. #5250 ships a distinct `unknown` state for the part of that
+population detection can prove: a commit whose message git or the forge
+composed, so the author's marker was discarded before the commit object
+existed. `agentic_pct` keeps those commits in its denominator and out of its
+numerator, which makes the figure an explicit lower bound. It does not reach
+a squash whose body is the PR description — that needs the pre-squash commits
+or the PR body, neither of which the commit carries.
 
 The marker set is a fixed list in `collect::ai_markers::BUILTIN`. Detecting a
 target org's own house footer therefore needs a tga release, and an audit of a
