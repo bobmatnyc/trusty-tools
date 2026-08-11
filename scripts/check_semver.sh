@@ -72,9 +72,12 @@
 #   So the run happens anyway, with `--release-type minor` forcing the full
 #   breaking-change lint set to apply, and its result is reported as an
 #   INVENTORY: the complete list of what this release breaks, for a human to
-#   check against what they meant to break. It is ADVISORY and cannot fail this
-#   gate — a major release is entitled to break things, and turning a permitted
-#   break into a red gate would just teach people to ignore it. What it costs is
+#   check against what they meant to break. Its FINDINGS are ADVISORY and cannot
+#   fail this gate — a major release is entitled to break things, and turning a
+#   permitted break into a red gate would just teach people to ignore it. The
+#   gate's own preconditions are unchanged: cargo-semver-checks must still be
+#   installed, because "the tool is missing" is a fact about the gate's readiness
+#   and never about the crate. What it costs is
 #   ~4 minutes of rustdoc on already-breaking releases only; what it buys is the
 #   one question the skip could not answer: did an UNINTENDED break ride along?
 #
