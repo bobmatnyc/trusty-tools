@@ -9,7 +9,7 @@ sequence.
 
 | ADR | Title | Status |
 |---|---|---|
-| [0001](./0001-consolidate-library-micro-crates.md) | Consolidate library micro-crates into one feature-gated crate | Accepted |
+| [0001](./0001-consolidate-library-micro-crates.md) | Consolidate library micro-crates into one feature-gated crate | Amended by workspace ADR-0040 |
 
 ---
 

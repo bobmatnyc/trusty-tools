@@ -1,9 +1,17 @@
 # 0014. Ship full native MCP support (ticketing, gworkspace, Slack/Telegram, and more)
 
-- **Status:** Accepted
+- **Status:** Amended by [0040](0040-trusty-mcp-services-absorbs-trusty-gworkspace.md), [0041](0041-trusty-okg-native-crate-search-absorbs-okf-indexing.md)
 - **Date:** 2026-07-14
 - **Scope:** Workspace-wide
-- **Supersedes / Superseded by:** — (none)
+- **Reversibility Cost:** High — MCP service packaging, shared protocol
+  primitives, and the single-language distribution model affect multiple
+  crates and installed integrations.
+- **Decision Drivers:** Single Rust toolchain, one installation and signing
+  path, shared MCP contracts and observability, avoidance of third-party
+  runtime dependencies
+- **Supersedes / Superseded by:** ADR-0040 changes the MCP framework and service
+  packaging; ADR-0041 applies that consumer-boundary rule to trusty-okg. The
+  native, in-workspace Rust decision remains in force.
 
 ## Context
 
@@ -120,3 +128,19 @@ long-term integration point for a key product surface.
 - DOC-22 / DOC-36 — three-layer communication model routing Slack/Telegram/MCP
   through `SessionProxy`
 - Commit `a90ba071` — absorption of `trusty-mcp-core` into `trusty-common`
+
+## Related Decisions
+
+Vetted retrospectively against the workspace corpus on 2026-08-11:
+
+- **ADR-0002 (Single-install convention):** Consistent — native Rust MCP
+  services preserve the shared Cargo-based installation model.
+- **ADR-0004 (Three harnesses):** Consistent — MCP services remain process
+  boundaries rather than sibling-harness library dependencies.
+- **ADR-0040 (MCP framework and services split):** Amends — extracts the shared
+  framework from `trusty-common` and narrows which integrations belong in the
+  service host without reversing native MCP support.
+- **ADR-0041 (trusty-okg consumer split):** Amends — applies ADR-0040's
+  agent-consumer/framework-consumer criterion to one capability.
+
+No silent contradictions remain after those amendments.

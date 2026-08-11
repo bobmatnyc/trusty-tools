@@ -108,7 +108,7 @@ trusty-code = { path = "crates/trusty-code" }
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.5.0" }
-trusty-common = { path = "crates/trusty-common", version = "0.30" }
+trusty-common = { path = "crates/trusty-common", version = "0.31" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.10" }
@@ -126,7 +126,7 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose
 # the trusty-review pipeline as `tr_review_*` tools (#630).
-trusty-review = { path = "crates/trusty-review", version = "0.13" }
+trusty-review = { path = "crates/trusty-review", version = "0.14" }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
@@ -217,6 +217,10 @@ clap = { version = "4", features = ["derive", "env"] }
 # secret from the TTY without echoing it so keys never land in shell history.
 rpassword = "7"
 toml = "0.8"
+# Format-preserving TOML editing for `trusty-common::codex_config` (#5264):
+# the Codex CLI config is a hand-maintained file, so a registration repair must
+# not reflow the operator's comments and unrelated tables.
+toml_edit = "0.22"
 libc = "0.2"
 unicode-width = "0.2"
 # `.env.local` loader for the trusty-common `credentials` resolver

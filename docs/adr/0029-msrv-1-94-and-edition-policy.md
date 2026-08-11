@@ -3,6 +3,12 @@
 - **Status:** Accepted
 - **Date:** 2026-08-05
 - **Scope:** Workspace-wide
+- **Reversibility Cost:** High — lowering the floor would require dependency
+  pinning or feature-boundary changes across every crate that consumes the AWS
+  SDK, while raising it changes the supported compiler contract workspace-wide.
+- **Decision Drivers:** AWS SDK MSRV constraints, reproducible `cargo install`
+  behavior without `--locked`, continued access to dependency security and
+  model updates, one workspace compiler floor
 - **Supersedes / Superseded by:** Supersedes [0003](./0003-msrv-and-edition-policy.md)
 
 ## Context

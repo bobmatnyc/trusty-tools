@@ -588,6 +588,15 @@ enum Commands {
         /// `list_indexes` and guess. Without this flag, behaviour is unchanged
         /// (callers must supply `index_id`; fan-out sweeps all). Wins over
         /// `--project` when both are given.
+        ///
+        /// Also reads `TRUSTY_INDEX`, which is what lets ADR-0042 share one
+        /// argless `["serve"]` MCP declaration across projects. The `env` is
+        /// declared once on the global `Cli::index`; this field spells the same
+        /// clap id, so clap fills it from that one arg rather than treating it
+        /// as a second, environment-blind one.
+        // #4181: the shared id is what carries TRUSTY_INDEX here — renaming
+        // either field, or dropping `global` from Cli::index, breaks it.
+        // Precedence is pinned by `commands::serve::index_env_tests`.
         #[arg(long)]
         index: Option<String>,
 
@@ -1198,20 +1207,17 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
     });
 
 async fn run() -> Result<()> {
-    // #2405: route the `.env.local` startup load through the ONE shared,
-    // idempotent loader in trusty-common (`credentials::load_env_local_once`)
-    // instead of an ad hoc `dotenvy::from_filename` call. This retires the
-    // bespoke copy the #2404 review flagged, so `config keys list`'s tier
-    // reporting is driven by a single controlled load order. Semantics are
-    // preserved: dotenvy never overrides an already-set process env var, so
-    // `env > .env.local > store` precedence is unchanged.
-    trusty_common::credentials::load_env_local_once();
+    // #4827: both loads must happen BEFORE clap parses — it reads
+    // `#[arg(long, env = "…")]` values from the real process env during the
+    // parse below, so anything sourced afterwards is a silent no-op. Ordering
+    // and the `start`-only gate on daemon.env live in `bootstrap_process_env`.
+    let argv: Vec<String> = std::env::args().collect();
+    trusty_search::service::bootstrap_process_env(&argv);
 
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion to clap's standard error rendering before
     // exiting (issue #216). On success the parse is indistinguishable from
     // the original `Cli::parse()` call.
-    let argv: Vec<String> = std::env::args().collect();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -1419,16 +1425,7 @@ async fn run() -> Result<()> {
             index,
             project,
         } => {
-            // Resolve the pinned index id (#1373): `--index` wins; otherwise
-            // derive it from `--project` via the shared derivation so it
-            // matches the CLI / trusty-mpm.
-            let pinned_index = index.or_else(|| {
-                project.map(|p| {
-                    let start = std::path::PathBuf::from(&p);
-                    let root = trusty_common::resolve_project_root(&start);
-                    trusty_common::derive_index_id(&root)
-                })
-            });
+            let pinned_index = commands::serve::resolve_pinned_index(index, project);
             commands::serve::handle_serve(with_http, port, http, pinned_index).await?;
         }
 

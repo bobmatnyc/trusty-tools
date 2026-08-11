@@ -3,18 +3,40 @@
 //! Why: The mutating half of the update flow. The #1316 added requirement makes
 //! the safety property explicit: present the available updates and apply them
 //! ONLY after confirmation (`--yes` skips the prompt for automation). Daemons
-//! are restarted cleanly after upgrade via `upgrade_and_restart` so launchd-
-//! supervised members come back on the new binary.
+//! are restarted after the new binary lands, instead of being left serving the
+//! old process indefinitely.
+//!
+//! 🔴 What that restart does NOT yet guarantee (#4964, Phase 4 owns the fix):
+//! the daemon comes back on the NEW binary only when the plist's
+//! `ProgramArguments[0]` already points at the directory this upgrade wrote to.
+//! `bootout`/`bootstrap` re-exec whatever path the plist names, and nothing on
+//! this path rewrites it. Today the prebuilt branch writes `~/.local/bin` while
+//! the `cargo install` fallback writes `$CARGO_HOME/bin`, so on a host whose
+//! plist was baked from the other directory the bounce costs a downtime window
+//! and brings the SAME OLD BINARY back — while the report still says
+//! "upgraded to X; restarted". That is a false success report, and it is why
+//! Phase 4's plist regeneration is a prerequisite for the guarantee rather than
+//! a cleanup after it. Phase 3 (single destination) removes the divergence that
+//! makes it reachable; until both land, read "restarted" as exactly that and no
+//! more.
 //!
 //! What: Gathers candidates (`update_engine`), runs the pure confirm-then-apply
-//! gate (`decide_apply`), and — only on `Apply` — upgrades each member. Daemons
-//! go through `upgrade_and_restart` (cargo install + health-gate + connection-
-//! safe restart); non-daemons go through `perform_upgrade` + `verify_installed_
-//! binary`. Progress rows render via `trusty-progress`. `--check` is a read-only
-//! alias for `tctl updates`.
+//! gate (`decide_apply`), and — only on `Apply` — upgrades each member: prebuilt
+//! download first, `cargo install` as the fallback, then a concrete-path health
+//! gate, then (daemons only) a restart through the same launchd path `tctl
+//! restart` uses. Progress rows render via `trusty-progress`. `--check` is a
+//! read-only alias for `tctl updates`.
 //!
-//! Test: `tests` covers the decision routing and the JSON report shaping; the
-//! actual `cargo install` + restart path is side-effecting.
+//! #4964: the daemon branches used to call
+//! `trusty_common::update::upgrade_and_restart`, which ran `cargo install`
+//! even when the prebuilt had just been placed (writing the binary to two
+//! directories in one command) and whose restart step could not restart
+//! anything when the caller is `tctl`. See `upgrade_one`'s doc.
+//!
+//! Test: `upgrade_tests.rs` (the sibling `#[path]`-included `tests` module —
+//! split out under the 500-SLOC production cap) covers the decision routing,
+//! the JSON report shaping, and the #4964 restart plan; the actual `cargo
+//! install` + restart path is side-effecting.
 
 use serde::Serialize;
 use tokio::runtime::Handle;
@@ -352,11 +374,10 @@ impl UpgradeDetail {
 /// the cargo path is the universal fallback for unsupported platforms and failures.
 /// Daemons must restart via the connection-safe path after upgrade.
 ///
-/// What: For each candidate, attempts a prebuilt download (Phase 2 / #1760):
-/// - Non-daemons: `try_install_prebuilt` → fallback to `perform_upgrade` +
-///   `verify_installed_binary_at_path`, then a PATH-shadow check (#3554).
-/// - Daemons: `try_install_prebuilt` (updates the binary on disk) → fallback to
-///   `upgrade_and_restart` (cargo install + connection-safe restart).
+/// What: For each candidate, attempts a prebuilt download (Phase 2 / #1760),
+/// falling back to `perform_upgrade` (`cargo install`), then health-gates the
+/// concrete path. Non-daemons additionally run a PATH-shadow check (#3554);
+/// daemons are restarted via `restart_daemon_member` (#4964).
 ///
 /// Renders a per-member narration line + a final component table. A genuine
 /// shadow is surfaced via `narr.error` (not `info`), same as a real failure,
@@ -414,80 +435,89 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
 /// Why: Extracted from `apply_all` to keep the loop body readable and to allow
 /// the `?` operator to propagate errors cleanly per-candidate.
 ///
-/// What: Tries `try_install_prebuilt`; on success the binary is on disk. For
-/// daemons, always runs the restart step (via `upgrade_and_restart` or a
-/// post-placement restart) to activate the new binary. On fallback, runs
-/// `upgrade_and_restart` (daemons) or `perform_upgrade` +
-/// `verify_installed_binary_at_path` (non-daemons). The two non-daemon
-/// branches ALSO run `shadow_check::detect` after the health gate passes
-/// (#3554 review — this was missing from the initial fix: the health-gate
-/// half landed for `tctl upgrade` but not the shadow-detection half, so a
-/// host with `~/.cargo/bin/tm` shadowing `~/.local/bin/tm` got the right
-/// version logged with zero warning that the shell still resolves the stale
-/// binary). `path_env` is the real `$PATH`, threaded in from `apply_all` so
-/// it is resolved once per `apply_all` call, not once per candidate.
+/// What: Tries `try_install_prebuilt`; on success the binary is on disk. On
+/// fallback, runs `perform_upgrade` (`cargo install`). EITHER way the binary is
+/// then health-gated at its CONCRETE path and, for a daemon member, activated
+/// via [`restart_daemon_member`]. Non-daemon branches ALSO run
+/// `shadow_check::detect` after the health gate passes (#3554 review — this was
+/// missing from the initial fix: the health-gate half landed for `tctl upgrade`
+/// but not the shadow-detection half, so a host with `~/.cargo/bin/tm`
+/// shadowing `~/.local/bin/tm` got the right version logged with zero warning
+/// that the shell still resolves the stale binary). `path_env` is the real
+/// `$PATH`, threaded in from `apply_all` so it is resolved once per `apply_all`
+/// call, not once per candidate.
 ///
-/// The daemon branches (`upgrade_and_restart`) are deliberately NOT given the
-/// same concrete-path/shadow treatment: that primitive is shared with
-/// trusty-memory/trusty-search's own self-upgrade tool in `trusty-common`,
-/// so switching it is a materially larger, riskier change than this issue's
-/// scope — tracked as deliberate follow-up, not a gap left by accident.
+/// 🔴 #4964 Phase 1 — this function no longer calls
+/// `trusty_common::update::upgrade_and_restart`, on either daemon branch. Two
+/// separate defects lived in that one call:
 ///
-/// Test: Side-effecting; covered indirectly. `UpgradeDetail`'s shadow-folding
-/// is covered by `tests::applied_report_all_ok_reflects_shadow_failure`.
+/// - **It double-installed.** On the prebuilt branch the binary was already on
+///   disk in `install_dir`, and `upgrade_and_restart` then ran `cargo install
+///   <crate> --locked` anyway, landing a second copy in `$CARGO_HOME/bin`. The
+///   comment claiming that step was "a no-op if the binary is already current"
+///   was wrong: `cargo install` skips only when Cargo's own `.crates2.json`
+///   records that exact version, and the prebuilt path writes no cargo
+///   metadata. Six of the seven stable-set members are daemons, so this fired
+///   on nearly every upgrade — and on a machine with no Rust toolchain it
+///   errored out AFTER the new binary had already landed.
+/// - **It never restarted anything.** `upgrade_and_restart` restarts by calling
+///   `std::process::exit(1)` and relying on launchd's `KeepAlive` to respawn
+///   THE PROCESS THAT JUST EXITED. That is correct for its other callers
+///   (`trusty-search upgrade`, `trusty-memory upgrade`, the two MCP `upgrade`
+///   tools), which all run inside the supervised daemon. `tctl` is a terminal
+///   process launchd has never heard of, so the supervision check returned
+///   false every time and the function returned a manual-restart hint, which
+///   `apply_all` reported as success. `tctl upgrade` has never restarted a
+///   daemon member.
+///
+/// A "restart-only" variant of `upgrade_and_restart` would have fixed the first
+/// defect and not the second, since `exit(1)` from `tctl` still restarts
+/// nothing. The restart now goes through the same launchd path `tctl restart`
+/// uses. `upgrade_and_restart` itself is unchanged and still serves its
+/// in-daemon callers.
+///
+/// Test: `tests::applied_report_all_ok_reflects_shadow_failure` (shadow
+/// folding), `tests::restart_plan_daemons_restart` and
+/// `tests::no_installer_call_site_invokes_upgrade_and_restart` (the #4964
+/// restart routing and the removed double-write) — all in `upgrade_tests.rs`.
+/// This function itself is side-effecting and covered only indirectly.
 async fn upgrade_one(
     c: &UpdateCandidate,
     path_env: &std::ffi::OsStr,
 ) -> anyhow::Result<UpgradeDetail> {
     use crate::download::{self, Outcome};
 
-    let install_dir = download::default_install_dir().unwrap_or_else(|| {
-        let cargo_home = std::env::var("CARGO_HOME").unwrap_or_default();
-        if cargo_home.is_empty() {
-            dirs::home_dir()
-                .map(|h| h.join(".cargo").join("bin"))
-                .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"))
-        } else {
-            std::path::PathBuf::from(&cargo_home).join("bin")
-        }
-    });
+    // #4964: fall back to the SHARED `canonical_bin_dir()` rather than an
+    // inline `CARGO_HOME` read (one of five copies of the same rule).
+    let install_dir = download::default_install_dir()
+        .or_else(trusty_common::bin_resolve::canonical_bin_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
 
     let outcome = download::try_install_prebuilt(&c.crate_name, &install_dir).await;
 
     match outcome {
         Outcome::Installed { paths, version } => {
             tracing::info!(crate_name = %c.crate_name, %version, "upgraded from prebuilt");
+            // #3554: health-gate the CONCRETE just-placed binary — the
+            // exact path `download::try_install_prebuilt` reports having
+            // written — never a name re-resolved afterward (mirrors
+            // `install::install_one`'s fix for the same bug class). #4964
+            // extends this to the daemon branch, which used to health-gate by
+            // NAME inside `upgrade_and_restart`.
+            let bin_path = paths
+                .iter()
+                .find(|p| p.file_name().and_then(|f| f.to_str()) == Some(c.binary.as_str()))
+                .cloned()
+                .unwrap_or_else(|| install_dir.join(&c.binary));
+            trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
             if c.daemon {
-                // Binary is now on disk at install_dir; trigger a daemon restart.
-                // We do this via upgrade_and_restart so the connection-safe
-                // restart protocol (SIGTERM + drain + launchd KeepAlive) is followed.
-                // The `perform_upgrade` step inside upgrade_and_restart is a no-op
-                // if the binary is already current, so this is safe.
-                //
-                // NOTE (#3554): `upgrade_and_restart` health-gates by NAME
-                // internally (shared with trusty-memory/trusty-search's own
-                // self-upgrade tool, in `trusty-common`) — the daemon-restart
-                // path is intentionally NOT switched to a concrete-path probe
-                // (or given a shadow check) here; doing so would mean
-                // changing that shared primitive's signature, a materially
-                // larger/riskier change affecting those other callers.
-                // Tracked as deliberate follow-up scope, not part of this fix
-                // (see the #3554 PR description).
-                let hint = trusty_common::update::upgrade_and_restart(&c.crate_name, &c.binary)
-                    .await
-                    .map(|h| h.unwrap_or_else(|| "restarted".to_owned()))?;
-                Ok(UpgradeDetail::ok(hint))
+                // #4964: no `cargo install` on this branch — the binary is
+                // already on disk, health-gated, and only needs activating.
+                let restarted = restart_daemon_member(c)?;
+                Ok(UpgradeDetail::ok(format!(
+                    "upgraded to {version}; {restarted}"
+                )))
             } else {
-                // #3554: health-gate the CONCRETE just-placed binary — the
-                // exact path `download::try_install_prebuilt` reports having
-                // written — never a name re-resolved afterward (mirrors
-                // `install::install_one`'s fix for the same bug class).
-                let bin_path = paths
-                    .iter()
-                    .find(|p| p.file_name().and_then(|f| f.to_str()) == Some(c.binary.as_str()))
-                    .cloned()
-                    .unwrap_or_else(|| install_dir.join(&c.binary));
-                trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
                 let shadow =
                     shadow_check::detect(&c.binary, &bin_path, Some(&version), path_env).await;
                 Ok(UpgradeDetail::from_shadow(
@@ -506,57 +536,111 @@ async fn upgrade_one(
                     c.crate_name
                 )
             })?;
+            trusty_common::update::perform_upgrade(&c.crate_name).await?;
+            // #3554: `cargo install` always lands in the cargo bin dir —
+            // resolve that CONCRETE destination directly rather than a name
+            // lookup.
+            let bin_path = trusty_common::bin_resolve::canonical_bin_dir()
+                .unwrap_or_else(|| install_dir.clone())
+                .join(&c.binary);
+            let reported =
+                trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
             if c.daemon {
-                // See the #3554 NOTE above — daemon restart intentionally
-                // keeps the shared, name-based `upgrade_and_restart` path.
-                trusty_common::update::upgrade_and_restart(&c.crate_name, &c.binary)
-                    .await
-                    .map(|hint| UpgradeDetail::ok(hint.unwrap_or_else(|| "restarted".to_owned())))
+                // #4964: the restart is NEW behaviour on this path too — it
+                // previously produced a manual-restart hint reported as
+                // success.
+                let restarted = restart_daemon_member(c)?;
+                Ok(UpgradeDetail::ok(format!(
+                    "upgraded to {}; {restarted}",
+                    c.latest
+                )))
             } else {
-                match trusty_common::update::perform_upgrade(&c.crate_name).await {
-                    Ok(()) => {
-                        // #3554: `cargo install` always lands in the cargo bin
-                        // dir — resolve that CONCRETE destination directly
-                        // rather than a name lookup.
-                        let bin_path = cargo_bin_dir_for_upgrade()
-                            .unwrap_or_else(|| install_dir.clone())
-                            .join(&c.binary);
-                        let reported =
-                            trusty_common::update::verify_installed_binary_at_path(&bin_path)
-                                .await?;
-                        let reported_version =
-                            super::update_engine::extract_version_from_line(&reported);
-                        let shadow = shadow_check::detect(
-                            &c.binary,
-                            &bin_path,
-                            reported_version.as_deref(),
-                            path_env,
-                        )
-                        .await;
-                        Ok(UpgradeDetail::from_shadow(
-                            format!("upgraded to {}", c.latest),
-                            shadow,
-                        ))
-                    }
-                    Err(e) => Err(e),
-                }
+                let reported_version = super::update_engine::extract_version_from_line(&reported);
+                let shadow = shadow_check::detect(
+                    &c.binary,
+                    &bin_path,
+                    reported_version.as_deref(),
+                    path_env,
+                )
+                .await;
+                Ok(UpgradeDetail::from_shadow(
+                    format!("upgraded to {}", c.latest),
+                    shadow,
+                ))
             }
         }
     }
 }
 
-/// Resolve the cargo binary install directory (#3554).
+/// Activate a just-placed daemon binary by restarting the member (#4964).
 ///
-/// Why: `cargo install` honours `CARGO_HOME`; a small local helper (mirroring
-/// `install::cargo_bin_dir`) avoids cross-module coupling for this one call
-/// site while keeping the concrete-path health gate accurate under a custom
-/// `CARGO_HOME` (e.g. CI).
-/// What: `<CARGO_HOME>/bin` when set and non-empty, else `~/.cargo/bin`.
-fn cargo_bin_dir_for_upgrade() -> Option<std::path::PathBuf> {
-    let cargo_home = std::env::var("CARGO_HOME").ok();
-    match cargo_home {
-        Some(home) if !home.is_empty() => Some(std::path::PathBuf::from(home).join("bin")),
-        _ => dirs::home_dir().map(|h| h.join(".cargo").join("bin")),
+/// Why: placing a binary on disk does nothing to a running daemon — launchd
+/// keeps the old process, and its plist keeps pointing wherever it pointed
+/// before. Until this landed, `tctl upgrade` produced exactly that state and
+/// reported success. Routing through [`super::lifecycle::restart_member`] means
+/// upgrade and `tctl restart` share ONE restart implementation, so the
+/// port-guard-then-`bootout`-then-`bootstrap` ordering (#4470) and the
+/// `ExitTimeOut` drain window apply here for free. `launchctl kickstart -k` is
+/// deliberately not used: it sends `SIGKILL` and drops in-flight requests.
+///
+/// What: dispatches on [`super::stable_set::manage_strategy_for`] — the same
+/// rule `tctl start|stop|restart` uses — so a launchd member is booted out and
+/// back in, and trusty-mpm (process-managed) goes through its own `restart`
+/// subcommand. On a non-macOS host a launchd member has no supervisor to
+/// restart, so the binary-upgrade is reported with a manual-restart note rather
+/// than a spurious failure.
+///
+/// Test: `tests::restart_plan_*` pin the dispatch exhaustively; the
+/// `launchctl`/subprocess calls themselves are side-effecting and are never
+/// invoked from a unit test (doing so would bounce the host's live daemons).
+fn restart_daemon_member(c: &UpdateCandidate) -> anyhow::Result<String> {
+    match restart_plan(&c.binary, c.daemon, cfg!(target_os = "macos")) {
+        RestartPlan::NoRestart(note) => Ok(note),
+        RestartPlan::Restart(strategy) => super::lifecycle::restart_member(&c.binary, strategy),
+    }
+}
+
+/// What restarting a just-upgraded member requires, decided without doing it.
+///
+/// Why: the side effect here bounces a live daemon, so the DECISION has to be
+/// separable from the act or it cannot be tested at all — and "does an upgraded
+/// daemon get restarted?" is the whole of #4964's Phase 1a. Pinning it as data
+/// means a future edit that quietly drops the restart for some member class
+/// fails a test instead of silently reproducing the defect.
+/// What: [`RestartPlan::Restart`] carries the lifecycle strategy to apply;
+/// [`RestartPlan::NoRestart`] carries the reason nothing is bounced.
+/// Test: `tests::restart_plan_*`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RestartPlan {
+    /// Bounce the member using this strategy.
+    Restart(super::stable_set::ManageStrategy),
+    /// Nothing to bounce; the payload is the human note for the report.
+    NoRestart(String),
+}
+
+/// Decide how a just-upgraded member should be restarted.
+///
+/// Why: see [`RestartPlan`]. `macos` is a parameter rather than a `cfg!` read
+/// so both platform answers are testable from either host.
+/// What: a non-daemon needs no restart. trusty-mpm is process-managed
+/// ([`ManageStrategy::OwnVerb`]) and restarts on any platform. Every other
+/// daemon is launchd-managed, which exists only on macOS — elsewhere the binary
+/// is upgraded and the operator is told to restart it, rather than the upgrade
+/// being reported as failed for a supervisor the host does not have.
+/// Test: `tests::restart_plan_daemons_restart`,
+/// `tests::restart_plan_non_daemon_is_a_noop`,
+/// `tests::restart_plan_launchd_member_off_macos_is_manual`.
+fn restart_plan(binary: &str, daemon: bool, macos: bool) -> RestartPlan {
+    use super::stable_set::{manage_strategy_for, ManageStrategy};
+
+    match manage_strategy_for(binary, daemon) {
+        ManageStrategy::None => {
+            RestartPlan::NoRestart("no restart needed (not a daemon)".to_owned())
+        }
+        ManageStrategy::Launchd if !macos => RestartPlan::NoRestart(format!(
+            "restart the {binary} daemon manually (launchd is macOS-only)"
+        )),
+        strategy => RestartPlan::Restart(strategy),
     }
 }
 
@@ -592,170 +676,5 @@ fn print_human(report: &UpgradeReport) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn candidate() -> UpdateCandidate {
-        UpdateCandidate {
-            crate_name: "trusty-search".to_owned(),
-            binary: "trusty-search".to_owned(),
-            installed: Some("0.19.0".to_owned()),
-            latest: "0.20.0".to_owned(),
-            daemon: true,
-            is_install: false,
-        }
-    }
-
-    /// Build an `UpgradeOutcome` with the pre-#3554 default shadow state
-    /// (clear — `shadow_ok: true`, empty detail), so tests that only care
-    /// about the binary-upgrade dimension don't have to repeat those fields.
-    fn outcome(member: &str, ok: bool, detail: &str) -> UpgradeOutcome {
-        UpgradeOutcome {
-            member: member.to_owned(),
-            ok,
-            detail: detail.to_owned(),
-            shadow_ok: true,
-            shadow_detail: String::new(),
-        }
-    }
-
-    /// Why: The non-applying envelope is a public contract; pin its shape.
-    /// What: Builds a needs-confirmation report; asserts keys.
-    /// Test: This is the test.
-    #[test]
-    fn report_serialises() {
-        let report = UpgradeReport::non_applying("needs_confirmation", vec![candidate()]);
-        let v = serde_json::to_value(&report).expect("serialises");
-        assert_eq!(v["command"], "upgrade");
-        assert_eq!(v["status"], "needs_confirmation");
-        assert_eq!(v["candidates"][0]["crate_name"], "trusty-search");
-        assert_eq!(v["members"].as_array().expect("array").len(), 0);
-    }
-
-    /// Why: An applied report's `all_ok` must reflect member outcomes.
-    /// What: Mixes ok + failed; asserts all_ok false and status "applied".
-    /// Test: This is the test.
-    #[test]
-    fn applied_report_all_ok() {
-        let report = UpgradeReport::applied(
-            vec![candidate()],
-            vec![outcome("a", true, ""), outcome("b", false, "boom")],
-        );
-        assert!(!report.all_ok);
-        assert_eq!(report.status, "applied");
-    }
-
-    /// Why: #3554 review (HIGH) — a just-upgraded binary that is provably
-    /// PATH-shadowed by a stale copy is a genuine "looks upgraded, actually
-    /// not live" failure; the report must not claim `all_ok: true` in that
-    /// case, mirroring `install::tests::report_all_ok_reflects_shadow_failure`.
-    /// What: one member with `ok: true, shadow_ok: false` → `all_ok == false`
-    /// and exit code 2; a `shadow_ok: true` (clear) member → `all_ok == true`.
-    /// Test: this is the test.
-    #[test]
-    fn applied_report_all_ok_reflects_shadow_failure() {
-        let shadowed = UpgradeReport::applied(
-            vec![candidate()],
-            vec![UpgradeOutcome {
-                member: "trusty-mpm".to_owned(),
-                ok: true,
-                detail: "upgraded to 0.19.29".to_owned(),
-                shadow_ok: false,
-                shadow_detail: "PATH SHADOWED: installed trusty-mpm 0.19.29 to \
-                                /x/.local/bin/tm, but the shell resolves `tm` to \
-                                /x/.cargo/bin/tm (0.19.26)"
-                    .to_owned(),
-            }],
-        );
-        assert!(
-            !shadowed.all_ok,
-            "a genuine PATH-shadow condition must flip all_ok to false"
-        );
-        assert_eq!(shadowed.exit_code(), 2);
-
-        let clear = UpgradeReport::applied(
-            vec![candidate()],
-            vec![outcome("trusty-mpm", true, "upgraded to 0.19.29")],
-        );
-        assert!(
-            clear.all_ok,
-            "a clear (non-shadowed) upgrade must not flip all_ok"
-        );
-        assert_eq!(clear.exit_code(), 0);
-    }
-
-    /// Why: Exit codes are the automation contract; pin each status mapping.
-    /// What: Asserts the four status → exit-code mappings.
-    /// Test: This is the test.
-    #[test]
-    fn exit_codes_per_status() {
-        assert_eq!(
-            UpgradeReport::non_applying("nothing_to_do", vec![]).exit_code(),
-            0
-        );
-        assert_eq!(
-            UpgradeReport::non_applying("needs_confirmation", vec![candidate()]).exit_code(),
-            3
-        );
-        assert_eq!(
-            UpgradeReport::non_applying("declined", vec![candidate()]).exit_code(),
-            4
-        );
-        let applied_ok = UpgradeReport::applied(vec![candidate()], vec![outcome("a", true, "")]);
-        assert_eq!(applied_ok.exit_code(), 0);
-    }
-
-    /// Why: The load-bearing safety invariant from re-review: the `tty` value
-    /// that gates the interactive prompt MUST be the same value fed to
-    /// `decide_apply` as `is_tty`. A divergence would let a user answer "yes"
-    /// while the gate silently treats the session as non-interactive (or the
-    /// reverse). This pins the single-source-of-truth `tty` binding.
-    /// What: For every (has_candidates, yes, tty, json) combination, asserts
-    /// (a) `build_apply_inputs.is_tty` equals the probed `tty`, and (b) whenever
-    /// `should_prompt` is true the same `tty` was true — so the consent path and
-    /// the gate's TTY view are always consistent.
-    /// Test: This is the test.
-    #[test]
-    fn prompt_gate_matches_apply_inputs() {
-        for &has_candidates in &[true, false] {
-            for &yes in &[true, false] {
-                for &tty in &[true, false] {
-                    for &json in &[true, false] {
-                        let prompt = should_prompt(has_candidates, yes, tty, json);
-                        // The consent the prompt would yield is irrelevant to
-                        // the invariant; what matters is the TTY value is shared.
-                        let inputs = build_apply_inputs(has_candidates, yes, tty, prompt);
-                        // (a) the gate sees exactly the probed tty.
-                        assert_eq!(inputs.is_tty, tty);
-                        // (b) we only ever prompt when that same tty is true.
-                        if prompt {
-                            assert!(tty, "prompted without a TTY the gate also sees");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Why: An unknown member must fail fast at selection (exit 3) and never
-    /// reach the network/apply path — a pure, offline-safe guard test.
-    /// What: Calls `run` with a bogus member in `--json` mode; asserts exit 3.
-    /// Test: This is the test.
-    #[test]
-    fn run_unknown_member_is_error() {
-        let code = run(false, false, false, true, &["not-a-tool".to_owned()], true);
-        assert_eq!(code, 3);
-    }
-
-    /// Why: `--check` must be read-only (delegates to `updates`) and never reach
-    /// the apply path. This performs a live crates.io probe, so it is
-    /// `#[ignore]`-tagged to keep CI fast and offline-deterministic.
-    /// What: Calls `run` with `check = true`; asserts exit 0 (read-only).
-    /// Test: `cargo test -p trusty-installer -- --include-ignored`.
-    #[test]
-    #[ignore = "performs a live crates.io probe; run with --include-ignored"]
-    fn run_check_is_readonly() {
-        let code = run(true, false, false, false, &["tga".to_owned()], true);
-        assert_eq!(code, 0);
-    }
-}
+#[path = "upgrade_tests.rs"]
+mod tests;

@@ -128,8 +128,6 @@ Lead with the point: what happened, then why it matters.
 - End options as a bare enumeration: "Two options: A, or B."
 - Short sentences, one idea each. Split anything carrying three commas and a
   dash.
-- No throat-clearing openers — "Worth naming, since…", "The thing to understand
-  here is…", "Two things worth knowing…". State the fact.
 - No closing aphorisms. Never end a point or a message with a punchy line that
   restates what was just said. Stop at the last useful sentence.
 - Don't justify the restraint. "I don't know yet" is the whole answer — the
@@ -177,16 +175,16 @@ banned however it is worded. Non-exhaustive examples:
 
 Right: "OK." Or: "That's wrong, because X."
 
-**Delete the framing opener; lead with the fact.** The banned template is
+**If you are saying it, its worth is implied.** Any opener that announces a
+fact's significance instead of stating the fact is banned, however it is
+worded. `One <noun> that <its significance, or your relation to it>:` is one
+shape of it, not the whole ban. Delete the opener and lead with the fact.
 
-> `One <noun> that <its significance, or your relation to it>:`
-
-placed in front of a fact. It announces that something matters instead of saying
-the thing. The fix is general: delete the opener, start at the fact.
-
-Instances observed so far, as illustration only — the rule is the template
+Instances observed so far, as illustration only — the rule is the sentence
 above, never this list:
 
+- "Worth naming what just happened:" / "Worth naming, since…"
+- "Two things worth knowing…" / "The thing to understand here is…"
 - "What remains unknown, stated plainly:"
 - "One distinction worth being precise about before I push…"
 - "One thing it caught that I'd have missed:"
@@ -194,6 +192,21 @@ above, never this list:
 
 Both rules are the same family as the banned word "honest": a word or phrase
 that manages the reader instead of informing them.
+
+**No borrowed-metaphor jargon.** "Load-bearing" is the instance that prompted
+this rule. The metaphor sounds precise, carries no fact the plain sentence would
+not, and stands in for the cause and effect the reader actually needs. Say the
+mechanism.
+
+- Wrong: "that section is load-bearing"
+- Right: "deleting that section breaks X"
+
+This bans the CATEGORY — an engineering metaphor borrowed to signal precision —
+not a list of words, which only invites the next synonym. Non-exhaustive
+examples: "surface area", "impedance mismatch", "first-class", "orthogonal".
+
+Scope: PM and agent prose. It does not reach code, an ADR quoting prior art, or
+a record of what someone else said.
 
 **Ticket and PR bodies** are sparse: point at a spec or issue instead of
 restating it, and never paste a source-file table or a diff in. The binding form

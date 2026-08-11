@@ -18,7 +18,7 @@ use clap::Args;
 
 use tga::audit::{
     resolve_review_binary, run_full_sweep, run_review_report, sweep_gap_lines, AuditSweepStats,
-    SweepOptions, DATA_HANDLING_NOTE,
+    SweepOptions, SweepStage, DATA_HANDLING_NOTE,
 };
 use tga::core::config::Config;
 use tga::core::db::Database;
@@ -244,7 +244,7 @@ fn print_stage_report(stats: &AuditSweepStats) {
 /// unobservable from a test — this split is the whole fix.
 /// What: identical output to `print_stage_report`, written through `out`/`err`
 /// instead of `stdout()`/`stderr()`.
-/// Test: `audit_command_reports_each_stage`.
+/// Test: `audit_command_reports_each_stage`, `collect_row_counts_stale_repositories`.
 fn write_stage_report(
     stats: &AuditSweepStats,
     out: &mut impl std::io::Write,
@@ -252,16 +252,11 @@ fn write_stage_report(
 ) -> std::io::Result<()> {
     writeln!(out, "\nStages:")?;
     for outcome in &stats.outcomes {
-        let mark = if outcome.status.is_failure() {
-            "FAILED"
-        } else {
-            "ok"
-        };
         writeln!(
             out,
             "  {:<20} {:>6}  {:.1}s",
             outcome.stage.as_str(),
-            mark,
+            stage_mark(stats, outcome),
             outcome.elapsed.as_secs_f64()
         )?;
     }
@@ -281,11 +276,32 @@ fn write_stage_report(
     Ok(())
 }
 
+/// One stage's status cell in the table.
+///
+/// Why: #5321 — `collect` succeeds when a repository falls back to stale local
+/// refs, so the bare `ok` it earned is a status the operator cannot act on. The
+/// report's Gaps & Caveats section states the same fact, but the person
+/// watching the run has not got the report yet.
+/// What: `FAILED` for a failed stage; `ok (N stale)` for the collect stage when
+/// N repositories were collected from stale refs; `ok` otherwise — so a run
+/// with no stale repository renders exactly as it did before.
+/// Test: `collect_row_counts_stale_repositories`.
+fn stage_mark(stats: &AuditSweepStats, outcome: &tga::audit::StageOutcome) -> String {
+    if outcome.status.is_failure() {
+        return "FAILED".to_string();
+    }
+    let stale = stats.stale_fetches.len();
+    if outcome.stage == SweepStage::Collect && stale > 0 {
+        return format!("ok ({stale} stale)");
+    }
+    "ok".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
 
-    use tga::audit::{AuditSweepStats, SweepStage};
+    use tga::audit::{AuditSweepStats, StaleFetch, SweepStage};
 
     use super::write_stage_report;
 
@@ -338,6 +354,55 @@ mod tests {
         assert!(
             err.contains("jira sync") && err.contains("no JIRA project configured"),
             "missing the named failure detail on stderr: {err}"
+        );
+    }
+
+    /// #5321 follow-up: the terminal table said a bare `ok` for a collect stage
+    /// that fell back to stale refs on N repositories — success it had not fully
+    /// earned, the same defect one surface over from the one this PR fixes.
+    /// Pins both directions: the qualifier appears when repositories went stale,
+    /// and a run with none renders the row exactly as it did before, right-
+    /// aligned `ok` and no mention of staleness anywhere in the output.
+    #[test]
+    fn collect_row_counts_stale_repositories() {
+        let render = |stats: &AuditSweepStats| {
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            write_stage_report(stats, &mut out, &mut err).expect("write to an in-memory buffer");
+            String::from_utf8(out).expect("stdout is UTF-8")
+        };
+        let collect_row = |rendered: &str| {
+            rendered
+                .lines()
+                .find(|l| l.contains("collect"))
+                .expect("collect row present")
+                .to_string()
+        };
+
+        let mut clean = AuditSweepStats::default();
+        clean.record(SweepStage::Collect, Instant::now(), Ok(()));
+        let clean_out = render(&clean);
+        assert!(
+            collect_row(&clean_out).contains("    ok  "),
+            "a run with no stale repository must render the row unchanged: {clean_out}"
+        );
+        assert!(
+            !clean_out.contains("stale"),
+            "nothing about staleness belongs in a clean run: {clean_out}"
+        );
+
+        let mut stale = AuditSweepStats::default();
+        stale.record(SweepStage::Collect, Instant::now(), Ok(()));
+        for repo in ["acme-service", "acme-web"] {
+            stale.record_stale_fetch(StaleFetch {
+                repo: repo.to_string(),
+                remote: "origin".to_string(),
+                error: "unsupported URL protocol".to_string(),
+            });
+        }
+        let stale_row = collect_row(&render(&stale));
+        assert!(
+            stale_row.contains("ok (2 stale)"),
+            "the row must count the repositories that fell back: {stale_row}"
         );
     }
 }

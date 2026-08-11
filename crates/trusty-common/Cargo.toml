@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.30.1"
+version = "0.31.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -179,6 +179,7 @@ base64 = { workspace = true, optional = true }
 # Optional: enabled by the `tickets` feature for config-file parsing. Also
 # reused by the `credentials` feature's `FileKeyStore` backend (issue #2401).
 toml = { version = "0.8", optional = true }
+toml_edit = { workspace = true, optional = true }
 
 # Optional: enabled by the `credentials` feature (issue #2401). Shared
 # `.env.local` loader for the `credentials` resolver's env tier.
@@ -601,6 +602,11 @@ console-metrics = ["stdio-mcp-client"]
 # loader) — all already optional workspace deps. Does NOT pull in the OS
 # keychain backend; see `keyring-store` for that.
 credentials = ["dep:thiserror", "dep:toml", "dep:dotenvy"]
+# Enables the `codex_config` module: the ONE writer for Codex CLI stdio MCP
+# registrations (`~/.codex/config.toml`), shared by trusty-search (#5264) and
+# trusty-memory (#5265). Pulls in `toml_edit` so a repair preserves the
+# operator's comments and unrelated tables.
+codex-config = ["dep:toml_edit"]
 # Enables `credentials::KeyringStore`, the OS-keychain backend
 # (macOS Keychain / Windows Credential Manager / Secret Service on Linux)
 # selected by `credentials::default_store` when available, with

@@ -59,8 +59,29 @@ fn skip_palace_enforcement() {
     });
 }
 
+/// Pre-seed the process-wide shared embedder with `MockEmbedder`.
+///
+/// Why: `memory_remember` / `memory_recall` resolve
+/// `retrieval::shared_embedder()`, a process-wide `OnceCell`. Whichever caller
+/// seeds it first wins for the rest of the process, so under `cargo test` — one
+/// process for this whole binary — a single sibling's seed silently satisfied
+/// every other test. Under per-test process isolation (`cargo nextest run`)
+/// each test gets a virgin cell instead, reaches for the real ONNX model, and
+/// fails on the HuggingFace download (HTTP 429 in CI). Same defect class as
+/// [`skip_palace_enforcement`] / #4413: a test that passes only because a
+/// sibling ran first. Establishing the precondition in the fixtures every test
+/// already calls is what makes each test self-sufficient.
+/// What: delegates to `seed_shared_embedder_with_mock`, which is idempotent
+/// (`OnceCell::set`, first caller wins), so calling it from both fixtures is
+/// free and order-independent.
+/// Test: every test in this module that constructs state.
+fn seed_embedder() {
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+}
+
 fn test_state() -> (AppState, tempfile::TempDir) {
     skip_palace_enforcement();
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = AppState::new(root);
@@ -78,6 +99,7 @@ fn test_state() -> (AppState, tempfile::TempDir) {
 ///       `note_returns_warming_error_while_state_is_warming`.
 fn test_state_warming() -> (crate::AppState, tempfile::TempDir) {
     skip_palace_enforcement();
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = crate::AppState::new(root);
@@ -172,6 +194,8 @@ fn tool_definitions_lists_all_tools() {
         "palace_unalias",
         "kg_assert",
         "kg_query",
+        // #4776: subject enumeration over MCP.
+        "kg_list_subjects",
         "memory_recall_all",
         "kg_gaps",
         "add_alias",
@@ -510,6 +534,200 @@ async fn dispatch_kg_assert_then_query() {
     assert_eq!(triples.len(), 1);
     assert_eq!(triples[0]["object"], "Acme");
     assert_eq!(triples[0]["predicate"], "works_at");
+}
+
+/// Why: #4776 — `kg_list_subjects` is the discovery read that makes `kg_query`
+/// usable without already knowing a subject, so the contract that matters is
+/// that every asserted subject comes back, once, in alphabetical order.
+/// What: asserts two triples under distinct subjects, dispatches
+/// `kg_list_subjects`, and checks the envelope plus the ordering.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_returns_distinct_subjects() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "subjects"}))
+        .await
+        .expect("palace_create");
+
+    for (subject, object) in [("zeta", "Acme"), ("alpha", "Globex")] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "subjects",
+                "subject": subject,
+                "predicate": "works_at",
+                "object": object,
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let listed = dispatch_tool(&state, "kg_list_subjects", json!({"palace": "subjects"}))
+        .await
+        .expect("kg_list_subjects");
+
+    assert_eq!(listed["palace"], "subjects");
+    assert_eq!(listed["with_counts"], false);
+    assert_eq!(listed["truncated"], false);
+    let subjects: Vec<&str> = listed["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        subjects.contains(&"alpha") && subjects.contains(&"zeta"),
+        "both asserted subjects should be listed: {subjects:?}"
+    );
+    let mut sorted = subjects.clone();
+    sorted.sort_unstable();
+    assert_eq!(subjects, sorted, "subjects should be alphabetical");
+}
+
+/// Why: #4776 — `with_counts` is what lets a caller pick the densest subject to
+/// query first, so the count has to be a real per-subject active-triple count,
+/// not a placeholder.
+/// What: asserts two triples on one subject and one on another, then checks the
+/// `{subject, count}` pairs the tool returns.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_with_counts_returns_pairs() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "counts"}))
+        .await
+        .expect("palace_create");
+
+    for (subject, predicate) in [
+        ("alpha", "works_at"),
+        ("alpha", "lives_in"),
+        ("beta", "owns"),
+    ] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "counts",
+                "subject": subject,
+                "predicate": predicate,
+                "object": "Acme",
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let listed = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "counts", "with_counts": true}),
+    )
+    .await
+    .expect("kg_list_subjects");
+
+    assert_eq!(listed["with_counts"], true);
+    let pairs: Vec<(&str, u64)> = listed["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .iter()
+        .filter_map(|v| Some((v["subject"].as_str()?, v["count"].as_u64()?)))
+        .collect();
+    assert!(
+        pairs.contains(&("alpha", 2)),
+        "alpha should carry both of its triples: {pairs:?}"
+    );
+    assert!(
+        pairs.contains(&("beta", 1)),
+        "beta should carry its single triple: {pairs:?}"
+    );
+}
+
+/// Why: #4810 — `truncated = subjects.len() == limit` cannot distinguish "the
+/// page filled and more subjects exist" from "the palace holds exactly
+/// `limit` subjects in total"; a caller that trusted the old flag would raise
+/// `limit` and get back an identical page for nothing.
+/// What: asserts three subjects, then discovers the palace's real total
+/// subject count with a wide-open `kg_list_subjects` call — `palace_create`
+/// auto-bootstraps its own `project_subject` triple (see
+/// `bootstrap::bootstrap_palace`), so the total is not simply the three
+/// asserted names. Requests `limit: <that total>` and confirms `truncated`
+/// is `false` — the case the length-equality check got wrong. Then requests
+/// `limit: 1` over the same palace and confirms `truncated` still comes back
+/// `true` there.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_exact_limit_is_not_truncated() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "exactlimit"}))
+        .await
+        .expect("palace_create");
+
+    for subject in ["alpha", "beta", "gamma"] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "exactlimit",
+                "subject": subject,
+                "predicate": "works_at",
+                "object": "Acme",
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let wide_open = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": 200}),
+    )
+    .await
+    .expect("kg_list_subjects wide-open baseline");
+    let total = wide_open["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .len();
+    assert!(
+        total >= 3,
+        "the three asserted subjects should all be present: total={total}"
+    );
+    assert_eq!(
+        wide_open["truncated"], false,
+        "a limit well above the real total is never truncated"
+    );
+
+    let listed = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": total}),
+    )
+    .await
+    .expect("kg_list_subjects");
+
+    let subjects = listed["subjects"].as_array().expect("subjects array");
+    assert_eq!(
+        subjects.len(),
+        total,
+        "every subject should come back: {subjects:?}"
+    );
+    assert_eq!(
+        listed["truncated"], false,
+        "exactly `limit` subjects total is not truncation"
+    );
+
+    let capped = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": 1}),
+    )
+    .await
+    .expect("kg_list_subjects");
+    assert_eq!(
+        capped["truncated"], true,
+        "limit below the subject count should still report truncated"
+    );
 }
 
 /// Why: Issue #53 — verify the MCP `kg_gaps` tool returns whatever was
@@ -910,18 +1128,44 @@ async fn palace_create_auto_seeds_temporal_metadata() {
         queried.get("hint").is_none(),
         "hint should be absent when triples exist"
     );
+    // #4775: `graph_state` is the miss discriminator, so its absence is what
+    // marks a hit; `kg_triple_count` is present either way.
+    assert!(
+        queried.get("graph_state").is_none(),
+        "graph_state should be absent when triples exist"
+    );
+    assert!(
+        queried["kg_triple_count"].as_u64().unwrap_or(0) >= 2,
+        "kg_triple_count must be present on a hit; got {}",
+        queried["kg_triple_count"],
+    );
 }
 
-/// Why (issue #60): `kg_query` against a subject with no triples must
-/// surface a `hint` field pointing the user at `kg_bootstrap` /
-/// `kg_assert`. Without the hint, brand-new palaces returned empty
-/// arrays with no breadcrumb back to the seeding tools.
+/// Why (#4775): this is the case the old single-hint behavior got wrong.
+/// `palace_create` auto-bootstraps at least `created_at` + `bootstrapped_at`,
+/// so the graph is provably non-empty; querying a subject it does not hold
+/// used to answer "Knowledge graph is empty" anyway. The replaced test
+/// asserted that falsehood and passed. The `kg_list_subjects` call here is
+/// what makes the non-emptiness a fact of the test rather than an assumption.
 #[tokio::test]
-async fn kg_query_emits_hint_when_palace_empty() {
+async fn kg_query_reports_subject_not_found_when_graph_has_other_subjects() {
     let (state, _tmp) = test_state();
     let _ = dispatch_tool(&state, "palace_create", json!({"name": "hinted"}))
         .await
         .expect("palace_create");
+
+    // Establish the precondition: the graph holds subjects.
+    let subjects = dispatch_tool(&state, "kg_list_subjects", json!({"palace": "hinted"}))
+        .await
+        .expect("kg_list_subjects");
+    assert!(
+        !subjects["subjects"]
+            .as_array()
+            .expect("subjects")
+            .is_empty(),
+        "auto-bootstrap should have seeded at least one subject",
+    );
+
     // Query a subject that auto-bootstrap did NOT seed.
     let queried = dispatch_tool(
         &state,
@@ -931,9 +1175,73 @@ async fn kg_query_emits_hint_when_palace_empty() {
     .await
     .expect("kg_query");
     assert_eq!(queried["triples"].as_array().unwrap().len(), 0);
+    assert_eq!(queried["graph_state"], "subject_not_found");
+    assert!(
+        queried["kg_triple_count"].as_u64().unwrap_or(0) >= 2,
+        "whole-graph count must reflect the bootstrapped triples; got {}",
+        queried["kg_triple_count"],
+    );
+    let hint = queried["hint"].as_str().expect("hint field present");
+    assert!(
+        hint.contains("kg_list_subjects"),
+        "miss hint must name kg_list_subjects; got {hint:?}",
+    );
+    assert!(
+        !hint.contains("Knowledge graph is empty"),
+        "must not claim emptiness for a non-empty graph; got {hint:?}",
+    );
+}
+
+/// Why (#4775): the `graph_empty` branch is the one the old hint was written
+/// for, and it must still fire — but only when the graph really holds nothing.
+/// The palace is created through the registry directly because
+/// `palace_create` auto-bootstraps, and there is no way to ask it not to.
+#[tokio::test]
+async fn kg_query_reports_graph_empty_when_graph_has_no_triples() {
+    use trusty_common::memory_core::palace::Palace;
+
+    let (state, _tmp) = test_state();
+    let palace = Palace {
+        id: PalaceId::new("barren"),
+        name: "barren".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join("barren"),
+    };
+    let _ = state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create_palace");
+
+    let queried = dispatch_tool(
+        &state,
+        "kg_query",
+        json!({"palace": "barren", "subject": "anything"}),
+    )
+    .await
+    .expect("kg_query");
+    assert_eq!(queried["triples"].as_array().unwrap().len(), 0);
+    assert_eq!(queried["kg_triple_count"], 0);
+    assert_eq!(queried["graph_state"], "graph_empty");
     let hint = queried["hint"].as_str().expect("hint field present");
     assert!(hint.contains("kg_bootstrap"));
     assert!(hint.contains("kg_assert"));
+}
+
+/// Why (#4775): the classification is pure, so pin all four combinations of
+/// (subject has triples, graph has triples) without a live palace.
+#[test]
+fn kg_miss_classify_distinguishes_empty_graph_from_missing_subject() {
+    use crate::bootstrap::KgMiss;
+
+    assert_eq!(KgMiss::classify(0, 0), Some(KgMiss::GraphEmpty));
+    assert_eq!(KgMiss::classify(0, 7), Some(KgMiss::SubjectNotFound));
+    assert_eq!(KgMiss::classify(3, 7), None);
+    // A subject with triples in a graph that reports zero is contradictory;
+    // a hit still wins, because the triples are in hand and the count is not.
+    assert_eq!(KgMiss::classify(3, 0), None);
+    assert_eq!(KgMiss::GraphEmpty.wire_value(), "graph_empty");
+    assert_eq!(KgMiss::SubjectNotFound.wire_value(), "subject_not_found");
 }
 
 /// Why (issue #60): `kg_bootstrap` against the live workspace root must
@@ -1875,10 +2183,15 @@ async fn bm25_index_queue_drops_when_full() {
 /// `handle.vector_store` returns a hit for the drawer id. This proves the
 /// deferred embed job is not just fired but actually completes.
 ///
-/// Deliberately does NOT seed a mock embedder: this unit-test binary also
-/// runs `dispatch_remember_then_recall` against the real, process-wide
-/// `shared_embedder()` singleton, and seeding a mock here would race with
-/// (and potentially poison) that test depending on execution order.
+/// Runs against the seeded `MockEmbedder` (via [`test_state_warming`] →
+/// [`seed_embedder`]). It used to deliberately skip the seed, on the reasoning
+/// that seeding would race `dispatch_remember_then_recall`'s use of the real
+/// embedder — but the cell is process-wide and first-writer-wins, so that
+/// reasoning made this test depend on whichever sibling happened to initialise
+/// it, and under `cargo nextest run` (a virgin cell per test) the
+/// `shared_embedder()` call below failed outright. The mock is a deterministic
+/// hash, so the backfilled vector and the query vector below match exactly;
+/// `dispatch_remember_then_recall` passes on the mock as well.
 /// Test: this test.
 #[tokio::test]
 async fn remember_succeeds_and_defers_embedding_while_state_is_warming() {

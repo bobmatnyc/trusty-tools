@@ -22,8 +22,8 @@ mod types;
 
 pub use scan::scan_project;
 pub use types::{
-    is_kg_empty_for_subject, result_to_json, BootstrapResult, BootstrapTriple, ScannedFile,
-    KG_EMPTY_HINT,
+    result_to_json, BootstrapResult, BootstrapTriple, KgMiss, ScannedFile, KG_EMPTY_HINT,
+    KG_SUBJECT_NOT_FOUND_HINT,
 };
 
 use anyhow::{Context, Result};

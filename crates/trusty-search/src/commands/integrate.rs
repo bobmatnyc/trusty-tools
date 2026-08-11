@@ -47,17 +47,21 @@ alwaysApply: true
 
 This project has trusty-search MCP tools available. Prefer them over grep for non-trivial queries.
 
-- `search_code` — hybrid BM25 + vector search with KG expansion (best for most queries)
+- `search` — hybrid BM25 + vector search with KG expansion (best for most queries)
+- `search_lexical` / `search_semantic` / `search_kg` — one retrieval lane each
+- `grep` — regex/literal match over the indexed files, exact line numbers
 - `search_similar` — find code similar to a given file/function
+- `get_call_chain` — callers and callees of a symbol
 - `reindex` — trigger a full reindex of this project
 - `index_status` — check chunk count and index health
 - `search_health` — confirm the daemon is running
 
 ## When to use
 
-- Finding function definitions → `search_code "fn <name>"` with Definition intent
-- Exploring callers of a function → `search_code "<name> callers"` with Usage intent
-- Conceptual queries ("how does auth work") → `search_code` with Conceptual intent
+- Finding function definitions → `search "fn <name>"` with Definition intent
+- Exploring callers of a function → `get_call_chain`, or `search "<name> callers"` with Usage intent
+- Conceptual queries ("how does auth work") → `search_semantic`, or `search` with Conceptual intent
+- A specific identifier or literal string → `grep`
 - Finding similar implementations → `search_similar`
 "#;
 
@@ -654,6 +658,44 @@ mod tests {
         assert!(!ts.contains(' '), "no spaces allowed: {ts}");
     }
 
+    /// Assert every tool name the Cursor rules body quotes is a real MCP tool.
+    ///
+    /// Why (#5138): `CURSOR_RULES_BODY` ships to every Cursor user who runs
+    /// `integrate cursor`, and it named `search_code` four times — a tool the
+    /// stdio dispatcher has never had. A literal-string assertion cannot catch
+    /// that, because the literal and the rules body were wrong together.
+    /// What: pulls every backtick-quoted bare identifier out of the rules body
+    /// and checks it against `tool_descriptors()`, the same list `tools/list`
+    /// serves. Quoted phrases (`search "fn <name>"`) are not bare identifiers
+    /// and are skipped.
+    /// Test: called by `test_write_rules_creates_file`.
+    fn assert_cursor_rules_name_only_real_tools(body: &str) {
+        let descriptors = trusty_search::mcp::tools::tool_descriptors();
+        let real: Vec<&str> = descriptors
+            .as_array()
+            .expect("tool_descriptors returns an array of descriptors")
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+
+        // Odd-indexed segments of a backtick split are the quoted spans.
+        for quoted in body.split('`').skip(1).step_by(2) {
+            let is_bare_ident = !quoted.is_empty()
+                && quoted.starts_with(|c: char| c.is_ascii_lowercase())
+                && quoted
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if !is_bare_ident {
+                continue;
+            }
+            assert!(
+                real.contains(&quoted),
+                "#5138: Cursor rules name `{quoted}`, which is not a real \
+                 trusty-search MCP tool. Real tools: {real:?}"
+            );
+        }
+    }
+
     /// Why: the rules file must be created the first time and never clobbered
     /// on a second run (idempotency).
     #[test]
@@ -672,9 +714,14 @@ mod tests {
             "rules frontmatter missing"
         );
         assert!(
-            body.contains("search_code"),
-            "rules body should mention search_code"
+            body.contains("`search`"),
+            "rules body should name the hybrid search tool"
         );
+        // #5138: the old assertion pinned `search_code`, a tool that has never
+        // existed in the dispatcher — so the suite went green on rules that
+        // told every Cursor user to call a nonexistent tool. Validate against
+        // the real descriptor list instead of a literal.
+        assert_cursor_rules_name_only_real_tools(&body);
 
         // Second run is idempotent: file left untouched.
         let again = write_cursor_rules(&rules_dir, false).expect("write rules again");

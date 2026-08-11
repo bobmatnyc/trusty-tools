@@ -1,22 +1,23 @@
 # 0024. Assistants Are Level-0 Delegators; Sub-Agents Are In-Process, Single-Edge Leaves That Never Delegate
 
-- **Status:** Proposed — **partially ratified and partially implemented.** The
-  L0-assistant clause (Context §1 item 3 / Decision clause 2, "every assistant
-  is tier L0") and its kind-primary corollary (Decision clause 6) are RATIFIED
-  by the owner (2026-07-28) and IMPLEMENTED. The EDITABLE CONFIG WHITELIST
-  (Context §1 item 2 / Decision clause 4) is RATIFIED by the owner (2026-07-29),
-  together with both of the owner-ratify sub-questions it raised, and is
-  IMPLEMENTED. Every other clause remains Proposed. See "Implementation status"
-  below for the clause-by-clause table — read that, not this one-line summary,
-  before assuming any clause has landed.
-- **Date:** 2026-07-28 (ratification of the L0-assistant clause recorded
-  2026-07-28; ratification of the editable-whitelist clause recorded
-  2026-07-29)
+- **Status:** Accepted
+- **Acceptance:** All six Decision clauses were ratified by the owner on
+  2026-07-28 or 2026-07-29. Implementation remains incomplete for the
+  three-tool-call router and assistant-to-assistant communication primitive;
+  acceptance records the architectural choice, not implementation completion.
+  See "Implementation status" for the clause-by-clause state.
+- **Date:** 2026-07-28
+- **Ratification:** L0-assistant clause recorded 2026-07-28;
+  editable-whitelist clause recorded 2026-07-29
 - **Scope:** crate `trusty-agents` (the `delegate_to_agent` / `dispatch_task` boundary; the L0/L1 tier model, #4167/#4200; touches the `trusty-code` cross-product bridge target and the Sub-agents API/pane, `#4029`/`#4211`)
 - **Reversibility Cost:** High — reverses/re-scopes shipped, tested, owner-directed machinery from epic #4021 (#4026/#4027/#4028/#4211, merged within 48 hours of this ADR), INVERTS the population assignment of the L0/L1 tier model merged the SAME DAY as this decision (PR #4200, squash `ada4d351`), and requires new, currently nonexistent machinery (an editable sub-agent whitelist, an assistant-to-assistant messaging primitive, and a tool-call-counted skill/delegate router)
 - **Decision Drivers:** Product framing clarity (the Sub-agents pane could not honestly present a name that means two different things), the owner's rejection of a UI-only fix, the owner's explicit generalization of the YOLO risk posture to every assistant, a documentation gap (DOC-57 does not yet cover Sub-agents at all, #4182), the owner's own PM/trusty-mpm prior art as an explicit analogy with an owner-named limit, and — underlying all of the above — the owner's virtual-twin authority principle (see "Rationale" below): each assistant must take authority over its own actions, and that authority is not transferable between assistants
 
-- **Supersedes / Superseded by:** — this ADR's OWN prior revision (same document, same day) recommended a hand-authored constant (`ASSISTANT_ALLOWED_DELEGATE_ROLES`-style) as the reachable-target model; decision 2 below explicitly supersedes that recommendation in favor of an editable config whitelist. See "Conflicts and open questions" for the still-unresolved tension with the owner's 2026-07-26 ruling on epic #4021's OQ-2.
+- **Supersedes / Superseded by:** — this ADR's own prior revision recommended
+  a hand-authored constant (`ASSISTANT_ALLOWED_DELEGATE_ROLES`-style) as the
+  reachable-target model; the accepted editable-config whitelist replaces that
+  recommendation. The later 2026-07-28/29 ratification resolves the tension
+  with the owner's informal 2026-07-26 OQ-2 ruling in favor of this ADR.
 
 ## Context
 
@@ -301,9 +302,8 @@ place.
 
 ## Decision
 
-We adopt, as **Proposed**, pending the owner's ratification of the specific
-implementation mechanics this document flags as open, the complete model
-stated in Context §1:
+We adopt the complete model stated in Context §1. Open implementation mechanics
+remain follow-up work and do not change the accepted architectural boundary:
 
 1. A sub-agent is always in-process (unchanged from the first draft).
 2. **Assistant = tier L0.** Delegates down to sub-agents; communicates
@@ -1127,9 +1127,8 @@ already cover their specifics.
 ## Conflicts and open questions
 
 - **This decision revises the owner's own 2026-07-26 ruling on epic
-  #4021's OQ-2** (retained, unresolved — see Context §4). Not smoothed
-  over by any option above; the owner should see both rulings side by side
-  before ratifying.
+  #4021's OQ-2.** The later 2026-07-28/29 owner ratification resolves the
+  conflict in favor of this ADR; the earlier ruling remains historical context.
 - **This decision, dated 2026-07-28, inverts the population assignment of
   the L0/L1 tier model merged the SAME DAY** (PR #4200, squash `ada4d351`)
   — L0 was built as "a new, rare orchestration persona above today's
@@ -1205,11 +1204,9 @@ Vetted against prior ADRs (`docs/adr/INDEX.md`) on 2026-07-28 (revision 2):
   primitive, still unreconciled with ADR-0016's singleton addressing.
 - **ADR-0020, ADR-0021 (Slack gateway), ADR-0022:** No interaction —
   unchanged.
-- **Conflict, not yet resolved by any ADR mechanism:** the owner's
-  2026-07-26 OQ-2 ruling (never itself an ADR) remains in direct tension
-  with decision 1. Unchanged from the first draft: not marked as
-  "Supersedes" because there is no ADR to formally supersede, but the
-  tension must reach the owner before acceptance.
+- **Owner ruling from 2026-07-26:** Conflict resolved — the later
+  2026-07-28/29 ratification adopts this ADR's model. The earlier ruling was
+  never an ADR, so there is no separate status field to update.
 - **New: this ADR's own first-draft recommendation is explicitly
   superseded by decision 2** (see header and "Conflicts and open
   questions") — recorded here per DOC-46 §3's self-consistency

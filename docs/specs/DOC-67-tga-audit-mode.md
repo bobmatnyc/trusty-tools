@@ -367,7 +367,7 @@ section with source and v1 status:
 | Template section | v1 status | Source |
 |---|---|---|
 | §1 Report Metadata | **Populated** | Manifest (`ReportSection` fields, §6) |
-| §2 Executive Summary + Top Risks | **Populated**, unchanged mechanism | trusty-review's existing LLM synthesis (`synthesize.rs`) over the RED/AMBER findings trusty-analyze supplies. Does **not** incorporate tga's DORA/velocity data in v1 (§12 Q3) |
+| §2 Executive Summary + Top Risks | **Populated** | Deterministic roll-up (`exec_summary.rs`) over the RED/AMBER findings and size data trusty-analyze supplies — AUDIT invokes `trusty-review report` without `--synthesize`, so the LLM path this row originally named never ran and §2 rendered empty until #5318. LLM synthesis (`synthesize.rs`) still overwrites both when a caller opts into it. Does **not** incorporate tga's DORA/velocity data in v1 (§12 Q3) |
 | §3 Scoring Model Normalization | **Populated**, unchanged mechanism | The fixed RED/AMBER/GREEN and A–F conventions already encoded in `analyze_adapter.rs:164-226` |
 | §4 Per-Application Scorecard — Profile (tech stack, LoC, frameworks, file counts) | **Populated**, unchanged mechanism | `report/scan.rs`'s `RepoScan` — computed directly from the local checkout (`git ls-files`, manifest detection), independent of trusty-analyze, already runs for any `RepositoryEntry::LocalPath` (`model.rs`) |
 | §4 Health-Factor Scores | **Populated, new call site** | trusty-analyze `/quality` (`avg_cyclomatic`/`pct_grade_a`/`grade`) — architecture factor; diagnostics/refactor rollup — security-proxy factor, captioned per §3's limitation |
@@ -422,6 +422,21 @@ What an acquirer concludes: whether the target ships safely and frequently
 drag, likely post-acquisition friction), and how much of the recent
 codebase was produced with AI-agent assistance (`agentic_pct`) — a
 provenance fact increasingly relevant to tech-M&A diligence.
+
+**`agentic_pct` must render its detection limits alongside the number
+(#5249).** Detection is marker-based: it reads `Co-Authored-By:` trailers,
+body footers, and agent bot identities. A target that strips, squashes, or
+rewrites trailers emits no markers, and its commits are then
+indistinguishable from human work — so a low share means "no markers
+emitted", not "no AI assistance". `collect::ai_markers::detection_disclosure()`
+returns the active tool list plus that caveat, and `tga collect` logs it once
+per run; the section renders it verbatim rather than presenting a bare
+percentage. #5250 proposes a distinct `unknown` state so a stripped-marker
+commit stops sharing a bucket with a genuinely human one.
+
+The marker set is a fixed list in `collect::ai_markers::BUILTIN`. Detecting a
+target org's own house footer therefore needs a tga release, and an audit of a
+repository with an unrecognised footer under-reports for that reason alone.
 
 **This is new work, not a reuse of the existing pipeline — call this out
 plainly.** §5's architecture claimed trusty-review's rendering layer is

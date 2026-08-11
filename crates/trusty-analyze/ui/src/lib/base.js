@@ -43,7 +43,9 @@
  * Compute the base URL once from the current document location.
  * Checks (in order):
  * 1. `window.__ANALYZER_BASE__` (legacy override, kept for backward-compat).
- * 2. `document.baseURI` with trailing `index.html` and trailing `ui/` stripped.
+ * 2. The `document.baseURI` PATHNAME (fragment and query excluded — #4980)
+ *    with trailing `index.html` and trailing `ui/` stripped, re-joined to the
+ *    origin.
  * 3. "/" as a final fallback for non-browser environments.
  * @returns {string}
  */
@@ -55,12 +57,16 @@ function computeBase() {
   if (typeof document === 'undefined') {
     return '/';
   }
+  // #4980: strip against the parsed pathname, not the raw href — baseURI
+  // carries the fragment, so at `…/ui/#/` the `$`-anchored strips no-op.
+  const u = new URL(document.baseURI);
   // 1. Strip a trailing "index.html" so the base always ends with "/".
   // 2. Strip the trailing "ui/" mount segment: the daemon serves the SPA at
   //    `/ui/` but the API endpoints are siblings at the parent (issue #1329).
-  return document.baseURI
+  const path = u.pathname
     .replace(/index\.html$/, '')
     .replace(/(^|\/)ui\/$/, '$1');
+  return u.origin + path;
 }
 
 // Snapshot the base once at module load. This runs before any client-side

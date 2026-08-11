@@ -109,8 +109,11 @@ pub(super) async fn dispatch_misc_tool(
         "grep" => {
             // grep-parity regex/literal search over an index's files.
             // Mirrors `POST /grep` (global) and `POST /indexes/:id/grep`.
-            // `index_id` is optional — when omitted, the daemon fans out
-            // across every registered index.
+            // #3805: `index_id` is optional, but omitting it does NOT fan out
+            // when the session is pinned — `resolve_index_id` below returns the
+            // pin first, and only an unpinned session reaches `POST /grep`.
+            // The comment here used to claim fan-out and so did the tool
+            // schema; both now state the pinned-first order.
             let pattern = match require_str(args, "pattern") {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),

@@ -175,9 +175,12 @@ impl CorpusStore {
     /// corpus means "unknown prior root" — the caller treats that as a
     /// first-ever reindex (no forced rewrite).
     /// What: opens a read transaction on `_meta`, looks up
-    /// `META_KEY_INDEXED_ROOT`, and decodes the UTF-8 path string. Returns
-    /// `None` when the table or key is absent or the bytes are not valid UTF-8.
-    /// Test: `test_meta_indexed_root_roundtrip` in `corpus::tests`.
+    /// `META_KEY_INDEXED_ROOT`, and decodes the UTF-8 path string. An absent
+    /// table or key is `Ok(None)` — this index has no prior root. Anything
+    /// else, including a stored value that is not valid UTF-8, is an error.
+    /// Test: `test_meta_indexed_root_roundtrip` in `corpus::tests`;
+    /// `service::reindex::root_hijack_tests::reindex_refuses_when_the_indexed_root_value_is_corrupt`
+    /// covers the corrupt-value arm.
     pub(crate) fn read_indexed_root_sync(&self) -> Result<Option<std::path::PathBuf>> {
         use crate::core::migration::{META_KEY_INDEXED_ROOT, META_TABLE};
         let txn = self.db.begin_read().context("begin _meta read txn")?;
@@ -192,7 +195,16 @@ impl CorpusStore {
         {
             Some(v) => match std::str::from_utf8(v.value()) {
                 Ok(s) => Ok(Some(std::path::PathBuf::from(s))),
-                Err(_) => Ok(None),
+                // #5357: this arm used to return `Ok(None)` — a CORRUPTED root
+                // read back as "this index has no prior root", which is the one
+                // answer that skips the #2178 root-move gate entirely. The
+                // candidate root was then walked and pruned against. Only
+                // `write_indexed_root_sync` writes this key and it always writes
+                // valid UTF-8 (`to_string_lossy`), so reaching here means the
+                // stored bytes are damaged and refusing is correct.
+                Err(e) => Err(anyhow::anyhow!(
+                    "indexed_root bytes at {META_KEY_INDEXED_ROOT} are not valid UTF-8: {e}"
+                )),
             },
             None => Ok(None),
         }

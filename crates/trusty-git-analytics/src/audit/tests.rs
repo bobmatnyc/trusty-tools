@@ -8,6 +8,7 @@ use crate::audit::{run_full_sweep, AuditSweepStats, StageStatus, SweepOptions, S
 use crate::commands::audit::AuditArgs;
 use crate::core::config::Config;
 use crate::core::db::Database;
+use crate::core::progress::{ProgressBus, Stage};
 
 /// The order `run_full_sweep` is contracted to execute in.
 ///
@@ -122,6 +123,9 @@ async fn sweep_runs_every_stage_in_order_and_survives_failures() {
 
     let stages: Vec<_> = stats.outcomes.iter().map(|o| o.stage).collect();
     assert_eq!(stages, EXPECTED_ORDER.to_vec());
+    // The "stage N of 8" denominator in the progress start events is this
+    // constant; a stage added without updating it would lie to the operator.
+    assert_eq!(stages.len(), super::sweep::TOTAL_STAGES);
 
     // JIRA is unconfigured here, so that stage must have failed — and the
     // seven stages after it must still have run.
@@ -206,6 +210,102 @@ async fn sweep_writes_reports_into_the_requested_directory() {
             out.display()
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Progress reporting from every stage, not just collection (#5361)
+// ---------------------------------------------------------------------------
+
+/// #5361: `run_full_sweep` used to bind and discard its `progress` parameter,
+/// so a caller that supplied a bus saw nothing for classify, report, pr-metrics,
+/// jira sync, dora, deployments, or incidents — a ~10-minute sweep behind a
+/// frozen screen. This asserts the non-collection stages reach the bus the
+/// caller passed in; before the fix the drained event list is empty.
+#[tokio::test]
+async fn sweep_emits_progress_for_non_collection_stages() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
+    let options = SweepOptions {
+        output: Some(dir.path().join("out")),
+        weeks: Some(1),
+    };
+    let bus = ProgressBus::new();
+
+    let stats = run_full_sweep(&Config::default(), &mut db, &options, Some(&bus))
+        .await
+        .expect("sweep");
+
+    let events = bus.drain();
+    assert_eq!(bus.dropped(), 0, "the run must fit in the default ring");
+    assert!(
+        !events.is_empty(),
+        "a bus handed to run_full_sweep received nothing at all"
+    );
+
+    // Report and classify are the stages furthest from collection: neither has
+    // any instrumentation of its own, so if the parameter is not threaded they
+    // are silent no matter what the collection pipeline does.
+    for stage in [SweepStage::Classify, SweepStage::Report] {
+        let mine: Vec<_> = events
+            .iter()
+            .filter(|e| e.stage == Stage::Audit && e.target == stage.as_str())
+            .collect();
+        assert!(
+            mine.iter().any(|e| !e.is_terminal()),
+            "no start event for the {stage} stage: {events:#?}"
+        );
+        assert!(
+            mine.iter().any(|e| e.is_terminal()),
+            "no completion event for the {stage} stage: {events:#?}"
+        );
+    }
+
+    // Every stage, not just those two — and the bus's verdict agrees with the
+    // recorded one, so a stage cannot report green on screen and red in stats.
+    for outcome in &stats.outcomes {
+        let terminal = events
+            .iter()
+            .find(|e| {
+                e.stage == Stage::Audit && e.target == outcome.stage.as_str() && e.is_terminal()
+            })
+            .unwrap_or_else(|| panic!("no terminal event for {}", outcome.stage));
+        let announced_failure = terminal
+            .outcome
+            .as_ref()
+            .is_some_and(|o| matches!(o, crate::core::progress::Outcome::Failed { .. }));
+        assert_eq!(
+            announced_failure,
+            outcome.status.is_failure(),
+            "{} announced and recorded different verdicts",
+            outcome.stage
+        );
+    }
+}
+
+/// An inactive bus must change nothing — the `None` caller's contract, proved
+/// through the one shape that is observable from outside.
+#[tokio::test]
+async fn a_disabled_bus_stays_a_no_op() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
+    let options = SweepOptions {
+        output: Some(dir.path().join("out")),
+        weeks: Some(1),
+    };
+    let bus = ProgressBus::disabled();
+
+    let stats = run_full_sweep(&Config::default(), &mut db, &options, Some(&bus))
+        .await
+        .expect("sweep");
+
+    assert!(bus.drain().is_empty(), "a disabled bus queued events");
+    assert_eq!(bus.dropped(), 0);
+    let stages: Vec<_> = stats.outcomes.iter().map(|o| o.stage).collect();
+    assert_eq!(
+        stages,
+        EXPECTED_ORDER.to_vec(),
+        "sequencing must not depend on whether anybody is watching"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +435,135 @@ fn sweep_gap_lines_name_each_failed_stage() {
     }
     // Execution order, so two runs over the same failures read identically.
     assert_eq!(lines, crate::audit::sweep_gap_lines(&stats, NO_SECRETS));
+}
+
+/// #5321: a `collect` stage that fell back to stale local refs used to reach
+/// the report as nothing at all.
+///
+/// The sweep hard-codes `--allow-stale` (DOC-67 §9), so an unreachable remote
+/// is not an error: the pipeline walks whatever the local clone already had and
+/// the stage records `Succeeded`. `sweep_gap_lines` only reads
+/// [`AuditSweepStats::failures`], so a succeeded stage contributed no line and
+/// the manifest carried no note — the reader could not tell "no stale refs" from
+/// "the data may be months behind". Before the fix this test fails on the final
+/// assertion: the gap lines name the failed `jira sync` stage and nothing else.
+#[tokio::test]
+async fn a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_path = dir.path().join("acme-service");
+    // An `origin` whose scheme has no transport: the fetch fails without
+    // touching the network, exactly as the reported run's SSH remote did
+    // ("unsupported URL protocol"), so the test is offline and deterministic.
+    init_repo_with_dead_origin(
+        &repo_path,
+        "sshx://git@example.invalid/acme/acme-service.git",
+    );
+
+    let mut config = Config::default();
+    config
+        .repositories
+        .push(crate::core::config::RepositoryConfig {
+            name: Some("acme-service".to_string()),
+            path: repo_path,
+            branch: None,
+            since_date: None,
+            until_date: None,
+            org: None,
+            head_only: false,
+            fetch_timeout_secs: None,
+        });
+
+    let mut db = Database::open(&dir.path().join("tga.db")).expect("open db");
+    let options = SweepOptions {
+        output: Some(dir.path().join("out")),
+        weeks: Some(1),
+    };
+    let stats = run_full_sweep(&config, &mut db, &options, None)
+        .await
+        .expect("sweep");
+
+    // The defect's own shape: the stage reports `ok`. That is correct — the
+    // sweep must not abort — which is exactly why the degradation needs its own
+    // channel to the report.
+    let collect = stats
+        .outcomes
+        .iter()
+        .find(|o| o.stage == SweepStage::Collect)
+        .expect("collect stage ran");
+    assert_eq!(
+        collect.status,
+        StageStatus::Succeeded,
+        "collect should still report ok under --allow-stale: {:?}",
+        collect.status
+    );
+
+    let lines = crate::audit::sweep_gap_lines(&stats, NO_SECRETS);
+    let stale = lines
+        .iter()
+        .find(|l| l.contains("acme-service"))
+        .unwrap_or_else(|| {
+            panic!("no Gaps & Caveats line names the repo that fell back to stale refs: {lines:#?}")
+        });
+    assert!(
+        stale.contains("origin"),
+        "the line must name the affected remote: {stale}"
+    );
+    assert!(
+        stale.contains("behind the true remote state"),
+        "the line must say the data may be out of date: {stale}"
+    );
+}
+
+/// A git repository with one commit and an `origin` that cannot be fetched.
+fn init_repo_with_dead_origin(path: &std::path::Path, remote_url: &str) {
+    std::fs::create_dir_all(path).expect("mkdir");
+    let repo = git2::Repository::init(path).expect("git init");
+    repo.remote("origin", remote_url).expect("add origin");
+
+    std::fs::write(path.join("README.md"), "acme").expect("write file");
+    let mut index = repo.index().expect("index");
+    index
+        .add_path(std::path::Path::new("README.md"))
+        .expect("index add");
+    index.write().expect("index write");
+    let tree = repo
+        .find_tree(index.write_tree().expect("write_tree"))
+        .expect("find_tree");
+    let sig = git2::Signature::now("Test", "t@example.com").expect("signature");
+    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+        .expect("commit");
+}
+
+/// The stale-refs line travels the same redaction path a stage message does,
+/// and it needs to: git2 quotes the remote URL back in the error, so an HTTPS
+/// remote with an embedded token puts that token in the manifest and the
+/// delivered report. Also pins the ordering — failed stages first, then the
+/// repositories that were collected anyway.
+#[test]
+fn a_credential_in_a_fetch_error_never_reaches_the_gap_line() {
+    let mut stats = AuditSweepStats::default();
+    stats.record(
+        SweepStage::Dora,
+        Instant::now(),
+        Err(anyhow::anyhow!("fact_deployments is empty")),
+    );
+    stats.record_stale_fetch(crate::audit::StaleFetch {
+        repo: "acme-service".to_string(),
+        remote: "origin".to_string(),
+        error: "failed to connect to https://x-access-token:ghp_SECRETVALUE@github.com/acme/svc"
+            .to_string(),
+    });
+
+    let lines = crate::audit::sweep_gap_lines(&stats, &["ghp_SECRETVALUE"]);
+
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(lines[0].contains("`dora`"), "{}", lines[0]);
+    assert!(lines[1].contains("acme-service"), "{}", lines[1]);
+    assert!(
+        !lines[1].contains("ghp_SECRETVALUE"),
+        "the token survived into the report: {}",
+        lines[1]
+    );
 }
 
 #[test]

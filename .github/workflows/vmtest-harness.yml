@@ -1,0 +1,126 @@
+# vmtest-harness host-only gates (issues #5014, #5015).
+#
+# The harness ships four host-only test scripts and one mechanical invariant,
+# and until this file they ran NOWHERE — `grep -rn "vmtest" .github/` returned
+# zero. Both bugs this file was created alongside were latent for exactly that
+# reason: #5014 (the #16 guard exempted `local x=$(f)`, which genuinely swallows
+# the child status) and #5015 (the single-file virtualisation-tool invariant was
+# red on main). Neither is detectable by review alone; both are caught by a
+# script that already existed and simply never ran.
+#
+# What this job enforces:
+#   - `check-no-swallowed-die.sh` — no die-capable function sits in a
+#     status-discarding context. `vmtest:649-657` records that the driver
+#     DECLINED a runtime exit-code override *because this static guard covers
+#     it*, so the guard is a load-bearing precondition of the exit-code
+#     contract, not a lint.
+#   - `check-no-swallowed-die-selftest.sh` — the guard can still go RED for
+#     every defect class it claims. Runs FIRST: a gate that cannot fail makes
+#     the real run's green meaningless (matches line-cap.yml's
+#     selftest-then-gate ordering).
+#   - `subshell-classification.sh` — `die`'s classification survives every
+#     subshell construct (issue #16 regression artefact).
+#   - `test-preflight-single-run.sh` — the single-run gate's refusals, proved
+#     without a VM (issue #15).
+#   - the single-file tool-name invariant declared at `lib/vm.sh:3`.
+#
+# NO VM AND NO NETWORK. Every script is host-only by construction:
+# `subshell-classification.sh` sources the driver through its `--source-only`
+# hook and dispatches nothing; `test-preflight-single-run.sh` puts a STUB for
+# the virtualisation CLI on PATH and points the run registry and $HOME at a
+# temporary directory; the other two are text scanners. Nothing outside the
+# temporary root is written.
+#
+# Pure shell — no Rust toolchain or build needed, so this runs as its own
+# lightweight job (matches line-cap.yml's structure/style).
+name: vmtest harness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "vmtest-harness/**"
+      - ".github/workflows/vmtest-harness.yml"
+  pull_request:
+    # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
+    # (opened/synchronize/reopened) and is the event a base-branch RETARGET
+    # fires, so without it a stacked PR retargeted onto main never re-triggers
+    # and can merge with zero checks — PR #3838 did exactly that.
+    # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
+    # A `paths:` filter is safe HERE and is not the pattern #4468 forbids: that
+    # rule binds gates in branch protection, where a path-skipped required check
+    # never reports and leaves the PR pending forever. This gate is not a
+    # required context, and the harness is a self-contained directory no other
+    # crate builds against — so a PR that touches none of it has nothing here to
+    # verify. The workflow file itself is in the filter so changes to this gate
+    # still exercise it.
+
+# Per-COMMIT concurrency group on push so a merge never cancels the previous
+# merge's verification (#4179); per-ref group on pull_request so a new push
+# still supersedes the superseded run. Matches ci.yml.
+concurrency:
+  group: vmtest-harness-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'edited' }}
+
+jobs:
+  vmtest-harness:
+    name: vmtest-harness host-only tests
+    # macOS, and NOT ubuntu-latest, because the target is the host the harness
+    # actually drives. `vmtest:17` and every script header pin /bin/bash 3.2.57,
+    # the version macOS has shipped since 2007, and
+    # `test-preflight-single-run.sh` reads BSD `ps` output and renames argv[0]
+    # with `exec -a`. A Linux runner would run these under bash 5 with GNU `ps`
+    # and could report green for semantics the real target fails — the exact
+    # false negative that lets a swallowed-status construct through.
+    runs-on: macos-14
+    # 10, not the 5 this repo's pure-shell gates default to. Measured on an
+    # arm64 macOS host: 0.2s + 2.5s + 2.5s + 17.9s ≈ 23s wall clock. The
+    # headroom is for `test-preflight-single-run.sh`, which starts and reaps
+    # REAL fixture processes and so is wall-clock bound rather than CPU bound.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      # The claim this job rests on is "these ran under the shell the harness
+      # targets". Recording the interpreter makes that auditable in the log
+      # instead of assumed, if a future runner image moves /bin/bash.
+      - name: Record the shell under test
+        run: /bin/bash --version | head -1
+
+      # Runs BEFORE the guard it proves — see the header. The `local`-form case
+      # is the one that keeps #5014's narrowed exemption narrow.
+      - name: Swallowed-die guard selftest (the guard must be able to fail)
+        run: /bin/bash vmtest-harness/tests/check-no-swallowed-die-selftest.sh
+
+      - name: Enforce no die-capable function in a status-discarding context
+        run: /bin/bash vmtest-harness/tests/check-no-swallowed-die.sh
+
+      - name: Classification must survive every subshell construct (#16)
+        run: /bin/bash vmtest-harness/tests/subshell-classification.sh
+
+      - name: Single-run preflight gate, proved without a VM (#15)
+        run: /bin/bash vmtest-harness/tests/test-preflight-single-run.sh
+
+      # `lib/vm.sh:3` declares that file the ONLY one in the harness that may
+      # contain the tool name, so a second VM backend can be swapped in
+      # (DOC-1 §12.2); this grep is the only thing enforcing it. `-w` and the
+      # absence of --exclude-dir are load-bearing (`vm.sh:15-26`).
+      #
+      # Comparing against the exact expected path also fails an EMPTY result,
+      # which is the vacuous-scan case: no match at all means the grep stopped
+      # examining the harness, not that the invariant holds.
+      - name: Enforce the single-file virtualisation-tool invariant
+        run: |
+          expected='vmtest-harness/lib/vm.sh'
+          found=$(grep -rlnw 'tart' vmtest-harness --include='*.sh' --include='vmtest' || :)
+          if [ "$found" != "$expected" ]; then
+              printf '%s declares it is the ONLY file in the harness that may name the\n' "$expected" >&2
+              printf 'virtualisation tool. The check must list it and nothing else.\n\n' >&2
+              printf 'Expected:\n  %s\nGot:\n%s\n' "$expected" \
+                  "$(printf '%s' "$found" | sed 's/^/  /')" >&2
+              printf '\nName the tool by description instead (see `lib/verify.sh:13-15`).\n' >&2
+              exit 1
+          fi
+          printf 'OK — only %s names the virtualisation tool.\n' "$expected"

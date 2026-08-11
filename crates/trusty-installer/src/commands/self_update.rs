@@ -237,16 +237,16 @@ pub fn read_only_fs_error(dir: &Path) -> String {
 /// can warn when it installs to a different directory than the original binary,
 /// which would leave the binary on PATH unmodified (the misleading-success bug).
 ///
-/// What: Returns `$CARGO_HOME/bin` when `CARGO_HOME` is set, otherwise
-/// `~/.cargo/bin` via `dirs::home_dir()`. Returns `None` if the home directory
-/// cannot be determined.
+/// What: #4964 — delegates to the shared
+/// [`trusty_common::bin_resolve::canonical_bin_dir`]. The local copy this
+/// replaces treated `CARGO_HOME=""` (how a shell exports a variable it never
+/// assigned) as a real value and resolved the RELATIVE path `bin`, which the
+/// shared helper rejects as unset.
 ///
-/// Test: `tests::cargo_install_dir_ends_in_bin`.
+/// Test: `tests::cargo_install_dir_ends_in_bin`; the rule itself is covered by
+/// `trusty_common::bin_resolve::tests::canonical_bin_dir_from_*`.
 pub fn cargo_install_dir() -> Option<PathBuf> {
-    if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
-        return Some(PathBuf::from(cargo_home).join("bin"));
-    }
-    dirs::home_dir().map(|h| h.join(".cargo").join("bin"))
+    trusty_common::bin_resolve::canonical_bin_dir()
 }
 
 /// Format the post-cargo-install success message, warning when the install

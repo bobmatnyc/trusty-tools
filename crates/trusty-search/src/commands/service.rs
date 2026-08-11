@@ -123,16 +123,24 @@ fn launchd_log_dir() -> Result<std::path::PathBuf> {
 /// [`crate::commands::service_unit::resolve_persisted_env`], which now carries
 /// forward every key the installed unit had.
 ///
+/// #4829: the unit also carries `RUST_LOG`, defaulting to `info`. Without it
+/// launchd exec'd the daemon with `RUST_LOG` unset, `tracing_init` fell back to
+/// `"warn"`, and every `tracing::info!` the daemon writes about its own boot was
+/// dropped. An installed-unit or shell value still wins — the default is only
+/// applied when neither supplies one.
+///
 /// What: always emits an `HF_HOME` entry resolved at install time, plus every
-/// env var the installed unit carried, with the process env taking precedence.
-/// Keys this function computes itself (`HF_HOME`) are never carried forward, so
-/// a stale value cannot outrank the freshly resolved one. The env lookup is
-/// injected so the assembly is testable without mutating a shared process env
-/// from a parallel test binary.
+/// env var the installed unit carried, with the process env taking precedence,
+/// plus a `RUST_LOG` fallback. Keys this function computes itself (`HF_HOME`)
+/// are never carried forward, so a stale value cannot outrank the freshly
+/// resolved one. The env lookup is injected so the assembly is testable without
+/// mutating a shared process env from a parallel test binary.
 /// Test: `launchd_env_pairs_never_carries_no_auto_discover`,
 /// `launchd_env_pairs_carries_forward_installed_tunables`,
-/// `launchd_env_pairs_carries_forward_unanticipated_keys`; the resolution
-/// rules themselves are covered by `service_unit::resolve_persisted_env_*`.
+/// `launchd_env_pairs_carries_forward_unanticipated_keys`,
+/// `launchd_env_pairs_defaults_rust_log_to_info`,
+/// `launchd_env_pairs_keeps_an_operator_rust_log`; the resolution rules
+/// themselves are covered by `service_unit::resolve_persisted_env_*`.
 #[cfg(target_os = "macos")]
 fn launchd_env_vars(
     existing: Option<&crate::commands::service_unit::InstalledUnit>,
@@ -147,6 +155,21 @@ fn launchd_env_vars(
 /// `with_daemon_path` (#1298); a stale value for either must not win.
 #[cfg(target_os = "macos")]
 const TEMPLATE_OWNED_ENV: &[&str] = &["HF_HOME", "PATH"];
+
+/// Tracing filter env var the daemon reads through `trusty_common::init_tracing`.
+#[cfg(target_os = "macos")]
+const RUST_LOG_ENV: &str = "RUST_LOG";
+
+/// Verbosity the generated unit falls back to when nothing else supplies one.
+///
+/// Why (#4829): launchd re-spawns the daemon with no shell environment, so
+/// `RUST_LOG` arrived unset and `trusty_common::tracing_init` fell back to
+/// `"warn"` — every `tracing::info!` line the daemon writes to diagnose itself
+/// was dropped, including the two that confirm auto-discovery suppression. A
+/// daemon that logs nothing at INFO cannot be diagnosed from its own logs.
+/// What: `"info"`, emitted only as a default — see [`launchd_env_pairs`].
+#[cfg(target_os = "macos")]
+const DEFAULT_LAUNCHD_RUST_LOG: &str = "info";
 
 /// Pure assembly behind [`launchd_env_vars`] — see its docs.
 #[cfg(target_os = "macos")]
@@ -167,7 +190,16 @@ fn launchd_env_pairs(
 
     // Operator tunables and everything else the unit carried: process env wins,
     // installed unit is the fallback (#4868).
-    pairs.extend(resolve_persisted_env(lookup, existing, TEMPLATE_OWNED_ENV));
+    pairs.extend(resolve_persisted_env(&lookup, existing, TEMPLATE_OWNED_ENV));
+
+    // #4829: give the unit a RUST_LOG so the daemon logs at INFO under launchd.
+    // Lowest precedence of the three sources — a value the installed unit
+    // already carried, or one exported in the installing shell, is picked up by
+    // `resolve_persisted_env` above and is left alone here.
+    if !pairs.iter().any(|(k, _)| k == RUST_LOG_ENV) {
+        let level = lookup(RUST_LOG_ENV).unwrap_or_else(|| DEFAULT_LAUNCHD_RUST_LOG.to_string());
+        pairs.push((RUST_LOG_ENV.to_string(), level));
+    }
 
     pairs
 }

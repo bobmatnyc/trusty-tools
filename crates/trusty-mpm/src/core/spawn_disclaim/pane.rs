@@ -45,10 +45,15 @@ pub const PANE_DISCLAIM_SUBCOMMAND: &str = "internal-spawn-disclaimed";
 /// Why: `current_exe()` under a home like `/Users/John Doe/.cargo/bin/tm`
 /// would otherwise word-split and break the pane launch — the same failure
 /// [`crate::runtime::claude_code`]'s `shell_single_quote` guards against.
+///
+/// #4181: `core::model_inject::build_claude_command_with` quotes its
+/// `CLAUDE_CONFIG_DIR` / `CLAUDE_CODE_OAUTH_TOKEN` assignments through this
+/// function rather than adding a fourth copy to the crate.
 /// What: wraps `s` in single quotes, escaping any embedded `'` with the
 /// canonical `'\''` close-reopen sequence.
-/// Test: `single_quotes_wrapper_with_space`.
-fn shell_single_quote(s: &str) -> String {
+/// Test: `single_quotes_wrapper_with_space`,
+/// `claude_command_quotes_a_config_dir_with_a_space` (the #4181 consumer).
+pub(crate) fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
@@ -181,7 +186,7 @@ mod tests {
     /// in the disclaimed process instead of the shim spawning `claude` directly.
     #[test]
     fn wraps_the_scrubbed_launch_line_with_env_as_the_program() {
-        let line = crate::core::model_inject::build_claude_command(None, None);
+        let line = crate::core::model_inject::build_claude_command(None, None, None, &[]);
         let out = disclaim_pane_command_with(Some("/w/tm"), &line);
 
         assert!(

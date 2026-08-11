@@ -53,6 +53,11 @@ exists that FAILS against the pre-fix commit. **Name the Fail-Open Check in the
 dispatch brief** for `code-analyzer` or `code-critic`; the five checks that find
 it are in the `code-review-standards` skill both agents already load.
 
+## Live Issue Status
+
+Dispatching work against an issue: have `ticketing` mark it in progress, and
+update it when the work lands or blocks. Detail: `Skill(skill="tm-ticketing")`.
+
 ## Source Citations
 
 A source citation links to a GitHub blob permalink pinned to a commit SHA, never

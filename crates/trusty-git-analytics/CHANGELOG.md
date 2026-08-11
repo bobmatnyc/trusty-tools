@@ -6,6 +6,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.15.0] — 2026-08-11
+
+### Fixed
+
+- Agentic-commit detection no longer undercounts. The seven hardcoded patterns all keyed on the literal "Claude", so a commit carrying only a house footer counted as human work — on trusty-tools' own 2434 commits the detector caught 47.7% against a 91.0% agentic share. Detection now runs a marker set with entries for the trusty-mpm footer, Devin, OpenHands and Aider alongside Claude Code, Copilot and Cursor, and also matches the author and committer email, which `tga collect` extracted and discarded. Measured on the same history the shipped set now catches 91.0% (#5249).
+- `commits.ai_tool` is now populated from body footers and bot identities as well as `Co-Authored-By:` trailers, from a single scan shared with `agentic_mode` so the two columns cannot disagree. Existing databases keep their stored values until `tga backfill ai-detection-commits` is run; that repair pass reads the stored author email and classifies exactly as the forward walk does.
+- `tga collect` and `tga backfill ai-detection-commits` log the active marker set and its limits once per run. Detection is marker-based, so a repository whose trailers were stripped, squashed, or rewritten reports a low share for a reason that is not "no AI assistance" — the log says so rather than leaving a reader to infer provenance from silence.
+
+## [2.14.0] — 2026-08-10
+
+### Fixed
+
+- A repository `tga audit` collected from stale local refs is now named in the
+  report's Gaps & Caveats section, with its remote and the fetch error, and
+  states that its data may be behind the true remote state. The sweep hard-codes
+  `--allow-stale`, so an unreachable remote leaves the `collect` stage reporting
+  `ok`; the per-repository fetch outcomes were printed to stderr and dropped, and
+  a report over months-old refs was indistinguishable from a current one (#5321,
+  DOC-67 §9). `commands::collect::run_reporting_fetch` is the new entry point
+  that returns those outcomes — `run` and `run_with_progress` are unchanged and
+  still return `()`. The sweep's terminal table qualifies the same stage as
+  `ok (N stale)`; a run where every remote was reached renders as before.
+- `audit::run_full_sweep` now reports every stage on the `ProgressBus` it is
+  given, instead of discarding the parameter. Each of the eight stages emits a
+  start event (naming the stage and its position in the run) and a
+  completed/failed event under the new `Stage::Audit`, and the collection stage
+  is handed that same bus so its per-repository events land there too. A `None`
+  or disabled bus stays a no-op.
+
 ## [2.13.0] — 2026-08-10
 
 ### Added
