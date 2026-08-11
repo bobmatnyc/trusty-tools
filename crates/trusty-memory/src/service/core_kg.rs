@@ -96,28 +96,53 @@ impl MemoryService {
             .map_err(|e| ServiceError::internal(format!("kg assert: {e:#}")))
     }
 
-    /// Retract the single active triple identified by `(subject, predicate)`.
+    /// Close the one active triple `(subject, predicate, object)`, leaving
+    /// every sibling object at that pair active. Returns the rows closed.
     ///
     /// Why: Issue #278 — the `DELETE /kg/triples/<id>` HTTP endpoint needs a
-    /// service-layer method so the HTTP handler stays a thin adapter.
-    /// What: Opens the palace handle, calls `KnowledgeGraph::retract`, and
-    /// maps the closed count to a 204/404 signal: `Ok(true)` when at least
-    /// one interval was closed, `Ok(false)` when no active triple matched.
-    /// Test: Covered by `kg_delete_triple_returns_204_on_success` in
-    /// `web::tests`.
+    /// service-layer method so the HTTP handler stays a thin adapter. It took
+    /// no object and called the pair-level `KnowledgeGraph::retract`, whose
+    /// meaning is "close every active row at this pair", so a caller deleting
+    /// one triple lost the siblings it never named. Retraction is a soft close
+    /// — `close_active_row` copies the row to a `hist:` key first — so the
+    /// damage was recoverable, not silent data loss.
+    /// What: Opens the palace handle and calls
+    /// [`trusty_common::memory_core::store::kg::KnowledgeGraph::retract_triple`],
+    /// which keys on all three fields. Returns the closed count so the caller
+    /// can tell a retraction (`1`) from a miss (`0`); a miss is a genuine
+    /// no-op, which makes the call idempotent. Rebuilds the prompt cache when
+    /// a hot-predicate row was actually closed — otherwise a retracted Tier S
+    /// fact keeps being injected until the next write. This mirrors the
+    /// `kg_retract_triple` MCP tool so both surfaces agree.
+    /// Test: `kg_delete_triple_closes_one_object_and_keeps_siblings`,
+    /// `kg_delete_triple_returns_404_for_missing`,
+    /// `kg_delete_triple_rebuilds_prompt_cache_for_hot_predicate` in
+    /// `web::tests`. Only the third reaches the cache rebuild — the other two
+    /// retract under the predicate `is`, which is not hot.
     pub async fn kg_retract_triple(
         &self,
         id: &str,
         subject: &str,
         predicate: &str,
-    ) -> ServiceResult<bool> {
+        object: &str,
+    ) -> ServiceResult<usize> {
         let handle = self.open_handle(id)?;
         let closed = handle
             .kg
-            .retract(subject, predicate)
+            .retract_triple(subject, predicate, object)
             .await
-            .map_err(|e| ServiceError::internal(format!("kg retract: {e:#}")))?;
-        Ok(closed > 0)
+            .map_err(|e| ServiceError::internal(format!("kg retract_triple: {e:#}")))?;
+        if closed > 0 && crate::prompt_facts::is_hot_predicate(predicate) {
+            // The write landed either way and the cache is only a
+            // denormalisation, so a rebuild failure is logged, not fatal.
+            // No test drives this arm: `rebuild_prompt_cache` skips a palace
+            // it cannot read and has no other fallible step, so it cannot
+            // currently return `Err`.
+            if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(&self.state).await {
+                tracing::warn!("rebuild_prompt_cache after kg_retract_triple failed: {e:#}");
+            }
+        }
+        Ok(closed)
     }
 
     /// List distinct subjects in the KG.
@@ -158,9 +183,14 @@ impl MemoryService {
     }
 
     /// Return the count of currently-active triples.
+    ///
+    /// #5384: a failed count read is a 500, not `{"active": 0}` — the badge
+    /// this feeds cannot tell those apart.
     pub async fn kg_count(&self, id: &str) -> ServiceResult<usize> {
         let handle = self.open_handle(id)?;
-        Ok(handle.kg.count_active_triples())
+        handle.kg.count_active_triples().map_err(|e| {
+            ServiceError::internal(format!("kg count_active_triples for palace {id}: {e:#}"))
+        })
     }
 
     /// Build the per-palace visual graph payload.
@@ -202,7 +232,11 @@ impl MemoryService {
             .map_err(|e| ServiceError::internal(format!("kg list_active: {e:#}")))?;
         // #4670: compare against the true active count, not the cap, so a
         // palace sitting exactly on the cap is not falsely flagged.
-        let active_triple_count = handle.kg.count_active_triples() as u64;
+        // #5384: a failed read would come back as 0 and make `truncated` false
+        // for every payload, which is the flag's exact failure mode.
+        let active_triple_count = handle.kg.count_active_triples().map_err(|e| {
+            ServiceError::internal(format!("kg count_active_triples for palace {id}: {e:#}"))
+        })? as u64;
         let returned_triple_count = triples.len() as u64;
         Ok(KgGraphPayload {
             triples,

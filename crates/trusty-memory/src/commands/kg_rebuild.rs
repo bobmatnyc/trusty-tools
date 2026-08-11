@@ -19,6 +19,7 @@ use trusty_common::memory_core::palace::PalaceId;
 use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
 use trusty_common::memory_core::store::OpenIntent;
 
+use super::kg_twin_merge::report_merge;
 use crate::kg_extract::{
     extract_triples, is_stop_token, ExtractInput, AUTO_PROVENANCE, DRAWER_SUBJECT_PREFIX,
     ROOM_SUBJECT_PREFIX, TAG_SUBJECT_PREFIX, TOPIC_SUBJECT_PREFIX,
@@ -33,7 +34,7 @@ use crate::{resolve_palace_registry_dir, AppState};
 /// What: the four prefixes `kg_extract` emits. A subject carrying any of them
 /// is skipped before the stopword test runs.
 /// Test: `purge_skips_namespaced_subjects`.
-const STRUCTURAL_PREFIXES: &[&str] = &[
+pub(crate) const STRUCTURAL_PREFIXES: &[&str] = &[
     DRAWER_SUBJECT_PREFIX,
     TAG_SUBJECT_PREFIX,
     TOPIC_SUBJECT_PREFIX,
@@ -65,8 +66,9 @@ pub struct PalaceRebuildSummary {
 /// [`handle_kg_rebuild`]'s existing one-argument signature intact — that
 /// function is public API of a crate `trusty-agents` links against, so
 /// widening it in place would be a breaking change for a bug fix.
-/// What: the palace filter plus the two purge switches. `Default` is an
-/// ordinary rebuild of every palace, which is the pre-#4678 behaviour.
+/// What: the palace filter plus the maintenance switches — #4678's purge,
+/// #5401's twin merge, and the shared dry run. `Default` is an ordinary rebuild
+/// of every palace, which is the pre-#4678 behaviour.
 /// Test: `purge_is_off_by_default`.
 #[derive(Debug, Clone, Default)]
 pub struct KgRebuildOptions {
@@ -74,7 +76,10 @@ pub struct KgRebuildOptions {
     pub palace: Option<String>,
     /// Delete auto-extracted subjects the #4678 token filter now rejects.
     pub purge_stale_subjects: bool,
-    /// Report the purge candidates and write nothing at all.
+    /// Re-point auto-extracted triples off a punctuated entity node onto its
+    /// cleaned twin (#5401).
+    pub merge_punctuated_twins: bool,
+    /// Report what the selected maintenance passes would do and write nothing.
     pub dry_run: bool,
 }
 
@@ -103,8 +108,10 @@ pub async fn handle_kg_rebuild(palace: Option<String>) -> Result<()> {
 /// platform equivalent) via `resolve_data_dir`, calls `rebuild_palaces` with
 /// the optional palace filter, then prints a human-readable summary to
 /// stdout. With `purge_stale_subjects` it then deletes the stale subjects;
-/// with `dry_run` it skips the rebuild entirely and only reports what the
-/// purge would delete, so the whole invocation writes nothing.
+/// with `merge_punctuated_twins` it re-points each punctuated entity's triples
+/// onto the cleaned twin (#5401); with `dry_run` it skips the rebuild entirely
+/// and only reports what the selected passes would do, so the whole invocation
+/// writes nothing.
 /// Test: not unit-tested (process-level entry point); `rebuild_palaces` and
 /// `purge_palaces` are the testable surfaces.
 pub async fn handle_kg_rebuild_with(opts: KgRebuildOptions) -> Result<()> {
@@ -120,9 +127,15 @@ pub async fn handle_kg_rebuild_with(opts: KgRebuildOptions) -> Result<()> {
     // drawers — a write, and precisely the thing --dry-run promises not to do.
     if opts.dry_run {
         println!("kg-rebuild: DRY RUN — nothing is written: no palace is hydrated, no triple is asserted, no subject is deleted");
-        let failures = report_purge(&state, palace.as_deref(), false).await?;
+        let mut failures = 0usize;
+        if opts.purge_stale_subjects {
+            failures += report_purge(&state, palace.as_deref(), false).await?;
+        }
+        if opts.merge_punctuated_twins {
+            failures += report_merge(&state, palace.as_deref(), false).await?;
+        }
         if failures > 0 {
-            anyhow::bail!("kg-rebuild purge: {failures} palace(s) could not be scanned");
+            anyhow::bail!("kg-rebuild: {failures} palace(s) could not be scanned");
         }
         return Ok(());
     }
@@ -165,6 +178,17 @@ pub async fn handle_kg_rebuild_with(opts: KgRebuildOptions) -> Result<()> {
         if failures > 0 {
             anyhow::bail!(
                 "kg-rebuild purge: {failures} subject deletion(s) failed — see the [purge-FAILED] lines above"
+            );
+        }
+    }
+    // #5401: merge after the purge — the purge deletes the stopword subjects
+    // this pass is required to leave alone, so a merged palace never inherits
+    // one of them as a target.
+    if opts.merge_punctuated_twins {
+        let failures = report_merge(&state, palace.as_deref(), true).await?;
+        if failures > 0 {
+            anyhow::bail!(
+                "kg-rebuild merge: {failures} re-point(s) failed — see the [merge-FAILED] lines above"
             );
         }
     }
@@ -395,21 +419,7 @@ async fn purge_one(state: &AppState, palace_id: &str, apply: bool) -> Result<Pal
     let kg = KnowledgeGraph::open_with_intent(&kg_path, intent)
         .with_context(|| format!("open kg for palace {palace_id}"))?;
 
-    let mut active: Vec<Triple> = Vec::new();
-    let mut offset = 0usize;
-    loop {
-        let page = kg
-            .list_active(PURGE_SCAN_PAGE, offset)
-            .await
-            .with_context(|| format!("scan active triples in {palace_id}"))?;
-        let n = page.len();
-        active.extend(page);
-        if n < PURGE_SCAN_PAGE {
-            break;
-        }
-        offset += n;
-    }
-
+    let active = scan_active_triples(&kg, palace_id).await?;
     let selected = stale_subject_candidates(&active);
     let outcome = if apply {
         let store = kg.store();
@@ -440,6 +450,37 @@ async fn purge_one(state: &AppState, palace_id: &str, apply: bool) -> Result<Pal
         rows_closed: outcome.rows_closed,
         error,
     })
+}
+
+/// Page every active triple in `kg` into one vec.
+///
+/// Why: both maintenance passes — the #4678 purge and the #5401 twin merge —
+/// decide from the whole active set, and `list_active` is a windowed read. One
+/// scan means the page size and the last-page condition cannot drift between
+/// them.
+/// What: repeats `list_active` at [`PURGE_SCAN_PAGE`] until a short page ends
+/// the walk.
+/// Test: `purge_selects_only_stopword_subjects` (through `purge_one`),
+/// `merge_repoints_both_positions_and_keeps_the_cleaned_nodes_triples`.
+pub(crate) async fn scan_active_triples(
+    kg: &KnowledgeGraph,
+    palace_id: &str,
+) -> Result<Vec<Triple>> {
+    let mut active: Vec<Triple> = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let page = kg
+            .list_active(PURGE_SCAN_PAGE, offset)
+            .await
+            .with_context(|| format!("scan active triples in {palace_id}"))?;
+        let n = page.len();
+        active.extend(page);
+        if n < PURGE_SCAN_PAGE {
+            break;
+        }
+        offset += n;
+    }
+    Ok(active)
 }
 
 /// Pick the subjects a purge may delete.
@@ -720,14 +761,17 @@ mod tests {
         );
     }
 
-    /// Why: the purge must never fire as a side effect of an ordinary rebuild.
-    /// What: the default options carry both switches off, so
-    /// `handle_kg_rebuild`'s one-argument form cannot delete anything.
+    /// Why: neither maintenance pass may fire as a side effect of an ordinary
+    /// rebuild.
+    /// What: the default options carry every switch off, so
+    /// `handle_kg_rebuild`'s one-argument form cannot delete or re-point
+    /// anything.
     /// Test: This test.
     #[test]
     fn purge_is_off_by_default() {
         let opts = KgRebuildOptions::default();
         assert!(!opts.purge_stale_subjects, "purge must be opt-in");
+        assert!(!opts.merge_punctuated_twins, "the merge must be opt-in");
         assert!(!opts.dry_run);
     }
 

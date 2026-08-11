@@ -68,14 +68,16 @@ impl KnowledgeGraph {
 
     /// Count currently active triples.
     ///
-    /// Why: Dashboard tally of live facts. Returns 0 on internal error so it
-    /// stays diagnostic-grade (matches prior behavior).
+    /// Why: Dashboard tally of live facts. Fallible since #5384 — swallowing
+    /// the store's read error here would hand every caller a `0` that reads
+    /// as "the graph is empty".
     /// What: Delegates to `KgStoreRedb::count_active_triples` and clamps the
-    /// u64 to `usize` for backward compatibility with existing callers.
-    /// Test: `count_active_triples_returns_live_only`.
-    pub fn count_active_triples(&self) -> usize {
-        let n = self.store.count_active_triples();
-        usize::try_from(n).unwrap_or(usize::MAX)
+    /// u64 to `usize`, which is what the existing callers consume.
+    /// Test: `count_active_triples_returns_live_only`,
+    /// `count_active_triples_surfaces_read_failure`.
+    pub fn count_active_triples(&self) -> Result<usize> {
+        let n = self.store.count_active_triples()?;
+        Ok(usize::try_from(n).unwrap_or(usize::MAX))
     }
 
     /// Number of distinct entities (nodes) in the in-memory adjacency.

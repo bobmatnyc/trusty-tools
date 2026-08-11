@@ -528,9 +528,9 @@ fn denylist_blocks_env_file() {
 
 #[test]
 fn denylist_denied_path_still_rejected_when_allowlisted() {
-    // Why: even when TRUSTY_ALLOW_UNLISTED logic in server.rs is bypassed,
-    // `check_path` itself must still deny a path that is in the allowlist
-    // but also hits the hard denylist.
+    // Why: the hard denylist is unconditional — `check_path` itself must
+    // still deny a path that is in the allowlist but also hits the hard
+    // denylist. There is no env-var override for either check (#5145).
     // What: put /etc/secrets in the allowlist; check_path must return Denied.
     let dir = tmp_dir("denylist-priority");
     let allowlist = allowlist_file(&dir);

@@ -683,3 +683,254 @@ fn binary_resolution_prefers_the_env_override() {
     let resolved = crate::audit::resolve_review_binary();
     assert!(!resolved.is_empty(), "{resolved}");
 }
+
+// ─── #5454: inference is required ────────────────────────────────────────────
+
+/// #5454 regression. Before this change `invoke` built `report --manifest <m>
+/// --analyze --out <dir>` and never passed `--synthesize`, so `model.synthesis`
+/// was `None` on every audit that had ever run and the whole report was
+/// deterministic. Pins the flag into the argument vector, and pins the rest of
+/// the vector alongside it so a future edit cannot drop `--analyze` while
+/// "fixing" this one.
+#[test]
+fn invocation_requests_inference() {
+    use std::path::Path;
+
+    let args = super::review::report_args(Path::new("/o/manifest.toml"), Path::new("/o"));
+    let rendered: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        rendered,
+        vec![
+            "report",
+            "--manifest",
+            "/o/manifest.toml",
+            "--analyze",
+            "--synthesize",
+            "--out",
+            "/o",
+        ],
+        "the audit's renderer invocation must request inference"
+    );
+}
+
+/// #5454. The credential is the one prerequisite knowable before the sweep
+/// starts, and DOC-67 §2 gives the run a single non-interactive shot — so a
+/// missing key must be named up front, with the variable and the way to set it,
+/// rather than surfacing minutes later at the render step.
+#[test]
+fn absent_credential_is_a_named_actionable_error() {
+    use super::review::credential_is_present;
+
+    assert!(!credential_is_present(None), "unset is absent");
+    assert!(!credential_is_present(Some("")), "empty is absent");
+    assert!(
+        !credential_is_present(Some("   \n")),
+        "whitespace-only is absent"
+    );
+
+    let msg = crate::audit::MissingInferenceCredential.to_string();
+    assert!(
+        msg.contains(crate::audit::ENV_INFERENCE_CREDENTIAL),
+        "names the variable: {msg}"
+    );
+    assert!(
+        msg.contains("export OPENROUTER_API_KEY="),
+        "says how to set it: {msg}"
+    );
+}
+
+/// #5454. The preflight must not stand between an operator who HAS a key and
+/// their run, and it must never copy the key anywhere — the message it can
+/// produce is a constant with no interpolation site for one.
+#[test]
+fn present_credential_passes_the_precheck() {
+    use super::review::credential_is_present;
+
+    let secret = "sk-or-v1-DEADBEEFdeadbeef";
+    assert!(credential_is_present(Some(secret)));
+
+    let msg = crate::audit::MissingInferenceCredential.to_string();
+    assert!(!msg.contains(secret), "no key material may appear: {msg}");
+    assert!(!msg.contains("sk-or"), "no key-shaped text: {msg}");
+}
+
+// ─── #5454 review: exit 0 is not evidence of a synthesis pass ────────────────
+
+/// A `ReviewRun` shaped like a clean render: the child exited 0 and printed both
+/// halves of the report pair.
+///
+/// Writes `report_json` to a real file, because the check reads the artifact the
+/// renderer wrote rather than anything the child said about it.
+fn successful_run_over(dir: &std::path::Path, report_json: &str) -> crate::audit::ReviewRun {
+    let md = dir.join("2026-08-11-acme.md");
+    let json = dir.join("2026-08-11-acme.json");
+    std::fs::write(&md, "# Acme\n").expect("write md");
+    std::fs::write(&json, report_json).expect("write json");
+    crate::audit::ReviewRun {
+        success: true,
+        code: Some(0),
+        stdout: format!("{}\n{}\n", md.display(), json.display()),
+        stderr: String::new(),
+        artifacts: vec![md, json],
+    }
+}
+
+/// The exact JSON a pre-0.15 `trusty-review` writes when its provider fails
+/// mid-render: `SynthesisStatus::Unavailable` and every prose field empty.
+const DEGRADED_0_14_REPORT: &str = r#"{
+  "title": "Acme — Technical Due Diligence",
+  "synthesis": {
+    "status": { "state": "unavailable", "reason": "provider build failed: 401 Unauthorized" },
+    "top_risks": [],
+    "findings": [],
+    "notes": []
+  }
+}"#;
+
+/// #5454 review, THE arm this guard exists for. A new `tga` beside a pre-0.15
+/// `trusty-review` is an ordinary pairing — the two are resolved through PATH,
+/// not a Cargo edge — and that renderer takes `--synthesize`, falls back to a
+/// deterministic report on any provider failure, writes it, and exits 0.
+/// `ReviewRun::success` is `output.status.success()` and nothing more, so the
+/// `if !run.success` check never fired and `tga audit` reported a clean pass over
+/// the exact narrative-free report #5454 exists to abolish.
+///
+/// Pins the failure AND its remedy: a message that says only "no narrative"
+/// leaves the operator with a symptom and no action.
+#[test]
+fn exit_zero_over_a_narrative_free_report_is_a_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let run = successful_run_over(dir.path(), DEGRADED_0_14_REPORT);
+    assert!(run.success, "the child exited 0 — that is the whole point");
+
+    let err = crate::audit::require_rendered_report_carries_synthesis(&run)
+        .expect_err("a report with no written analysis must not pass as a successful audit");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("trusty-review") && msg.contains("predates"),
+        "the message must name the stale renderer as the cause: {msg}"
+    );
+    assert!(
+        msg.contains("tctl install trusty-review"),
+        "the message must name the upgrade that fixes it: {msg}"
+    );
+
+    // The rule itself, over both narrative-free shapes: 0.14's degraded object,
+    // and a report carrying no `synthesis` key at all.
+    use crate::audit::review::json_carries_synthesis;
+    assert_eq!(json_carries_synthesis(DEGRADED_0_14_REPORT), Some(false));
+    assert_eq!(json_carries_synthesis(r#"{"title": "Acme"}"#), Some(false));
+}
+
+/// The guard must not stand between an operator and a report that DID get its
+/// narrative written — including the one arm 0.15 still allows through, where the
+/// numeric guardrail rejected the executive summary on its own and the
+/// deterministic composition (#5374) fills §2 while the top-risk rows survive.
+#[test]
+fn a_synthesized_report_passes_the_check() {
+    use crate::audit::review::json_carries_synthesis;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let full = r#"{
+      "title": "Acme",
+      "synthesis": {
+        "executive_summary": "Two of three applications carry RED findings.",
+        "top_risks": [{"description": "No tests", "severity": "RED", "cost": "high", "apps": "web"}],
+        "findings": [],
+        "notes": []
+      }
+    }"#;
+    crate::audit::require_rendered_report_carries_synthesis(&successful_run_over(dir.path(), full))
+        .expect("a synthesized report passes");
+
+    // Guardrail rejected the summary; rows survived. Still a synthesized report.
+    assert_eq!(
+        json_carries_synthesis(
+            r#"{"synthesis": {"top_risks": [{"description": "x"}], "findings": [], "notes": ["synthesis: rejected (unverified figure)"]}}"#
+        ),
+        Some(true)
+    );
+    // Only finding prose survived.
+    assert_eq!(
+        json_carries_synthesis(r#"{"synthesis": {"top_risks": [], "findings": [{"title": "x"}]}}"#),
+        Some(true)
+    );
+    // A blank summary is not prose.
+    assert_eq!(
+        json_carries_synthesis(r#"{"synthesis": {"executive_summary": "   "}}"#),
+        Some(false)
+    );
+}
+
+/// A check that cannot be performed must fail, not pass — passing on "I could not
+/// look" reopens the hole the guard closes. Covers both ways the artifact can go
+/// missing: no `.json` path printed, and a path that is not JSON.
+#[test]
+fn an_uncheckable_report_fails_rather_than_passes() {
+    use crate::audit::review::json_carries_synthesis;
+
+    let no_json = crate::audit::ReviewRun {
+        success: true,
+        code: Some(0),
+        stdout: "/o/report.md\n".to_string(),
+        stderr: String::new(),
+        artifacts: vec![std::path::PathBuf::from("/o/report.md")],
+    };
+    let err = crate::audit::require_rendered_report_carries_synthesis(&no_json)
+        .expect_err("no .json artifact means nothing can be asserted about the report");
+    assert!(err.to_string().contains("could not be checked"), "{err}");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let err = crate::audit::require_rendered_report_carries_synthesis(&successful_run_over(
+        dir.path(),
+        "not json at all",
+    ))
+    .expect_err("an unparseable report cannot be claimed to carry a narrative");
+    assert!(err.to_string().contains("could not be checked"), "{err}");
+
+    assert_eq!(json_carries_synthesis("not json at all"), None);
+}
+
+/// #5454 review. The version skew is knowable before stage 1, and DOC-67 §2 gives
+/// the sweep one non-interactive shot — so an operator learning about it only
+/// after eight stages have run learns it at the worst moment. Pins the floor, the
+/// parse, and the deliberate proceed-on-unreadable behaviour that leaves
+/// `require_rendered_report_carries_synthesis` as the thing that actually closes
+/// the hole.
+#[test]
+fn stale_renderer_is_rejected_before_the_sweep() {
+    use crate::audit::review::{parse_review_version, version_verdict};
+    use crate::audit::MIN_REVIEW_VERSION;
+
+    assert_eq!(MIN_REVIEW_VERSION, (0, 15, 0));
+
+    // The version actually on PATH when this defect was found. The message names
+    // the version found, the floor, and the upgrade that fixes it.
+    let err = version_verdict("trusty-review", "trusty-review 0.14.1\n")
+        .expect_err("a pre-0.15 renderer must not clear the preflight");
+    let msg = err.to_string();
+    for needle in ["0.14.1", "0.15.0", "tctl install trusty-review", "exits 0"] {
+        assert!(msg.contains(needle), "missing {needle:?}: {msg}");
+    }
+
+    for ok in ["trusty-review 0.15.0", "trusty-review 0.15.1", "tr v1.0.0"] {
+        version_verdict("trusty-review", ok).unwrap_or_else(|e| panic!("{ok} must pass: {e}"));
+    }
+    // Pre-release and build suffixes read as their release core.
+    assert_eq!(
+        parse_review_version("trusty-review 0.15.0-rc.1+build.7"),
+        Some((0, 15, 0))
+    );
+
+    // Unreadable → the caller proceeds; the delivered-artifact check is what
+    // closes the hole, not this.
+    for unreadable in ["", "\n\n", "trusty-review", "trusty-review unknown"] {
+        assert_eq!(parse_review_version(unreadable), None, "{unreadable:?}");
+        version_verdict("trusty-review", unreadable)
+            .unwrap_or_else(|e| panic!("{unreadable:?} must proceed, not fail: {e}"));
+    }
+}

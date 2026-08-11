@@ -135,7 +135,15 @@ pub(crate) async fn chat_handler(
             // Live counts from the opened handle.
             let drawer_count = handle.drawers.read().len();
             let vector_count = handle.vector_store.index_size();
-            let kg_triple_count = handle.kg.count_active_triples();
+            // #5384: the prompt claims to be an honest view of the palace, so a
+            // failed count says so rather than printing a 0 the model repeats.
+            let kg_triple_count = match handle.kg.count_active_triples() {
+                Ok(n) => n.to_string(),
+                Err(e) => {
+                    tracing::warn!(palace = %palace_id, "kg_triple_count unavailable: {e:#}");
+                    "unknown (read failed)".to_string()
+                }
+            };
 
             // Prefer the on-disk palace.json name/description; fall back to id.
             let (name, description) = match &selected_palace_meta {

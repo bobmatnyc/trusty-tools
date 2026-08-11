@@ -19,6 +19,8 @@ pub mod daemon_lock;
 pub mod doctor;
 pub mod inbox_check;
 pub mod kg_rebuild;
+// #5401: fold pre-#4678 punctuated entity nodes onto their cleaned twins.
+pub mod kg_twin_merge;
 pub mod kuzu_migrate;
 pub mod link;
 pub mod migrate;
