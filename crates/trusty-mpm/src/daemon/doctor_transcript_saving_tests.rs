@@ -81,10 +81,18 @@ fn launch_lines_covers_every_builder() {
 const ALLOWLISTED_CLAUDE_SITES: &[(&str, usize, &str)] = &[
     (
         "core/model_inject.rs",
-        4,
+        3,
         "the three shared launch-line builders (build_claude_command, \
          build_inplace_session_command, build_client_session_command — all three in \
-         launch_lines()) plus the `head()` test helper that reconstructs their prefix",
+         launch_lines()) plus the `head()` test helper that reconstructs their prefix. \
+         #4181 dropped this from 4 to 3 WITHOUT removing a launch line: \
+         build_claude_command gained optional CLAUDE_CONFIG_DIR / \
+         CLAUDE_CODE_OAUTH_TOKEN assignments between the scrub flags and the \
+         program word, so its `format!(\"env{} claude\")` became a push_str \
+         sequence and the literal it emits is ` claude`, which this scanner's \
+         patterns do not match. The builder is still registered in launch_lines() \
+         — see `claude_command_relocates_the_config_dir`, which pins the whole \
+         emitted line",
     ),
     (
         "core/standalone/run.rs",
