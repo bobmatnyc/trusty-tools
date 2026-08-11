@@ -129,8 +129,7 @@ fn full_assembly_writes_nothing_to_real_home() {
     ensure_global_config_dir(&managed_root, &claude_config)
         .expect("ensure_global_config_dir must not fail");
     ensure_managed_hooks(&claude_config).expect("ensure_managed_hooks must not fail");
-    preseed_managed_trust(&claude_config, &workspace, true, true, true, true)
-        .expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&claude_config, &workspace).expect("preseed_managed_trust must not fail");
 
     // --- Positive assertion: output must exist inside claude_config ---
     assert!(
@@ -303,15 +302,14 @@ fn hook_triad_does_not_land_in_workspace_dot_claude() {
 /// workspace, then parses `.claude.json` and asserts the required fields.
 /// Test: this function IS the test.
 #[test]
-fn trust_seed_sets_trust_and_mcp_servers() {
+fn trust_seed_sets_trust_and_no_mcp_approval() {
     let tmp = TempDir::new().expect("temp dir");
     let cfg = tmp.path().join("claude-config");
     std::fs::create_dir_all(&cfg).expect("create config dir");
     let workspace = tmp.path().join("projects").join("my-repo");
     std::fs::create_dir_all(&workspace).expect("create workspace");
 
-    preseed_managed_trust(&cfg, &workspace, true, true, true, true)
-        .expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&cfg, &workspace).expect("preseed_managed_trust must not fail");
 
     let text = std::fs::read_to_string(cfg.join(".claude.json"))
         .expect(".claude.json must exist after preseed_managed_trust");
@@ -345,20 +343,19 @@ fn trust_seed_sets_trust_and_mcp_servers() {
         "projects.<workspace>.projectOnboardingSeenCount must be >= 1"
     );
 
-    // enabledMcpjsonServers
-    let servers = proj
-        .get("enabledMcpjsonServers")
-        .and_then(|v| v.as_array())
-        .expect("projects.<workspace>.enabledMcpjsonServers must be an array");
-    let names: Vec<&str> = servers.iter().filter_map(|v| v.as_str()).collect();
+    // // #4181 (ADR-0042): the seeder writes NO `enabledMcpjsonServers`. An
+    // approved name is what lets a repo's own `.mcp.json` entry override the
+    // operator's user-scope declaration, so the approval is removed rather than
+    // narrowed. The servers this test used to look for are declared once in the
+    // config dir's own top-level `mcpServers` map, which a relocated session
+    // reads with no approval — asserted below.
     assert!(
-        names.contains(&"trusty-memory"),
-        "enabledMcpjsonServers must include 'trusty-memory'; got {names:?}"
+        proj.get("enabledMcpjsonServers").is_none(),
+        "no MCP name may be pre-approved: {proj:?}"
     );
-    assert!(
-        names.contains(&"trusty-search"),
-        "enabledMcpjsonServers must include 'trusty-search'; got {names:?}"
-    );
+    // The servers themselves are seeded by `ensure_global_config_dir`, not by
+    // this function — `ide_attach_boundary_config_dir_vs_workspace` drives the
+    // full pipeline and asserts the user-scope declaration.
 }
 
 /// `preseed_managed_trust` must NOT write `.claude.json` or create `.claude/`
@@ -379,8 +376,7 @@ fn trust_seed_does_not_land_in_workspace() {
     let workspace = tmp.path().join("my-workspace");
     std::fs::create_dir_all(&workspace).expect("create workspace");
 
-    preseed_managed_trust(&cfg, &workspace, true, true, true, true)
-        .expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&cfg, &workspace).expect("preseed_managed_trust must not fail");
 
     assert!(
         !workspace.join(".claude.json").exists(),
@@ -513,8 +509,7 @@ fn ide_attach_boundary_config_dir_vs_workspace() {
 
     ensure_global_config_dir(&managed_root, &cfg).expect("ensure_global_config_dir must not fail");
     ensure_managed_hooks(&cfg).expect("ensure_managed_hooks must not fail");
-    preseed_managed_trust(&cfg, &workspace, true, true, true, true)
-        .expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&cfg, &workspace).expect("preseed_managed_trust must not fail");
 
     // (a) Managed config dir must have the hook triad in settings.json.
     let settings_text = std::fs::read_to_string(cfg.join("settings.json"))
@@ -534,19 +529,27 @@ fn ide_attach_boundary_config_dir_vs_workspace() {
          project-local workspace layer that a plain IDE `claude` invocation reads"
     );
 
-    // (c) Managed config dir must have enabledMcpjsonServers in .claude.json.
+    // (c) The managed config dir DECLARES the servers in user scope and
+    // pre-approves nothing (#4181, ADR-0042). The boundary this test guards —
+    // config dir versus workspace — is unchanged; what moved is which key
+    // carries the servers.
     let claude_json_text = std::fs::read_to_string(cfg.join(".claude.json"))
         .expect("config_dir/.claude.json must be readable");
     let claude_json_val: serde_json::Value = serde_json::from_str(&claude_json_text)
         .expect("config_dir/.claude.json must be valid JSON");
     let ws_key = workspace.to_string_lossy().to_string();
-    let servers = claude_json_val["projects"][&ws_key]["enabledMcpjsonServers"]
-        .as_array()
-        .expect("config_dir/.claude.json must have enabledMcpjsonServers for the workspace");
-    let names: Vec<&str> = servers.iter().filter_map(|v| v.as_str()).collect();
     assert!(
-        names.contains(&"trusty-memory"),
-        "enabledMcpjsonServers in config_dir/.claude.json must include trusty-memory"
+        claude_json_val["projects"][&ws_key]
+            .get("enabledMcpjsonServers")
+            .is_none(),
+        "no MCP name may be pre-approved in the managed config dir"
+    );
+    let declared = claude_json_val["mcpServers"]
+        .as_object()
+        .expect("config_dir/.claude.json must declare the servers in user scope");
+    assert!(
+        declared.contains_key("trusty-memory"),
+        "trusty-memory must be declared in user scope: {declared:?}"
     );
 
     // (d) workspace/.claude.json must NOT exist.
@@ -591,8 +594,7 @@ fn teardown_leaves_no_stray_artifacts_outside_temp_roots() {
     ensure_global_config_dir(&managed_root, &claude_config)
         .expect("ensure_global_config_dir must not fail");
     ensure_managed_hooks(&claude_config).expect("ensure_managed_hooks must not fail");
-    preseed_managed_trust(&claude_config, &workspace, true, true, true, true)
-        .expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&claude_config, &workspace).expect("preseed_managed_trust must not fail");
 
     // Verify no writes leaked to fake home.
     assert_no_real_claude_writes(fake_home.path());
@@ -820,8 +822,7 @@ fn regression_guard_version_capture_and_isolation_invariant() {
     ensure_global_config_dir(&managed_root, &claude_config)
         .expect("ensure_global_config_dir must not fail");
     ensure_managed_hooks(&claude_config).expect("ensure_managed_hooks must not fail");
-    preseed_managed_trust(&claude_config, &workspace, true, true, true, true)
-        .expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&claude_config, &workspace).expect("preseed_managed_trust must not fail");
 
     // Step 3: isolation assertions.
     // If any of these panic the message names the exact violating path,
@@ -887,8 +888,7 @@ fn regression_guard_config_write_paths_never_escape_to_home() {
     // Run every public config-assembly entry point.
     ensure_global_config_dir(&managed_root, &claude_config).expect("ensure_global_config_dir");
     ensure_managed_hooks(&claude_config).expect("ensure_managed_hooks");
-    preseed_managed_trust(&claude_config, &workspace, true, true, true, true)
-        .expect("preseed_managed_trust");
+    preseed_managed_trust(&claude_config, &workspace).expect("preseed_managed_trust");
 
     // All writes must be confined to claude_config (or managed_root).
     // None must escape to fake_home.

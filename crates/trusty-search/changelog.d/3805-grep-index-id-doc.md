@@ -1,0 +1,2 @@
+Fixed
+- The `grep` MCP tool's description and its `index_id` parameter description no longer contradict each other. Both said an omitted `index_id` fans out across every registered index; the dispatcher actually resolves the session-pinned project index first and only sweeps every index when the session has no pin, so a pinned caller following the old text got zero matches with no explanation. Text only — `grep`'s behaviour is unchanged (closes [#3805](https://github.com/bobmatnyc/trusty-tools/issues/3805))

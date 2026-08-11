@@ -3,6 +3,11 @@
 - **Status:** Proposed
 - **Date:** 2026-07-18
 - **Scope:** Workspace-wide (trusty-agents, trusty-mpm, trusty-code)
+- **Reversibility Cost:** High — role cardinality and authority boundaries shape
+  control-bus addressing, session ownership, and cross-product orchestration.
+- **Decision Drivers:** Single-workstream PM ownership, explicit consolidation
+  scope, preservation of Assistant-only user authority, alignment with DOC-36
+  and DOC-41
 - **Supersedes / Superseded by:** — (consolidates DOC-36 tm-manager-vision;
   to be reconciled with DOC-42 / PR #3006)
 

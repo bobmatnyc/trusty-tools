@@ -181,6 +181,7 @@ fn cd_and_group(cwd: &Path, body: &str) -> String {
 /// `spawn_command_without_config_dir_omits_it`,
 /// `env_bin_prefix_quotes_config_dir_with_space`,
 /// `env_bin_prefix_orders_unset_flag_before_config_dir_assignment`,
+/// `env_bin_prefix_carries_a_non_empty_mcp_env`,
 /// `spawn_command_sets_oauth_token_when_available`,
 /// `spawn_command_omits_oauth_token_when_absent`,
 /// `spawn_command_without_token_pins_the_exact_command`,
@@ -198,11 +199,20 @@ pub(crate) fn env_bin_prefix(
     claude_bin: &str,
     config_dir: Option<&Path>,
     oauth_token: Option<&str>,
+    mcp_env: &[(String, String)],
 ) -> String {
     let mut assignments = String::new();
     if let Some(dir) = config_dir {
         let quoted = shell_single_quote(&dir.display().to_string());
         assignments.push_str(&format!(" CLAUDE_CONFIG_DIR={quoted}"));
+    }
+    // #4181: the per-project MCP pins. Claude Code hands its own environment to
+    // every stdio MCP server it spawns, so these reach `trusty-memory` and
+    // `trusty-search` in place of the arguments the deleted injectors wrote into
+    // a workspace `.mcp.json`. See `core::mcp_session_env`.
+    for (name, value) in mcp_env {
+        let quoted = shell_single_quote(value);
+        assignments.push_str(&format!(" {name}={quoted}"));
     }
     if let Some(token) = oauth_token {
         let quoted = shell_single_quote(token);
@@ -308,12 +318,13 @@ fn spawn_command(
     prompt_file: Option<&Path>,
     oauth_token: Option<&str>,
     gh_env_file: Option<&Path>,
+    mcp_env: &[(String, String)],
 ) -> String {
     let body = format!(
         "{}{}{}{} {} {}{}",
         session_id_export_prefix(session_id),
         claude_code_gh_env::gh_env_source_prefix(gh_env_file),
-        env_bin_prefix(claude_bin, config_dir, oauth_token),
+        env_bin_prefix(claude_bin, config_dir, oauth_token, mcp_env),
         prompt_file_flag(prompt_file),
         // #4451: the relocated spawn must load the `user` tier — that is where
         // `CLAUDE_CONFIG_DIR/agents` (the bundled roster) lives.
@@ -471,12 +482,13 @@ fn resume_command(
     prompt_file: Option<&Path>,
     oauth_token: Option<&str>,
     gh_env_file: Option<&Path>,
+    mcp_env: &[(String, String)],
 ) -> String {
     let base = format!(
         "{}{}{}{} {} {}",
         session_id_export_prefix(session_id),
         claude_code_gh_env::gh_env_source_prefix(gh_env_file),
-        env_bin_prefix(claude_bin, config_dir, oauth_token),
+        env_bin_prefix(claude_bin, config_dir, oauth_token, mcp_env),
         prompt_file_flag(prompt_file),
         // #4451: same relocated-tier contract as `spawn_command`.
         crate::core::model_inject::setting_sources_flag(config_dir),
@@ -662,55 +674,20 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// [`crate::core::home_trust_seed::preseed_home_trust`] and returns `None`
 /// (no `CLAUDE_CONFIG_DIR` to inject).
 ///
-/// Issue #3918: before this fix, [`crate::core::standalone::preseed_managed_trust`]
-/// derived `enabledMcpjsonServers` from a hardcoded three-server list that
-/// structurally excluded `trusty-mpm`, so a managed session's OWN MCP server
-/// could end up genuinely untrusted in the one file Claude Code actually reads
-/// for a managed session (`<config_dir>/.claude.json` — never `~/.claude.json`,
-/// per the isolation invariant above). `trusty-mpm` now joins the framework
-/// constant (`mcp_config::BUILTIN_MANAGED_MCP_SERVERS`) instead. An earlier
-/// version of this fix derived the trust list from `cwd`'s own `.mcp.json`
-/// (which `session_launch::prepare_session` populates earlier in this call
-/// chain, WHEN it has run for `cwd` in this request — see the #3950 note
-/// below for why that is not guaranteed) — a code-critic review rejected
-/// that: `.mcp.json` is git-tracked content that arrives with a cloned repo,
-/// so trusting it unconditionally in a headless managed session (no human
-/// to decline a consent dialog) would let a hostile clone smuggle an
-/// arbitrary MCP server past approval on the very first `tm session new`.
-/// See `standalone::trust_seed`'s module doc for the corrected derivation
-/// and its security reasoning.
-///
-/// **Issue #3950 (fifth instance of the name-approval/content-pinning
-/// vulnerability class) — this function now PINS the four builtins itself,
-/// rather than trusting a manifest toggle or a hardcoded `true` as proof of
-/// pinning.** This function has NO ordering dependency on
-/// `session_launch::prepare_session` having run for `cwd` — that was true
-/// before and remains true now, but for a different reason: previously the
-/// trust list was simply assumed safe regardless (a hardcoded `true` for the
-/// unconditional pair, a bare manifest-toggle read for the conditional
-/// pair); now this function does not need that earlier run to have happened
-/// because it re-runs the SAME idempotent injectors
-/// (`session_launch::inject_trusty_mpm_mcp`/`inject_trusty_review_mcp`/
-/// `inject_trusty_memory_mcp`/`inject_trusty_search_mcp`) itself and derives
-/// trust-set membership from what THEY actually returned this run. This
-/// matters because `spawn_resume` reaches this function with NO
-/// corresponding `prepare_session*` call anywhere in its own request chain
-/// (see `daemon::managed_routes::lifecycle::resume_managed`'s doc: "the
-/// broader prep pipeline … is intentionally NOT re-run here") — the
-/// headless resume path, the sharpest case across all five instances of
-/// this vulnerability class, previously asserted pinning with zero same-run
-/// evidence and never re-verified it on any subsequent resume. Each injector
-/// is idempotent (`settings::inject_mcp_server`'s own doc: "skip the write
-/// when the entry already matches"), so re-running them here on every
-/// spawn/resume is cheap and self-healing rather than wasteful: a healthy
-/// entry costs one read-and-compare, a missing/spoofed/previously-failed one
-/// gets repaired in place.
+/// // #4181 (ADR-0042): this function used to re-run the four `.mcp.json`
+/// force-overwrite injectors on every spawn and resume, and derive
+/// `enabledMcpjsonServers` from whether each write succeeded (#3918→#3950). Both
+/// halves are deleted. MCP servers are declared once in
+/// `<config_dir>/.claude.json`'s user-scope `mcpServers` map — the map a
+/// relocated spawn reads under `--setting-sources user,project,local`, and which
+/// Claude Code connects with no approval — so there is no per-run write to prove
+/// and no name to pre-approve. `preseed_managed_trust` now seeds the trust dialog
+/// only, and strips any approval an older tm left in the file.
 /// Test: exercised via `spawn_sends_env_scrub_when_binary_available` and the
 /// `spawn_command`/`resume_command` config-dir tests (the command-string layer);
 /// the provisioning itself is covered in `core::managed_config`;
-/// `prepare_managed_config_excludes_builtins_when_mcp_json_write_fails` and
-/// `prepare_managed_config_pins_all_builtins_on_success` cover this
-/// function's own pin derivation directly.
+/// `prepare_managed_config_writes_no_mcp_json` and
+/// `prepare_managed_config_writes_no_mcp_approval` cover the deletions.
 fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::PathBuf> {
     let Some(config_dir) = crate::core::trusty_tools_config::managed_claude_config_dir() else {
         // Home unresolved (stripped env): no config dir to point at. Fall back
@@ -740,94 +717,10 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
         );
     }
 
-    // #4181: git-exclude `.mcp.json` BEFORE the injectors below write to it.
-    // This is the second write site, not a duplicate of `prepare_session_inner`'s
-    // call: `spawn_resume` and `build_inplace_resume_command` both reach this
-    // function with no `prepare_session*` anywhere in their chain, so without
-    // this call every resume re-dirties a tracked, machine-specific `.mcp.json`.
-    // Cheap and idempotent — `info/exclude` lives in the shared common git dir,
-    // so one successful call covers every worktree in the project permanently.
-    crate::core::session_launch::exclude_mcp_json_from_git(cwd);
-
-    // Force-write the two unconditional framework builtins into `cwd`'s
-    // `.mcp.json` and track whether the write ACTUALLY succeeded this run
-    // (issue #3950) — mirroring `session_launch::prepare_session_inner`'s
-    // identical injector sequence exactly, so the trust-set membership below
-    // reflects a real per-run pin result rather than an assumed one.
-    let mpm_pinned = match crate::core::session_launch::inject_trusty_mpm_mcp(cwd) {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!(
-                session = %tmux_name,
-                cwd = %cwd.display(),
-                "failed to pin trusty-mpm MCP entry (non-fatal): {e}"
-            );
-            false
-        }
-    };
-    let review_pinned = match crate::core::session_launch::inject_trusty_review_mcp(cwd) {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!(
-                session = %tmux_name,
-                cwd = %cwd.display(),
-                "failed to pin trusty-review MCP entry (non-fatal): {e}"
-            );
-            false
-        }
-    };
-
     // Seed workspace trust into <config_dir>/.claude.json (isolation invariant:
-    // NEVER ~/.claude.json) so the session starts without the trust/MCP dialogs.
-    //
-    // Issue #3934/#3950: re-resolve whether `cwd`'s manifest currently
-    // enables the `trusty-memory`/`trusty-search` force-overwrite
-    // injectors, then — when enabled — actually RUN them here and use their
-    // real `Result`, exactly like the unconditional pair above. A toggle
-    // being on is necessary but not sufficient: the write itself can still
-    // fail (disk full, permission error, transient I/O fault), and a
-    // manifest that disabled the injector must drop the name regardless of
-    // what a stale/spoofed `.mcp.json` entry claims.
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(cwd);
-    let (inject_trusty_memory, inject_trusty_search) =
-        crate::core::mcp_config::resolve_conditional_mcp_toggles(&fw, cwd);
-    let memory_pinned = inject_trusty_memory
-        && match crate::core::session_launch::inject_trusty_memory_mcp(cwd, None) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(
-                    session = %tmux_name,
-                    cwd = %cwd.display(),
-                    "failed to pin trusty-memory MCP entry (non-fatal): {e}"
-                );
-                false
-            }
-        };
-    let search_pinned = inject_trusty_search && {
-        // Same index-lookup-then-pin sequence `session_launch` itself uses
-        // (`register_project_index` finds-or-creates the project's trusty-search
-        // index; best-effort, daemon-unreachable handled internally, never fails).
-        let pinned_index = crate::core::session_launch::register_project_index(cwd);
-        match crate::core::session_launch::inject_trusty_search_mcp(cwd, pinned_index.as_deref()) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(
-                    session = %tmux_name,
-                    cwd = %cwd.display(),
-                    "failed to pin trusty-search MCP entry (non-fatal): {e}"
-                );
-                false
-            }
-        }
-    };
-    if let Err(e) = crate::core::standalone::preseed_managed_trust(
-        &config_dir,
-        cwd,
-        mpm_pinned,
-        review_pinned,
-        memory_pinned,
-        search_pinned,
-    ) {
+    // NEVER ~/.claude.json) so the session starts without the trust dialog.
+    // // #4181: no MCP approval is written, and a stale one is stripped.
+    if let Err(e) = crate::core::standalone::preseed_managed_trust(&config_dir, cwd) {
         tracing::warn!(
             session = %tmux_name,
             cwd = %cwd.display(),
@@ -871,6 +764,12 @@ pub struct InPlaceResumeCommand {
     /// The resolved `CLAUDE_CODE_OAUTH_TOKEN`, when available (issue #2246;
     /// see [`crate::core::oauth_token::resolve_oauth_token`]'s precedence).
     pub oauth_token: Option<String>,
+    /// The per-project MCP pins to export (#4181): `TRUSTY_MEMORY_PALACE` and
+    /// `TRUSTY_INDEX`, as [`crate::core::mcp_session_env::session_mcp_env`]
+    /// resolved them. Empty when both manifest toggles are off or neither value
+    /// could be derived — the servers then fall back to their own cwd
+    /// derivation, which is what the unpinned stub used to do.
+    pub mcp_env: Vec<(String, String)>,
 }
 
 /// Pure argv composition shared by [`build_inplace_resume_command`] (#2023 C).
@@ -978,11 +877,14 @@ pub fn build_inplace_resume_command(
         prompt_file.as_deref(),
     );
     let oauth_token = crate::core::oauth_token::resolve_oauth_token();
+    // #4181: same per-project MCP pins the tmux-pane paths export.
+    let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
     Ok(InPlaceResumeCommand {
         claude_bin,
         args,
         config_dir,
         oauth_token,
+        mcp_env,
     })
 }
 
@@ -1138,6 +1040,10 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // we only write it to a mode-0600 temp file the pane sources-and-
         // deletes — the token value itself never appears in the command
         // line sent via `send-keys` (history/`ps` exposure, review follow-up).
+        // #4181: the per-project MCP pins the shared user-scope declarations
+        // cannot carry as arguments. Resolved once per spawn (it touches the
+        // trusty-search daemon), never inside the command-string builder.
+        let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
         let gh_env_file = claude_code_gh_env::write_gh_env_file(gh_env);
         self.tmux
             .send_line(
@@ -1156,6 +1062,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                     prompt_file.as_deref(),
                     oauth_token.as_deref(),
                     gh_env_file.as_deref(),
+                    &mcp_env,
                 ),
             )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
@@ -1236,6 +1143,10 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // Issue #3025: same caller-resolved `gh_env` → temp-file delivery as
         // `spawn` — every resumed/guided-resume/crash-recovery session must
         // get the same deterministic `gh` identity.
+        // #4181: the per-project MCP pins the shared user-scope declarations
+        // cannot carry as arguments. Resolved once per spawn (it touches the
+        // trusty-search daemon), never inside the command-string builder.
+        let mcp_env = crate::core::mcp_session_env::session_mcp_env(cwd, None);
         let gh_env_file = claude_code_gh_env::write_gh_env_file(gh_env);
 
         // #2013: a stored id can go stale — existence-check it before trusting
@@ -1294,6 +1205,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             prompt_file.as_deref(),
             oauth_token.as_deref(),
             gh_env_file.as_deref(),
+            &mcp_env,
         );
         // Sibling-window hijack fix (follow-up to #2456): when the caller
         // supplies the record's own `pane_id`, target it directly — tmux's

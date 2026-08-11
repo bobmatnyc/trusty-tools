@@ -315,13 +315,15 @@ pub fn tool_descriptors() -> Value {
                             re-embedding occurs and line numbers are exact. Supports regex or fixed-string \
                             matching, case folding (-i), context windows (-A/-B/-C), include globs, \
                             multiline mode, files-with-matches (-l), invert (-v), and word-regexp (-w). \
-                            When `index_id` is omitted the daemon fans out across every registered index.",
+                            Omitting `index_id` searches the session's pinned project index; \
+                            it fans out across every registered index ONLY when the session has \
+                            no pin. Pass `index_id` explicitly to search a different project.",
             "inputSchema": {
                 "type": "object",
                 "required": ["pattern"],
                 "properties": {
                     "pattern":            { "type": "string", "description": "Regex (default) or literal when fixed_strings=true" },
-                    "index_id":           { "type": "string", "description": "Optional index id; omit to fan out across all indexes" },
+                    "index_id":           { "type": "string", "description": "Optional index id. Omitted, this resolves to the session's pinned project index (#1373) — NOT a fan-out. Only a session with no pin falls back to sweeping every registered index." },
                     "case_insensitive":   { "type": "boolean", "default": false, "description": "-i / --ignore-case" },
                     "context":            { "type": "integer", "description": "-C: equal before/after context, overrides context_before/context_after" },
                     "context_before":     { "type": "integer", "description": "-B: lines of context before each match" },

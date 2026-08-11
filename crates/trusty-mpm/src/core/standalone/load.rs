@@ -92,62 +92,20 @@ pub fn load_alias(
     // shallow / renamed / origin-less clone might lack); the operator
     // `TRUSTY_MEMORY_PALACE` override still wins over it per `derive_palace_id`
     // precedence.
-    let pins = run_prepare_session(&repo_dir, Some(&url), managed_root)?;
+    run_prepare_session(&repo_dir, Some(&url), managed_root)?;
+
     write_marker(&repo_dir, alias, &url, &git_ref, claude_config_dir)?;
 
-    // Issue #3950 (fifth instance, follow-up to #3934): `pins` carries each
-    // builtin's ACTUAL per-run pin result — read straight off the
-    // `PrepReport` the `run_prepare_session` call above already produced —
-    // rather than re-deriving from the manifest toggle alone. A previous
-    // version of this call re-resolved just the `trusty-memory`/
-    // `trusty-search` manifest toggle via `resolve_conditional_mcp_toggles`,
-    // which reflected only whether the injector was ATTEMPTED, not whether
-    // its write actually SUCCEEDED (disk full, permission error, transient
-    // I/O fault) — and never gated the two unconditional builtins
-    // (`trusty-mpm`/`trusty-review`) on their own write result at all.
-    // Passing a hardcoded `true, true, true, true` (or any value not sourced
-    // from this run's actual injector outcomes) to the trust-seed call below
-    // reopens the exact vulnerability this fixes: a spoofed or stale
-    // `.mcp.json` entry surviving a failed or disabled force-overwrite would
-    // then get its name pre-approved with unverified content behind it.
-
-    // WI-3 sub-parts 2+3: pre-seed project trust + MCP-server approval into
-    // <claude_config_dir>/.claude.json so managed sessions start without dialogs.
+    // WI-3 sub-part 2: pre-seed project trust into
+    // <claude_config_dir>/.claude.json so managed sessions start without the
+    // trust dialog. // #4181: no MCP approval is written any more.
     // Writes ONLY to <claude_config_dir>/.claude.json — never to ~/.claude.json.
     // Non-fatal: a seed failure only means the operator may see the trust dialog.
-    if let Err(err) = super::trust_seed::preseed_managed_trust(
-        claude_config_dir,
-        &repo_dir,
-        pins.trusty_mpm,
-        pins.trusty_review,
-        pins.trusty_memory,
-        pins.trusty_search,
-    ) {
+    if let Err(err) = super::trust_seed::preseed_managed_trust(claude_config_dir, &repo_dir) {
         tracing::warn!("failed to pre-seed managed trust for '{alias}': {err}");
     }
 
     Ok(repo_dir)
-}
-
-/// Each framework builtin's ACTUAL per-run `.mcp.json` pin result, as
-/// observed by [`run_prepare_session`]'s `prepare_session_with_repo_url` call
-/// (issue #3950).
-///
-/// Why: a bare `(bool, bool, bool, bool)` tuple returned across a function
-/// boundary is easy to mis-order (e.g. swapping `trusty_mpm`/`trusty_review`
-/// silently type-checks); this struct names each field so a transposition
-/// bug is a compile-time field-name error instead of a silent security gap.
-/// What: `true` when that name's force-overwrite injector's `Result` was
-/// `Ok` THIS run (for `trusty_memory`/`trusty_search`, additionally gated on
-/// the manifest toggle having been on — see
-/// [`crate::core::session_launch::PrepReport`]'s `trusty_*_injected` fields,
-/// which this struct mirrors verbatim).
-#[derive(Debug, Clone, Copy)]
-struct InjectedMcpPins {
-    trusty_mpm: bool,
-    trusty_review: bool,
-    trusty_memory: bool,
-    trusty_search: bool,
 }
 
 /// Clone the repository into `<project_dir>/repo/`.
@@ -202,14 +160,16 @@ fn pull_ff_only(repo_dir: &Path) {
 /// cloned-from `repo_url` (issue #1651).
 ///
 /// Why: `prepare_session` deploys composed agents, skills, and CLAUDE.md so the
-/// project-local half of the managed configuration is complete — and (issue
-/// #1605/#1651) injects the per-project `repo/.mcp.json` trusty-memory stub.
-/// Threading the registry clone URL as the authoritative git remote makes the
-/// injector pin `env.TRUSTY_MEMORY_PALACE` to the repo's canonical `owner-repo`
-/// slug (the highest-precedence `derive_palace_id` source after the operator
-/// override), so the managed session lands in the SAME palace a non-tm Claude
-/// session in that repo would use. `None` falls back to probing the checkout's
-/// own `git remote get-url origin`, then to the directory-basename slug.
+/// project-local half of the managed configuration is complete. The registry
+/// clone URL is threaded through as the authoritative git remote because a
+/// managed checkout's own `git remote get-url origin` is not always the repo the
+/// session belongs to. Since ADR-0042 deleted the `.mcp.json` injectors, the
+/// remote no longer feeds a pin written into the workspace: the palace is
+/// exported at spawn by [`crate::core::mcp_session_env::session_mcp_env`], and
+/// the remote's remaining job here is the #1939 alias healing
+/// ([`crate::core::session_launch::maybe_register_palace_alias`]), which uses it
+/// to decide whether the derived `owner-repo` palace should resolve to a
+/// pre-existing bare-repo one. `None` falls back to probing the checkout.
 ///
 /// Issue #1927 (DOC-24 SPEC-STANDALONE-MPM-04): this previously resolved
 /// `FrameworkPaths::default()`, which always deploys composed agents/skills
@@ -230,21 +190,18 @@ fn pull_ff_only(repo_dir: &Path) {
 /// What: resolves `FrameworkPaths::for_managed_project(managed_root, repo_dir)`
 /// and calls `crate::core::session_launch::prepare_session_with_repo_url`,
 /// forwarding `repo_url` to the trusty-memory MCP palace-slug derivation.
-/// Returns the [`InjectedMcpPins`] the resulting `PrepReport` actually
-/// observed (issue #3950) so the caller can gate `enabledMcpjsonServers`
-/// membership on real per-run write success instead of re-deriving from the
-/// manifest toggle alone.
-/// Test: `run_prepare_session_pins_palace_from_clone_url`,
-/// `run_prepare_session_bare_stub_when_no_identity`,
-/// `run_prepare_session_never_writes_real_home_claude_dirs`,
-/// `run_prepare_session_reports_all_pins_true_on_success`,
-/// `load_alias_excludes_builtins_from_managed_trust_when_mcp_json_write_fails`;
-/// `prepare_session` itself is covered in session_launch/tests.rs.
+// #4181: this used to return the four per-run `.mcp.json` pin results so the
+/// caller could gate `enabledMcpjsonServers` on them. Both the injectors and the
+/// approval are gone (ADR-0042), so it returns nothing but success or failure.
+/// Test: `run_prepare_session_never_writes_real_home_claude_dirs`;
+/// `prepare_session` itself is covered in session_launch/tests.rs, and the
+/// remote-driven alias healing in `session_launch::palace_alias`'s own tests
+/// plus `ensure_managed_config_dir_heals_a_bare_repo_palace_alias`.
 fn run_prepare_session(
     repo_dir: &Path,
     repo_url: Option<&str>,
     managed_root: &Path,
-) -> anyhow::Result<InjectedMcpPins> {
+) -> anyhow::Result<()> {
     let fw = crate::core::paths::FrameworkPaths::for_managed_project(managed_root, repo_dir);
     let report =
         crate::core::session_launch::prepare_session_with_repo_url(&fw, repo_dir, repo_url)
@@ -257,12 +214,7 @@ fn run_prepare_session(
             "roster provisioning gap (session still launches with its trusty-mpm identity): {err}"
         );
     }
-    Ok(InjectedMcpPins {
-        trusty_mpm: report.trusty_mpm_injected,
-        trusty_review: report.trusty_review_injected,
-        trusty_memory: report.trusty_memory_injected,
-        trusty_search: report.trusty_search_injected,
-    })
+    Ok(())
 }
 
 /// Write `.trusty-mpm/managed.toml` into the repo directory.
@@ -301,13 +253,13 @@ mod tests {
     /// RAII guard that clears an env var for the duration of a test and restores
     /// the prior value on drop.
     ///
-    /// Why: the palace-pin test must be hermetic against an ambient
-    /// `TRUSTY_MEMORY_PALACE` override (which `derive_palace_id` honours at
-    /// highest precedence and would otherwise mask the URL-derived slug).
+    /// Why: the isolation test below runs the whole `prepare_session` pipeline,
+    /// which reaches palace derivation; an ambient `TRUSTY_MEMORY_PALACE`
+    /// override would make that step non-hermetic.
     /// What: snapshots the prior value, removes the var, and restores it on drop.
     /// Pairs with `#[serial_test::serial]` so concurrent tests never race on the
     /// shared process environment.
-    /// Test: used by `run_prepare_session_pins_palace_from_clone_url`.
+    /// Test: used by `run_prepare_session_never_writes_real_home_claude_dirs`.
     struct EnvClearGuard {
         key: &'static str,
         prior: Option<String>,
@@ -333,107 +285,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// Why (issue #1651): the standalone `load` path must pin the per-project
-    /// `repo/.mcp.json` trusty-memory palace to the registry CLONE URL's
-    /// canonical `owner-repo` slug — the same `derive_palace_id` mechanism #1605
-    /// uses — rather than leaving a bare stub or relying on probing the
-    /// checkout's own origin remote. Threading the clone URL explicitly is the
-    /// authoritative identity (a shallow/origin-less clone might lack a remote).
-    /// What: runs `run_prepare_session` on a repo dir with an explicit clone URL
-    /// and asserts the injected `.mcp.json` carries
-    /// `env.TRUSTY_MEMORY_PALACE == "bobmatnyc-trusty-tools"`.
-    /// Test: itself.
-    #[test]
-    #[serial_test::serial]
-    fn run_prepare_session_pins_palace_from_clone_url() {
-        // Hermetic: an ambient override would win over the URL-derived slug.
-        let _guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
-        // #3965: `run_prepare_session` drives `prepare_session`, which seeds
-        // `$HOME/.claude.json` via the REAL process `$HOME` (not a param this
-        // function takes) — point `$HOME` at a throwaway dir so this never
-        // writes into the operator's real file. See `HomeGuard` below.
-        let fake_home = crate::test_support::hermetic_temp_dir();
-        let _home_guard = {
-            let prior = std::env::var("HOME").ok();
-            // SAFETY: serialized via `#[serial_test::serial]`.
-            unsafe { std::env::set_var("HOME", fake_home.path()) };
-            HomeGuard(prior)
-        };
-        let tmp = crate::test_support::hermetic_temp_dir();
-        // Deliberately a session-id-like basename: the pin must come from the
-        // clone URL, NOT this directory name.
-        let repo = tmp.path().join("0c8f1a2b3c4d");
-        std::fs::create_dir_all(&repo).unwrap();
-        let managed_root = tmp.path().join("managed-root");
-
-        run_prepare_session(
-            &repo,
-            Some("git@github.com:bobmatnyc/trusty-tools.git"),
-            &managed_root,
-        )
-        .expect("run_prepare_session succeeds");
-
-        let mcp_path = repo.join(".mcp.json");
-        assert!(
-            mcp_path.exists(),
-            "run_prepare_session must write repo/.mcp.json"
-        );
-        let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
-        assert_eq!(
-            value["mcpServers"]["trusty-memory"]["env"]["TRUSTY_MEMORY_PALACE"],
-            serde_json::json!("bobmatnyc-trusty-tools"),
-            "standalone load must pin the palace to the clone URL's owner-repo slug, \
-             not the workspace basename"
-        );
-    }
-
-    /// Why (issue #1651): when no clone URL is threaded AND the checkout has no
-    /// git origin remote AND no env override, the injection must fail open with
-    /// a BARE trusty-memory stub (no `env` key) so the session still gets the
-    /// memory tools — backward-compatible with the pre-#1651 behaviour.
-    /// What: runs `run_prepare_session(repo, None)` on a non-repo dir whose
-    /// basename does not slugify and asserts the trusty-memory block has no
-    /// `TRUSTY_MEMORY_PALACE` pin. (A non-empty basename would fall back to the
-    /// parent-dir slug, so we assert only the no-`env` shape is preserved when
-    /// pinning is impossible.)
-    /// Test: itself.
-    #[test]
-    #[serial_test::serial]
-    fn run_prepare_session_bare_stub_when_no_identity() {
-        let _guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
-        // #3965: `$HOME` override — see `run_prepare_session_pins_palace_from_clone_url`.
-        let fake_home = crate::test_support::hermetic_temp_dir();
-        let _home_guard = {
-            let prior = std::env::var("HOME").ok();
-            // SAFETY: serialized via `#[serial_test::serial]`.
-            unsafe { std::env::set_var("HOME", fake_home.path()) };
-            HomeGuard(prior)
-        };
-        let tmp = crate::test_support::hermetic_temp_dir();
-        // A basename that slugifies to empty (only separators) cannot yield a
-        // parent-dir slug, so with no URL/remote/override the stub stays bare.
-        let repo = tmp.path().join("---");
-        std::fs::create_dir_all(&repo).unwrap();
-        let managed_root = tmp.path().join("managed-root");
-
-        run_prepare_session(&repo, None, &managed_root).expect("run_prepare_session succeeds");
-
-        let value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(repo.join(".mcp.json")).unwrap())
-                .unwrap();
-        let memory = &value["mcpServers"]["trusty-memory"];
-        assert_eq!(
-            memory["command"],
-            serde_json::json!("trusty-memory"),
-            "the trusty-memory stub must still be present"
-        );
-        assert!(
-            memory.get("env").is_none(),
-            "with no derivable identity the stub must be bare (no TRUSTY_MEMORY_PALACE env); got {memory}"
-        );
     }
 
     /// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
@@ -551,156 +402,6 @@ mod tests {
             "run_prepare_session must deploy the compiled-in skill bundle to \
              repo/.claude/skills (project-local, DOC-24); dir: {}",
             deployed_skills_dir.display()
-        );
-    }
-
-    /// Why (issue #3950 — fifth instance, sanity/no-over-correction check):
-    /// on a normal, unobstructed run every builtin's write succeeds, so
-    /// `run_prepare_session` must report all four as pinned — proving the
-    /// fix does not over-correct into never trusting them.
-    /// What: runs `run_prepare_session` against a clean repo dir and asserts
-    /// the returned [`InjectedMcpPins`] are all `true`.
-    /// Test: itself.
-    #[test]
-    #[serial_test::serial]
-    fn run_prepare_session_reports_all_pins_true_on_success() {
-        let _palace_guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
-        let fake_home = crate::test_support::hermetic_temp_dir();
-        let _home_guard = {
-            let prior = std::env::var("HOME").ok();
-            // SAFETY: serialized via `#[serial_test::serial]`.
-            unsafe { std::env::set_var("HOME", fake_home.path()) };
-            HomeGuard(prior)
-        };
-
-        let tmp = crate::test_support::hermetic_temp_dir();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let managed_root = tmp.path().join("managed-root");
-
-        let pins =
-            run_prepare_session(&repo, None, &managed_root).expect("run_prepare_session succeeds");
-
-        assert!(
-            pins.trusty_mpm,
-            "trusty-mpm pin must succeed on a clean run"
-        );
-        assert!(
-            pins.trusty_review,
-            "trusty-review pin must succeed on a clean run"
-        );
-        assert!(
-            pins.trusty_memory,
-            "trusty-memory pin must succeed on a clean run (default-on toggle)"
-        );
-        assert!(
-            pins.trusty_search,
-            "trusty-search pin must succeed on a clean run (default-on toggle)"
-        );
-    }
-
-    /// Issue #3950 (fifth instance of the name-approval/content-pinning
-    /// vulnerability class, found by code-critic while approving PR #3946).
-    ///
-    /// Why: `load_alias` (the `tm load`/`tm run` daemon-managed driver) is
-    /// the ONE production call site that has BOTH the actual `PrepReport`
-    /// from this run's injectors AND the `preseed_managed_trust` call in the
-    /// SAME function — so this test drives the two real production
-    /// functions back to back (`run_prepare_session` then
-    /// `preseed_managed_trust`, exactly as `load_alias` calls them) rather
-    /// than a full `load_alias` (which needs a network `git clone`). A write
-    /// failure is forced for REAL — not by mocking a boolean — by making
-    /// `repo/.mcp.json` an existing DIRECTORY before running preparation:
-    /// `inject_mcp_server`'s shared read-merge-write helper calls
-    /// `std::fs::write(&mcp_path, ..)`, which fails with an IO error
-    /// (`Is a directory`) regardless of permission bits — portable even in a
-    /// CI container that runs as root, where a read-only-directory
-    /// permission trick would not actually block the write.
-    /// What: asserts (1) `run_prepare_session`'s returned pins are all
-    /// `false` (the write genuinely failed, not merely "toggle off"), and
-    /// (2) feeding those ACTUAL pins into `preseed_managed_trust` (mirroring
-    /// `load_alias`) excludes all four builtin names from
-    /// `<claude_config_dir>/.claude.json`'s `enabledMcpjsonServers` — the
-    /// name must not enter the approved set when nothing pinned its content
-    /// behind it this run.
-    /// Test: itself; `run_prepare_session_reports_all_pins_true_on_success`
-    /// covers the complementary non-regression case.
-    #[test]
-    #[serial_test::serial]
-    fn load_alias_excludes_builtins_from_managed_trust_when_mcp_json_write_fails() {
-        let _palace_guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
-        let fake_home = crate::test_support::hermetic_temp_dir();
-        let _home_guard = {
-            let prior = std::env::var("HOME").ok();
-            // SAFETY: serialized via `#[serial_test::serial]`.
-            unsafe { std::env::set_var("HOME", fake_home.path()) };
-            HomeGuard(prior)
-        };
-
-        let tmp = crate::test_support::hermetic_temp_dir();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        // Force EVERY builtin injector's write to fail — all four share the
-        // same `inject_mcp_server` read-merge-write helper over this one
-        // file (see that helper's doc in `session_launch::settings`).
-        std::fs::create_dir_all(repo.join(".mcp.json")).unwrap();
-        let managed_root = tmp.path().join("managed-root");
-        let claude_config_dir = tmp.path().join("claude-config");
-
-        let pins = run_prepare_session(&repo, None, &managed_root).expect(
-            "run_prepare_session must still succeed: injector failures are non-fatal to launch",
-        );
-        assert!(
-            !pins.trusty_mpm,
-            "a failed write must never count as pinned, even though trusty-mpm has no manifest toggle"
-        );
-        assert!(!pins.trusty_review, "same as trusty-mpm, for trusty-review");
-        assert!(
-            !pins.trusty_memory,
-            "a failed write must never count as pinned, independent of the manifest toggle"
-        );
-        assert!(
-            !pins.trusty_search,
-            "same as trusty-memory, for trusty-search"
-        );
-
-        crate::core::standalone::preseed_managed_trust(
-            &claude_config_dir,
-            &repo,
-            pins.trusty_mpm,
-            pins.trusty_review,
-            pins.trusty_memory,
-            pins.trusty_search,
-        )
-        .expect("preseed_managed_trust succeeds");
-
-        let value: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(claude_config_dir.join(".claude.json")).unwrap(),
-        )
-        .unwrap();
-        let key = repo.to_string_lossy().to_string();
-        let enabled: Vec<&str> = value["projects"][&key]["enabledMcpjsonServers"]
-            .as_array()
-            .expect("enabledMcpjsonServers is an array")
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
-
-        assert!(
-            !enabled.contains(&"trusty-mpm"),
-            "trusty-mpm must not be pre-approved when its pin write failed this run: {enabled:?}"
-        );
-        assert!(
-            !enabled.contains(&"trusty-review"),
-            "trusty-review must not be pre-approved when its pin write failed this run: {enabled:?}"
-        );
-        assert!(
-            !enabled.contains(&"trusty-memory"),
-            "trusty-memory must not be pre-approved when its pin write failed this run: {enabled:?}"
-        );
-        assert!(
-            !enabled.contains(&"trusty-search"),
-            "trusty-search must not be pre-approved when its pin write failed this run: {enabled:?}"
         );
     }
 

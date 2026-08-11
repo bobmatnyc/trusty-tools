@@ -251,6 +251,38 @@ fn run_lifecycle(verb: Verb, members: &[String], yes: bool, json: bool) -> i32 {
     report.exit_code()
 }
 
+/// Bounce ONE member, connection-safely, by its lifecycle strategy (#4964).
+///
+/// Why: `tctl upgrade` places a new binary and then needs the running daemon to
+/// actually start executing it. Before #4964 it called
+/// `trusty_common::update::upgrade_and_restart`, whose restart mechanism is
+/// `std::process::exit(1)` plus launchd `KeepAlive` — correct for the daemon
+/// restarting ITSELF, and a guaranteed no-op when the caller is `tctl`, a
+/// terminal process launchd does not supervise. Exposing the restart `tctl
+/// restart` already performs, rather than writing a second one, is what keeps
+/// the #4470 port guard, the bootout-before-bootstrap ordering, and the
+/// `ExitTimeOut` drain window applying to upgrades too.
+///
+/// What: [`apply_to_member`] with [`Verb::Restart`], over a member synthesised
+/// from `binary` + `manage` (the only two fields the restart path reads).
+///
+/// Test: `super::upgrade::tests::restart_plan_daemons_restart`,
+/// `super::upgrade::tests::restart_plan_non_daemon_is_a_noop`,
+/// `super::upgrade::tests::restart_plan_launchd_member_off_macos_is_manual`
+/// pin the caller's dispatch (in `upgrade_tests.rs`); the
+/// `launchctl`/subprocess calls are side-effecting and never run in unit
+/// tests.
+pub fn restart_member(binary: &str, manage: ManageStrategy) -> anyhow::Result<String> {
+    let m = StableMember {
+        crate_name: binary.to_owned(),
+        binary: binary.to_owned(),
+        daemon: manage != ManageStrategy::None,
+        manage,
+        required: true,
+    };
+    apply_to_member(Verb::Restart, &m)
+}
+
 /// Apply a lifecycle verb to a single member, dispatching on its strategy.
 ///
 /// Why: launchd and process-managed members need different mechanisms; this is
@@ -354,11 +386,15 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
                     // #4470: `service install` writes the plist AND bootstraps
                     // it — gate it before it can leave a half-installed member.
                     super::port_guard::guard_bootstrap(binary).map_err(anyhow::Error::msg)?;
-                    RealServiceEnv.run_service_install(binary).map_err(|e| {
-                        anyhow::anyhow!(
-                            "no launchd plist for {binary} and `service install` failed: {e}"
-                        )
-                    })?;
+                    // #4964: `None` — `tctl start` installs no binary, so it has
+                    // no concrete path to offer and keeps the `PATH` lookup.
+                    RealServiceEnv
+                        .run_service_install(binary, None)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "no launchd plist for {binary} and `service install` failed: {e}"
+                            )
+                        })?;
                     Ok(format!("installed + bootstrapped {}", cfg.label))
                 }
             }
@@ -398,6 +434,15 @@ fn launchd_control(_verb: Verb, binary: &str) -> anyhow::Result<String> {
 /// restart` that spawn/`pkill` the daemon. Shelling to those is the only correct
 /// way to control its lifecycle (#1332 decision 3).
 /// What: spawns `<binary> <verb>`; maps a non-zero exit into an `Err`.
+///
+/// #4964: `binary` is resolved through `which::which`, so the process this
+/// bounces is whichever copy wins `$PATH` — NOT necessarily the concrete path
+/// `tctl upgrade` just wrote and health-gated before calling
+/// [`restart_member`]. On a host with two copies on `PATH` the upgrade can
+/// therefore restart a different binary than the one it verified. Left as-is
+/// deliberately: the fix is one destination (Phase 3), not a second
+/// path-threading change here.
+///
 /// Test: side-effecting subprocess; never exercised in unit tests.
 fn own_verb_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
     if which::which(binary).is_err() {

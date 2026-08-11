@@ -22,7 +22,7 @@ use colored::Colorize;
 use trusty_common::repo_identity::RepoIdentity;
 
 use crate::service::persistence::{
-    indexes_toml_path, load_index_registry_at, save_index_registry_at, PersistedIndex,
+    indexes_toml_path, load_index_registry_at, remove_index_registry_entries_at, PersistedIndex,
 };
 
 /// Why: a small record per orphaned entry keeps the display and removal
@@ -169,14 +169,21 @@ pub(crate) fn handle_prune_orphans_at(
         }
     }
 
-    // 6. Write the pruned registry (live entries only).
-    save_index_registry_at(toml_path, &live)?;
+    // 6. #5344: remove BY ID rather than republishing `live`. This command runs
+    //    in a SEPARATE process from the daemon, so the registry can have gained
+    //    entries between the load above and this write — republishing the
+    //    snapshot's survivors deletes them and still prints success.
+    //    `remove_index_registry_entries_at` re-reads under the cross-process
+    //    write lock and drops only the orphan ids.
+    let orphan_ids: Vec<&str> = orphans.iter().map(|e| e.id.as_str()).collect();
+    remove_index_registry_entries_at(toml_path, &orphan_ids)?;
+    let remaining = load_index_registry_at(toml_path)?.len();
 
     println!(
         "{} Removed {} orphaned registration(s) from indexes.toml. {} registration(s) remain.",
         "✓".green(),
         count.to_string().bold(),
-        live.len()
+        remaining
     );
 
     Ok(())
@@ -494,6 +501,80 @@ mod tests {
             load_index_registry_at(&toml_path).unwrap().len(),
             1,
             "no-match report must not mutate"
+        );
+    }
+
+    /// Why: `prune-orphans` runs in a separate process from the daemon and used
+    /// to republish the `live` survivors of its own snapshot with no lock of any
+    /// kind — a registration made between its load and its save was deleted and
+    /// the command still printed success (#5344). A second descriptor on the
+    /// `indexes.toml.lock` sidecar is exactly the conflict another process
+    /// produces.
+    /// What: holds the lock, runs the prune on a worker thread, and proves the
+    /// registry is untouched while the lock is held — then that it completes
+    /// normally once released. (The by-id-vs-snapshot half of the same fix is
+    /// pinned by `prune_apply_preserves_a_registration_made_after_its_snapshot`,
+    /// which has an injection point this command does not.)
+    /// Test: this test. On the pre-fix commit the prune takes no lock, so the
+    /// orphan is already gone before the release.
+    #[test]
+    fn prune_orphans_blocks_on_the_cross_process_registry_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let tmp = tempdir().unwrap();
+        let toml_path = tmp.path().join("indexes.toml");
+        let live = PersistedIndex {
+            id: "live".into(),
+            root_path: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        save_index_registry_at(
+            &toml_path,
+            &[
+                entry("ghost", "/tmp/trusty-prune-orphans-lock-xyz9999"),
+                live,
+            ],
+        )
+        .unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let worker_path = toml_path.clone();
+
+        let worker = trusty_common::file_lock::with_exclusive_lock(&toml_path, || {
+            let worker = std::thread::spawn(move || {
+                handle_prune_orphans_at(&worker_path, false, true, false, None).unwrap();
+                let _ = done_tx.send(());
+            });
+            std::thread::sleep(Duration::from_millis(1500));
+            let during: Vec<String> = load_index_registry_at(&toml_path)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.id)
+                .collect();
+            assert!(
+                during.iter().any(|id| id == "ghost"),
+                "prune-orphans wrote the registry while another process held the \
+                 cross-process lock (#5344); registry now holds {during:?}"
+            );
+            assert!(
+                done_rx.try_recv().is_err(),
+                "prune-orphans completed while the cross-process lock was held (#5344)"
+            );
+            worker
+        })
+        .expect("lock acquisition");
+
+        worker.join().expect("prune-orphans thread");
+        let after: Vec<String> = load_index_registry_at(&toml_path)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            after,
+            vec!["live".to_string()],
+            "once the lock is released the orphan must be removed"
         );
     }
 }

@@ -10288,7 +10288,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "2.14.0"
+version = "2.15.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11802,7 +11802,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "anyhow",
  "arc-swap",

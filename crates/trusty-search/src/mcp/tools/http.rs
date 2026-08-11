@@ -6,13 +6,18 @@
 //! describes *what* to send, not *how* to handle the response.
 //! What: `get`, `get_text`, `post`, `delete` — all implemented as inherent
 //! methods on `McpServer` that forward to the daemon and map HTTP errors to
-//! `DispatchError` variants.
+//! `DispatchError` variants. Two statuses get structured treatment before the
+//! prose fallback: `404` via [`McpServer::classify_index_miss`] (#4715) and
+//! `503` via [`super::unavailable::classify_unavailable`] (#5350). Both are
+//! applied on EVERY verb — a verdict that arrives as data on `search` and as a
+//! string on `index_status` is the same defect with a smaller blast radius.
 //! Test: indirectly covered by the tool-dispatch tests in `tests.rs` and
 //! `tests_lane.rs` (every test that spins up a mock daemon exercises these
 //! paths).
 
 use serde_json::Value;
 
+use super::unavailable::{classify_unavailable, classify_unavailable_text};
 use super::{types::DispatchError, McpServer};
 
 impl McpServer {
@@ -65,6 +70,11 @@ impl McpServer {
                 if let Some(e) = self.classify_index_miss(index_id) {
                     return Err(e);
                 }
+            }
+            // #5350: a structured 503 must reach the caller as data, not as a
+            // prose string it would have to parse.
+            if let Some(e) = classify_unavailable_text(status, &text) {
+                return Err(e);
             }
             return Err(DispatchError::Transport(format!(
                 "GET {url} returned {status}: {text}"
@@ -122,6 +132,11 @@ impl McpServer {
                     return Err(e);
                 }
             }
+            // #5350: a structured 503 must reach the caller as data, not as a
+            // prose string it would have to parse.
+            if let Some(e) = classify_unavailable_text(status, &text) {
+                return Err(e);
+            }
             return Err(DispatchError::Transport(format!(
                 "GET {url} returned {status}: {text}"
             )));
@@ -161,6 +176,11 @@ impl McpServer {
             // caller as an INVALID_PARAMS error rather than INTERNAL_ERROR.
             if status == reqwest::StatusCode::BAD_REQUEST {
                 return Err(DispatchError::InvalidParams(body));
+            }
+            // #5350: `get_call_chain` is the caller here, and `503 kg_unavailable`
+            // is a structured verdict like any other.
+            if let Some(e) = classify_unavailable_text(status, &body) {
+                return Err(e);
             }
             return Err(DispatchError::Transport(format!(
                 "GET {url} returned {status}: {body}"
@@ -229,6 +249,11 @@ impl McpServer {
                     .to_owned();
                 return Err(DispatchError::InvalidParams(msg));
             }
+            // #5350: the body is already decoded here, so the availability
+            // verdict is passed through as-is rather than re-parsed.
+            if let Some(e) = classify_unavailable(status, &body) {
+                return Err(e);
+            }
             return Err(DispatchError::Transport(format!(
                 "POST {url} returned {status}: {body}"
             )));
@@ -259,6 +284,11 @@ impl McpServer {
             .await
             .map_err(|e| DispatchError::Transport(format!("read {url}: {e}")))?;
         if !status.is_success() {
+            // #5350: uniform treatment across every verb — a 503 on delete is
+            // the same kind of verdict as a 503 on search.
+            if let Some(e) = classify_unavailable_text(status, &text) {
+                return Err(e);
+            }
             return Err(DispatchError::Transport(format!(
                 "DELETE {url} returned {status}: {text}"
             )));

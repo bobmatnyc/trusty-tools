@@ -78,14 +78,37 @@ fn cli_parses_connect_with_dir() {
 /// drive the full async `connect()` end-to-end.
 fn assert_connect_claude_cmd_carries_persona_flags() {
     let path = std::path::Path::new("/tmp/trusty-mpm-connect-test-prompt.txt");
-    let cmd = crate::commands::launch::connect_claude_cmd(Some(path));
+
+    // #4181: `connect` now relocates `CLAUDE_CONFIG_DIR` when the tm-owned config
+    // home resolves, and falls back to the pre-#4181 shape when it does not.
+    // Both shapes must carry the prompt and an isolation flag, so assert on both
+    // rather than narrowing this to whichever one the test machine happens to
+    // produce.
+    let fallback = crate::commands::launch::connect_claude_cmd(Some(path), None, &[]);
     assert!(
-        cmd.contains("--append-system-prompt-file"),
-        "connect claude_cmd must inject the PM system prompt file: {cmd}"
+        fallback.contains("--append-system-prompt-file"),
+        "connect claude_cmd must inject the PM system prompt file: {fallback}"
     );
     assert!(
-        cmd.contains("--setting-sources project,local"),
-        "connect claude_cmd must carry the session-isolation flag: {cmd}"
+        fallback.contains("--setting-sources project,local"),
+        "with no config dir the user tier is the operator's own ~/.claude and \
+         must stay excluded (#1269): {fallback}"
+    );
+
+    let dir = std::path::Path::new("/tm/claude-config");
+    let relocated = crate::commands::launch::connect_claude_cmd(Some(path), Some(dir), &[]);
+    assert!(
+        relocated.contains("--append-system-prompt-file"),
+        "connect claude_cmd must inject the PM system prompt file: {relocated}"
+    );
+    assert!(
+        relocated.contains("CLAUDE_CONFIG_DIR='/tm/claude-config'"),
+        "the relocated shape must redirect the user tier to the tm-owned home: \
+         {relocated}"
+    );
+    assert!(
+        relocated.contains("--setting-sources user,project,local"),
+        "the relocated shape loads the user tier it just redirected: {relocated}"
     );
 }
 
@@ -1711,10 +1734,13 @@ fn launch_paths_prepare_through_the_isolated_seam() {
     ] {
         assert!(
             !src.contains("FrameworkPaths::default()"),
-            "{name} spawns `claude` with `{}`, which excludes the `user` tier \
+            "{name} spawns `claude` with a `--setting-sources` flag \
+             (`{}` when it cannot relocate `CLAUDE_CONFIG_DIR`, `{}` when it can \
+             — #4181), and the non-relocated one excludes the `user` tier \
              `FrameworkPaths::default()` deploys into — deploy via \
              `session_launch::prepare_isolated_session` instead (issue #4203)",
-            trusty_mpm::core::model_inject::SETTING_SOURCES_FLAG
+            trusty_mpm::core::model_inject::SETTING_SOURCES_FLAG,
+            trusty_mpm::core::model_inject::SETTING_SOURCES_FLAG_RELOCATED
         );
         assert_eq!(
             src.matches("prepare_isolated_session(").count(),

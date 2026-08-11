@@ -20,6 +20,7 @@
 //! - [`errors`] — module-level error type ([`CollectError`])
 
 pub mod ai_attribution;
+pub mod ai_markers;
 pub mod azdo;
 pub mod bitbucket;
 pub mod collector;

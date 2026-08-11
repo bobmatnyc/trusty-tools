@@ -11,8 +11,9 @@
 //! #2214 defense-in-depth — see that module's doc comment), merges the MPM hook
 //! triad, seeds `.credentials.json` from `~/.claude/.credentials.json` if it
 //! exists (NOTE: this file holds MCP OAuth tokens, NOT the primary session auth
-//! — see WI-10 for the auth model), writes a minimal `.mcp.json` with
-//! trusty-memory, trusty-review, and trusty-search server stubs, and (WI-2)
+//! — see WI-10 for the auth model), declares the framework builtin MCP servers
+//! in the user-scope `mcpServers` map of `.claude.json` (#4181 / ADR-0042 —
+//! see [`seed_builtin_mcp_servers`]), and (WI-2)
 //! deploys bundled agents and skills from `<managed_root>/framework/{agents,skills}`
 //! into the managed config dir so that every tm-launched session starts with
 //! the full agent/skill set.
@@ -50,14 +51,15 @@ use std::path::{Path, PathBuf};
 /// non-destructive — never overwrites an already-set value), merges the MPM
 /// hook triad into `settings.json` via [`super::hooks::ensure_managed_hooks`]
 /// (WI-3), copies `~/.claude/.credentials.json` if found (silently skips
-/// otherwise), writes `.mcp.json` with trusty-memory, trusty-review, and
-/// trusty-search stubs (idempotent via the inject pattern; WI-8 adds
-/// trusty-review), then deploys bundled agents and skills via
-/// [`deploy_agents_and_skills`].
+/// otherwise), declares the framework builtin MCP servers in `.claude.json`'s
+/// user-scope `mcpServers` map (#4181 / ADR-0042 — insert-if-absent, non-fatal;
+/// see [`seed_builtin_mcp_servers`]), then deploys bundled agents and skills
+/// via [`deploy_agents_and_skills`].
 /// Test: `test_global_config_dir_ensure_idempotent`,
 /// `test_deploy_agents_and_skills_populates_config_dir`,
 /// `test_deploy_agents_and_skills_missing_source_is_ok`,
-/// `test_global_config_dir_seeds_output_style_and_status_line`.
+/// `test_global_config_dir_seeds_output_style_and_status_line`,
+/// `test_global_config_dir_seeds_builtin_mcp_servers`.
 pub fn ensure_global_config_dir(
     managed_root: &Path,
     claude_config_dir: &Path,
@@ -74,7 +76,7 @@ pub fn ensure_global_config_dir(
     super::hooks::ensure_managed_hooks(claude_config_dir)?;
 
     seed_credentials(claude_config_dir);
-    ensure_mcp_config(claude_config_dir)?;
+    seed_builtin_mcp_servers(claude_config_dir);
     deploy_agents_and_skills(managed_root, claude_config_dir)?;
 
     Ok(claude_config_dir.to_path_buf())
@@ -281,88 +283,38 @@ fn seed_credentials(claude_config_dir: &Path) {
     }
 }
 
-/// Write a minimal `.mcp.json` with trusty-memory, trusty-review, and trusty-search stubs.
+/// Declare the framework builtin MCP servers in USER scope, non-fatally.
 ///
-/// Why: the tm-global config dir must carry the global MCP server definitions
-/// so every tm-launched session can use memory, review, and search tools without
-/// per-project wiring. `trusty-review` was added in WI-8 (refs #1548).
-/// What: reads `<claude_config_dir>/.mcp.json` (starts from `{}` when absent),
-/// injects `trusty-memory`, `trusty-review`, and `trusty-search` entries under
-/// `mcpServers` using the same idempotent merge used by `inject_mcp_server` in
-/// settings.rs. To avoid spurious mtime bumps on every `tm run`, the on-disk
-/// content is parsed into a `serde_json::Value` and compared structurally
-/// (not byte-wise) to the merged value; the file is only written when the
-/// parsed Values differ (closes #1550 item 3). Byte-wise comparison would be
-/// defeated by any trailing newline or whitespace difference left by editors or
-/// prior writes; structural comparison is immune to those formatting variations.
-/// Secrets/env: trusty-review reads its config from the environment
-/// (OPENROUTER_API_KEY, AWS credentials, TRUSTY_SEARCH_URL etc.) — no secrets
-/// are injected here; the managed session inherits the daemon env, matching the
-/// pattern used for trusty-memory and trusty-search.
-/// Palace pinning (issue #1651): the trusty-memory entry here is DELIBERATELY a
-/// bare `serve --stdio` stub with NO `env.TRUSTY_MEMORY_PALACE`. This is the
-/// SINGLE tm-global config dir (SPEC-STANDALONE-MPM-08), shared as the
-/// user-level MCP layer across EVERY alias, so it cannot carry any one project's
-/// palace slug. The per-project palace pin lives in the cloned repo's
-/// `repo/.mcp.json` (written by `load_alias` → `run_prepare_session` →
-/// `prepare_session_with_repo_url`, threading the registry clone URL), which
-/// Claude Code layers OVER this global stub (project-local precedence, A4). So
-/// the correct slug is always applied at the project layer; this global stub
-/// only declares server availability and must stay bare.
-/// Test: `test_global_config_dir_ensure_idempotent`,
-/// `test_mcp_config_contains_all_three_servers`,
-/// `test_mcp_config_no_spurious_write_when_unchanged`,
-/// `test_mcp_config_trailing_newline_does_not_trigger_rewrite`.
-fn ensure_mcp_config(claude_config_dir: &Path) -> anyhow::Result<()> {
-    let mcp_path = claude_config_dir.join(".mcp.json");
-
-    // Parse the on-disk value for structural comparison.  On parse failure
-    // (malformed file) or absence we treat the existing state as "empty object"
-    // so the merge proceeds and the file is (re)written correctly.
-    let existing_value: Option<serde_json::Value> = std::fs::read_to_string(&mcp_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .filter(|v| v.is_object());
-
-    let mut config = existing_value
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    let servers = config
-        .as_object_mut()
-        .expect("config is an object")
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::json!({}));
-    if !servers.is_object() {
-        *servers = serde_json::json!({});
+/// Why (#4181, ADR-0042): this replaced `ensure_mcp_config`, which wrote the
+/// same four servers into `<claude_config_dir>/.mcp.json`. Claude Code
+/// discovers a `.mcp.json` only by walking UP from the session's cwd, and cwd
+/// is always the repo (`standalone::run` sets `current_dir(repo_path)`; the
+/// daemon spawns in the workspace), so that file was never on any session's
+/// search path — a server declared there reached nothing. The top-level
+/// `mcpServers` map of `<claude_config_dir>/.claude.json` is the map that does
+/// reach a session, and reaches it with no approval prompt.
+/// What: calls [`crate::core::mcp_config::seed_builtin_servers`] and swallows
+/// the outcome into a log line. **Non-fatal by construction** — this runs
+/// between `seed_credentials` and [`deploy_agents_and_skills`], so a `?` here
+/// would let an unwritable `.claude.json` skip the agent and skill deploy and
+/// leave the session with no roster. A seeding failure costs MCP servers for
+/// one launch; it must cost nothing else.
+/// Test: `test_global_config_dir_seeds_builtin_mcp_servers`,
+/// `test_global_config_dir_never_overwrites_an_operator_mcp_entry`,
+/// `test_global_config_dir_survives_a_malformed_claude_json`.
+fn seed_builtin_mcp_servers(claude_config_dir: &Path) {
+    match crate::core::mcp_config::seed_builtin_servers(claude_config_dir) {
+        Ok(seeded) if !seeded.is_empty() => tracing::info!(
+            config_dir = %claude_config_dir.display(),
+            servers = %seeded.join(", "),
+            "declared builtin MCP servers in user scope"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            config_dir = %claude_config_dir.display(),
+            "builtin MCP server seeding failed (non-fatal): {e}"
+        ),
     }
-    let servers = servers.as_object_mut().expect("mcpServers is an object");
-
-    // The three built-in framework servers' launch definitions live in a single
-    // catalog (`core::mcp_config::builtin_server_entry`) so this managed-config
-    // wiring and `tm mcp test`'s probe can never disagree on how a server starts.
-    // trusty-review reads its LLM credentials (OPENROUTER_API_KEY, AWS credentials)
-    // and TRUSTY_SEARCH_URL from the environment — no secrets are injected here;
-    // the managed session inherits the daemon env, matching the memory/search pattern.
-    for name in crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS {
-        if let Some(entry) = crate::core::mcp_config::builtin_server_entry(name) {
-            servers.entry(*name).or_insert(entry);
-        }
-    }
-
-    // Compare structurally (Value == Value) rather than byte-wise so that
-    // trailing newlines, editor-inserted whitespace, or any other formatting
-    // difference in the on-disk file does NOT trigger a spurious rewrite.
-    // A byte comparison of `existing_text` vs the fresh serialization would
-    // fail whenever the on-disk file has a trailing newline, defeating the
-    // idempotency guarantee this function is supposed to provide.
-    let needs_write = existing_value.as_ref() != Some(&config);
-
-    if needs_write {
-        let serialized = serde_json::to_string_pretty(&config)?;
-        std::fs::write(&mcp_path, &serialized)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -378,7 +330,9 @@ mod tests {
 
         ensure_global_config_dir(&managed_root, &claude_config).unwrap();
         assert!(claude_config.join("settings.json").exists());
-        assert!(claude_config.join(".mcp.json").exists());
+        // #4181: the MCP declaration moved from `.mcp.json` (never on a
+        // session's discovery path) to `.claude.json`'s user-scope map.
+        assert!(claude_config.join(".claude.json").exists());
 
         // Second call must not fail (idempotent).
         ensure_global_config_dir(&managed_root, &claude_config).unwrap();
@@ -435,45 +389,38 @@ mod tests {
         );
     }
 
-    // WI-3 + WI-8: ensure_mcp_config must define all three managed MCP servers,
-    // including trusty-review added in WI-8 (refs #1548).
+    // WI-3 + WI-8 + #3918, retargeted by #4181: the four framework builtins
+    // must be declared in `.claude.json`'s user-scope `mcpServers` map — the
+    // map that reaches a session without an approval prompt. This assertion
+    // used to read the `.mcp.json` `ensure_mcp_config` wrote, which no session
+    // ever discovered (cwd is always the repo, and discovery walks up from cwd).
     #[test]
-    fn test_mcp_config_contains_all_three_servers() {
+    fn test_global_config_dir_seeds_builtin_mcp_servers() {
         let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().to_path_buf();
-        ensure_mcp_config(&cfg).unwrap();
-        let text = std::fs::read_to_string(cfg.join(".mcp.json")).unwrap();
+        let managed_root = tmp.path().join("managed");
+        let cfg = managed_root.join("claude-config");
+
+        ensure_global_config_dir(&managed_root, &cfg).unwrap();
+
+        let text = std::fs::read_to_string(cfg.join(".claude.json")).unwrap();
         let val: serde_json::Value = serde_json::from_str(&text).unwrap();
         let servers = val["mcpServers"].as_object().unwrap();
-        assert!(
-            servers.contains_key("trusty-memory"),
-            "trusty-memory must be defined in .mcp.json"
-        );
-        assert!(
-            servers.contains_key("trusty-review"),
-            "trusty-review must be defined in .mcp.json (WI-8)"
-        );
-        assert!(
-            servers.contains_key("trusty-search"),
-            "trusty-search must be defined in .mcp.json"
-        );
-        // Issue #3918: trusty-mpm joined BUILTIN_MANAGED_MCP_SERVERS, so the
-        // standalone driver's own global .mcp.json now also self-declares it
-        // (previously the standalone `tm run` driver could not connect to its
-        // own trusty-mpm MCP server either).
-        assert!(
-            servers.contains_key("trusty-mpm"),
-            "trusty-mpm must be defined in .mcp.json (#3918)"
-        );
+        for name in crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS {
+            assert!(
+                servers.contains_key(*name),
+                "{name} must be declared in .claude.json's user-scope mcpServers map"
+            );
+        }
     }
 
-    // WI-8: trusty-review server entry must use stdio transport and the correct command/args.
+    // WI-8, retargeted: the trusty-review entry keeps its stdio transport and
+    // canonical command/args in its new home.
     #[test]
-    fn test_mcp_config_review_server_entry() {
+    fn test_seeded_review_server_entry() {
         let tmp = TempDir::new().unwrap();
         let cfg = tmp.path().to_path_buf();
-        ensure_mcp_config(&cfg).unwrap();
-        let text = std::fs::read_to_string(cfg.join(".mcp.json")).unwrap();
+        seed_builtin_mcp_servers(&cfg);
+        let text = std::fs::read_to_string(cfg.join(".claude.json")).unwrap();
         let val: serde_json::Value = serde_json::from_str(&text).unwrap();
         let review = &val["mcpServers"]["trusty-review"];
         assert_eq!(
@@ -499,11 +446,11 @@ mod tests {
         );
     }
 
-    // WI-8 ISOLATION: ensure_mcp_config must write the review entry without
-    // touching any file outside the given claude_config_dir.
+    // WI-8 ISOLATION, retargeted: seeding must touch nothing outside the given
+    // config dir — in particular never the operator's real `$HOME`.
     #[serial_test::serial]
     #[test]
-    fn test_mcp_config_review_no_home_write() {
+    fn test_seed_builtin_mcp_servers_no_home_write() {
         /// RAII guard restoring $HOME on drop (including panic).
         struct HomeGuard(Option<String>);
         impl Drop for HomeGuard {
@@ -527,103 +474,178 @@ mod tests {
             HomeGuard(prev)
         };
 
-        ensure_mcp_config(&cfg).unwrap();
+        seed_builtin_mcp_servers(&cfg);
 
-        // .mcp.json must exist inside cfg.
         assert!(
-            cfg.join(".mcp.json").exists(),
-            "ensure_mcp_config must write .mcp.json inside the given dir"
+            cfg.join(".claude.json").exists(),
+            "seeding must write .claude.json inside the given dir"
         );
         // Nothing must land directly under root (outside cfg).
         assert!(
-            !root.path().join(".mcp.json").exists(),
-            "ensure_mcp_config must NOT write .mcp.json outside the given dir (isolation)"
+            !root.path().join(".claude.json").exists(),
+            "seeding must NOT write .claude.json outside the given dir (isolation)"
         );
         // $HOME must remain empty — no .claude.json or .claude/ created.
         assert!(
-            !fake_home.path().join(".mcp.json").exists(),
-            "ensure_mcp_config must NOT write .mcp.json to $HOME (isolation)"
+            !fake_home.path().join(".claude.json").exists(),
+            "seeding must NOT write .claude.json to $HOME (isolation)"
         );
         assert!(
             !fake_home.path().join(".claude").exists(),
-            "ensure_mcp_config must NOT create $HOME/.claude/ (isolation)"
+            "seeding must NOT create $HOME/.claude/ (isolation)"
         );
         // _home_guard drops here and restores HOME.
     }
 
-    // #1550 item 3: ensure_mcp_config must NOT rewrite .mcp.json when the
-    // content is already correct.  We detect a write by comparing the raw bytes
-    // before and after — if the guard regresses the bytes will change.
-    // (mtime-based assertions are unreliable on coarse-grained CI filesystems.)
+    // #1550 item 3, retargeted by #4181: re-provisioning must not rewrite
+    // `.claude.json` when every builtin is already declared. Byte comparison,
+    // because mtime is unreliable on coarse-grained CI filesystems.
     #[test]
-    fn test_mcp_config_no_spurious_write_when_unchanged() {
+    fn test_seeding_no_spurious_write_when_unchanged() {
         let tmp = TempDir::new().unwrap();
         let cfg = tmp.path().to_path_buf();
-        let mcp_path = cfg.join(".mcp.json");
+        let claude_json = cfg.join(".claude.json");
 
-        // First call writes the canonical file.
-        ensure_mcp_config(&cfg).unwrap();
-        let bytes_after_first = std::fs::read(&mcp_path).unwrap();
+        seed_builtin_mcp_servers(&cfg);
+        let bytes_after_first = std::fs::read(&claude_json).unwrap();
 
-        // Second call must leave the file byte-identical (no write occurred).
-        ensure_mcp_config(&cfg).unwrap();
-        let bytes_after_second = std::fs::read(&mcp_path).unwrap();
+        seed_builtin_mcp_servers(&cfg);
+        let bytes_after_second = std::fs::read(&claude_json).unwrap();
 
         assert_eq!(
             bytes_after_first, bytes_after_second,
-            "ensure_mcp_config must not rewrite .mcp.json when content is unchanged (#1550 item 3)"
+            "seeding must not rewrite .claude.json when every builtin is already present"
         );
     }
 
-    // #1550 item 3 regression: a file with a trailing newline (left by an
-    // editor or a prior write) is logically identical to the same JSON without
-    // the newline.  The structural comparison must treat them as equal and must
-    // NOT rewrite the file.  A byte-wise comparison would fail here, defeating
-    // idempotency.  This test directly covers the Finding-1 regression scenario.
+    // #1550 Finding-1, retargeted by #4181: a trailing newline left by an
+    // editor is a formatting difference, not a content difference. Seeding
+    // decides by parsed key membership, so such a file must come back
+    // byte-identical — a serialize-and-compare implementation would silently
+    // reformat the operator's `.claude.json` on every single launch.
     #[test]
-    fn test_mcp_config_trailing_newline_does_not_trigger_rewrite() {
+    fn test_seeding_trailing_newline_does_not_trigger_rewrite() {
         let tmp = TempDir::new().unwrap();
         let cfg = tmp.path().to_path_buf();
-        let mcp_path = cfg.join(".mcp.json");
+        let claude_json = cfg.join(".claude.json");
 
-        // Write the canonical content, then append a trailing newline to
-        // simulate what an editor or prior implementation might have left.
-        ensure_mcp_config(&cfg).unwrap();
-        let canonical = std::fs::read_to_string(&mcp_path).unwrap();
-        let with_trailing_newline = format!("{canonical}\n");
-        std::fs::write(&mcp_path, with_trailing_newline.as_bytes()).unwrap();
+        seed_builtin_mcp_servers(&cfg);
+        let canonical = std::fs::read_to_string(&claude_json).unwrap();
+        std::fs::write(&claude_json, format!("{canonical}\n").as_bytes()).unwrap();
+        let bytes_before = std::fs::read(&claude_json).unwrap();
 
-        // Capture the bytes as they are now (with the extra newline).
-        let bytes_before = std::fs::read(&mcp_path).unwrap();
+        seed_builtin_mcp_servers(&cfg);
 
-        // ensure_mcp_config must recognise the file is structurally up-to-date
-        // and must NOT rewrite it.
-        ensure_mcp_config(&cfg).unwrap();
-
-        let bytes_after = std::fs::read(&mcp_path).unwrap();
+        let bytes_after = std::fs::read(&claude_json).unwrap();
         assert_eq!(
             bytes_before, bytes_after,
-            "trailing newline in .mcp.json must not trigger a spurious rewrite \
-             (structural comparison must tolerate formatting differences, refs #1550 Finding-1)"
+            "a trailing newline must not trigger a spurious rewrite of .claude.json \
+             (refs #1550 Finding-1)"
         );
     }
 
-    // #1550 item 3: ensure_mcp_config is idempotent across two calls — content
-    // must be byte-identical after both calls.
+    // #4181: an entry the operator registered under a builtin name via
+    // `tm mcp add` is the supported edit path (ADR-0042 decision item 3) and
+    // must survive re-provisioning verbatim. Insert-if-absent, observed through
+    // the real `ensure_global_config_dir` entry point.
     #[test]
-    fn test_mcp_config_idempotent_content() {
+    fn test_global_config_dir_never_overwrites_an_operator_mcp_entry() {
         let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().to_path_buf();
+        let managed_root = tmp.path().join("managed");
+        let cfg = managed_root.join("claude-config");
+        std::fs::create_dir_all(&cfg).unwrap();
 
-        ensure_mcp_config(&cfg).unwrap();
-        let text_first = std::fs::read_to_string(cfg.join(".mcp.json")).unwrap();
+        let operator = serde_json::json!({
+            "type": "stdio",
+            "command": "/opt/operator/trusty-search",
+            "args": ["serve", "--index", "pinned"]
+        });
+        std::fs::write(
+            cfg.join(".claude.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mcpServers": { "trusty-search": operator.clone() }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
-        ensure_mcp_config(&cfg).unwrap();
-        let text_second = std::fs::read_to_string(cfg.join(".mcp.json")).unwrap();
+        ensure_global_config_dir(&managed_root, &cfg).unwrap();
+
+        let text = std::fs::read_to_string(cfg.join(".claude.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            val["mcpServers"]["trusty-search"], operator,
+            "seeding must never overwrite an operator-registered entry"
+        );
+        assert!(
+            val["mcpServers"]["trusty-mpm"].is_object(),
+            "the remaining builtins must still be seeded alongside it"
+        );
+    }
+
+    // #4181 FAIL-OPEN: seeding runs on every launch now, so a malformed
+    // `.claude.json` must neither fail provisioning nor be quarantined by the
+    // seeder — that file also holds OAuth state. `deploy_agents_and_skills`
+    // runs AFTER the seed, so the output-styles assertion is what proves the
+    // failure did not short-circuit the rest of provisioning.
+    #[test]
+    fn test_global_config_dir_survives_a_malformed_claude_json() {
+        let tmp = TempDir::new().unwrap();
+        let managed_root = tmp.path().join("managed");
+        let cfg = managed_root.join("claude-config");
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        // Truncated mid-object — what a crash or a full disk leaves behind.
+        // Built rather than written as a literal: an unbalanced brace inside a
+        // string literal skews `check_line_cap.sh`'s brace matcher and makes it
+        // count this whole inline test module against the 500-SLOC prod cap.
+        let complete = serde_json::to_string(&serde_json::json!({
+            "oauthAccount": { "emailAddress": "op@example.com" }
+        }))
+        .unwrap();
+        let malformed = complete.as_bytes()[..complete.len() - 1].to_vec();
+        std::fs::write(cfg.join(".claude.json"), &malformed).unwrap();
+
+        ensure_global_config_dir(&managed_root, &cfg)
+            .expect("a malformed .claude.json must not fail provisioning");
 
         assert_eq!(
-            text_first, text_second,
-            "ensure_mcp_config must produce byte-identical output on repeated calls (#1550 item 3)"
+            std::fs::read(cfg.join(".claude.json")).unwrap(),
+            malformed,
+            "the seeder must leave a malformed .claude.json byte-identical — no rename, no write"
+        );
+        let quarantined = std::fs::read_dir(&cfg)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().contains("corrupt"));
+        assert!(!quarantined, "the seeder must not quarantine .claude.json");
+        assert!(
+            cfg.join("output-styles").exists(),
+            "provisioning steps after the seed must still have run"
+        );
+    }
+
+    // #4181 FAIL-OPEN: an unreadable `.claude.json` makes `seed_builtin_servers`
+    // return `Err`, and the wrapper must absorb it so the agent/skill deploy
+    // below still runs. A directory standing where the file belongs is the
+    // read error that reproduces without depending on the test user's uid.
+    #[test]
+    fn test_global_config_dir_survives_an_unreadable_claude_json() {
+        let tmp = TempDir::new().unwrap();
+        let managed_root = tmp.path().join("managed");
+        let cfg = managed_root.join("claude-config");
+        std::fs::create_dir_all(cfg.join(".claude.json")).unwrap();
+
+        ensure_global_config_dir(&managed_root, &cfg)
+            .expect("an unreadable .claude.json must not fail provisioning");
+
+        assert!(
+            cfg.join(".claude.json").is_dir(),
+            "the seeder must not have disturbed what it could not read"
+        );
+        assert!(
+            cfg.join("output-styles").exists(),
+            "provisioning steps after the seed must still have run"
         );
     }
 

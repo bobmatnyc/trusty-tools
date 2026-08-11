@@ -1207,20 +1207,17 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
     });
 
 async fn run() -> Result<()> {
-    // #2405: route the `.env.local` startup load through the ONE shared,
-    // idempotent loader in trusty-common (`credentials::load_env_local_once`)
-    // instead of an ad hoc `dotenvy::from_filename` call. This retires the
-    // bespoke copy the #2404 review flagged, so `config keys list`'s tier
-    // reporting is driven by a single controlled load order. Semantics are
-    // preserved: dotenvy never overrides an already-set process env var, so
-    // `env > .env.local > store` precedence is unchanged.
-    trusty_common::credentials::load_env_local_once();
+    // #4827: both loads must happen BEFORE clap parses — it reads
+    // `#[arg(long, env = "…")]` values from the real process env during the
+    // parse below, so anything sourced afterwards is a silent no-op. Ordering
+    // and the `start`-only gate on daemon.env live in `bootstrap_process_env`.
+    let argv: Vec<String> = std::env::args().collect();
+    trusty_search::service::bootstrap_process_env(&argv);
 
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion to clap's standard error rendering before
     // exiting (issue #216). On success the parse is indistinguishable from
     // the original `Cli::parse()` call.
-    let argv: Vec<String> = std::env::args().collect();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {

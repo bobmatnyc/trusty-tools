@@ -206,10 +206,14 @@ pub async fn perform_upgrade_captured(crate_name: &str) -> anyhow::Result<()> {
 /// `dirs::home_dir()` / `std::env::var` directly — keeps it testable without
 /// mutating global process state for the common case.
 ///
-/// What: Returns, in priority order: `<cargo_home>/bin` when `cargo_home` is
-/// `Some` and non-empty, else `<home>/.cargo/bin`; then `<home>/.local/bin`
-/// (the prebuilt installer's default). Entries that require `home` are
-/// omitted when `home` is `None`.
+/// What: Returns, in priority order: [`crate::bin_resolve::canonical_bin_dir_from`]
+/// (`<cargo_home>/bin` when `cargo_home` is `Some` and non-empty, else
+/// `<home>/.cargo/bin`); then `<home>/.local/bin` (the prebuilt installer's
+/// default). Entries that require `home` are omitted when `home` is `None`.
+///
+/// #4964: the first entry's rule is no longer restated here — it is the shared
+/// [`crate::bin_resolve::canonical_bin_dir_from`], so this list and every
+/// installer write path resolve the cargo bin dir identically.
 ///
 /// Test: `candidate_bin_dirs_prefers_cargo_home_override`,
 /// `candidate_bin_dirs_falls_back_to_dot_cargo`,
@@ -221,13 +225,8 @@ pub(crate) fn candidate_bin_dirs(
 ) -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
 
-    match cargo_home {
-        Some(h) if !h.is_empty() => dirs.push(std::path::PathBuf::from(h).join("bin")),
-        _ => {
-            if let Some(home) = home {
-                dirs.push(home.join(".cargo").join("bin"));
-            }
-        }
+    if let Some(canonical) = crate::bin_resolve::canonical_bin_dir_from(home, cargo_home) {
+        dirs.push(canonical);
     }
 
     if let Some(home) = home {

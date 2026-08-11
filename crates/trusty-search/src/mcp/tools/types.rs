@@ -15,10 +15,11 @@ use serde_json::Value;
 /// Why: a typed enum lets `dispatch` branch on the failure kind and map it
 /// to the correct JSON-RPC error code or in-band MCP tool error shape without
 /// parsing error strings.
-/// What: five variants — `UnknownTool` (no route), `InvalidParams` (bad args),
+/// What: six variants — `UnknownTool` (no route), `InvalidParams` (bad args),
 /// `Transport` (HTTP-level failure), `StageNotReady` (issue #138 pre-flight
 /// failure with structured retry hint), `IndexNotReady` (issue #4715 — the
-/// session's advertised index has never been built).
+/// session's advertised index has never been built), `IndexUnavailable`
+/// (issue #5350 — the daemon answered a structured 503).
 /// Test: every variant is exercised by at least one unit test in `tests.rs`,
 /// `tests_lane.rs`, or `tests_not_ready.rs`.
 #[derive(Debug)]
@@ -41,6 +42,17 @@ pub(super) enum DispatchError {
     /// Carries the prose message and the structured payload built by
     /// [`super::not_ready`].
     IndexNotReady {
+        message: String,
+        payload: Value,
+    },
+    /// #5350 — the daemon answered `503` with a structured availability body
+    /// (`index_not_resident`, `vector_unavailable`, `index_restore_failed`, …).
+    /// Distinct from `Transport` because that variant is a prose string: it
+    /// destroys the `error` code, the `retryable` flag, and the `restore_via`
+    /// hint the body carries, which is exactly what a caller needs to branch on.
+    /// Carries the daemon body verbatim as `payload`, plus `error_code` and
+    /// `http_status`.
+    IndexUnavailable {
         message: String,
         payload: Value,
     },
