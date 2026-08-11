@@ -12,7 +12,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rusqlite::params;
 use tracing::{debug, info, warn};
 
-use crate::collect::ai_attribution::{detect_agentic_mode, detect_ai_tool};
+use crate::collect::ai_markers::{detect, CommitSignals};
 use crate::collect::collector::{FetchOutcome, PerRepoFetch};
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::git::diff::{compute_commit_diff, CommitDiff};
@@ -545,6 +545,9 @@ impl GitCollector {
             let author = commit.author();
             let author_name = author.name().unwrap_or("").to_string();
             let author_email = author.email().unwrap_or("").to_string();
+            // #5249: an agent-identifying committer address is a detection
+            // signal in its own right; the walk used to discard it.
+            let committer_email = commit.committer().email().unwrap_or("").to_string();
             let message = commit.message().unwrap_or("").to_string();
             let sha_str = oid.to_string();
 
@@ -552,9 +555,16 @@ impl GitCollector {
             // Issue #316: extract ticket ID at insert time (no backfill needed).
             let ticket_id = extract_ticket_id(&message);
             // Issue #445/#1113: AI co-authorship and canonical agentic-mode.
-            let ai_tool = detect_ai_tool(&message);
+            // #5249: one pass over the configured marker set, so `ai_tool` and
+            // `agentic_mode` cannot disagree, and emails count as signals.
+            let detection = detect(&CommitSignals {
+                message: &message,
+                author_email: &author_email,
+                committer_email: &committer_email,
+            });
+            let ai_tool = detection.tool;
             let is_ai_assisted = ai_tool.is_some();
-            let agentic_mode = detect_agentic_mode(&message);
+            let agentic_mode = detection.mode;
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO commits \
                  (sha, author_name, author_email, timestamp, message, repository, \
@@ -840,6 +850,122 @@ mod tests {
             !std::io::stderr().is_terminal(),
             "with no bus the spinner must follow stderr, exactly as before"
         );
+    }
+
+    /// Commit with distinct author and committer identities.
+    ///
+    /// #5249: the walk classifies on the committer address too, and
+    /// `commit_at` reuses one signature for both roles.
+    fn commit_with_identities(
+        repo: &Repository,
+        repo_path: &Path,
+        msg: &str,
+        author_email: &str,
+        committer_email: &str,
+    ) -> git2::Oid {
+        let filename = format!("f-{}.txt", rand_like());
+        std::fs::write(repo_path.join(&filename), msg).expect("write file");
+        let mut index = repo.index().expect("index");
+        index
+            .add_path(Path::new(&filename))
+            .expect("index add_path");
+        index.write().expect("index write");
+        let tree_oid = index.write_tree().expect("write_tree");
+        let tree = repo.find_tree(tree_oid).expect("find_tree");
+
+        let time = Time::new(utc_seconds(2026, 8, 3, 12, 0, 0), 0);
+        let author = Signature::new("Author", author_email, &time).expect("author sig");
+        let committer = Signature::new("Committer", committer_email, &time).expect("committer sig");
+        let parents: Vec<git2::Commit<'_>> = match repo.head() {
+            Ok(head) => vec![head.peel_to_commit().expect("peel")],
+            Err(_) => vec![],
+        };
+        let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
+        repo.commit(Some("HEAD"), &author, &committer, msg, &tree, &parent_refs)
+            .expect("commit")
+    }
+
+    fn stored_detection(db: &Database, sha_prefix: &str) -> (String, Option<String>, i64) {
+        db.connection()
+            .query_row(
+                "SELECT agentic_mode, ai_tool, is_ai_assisted FROM commits \
+                 WHERE sha LIKE ?1 || '%'",
+                params![sha_prefix],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read detection columns")
+    }
+
+    /// #5249: real commit shapes from this repo's own history, walked
+    /// end-to-end and read back out of `commits`.
+    ///
+    /// Both messages are verbatim shapes that the pre-#5249 detector scored
+    /// `agentic_mode = 'none'`: the house footer carries no `Co-Authored-By:`
+    /// trailer and the body pattern required the literal "Claude Code".
+    #[test]
+    fn walk_classifies_house_footer_and_claude_trailer() {
+        let (repo_dir, repo) = init_repo("markers-real-shape");
+        let ts = utc_seconds(2026, 8, 3, 12, 0, 0);
+        let mpm = commit_at(
+            &repo,
+            &repo_dir.path,
+            ts,
+            0,
+            "docs: add website link to README (#5330)\n\n\
+             🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools\n",
+        );
+        let claude = commit_at(
+            &repo,
+            &repo_dir.path,
+            ts + 60,
+            0,
+            "fix: resolve timeout\n\n\
+             🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\
+             Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>\n",
+        );
+        let human = commit_at(&repo, &repo_dir.path, ts + 120, 0, "chore: bump dep\n");
+
+        let mut db = open_in_memory_db();
+        make_collector(&repo_dir.path, None, None)
+            .collect_window(&mut db, None, None)
+            .expect("collect");
+
+        let (mode, tool, is_ai) = stored_detection(&db, &mpm.to_string());
+        assert_eq!(mode, "full_agentic", "house-footer commit (#5249)");
+        assert_eq!(tool.as_deref(), Some("trusty-mpm"));
+        assert_eq!(is_ai, 1);
+
+        let (mode, tool, _) = stored_detection(&db, &claude.to_string());
+        assert_eq!(mode, "full_agentic");
+        assert_eq!(tool.as_deref(), Some("claude"));
+
+        let (mode, tool, is_ai) = stored_detection(&db, &human.to_string());
+        assert_eq!(mode, "none", "a plain commit must stay unclassified");
+        assert!(tool.is_none());
+        assert_eq!(is_ai, 0);
+    }
+
+    /// #5249: `author_email` was extracted and never passed to detection, so a
+    /// bot identity with a bare message was invisible.
+    #[test]
+    fn walk_classifies_agent_identity_from_committer_email() {
+        let (repo_dir, repo) = init_repo("markers-identity");
+        let oid = commit_with_identities(
+            &repo,
+            &repo_dir.path,
+            "Fix flaky integration test\n",
+            "human@example.com",
+            "openhands@all-hands.dev",
+        );
+
+        let mut db = open_in_memory_db();
+        make_collector(&repo_dir.path, None, None)
+            .collect_window(&mut db, None, None)
+            .expect("collect");
+
+        let (mode, tool, _) = stored_detection(&db, &oid.to_string());
+        assert_eq!(mode, "full_agentic", "committer identity is a signal");
+        assert_eq!(tool.as_deref(), Some("openhands"));
     }
 
     /// Build a minimal [`RepositoryConfig`] for a test repo path.

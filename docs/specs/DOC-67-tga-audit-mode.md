@@ -423,6 +423,21 @@ drag, likely post-acquisition friction), and how much of the recent
 codebase was produced with AI-agent assistance (`agentic_pct`) — a
 provenance fact increasingly relevant to tech-M&A diligence.
 
+**`agentic_pct` must render its detection limits alongside the number
+(#5249).** Detection is marker-based: it reads `Co-Authored-By:` trailers,
+body footers, and agent bot identities. A target that strips, squashes, or
+rewrites trailers emits no markers, and its commits are then
+indistinguishable from human work — so a low share means "no markers
+emitted", not "no AI assistance". `collect::ai_markers::detection_disclosure()`
+returns the active tool list plus that caveat, and `tga collect` logs it once
+per run; the section renders it verbatim rather than presenting a bare
+percentage. #5250 proposes a distinct `unknown` state so a stripped-marker
+commit stops sharing a bucket with a genuinely human one.
+
+The marker set is a fixed list in `collect::ai_markers::BUILTIN`. Detecting a
+target org's own house footer therefore needs a tga release, and an audit of a
+repository with an unrecognised footer under-reports for that reason alone.
+
 **This is new work, not a reuse of the existing pipeline — call this out
 plainly.** §5's architecture claimed trusty-review's rendering layer is
 "consumed exactly as they exist today... AUDIT mode adds no template." Q3

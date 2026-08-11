@@ -98,13 +98,19 @@ pub async fn run(config: Config, db: &mut Database, args: BackfillArgs) -> anyho
         BackfillSubcommand::Ticketed => {
             flags::backfill_ticketed(db, args.dry_run, &repos, since.as_deref(), until.as_deref())
         }
-        BackfillSubcommand::AiDetectionCommits => flags::backfill_ai_detection_commits(
-            db,
-            args.dry_run,
-            &repos,
-            since.as_deref(),
-            until.as_deref(),
-        ),
+        BackfillSubcommand::AiDetectionCommits => {
+            // #5249: the repair pass states the same detection limits as the
+            // forward walk, so a repaired database is read with the same
+            // caveat as a freshly collected one.
+            tracing::info!("{}", tga::collect::ai_markers::detection_disclosure());
+            flags::backfill_ai_detection_commits(
+                db,
+                args.dry_run,
+                &repos,
+                since.as_deref(),
+                until.as_deref(),
+            )
+        }
         BackfillSubcommand::TopLevel => misc::backfill_top_level(db, args.dry_run),
         BackfillSubcommand::EffortTshirt => effort::backfill_effort_tshirt(db, args.dry_run),
         BackfillSubcommand::Quality => misc::backfill_quality(db, args.dry_run),

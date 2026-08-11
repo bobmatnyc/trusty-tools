@@ -6,7 +6,7 @@
 //! makes the shared `build_commits_filter_sql` helper easy to find.
 
 use rusqlite::params;
-use tga::collect::ai_attribution::{detect_agentic_mode, detect_ai_tool};
+use tga::collect::ai_markers::{detect, CommitSignals};
 use tga::collect::ticket::{extract_ticket_id, is_ticketed};
 use tga::core::db::Database;
 
@@ -346,12 +346,14 @@ pub(super) fn backfill_ai_detection(db: &mut Database, dry_run: bool) -> anyhow:
 /// missed every backfilled Claude Code commit. This backfill now retroactively
 /// detects Claude, GitHub Copilot, and Cursor via `Co-Authored-By:` trailers AND
 /// recomputes `agentic_mode`, exactly as the forward `tga collect` path does.
-/// What: loads every commit (filtered by repos/since/until), runs
-/// [`detect_ai_tool`] and [`detect_agentic_mode`] on the message, and updates
-/// rows where `ai_tool` OR `agentic_mode` differs from the stored value. No LLM
-/// required — pure string matching, identical to the extractor's INSERT path.
-/// Test: `tests::backfill_ai_detection_commits_detects_claude` (ai_tool) and
-/// `tests::backfill_ai_detection_commits_repairs_agentic_mode` (agentic_mode).
+/// What: loads every commit (filtered by repos/since/until), runs detection
+/// over the stored message and author email, and updates rows where `ai_tool`
+/// OR `agentic_mode` differs from the stored value. No LLM required — pure
+/// string matching, identical to the extractor's INSERT path. The committer
+/// email is unavailable here because `commits` never stored it.
+/// Test: `tests::backfill_ai_detection_commits_detects_claude` (ai_tool),
+/// `tests::backfill_ai_detection_commits_repairs_agentic_mode` (agentic_mode)
+/// and `tests::backfill_ai_detection_commits_repairs_house_footer_and_openhands` (#5249).
 ///
 /// # Errors
 ///
@@ -365,17 +367,17 @@ pub(super) fn backfill_ai_detection_commits(
 ) -> anyhow::Result<()> {
     // (id, is_ai, ai_tool, agentic_mode) — agentic_mode is the forward-path
     // string ("none" | "ide_assisted" | "full_agentic") via `AgenticMode::as_str`.
-    let mut to_update: Vec<(i64, i64, Option<&'static str>, &'static str)> = Vec::new();
+    let mut to_update: Vec<(i64, i64, Option<String>, &'static str)> = Vec::new();
     {
         let conn = db.connection();
         let (sql, params) = build_commits_filter_sql(
-            "SELECT id, message, ai_tool, agentic_mode FROM commits",
+            "SELECT id, message, ai_tool, agentic_mode, author_email FROM commits",
             repos_filter,
             since,
             until,
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows: Vec<(i64, String, Option<String>, String)> = stmt
+        let rows: Vec<(i64, String, Option<String>, String, String)> = stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -384,18 +386,26 @@ pub(super) fn backfill_ai_detection_commits(
                     // Pre-v21 rows default to 'none'; COALESCE guards any NULLs.
                     row.get::<_, Option<String>>(3)?
                         .unwrap_or_else(|| "none".to_string()),
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 ))
             })?
             .collect::<Result<_, _>>()?;
 
-        for (id, message, current_tool, current_mode) in rows {
-            let detected = detect_ai_tool(&message);
-            let mode = detect_agentic_mode(&message).as_str();
+        for (id, message, current_tool, current_mode, author_email) in rows {
+            // #5249: `commits` has no committer_email column, so the email
+            // family sees the author address only on this path.
+            let detection = detect(&CommitSignals {
+                message: &message,
+                author_email: &author_email,
+                committer_email: "",
+            });
+            let detected = detection.tool;
+            let mode = detection.mode.as_str();
             let tool_changed = detected != current_tool.as_deref();
             let mode_changed = mode != current_mode;
             if tool_changed || mode_changed {
                 let is_ai = if detected.is_some() { 1_i64 } else { 0_i64 };
-                to_update.push((id, is_ai, detected, mode));
+                to_update.push((id, is_ai, detected.map(str::to_string), mode));
             }
         }
     }
