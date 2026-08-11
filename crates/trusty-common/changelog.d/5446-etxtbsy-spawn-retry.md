@@ -1,0 +1,2 @@
+Added
+- `spawn_retry` module: `retry_on_etxtbsy` (sync) and `retry_on_etxtbsy_async` (tokio back-off) plus the `ETXTBSY_MAX_ATTEMPTS` / `ETXTBSY_BACKOFF_MS` constants — the workspace's one bounded `ETXTBSY` spawn-retry policy, replacing four independent copies across trusty-agents, trusty-common, and trusty-mpm. Both drivers share one policy function and take a synchronous attempt closure, so the sync caller needs no tokio runtime and no attempt can wait on a child it started ([#5446](https://github.com/bobmatnyc/trusty-tools/issues/5446))

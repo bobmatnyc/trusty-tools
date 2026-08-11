@@ -378,8 +378,9 @@ async fn spawn_child(
         );
     }
 
-    // Command construction + the bounded ETXTBSY retry (#3570 / #1634) both
-    // live in `spawn_retry` to keep this file under the 500-SLOC prod cap.
+    // Command construction lives in `spawn_retry` to keep this file under the
+    // 500-SLOC prod cap; the ETXTBSY policy it spawns through is the shared
+    // `crate::spawn_retry` one (#5446, was #3570 / #1634).
     let mut child = spawn_retry::spawn_embedderd(binary_path, config)
         .await
         .with_context(|| {
