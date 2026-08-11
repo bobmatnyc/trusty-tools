@@ -227,22 +227,38 @@ fn checks_reference_revision_drift() {
 #[test]
 fn checks_code_file() {
     let src = "//! # Spec References\n//! - [`SPEC-X-01~draft`](docs/specs/x.md#SPEC-X-01~draft)\ncode();";
-    assert!(checks::check_code_file("s.rs", src, "rs", &lookup).is_empty());
-    // Unknown extension → nothing scanned.
-    assert!(checks::check_code_file("s.bin", src, "bin", &lookup).is_empty());
+    let scan = checks::check_code_file("s.rs", src, "rs", &lookup);
+    assert!(scan.diagnostics.is_empty());
+    // #5440-followup: the resolving reference must be COUNTED, not just found
+    // clean — an empty diagnostic list is what a broken parser also produces.
+    assert_eq!(scan.checked, 1, "the one declared reference was resolved");
+    // Unknown extension → nothing scanned, and nothing counted as checked.
+    let unknown = checks::check_code_file("s.bin", src, "bin", &lookup);
+    assert!(unknown.diagnostics.is_empty());
+    assert_eq!(unknown.checked, 0);
 }
 
 #[test]
 fn checks_markdown_refs() {
     let md = "---\nspec_refs:\n  - id: SPEC-X-01~draft\n    path: docs/specs/x.md\n    anchor: SPEC-X-01~draft\n---\n# Doc\n";
-    assert!(checks::check_markdown_refs("d.md", md, &lookup).is_empty());
+    let scan = checks::check_markdown_refs("d.md", md, &lookup);
+    assert!(scan.diagnostics.is_empty());
+    assert_eq!(
+        scan.checked, 1,
+        "the one frontmatter reference was resolved"
+    );
 }
 
 #[test]
 fn checks_markdown_bad_frontmatter() {
     let md = "---\nspec_refs:\n  - \"garbage\"\n---\n# Doc\n";
-    let d = checks::check_markdown_refs("d.md", md, &lookup);
-    assert!(d.iter().any(|x| x.check == "frontmatter-schema"));
+    let scan = checks::check_markdown_refs("d.md", md, &lookup);
+    assert!(scan
+        .diagnostics
+        .iter()
+        .any(|x| x.check == "frontmatter-schema"));
+    // An unparseable block resolved nothing — it must not inflate the floor.
+    assert_eq!(scan.checked, 0);
 }
 
 // ── checks: spec-document conventions ────────────────────────────────────────
@@ -463,6 +479,68 @@ fn run_clean_tree() {
     );
     assert_eq!(report.spec_docs, 1);
     assert!(report.code_files >= 1);
+}
+
+/// `run` must accumulate the references it RESOLVED, not just the files walked.
+///
+/// #5440-followup: the discovery counts above stay healthy when the reference
+/// grammar stops matching, so they cannot tell a real run from one that checked
+/// nothing. This asserts the two counters the floor is built on actually move.
+#[test]
+fn run_counts_references_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "docs/specs/README.md",
+        "| DOC | Spec ID | Title | Subsystem |\n|---|---|---|---|\n| DOC-1 | `SPEC-X-01~draft` | [Foo](./foo.md) | x |\n",
+    );
+    write(
+        root,
+        "docs/specs/foo.md",
+        "---\nspec_refs:\n  - id: SPEC-X-01~draft\n    path: docs/specs/foo.md\n    anchor: SPEC-X-01~draft\n---\n\n# DOC-1 — Foo\n\n**Status:** Draft\n**Subsystem:** x\n**Owner:** eng\n**Last-updated:** 2026-01-01\n**Spec ID:** SPEC-X-01~draft\n\n## 1. Section {#SPEC-X-01~draft}\n**ID:** SPEC-X-01~draft\nbody\n",
+    );
+    write(
+        root,
+        "crates/x/src/lib.rs",
+        "//! # Spec References\n//!\n//! - [`SPEC-X-01~draft`](docs/specs/foo.md#SPEC-X-01~draft)\npub fn f() {}\n",
+    );
+
+    let report = run(&LintOptions::new(root)).expect("runs");
+    assert!(
+        report.is_clean(),
+        "expected clean: {:?}",
+        report.diagnostics
+    );
+    assert_eq!(
+        report.spec_refs_checked, 1,
+        "the spec's one frontmatter reference was resolved"
+    );
+    assert_eq!(
+        report.code_refs_checked, 1,
+        "the code file's one inline reference was resolved"
+    );
+
+    // The same tree with the block marker drifted: discovery is untouched, but
+    // no reference resolves. This is the shape that used to pass silently.
+    write(
+        root,
+        "crates/x/src/lib.rs",
+        "//! # Specification References\n//!\n//! - [`SPEC-X-01~draft`](docs/specs/foo.md#SPEC-X-01~draft)\npub fn f() {}\n",
+    );
+    let drifted = run(&LintOptions::new(root)).expect("runs");
+    assert_eq!(
+        drifted.code_files, report.code_files,
+        "discovery must stay at full strength — that is what makes the drift invisible"
+    );
+    assert_eq!(
+        drifted.code_refs_checked, 0,
+        "a drifted marker resolves nothing"
+    );
+    assert!(
+        drifted.is_clean(),
+        "and emits no diagnostic, which is why only a reference FLOOR catches it"
+    );
 }
 
 #[test]

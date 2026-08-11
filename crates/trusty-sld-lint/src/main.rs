@@ -38,22 +38,67 @@ const MIN_SPEC_DOCS: usize = 20;
 /// Test: `tests::floor_rejects_empty_scan`.
 const MIN_CODE_FILES: usize = 200;
 
+/// Minimum `spec_refs:` frontmatter references a real run must have RESOLVED.
+///
+/// Why (#5440-followup): the two counts above are walkdir DISCOVERY totals.
+/// They stay at full strength when the reference parser stops matching, so a
+/// summary built only from them reports a healthy scan over a tree where zero
+/// checks ran — renaming the `# Spec References` block marker in
+/// `trusty_common::sld::inline` flipped this gate from exit 1 to exit 0 with a
+/// byte-identical summary line. A floor must count the WORK, not the discovery,
+/// so the resolved-reference totals are floored too.
+/// What: compared against `LintReport::spec_refs_checked` in
+/// [`scan_floor_violation`]. Set from the MEASURED tree, not guessed: this
+/// checkout resolves 40 frontmatter references, so the floor sits at roughly
+/// two-thirds of that. Losing more than about a third of them trips the gate
+/// instead of passing quietly, while ordinary churn (a spec dropping a
+/// reference or two) does not. A floor near zero would survive a 99% scan loss
+/// and prove nothing.
+/// Test: `tests::floor_rejects_zeroed_references`.
+const MIN_SPEC_REFS: usize = 26;
+
+/// Minimum inline `# Spec References` references a real run must have RESOLVED.
+///
+/// Why/What: see [`MIN_SPEC_REFS`]. Floored separately from the frontmatter
+/// count because the two grammars are parsed by different code paths — the
+/// inline block scanner and the YAML frontmatter reader — and either can break
+/// alone; a combined total would let a healthy frontmatter count mask the
+/// inline parser matching nothing, which is exactly the demonstrated defect.
+/// Measured tree: 37 inline references, floored on the same two-thirds basis.
+/// Test: `tests::floor_rejects_zeroed_references`.
+const MIN_CODE_REFS: usize = 24;
+
 /// Reports why a run's scan coverage is too low to be trusted, if it is.
 ///
 /// Why: keeps the floor a pure, unit-testable predicate rather than an inline
-/// `if` in `main` that only CI can exercise (issue #4618).
-/// What: returns `Some(message)` when either count is below its declared
-/// minimum, `None` when the run examined enough to be meaningful.
-/// Test: `tests::floor_rejects_empty_scan`, `tests::floor_accepts_real_scan`.
-fn scan_floor_violation(spec_docs: usize, code_files: usize) -> Option<String> {
-    if spec_docs >= MIN_SPEC_DOCS && code_files >= MIN_CODE_FILES {
+/// `if` in `main` that only CI can exercise (issue #4618). #5440-followup
+/// extends it past discovery to the references actually resolved.
+/// What: returns `Some(message)` when any of the four counts is below its
+/// declared minimum, `None` when the run examined enough — and CHECKED enough —
+/// to be meaningful.
+/// Test: `tests::floor_rejects_empty_scan`, `tests::floor_rejects_zeroed_references`,
+/// `tests::floor_accepts_real_scan`.
+fn scan_floor_violation(
+    spec_docs: usize,
+    code_files: usize,
+    spec_refs: usize,
+    code_refs: usize,
+) -> Option<String> {
+    if spec_docs >= MIN_SPEC_DOCS
+        && code_files >= MIN_CODE_FILES
+        && spec_refs >= MIN_SPEC_REFS
+        && code_refs >= MIN_CODE_REFS
+    {
         return None;
     }
     Some(format!(
         "sld-lint: SCAN FLOOR — scanned {spec_docs} spec doc(s) and {code_files} code file(s), \
-         below the declared minimums of {MIN_SPEC_DOCS}/{MIN_CODE_FILES}. A run that discovered \
-         nothing reports 0 errors and cannot fail; that is a broken scan, not a clean tree \
-         (issue #4618). Check --root, or lower the floor in main.rs on purpose."
+         resolving {spec_refs} frontmatter and {code_refs} inline reference(s); below the declared \
+         minimums of {MIN_SPEC_DOCS}/{MIN_CODE_FILES} files and {MIN_SPEC_REFS}/{MIN_CODE_REFS} \
+         references. A run that discovered nothing — or that walked every file but resolved no \
+         references because the grammar drifted — reports 0 errors and cannot fail; that is a \
+         broken scan, not a clean tree (issues #4618, #5440). Check --root, or lower the floor in \
+         main.rs on purpose."
     ))
 }
 
@@ -183,14 +228,24 @@ fn main() -> Result<ExitCode> {
     }
     let errors = report.error_count();
     let warnings = report.diagnostics.len() - errors;
+    // #5440-followup: the resolved-reference counts are printed, not just
+    // floored — a CI log that shows only file counts cannot distinguish a real
+    // run from one whose grammar drifted to matching nothing.
     println!(
-        "sld-lint: scanned {} spec doc(s) + {} code file(s); {errors} error(s), {warnings} warning(s){}",
+        "sld-lint: scanned {} spec doc(s) + {} code file(s); resolved {} frontmatter + {} inline reference(s); {errors} error(s), {warnings} warning(s){}",
         report.spec_docs,
         report.code_files,
+        report.spec_refs_checked,
+        report.code_refs_checked,
         if strict { " [strict]" } else { "" }
     );
 
-    if let Some(msg) = scan_floor_violation(report.spec_docs, report.code_files) {
+    if let Some(msg) = scan_floor_violation(
+        report.spec_docs,
+        report.code_files,
+        report.spec_refs_checked,
+        report.code_refs_checked,
+    ) {
         eprintln!("{msg}");
         return Ok(ExitCode::FAILURE);
     }
@@ -231,35 +286,76 @@ fn run_gap_report_cmd(root: &Path, json: bool, strict: bool) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{scan_floor_violation, MIN_CODE_FILES, MIN_SPEC_DOCS};
+    use super::{
+        scan_floor_violation, MIN_CODE_FILES, MIN_CODE_REFS, MIN_SPEC_DOCS, MIN_SPEC_REFS,
+    };
 
     /// A scan that examined nothing — or only one of the two trees — must be
     /// rejected, not reported as clean (issue #4618).
     #[test]
     fn floor_rejects_empty_scan() {
-        let msg = scan_floor_violation(0, 0).expect("an empty scan violates the floor");
+        let msg = scan_floor_violation(0, 0, 0, 0).expect("an empty scan violates the floor");
         assert!(
             msg.contains("SCAN FLOOR"),
             "message names the failure: {msg}"
         );
         assert!(
-            scan_floor_violation(0, MIN_CODE_FILES).is_some(),
+            scan_floor_violation(0, MIN_CODE_FILES, MIN_SPEC_REFS, MIN_CODE_REFS).is_some(),
             "a healthy code-file count must not excuse zero spec docs"
         );
         assert!(
-            scan_floor_violation(MIN_SPEC_DOCS, 0).is_some(),
+            scan_floor_violation(MIN_SPEC_DOCS, 0, MIN_SPEC_REFS, MIN_CODE_REFS).is_some(),
             "a healthy spec-doc count must not excuse zero code files"
         );
         assert!(
-            scan_floor_violation(MIN_SPEC_DOCS - 1, MIN_CODE_FILES).is_some(),
+            scan_floor_violation(
+                MIN_SPEC_DOCS - 1,
+                MIN_CODE_FILES,
+                MIN_SPEC_REFS,
+                MIN_CODE_REFS
+            )
+            .is_some(),
             "one below the spec-doc floor still violates it"
         );
     }
 
-    /// A run at or above both declared minimums passes the floor.
+    /// Full discovery with zero references resolved is the #5440 shape: every
+    /// file walked, no check executed. The file floors alone cannot see it.
+    #[test]
+    fn floor_rejects_zeroed_references() {
+        let msg = scan_floor_violation(MIN_SPEC_DOCS, MIN_CODE_FILES, 0, 0)
+            .expect("healthy discovery with zero references resolved violates the floor");
+        assert!(
+            msg.contains("SCAN FLOOR"),
+            "message names the failure: {msg}"
+        );
+        assert!(
+            scan_floor_violation(MIN_SPEC_DOCS, MIN_CODE_FILES, MIN_SPEC_REFS, 0).is_some(),
+            "a healthy frontmatter-reference count must not excuse zero inline references"
+        );
+        assert!(
+            scan_floor_violation(MIN_SPEC_DOCS, MIN_CODE_FILES, 0, MIN_CODE_REFS).is_some(),
+            "a healthy inline-reference count must not excuse zero frontmatter references"
+        );
+        assert!(
+            scan_floor_violation(
+                MIN_SPEC_DOCS,
+                MIN_CODE_FILES,
+                MIN_SPEC_REFS,
+                MIN_CODE_REFS - 1
+            )
+            .is_some(),
+            "one below the inline-reference floor still violates it"
+        );
+    }
+
+    /// A run at or above every declared minimum passes the floor.
     #[test]
     fn floor_accepts_real_scan() {
-        assert!(scan_floor_violation(MIN_SPEC_DOCS, MIN_CODE_FILES).is_none());
-        assert!(scan_floor_violation(10_000, 10_000).is_none());
+        assert!(
+            scan_floor_violation(MIN_SPEC_DOCS, MIN_CODE_FILES, MIN_SPEC_REFS, MIN_CODE_REFS)
+                .is_none()
+        );
+        assert!(scan_floor_violation(10_000, 10_000, 10_000, 10_000).is_none());
     }
 }
