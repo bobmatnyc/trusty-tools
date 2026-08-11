@@ -4,6 +4,33 @@
 # holds the per-index teardown guard in its own scope, or is DECLARED as not
 # holding it, with a reason (issue #3049 round 4).
 #
+# ── WHAT THIS GATE IS, AND IS NOT ──────────────────────────────────────────────
+#
+# READ THIS BEFORE TRUSTING A GREEN RUN. This gate is a drift detector, not a
+# proof, and the difference matters to anyone deciding how much weight to put on
+# it.
+#
+# It CATCHES the drift it was built for: an existing durable-write method gaining
+#   a new call site that does not take the guard. That is the failure that
+#   actually happened, three review rounds running, and on its first real run
+#   this gate found a FOURTH ungated writer those rounds had all missed
+#   (`watch_loop::handle_modified`, whose guard sat after a `remove_chunk` loop
+#   that had already deleted from redb).
+#
+# It DOES NOT catch every way a write can be deferred past its guard. Detection
+#   is textual and pattern-based, so it recognises the spellings listed below and
+#   not the ones nobody has written yet. Review round 5 defeated an earlier
+#   version of it, round 6 defeated the version after that (see KNOWN LIMITS),
+#   and each fix narrowed to the spelling that had just escaped. Closing the
+#   class properly needs an AST parser that resolves what a closure or future
+#   binding actually is — a different tool, and out of scope here.
+#
+# So: a red run means something real. A green run means "no KNOWN drift shape is
+# present", which is weaker than "every writer holds its guard". Do not read it
+# as the latter. The guard invariant itself is documented on
+# `INDEX_TEARDOWN_LOCKS` in `service/reindex/semaphore.rs`; that doc comment, not
+# this script, is what a reader reasons from.
+#
 # Why: `DELETE /indexes/:id?delete_data=true` quiesces by taking the EXCLUSIVE
 #   side of that index's teardown lock; every writer is supposed to hold the
 #   SHARED side for the span of its write. Which paths those are was tracked in a
@@ -26,10 +53,11 @@
 #   and asks whether a teardown-guard acquisition
 #   (`acquire_index_teardown_read` / `_write`) appears EARLIER IN THE SAME SCOPE.
 #
-#   "Scope" is the innermost enclosing `fn` body OR spawned-task body
-#   whichever is inner. A DEFERRED BODY is a spawn call (`tokio::spawn(…)`,
+#   "Scope" is the innermost enclosing `fn` body or DEFERRED BODY, whichever is
+#   inner. A deferred body is a spawn call (`tokio::spawn(…)`,
 #   `spawn_blocking(…)`, `spawn_local(…)`), an `async` / `async move` block, or a
-#   closure with a braced body.
+#   closure with a braced body — see KNOWN LIMITS for the brace-less closure this
+#   does not reach.
 #
 #   Treating a deferred body as its own scope is what makes the missed shapes
 #   visible: the guard is a scope guard, DROPPED when the function that took it
@@ -91,6 +119,26 @@
 #     itself only ever called from a spawned task, with no manifest row saying so
 #     — is attributed to wherever it is written. `CALLER:<fn>` rows are what
 #     record those chains, and they are human-checked, not proven.
+#   - A CLOSURE WITH NO BRACES ESCAPES. `deferred_kind`'s closure pattern
+#     requires a braced body (`|…| {`), so a bare-expression closure is invisible
+#     to it:
+#
+#         let f = move || idx.save_contrib_graph(&g);   // not seen as deferred
+#         spawn_blocking(f);                             // gate reports OK
+#
+#     The braced spelling of the same thing IS caught; only the brace-less form
+#     escapes. This is live, not hypothetical: `contrib_graph.rs` writes redb
+#     through exactly that idiom (`move || corpus.save_contrib_graph(&contrib)`,
+#     passed inline to `spawn_blocking`), and it is caught today only because the
+#     inline `spawn_blocking(` shares its line. Bind that closure to a variable
+#     first — an ordinary readability or conditional-dispatch refactor — and the
+#     site drops out of the gate's view along with its manifest row.
+#
+#     This is deliberately NOT fixed, and there is no selftest case for it: a
+#     selftest that documents a gap it does not close is a red gate. Extending
+#     the regex to brace-less closures would only move the boundary again, which
+#     is the pattern-per-spelling treadmill this limit exists to name. The class
+#     closes with an AST parser or not at all.
 #
 # Usage:  bash scripts/check_teardown_guard.sh
 # Exit:   0 clean; 1 on any undeclared site, stale/malformed manifest row, tool
