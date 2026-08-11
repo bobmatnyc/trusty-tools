@@ -42,9 +42,15 @@ use super::state::load_catchup_state;
 /// loader discards the path — see [`mpm_session::load_all_claude_mpm_sessions`]),
 /// so that field is `None` for that variant; its `in_progress`/`next_steps`
 /// are best-effort folds of `todos`+`task_list` / `open_questions`.
+///
+/// Every field here is populated unconditionally. Withholding the fields a
+/// non-owning caller may not see is a separate, explicit step —
+/// [`resolve::redact_sessions_not_owned_by`](crate::catchup::resolve::redact_sessions_not_owned_by),
+/// which the MCP tool applies and the CLI digest does not (#5386).
 /// Test: `paused_session_to_json_maps_trusty_mpm_fields`,
 /// `paused_session_to_json_maps_claude_mpm_fields`.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct PausedSessionJson {
     /// `"trusty-mpm"` (native markdown) or `"claude-mpm"` (legacy JSON).
     pub format: String,
@@ -59,9 +65,29 @@ pub struct PausedSessionJson {
     /// Git branch/commit/status context captured at pause time.
     pub git_context: Option<String>,
     /// `session_name:window_index:window_id`, trusty-mpm sessions only.
+    ///
+    /// Withheld (`None`) from a caller that does not own this session, since a
+    /// caller that learns another session's window can hand it straight back as
+    /// its own and resolve that session's snapshot (#5386).
     pub tmux_window: Option<String>,
     /// Absolute path to the on-disk snapshot file, trusty-mpm sessions only.
+    ///
+    /// Withheld (`None`) from a caller that does not own this session.
     pub source_file: Option<String>,
+    /// Whether the receiving caller owns this session.
+    ///
+    /// Why: without it, a withheld field is indistinguishable from an absent
+    /// one — a redacted `tmux_window` reads exactly like a snapshot paused
+    /// outside tmux, and a caller cannot tell "you may not see this" from
+    /// "there is nothing to see" (#5386).
+    /// What: `true` when the session is attributable to the caller — by
+    /// `session_id` in `sessions-log.jsonl`, or by the caller sitting in the
+    /// tmux window that paused it. Always `true` as constructed here; only
+    /// [`resolve::redact_sessions_not_owned_by`](crate::catchup::resolve::redact_sessions_not_owned_by)
+    /// sets it `false`, and it clears the withheld fields in the same pass.
+    /// Test: `redaction_withholds_handles_and_restorable_state`,
+    /// `owner_sees_every_field`.
+    pub owned: bool,
 }
 
 /// Map a [`PausedSession`] to its structured JSON form.
@@ -90,6 +116,7 @@ fn paused_session_to_json(session: &PausedSession) -> PausedSessionJson {
             git_context: git_context.clone(),
             tmux_window: tmux_window.clone(),
             source_file: Some(path.display().to_string()),
+            owned: true,
         },
         PausedSession::ClaudeMpm { session: s } => {
             let in_progress = {
@@ -122,6 +149,7 @@ fn paused_session_to_json(session: &PausedSession) -> PausedSessionJson {
                 git_context: s.git_context.clone(),
                 tmux_window: None,
                 source_file: None,
+                owned: true,
             }
         }
     }
