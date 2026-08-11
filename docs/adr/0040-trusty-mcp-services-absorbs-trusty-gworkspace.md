@@ -356,6 +356,30 @@ integration is real follow-up, not built here. `#4644` (no CI gate for
 skill byte-parity) is made more urgent by this design's copy-multiplication
 at scale — not resolved, not edited here.
 
+## Consequences
+
+**Easier / positive:**
+
+- MCP-only consumers depend on the focused `trusty-mcp` protocol crate rather
+  than pulling the full `trusty-common` feature surface.
+- Agent-consumed services gain one publishable, registry-driven host while
+  keeping service-owned dependencies and bundled skills together.
+- The agent-consumer/framework-consumer rule gives later capability work a
+  repeatable boundary test instead of deciding from crate names.
+
+**Harder / negative:**
+
+- Removing `trusty_common::mcp` is a breaking change and requires coordinated
+  import migration across ten verified consumers.
+- `trusty-mcp-services` adds registry and packaging machinery, and its skill
+  assets still need an explicit cross-crate deployment path.
+- The native future of `trusty-channels`, `trusty-kb`'s final disposition, and
+  a normative spec home for the consumer rule remain follow-up decisions.
+
+**Neutral / deferred:** WASM isolation remains deferred until a third-party
+service cannot be compiled into the host or native build-health pressure makes
+the link-time registry insufficient.
+
 ## Where the agent-consumer / framework-consumer rule lives
 
 The owner: "We should include this distinction in the spec." This makes the
@@ -460,11 +484,9 @@ error named.
   in-repo.
 - The two WASM triggers are qualitative, not numeric thresholds.
 - Re-pointing #5083 at this ADR's scope — not this ADR's job to execute.
-- **Unrelated, found in passing:** `docs/adr/` has two files both numbered
-  `0021` (`0021-cargo-bin-policy.md`, Proposed, absent from `INDEX.md`; and
-  `0021-slack-inbound-hybrid-gateway-eventstream.md`, Accepted, the one
-  `INDEX.md` lists) — a pre-existing collision, orthogonal to this ADR,
-  flagged not fixed.
+- **Unrelated, found in passing:** `docs/adr/` formerly had two files numbered
+  `0021`. The consistency repair retained the Accepted Slack inbound ADR as
+  0021 and moved the Proposed Cargo policy to ADR-0043 before acceptance.
 - **Noted, not waited on:** a separate verification is in progress on
   whether the event-bus/push-semantics/performance case for
   `trusty-channels` going native survives contact with real message rates.

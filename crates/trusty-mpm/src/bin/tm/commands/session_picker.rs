@@ -197,7 +197,58 @@ pub(crate) async fn fetch_managed_raw(
     if let Some(sid) = source_id {
         req = req.query(&[("source_id", sid)]);
     }
-    Ok(req.send().await?.error_for_status()?.text().await?)
+    let raw = req.send().await?.error_for_status()?.text().await?;
+    // #5007: every listing surface — `tm ls`, `tm ls --json`, the interactive
+    // picker, the guided flow — comes through here, so this is the one place a
+    // degraded store has to be announced to be announced everywhere.
+    warn_if_store_degraded(&raw);
+    Ok(raw)
+}
+
+/// Announce a degraded store on STDERR, above whatever the caller prints.
+///
+/// Why (#5027 review): the stream this writes to is the whole contract —
+/// `tm ls --json` puts the response body on stdout, so a banner on stdout would
+/// make the JSON unparseable for every consumer. Nothing asserted it, and
+/// changing `eprintln!` to `println!` killed no test. Emitting from its own
+/// function is what lets one be written.
+/// What: writes [`store_degradation_banner`] to stderr, or nothing when the
+/// listing is healthy.
+/// Test: `store_banner_goes_to_stderr_so_json_stays_machine_readable`.
+pub(crate) fn warn_if_store_degraded(raw: &str) {
+    if let Some(banner) = store_degradation_banner(raw) {
+        eprintln!("{banner}");
+    }
+}
+
+/// The warning to print above a listing the daemon served from stale memory.
+///
+/// Why (#5007): on 2026-08-06 `tm ls` printed a perfectly normal fleet while
+/// `sessions.json` was corrupt and EVERY write to it was failing. The list is
+/// produced by a deliberate fallback to the daemon's last-known in-memory set,
+/// and that fallback is worth keeping — a transient read error must not report
+/// an empty fleet. What was wrong is that it was silent. This turns the same
+/// fallback into a visible one.
+/// What: `None` for a healthy or unparseable response (a body this client
+/// cannot read is not evidence of store corruption, and the caller already
+/// handles it). Otherwise a stderr banner carrying the daemon's own message —
+/// which for corruption names the file, the byte offset, and the repair
+/// command — so the JSON on stdout stays machine-readable.
+/// Test: `store_banner_is_absent_for_a_healthy_listing`,
+/// `store_banner_names_corruption_and_the_repair_command`,
+/// `store_banner_marks_a_transient_read_failure_as_stale_not_corrupt`.
+pub(crate) fn store_degradation_banner(raw: &str) -> Option<String> {
+    let health = serde_json::from_str::<ManagedListResponse>(raw)
+        .ok()?
+        .store_health?;
+    let headline = if health.corrupt {
+        "tm: WARNING — the session store is CORRUPT. This list is the daemon's last-known \
+         in-memory copy; every write to the store is failing."
+    } else {
+        "tm: WARNING — the session store could not be read. This list is the daemon's \
+         last-known in-memory copy and may be stale."
+    };
+    Some(format!("{headline}\ntm:   {}", health.message))
 }
 
 /// Deserialize a raw managed-session list body — every row, unscoped.

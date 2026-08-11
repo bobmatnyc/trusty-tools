@@ -399,7 +399,7 @@ fn spawn_piped_native(cmd: std::process::Command) -> std::io::Result<PipedSpawn>
     })
 }
 
-mod pane;
+pub(crate) mod pane;
 pub use pane::{PANE_DISCLAIM_SUBCOMMAND, disclaim_pane_command};
 
 /// Whether the private `responsibility_spawnattrs_setdisclaim` SPI resolves on

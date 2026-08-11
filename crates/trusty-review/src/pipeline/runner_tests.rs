@@ -1805,6 +1805,58 @@ diff --git a/src/db.rs b/src/db.rs
     assert_eq!(result.inline_comments[0].line, 2);
 }
 
+/// A refuted finding cannot reach the PR as an unmarked inline comment (#5312).
+///
+/// Why: verification runs before `attach_inline_comments` on both pipeline paths
+/// (`runner.rs` `maybe_verify` → `attach_inline_comments`, and the same order in
+/// `runner_mapreduce.rs`), so the `verified` outcome IS on the finding by the
+/// time the inline plan is built — it was simply never read. A reader of the PR
+/// saw a claim the verifier had disproved rendered exactly like a surviving one.
+/// What: runs the real runner-side glue over two on-diff findings — one refuted,
+/// one unjudged — and asserts the refuted one's inline body carries the
+/// verification caveat while the unjudged one does not.
+/// Test: this test itself (no network).
+#[test]
+fn attach_inline_comments_marks_refuted_finding() {
+    use crate::models::{Effort, Finding, VerifyOutcome};
+    use crate::pipeline::runner_helpers::attach_inline_comments;
+
+    let raw_diff = "\
+diff --git a/src/db.rs b/src/db.rs
+--- a/src/db.rs
++++ b/src/db.rs
+@@ -1,1 +1,3 @@
+ fn a() {}
++fn b() {}
++fn c() {}
+";
+    let mut result = crate::models::ReviewResult::new("o", "r", 1, "t", "u");
+    let mut refuted = Finding::new("src/db.rs", "bug", "desc", "fix", 0.1, Effort::High);
+    refuted.line = Some(2);
+    refuted.verified = Some(VerifyOutcome::Refuted);
+    let mut surviving = Finding::new("src/db.rs", "bug2", "desc2", "fix2", 0.9, Effort::Medium);
+    surviving.line = Some(3);
+    result.findings = vec![refuted, surviving];
+
+    attach_inline_comments(&mut result, raw_diff);
+
+    assert_eq!(
+        result.inline_comments.len(),
+        2,
+        "both findings anchor inline"
+    );
+    assert!(
+        result.inline_comments[0].body.contains("REFUTED"),
+        "a refuted finding must be marked inline: {}",
+        result.inline_comments[0].body
+    );
+    assert!(
+        !result.inline_comments[1].body.contains("Verification:"),
+        "a surviving finding must stay unqualified: {}",
+        result.inline_comments[1].body
+    );
+}
+
 /// `build_author_rationale` returns None when neither input is present (#1618).
 ///
 /// Why: with no caller context the verifier prompt must be unchanged.

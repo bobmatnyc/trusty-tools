@@ -1,12 +1,11 @@
 # 0032. No trusty-\* service owns an HTTP daemon; UDS is the inter-service transport; `trusty-console` is the only HTTP surface
 
-- **Status:** Accepted — **Amended by
-  [0034](0034-webhook-ingress-console-relays-over-uds-to-a-supervised-on-demand-process.md)**
+- **Status:** Amended by [0034](0034-webhook-ingress-console-relays-over-uds-to-a-supervised-on-demand-process.md), [0035](0035-console-health-probe-aggregates-over-uds.md)
+- **Amendments:** ADR-0034
   (2026-08-07 owner ruling "Console relays over UDS." closes the Open
   Question below: console terminates the webhook's HTTP request, verifies
   HMAC once, spools the payload durably before acknowledging, and relays
-  over UDS to a console-supervised on-demand process) **and by
-  [0035](0035-console-health-probe-aggregates-over-uds.md)** (2026-08-08
+  over UDS to a console-supervised on-demand process); ADR-0035 (2026-08-08
   owner ruling "Console should have a health probe that probes all the UDS
   services." replaces the per-CLI UDS-dial mechanism named below in
   Consequences with a console-side aggregator: console fans out over UDS to
@@ -14,7 +13,7 @@
   instead of dialing each daemon directly). This ADR's Decision
   remains in force in full; its Context/Decision/Consequences are left as
   originally accepted per the ADR immutability rule (DOC-46 §4), and
-  ADR-0034 and ADR-0035 are the record of the amendments.
+  ADR-0034 and ADR-0035 are the records of the amendments.
   Its `0600` access-control premise is separately corrected by
   [#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099) — see the
   correction note in Consequences.

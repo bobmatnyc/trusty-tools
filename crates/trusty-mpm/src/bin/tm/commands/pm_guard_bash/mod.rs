@@ -20,15 +20,20 @@
 //! it is narrowly read-only (no in-place flag, no external script load, no
 //! write/exec script construct, balanced quotes) to be allowed. The sibling
 //! [`persistence`] module runs the one ALLOW-list here — the agent-cost stop's
-//! escape hatch (#4837) — and is default-deny in the opposite direction.
+//! escape hatch (#4837) — and is default-deny in the opposite direction. The
+//! sibling [`main_checkout`] module carries the second rule `pm_guard` calls
+//! directly, ahead of the subagent exemptions: whole-tree-destructive git
+//! verbs aimed at a project's main checkout (ADR-0037).
 //! Test: `evaluate_bash_command_*`, `split_shell_segments_*`, and
 //! `has_file_write_redirection_*` in this module's `tests` submodule;
 //! `sed_awk::tests` for the sed/awk-specific safety analysis.
 
+mod main_checkout;
 mod persistence;
 mod sed_awk;
 mod shell_lex;
 
+pub(crate) use main_checkout::evaluate_main_checkout_destructive_command;
 pub(crate) use persistence::command_is_persistence_only;
 
 use std::path::{Path, PathBuf};

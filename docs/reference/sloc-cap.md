@@ -2,9 +2,9 @@
 
 > **The cap numbers, classification rule, and merge-blocking prohibition are
 > in [`CLAUDE.md`](../../CLAUDE.md)** (Key Conventions). This page is the counting definition, the
-> ratchet-allowlist mechanics, and the resolved-refactor history — consult it
-> when running the gate locally or updating the allowlist, not to decide
-> whether a file needs splitting.
+> batch-with-the-next-change scheduling rule, the ratchet-allowlist mechanics,
+> and the resolved-refactor history — consult it when running the gate locally,
+> updating the allowlist, or deciding which PR carries a split.
 
 ## Enforcement
 
@@ -13,9 +13,42 @@ As of issue #610 the production cap is no longer advice: it is gated by
 and the local pre-commit hook (`line-cap`). A new tracked production `.rs` file
 over 500 SLOC **cannot merge**; a new test/benchmark `.rs` file over 3000 SLOC
 **cannot merge**. Files approaching their limit are a signal to split into
-focused submodules before the next feature lands on them. When splitting, prefer:
+focused submodules as part of the next change that lands on them — see "When a
+Violation Gets Fixed" below for why the split rides along. When splitting, prefer:
 one public module per logical concept, a thin `mod.rs` that re-exports, and
 sibling files with clear single responsibilities.
+
+## When a Violation Gets Fixed — Batch, Never Standalone
+
+A file can cross its cap without anyone touching it: main grows the file under a
+branch, a rebase lands both halves, and the gate goes red on a diff that never
+added those lines. The fix is a split, and the question is *which PR carries it*.
+
+**It is the PR that next adds to that file, always.** Never open a PR — or
+dispatch an agent — whose only deliverable is bringing a file back under cap.
+That PR pays a full CI cycle, a review pass, and a merge for zero behavior
+change, and it conflicts with whatever branch is already editing the file. Since
+a PR that adds to an over-cap file is blocked by the gate regardless, folding the
+split into it lands the same work at the same moment for one CI cycle instead of
+two.
+
+The rule is about *scheduling* the split, not skipping it. A red gate never
+merges (see the ratchet rules below), so if your PR trips the cap, you split in
+your PR — the pressure to split arrives exactly when someone is already in the
+file and best placed to choose the seam.
+
+Worked example: a rebase pushed `crates/trusty-mpm/src/bin/tm/main.rs` to 505
+SLOC because main had grown the file while the branch was adding a third
+`RepairAction` arm. The split shipped inside that PR — the dispatch match moved
+into a `commands` submodule and `main.rs`'s arm became one line. What the rule
+forbids is the opposite shape: a separate PR splitting `main.rs` while nobody is
+otherwise touching it.
+
+Two cases sit outside this rule. A file that is genuinely un-growable without a
+split (every pending change to it is blocked) is a refactor ticket in its own
+right — that is a planned restructuring, not a cap fix. And an allowlisted file
+that drops below its budget only needs `check_line_cap.sh --update`, which is a
+line in whatever PR shrank it.
 
 ## SLOC Counting Definition
 

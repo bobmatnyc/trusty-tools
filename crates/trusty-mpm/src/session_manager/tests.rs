@@ -498,24 +498,34 @@ async fn manager_create_success_does_not_reap_session() {
 /// and kill it so it cannot accumulate as an orphan. #1457 additionally logs the
 /// rollback at warn so it is visible in the daemon's stderr; this test pins the
 /// reap behaviour the log narrates.
-/// What: makes the store's backing `sessions.json` a NON-EMPTY directory so the
-/// atomic `rename(tmp, sessions.json)` inside `save()` fails, drives a create,
-/// asserts the create returns a `Store` error AND that the fake driver recorded
-/// a `kill_session` for the exact tmux name that was created.
+/// What: makes the store's DIRECTORY read-only so the staging write inside
+/// `save()` fails, drives a create, asserts the create returns a `Store` error
+/// AND that the fake driver recorded a `kill_session` for the exact tmux name
+/// that was created.
+///
+/// #5007 changed the sabotage, not the behaviour under test. It used to replace
+/// `sessions.json` with a non-empty DIRECTORY so the rename failed — but a read
+/// error is no longer swallowed as "empty store", so that sabotage now fails
+/// the reload at the top of `upsert`, before `create_session` has made anything
+/// to orphan. A read-only parent leaves the read succeeding (the file is simply
+/// absent) and fails only the WRITE, which is the sequence this test exists to
+/// cover.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_create_store_failure_reaps_orphan() {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
 
-    // Sabotage the store: replace `sessions.json` (a file after `load`) with a
-    // NON-EMPTY directory of the same name. `save()` writes `sessions.json.tmp`
-    // then renames it onto `sessions.json`; renaming a file onto a non-empty
-    // directory fails on every supported platform, so `upsert` returns an error
-    // AFTER `create_session` already created the tmux session — the orphan case.
-    let store_path = dir.path().join("sessions.json");
-    let _ = std::fs::remove_file(&store_path);
-    std::fs::create_dir_all(store_path.join("not-empty")).expect("make sessions.json a dir");
+    // Sabotage the store: make its directory read-only, so `save()`'s staging
+    // write fails with EACCES AFTER `create_session` already created the tmux
+    // session — the orphan case.
+    let restore = std::fs::metadata(dir.path())
+        .expect("stat data dir")
+        .permissions();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500))
+        .expect("make the store directory read-only");
 
     let err = mgr
         .create(
@@ -528,6 +538,9 @@ async fn manager_create_store_failure_reaps_orphan() {
         )
         .await
         .expect_err("create must fail when the store write fails");
+
+    // Restore permissions immediately so the temp dir can be cleaned up.
+    std::fs::set_permissions(dir.path(), restore).expect("restore permissions");
 
     assert!(
         matches!(err, ManagedError::Store(_)),

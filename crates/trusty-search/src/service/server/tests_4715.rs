@@ -220,8 +220,9 @@ async fn restore_failed_index_grep_says_restart_not_retry() {
 /// delete-then-reindex case (#4715).
 /// What: parks an index cold, deletes it through the real handler, then drives
 /// `index_status_handler`, `get_index_chunks_handler`, and `grep_handler` —
-/// the same three guards this file pins — asserting 404 from each. Pre-fix all
-/// three return 503.
+/// the same three guards this file pins — asserting from each both the 404 and
+/// the `unknown index: <id>` body that names the absent-everywhere verdict.
+/// Pre-fix all three return 503.
 /// Test: this test.
 #[tokio::test]
 async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
@@ -240,20 +241,29 @@ async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
          real registration. Body: {body}"
     );
 
-    let status_err = super::status::index_status_handler(
+    // #5345 gave `status` and `chunks` a JSON body alongside the status code,
+    // so both arrive as `(StatusCode, Json<Value>)`. Assert the body too: the
+    // code alone cannot tell the 404 verdict apart from a 503 body that still
+    // advertises `restore_via`, which is the exact regression #5075 is about.
+    let (status_code, axum::Json(status_body)) = super::status::index_status_handler(
         State(Arc::clone(&state)),
         axum::extract::Path("cold-deleted".to_string()),
     )
     .await
     .expect_err("a deleted index cannot be reported");
     assert_eq!(
-        status_err,
+        status_code,
         StatusCode::NOT_FOUND,
         "#5075: /status must say the index is gone, not that it is still \
-         restoring — the 503 never clears"
+         restoring — the 503 never clears. Body: {status_body}"
+    );
+    assert_eq!(
+        status_body["error"], "unknown index: cold-deleted",
+        "#5075: /status must render the absent-everywhere verdict, not a \
+         residency miss. Body: {status_body}"
     );
 
-    let chunks_err = super::files::get_index_chunks_handler(
+    let (chunks_code, axum::Json(chunks_body)) = super::files::get_index_chunks_handler(
         State(Arc::clone(&state)),
         axum::extract::Path("cold-deleted".to_string()),
         axum::extract::Query(chunks_params()),
@@ -261,12 +271,17 @@ async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
     .await
     .expect_err("a deleted index has no chunks");
     assert_eq!(
-        chunks_err,
+        chunks_code,
         StatusCode::NOT_FOUND,
-        "#5075: /chunks must be 404"
+        "#5075: /chunks must be 404. Body: {chunks_body}"
+    );
+    assert_eq!(
+        chunks_body["error"], "unknown index: cold-deleted",
+        "#5075: /chunks must render the absent-everywhere verdict, not a \
+         residency miss. Body: {chunks_body}"
     );
 
-    let grep_err = super::files::grep_handler(
+    let (grep_code, axum::Json(grep_body)) = super::files::grep_handler(
         State(Arc::clone(&state)),
         axum::extract::Path("cold-deleted".to_string()),
         axum::Json(grep_request()),
@@ -274,9 +289,13 @@ async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
     .await
     .expect_err("a deleted index has nothing to grep");
     assert_eq!(
-        grep_err.0,
+        grep_code,
         StatusCode::NOT_FOUND,
-        "#5075: /grep must be 404, got body {:?}",
-        grep_err.1 .0
+        "#5075: /grep must be 404. Body: {grep_body}"
+    );
+    assert_eq!(
+        grep_body["error"], "unknown index: cold-deleted",
+        "#5075: /grep must render the absent-everywhere verdict, not a \
+         residency miss. Body: {grep_body}"
     );
 }

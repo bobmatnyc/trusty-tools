@@ -1019,10 +1019,11 @@ fn prepare_session_inner(
     // running daemon, then inject the `trusty-search` MCP stub PINNED to that id
     // (`serve --index <id>`). Pinning makes a bare `search`/`grep` resolve to
     // the session's OWN project index instead of letting the LLM guess (and
-    // routinely pick the wrong `claude-mpm` index). The daemon-unreachable case
-    // is handled inside `register_project_index` (logged, non-fatal) and still
-    // returns the id so the stub is pinned; a `None` id (empty derivation) falls
-    // back to the unpinned stub. Either way the session launches.
+    // routinely pick the wrong `claude-mpm` index). #5091: an id comes back only
+    // when the daemon CONFIRMED the index — an unreachable daemon, a refused
+    // create, or an empty derivation all yield `None` and the unpinned stub,
+    // because pinning an index that does not exist 404s every later search.
+    // Either way the session launches.
     // Gated by the manifest's `[mcp] trusty_search` toggle (default on).
     // `trusty_search_injected` mirrors `trusty_memory_injected` above (#3950).
     let mut trusty_search_injected = false;

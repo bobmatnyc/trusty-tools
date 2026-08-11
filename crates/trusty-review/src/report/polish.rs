@@ -513,9 +513,9 @@ fn collapse_recursive(lines: &[String], gaps: &mut Vec<String>) -> (Vec<String>,
 /// Why: instead of a wall of `not stated` bullets, one compact line names every
 /// omitted field so a reader sees the gaps at a glance while the body stays lean.
 /// What: locates the Gaps & Caveats heading, replaces every line from after it up
-/// to the next `---` / heading / EOF with a one-line "Data gaps: …" summary (or a
-/// "no material gaps" note when the list is empty).  When the section is absent
-/// (a custom template), the body is returned unchanged.
+/// to the next `---` / heading / EOF with [`render_gaps_line`]'s one-line summary
+/// (or a "no material gaps" note when the list is empty).  When the section is
+/// absent (a custom template), the body is returned unchanged.
 /// Test: `polish_tests.rs::gaps_section_lists_dropped_fields`.
 fn render_gaps_section(text: &str, gaps: &[String], declared: &[String]) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -558,17 +558,51 @@ fn render_gaps_section(text: &str, gaps: &[String], declared: &[String]) -> Stri
     if gaps.is_empty() {
         out.push("No material data gaps: every templated field was populated from measured, declared, or inferred data.".to_string());
     } else {
-        out.push(format!("Data gaps: {}.", gaps.join(", ")));
+        out.push(render_gaps_line(gaps));
     }
     out.push(String::new());
     out.extend(lines[end..].iter().map(|s| s.to_string()));
     out.join("\n")
 }
 
+/// Render the one-line gap summary: how many gaps, then those same gaps.
+///
+/// Why: #5319 — gap labels keep their template numbering ("2. Executive
+/// Summary"), so comma-joining them straight after `Data gaps:` produced
+/// `Data gaps: 2. Executive Summary, …` and a diligence reader parsed the "2."
+/// as a count of two ahead of a sixteen-name list. Nothing had counted
+/// anything; the number was the first label's own section number. A report
+/// whose stated count disagrees with the list beneath it costs the reader
+/// confidence in every other figure in the document.
+/// What: states the count as `gaps.len()` of the very slice it then joins, so
+/// the two cannot drift, and separates the items with `;` — a label may
+/// contain a comma or open with a section number, neither of which may be
+/// readable as a list boundary or a count.
+/// Test: `polish_tests.rs::{gaps_line_count_matches_its_own_list,
+/// collapses_empty_section}`.
+fn render_gaps_line(gaps: &[String]) -> String {
+    let noun = if gaps.len() == 1 {
+        "field/section"
+    } else {
+        "fields/sections"
+    };
+    format!(
+        "Data gaps: {} unpopulated {noun} — {}.",
+        gaps.len(),
+        gaps.join("; ")
+    )
+}
+
 // ─── Line/cell helpers ──────────────────────────────────────────────────────
 
-/// Return the heading text (after the `#`s and any leading section number) for a
-/// markdown heading line, or `None` when the line is not a heading.
+/// Return the heading text (after the leading `#`s only) for a markdown heading
+/// line, or `None` when the line is not a heading.
+///
+/// A template section number is part of the returned text: `## 2. Executive
+/// Summary` yields `2. Executive Summary`, not `Executive Summary`. Callers that
+/// render the result into prose must not let that number read as a value of
+/// their own — see #5319, where joining it behind `Data gaps:` produced a count
+/// the report never computed.
 fn heading_text(trimmed: &str) -> Option<&str> {
     let rest = trimmed.trim_start_matches('#');
     if rest.len() == trimmed.len() {

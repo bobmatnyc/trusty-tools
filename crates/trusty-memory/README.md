@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/trusty-memory.svg)](https://crates.io/crates/trusty-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Memory palace MCP server (HTTP/SSE) backed by `usearch` (HNSW) vector store,
+Memory palace MCP server (HTTP/SSE) backed by `hnsw_rs` (HNSW) vector store,
 `redb` metadata and knowledge-graph stores, and `fastembed` embeddings. Stores
 and retrieves natural-language memories organized into named "palaces"
 (namespaces), with an optional knowledge-graph layer for structured triples.
@@ -26,7 +26,7 @@ long-term memory backend.
 ## System Requirements
 
 - **RAM**: 512 MB minimum; 1 GB+ recommended (ONNX embedding model loads ~22 MB,
-  usearch index scales with corpus size)
+  hnsw_rs index scales with corpus size)
 - **Disk**: ~100 MB for the model cache on first run
   (`~/Library/Application Support/trusty-memory/` on macOS,
   `~/.local/share/trusty-memory/` on Linux)
@@ -246,7 +246,7 @@ per-palace conversation store: turns are stored verbatim and bypass the
 `memory_remember` signal/noise and dedup gates.
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **45 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
+The MCP server registers **46 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -266,6 +266,7 @@ this table is generated from it, not maintained by hand.
 | `kg_assert` | `palace`, `subject`, `predicate`, `object`, `confidence?`, `provenance?` | Assert a fact in the temporal knowledge graph. |
 | `kg_bootstrap` | `palace?`, `project_path?` | Seed the knowledge graph from well-known project files (Cargo.toml, package.json, pyproject.toml, go.mod, CLAUDE.md, .git/config). |
 | `kg_gaps` | `palace?` | List knowledge gaps detected in the memory palace graph. |
+| `kg_list_subjects` | `palace`, `limit?`, `with_counts?` | List the subjects this palace's knowledge graph actually holds, alphabetically. |
 | `kg_query` | `palace`, `subject` | Query active knowledge-graph triples for a subject. |
 | `list_prompt_facts` | — | List every active prompt-fact triple (aliases, conventions, facts, shorthands) across all palaces. |
 | `memory_forget` | `palace`, `drawer_id` | Delete a drawer from a palace by its UUID. |
@@ -580,7 +581,7 @@ Memories and vector indexes persist under the OS-standard data directory:
 
 Each palace directory contains:
 - `kg.redb` — redb store for drawer metadata and knowledge-graph triples
-- `index.usearch` — usearch vector index (approximate nearest-neighbour)
+- `index.usearch` — HNSW vector index (`hnsw_rs`, approximate nearest-neighbour)
 - `recall.redb` — recall analytics log (redb; migrated from `recall.db` on first open)
 - `l1_cache.json` — top-15 drawers by importance (L1 hot cache, rebuilt at each write)
 - `palace.json` — palace metadata (name, description, created_at)
@@ -590,7 +591,7 @@ Each palace directory contains:
 ```
 trusty-memory (this crate)          trusty-common `memory-core` feature
   axum HTTP/SSE server     ──────►  PalaceRegistry
-  serve --stdio (JSON-RPC) ──────►  usearch vector index (index.usearch)
+  serve --stdio (JSON-RPC) ──────►  HNSW vector index (index.usearch)
   embedded Svelte UI               redb metadata + KG (kg.redb)
   MCP tool surface                 fastembed (AllMiniLML6V2Q)
 
@@ -598,7 +599,7 @@ Claude Code stdio ◄──JSON-RPC──► `trusty-memory serve --stdio`
                                   ──POST /rpc (HTTP)──► trusty-memory daemon
 ```
 
-The `memory-core` feature of `trusty-common` owns the storage engine: `usearch` for approximate
+The `memory-core` feature of `trusty-common` owns the storage engine: `hnsw_rs` for approximate
 nearest-neighbor search, `redb` for drawer metadata and knowledge-graph triples, and
 `fastembed` for 384-dim text embeddings. The MCP server (`trusty-memory`) is a
 thin protocol layer on top.

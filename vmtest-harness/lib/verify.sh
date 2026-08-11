@@ -1439,7 +1439,7 @@ verify_degraded_probe() {
     # ---- 3. FAULT B — trusty-review, genuinely gone, address left stale. --
     # SIGKILL first so the graceful-shutdown path that removes `http_addr` never
     # runs, then `tctl stop` to unload the launchd job so KeepAlive cannot
-    # respawn it. One `tart exec`, so the window between them is sub-second and
+    # respawn it. One guest `exec`, so the window between them is sub-second and
     # far inside launchd's ThrottleInterval. `pkill -x` matches the process NAME
     # exactly — never `-f`, which would also match this very command line.
     log 'degraded-check: FAULT B — `pkill -9 -x trusty-review` then `tctl stop trusty-review --json --yes`'

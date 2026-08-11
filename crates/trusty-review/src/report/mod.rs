@@ -16,6 +16,7 @@
 pub mod analyze_adapter;
 pub mod benchmark;
 pub mod error;
+pub mod exec_summary;
 pub mod fill;
 pub mod git_info;
 pub mod instructions;
@@ -26,6 +27,7 @@ pub mod metrics;
 pub mod model;
 pub mod polish;
 pub mod provenance;
+pub mod redact;
 pub mod reporter;
 pub mod reporter_fill;
 pub mod reporter_graph_datasets;
@@ -48,6 +50,7 @@ pub use benchmark::{
     RepositoryBenchmark, build_benchmark_report, corpus_dir, load_corpus, write_snapshot,
 };
 pub use error::{ManifestError, ReportError, Result};
+pub use exec_summary::{DeterministicRisk, ExecSummary, TopRisks, compose as compose_exec_summary};
 pub use fill::{HONESTY_MARKER, Scope, render, strip_leading_comment};
 pub use git_info::{GitInfo, gather_git_info};
 pub use instructions::{Instructions, load_instructions};
@@ -63,6 +66,7 @@ pub use metrics::{AnalyzeMetrics, MetricFinding, Severity, load_metrics};
 pub use model::{ReportModel, RepositoryReport};
 pub use polish::{polish, polish_with_gaps, strip_template_comments};
 pub use provenance::{Provenance, tag};
+pub use redact::{report_secrets, scrub_finding, scrub_investigation, scrub_metrics, scrub_prose};
 pub use reporter::Reporter;
 pub use scan::{Framework, RepoScan, scan_repo};
 pub use synthesize::{FindingProse, RiskRow, Synthesis, SynthesisStatus, Synthesizer};

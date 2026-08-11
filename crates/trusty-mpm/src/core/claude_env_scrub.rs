@@ -218,12 +218,16 @@ pub fn scrub_command(cmd: &mut std::process::Command) {
 /// that reported `FOO` unset there would let the `tm doctor` probe pass on an
 /// ordering that kills every spawn.
 ///
-/// The COMMAND stop (review round 2) matters because
-/// [`crate::core::model_inject::build_claude_command`] emits NO assignments at
-/// all, so the assignment stop never fires on its output and the scan would
-/// otherwise run to the end of the line. A future `claude` flag pair spelled
-/// `-u <value>` would then be miscounted as an unset variable. Not reachable
-/// today — this closes the hole before a flag makes it reachable.
+/// The COMMAND stop (review round 2) matters because a builder can emit NO
+/// assignments at all, so the assignment stop never fires on its output and the
+/// scan would otherwise run to the end of the line. A future `claude` flag pair
+/// spelled `-u <value>` would then be miscounted as an unset variable. Not
+/// reachable today — this closes the hole before a flag makes it reachable.
+/// [`crate::core::model_inject::build_inplace_session_command`] and
+/// `build_client_session_command` are still assignment-free; #4181 gave
+/// [`crate::core::model_inject::build_claude_command`] the same optional
+/// `CLAUDE_CONFIG_DIR` / `CLAUDE_CODE_OAUTH_TOKEN` assignments the daemon prefix
+/// carries, so on that line the assignment stop now fires.
 /// Test: `parse_env_unset_vars_reads_the_real_spawn_prefix`,
 /// `parse_env_unset_vars_stops_at_the_first_assignment`,
 /// `parse_env_unset_vars_stops_at_the_command_word`,

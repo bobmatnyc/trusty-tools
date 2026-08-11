@@ -19,7 +19,6 @@
 # These are pre-existing allocations, several tangled with open issues
 # (renumbering a live DOC-N rewrites every inbound reference), so they are
 # recorded here for an owner decision rather than rewritten by this gate.
-DUP-ADR	21
 DUP-DOC	28
 DUP-DOC	32
 DUP-DOC	33

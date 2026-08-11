@@ -492,3 +492,110 @@ fn restart_confirm_hint_disowns_n_as_no() {
         "`n`'s real effect unstated: {hint}"
     );
 }
+
+// ── #5007: the degraded-store banner every listing surface prints ───────────
+
+/// Why (#5007): on 2026-08-06 `tm ls` printed a normal-looking fleet while the
+/// store was corrupt and every write was failing. The banner is what makes that
+/// impossible — but a banner that fired on healthy listings would be noise on
+/// every invocation, so the healthy case has to be silent.
+/// What: a response with no `store_health` field produces no banner.
+/// Test: this test.
+#[test]
+fn store_banner_is_absent_for_a_healthy_listing() {
+    assert_eq!(
+        super::store_degradation_banner(r#"{"sessions":[]}"#),
+        None,
+        "a healthy listing must print nothing"
+    );
+}
+
+/// Why: a body this client cannot parse is not evidence that the STORE is
+/// broken, and claiming so would send an operator to repair the wrong thing.
+/// What: unparseable input produces no banner.
+/// Test: this test.
+#[test]
+fn store_banner_is_absent_for_an_unparseable_body() {
+    assert_eq!(super::store_degradation_banner("not json"), None);
+}
+
+/// Why: the corrupt case is the incident. The banner has to say the list is a
+/// stale in-memory copy AND carry the daemon's message, which is what names the
+/// file, the byte offset, and the repair command.
+/// What: asserts both halves appear.
+/// Test: this test.
+#[test]
+fn store_banner_names_corruption_and_the_repair_command() {
+    let raw = r#"{"sessions":[],"store_health":{"message":"/x/sessions.json is corrupt: trailing characters (line 3755, column 2); a complete JSON document ends at byte 145090 of 146201, followed by 1111 trailing byte(s). Repair with `tm repair session-store`","corrupt":true,"observed_at":"2026-08-06T09:01:17Z"}}"#;
+    let banner = super::store_degradation_banner(raw).expect("a corrupt store must warn");
+    assert!(banner.contains("CORRUPT"), "{banner}");
+    assert!(
+        banner.contains("every write to the store is failing"),
+        "{banner}"
+    );
+    assert!(banner.contains("byte 145090"), "{banner}");
+    assert!(banner.contains("tm repair session-store"), "{banner}");
+}
+
+/// Why (#5027 review): the banner's STREAM is the whole contract. `tm ls
+/// --json` writes the daemon's response body to stdout, so a banner on stdout
+/// makes that JSON unparseable for every consumer. Nothing asserted it —
+/// changing `eprintln!` to `println!` left the suite at `10 passed; 0 failed`
+/// with the banner on stdout.
+/// What: re-runs THIS test as a child process (the only way to observe the two
+/// real streams — under `cargo test` libtest intercepts them) and asserts the
+/// banner reaches stderr and never stdout.
+/// Test: this test.
+#[test]
+fn store_banner_goes_to_stderr_so_json_stays_machine_readable() {
+    const CHILD: &str = "TM_5027_BANNER_CHILD";
+    const MARKER: &str = "CORRUPT";
+    let raw = r#"{"sessions":[],"store_health":{"message":"/x/sessions.json is corrupt","corrupt":true,"observed_at":"2026-08-06T09:01:17Z"}}"#;
+
+    if std::env::var_os(CHILD).is_some() {
+        super::warn_if_store_degraded(raw);
+        return;
+    }
+
+    // libtest names tests relative to the crate root, without the crate name.
+    let module = module_path!();
+    let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+    let name = format!("{module}::store_banner_goes_to_stderr_so_json_stays_machine_readable");
+    let out = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+        .args([&name, "--exact", "--nocapture", "--test-threads", "1"])
+        .env(CHILD, "1")
+        .output()
+        .expect("re-run this test as a child process");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("1 passed"),
+        "the child must have actually run the case; stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(MARKER),
+        "the banner must go to stderr; stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains(MARKER),
+        "the banner must NEVER reach stdout — `tm ls --json` writes the response body \
+         there; stdout: {stdout}"
+    );
+}
+
+/// Why: a transient read failure is genuinely different — the fallback may
+/// already have cleared by the next listing — so the banner must say "stale",
+/// not "corrupt", or it would send an operator to repair a healthy file.
+/// What: asserts the non-corrupt wording.
+/// Test: this test.
+#[test]
+fn store_banner_marks_a_transient_read_failure_as_stale_not_corrupt() {
+    let raw = r#"{"sessions":[],"store_health":{"message":"session store I/O error: nfs hiccup","corrupt":false,"observed_at":"2026-08-06T09:01:17Z"}}"#;
+    let banner = super::store_degradation_banner(raw).expect("a degraded store must warn");
+    assert!(banner.contains("may be stale"), "{banner}");
+    assert!(
+        !banner.contains("CORRUPT"),
+        "a transient failure must not be called corruption: {banner}"
+    );
+}
