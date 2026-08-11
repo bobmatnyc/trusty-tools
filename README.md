@@ -1,5 +1,7 @@
 # trusty-tools
 
+**Website: [trustytools.dev](https://trustytools.dev/)**
+
 Unified Rust workspace consolidating the entire trusty-* AI tooling ecosystem.
 21 crates of AI development tooling with three flagship MCP servers for code search, memory management, and analysis.
 
