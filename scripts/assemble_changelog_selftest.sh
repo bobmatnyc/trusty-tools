@@ -699,6 +699,95 @@ else
   fail=1
 fi
 
+# ===========================================================================
+# 14. UNDELETABLE FRAGMENT — the silent-partial arm, both write paths.
+#
+# Both paths delete the consumed fragments AFTER CHANGELOG.md is replaced. A
+# bare `rm` there aborts under `set -e` with no message: section written,
+# fragments still pending, nothing said so, and the next run re-adds the
+# bullets. --merge is the worse of the two — its re-run appends the survivor to
+# a section that already contains it, where the write path's re-run at least
+# hits the already-has-a-section refusal.
+#
+# Lever: chmod a-w on changelog.d/, since unlink needs write permission on the
+# DIRECTORY. Root defeats that, so the cases are skipped there rather than
+# reported as passing — a spurious pass is worse than an honest skip.
+# ===========================================================================
+
+if [ "$(id -u)" = "0" ]; then
+  echo "SKIP: undeletable-fragment cases — running as root, chmod a-w does not"
+  echo "      stop unlink, so the failure cannot be provoked deterministically."
+else
+  # 14a. --merge path.
+  undel_dir="$(new_stale_crate undeletable-fragment-merge)"
+  cat >"$undel_dir/changelog.d/4920-undeletable.md" <<'EOF'
+Fixed
+
+- a bullet whose fragment cannot be removed (#4920)
+EOF
+  chmod a-w "$undel_dir/changelog.d"
+  undel_rc=0
+  undel_out="$(bash "$ASSEMBLER" undeletable-fragment-merge 1.3.5 --merge 2>&1)" || undel_rc=$?
+  chmod u+w "$undel_dir/changelog.d"
+
+  if [ "$undel_rc" -eq 1 ]; then
+    echo "PASS: undeletable-fragment-merge -> exit 1"
+  else
+    echo "FAIL: undeletable-fragment-merge -> exit $undel_rc (expected 1)" >&2
+    printf '%s\n' "$undel_out" | sed 's/^/       /' >&2
+    fail=1
+  fi
+  # The diagnostic owes three things: that CHANGELOG.md is already updated, the
+  # name of each survivor, and "do not re-run".
+  for want in 'WAS ALREADY UPDATED' 'changelog.d/4920-undeletable.md' 'Do NOT re-run'; do
+    if grep -qF -- "$want" <<<"$undel_out"; then
+      echo "PASS: undeletable-fragment-merge diagnostic states $want"
+    else
+      echo "FAIL: undeletable-fragment-merge diagnostic omits $want" >&2
+      printf '%s\n' "$undel_out" | sed 's/^/       /' >&2
+      fail=1
+    fi
+  done
+  # The success message is keyed to the DELETION, not to the mv — the whole
+  # point is that a half-applied release never reads as a completed one.
+  if grep -qF 'Merged 1 fragment' <<<"$undel_out"; then
+    echo "FAIL: undeletable-fragment-merge printed the success message anyway" >&2
+    fail=1
+  else
+    echo "PASS: undeletable-fragment-merge suppressed the success message"
+  fi
+  # CHANGELOG.md really was written — this is a partial, not a rollback, and the
+  # message has to be true when it says so.
+  if grep -qF -- '- a bullet whose fragment cannot be removed (#4920)' "$undel_dir/CHANGELOG.md"; then
+    echo "PASS: undeletable-fragment-merge left CHANGELOG.md updated, as reported"
+  else
+    echo "FAIL: undeletable-fragment-merge reported an update that did not happen" >&2
+    fail=1
+  fi
+
+  # 14b. Default-write path — the same shape, inherited from origin/main.
+  d="$(new_crate undeletable-fragment-write)"
+  cat >"$d/4921-undeletable.md" <<'EOF'
+Added
+
+- a bullet whose fragment cannot be removed (#4921)
+EOF
+  chmod a-w "$d"
+  wr_rc=0
+  wr_out="$(bash "$ASSEMBLER" undeletable-fragment-write 3.0.0 2>&1)" || wr_rc=$?
+  chmod u+w "$d"
+
+  if [ "$wr_rc" -eq 1 ] \
+    && grep -qF -- 'changelog.d/4921-undeletable.md' <<<"$wr_out" \
+    && ! grep -qF 'Assembled 1 fragment' <<<"$wr_out"; then
+    echo "PASS: undeletable-fragment-write -> exit 1, names the survivor, no success line"
+  else
+    echo "FAIL: undeletable-fragment-write -> exit $wr_rc" >&2
+    printf '%s\n' "$wr_out" | sed 's/^/       /' >&2
+    fail=1
+  fi
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "assemble_changelog_selftest: one or more fragment-validation cases FAILED." >&2
   exit 1

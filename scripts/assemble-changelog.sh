@@ -580,6 +580,42 @@ merge_into_section() {
 # PLACED report to list every category that had pending fragments. Any shortfall
 # leaves CHANGELOG.md and changelog.d/ untouched and exits nonzero.
 # Test: the #5298 `--merge` cases in scripts/assemble_changelog_selftest.sh.
+# Why: both write paths end with `rm -f "${fragments[@]}"` AFTER CHANGELOG.md has
+# already been replaced, and a bare `rm` there is a silent-partial arm. If it
+# fails — a read-only changelog.d/, a permissions change, an immutable flag —
+# `set -e` aborts before the success message, so the operator sees NO output at
+# all: the section is written, the fragments are still pending, and nothing says
+# so. The next run then re-adds those bullets. --merge is the more damaging of
+# the two, because its re-run appends the survivor to a section that already
+# contains it; the default-write path's re-run at least hits the
+# already-has-a-section refusal.
+#
+# What: deletes the consumed fragments and verifies each one is gone. Any
+# survivor is reported by name, together with the fact that CHANGELOG.md is
+# ALREADY updated and that re-running would duplicate the bullets, and returns
+# nonzero so the caller's success message never prints. Existence is the ground
+# truth here, not `rm`'s exit status — one status covers N files.
+# Test: the `undeletable-fragment-*` cases in scripts/assemble_changelog_selftest.sh.
+delete_consumed_fragments() {
+  local crate_dir="$1" what="$2"
+  shift 2
+  local fragments=("$@") survivors=() f
+
+  rm -f "${fragments[@]}" || true
+  for f in "${fragments[@]}"; do
+    if [[ -e "${f}" ]]; then survivors+=("${f}"); fi
+  done
+  [[ "${#survivors[@]}" -eq 0 ]] && return 0
+
+  echo "ERROR: crates/${crate_dir}/CHANGELOG.md WAS ALREADY UPDATED (${what}), but" >&2
+  echo "       ${#survivors[@]} of ${#fragments[@]} fragment(s) could not be deleted:" >&2
+  printf '%s\n' "${survivors[@]}" | sed 's#^.*/changelog\.d/#         changelog.d/#' >&2
+  echo "       Do NOT re-run: those bullets are in CHANGELOG.md already, and a" >&2
+  echo "       second run would add them a second time. Delete these by hand," >&2
+  echo "       then review and commit the CHANGELOG.md change." >&2
+  return 1
+}
+
 merge_fragments() {
   local crate_dir="$1" changelog="$2" version="$3" parsed="$4"
   shift 4
@@ -614,7 +650,7 @@ merge_fragments() {
   rm -f "${plan}" "${report}"
   trap - EXIT
 
-  rm -f "${fragments[@]}"
+  delete_consumed_fragments "${crate_dir}" "merged into [${version}]" "${fragments[@]}" || exit 1
 
   echo "Merged ${#fragments[@]} fragment(s) into the existing [${version}] section of" >&2
   echo "crates/${crate_dir}/CHANGELOG.md and removed them from changelog.d/." >&2
@@ -808,7 +844,7 @@ main() {
   # with no such directory sends the next PR straight back to editing
   # `## [Unreleased]` — which is both the conflict this change removes and, one
   # release later, a hard stop in the leftover-[Unreleased] check above.
-  rm -f "${fragments[@]}"
+  delete_consumed_fragments "${crate_dir}" "assembled as [${version}]" "${fragments[@]}" || exit 1
 
   echo "Assembled ${#fragments[@]} fragment(s) into crates/${crate_dir}/CHANGELOG.md as [${version}]" >&2
   echo "and removed them from crates/${crate_dir}/changelog.d/." >&2
