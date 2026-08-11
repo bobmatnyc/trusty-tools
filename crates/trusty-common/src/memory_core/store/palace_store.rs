@@ -168,9 +168,26 @@ impl PalaceStore {
     /// loads and pushes the `Palace`. Subdirs without metadata are silently
     /// skipped.
     /// Test: `list_palaces_finds_saved_palaces` (registry tests cover the full
-    /// stack).
+    /// stack); `list_palaces_missing_dir_is_empty` pins the absent-root arm and
+    /// `list_palaces_propagates_an_unstattable_registry_dir` the denied one.
+    ///
+    /// The absence guard uses `try_exists` rather than `exists`, because
+    /// `Path::exists` is `fs::metadata(..).is_ok()` and so coerces *every* stat
+    /// failure to `false` — a registry we are forbidden to stat would read as a
+    /// registry that is not there, and callers on the destructive paths
+    /// (`purge_palaces`, `rebuild_palaces`, `merge_palaces`) would report a
+    /// clean zero-palace run over data they never read. `try_exists` keeps
+    /// "absent" (`Ok(false)`, including a broken symlink or any missing parent)
+    /// distinct from "cannot determine" (`Err`), so only the former still
+    /// yields an empty list. A first run against a data root that does not
+    /// exist yet is normal and must not error.
     pub fn list_palaces(registry_dir: &Path) -> Result<Vec<Palace>> {
-        if !registry_dir.exists() {
+        // #5532: `exists()` reports a stat we are denied as "absent", silently
+        // turning an unreadable registry into an empty one.
+        let present = registry_dir
+            .try_exists()
+            .map_err(|e| PalaceStoreError::io(registry_dir, e))?;
+        if !present {
             return Ok(Vec::new());
         }
         let read_dir =
@@ -309,5 +326,87 @@ mod tests {
         let missing = tmp.path().join("does-not-exist");
         let palaces = PalaceStore::list_palaces(&missing).unwrap();
         assert!(palaces.is_empty());
+    }
+
+    /// Restore a directory's mode on drop, including while unwinding.
+    ///
+    /// Why: the denial test below strips a directory to mode 000. If an
+    /// assertion panics before it is restored, `tempfile` cannot delete the
+    /// tree and the run leaks an undeletable directory.
+    #[cfg(unix)]
+    struct RestoreMode(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    /// Why (#5532): the absence guard used `Path::exists`, which is
+    /// `fs::metadata(..).is_ok()` and so reports *any* stat failure as "not
+    /// there". A registry we are forbidden to stat therefore returned
+    /// `Ok(vec![])`, and the propagation #5488/#5526 added one layer down (at
+    /// `read_dir`) never ran, because `read_dir` was never reached. The
+    /// destructive callers would report a clean empty run over data they never
+    /// read.
+    /// What: strips a PARENT of the registry dir to mode 000, so the failure
+    /// lands on `stat` rather than on `read_dir` — the arm the existing
+    /// regular-file/`ENOTDIR` harnesses cannot reach, since a regular file
+    /// stats just fine and only fails once enumeration starts. Asserts the
+    /// error propagates and carries the denial.
+    /// Test: This test.
+    #[cfg(unix)]
+    #[test]
+    fn list_palaces_propagates_an_unstattable_registry_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path().join("locked");
+        let registry = parent.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+
+        // Baseline: listable while the parent is traversable.
+        assert!(
+            PalaceStore::list_palaces(&registry).is_ok(),
+            "the registry must list cleanly before the parent is locked"
+        );
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = RestoreMode(parent.clone());
+
+        // Root bypasses the mode bits outright, and some filesystems ignore
+        // them, so confirm the denial actually took hold. Asserting against a
+        // stat that still succeeds would pass without exercising anything, and
+        // a vacuous pass on a fail-open guard is worse than no test at all.
+        match std::fs::metadata(&registry) {
+            Ok(_) => panic!(
+                "cannot exercise #5532: stat of {} still succeeds at mode 000. \
+                 Run this suite as a non-root user on a filesystem that honours \
+                 POSIX permission bits.",
+                registry.display()
+            ),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "expected the locked parent to deny stat, got {e}"
+            ),
+        }
+
+        let err = PalaceStore::list_palaces(&registry)
+            .expect_err("a registry dir that cannot be stat'd must not report as empty");
+
+        match err {
+            PalaceStoreError::Io { path, source } => {
+                assert_eq!(path, registry, "the error must name the registry dir");
+                assert_eq!(
+                    source.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "the denial must survive into the error, got {source}"
+                );
+            }
+            other => panic!("expected an Io error carrying the denial, got {other:?}"),
+        }
     }
 }
