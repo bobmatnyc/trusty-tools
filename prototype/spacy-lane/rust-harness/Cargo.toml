@@ -1,0 +1,15 @@
+[package]
+name = "spacy-lane-harness"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Detached from the trusty-tools workspace on purpose: this is a throwaway
+# measurement rig for the #5399 bake-off, not a workspace member. Keeping it out
+# means `cargo check --workspace` never builds it and no version file moves.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

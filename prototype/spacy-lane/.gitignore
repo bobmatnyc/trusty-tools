@@ -1,0 +1,4 @@
+# The 94 MB uv venv and the Rust build dir are reproducible from uv.lock +
+# Cargo.toml; committing them would put the model weights in git history.
+python/.venv/
+rust-harness/target/
