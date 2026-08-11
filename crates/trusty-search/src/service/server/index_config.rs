@@ -205,6 +205,15 @@ pub(super) async fn patch_index_config_handler(
             .into_response();
     };
 
+    // #3049 round 3: hold this id's teardown-lock SHARED side across the whole
+    // PATCH, then hand it to the catch-up task exactly as `permit` is handed
+    // over. Round 2's writer table claimed this path took the read side and it
+    // did not: round 1 quiesced on `index_semaphore`, which this handler DOES
+    // hold, so moving quiescence onto the teardown lock silently un-guarded both
+    // the `indexes.toml` upsert below (which would otherwise resurrect an entry a
+    // concurrent delete had just removed) and the catch-up's corpus writes.
+    let teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
+
     // Issue #2984 Phase 1 CRITICAL finding 2: resolve the component
     // transition and, if it needs a catch-up, acquire THIS index's
     // per-index mutual-exclusion semaphore BEFORE mutating any state — a
@@ -354,7 +363,9 @@ pub(super) async fn patch_index_config_handler(
     // acquisition above) moves into the task and is released when it finishes.
     let catch_up_started = transition.needs_catch_up();
     if let Some(permit) = permit {
-        components::spawn_component_catch_up(registered, transition, permit);
+        // #3049: the teardown guard moves with the permit, so the catch-up's
+        // corpus writes stay covered after this handler returns.
+        components::spawn_component_catch_up(registered, transition, permit, teardown_guard);
     }
 
     state.emit(DaemonEvent::IndexRegistered {

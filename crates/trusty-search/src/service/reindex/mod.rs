@@ -161,20 +161,36 @@ pub(crate) use semaphore::remove_index_semaphore;
 /// `semaphore` submodule, so these two are re-exported rather than widening that
 /// submodule. `runner::run_reindex` reads the flag through `super::semaphore`
 /// directly and needs no re-export.
-/// What: delegates to `semaphore::{remove_index_cancel_flag, signal_index_cancel}`.
+/// What: delegates to `semaphore::{clear_index_cancel, remove_index_cancel_flag,
+/// signal_index_cancel}`. `clear_index_cancel` is round 3's: a delete that
+/// abandons itself on a quiesce timeout must un-signal the flag it set.
 /// Test: `service::server::tests_3049`.
-pub(crate) use semaphore::{remove_index_cancel_flag, signal_index_cancel};
+pub(crate) use semaphore::{clear_index_cancel, remove_index_cancel_flag, signal_index_cancel};
 
-/// Re-export the teardown-lock accessors (issue #3049, round 2).
+/// Re-export the teardown-lock accessors (issue #3049, rounds 2-3).
 ///
 /// Why: every path that writes `handle.indexer` holds this lock's READ side for
 /// the span of its write, and `unregister_index` takes the WRITE side. Those
-/// writers live across `service::server` (files, contrib_graph, indexes_relocate),
-/// `service::watch_loop`, and `service::reconcile` — all outside the private
-/// `semaphore` submodule.
-/// What: delegates to `semaphore::{index_teardown_lock, remove_index_teardown_lock}`.
+/// writers live across `service::server` (files, contrib_graph, indexes_relocate,
+/// indexes, components), `service::watch_loop`, and `service::reconcile` — all
+/// outside the private `semaphore` submodule.
+/// What: delegates to `semaphore::{acquire_index_teardown_read,
+/// acquire_index_teardown_write, remove_index_teardown_lock}`. Round 3 moved
+/// callers off the raw `index_teardown_lock` accessor onto the two `acquire_*`
+/// helpers, which re-validate the entry against eviction — see
+/// `semaphore::acquire_index_teardown_read` for why a raw acquire is unsafe.
 /// Test: `service::server::tests_3049`.
-pub(crate) use semaphore::{index_teardown_lock, remove_index_teardown_lock};
+pub(crate) use semaphore::{
+    acquire_index_teardown_read, acquire_index_teardown_write, remove_index_teardown_lock,
+};
+
+/// Re-export the raw teardown-lock accessor for `tests_3049`, which needs to
+/// stage a writer that parks on a SPECIFIC lock instance across an eviction —
+/// exactly what the `acquire_*` helpers exist to make impossible. Production
+/// callers use those helpers.
+/// Test: `service::server::tests_3049::a_writer_parked_across_teardown_is_visible_to_the_next_delete`.
+#[cfg(test)]
+pub(crate) use semaphore::index_teardown_lock;
 
 /// Re-export `index_cancel_flag` for the `tests_3049` eviction test, which needs
 /// to read the flag the delete signalled. Production readers reach it through
