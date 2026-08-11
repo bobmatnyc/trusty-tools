@@ -1,6 +1,6 @@
 //! `ServiceDescriptor` impl for the trusty-memory MCP service.
 //!
-//! Why: open-mpm (and any future host process that links several MCP
+//! Why: trusty-agents (and any future host process that links several MCP
 //! services into a single binary) needs a uniform way to enumerate every
 //! tool a linked service contributes and the scopes each tool requires.
 //! The shared `trusty_mcp_core::ServiceDescriptor` trait is that contract:
@@ -27,7 +27,7 @@ use crate::tools::tool_definitions_with;
 
 /// `ServiceDescriptor` impl that advertises this crate's 44 memory tools.
 ///
-/// Why: Lets open-mpm link trusty-memory-mcp directly and include its
+/// Why: Lets trusty-agents link trusty-memory-mcp directly and include its
 /// tools in a unified `rpc.discover` document without bespoke glue code.
 /// What: Wraps the existing tool definitions and the per-tool scope
 /// mapping behind the shared trait. The struct is unit-like — there is
@@ -87,8 +87,8 @@ mod tests {
         let tools = svc.tools();
         assert_eq!(
             tools.len(),
-            44,
-            "expected 44 memory tools (chat-session + dream-ops + palace_dream + the ADR-0027 room and wing surfaces + #4906 palace_reembed), got {}",
+            46,
+            "expected 46 memory tools (chat-session + dream-ops + palace_dream + the ADR-0027 room and wing surfaces + #4906 palace_reembed + #5005 palace_unalias + #4776 kg_list_subjects), got {}",
             tools.len()
         );
     }
@@ -107,12 +107,14 @@ mod tests {
 
     #[test]
     fn dispatches_through_trait_object() {
-        // Why: open-mpm collects services as `Vec<Box<dyn ServiceDescriptor>>`,
+        // Why: trusty-agents collects services as `Vec<Box<dyn ServiceDescriptor>>`,
         //      so we must confirm dynamic dispatch resolves correctly here.
         let svc: Box<dyn ServiceDescriptor> = Box::new(MemoryMcpService);
         assert_eq!(svc.name(), "trusty-memory");
-        assert_eq!(svc.tools().len(), 44);
+        assert_eq!(svc.tools().len(), 46);
         assert_eq!(svc.scopes_for("palace_create"), vec!["memory.write"]);
+        // #5005: the repair deletes vector keys, so it must classify as a write.
+        assert_eq!(svc.scopes_for("palace_unalias"), vec!["memory.write"]);
         assert_eq!(svc.scopes_for("palace_delete"), vec!["memory.write"]);
         assert_eq!(svc.scopes_for("palace_update"), vec!["memory.write"]);
         assert_eq!(svc.scopes_for("palace_list"), vec!["memory.read"]);

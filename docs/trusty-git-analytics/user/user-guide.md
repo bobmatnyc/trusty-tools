@@ -52,24 +52,32 @@ is on your `PATH`.
 ### Option B: Build from source
 
 ```bash
-git clone https://github.com/bobmatnyc/trusty-git-analytics
-cd trusty-git-analytics
-cargo build --release
-# Binary is at: target/release/tga
-cp target/release/tga /usr/local/bin/tga
+git clone https://github.com/bobmatnyc/trusty-tools
+cd trusty-tools
+cargo install --path crates/trusty-git-analytics --locked
+# Binary: ~/.cargo/bin/tga
 ```
+
+Do not `cp`/copy a locally built `target/release/tga` onto an existing PATH
+location by hand — on macOS this can leave a stale kernel code-signing
+(`cdhash`) cache behind, and the next run of that path is killed as an
+invalid signature (indistinguishable from an OOM kill). `cargo install`
+writes atomically and keeps the cache consistent.
 
 ### Option C: Pre-built binaries
 
 Pre-built binaries for macOS (x86_64 and aarch64), Linux (x86_64), and Windows (x86_64)
 are published on the
-[GitHub Releases page](https://github.com/bobmatnyc/trusty-git-analytics/releases).
+[GitHub Releases page](https://github.com/bobmatnyc/trusty-tools/releases).
 Download the binary for your platform, make it executable, and place it on your `PATH`:
 
 ```bash
 # Example for macOS arm64
 chmod +x tga-aarch64-apple-darwin
 mv tga-aarch64-apple-darwin /usr/local/bin/tga
+# macOS only: regenerate the signature after a manual move, for the same
+# cdhash-cache reason as above
+codesign --force --sign - /usr/local/bin/tga
 ```
 
 ### Verify installation

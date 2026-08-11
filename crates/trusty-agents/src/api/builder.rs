@@ -108,6 +108,12 @@ pub fn build_from_workflow(
         // signal to attribute; the in-process chat path sets this in
         // `api/server/handlers.rs::submit_task` instead.
         responder_agent: None,
+        // #4355: this envelope is built inside the workflow subprocess, which
+        // is never told which roster entry the user had selected. The API
+        // server stamps the stream on the way to the store
+        // (`api/server/handlers.rs::submit_task`), so the Concierge default is
+        // only ever observed by the `--json` CLI path, where it is correct.
+        addressed_agent: crate::api::types::DEFAULT_ADDRESSED_AGENT.to_string(),
     }
 }
 

@@ -1,6 +1,6 @@
 //! Cross-service registration contract for unified OpenRPC documents.
 //!
-//! Why: The trusty-* ecosystem is moving toward a host process (open-mpm /
+//! Why: The trusty-* ecosystem is moving toward a host process (trusty-agents /
 //! a unified daemon) that links several MCP services into one binary and
 //! exposes a single `rpc.discover` document covering all of them. Each
 //! linked service needs a uniform way to advertise its tools, version, and

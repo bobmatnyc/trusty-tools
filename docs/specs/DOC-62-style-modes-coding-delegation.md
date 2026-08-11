@@ -1,5 +1,9 @@
 ---
 spec_refs:
+  - id: SPEC-PMINSTR-12~draft
+    path: docs/specs/SPEC-PMINSTR-01-p1-p2-instruction-restructure.md
+    anchor: SPEC-PMINSTR-12~draft
+    note: Single workflow-skill ownership and the delivery handoff.
   - id: SPEC-AGENTSTD-04~draft
     path: docs/specs/DOC-61-canonical-agent-standard.md
     anchor: SPEC-AGENTSTD-04~draft
@@ -20,7 +24,7 @@ spec_refs:
 **Spec ID:** `SPEC-STYLE-01~draft` … `SPEC-STYLE-10~draft`
 **Subsystem:** cross-crate — trusty-agents (delegation surface, `HandoffContext`, preamble carriage); trusty-code (style parameter, internal pipeline selection); trusty-mpm/GUI (style selector, downstream)
 **Owner:** Architecture / Technical Leadership
-**Last-updated:** 2026-08-01
+**Last-updated:** 2026-08-08
 **Epic:** [#4345](https://github.com/bobmatnyc/trusty-tools/issues/4345) — tcode-as-coding-delegate
 **Builds on:** [ADR-0024](../adr/0024-subagents-in-process-only-assistants-communicate-not-delegate.md) (L0/L1 tier model), [DOC-41](./trusty-agents-eve-style-agents-spec.md) §5 (`HandoffContext`, propose-not-authorize), [DOC-61](./DOC-61-canonical-agent-standard.md) §4 (source model vs per-product builder), [`docs/trusty-code/vision-and-architecture-spec.md`](../trusty-code/vision-and-architecture-spec.md) §5.10 + §10 D3 (Execution Patterns)
 **Cross-ref:** [#4346](https://github.com/bobmatnyc/trusty-tools/issues/4346) (this spec), [#4348](https://github.com/bobmatnyc/trusty-tools/issues/4348) (tcode style parameter), [#4349](https://github.com/bobmatnyc/trusty-tools/issues/4349) (`HandoffContext` style field + policy preamble), [#4350](https://github.com/bobmatnyc/trusty-tools/issues/4350) (addressable tcode PM target), [#4353](https://github.com/bobmatnyc/trusty-tools/issues/4353) (GUI selector), [#2596](https://github.com/bobmatnyc/trusty-tools/issues/2596) (VIBE execution tier), [#4126](https://github.com/bobmatnyc/trusty-tools/issues/4126) (prompt-injection floor)
@@ -171,7 +175,8 @@ workflow evaluated on GitHub's runners from a fresh `actions/checkout`. The
 **trusty-review gate is process-enforced, not CI-enforced** — it has no
 workflow file; it is invoked by the PM via
 `mcp__trusty-review__review_diff`/`review_pr`
-(`crates/trusty-mpm/src/assets/skills/tm-pr-workflow.md:100-108`). It is
+(`crates/trusty-mpm/src/assets/skills/tm-workflow.md`, "The trusty-review
+Gate" — the skill was `tm-pr-workflow` until #5202 consolidated it). It is
 therefore the one gate on the list whose enforcement a lower-ceremony
 *convention* could plausibly erode, even though no parameter can reach it.
 §3.2 SM-10 addresses this directly.
@@ -805,6 +810,10 @@ consumes them.
 
 ### 10.2 Change log
 
+- **2026-08-08** — Aligns the process-enforced trusty-review gate with the
+  single-workflow-skill ruling in DOC-59 §12 / #5202; cites `tm-workflow`'s
+  "The trusty-review Gate" section now that #5202 has retired `tm-pr-workflow`
+  rather than leaving it as a second policy owner.
 - **2026-08-01 (rev 1, draft)** — Initial draft (#4346). Folds in epic #4345's
   five open questions: questions 4 and 5 decided with code evidence (§6, §3);
   questions 1–3 routed to #2596 as a consumed dependency with a fail-safe that

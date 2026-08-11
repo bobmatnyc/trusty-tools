@@ -68,12 +68,16 @@ pub const TM_GIT_FILE_TRACKING: &str = include_str!("../assets/skills/tm-git-fil
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_ADR: &str = include_str!("../assets/skills/tm-adr.md");
 
-/// PM workflow/phase/gate customization via project-level `.trusty-mpm/` overrides.
+/// The single delivery-workflow skill: phases/gates, the ticketing↔version-control
+/// ownership boundary, worktree/branch discipline, changelog, PR body, review
+/// gate, squash-merge, and the `CLAUDE.md` customization mechanism.
 ///
-/// Why: maps to the *real* override mechanism in `core/instruction_overrides.rs`
-/// and `core/instruction_pipeline.rs`, not a fixed claude-mpm 5-phase script.
+/// Why: #5202 absorbed the retired `tm-pr-workflow` here so one skill owns the
+/// whole delivery chain. It maps to the *real* override mechanism in
+/// `core/instruction_overrides.rs` and `core/instruction_pipeline.rs`, not a
+/// fixed claude-mpm 5-phase script.
 /// What: embedded markdown skill file deployed to `skills/tm-workflow.md`.
-/// Test: `tm_skills_are_in_bundle`.
+/// Test: `tm_skills_are_in_bundle`, `retired_pr_workflow_skill_is_not_bundled`.
 pub const TM_WORKFLOW: &str = include_str!("../assets/skills/tm-workflow.md");
 
 /// Official (source→rebuild→deploy) vs custom agent update workflow.
@@ -117,15 +121,6 @@ pub const TM_TEACHING_TEMPLATES: &str = include_str!("../assets/skills/tm-teachi
 /// What: embedded markdown skill file deployed to `skills/tm-ticketing.md`.
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_TICKETING: &str = include_str!("../assets/skills/tm-ticketing.md");
-
-/// Branch protection, changelog fragments, trusty-review gate, squash-merge,
-/// worktree discipline.
-///
-/// Why: SLIM per the portfolio design — native Claude Code already knows
-/// basic `gh pr create` mechanics; this keeps only the tm-specific layer.
-/// What: embedded markdown skill file deployed to `skills/tm-pr-workflow.md`.
-/// Test: `tm_skills_are_in_bundle`.
-pub const TM_PR_WORKFLOW: &str = include_str!("../assets/skills/tm-pr-workflow.md");
 
 /// Delegation matrices and agent-selection decision trees.
 ///

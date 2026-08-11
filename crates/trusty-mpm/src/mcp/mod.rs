@@ -228,15 +228,20 @@ pub trait OrchestratorBackend: Send + Sync {
     ///      is required because the `serve --stdio` bridge forwards no cwd/env —
     ///      the daemon cannot infer it.
     /// What: returns `{ sessions, recent_commits, recent_memory,
-    ///       resolved_snapshot, watermark_advanced }`. This is a manual PEEK —
-    ///       it NEVER advances the incremental-catchup watermark (only
-    ///       automatic session-start injection does), so `watermark_advanced`
-    ///       is always `false` and repeated calls are always safe.
+    ///       resolved_snapshot, resolved_via, watermark_advanced }`. This is a
+    ///       manual PEEK — it NEVER advances the incremental-catchup watermark
+    ///       (only automatic session-start injection does), so
+    ///       `watermark_advanced` is always `false` and repeated calls are
+    ///       always safe. `tmux_window` is the caller's own
+    ///       `session_name:window_index:window_id`; it resolves a snapshot only
+    ///       when `session_id` matched nothing, and `resolved_via` says which
+    ///       of the two answered.
     /// Test: `dispatch_session_context_catchup_tool` (mock).
     async fn session_context_catchup(
         &self,
         project_dir: &str,
         session_id: Option<&str>,
+        tmux_window: Option<&str>,
         all_projects: bool,
         full: bool,
     ) -> Result<Value, String>;

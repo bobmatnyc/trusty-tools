@@ -107,7 +107,7 @@ pub fn shared_embedder_initialized() -> bool {
 /// without hitting HTTP 429 rate limits. Calling this before any `remember` /
 /// `recall` / `dream_cycle` operation in tests avoids the download entirely by
 /// pre-populating the process-wide `SHARED_EMBEDDER` cell with a deterministic
-/// hash-based mock (issue #850 — mirrors the fix applied to open-mpm in #813).
+/// hash-based mock (issue #850 — mirrors the fix applied to trusty-agents in #813).
 /// What: Attempts `OnceCell::set` with a 384-dim `MockEmbedder`. Idempotent
 /// — if the cell was already set (by an earlier test in the same process), the
 /// call is a silent no-op; the first caller wins.

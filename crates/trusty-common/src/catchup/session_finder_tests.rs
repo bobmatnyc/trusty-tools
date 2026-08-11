@@ -317,9 +317,31 @@ fn render_tmux_window_present_and_omitted() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #5272 — session-snapshot crosstalk
+// ---------------------------------------------------------------------------
+
+/// Append a `pause` line attributing `snap` (a path relative to the store root)
+/// to `id`.
+fn log_pause(sdir: &Path, id: &str, snap: &str, ts: &str) {
+    crate::catchup::session_log::append_entry(
+        sdir,
+        &crate::catchup::session_log::SessionLogEntry {
+            session_id: id.to_string(),
+            event: "pause".to_string(),
+            snapshot: snap.to_string(),
+            timestamp: ts.to_string(),
+        },
+    )
+    .unwrap();
+}
+
+/// The two ids from the #5272 report: A paused, B never did.
+const SESSION_A: &str = "2eb72dca-de08-481b-8dfa-22ab7f81b1f9";
+const SESSION_B: &str = "7bd5c27a-475b-41df-9e9f-a6f630801717";
+
 #[test]
 fn latest_snapshot_prefers_session_log() {
-    use crate::catchup::session_log::{SessionLogEntry, append_entry};
     let tmp = TempDir::new().unwrap();
     let sdir = tmp.path().join(".trusty-mpm").join("sessions");
     fs::create_dir_all(&sdir).unwrap();
@@ -327,36 +349,141 @@ fn latest_snapshot_prefers_session_log() {
     // Two sessions interleave; each snapshot file exists on disk.
     write_file(&sdir, "session-A.md", "## Summary\nS1 work");
     write_file(&sdir, "session-B.md", "## Summary\nS2 work");
-    let mk = |id: &str, snap: &str, ts: &str| SessionLogEntry {
-        session_id: id.to_string(),
-        event: "pause".to_string(),
-        snapshot: snap.to_string(),
-        timestamp: ts.to_string(),
-    };
-    append_entry(&sdir, &mk("s1", "session-A.md", "t1")).unwrap();
-    append_entry(&sdir, &mk("s2", "session-B.md", "t2")).unwrap();
+    log_pause(&sdir, "s1", "session-A.md", "t1");
+    log_pause(&sdir, "s2", "session-B.md", "t2");
 
     // s1 resumes its own snapshot even though s2 paused last.
     let got = latest_trusty_mpm_snapshot(tmp.path(), Some("s1")).unwrap();
     assert_eq!(got.file_name().unwrap(), "session-A.md");
-    // No id → latest overall (s2's).
-    let got = latest_trusty_mpm_snapshot(tmp.path(), None).unwrap();
+    // An explicit request for another session's state is the opt-in, and still
+    // succeeds — that is what makes the default refusal a boundary and not a
+    // blanket ban.
+    let got = latest_trusty_mpm_snapshot(tmp.path(), Some("s2")).unwrap();
     assert_eq!(got.file_name().unwrap(), "session-B.md");
 }
 
+/// Why: issue #5272, reproduced exactly. Session `7bd5c27a…` called
+/// `session_context_catchup` on a store whose only snapshot,
+/// `session-20260809-010155.md`, `sessions-log.jsonl` attributes to
+/// `2eb72dca…`. The old chain's "newest pause overall" step handed it over with
+/// nothing in the response saying whose it was. Two sessions, one store, a
+/// snapshot belonging to A, B resuming: B must get nothing.
+/// What: asserts B resolves to `None` while A still resolves to its own file,
+/// so the refusal is provably B-specific and not the resolver going dark.
+/// Test: itself.
 #[test]
-fn latest_snapshot_falls_back() {
+fn latest_snapshot_refuses_cross_session_fallback() {
     let tmp = TempDir::new().unwrap();
     let sdir = tmp.path().join(".trusty-mpm").join("sessions");
     fs::create_dir_all(&sdir).unwrap();
-    // No log at all → mtime scan of session-*.md.
-    write_file(&sdir, "session-20260101-000000.md", "## Summary\nold");
+
+    let snap = "session-20260809-010155.md";
+    write_file(&sdir, snap, "## Summary\nSession A's work.\n");
+    log_pause(&sdir, SESSION_A, snap, "2026-08-09T01:01:55.796934+00:00");
+
+    assert_eq!(
+        latest_trusty_mpm_snapshot(tmp.path(), Some(SESSION_B)),
+        None,
+        "session B has no snapshot of its own and must NOT be handed A's"
+    );
+    assert_eq!(
+        latest_trusty_mpm_snapshot(tmp.path(), Some(SESSION_A))
+            .unwrap()
+            .file_name()
+            .unwrap(),
+        snap,
+        "A still resolves its own snapshot"
+    );
+}
+
+/// Why: #5272 — an unidentified caller cannot own anything in a shared store,
+/// so "latest overall" is a guess dressed as an answer. Every session-blind
+/// route into the native store is closed, not just the one the report hit.
+/// What: with a snapshot present and logged, `None` resolves to `None`.
+/// Test: itself.
+#[test]
+fn latest_snapshot_requires_a_session_id() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+    fs::create_dir_all(&sdir).unwrap();
+    write_file(&sdir, "session-20260809-010155.md", "## Summary\nA's work");
+    log_pause(&sdir, SESSION_A, "session-20260809-010155.md", "t1");
+
+    assert_eq!(latest_trusty_mpm_snapshot(tmp.path(), None), None);
+    assert!(latest_trusty_mpm_snapshot(&tmp.path().join("nope"), Some(SESSION_A)).is_none());
+}
+
+/// Why: #5272 back-compat. Flat `session-YYYYMMDD-HHMMSS.md` files at the store
+/// root are not migrated — they resolve through `sessions-log.jsonl`, which
+/// already attributes them. A flat file with no log line is attributable to
+/// nobody and must resolve for nobody, rather than to whichever session asks.
+/// What: two flat files, one logged to A and one unlogged; A gets its own, and
+/// the orphan is invisible to A and to an unrelated session alike.
+/// Test: itself.
+#[test]
+fn latest_snapshot_reads_legacy_flat_snapshot_via_log() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+    fs::create_dir_all(&sdir).unwrap();
+
+    write_file(
+        &sdir,
+        "session-20260807-040441.md",
+        "## Summary\nA's legacy",
+    );
+    // Newer by mtime, and deliberately never logged.
     std::thread::sleep(std::time::Duration::from_millis(10));
-    write_file(&sdir, "session-20260202-000000.md", "## Summary\nnew");
-    let got = latest_trusty_mpm_snapshot(tmp.path(), Some("unknown-id")).unwrap();
-    assert_eq!(got.file_name().unwrap(), "session-20260202-000000.md");
-    // Missing project dir → None.
-    assert!(latest_trusty_mpm_snapshot(&tmp.path().join("nope"), None).is_none());
+    write_file(&sdir, "session-20260807-043031.md", "## Summary\norphan");
+    log_pause(&sdir, SESSION_A, "session-20260807-040441.md", "t1");
+
+    assert_eq!(
+        latest_trusty_mpm_snapshot(tmp.path(), Some(SESSION_A))
+            .unwrap()
+            .file_name()
+            .unwrap(),
+        "session-20260807-040441.md",
+        "the logged flat file resolves without migrating it"
+    );
+    assert_eq!(
+        latest_trusty_mpm_snapshot(tmp.path(), Some(SESSION_B)),
+        None,
+        "the unattributable orphan must not resolve to an arbitrary session"
+    );
+}
+
+/// Why: #5272 moved pause snapshots into `sessions/<session-id>/`. A digest
+/// scan that only read the store root would report an empty catch-up on a
+/// project full of them — a regression this change would otherwise introduce.
+/// What: one flat snapshot and one nested under a session directory; both reach
+/// `find_paused_sessions`.
+/// Test: itself.
+#[test]
+fn find_includes_per_session_directories() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+    fs::create_dir_all(sdir.join(SESSION_A)).unwrap();
+    write_file(&sdir, "session-20260807-040441.md", "## Summary\nflat");
+    write_file(
+        &sdir.join(SESSION_A),
+        "session-20260809-010155.md",
+        "## Summary\nnested",
+    );
+
+    let found = find_paused_sessions(tmp.path()).unwrap();
+    let summaries: Vec<&str> = found
+        .iter()
+        .filter_map(|s| match s {
+            PausedSession::TrustyMpm { summary, .. } => Some(summary.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        summaries.len(),
+        2,
+        "both layouts are discovered: {summaries:?}"
+    );
+    assert!(summaries.contains(&"flat"));
+    assert!(summaries.contains(&"nested"));
 }
 
 #[test]
@@ -366,4 +493,202 @@ fn render_empty_returns_no_sessions_message() {
         output.contains("No paused sessions"),
         "empty renders a notice"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #5072 — undated snapshots and the watermark filter
+// ---------------------------------------------------------------------------
+
+/// Set a file's mtime so ordering assertions don't depend on write order.
+fn set_mtime(path: &Path, ts: DateTime<Utc>) {
+    let f = fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::from(ts)).unwrap();
+}
+
+/// Why: issue #5072 — a hand-written snapshot such as
+/// `session-20260730-bounce.md` has a filename that `parse_filename_timestamp`
+/// cannot decode, and before the fix `paused_at` was left `None` forever. That
+/// made the record undatable, which in turn made the watermark filter admit it
+/// unconditionally (see `filter_sessions_since_drops_undatable_session`).
+/// What: writes an undated snapshot, stamps a known mtime, and asserts the
+/// parser recovers that instant.
+/// Test: itself.
+#[test]
+fn parse_falls_back_to_mtime_when_filename_lacks_timestamp() {
+    let tmp = TempDir::new().unwrap();
+    let p = write_file(tmp.path(), "session-20260730-bounce.md", "# Hand written\n");
+    let expected: DateTime<Utc> = "2026-07-30T14:55:00Z".parse().unwrap();
+    set_mtime(&p, expected);
+
+    match parse_trusty_mpm_session(&p).unwrap() {
+        PausedSession::TrustyMpm { paused_at, .. } => {
+            assert_eq!(
+                paused_at,
+                Some(expected),
+                "an undated filename must fall back to the file's mtime"
+            );
+        }
+        other => panic!("expected TrustyMpm, got {other:?}"),
+    }
+}
+
+/// Why: issue #5072 — with `paused_at` stuck at `None`, an undated snapshot
+/// sorted LAST regardless of how recent it actually was, so the newest-first
+/// digest misordered it.
+/// What: an undated snapshot with a NEWER mtime than a well-formed dated one
+/// must sort first.
+/// Test: itself.
+#[test]
+fn find_orders_undated_snapshot_by_mtime() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+    fs::create_dir_all(&sdir).unwrap();
+    write_file(&sdir, "session-20260101-000000.md", "## Summary\nold");
+    let undated = write_file(&sdir, "session-rescue.md", "# Hand written\n");
+    set_mtime(&undated, "2026-06-01T00:00:00Z".parse().unwrap());
+
+    let sessions = find_paused_sessions(tmp.path()).unwrap();
+    assert_eq!(sessions.len(), 2);
+    match &sessions[0] {
+        PausedSession::TrustyMpm { path, .. } => {
+            assert_eq!(
+                path.file_name().unwrap(),
+                "session-rescue.md",
+                "the undated-but-newer snapshot must sort first"
+            );
+        }
+        other => panic!("expected TrustyMpm, got {other:?}"),
+    }
+}
+
+/// A genuinely undatable session: no file behind it, so no mtime to fall back
+/// on, and an unparseable recorded timestamp. This is the ONLY shape that
+/// still yields `sort_key() == None` after #5072 — a session read from disk
+/// always has an mtime.
+fn undatable_session() -> PausedSession {
+    let s = PausedSession::ClaudeMpm {
+        session: ClaudeMpmSession {
+            paused_at: Some("not-a-timestamp".to_string()),
+            source_mtime: None,
+            ..Default::default()
+        },
+    };
+    assert!(
+        s.sort_key().is_none(),
+        "fixture must actually be undatable, or the tests below prove nothing"
+    );
+    s
+}
+
+fn dated_session(ts: &str) -> PausedSession {
+    PausedSession::ClaudeMpm {
+        session: ClaudeMpmSession {
+            paused_at: Some(ts.to_string()),
+            ..Default::default()
+        },
+    }
+}
+
+/// Why: issue #5072 — `filter(|s| s.sort_key().is_none_or(|ts| ts > wm))`
+/// admitted every session whose timestamp could not be derived, so the ONE
+/// record that survived a recent watermark was the undatable one while every
+/// genuinely recent snapshot was dropped.
+/// What: a session with no derivable timestamp is excluded from a
+/// watermark-filtered result, and a session newer than the watermark is kept.
+/// Test: itself.
+#[test]
+fn filter_sessions_since_drops_undatable_session() {
+    let wm: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().unwrap();
+    let out = filter_sessions_since(
+        vec![undatable_session(), dated_session("2026-08-06T21:13:05Z")],
+        Some(wm),
+    );
+    assert_eq!(
+        out.kept.len(),
+        1,
+        "only the datable, newer-than-watermark session survives"
+    );
+    assert_eq!(
+        out.kept[0].sort_key(),
+        Some("2026-08-06T21:13:05Z".parse::<DateTime<Utc>>().unwrap())
+    );
+}
+
+/// Why: the watermark advances past a withheld session and never returns for
+/// it, so the count is a receipt the caller must receive — a stderr warning is
+/// invisible to an MCP client reading a JSON body (#5072).
+/// What: two undatable sessions and one that merely predates the watermark;
+/// only the two undatable ones are counted, and one datable session is kept.
+/// Test: itself.
+#[test]
+fn filter_sessions_since_reports_dropped_count() {
+    let wm: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().unwrap();
+    let out = filter_sessions_since(
+        vec![
+            undatable_session(),
+            undatable_session(),
+            dated_session("2026-07-01T00:00:00Z"), // too old — not "undatable"
+            dated_session("2026-08-06T21:13:05Z"),
+        ],
+        Some(wm),
+    );
+    assert_eq!(out.kept.len(), 1);
+    assert_eq!(
+        out.dropped_undatable, 2,
+        "only undatable exclusions are counted, never merely-too-old ones"
+    );
+}
+
+/// Why: `full=true` (no watermark) must never drop anything — the fail-closed
+/// rule above applies only when there is a watermark to compare against.
+/// What: with `None` as the watermark, both sessions survive and nothing is
+/// reported as withheld.
+/// Test: itself.
+#[test]
+fn filter_sessions_since_keeps_everything_without_watermark() {
+    let out = filter_sessions_since(
+        vec![undatable_session(), dated_session("2026-08-06T21:13:05Z")],
+        None,
+    );
+    assert_eq!(out.kept.len(), 2);
+    assert_eq!(out.dropped_undatable, 0);
+}
+
+/// Why: fail-closed filtering applies to BOTH `PausedSession` variants, but the
+/// #5072 mtime rescue initially covered only `TrustyMpm`. A claude-mpm JSON
+/// carrying nothing but `session_id` deserialises with `paused_at: None`
+/// (`roundtrip_partial_json_uses_defaults` pins that), so it would have gone
+/// from "appears in every digest" straight to "silently withheld from all of
+/// them" — a regression on the arm the fix did not rescue.
+/// What: loads such a file through the real loader and asserts it survives a
+/// watermark it postdates, dated by its mtime.
+/// Test: itself.
+#[test]
+fn claude_mpm_session_with_no_paused_at_is_dated_by_mtime() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".claude-mpm").join("sessions");
+    fs::create_dir_all(&sdir).unwrap();
+    let p = write_file(
+        &sdir,
+        "session-legacy.json",
+        r#"{"session_id":"legacy-only-id"}"#,
+    );
+    set_mtime(&p, "2026-08-06T21:13:05Z".parse().unwrap());
+
+    let sessions = find_paused_sessions(tmp.path()).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].sort_key(),
+        Some("2026-08-06T21:13:05Z".parse::<DateTime<Utc>>().unwrap()),
+        "a claude-mpm session with no paused_at must be dated by its file mtime"
+    );
+
+    let wm: DateTime<Utc> = "2026-08-01T00:00:00Z".parse().unwrap();
+    let out = filter_sessions_since(sessions, Some(wm));
+    assert_eq!(
+        out.kept.len(),
+        1,
+        "and must survive a watermark it postdates"
+    );
+    assert_eq!(out.dropped_undatable, 0);
 }

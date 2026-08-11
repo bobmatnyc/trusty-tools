@@ -6,6 +6,176 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.14.0] — 2026-08-10
+
+### Fixed
+
+- The technical-DD report's §2 Executive Summary no longer renders
+  `_No data available — see Gaps & Caveats._` on a run without `--synthesize`
+  (issue #5318). It was filled only from LLM synthesis prose, so every
+  `tga audit` report collapsed the first section a diligence reader opens while
+  listing real RED/AMBER findings in §5. §2 and its Top Risks table now roll up
+  from the report's own data — applications, size, language mix, severity counts
+  by dimension, and the application risk concentrates in — with the provenance of
+  the figures used. Verified synthesis prose still wins when `--synthesize` runs.
+  - When nothing measurable was supplied, §2 now names the specific missing
+    inputs (no `metrics` file, no `--analyze` fetch, no scannable checkout)
+    instead of collapsing to the generic Gaps & Caveats pointer.
+  - The Top Risks table caps at five rows and now says so in the table itself
+    ("**Top 5 of 7** — 2 further RED/AMBER finding(s) are not listed here…"), so
+    a reader who skims the table without the paragraph above it cannot mistake
+    five rows for the whole risk picture.
+- The report's `Data gaps:` line now states how many gaps it lists and then lists
+  exactly that many. It used to comma-join the labels straight after the colon, so
+  a label carrying its template section number rendered as
+  `Data gaps: 2. Executive Summary, …` — read as a count of two ahead of sixteen
+  names. The count is now the length of the same slice the line joins, and items
+  are separated with `;` so a label's own comma or leading section number cannot be
+  read as a count or a list boundary (#5319).
+
+## [0.13.0] — 2026-08-10
+
+### Breaking
+
+- `ReportSection` and `ReportModel` gain a public `gaps` field (added for #5239's Gaps & Caveats reporting). Both structs are externally constructible, so an exhaustive struct literal built against 0.12.0 no longer compiles — `cargo-semver-checks` flags this as `constructible_struct_adds_field`. Version bumped 0.12.0 -> 0.13.0 per Cargo's 0.x rule (the breaking bump lands in the MINOR position). No in-workspace crate needed a source change: `trusty-analyze` and `trusty-mpm` both reference `trusty-review` via `workspace = true`, so bumping the workspace-level `version = "0.13"` pin in the root `Cargo.toml` was sufficient.
+
+### Added
+
+- `report --analyze` now names every repository it could not enrich, in the report's Gaps & Caveats section, instead of only warning on stderr. A findings table that renders empty because the analyze daemon was unreachable no longer looks like a codebase with no findings (#5239, DOC-67 §9). The fetch contract is unchanged — still fail-open, still never aborts the report.
+- `AnalyzeMetricsSource::fetch_named` returns the reason a fetch yielded nothing (`AnalyzeGap::NotIndexed`, `Unreachable`, or `Unavailable`) rather than a bare `None`. It has a default implementation, so existing implementors are unaffected; `HttpAnalyzeMetricsSource` distinguishes the two conditions it can tell apart. The raw transport error stays on stderr — the report gets the category only, so a URL or a response body never reaches an artifact handed to a third party.
+- `enrich_with_analyze_gaps` is the enrichment entry point that returns those lines; `enrich_with_analyze` is unchanged and now delegates to it.
+- A manifest may declare `[report] gaps = [...]` — Gaps & Caveats lines from whoever produced the manifest. `tga audit` uses this to carry the stages its sweep could not complete into the report (#5236).
+- `polish_with_gaps` renders declared gaps as their own bullets ahead of the auto-collected `Data gaps:` list. A template with no Gaps & Caveats heading gets one appended rather than dropping the lines.
+
+### Fixed
+
+- A finding the verifier REFUTED no longer leaves the model's own grade standing: the
+  post-verification grade is reconciled in both directions, so a relaxed verdict can no
+  longer sit beside an `F` that rested on discarded evidence (#4044).
+- The narrative summary is written before the verification round and nothing revisited
+  it, so it kept citing refuted findings as merge blockers. A deterministic verification
+  notice now leads the review body, naming each refuted finding by the index the prose
+  uses (#4044).
+- A `code_provable` finding whose own text admits the evidence was not available —
+  "the diff does not show their signatures, so this cannot be confirmed from the diff
+  alone" — is no longer markable `verified: "confirmed"`. It is pre-stamped
+  `unverifiable`, stripped of its escalation signals, and never sent to the verifier.
+  This generalises #4081's rule from the claim's subject (registry vocabulary) to the
+  claim's own admission, which is what let the defect recur (#5309).
+- The verifier can now answer `UNVERIFIABLE`. With only CONFIRMED and REFUTED available
+  it had to pick one even for a claim the diff cannot settle, and it picked CONFIRMED
+  (#5309).
+- Refactor suggestions from trusty-analyze no longer render in the report's RED/CRITICAL band, and analyze-derived findings now carry the daemon's own rationale and suggested action instead of showing `not stated in source data` in every prose slot. A finding that would still render as a bare title and path is dropped, and a repository whose analysis ran with no external static-analysis tool installed is named under Gaps & Caveats so an empty RED band reads as unassessed rather than clean (#5317).
+- The §7 complexity distribution is fetched from trusty-analyze's new full-corpus histogram instead of being bucketed from a truncated top-1000 hotspot list, so its bands and percentages describe the whole codebase. On a daemon that serves no histogram the table is omitted and the reason stated under Gaps & Caveats, rather than rendering shares of a truncation as if they were shares of the codebase (#5320).
+
+### Changed
+
+- `pipeline::finding_hygiene::HygieneCounts` gained a fourth per-pass counter and is now
+  `#[non_exhaustive]`. Construct it with `..Default::default()` from outside the crate.
+  Both land in this release together so adding a fifth hygiene pass is not a further
+  break (#4088).
+
+## [0.12.0] — 2026-08-10
+
+### Breaking
+
+- `DedupStore`'s `claim`, `complete`, and `release` are now `async` and take
+  `&Arc<Self>`; the synchronous forms are renamed `claim_blocking`,
+  `complete_blocking`, and `release_blocking`. The blocking forms wait on redb's
+  file lock, so calling one from an async task stalls a runtime worker — the
+  async forms move that wait to a blocking thread. `DedupError` gains a
+  `Contended` variant and is now `#[non_exhaustive]`: an exhaustive `match` on
+  it needs a wildcard arm, and in exchange future variants stop being breaking
+  changes. Construction of existing variants is unaffected (#5064).
+- **`POST /pr/github/webhook` is retired and now returns 404** (#5181, ADR-0034). GitHub deliveries reach `trusty-review` only through `trusty-console`'s `POST /api/webhooks/{source}`, which verifies the HMAC once, spools the payload durably, and relays over UDS to `trusty-review webhook-listen`. The route is deleted rather than stubbed, so a delivery still aimed at it fails visibly at GitHub instead of being acknowledged and dropped. Anyone with a GitHub webhook pointed at `trusty-review` directly must repoint it at the console.
+- **The `closed` + `merged` outcome poll is DELETED, not relocated** (#5181, owner ruling). It scheduled a task that slept an hour, which a console-supervised process that exits on SIGTERM cannot honour. Nothing acts on a `closed` or `merged` webhook event any more: the drain records it as deliberately ignored, writes its processed-ledger marker, and removes the entry. `poll_review_outcomes`, `OutcomeStore` / `OutcomeRecord` / `OutcomeError`, `OutcomeConfig`, the `[outcome]` TOML section and `TRUSTY_REVIEW_OUTCOME_ENABLED` / `_POLL_DELAY_MINUTES` / `_DISMISSAL_THRESHOLD` all go with it — a knob an operator could set and get silence from is the same defect one level down. Issue #1421's outcome-feedback loop is unimplemented again and needs a restart-durable design before it returns.
+- **Removed public API:** `service::webhook` (whole module), `integrations::github::webhook::verify_webhook_signature` and its re-exports, `integrations::github::outcomes`, `store::{OutcomeStore, OutcomeRecord, OutcomeError}`, `config::{OutcomeConfig, OutcomeFileConfig}`, `ReviewConfig::{outcome, github_webhook_secret}`, and `AppState::shutdown_tx`. The secret and the signature check belong to `trusty-console` alone now (ADR-0034 §3).
+- `webhook_listener::run` now takes a `ReviewConfig`, which it needs to build the review pipeline (#5192).
+
+### Added
+
+- `trusty-review webhook-listen` binds `trusty-review-webhook.sock`, the socket `trusty-console` has been relaying verified GitHub deliveries to since #5089 step 3 with nothing on the other end. Each delivery is fsync'd to a durable inbox under the crate's data directory before the acknowledgement is written; an acknowledgement is what lets console delete its own copy, so nothing is acked that is not already held. The listener exits on SIGTERM, so the socket exists without the service running resident. Both the socket and the inbox root resolve from `trusty_common::webhook_relay` rather than being spelled here, so the directory this service writes to is by construction the one `trusty-console` meters for an undrained backlog. The legacy `POST /pr/github/webhook` route is unchanged.
+
+### Fixed
+
+- **`SubprocessAnalyzeClient`'s health check ignored degraded-but-serving,
+  permanently blocking the review gate** (closes
+  [#4440](https://github.com/bobmatnyc/trusty-tools/issues/4440)).
+  - The MCP `review_pr` / `serve` path uses `SubprocessAnalyzeClient`, whose
+    `health()` probed trusty-search's `/health` and tested `status == "ok"` as a
+    literal string. trusty-search latches `status: "degraded"` for its entire
+    process lifetime once warm boot skips any index (the underlying
+    `degraded_by_timeout` / `degraded_by_tcc` counters are never decremented), so
+    `has_analysis()` returned `false` forever and `pipeline::context_gate` skipped
+    every review with "trusty-analyze unreachable/not-ready" — against a daemon
+    that was up, embedder-ready and answering queries normally.
+  - This was a duplicated health check that missed a fix applied to its twin:
+    `HealthResponse::serving_state()` already distinguishes "degraded but
+    serving" from "not serving" and was applied to the search-side gate under
+    #4079. `SubprocessAnalyzeClient` now **consumes** `serving_state()` /
+    `is_serving()` instead of re-deriving its own verdict, so one place decides
+    what a trusty-search health payload means.
+  - The gate is narrowed, not weakened: a genuinely not-serving trusty-search
+    (embedder down, or a status that is neither `ok` nor `degraded`) still fails
+    the probe as `Unavailable`. trusty-search's own status string is passed
+    through verbatim rather than laundered into `"ok"`.
+- `service uninstall` removes the unit under its old label too. The owner's host
+  has `com.trusty.trusty-review.plist` on disk, so removing only the canonical
+  plist left it behind for a later bootstrap to resurrect (#4868)
+- `dedup.redb` no longer locks out sibling processes, and a failed claim no
+  longer posts an ungated review. The dedup claim store held redb's exclusive
+  file lock for the whole process lifetime, so a second opener against the same
+  `--log-dir` — `serve --stdio` alongside `serve`, or an ADR-0034
+  console-spawned webhook worker alongside the HTTP daemon — got
+  `DatabaseAlreadyOpen`, which was downgraded to a warning and run past. The
+  store now opens redb per operation and releases it again, waiting out a
+  concurrent holder for up to 2s and returning a typed `DedupError::Contended`
+  if it never frees; the #702 rebuild-on-unreadable-file recovery is serialised
+  behind a lock so two processes cannot rename away each other's database. Every
+  `AppState` builder now declares `DedupNeed`: modes that never post do not touch
+  the file, and modes that can post fail to start without the claim gate. A
+  claim that cannot be established aborts the review instead of proceeding. The
+  review is then lost until a human re-requests it — the webhook acks with 202
+  before the review runs, so GitHub does not redeliver — which is still better
+  than a duplicate comment nobody can retract. An abort releases only a claim
+  the aborting review actually acquired, so a failed claim never deletes
+  another process's record.
+  Store operations run on a blocking thread so the lock wait cannot stall a
+  tokio worker (#5064).
+- `trusty-review webhook-listen` now drains its webhook inbox into the review pipeline instead of holding acknowledged deliveries forever. Dependencies build lazily on the first actionable delivery and open the dedup store as `Required`.
+- The `review_requested` filter moved to `webhook_drain` and is shared with the legacy `POST /pr/github/webhook` route, so the two transports cannot drift on which deliveries cause a review (#5192).
+
+### Changed
+
+- The `require_analyze` skip message no longer tells every operator to run
+  `trusty-analyze serve`. That advice was irrelevant in the default subprocess
+  mode, where no analyze daemon exists at all; the message now names the real
+  preconditions (a serving trusty-search and a runnable `trusty-analyze` binary
+  on PATH) and scopes the daemon advice to daemon-backed deployments
+  ([#4440](https://github.com/bobmatnyc/trusty-tools/issues/4440)).
+
+---
+- The LaunchAgent label moved from `com.trusty.trusty-review` onto the
+  `com.trusty.<stem>` convention every loaded trusty-* unit obeys, and is read
+  from `trusty_common::launchd_labels::REVIEW` rather than restated beside the
+  installer's own copy of it. The old label is recorded as a legacy alias, so an
+  install evicts a unit left by a prior version instead of running beside it
+  (#4868)
+- `service install` routes through the label-correct activation path, so the
+  `com.trusty.trusty-review.plist` a prior version installed is booted out and
+  deleted rather than stranded. Without that, `plist_label_for` moving to
+  `com.trusty.review` would leave `tctl start trusty-review` and `tctl stack
+  doctor` pointing at a plist that still exists but is no longer written (#4868)
+- `ReviewDeps` derives `Clone`, so one built dependency set can drive repeated reviews (#5192).
+
+### Security
+
+- a repository whose `git ls-files` merely FAILED no longer contributes a `.gitignore`-blind directory walk to the corpus sent to the LLM (closes [#4733](https://github.com/bobmatnyc/trusty-tools/issues/4733))
+  - the walk consults a fixed skip-dir list and nothing else, so a repo with a stale worktree gitlink, `detected dubious ownership`, or an unreadable `.git` handed its ignored `.env` straight to the model; only a CORROBORATED "no repository here" still walks
+  - the exit code is not a classifier — git exits 128 for every fatal alike — so the stderr is matched on the parenthesised `not a git repository (or any of the parent directories)` form only, and even that is corroborated against an ancestor `.git` witness before it is believed. `fatal: not a git repository: (null)` (a stale worktree pointer) contains the shorter phrase while meaning the opposite
+  - a repository with an EMPTY tracked corpus is now an empty corpus, not a walk trigger: nothing committed yet still means a live `.gitignore`
+  - anything git could not answer degrades loudly to no measured baseline rather than a leaky one
+
 ## [0.11.0] — 2026-07-27
 
 MINOR, not patch: `HealthResponse::is_serving` and

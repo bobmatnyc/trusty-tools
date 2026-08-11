@@ -50,7 +50,8 @@ ONLY NOW: mark the todo complete
 
 Follow this repo's conventional-commit style (see the root `CLAUDE.md` git
 workflow section). Every trusty-mpm commit and PR body **ends with the
-trusty-mpm attribution footer** (see `tm-pr-workflow`) — this overrides any
+trusty-mpm attribution footer** (a Framework-Guaranteed Convention in the
+instruction package) — this overrides any
 harness default (do **not** emit `🤖 Generated with Claude Code` or a
 `Co-Authored-By: Claude …` trailer). A typical agent-tracked commit:
 

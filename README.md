@@ -1,5 +1,7 @@
 # trusty-tools
 
+**Website: [trustytools.dev](https://trustytools.dev/)**
+
 Unified Rust workspace consolidating the entire trusty-* AI tooling ecosystem.
 21 crates of AI development tooling with three flagship MCP servers for code search, memory management, and analysis.
 
@@ -37,7 +39,7 @@ See [crates/trusty-search/README.md](crates/trusty-search/README.md) for full do
 Long-term memory storage with semantic search, persistent embedding index, and embedded Svelte UI. Store development context, notes, snippets, and retrieve them via natural language.
 
 **What you get:**
-- HNSW vector index (usearch) + SQLite persistent storage + fastembed embeddings
+- Pure-Rust HNSW vector index (`hnsw_rs`) persisted in `redb` + fastembed embeddings
 - Semantic search over all stored memories
 - Collection organization (notes, snippets, code patterns, decisions)
 - Svelte UI for browsing and editing
@@ -283,7 +285,7 @@ cargo fmt
 
 ## Workspace Info
 
-**Single source of truth:** This monorepo consolidates seven formerly separate repos. All 21 crates are co-located under `crates/` with one workspace root and one `Cargo.lock` — no more `[patch.crates-io]` dances during active development.
+**Single source of truth:** Every crate is co-located under `crates/` with one workspace root and one `Cargo.lock`, so a change spanning several of them is one commit.
 
 **MSRV:** Rust 1.94+ (required by the `aws-config` / `aws-sdk-bedrockruntime` dependencies)
 

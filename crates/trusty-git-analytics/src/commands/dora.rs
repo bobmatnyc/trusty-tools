@@ -27,7 +27,8 @@ use tga::core::config::{Config, FailureSignal};
 use tga::core::db::Database;
 
 /// Arguments for `tga dora`.
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Compute and display DORA metrics (lead time, deployment frequency, MTTR, CFR).",
     long_about = "Compute the four DORA (DevOps Research and Assessment) metrics from the\n\

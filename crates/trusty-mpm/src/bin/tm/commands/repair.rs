@@ -23,6 +23,33 @@ use trusty_mpm::core::agent_manifest::{AgentManifest, MANIFEST_FILE, ManifestLoa
 use trusty_mpm::core::paths::FrameworkPaths;
 use trusty_mpm::core::skill_manifest::{SKILL_MANIFEST_FILE, SkillManifest};
 
+use crate::cli::RepairAction;
+
+/// Routes a parsed `tm repair` subcommand to its handler.
+///
+/// Why: #5007 added a third repair subcommand and the inline `match` in
+/// `main.rs` crossed the 500-SLOC production cap. Dispatch lives beside the
+/// handlers it selects, so a fourth subcommand costs `main.rs` nothing.
+///
+/// What: maps each `RepairAction` variant onto the module that implements it.
+///
+/// Test: `cli_parses_repair_deploy`, `cli_parses_repair_push_guard`, and the
+/// `tests_behavior_repair_tests.rs` behaviour suite exercise the handlers this
+/// routes to.
+pub(crate) fn dispatch(action: RepairAction) -> anyhow::Result<()> {
+    match action {
+        RepairAction::Deploy { force } => repair_deploy(force),
+        RepairAction::PushGuard { path, dry_run } => {
+            super::push_guard::repair_push_guard(path, dry_run)
+        }
+        RepairAction::SessionStore {
+            path,
+            dry_run,
+            force,
+        } => super::repair_session_store::repair_session_store(path, dry_run, force),
+    }
+}
+
 /// `tm repair deploy` handler.
 ///
 /// Why: one safe, user-facing entry point to recover from the two crash

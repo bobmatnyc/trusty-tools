@@ -106,3 +106,70 @@ fn register_project_index_never_bypasses_sensitive_path_denylist() {
         "register_project_index must never set allow_sensitive_path: true; got {body_json:?}"
     );
 }
+
+/// A worktree root asks for `skip_vector` at LAUNCH too (#5065 review).
+///
+/// Why: #5060 registers a worktree BM25+KG-only at creation, but `POST
+/// /indexes` is find-or-create and short-circuits on an existing id, so
+/// whichever call lands first decides. Session launch reached the same worktree
+/// path with `skip_vector` at its `false` default — so any time creation-time
+/// indexing failed, was skipped, or lost the race, launch minted a
+/// vector-bearing index and the daemon persisted it. The invariant the PR title
+/// claims only holds if BOTH call sites decide from the path.
+/// What: builds a real worktree-shaped root (`.git` is a FILE) and asserts the
+/// launch-side decision is `true`.
+/// Test: this test.
+#[test]
+fn worktree_skip_vector_true_for_worktree_root() {
+    let tmp = tempdir().unwrap();
+    let wt = tmp.path().join("feat-branch");
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(wt.join(".git"), "gitdir: /elsewhere/.git/worktrees/feat").unwrap();
+
+    assert!(
+        super::search_index::worktree_skip_vector(&wt),
+        "a worktree keeps its BM25+KG-only registration at launch"
+    );
+}
+
+/// Launching from a SUBDIRECTORY of a worktree still decides `true`.
+///
+/// Why: this is why the check runs against `resolve_project_root(project_root)`
+/// rather than `project_root` itself. The index is keyed to the git-root, so a
+/// session launched from `<worktree>/crates/foo` registers the WORKTREE's
+/// index — but a naive `is_git_worktree(project_root)` answers `false` for that
+/// path (no `.git` file in a subdirectory) and would re-register the worktree's
+/// index with the vector lane on. Same drift, narrower door.
+/// Test: this test.
+#[test]
+fn worktree_skip_vector_true_from_worktree_subdirectory() {
+    let tmp = tempdir().unwrap();
+    let wt = tmp.path().join("feat-branch");
+    let nested = wt.join("crates").join("inner");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(wt.join(".git"), "gitdir: /elsewhere/.git/worktrees/feat").unwrap();
+
+    assert!(
+        super::search_index::worktree_skip_vector(&nested),
+        "the decision must follow the git-root the index is keyed to, not the cwd"
+    );
+}
+
+/// A plain clone keeps the vector lane.
+///
+/// Why: the BM25+KG-only ruling is about worktrees specifically — the expensive
+/// embedding lane is built ONCE, on the base checkout. Suppressing it there too
+/// would delete semantic search for the primary repo, which is the opposite of
+/// what #5060 decided.
+/// Test: this test.
+#[test]
+fn worktree_skip_vector_false_for_plain_clone() {
+    let tmp = tempdir().unwrap();
+    let clone = tmp.path().join("my-repo");
+    std::fs::create_dir_all(clone.join(".git")).unwrap();
+
+    assert!(
+        !super::search_index::worktree_skip_vector(&clone),
+        "a primary clone still embeds — skip_vector is a worktree-only decision"
+    );
+}

@@ -20,15 +20,20 @@
 //! it is narrowly read-only (no in-place flag, no external script load, no
 //! write/exec script construct, balanced quotes) to be allowed. The sibling
 //! [`persistence`] module runs the one ALLOW-list here — the agent-cost stop's
-//! escape hatch (#4837) — and is default-deny in the opposite direction.
+//! escape hatch (#4837) — and is default-deny in the opposite direction. The
+//! sibling [`main_checkout`] module carries the second rule `pm_guard` calls
+//! directly, ahead of the subagent exemptions: whole-tree-destructive git
+//! verbs aimed at a project's main checkout (ADR-0037).
 //! Test: `evaluate_bash_command_*`, `split_shell_segments_*`, and
 //! `has_file_write_redirection_*` in this module's `tests` submodule;
 //! `sed_awk::tests` for the sed/awk-specific safety analysis.
 
+mod main_checkout;
 mod persistence;
 mod sed_awk;
 mod shell_lex;
 
+pub(crate) use main_checkout::evaluate_main_checkout_destructive_command;
 pub(crate) use persistence::command_is_persistence_only;
 
 use std::path::{Path, PathBuf};
@@ -496,7 +501,7 @@ pub(crate) fn has_file_write_redirection(command: &str) -> bool {
 pub(crate) const WORKTREE_TMP_REASON: &str = "`git worktree add` must not target /tmp, \
      /private/tmp, /var/folders, $TMPDIR, or the harness scratchpad — worktrees provisioned \
      there silently fail unrelated tests and can be reaped mid-task (issue #3955). Use \
-     `<repo-root>/.claude/worktrees/<name>` (the tm-pr-workflow convention) instead.";
+     `<repo-root>/.claude/worktrees/<name>` (the tm-workflow convention) instead.";
 
 /// Filesystem roots `git worktree add` must never target (issue #3977).
 ///

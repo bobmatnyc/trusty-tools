@@ -41,6 +41,36 @@ fn lock_path_for(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Restrict `opts` so a file it CREATES is owner-only (`0600`) (#4355).
+///
+/// Why: every file this module writes is per-user state under
+/// `~/.trusty-agents/` — prompts, task narratives, session records, and
+/// captured child-process stderr that is credential-scrubbed but explicitly not
+/// proven secret-free (#5230). Created at the process umask they land
+/// world-readable (0644 on a typical host), which is wrong for all of them on a
+/// shared machine. The mode is applied AT CREATION rather than by a follow-up
+/// `set_permissions` because create-then-chmod leaves a window, however narrow,
+/// in which the content is readable at the wider mode.
+/// What: on unix adds `.mode(0o600)`; elsewhere returns `opts` untouched —
+/// `OpenOptionsExt::mode` is unix-only, and on Windows these paths sit inside a
+/// per-user profile directory whose ACL already excludes other users. Note the
+/// mode applies only when the open actually creates the file; callers that must
+/// guarantee it (see `write_tmp_and_rename`) remove a stale file first, and
+/// treat a removal they could not complete as fatal rather than writing at a
+/// mode they no longer control.
+/// Test: `atomic_write_creates_an_owner_only_file`,
+/// `atomic_write_tightens_an_existing_world_readable_file`,
+/// `atomic_append_line_creates_an_owner_only_file`,
+/// `atomic_write_fails_when_a_stale_tmp_cannot_be_removed`.
+fn private_mode(opts: &mut OpenOptions) -> &mut OpenOptions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts
+}
+
 /// Open (or create) the sibling lock file for `path`.
 ///
 /// Why: `fs4`'s lock methods need an open `File`. Centralizing the open-with-
@@ -110,10 +140,24 @@ fn write_tmp_and_rename(path: &Path, contents: &[u8]) -> Result<()> {
         PathBuf::from(s)
     };
     {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
+        // #4355: a tmp left behind by a crashed write (see this module's doc)
+        // would be REOPENED at its existing mode, and the rename below would
+        // then carry that mode onto the target. Removing it first makes the
+        // open below always a creation, so `private_mode` always applies.
+        // Absence is the normal case; ANY other error means the stale tmp is
+        // still there, so the open would truncate in place at its mode and
+        // publish it — abort instead of writing at an unknown mode.
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("removing stale tmp file {}", tmp.display()));
+            }
+        }
+        let mut opts = OpenOptions::new();
+        opts.create(true).write(true).truncate(true);
+        let mut f = private_mode(&mut opts)
             .open(&tmp)
             .with_context(|| format!("opening tmp file {}", tmp.display()))?;
         f.write_all(contents)
@@ -196,9 +240,13 @@ pub fn atomic_append_line(path: &Path, line: &str) -> Result<()> {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating parent dir {}", parent.display()))?;
         }
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
+        // #4355: owner-only on creation. An append target cannot be removed
+        // and recreated the way `write_tmp_and_rename` does — that would
+        // discard the log — so a file created before this change keeps its
+        // original mode until it is rotated.
+        let mut opts = OpenOptions::new();
+        opts.create(true).append(true);
+        let mut f = private_mode(&mut opts)
             .open(path)
             .with_context(|| format!("opening append target {}", path.display()))?;
         f.write_all(line.as_bytes())
@@ -403,5 +451,125 @@ mod tests {
         atomic_write(&path, b"second").unwrap();
         atomic_write(&path, b"third").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "third");
+    }
+
+    /// The permission bits of `path`, masked to the usual rwx triples.
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .expect("stat written file")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    /// #4355: state files carry prompts, task narratives, and captured
+    /// child-process stderr that is credential-scrubbed but not proven
+    /// secret-free (#5230). At the process umask they land 0644 —
+    /// world-readable on a shared host. Both the published file and the tmp it
+    /// is renamed from must be owner-only; a 0644 tmp would simply carry its
+    /// mode onto the target through the rename.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_creates_an_owner_only_file() {
+        let tmp_dir = TempDir::new().unwrap();
+        let path = tmp_dir.path().join("state").join("tasks.json");
+        atomic_write(&path, b"{\"narrative\":\"secret-ish\"}").unwrap();
+        assert_eq!(mode_of(&path), 0o600, "published state file must be 0600");
+    }
+
+    /// #4355: the mode has to reach files that ALREADY exist at the old wide
+    /// mode — a user upgrading has a 0644 `tasks.json` on disk right now, and
+    /// it is never recreated, only rewritten. The rename publishes the 0600
+    /// tmp over it, so the next write is what tightens it.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_tightens_an_existing_world_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp_dir = TempDir::new().unwrap();
+        let path = tmp_dir.path().join("tasks.json");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(mode_of(&path), 0o644, "fixture starts world-readable");
+
+        atomic_write(&path, b"new").unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    /// #4355: a tmp orphaned by a crashed write (this module's documented
+    /// failure mode) must not be reopened at ITS mode and renamed over the
+    /// target — that would silently republish a world-readable file.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_ignores_a_stale_world_readable_tmp() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp_dir = TempDir::new().unwrap();
+        let path = tmp_dir.path().join("tasks.json");
+        let stale = tmp_dir.path().join("tasks.json.tmp");
+        std::fs::write(&stale, b"crashed").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        atomic_write(&path, b"fresh").unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
+    }
+
+    /// #4355: if the stale tmp cannot be removed, the write must ABORT. Left in
+    /// place it would be truncated and rewritten in place — `create(true)` does
+    /// not re-apply a mode to an existing file — and the rename would publish
+    /// its wide mode onto the target, so the 0600 guarantee would silently not
+    /// engage. Discarding that error was the fail-open shape: a security
+    /// control bypassed with nothing reported.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_fails_when_a_stale_tmp_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("tasks.json");
+        // A first successful write, so the sibling `.lock` already exists and
+        // the read-only directory below cannot fail us earlier than intended.
+        atomic_write(&path, b"first").unwrap();
+
+        let stale = dir.path().join("tasks.json.tmp");
+        std::fs::write(&stale, b"crashed").unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // root ignores directory permissions, so the restriction this test
+        // depends on would not hold there. Detect and skip rather than fail.
+        let unrestricted = std::fs::remove_file(dir.path().join("probe")).is_ok()
+            || std::fs::write(dir.path().join("probe"), b"x").is_ok();
+        let result = if unrestricted {
+            None
+        } else {
+            Some(atomic_write(&path, b"second"))
+        };
+
+        // Restore before the TempDir drops, or cleanup fails.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let Some(result) = result else { return };
+        let err = result.expect_err("a stale tmp that cannot be removed must abort the write");
+        assert!(
+            format!("{err:#}").contains("removing stale tmp file"),
+            "error must name the failing step, got: {err:#}"
+        );
+        // The target keeps its previous contents — nothing was published.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+    }
+
+    /// #4355: NDJSON logs (`interactions.jsonl`, `runs.jsonl`) hold prompt and
+    /// response text, so a file this helper CREATES is owner-only too. An
+    /// append target that predates this change keeps its mode — it cannot be
+    /// recreated without discarding the log — which is why this asserts the
+    /// creation case only.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_append_line_creates_an_owner_only_file() {
+        let tmp_dir = TempDir::new().unwrap();
+        let path = tmp_dir.path().join("logs").join("interactions.jsonl");
+        atomic_append_line(&path, "{\"prompt\":\"secret-ish\"}").unwrap();
+        assert_eq!(mode_of(&path), 0o600);
     }
 }

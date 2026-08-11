@@ -213,22 +213,27 @@ async fn partition_covers_all_nodes() {
     assert_eq!(total, expected.len(), "no node may be missing");
 }
 
+/// Enough leaves for a star's internal density to fall below the 0.2 gap
+/// threshold — see `knowledge_gaps_on_sparse_graph` for the arithmetic (#4810).
+const LEAVES: [&str; 12] = [
+    "leaf1", "leaf2", "leaf3", "leaf4", "leaf5", "leaf6", "leaf7", "leaf8", "leaf9", "leaf10",
+    "leaf11", "leaf12",
+];
+
 /// Star topology (hub connected to many leaves, no other edges) — leaf-
 /// only communities have density 0.0 (a single node has no possible
 /// internal edges by our convention). With many leaves the partition
 /// should contain at least one community classified as a gap.
+///
+/// #4810: this used to pass with six leaves because `rel` is multi-valued and
+/// every assert closed the previous one — the graph under test was a hub and
+/// ONE edge, not a star. On the real star, six leaves give an internal density
+/// of 6/21 ≈ 0.29, above the 0.2 gap threshold. Twelve leaves (12/78 ≈ 0.15)
+/// restore the sparseness the test is about.
 #[tokio::test]
 async fn knowledge_gaps_on_sparse_graph() {
-    // Hub with 6 leaves.
-    let (_dir, kg) = build_kg(&[
-        ("hub", "rel", "leaf1"),
-        ("hub", "rel", "leaf2"),
-        ("hub", "rel", "leaf3"),
-        ("hub", "rel", "leaf4"),
-        ("hub", "rel", "leaf5"),
-        ("hub", "rel", "leaf6"),
-    ])
-    .await;
+    let edges: Vec<(&str, &str, &str)> = LEAVES.iter().map(|l| ("hub", "rel", *l)).collect();
+    let (_dir, kg) = build_kg(&edges).await;
 
     let gaps = kg.knowledge_gaps();
     assert!(
@@ -241,14 +246,8 @@ async fn knowledge_gaps_on_sparse_graph() {
 /// string for downstream prompt assembly.
 #[tokio::test]
 async fn suggested_exploration_is_non_empty() {
-    let (_dir, kg) = build_kg(&[
-        ("hub", "rel", "leaf1"),
-        ("hub", "rel", "leaf2"),
-        ("hub", "rel", "leaf3"),
-        ("hub", "rel", "leaf4"),
-        ("hub", "rel", "leaf5"),
-    ])
-    .await;
+    let edges: Vec<(&str, &str, &str)> = LEAVES.iter().map(|l| ("hub", "rel", *l)).collect();
+    let (_dir, kg) = build_kg(&edges).await;
     let gaps = find_communities(&kg);
     assert!(!gaps.is_empty(), "expected at least one gap to exist");
     for g in &gaps {

@@ -1,22 +1,26 @@
 # Quickstart
 
-Get open-mpm running in five minutes.
+Get `tagent` (trusty-agents) running in five minutes.
 
 ## 1. Install
 
-### From source (recommended for now)
+`trusty-agents` is not published to crates.io — build it from the
+`trusty-tools` monorepo source.
 
 ```bash
-git clone https://github.com/bobmatnyc/open-mpm
-cd open-mpm
-cargo build --release
-# Binary: ./target/release/open-mpm
+git clone https://github.com/bobmatnyc/trusty-tools
+cd trusty-tools
+cargo install --path crates/trusty-agents --locked
+# Binary: ~/.cargo/bin/tagent
 ```
 
-### Via cargo (when published)
+On macOS, prefer the signed-install script — it also signs the `Trusty
+Agents.app` desktop shell if present, so both artifacts keep their TCC grants
+across rebuilds:
 
 ```bash
-cargo install open-mpm
+scripts/install-trusty-agents-signed.sh
+# or: make install-agents-signed
 ```
 
 ## 2. Configure credentials
@@ -40,8 +44,8 @@ the full credential matrix.
 ## 3. Verify
 
 ```bash
-open-mpm --version
-# open-mpm v0.1.37 (abc1234) build #1
+tagent --version
+# trusty-agents v0.38.6 build #1
 ```
 
 ## 4. Run modes
@@ -49,9 +53,9 @@ open-mpm --version
 ### Interactive CTRL REPL (default)
 
 ```bash
-open-mpm
+tagent
 # or explicitly:
-open-mpm --ctrl
+tagent --ctrl
 ```
 
 You get a prompt:
@@ -66,10 +70,10 @@ sub-agent (e.g. `python-engineer`). Type `/help` for slash commands.
 ### API server + Web UI
 
 ```bash
-open-mpm --api --port 7654
-# [open-mpm] API:    http://localhost:7654/api
-# [open-mpm] Web UI: http://localhost:7654/
-# [open-mpm] Docs index: 24 documents indexed from ./docs
+tagent --api --port 7654
+# [trusty-agents] API:    http://localhost:7654/api
+# [trusty-agents] Web UI: http://localhost:7654/
+# [trusty-agents] Docs index: 24 documents indexed from ./docs
 ```
 
 The web UI is embedded in the binary — no separate frontend deploy.
@@ -80,7 +84,7 @@ Add `--api-token <TOK>` to require bearer-token auth on `/api/*` routes.
 Run a declarative pipeline (`research → plan → code → qa → observe`):
 
 ```bash
-open-mpm --workflow prescriptive \
+tagent --workflow prescriptive \
   --task "Implement FizzBuzz with pytest tests" \
   --out-dir ./out/fizzbuzz
 ```
@@ -91,7 +95,7 @@ Generated files land under `--out-dir` and pytest runs automatically in the
 ### Direct mode (bypass PM)
 
 ```bash
-open-mpm --direct python-engineer \
+tagent --direct python-engineer \
   --task "Bubble sort with type hints" \
   --out-dir ./out/sort
 ```
@@ -114,5 +118,5 @@ matching files under `docs/`. The same index powers
 ## Next steps
 
 - [CLI reference](./cli-reference.md) — every flag, every mode
-- [Configuration](./configuration.md) — `.open-mpm/`, agents, skills, workflows
+- [Configuration](./configuration.md) — `.trusty-agents/`, agents, skills, workflows
 - [Agents and skills](./agents-and-skills.md) — what's bundled, how to extend

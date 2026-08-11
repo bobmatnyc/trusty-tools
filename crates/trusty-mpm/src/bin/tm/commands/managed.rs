@@ -213,7 +213,7 @@ pub(crate) async fn session_ls(
     source_id: Option<&str>,
     all: bool,
     sort: crate::commands::session_picker::SessionSortArg,
-    term: Option<String>,
+    term: Option<crate::commands::session_picker::SessionFilter>,
 ) -> anyhow::Result<()> {
     let ctx = crate::commands::session_picker_prune::PruneContext::production();
     session_ls_at(client, url, json, source_id, all, sort, term, &ctx).await
@@ -257,7 +257,7 @@ pub(crate) async fn session_ls_at(
     source_id: Option<&str>,
     all: bool,
     sort: crate::commands::session_picker::SessionSortArg,
-    term: Option<String>,
+    term: Option<crate::commands::session_picker::SessionFilter>,
     ctx: &crate::commands::session_picker_prune::PruneContext,
 ) -> anyhow::Result<()> {
     // Fetch the response body ONCE via the shared fetch path. `--json` echoes
@@ -292,7 +292,7 @@ pub(crate) async fn session_ls_at(
         &listing.dead_ids,
     );
     let mut sessions =
-        crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_deref());
+        crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_ref());
     crate::commands::session_picker::sort_sessions(&mut sessions, sort);
     crate::commands::managed_render::render_session_table(&sessions, source_id);
     Ok(())

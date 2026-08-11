@@ -72,7 +72,18 @@ pub struct StageState {
     /// JSON payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunks: Option<usize>,
-    /// Embedded chunks (semantic stage running counter).
+    /// Embedded chunks — a running counter for the CURRENT pass, not
+    /// cumulative coverage (issue #4787).
+    ///
+    /// Why: this counts what THIS boot's / this reindex's embed pass computed.
+    /// When a persisted HNSW snapshot is already current, nothing needs
+    /// embedding and the field reads `0` on an index whose semantic search is
+    /// fully functional — the exact signature of a dead vector lane (#2178), so
+    /// an operator triaging a suspected semantic failure draws the wrong
+    /// conclusion from it. The name is kept for wire compatibility;
+    /// `GET /indexes/:id/status` carries the cumulative truth beside it as
+    /// `semantic_coverage.vectors_present`, read from the live vector store.
+    /// Test: `status_semantic_coverage_reports_live_vector_count`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedded: Option<usize>,
     /// Total chunks to embed (semantic stage denominator).

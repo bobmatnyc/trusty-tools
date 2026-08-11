@@ -14,6 +14,17 @@
 //! refuted relaxes correctly.  `probe_verifier_liveness` is the startup gate that
 //! refuses live mode when the verifier model is unavailable.
 //!
+//! ## Third judgment (#5309)
+//! The verifier may also answer `UNVERIFIABLE` — "the evidence needed to settle
+//! this finding is not in the diff I was given". Before #5309 the schema offered
+//! only CONFIRMED and REFUTED, so a claim the diff could not settle had to be
+//! forced into one of them; on PR #5303 it was forced into CONFIRMED, on a
+//! finding whose own text said it could not be confirmed from the diff, and that
+//! produced a false BLOCK. `Unverifiable` is not a refutation: the finding
+//! survives into the verdict input, but `apply_outcome` strips the signals that
+//! let it escalate. See `evidence_admission` for the deterministic sibling that
+//! catches the same shape before the verifier is ever called.
+//!
 //! ## Liveness gate
 //! The startup liveness probe (`probe_verifier_liveness`, in `verify_liveness.rs`)
 //! refuses live mode when the verifier model is dead, so a stale inference profile
@@ -452,8 +463,14 @@ async fn verify_one(verifier: &Arc<dyn LlmProvider>, req: crate::llm::LlmRequest
     let model = req.model.clone();
     match verifier.complete(req).await {
         Ok(resp) => match parse_judgment(&resp.text) {
-            Some(true) => VerifyOutcome::Confirmed,
-            Some(false) => VerifyOutcome::Refuted,
+            Some(Judgment::Confirmed) => VerifyOutcome::Confirmed,
+            Some(Judgment::Refuted) => VerifyOutcome::Refuted,
+            // #5309: the verifier declined to confirm a claim the diff cannot
+            // settle.  Not a refutation — the finding may well be real — so it
+            // survives as an advisory note rather than being disproved.
+            Some(Judgment::Unverifiable) => VerifyOutcome::Unverifiable {
+                reason: VERIFIER_UNVERIFIABLE_REASON.to_string(),
+            },
             None => {
                 warn!(
                     text = %truncate(&resp.text, 120),
@@ -501,9 +518,16 @@ async fn verify_one(verifier: &Arc<dyn LlmProvider>, req: crate::llm::LlmRequest
 /// What: sets `finding.verified`; for any refutation variant
 /// (`Refuted` / `ErrorRefuted` / `TruncationRefuted`) also clamps the confidence
 /// down to `VERIFY_REFUTED_CONFIDENCE` (0.10), below every advisory / block gate.
-/// `Confirmed` and `Skipped` leave the confidence untouched.
+/// For `Unverifiable` (#5309) applies
+/// `evidence_admission::demote_to_unverifiable_advisory` instead — the finding is
+/// not disproved, so its confidence is capped rather than floored, but it loses
+/// `code_provable` and its High effort so it cannot drive the BLOCK floor. That
+/// is the SAME demotion the hygiene passes apply when they pre-stamp
+/// `Unverifiable`, so a claim carries the same weight whichever route classified
+/// it. `Confirmed` and `Skipped` leave the finding untouched.
 /// Test: `verify_confirmed_keeps_and_block_holds`,
-/// `verify_refuted_demotes_and_block_relaxes`.
+/// `verify_refuted_demotes_and_block_relaxes`,
+/// `apply_outcome_unverifiable_strips_block_floor_signals`.
 pub fn apply_outcome(finding: &mut Finding, outcome: VerifyOutcome) {
     let is_refutation = matches!(
         outcome,
@@ -514,36 +538,78 @@ pub fn apply_outcome(finding: &mut Finding, outcome: VerifyOutcome) {
     if is_refutation {
         finding.confidence = VERIFY_REFUTED_CONFIDENCE;
     }
+    // #5309: an unchecked claim must not wear the pipeline's escalation signals.
+    // #5309: an unchecked claim must not wear the pipeline's escalation signals.
+    if matches!(outcome, VerifyOutcome::Unverifiable { .. }) {
+        crate::pipeline::evidence_admission::demote_to_unverifiable_advisory(finding);
+    }
     finding.verified = Some(outcome);
 }
 
-/// Parse the verifier's forced JSON judgment into `Some(true)`=CONFIRMED,
-/// `Some(false)`=REFUTED, or `None` if unparseable.
+/// Reason recorded when the VERIFIER itself declines to confirm (#5309).
+///
+/// Why: `VerifyOutcome::Unverifiable` carries a human-readable reason, and a
+/// consumer must be able to tell "a hygiene pass pre-stamped this from the
+/// finding's own admission" apart from "the verifier looked and said the
+/// evidence is not in the diff".
+/// What: the reason string for the latter case.
+/// Test: `parse_judgment_unverifiable`,
+/// `apply_outcome_unverifiable_strips_block_floor_signals`.
+const VERIFIER_UNVERIFIABLE_REASON: &str = "the verifier could not settle this from the diff — the evidence it rests on is outside \
+     the reviewed change";
+
+/// A verifier judgment (#5309 made this tri-state; it was `bool` before).
+///
+/// Why: `Option<bool>` could express CONFIRMED / REFUTED / unparseable but had
+/// no room for "the verifier examined it and could not tell", which is the whole
+/// point of the third judgment.
+/// What: mirrors the `judgment` enum in `verify_prompt::verify_response_schema`.
+/// Test: `parse_judgment_confirmed`, `parse_judgment_refuted`,
+/// `parse_judgment_unverifiable`, `parse_judgment_unparseable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Judgment {
+    /// The finding is real and grounded in the diff.
+    Confirmed,
+    /// The finding is not defensible.
+    Refuted,
+    /// The evidence needed to settle the finding is not in the diff.
+    Unverifiable,
+}
+
+/// Parse the verifier's forced JSON judgment, or `None` if unparseable.
 ///
 /// Why: the verifier output is forced JSON `{judgment, reason}`; a robust parse
 /// (with a keyword fallback for non-structured providers) keeps the outcome
 /// deterministic.
 /// What: tries direct JSON deserialisation first; falls back to a case-insensitive
-/// keyword scan (CONFIRMED before REFUTED) so a provider that ignored the schema
-/// still produces a decision.  Returns `None` only when neither token appears.
+/// keyword scan so a provider that ignored the schema still produces a decision.
+/// UNVERIFIABLE is scanned FIRST in the fallback because it is the only token
+/// that could be swallowed by a substring match on another — a prose answer
+/// reading "not confirmed, unverifiable from this diff" contains both tokens, and
+/// the safe reading of an ambiguous answer is the one that does not confirm.
+/// Returns `None` only when no token appears.
 /// Test: `parse_judgment_confirmed`, `parse_judgment_refuted`,
-/// `parse_judgment_unparseable`.
-fn parse_judgment(text: &str) -> Option<bool> {
+/// `parse_judgment_unverifiable`, `parse_judgment_unparseable`.
+fn parse_judgment(text: &str) -> Option<Judgment> {
     let trimmed = text.trim();
     if let Ok(j) = serde_json::from_str::<VerifyJudgment>(trimmed) {
         return match j.judgment.trim().to_uppercase().as_str() {
-            "CONFIRMED" => Some(true),
-            "REFUTED" => Some(false),
+            "CONFIRMED" => Some(Judgment::Confirmed),
+            "REFUTED" => Some(Judgment::Refuted),
+            "UNVERIFIABLE" => Some(Judgment::Unverifiable),
             _ => None,
         };
     }
     // Fallback keyword scan for providers that ignored the forced schema.
     let upper = trimmed.to_uppercase();
+    if upper.contains("UNVERIFIABLE") {
+        return Some(Judgment::Unverifiable);
+    }
     if upper.contains("CONFIRMED") {
-        return Some(true);
+        return Some(Judgment::Confirmed);
     }
     if upper.contains("REFUTED") {
-        return Some(false);
+        return Some(Judgment::Refuted);
     }
     None
 }

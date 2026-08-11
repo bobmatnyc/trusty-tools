@@ -139,6 +139,29 @@ use doctor_worktree_disk::check_worktree_disk;
 mod doctor_legacy_overrides;
 use doctor_legacy_overrides::check_legacy_overrides;
 
+// #5045: the resolution half of `check_search` below. That probe asks the
+// daemon whether it is healthy and whether the DERIVED id appears in
+// `/indexes`; this one resolves the id the session is actually PINNED to. The
+// registration path is fail-open at every step, so the pin advances even when
+// index creation failed — 4 of 75 live worktrees had an index while `search`
+// reported fine.
+#[path = "doctor_search_pin.rs"]
+mod doctor_search_pin;
+use doctor_search_pin::check_search_index_pin;
+
+// Split out to keep this file under the 500-SLOC production cap (issue #5007 —
+// the managed-session-store integrity probe; a corrupt `sessions.json` blocks
+// every write and was previously invisible to every diagnostic).
+#[path = "doctor_session_store.rs"]
+mod doctor_session_store;
+use doctor_session_store::check_session_store;
+// Claude Code finds `.mcp.json` by walking UP from a session's cwd, so one
+// written above real projects configures every session beneath it with nothing
+// in the project to point at. Read-only; the quarantine is opt-in.
+#[path = "doctor_stray_mcp.rs"]
+mod doctor_stray_mcp;
+use doctor_stray_mcp::check_stray_mcp_json;
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -227,9 +250,13 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// `project_dir`'s clone has no trusty-mpm cross-branch `pre-push` guard, or
 /// carries an older revision of it, naming the `tm repair push-guard`
 /// retrofit; this is the only way a base clone provisioned BEFORE the guard
-/// shipped is discoverable as unprotected) — folding the resulting twenty-two
-/// [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status is the
-/// worst of them.
+/// shipped is discoverable as unprotected), and the `search_index_pin` probe
+/// (issue #5045 — resolves the index id the project's `.mcp.json` actually
+/// PINS against `GET /indexes/{id}/status` and `Fail`s on a 404; index
+/// registration is fail-open at every step, so the pin advances even when
+/// creation failed and the `search` probe above stays green) — folding the
+/// resulting [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status
+/// is the worst of them.
 ///
 /// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a
 /// permanent probe here — it is a one-time migration
@@ -254,7 +281,7 @@ const PROBE_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_twenty_nine_checks`,
+/// Test: `run_doctor_produces_thirty_two_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -312,6 +339,10 @@ pub async fn run_doctor(
     ];
     checks.push(check_memory(&home).await);
     checks.push(check_search(&home, project_dir).await);
+    // #5045: `check_search` above reports the daemon and the DERIVED id; this
+    // resolves the id `.mcp.json` actually pins, which is what every `search`
+    // call in the session sends.
+    checks.push(check_search_index_pin(&home, project_dir).await);
     checks.push(check_worktrees(repos_root, active_workspace_paths).await);
     // #2919: `check_worktrees` above counts ORPHANS and has never reported a
     // byte, so it read identically whether the worktree store held 4 GiB or the
@@ -340,6 +371,20 @@ pub async fn run_doctor(
     // still exists. Reports UNKNOWN — never Ok — when provenance cannot be
     // determined. Read-only; never installs, moves, or deletes.
     checks.push(check_binary_provenance());
+    // Issue #5007: whether `sessions.json` still parses. A corrupt store blocks
+    // every write while `tm ls` keeps serving the daemon's in-memory copy, so
+    // without this probe the condition is invisible until someone attempts a
+    // mutation. Read-only; the repair is `tm repair session-store`.
+    checks.push(check_session_store(&FrameworkPaths::default().root));
+    // A `.mcp.json` ABOVE the workspace is read by every session whose cwd is
+    // beneath it — including agent scratchpads under /tmp — and nothing else
+    // reports it. Read-only, and it names the provenance verdict per file so
+    // the operator can see which ones `--fix` will refuse to touch.
+    checks.push(check_stray_mcp_json(
+        &crate::core::mcp_provenance::default_framework_root(),
+        project_dir,
+        &home,
+    ));
 
     DoctorReport::from_checks(checks)
 }

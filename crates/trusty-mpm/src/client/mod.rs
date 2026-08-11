@@ -33,7 +33,8 @@ pub use http_client::{
     ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
     ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
     ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
-    OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
+    ManagedStoreHealth, OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow,
+    TmuxSessionRow,
 };
 pub use proxy::{
     ActivityDigest, FocusOutcome, FocusTarget, FreeTextRoute, InjectOutcome, ManagedBackend,

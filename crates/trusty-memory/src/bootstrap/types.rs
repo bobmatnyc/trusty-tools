@@ -4,14 +4,13 @@
 //! point. Keeping them in a separate file prevents circular dependencies and
 //! keeps each module under the 500-SLOC cap.
 //! What: `BootstrapTriple`, `ScannedFile`, `BootstrapResult`, plus the
-//! `KG_EMPTY_HINT` constant and the `is_kg_empty_for_subject` / `result_to_json`
-//! helpers that operate directly on these types.
+//! `KG_EMPTY_HINT` / `KG_SUBJECT_NOT_FOUND_HINT` constants, the `KgMiss`
+//! classifier behind `kg_query`'s `graph_state` field, and `result_to_json`.
 //! Test: types are covered by the scanner and integration tests in sibling
 //! modules.
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
-use trusty_common::memory_core::store::kg::Triple;
 
 /// A single bootstrap discovery before it becomes a Triple.
 ///
@@ -61,32 +60,88 @@ pub struct BootstrapResult {
     pub scanned_files: Vec<ScannedFile>,
 }
 
-/// Hint string returned by `kg_query` when the palace KG is empty.
+/// Hint string returned by `kg_query` when the palace KG holds no triples.
 ///
 /// Why: Issue #60 — when a user calls `kg_query` against a brand-new palace
 /// they get an empty triples array with no indication that `kg_bootstrap` /
 /// `kg_assert` even exist. A short hint embedded in the response solves
 /// this with one line of code at the call site.
 /// What: Static string, kept in this module so tests can pin it.
-/// Test: `kg_query_emits_hint_when_palace_empty` in `tools.rs`.
+/// Test: `kg_query_reports_graph_empty_when_graph_has_no_triples`.
 pub const KG_EMPTY_HINT: &str =
     "Knowledge graph is empty. Run kg_bootstrap to seed it from project files, \
      or use kg_assert to add triples manually.";
 
-/// Convenience: count active triples across an entire palace.
+/// Hint string returned by `kg_query` when the graph has triples but not for
+/// the queried subject.
 ///
-/// Why: `kg_query` is per-subject, so to determine "is the KG empty?" the
-/// `kg_query` handler needs a separate broader check. Centralising the
-/// emptiness check here keeps the hint logic in one place and lets future
-/// changes (e.g. counting across closets) live alongside their consumer.
-/// What: Returns `Ok(true)` iff the palace has zero triples for the queried
-/// subject AND the broader "is_anything_asserted" check is empty. Practical
-/// emptiness: we treat the palace as empty if the queried subject returned
-/// no triples — this is the user's signal that something is wrong, even if
-/// other subjects have data.
-/// Test: covered indirectly through `kg_query_emits_hint_when_palace_empty`.
-pub fn is_kg_empty_for_subject(triples: &[Triple]) -> bool {
-    triples.is_empty()
+/// Why (#4775): the caller guessed a subject the graph does not hold. Telling
+/// them to seed the graph is wrong — it is already seeded — and it sends them
+/// to `kg_assert` when what they need is the list of subjects that do exist.
+/// What: names `kg_list_subjects` (shipped in #4776) so the recovery step is a
+/// tool call, not a second guess.
+/// Test: `kg_query_reports_subject_not_found_when_graph_has_other_subjects`.
+pub const KG_SUBJECT_NOT_FOUND_HINT: &str =
+    "No active triples for this subject. The knowledge graph is not empty — \
+     call kg_list_subjects to see which subjects it holds.";
+
+/// Which of the two distinct "no triples came back" outcomes a `kg_query` hit.
+///
+/// Why (#4775): both outcomes returned the same "Knowledge graph is empty"
+/// hint, and for the common case — a graph with facts, queried for a subject
+/// it does not hold — that hint states something the handler can prove false.
+/// A caller that believes it wastes a `kg_bootstrap` on an already-seeded
+/// graph instead of listing the subjects that are there.
+/// What: the discriminator behind `kg_query`'s `graph_state` response field.
+/// [`Self::classify`] decides which one applies; [`Self::wire_value`] and
+/// [`Self::hint`] are the two strings that reach the caller. Marked
+/// `#[non_exhaustive]` so a future third outcome is not a breaking change.
+/// Test: `kg_miss_classify_distinguishes_empty_graph_from_missing_subject`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum KgMiss {
+    /// The graph holds active triples, just none for the queried subject.
+    SubjectNotFound,
+    /// The graph holds no active triples at all.
+    GraphEmpty,
+}
+
+impl KgMiss {
+    /// Classify a `kg_query` result; `None` means the subject matched.
+    ///
+    /// Why (#4775): emptiness is a whole-graph property, so it cannot be read
+    /// off the per-subject result alone — that conflation is the defect. Both
+    /// counts are required, and taking them as parameters keeps the decision
+    /// pure and directly testable without a live palace.
+    /// What: `None` when `subject_triples > 0`. Otherwise `GraphEmpty` iff the
+    /// whole graph reports zero active triples, else `SubjectNotFound`.
+    /// Test: `kg_miss_classify_distinguishes_empty_graph_from_missing_subject`.
+    pub fn classify(subject_triples: usize, total_active_triples: usize) -> Option<Self> {
+        if subject_triples > 0 {
+            return None;
+        }
+        if total_active_triples == 0 {
+            Some(Self::GraphEmpty)
+        } else {
+            Some(Self::SubjectNotFound)
+        }
+    }
+
+    /// The string emitted as `kg_query`'s `graph_state` field.
+    pub fn wire_value(self) -> &'static str {
+        match self {
+            Self::SubjectNotFound => "subject_not_found",
+            Self::GraphEmpty => "graph_empty",
+        }
+    }
+
+    /// The recovery hint that matches this outcome.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::SubjectNotFound => KG_SUBJECT_NOT_FOUND_HINT,
+            Self::GraphEmpty => KG_EMPTY_HINT,
+        }
+    }
 }
 
 /// Helper: bubble up the bootstrap result as the MCP JSON envelope expects.

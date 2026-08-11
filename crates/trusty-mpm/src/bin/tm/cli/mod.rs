@@ -599,6 +599,17 @@ pub(crate) enum Command {
         /// to the default.
         #[arg(long)]
         style: Option<String>,
+        /// Run this session in its own git worktree instead of the project's
+        /// main checkout (#5274).
+        ///
+        /// By default a session launches in the project's own checkout: the PM
+        /// works where you work, and only the agents it dispatches are isolated
+        /// (governed separately by the project's `worktree` setting). Pass
+        /// `--worktree` when you want THIS session provisioned into a protected
+        /// managed clone plus a per-session worktree, leaving the live checkout
+        /// untouched.
+        #[arg(long)]
+        worktree: bool,
     },
     /// Start or attach to a session without running the deployment sequence.
     ///
@@ -929,6 +940,28 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
+    /// Find a session by NAME, filtering as you type — `tm f [pattern]`.
+    ///
+    /// Why: `tm ls <term>` is a one-shot filter over every visible column, so a
+    /// wrong guess means retyping the whole command, and a task description
+    /// mentioning "api" pads the answer to "which sessions are CALLED
+    /// api-something". `tm f` keeps the list on screen and narrows it per
+    /// keystroke against the NAME only, which is the lookup an operator with
+    /// ~90 sessions runs constantly. `tm ls` is unchanged — it stays the
+    /// one-shot, pipeable listing.
+    /// What: opens the type-to-filter picker. `[pattern]` seeds the filter box;
+    /// typing narrows, Up/Down select, Enter opens the highlighted session (the
+    /// same resume path the numbered picker uses), Esc cancels, Backspace edits,
+    /// Ctrl-U clears. Matching is case-insensitive substring on the name.
+    /// Piped, `--json`, `--all`, or `TERM=dumb` never enter raw mode: they print
+    /// the same static filtered table `tm ls` would.
+    /// Test: `cli_parses_f_pattern`, `cli_parses_f_multi_word_pattern`,
+    /// `cli_parses_f_bare_is_allowed`, `cli_parses_f_json`,
+    /// `cli_f_source_id_and_current_conflict`; the fallback gate by
+    /// `interactive_filter_allowed_*`.
+    #[command(name = "f")]
+    F(FindArgs),
+
     /// Clone or refresh the managed workspace for a registered alias (DOC-24).
     ///
     /// Why: `load` is the idempotent step that materializes a registered alias
@@ -1218,12 +1251,22 @@ pub(crate) enum Command {
 /// bare `tm doctor` is unchanged and READ-ONLY. The `repair` arg group holds
 /// the two flags that select a repair (`--fix`, `--fix-skills`) so
 /// `--include-frozen` can require either one without duplicating the check.
+/// The `writes` group holds the two that DEFAULT TO A PREVIEW (`--fix`,
+/// `--quarantine-mcp`) so `--yes` can promote either without naming both.
 /// Test: `cli_parses_doctor`, `cli_parses_doctor_prune_stale_skills`,
-/// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`.
+/// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`,
+/// `cli_parses_doctor_quarantine_mcp`,
+/// `cli_rejects_doctor_yes_without_a_write_action`.
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
 #[command(group(
     clap::ArgGroup::new("repair")
         .args(["fix", "fix_skills"])
+        .multiple(true)
+        .required(false)
+))]
+#[command(group(
+    clap::ArgGroup::new("writes")
+        .args(["fix", "quarantine_mcp"])
         .multiple(true)
         .required(false)
 ))]
@@ -1283,14 +1326,35 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix: bool,
 
-    /// With `--fix`, actually perform the repairs instead of previewing.
+    /// With `--fix` or `--quarantine-mcp`, actually perform the change
+    /// instead of previewing.
     ///
     /// Why (#4948): these repairs rewrite files the operator can see and
     /// care about, so a preview is the default and writing is a second
-    /// deliberate act. Every overwrite is still backed up first.
-    /// What: promotes `--fix` from a dry run to an applied run.
-    #[arg(long, requires = "fix")]
+    /// deliberate act. Every overwrite is still backed up first, and a
+    /// quarantine renames aside rather than deleting.
+    /// What: promotes `--fix` and `--quarantine-mcp` from a dry run to an
+    /// applied run.
+    #[arg(long, requires = "writes")]
     pub yes: bool,
+
+    /// Quarantine one specific stray `.mcp.json` by path. DRY RUN unless
+    /// `--yes`.
+    ///
+    /// Why: `--fix`'s stray sweep acts only on files tm's provenance ledger
+    /// proves it wrote, and that ledger only covers writes made after it
+    /// shipped — so every stray already on disk is unattributable and the
+    /// sweep refuses it. Rather than weaken the evidence rule that keeps the
+    /// sweep off hand-written config, this takes the attribution from the
+    /// operator: naming an exact path is a deliberate act tm cannot perform
+    /// on its own.
+    /// What: renames the named file to `.mcp.json.quarantined-<epoch>` beside
+    /// itself, which is what stops Claude Code's upward walk finding it while
+    /// keeping every byte recoverable. Nothing is deleted. It refuses a path
+    /// that is not a `.mcp.json`, the current workspace's own `.mcp.json`, and
+    /// a symlink.
+    #[arg(long, value_name = "PATH")]
+    pub quarantine_mcp: Option<std::path::PathBuf>,
 
     /// With `--fix` or `--fix-skills`, also overwrite skills that were
     /// HAND-EDITED after deployment.
@@ -1324,4 +1388,42 @@ pub(crate) struct ReinstallArgs {
     /// Skip the `--binary` confirmation prompt.
     #[arg(long, requires = "binary")]
     pub(crate) yes: bool,
+}
+
+/// Flags for [`Command::F`] (`tm f`).
+///
+/// Why: same reason as [`ReinstallArgs`] — five fields as a struct variant make
+/// the `main.rs` dispatch arm wrap onto seven lines, and that file sits against
+/// the 500-SLOC production cap. Flattened by clap, so the parsed CLI surface is
+/// identical to the inline form.
+/// What: the pattern seed plus the four `tm ls`-mirroring flags.
+/// Test: `cli_parses_f_pattern`, `cli_parses_f_bare_is_allowed`,
+/// `cli_parses_f_json`, `cli_f_source_id_and_current_conflict`.
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct FindArgs {
+    /// Substring to seed the filter with (case-insensitive, name only).
+    ///
+    /// Optional — bare `tm f` opens the picker with an empty filter box.
+    /// Multiple words are joined with a single space and matched as one
+    /// substring.
+    #[arg(value_name = "PATTERN", num_args = 0..)]
+    pub(crate) pattern: Vec<String>,
+    /// Output the raw daemon managed-session JSON (byte-for-byte
+    /// passthrough), forcing static output even on a TTY.
+    ///
+    /// As with `tm ls --json`, the passthrough is the complete unfiltered
+    /// fleet — scripts consuming it do their own filtering.
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// Also restrict to this `owner/repo` slug (passed to the daemon).
+    #[arg(long)]
+    pub(crate) source_id: Option<String>,
+    /// Derive `source_id` from the cwd's git remote.
+    ///
+    /// Mutually exclusive with `--source-id`; passing both is a parse error.
+    #[arg(long, conflicts_with = "source_id")]
+    pub(crate) current: bool,
+    /// Include decommissioned tombstone sessions (forces static output).
+    #[arg(long)]
+    pub(crate) all: bool,
 }

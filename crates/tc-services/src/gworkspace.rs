@@ -4,7 +4,7 @@
 //! authenticated Google API client + per-service handlers already live in
 //! `trusty-gworkspace`; this module is a thin host-agnostic *bridge* that
 //! emits OpenAI-compatible schemas and dispatches calls — the same shape as
-//! `cto_db.rs` and `granola.rs` — so open-mpm, trusty-izzie, and future
+//! `cto_db.rs` and `granola.rs` — so trusty-agents, trusty-izzie, and future
 //! consumers reuse one surface instead of re-deriving it.
 //! What: One `GworkspaceService` per published tool. Phase 2 scope is
 //! Calendar (`manage_calendars`, `manage_events`, `query_free_busy`) and

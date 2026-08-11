@@ -82,17 +82,26 @@ pub(crate) const BASE_CLONE_DIRNAME: &str = ".base";
 /// and the caller then renames live work. Anything that is not a definite
 /// `NotFound` therefore counts as present: the cost of a false positive is a
 /// refusal the operator can act on, the cost of a false negative is lost work.
-/// What: returns the first of `.git`, `.base`, or `.worktrees` found under
-/// `dir`, so the caller's message can name what it found; `None` only when all
-/// three are definitely absent.
+/// What: returns the first of `.git`, `.base`, the CONFIGURED worktree base, or
+/// the built-in `.worktrees` found under `dir`, so the caller's message can name
+/// what it found; `None` only when all are definitely absent.
+///
+/// #5204 widened this from a fixed triple to include a retargeted worktree base.
+/// Both the configured name and `.worktrees` are probed: a checkout that held
+/// worktrees before the retarget still holds them after, and moving it aside
+/// would orphan them just the same. Returns `String` rather than `&'static str`
+/// because the configured name is resolved at runtime.
 /// Test: `protected_state_in_names_each_protected_entry`,
 /// `protected_state_in_is_none_for_a_foreign_directory`,
 /// `protected_state_in_treats_an_unreadable_entry_as_present`.
-pub(crate) fn protected_state_in(dir: &Path) -> Option<&'static str> {
+pub(crate) fn protected_state_in(dir: &Path) -> Option<String> {
+    // #5204: DETECTION site — probe the configured base AND the built-in one.
+    let names = crate::session_manager::decommission::worktree_dir_names();
     [
         ".git",
         BASE_CLONE_DIRNAME,
-        crate::session_manager::decommission::WORKTREES_DIRNAME,
+        names.creation_name(),
+        trusty_common::workspace_layout::DEFAULT_WORKTREES_DIRNAME,
     ]
     .into_iter()
     .find(|name| {
@@ -101,6 +110,7 @@ pub(crate) fn protected_state_in(dir: &Path) -> Option<&'static str> {
             Err(ref e) if e.kind() == std::io::ErrorKind::NotFound
         )
     })
+    .map(str::to_string)
 }
 
 /// Environment variable carrying the managed session id inside a tm pane.

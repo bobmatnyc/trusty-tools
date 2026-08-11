@@ -790,7 +790,7 @@ fn verify_judgment_full_shape_deserializes() {
     );
 
     // End-to-end through the public parser entry point.
-    assert_eq!(parse_judgment(&body), Some(true));
+    assert_eq!(parse_judgment(&body), Some(Judgment::Confirmed));
 }
 
 /// Verify response that OMITS `reason` still deserializes (proves `#[serde(default)]`).
@@ -815,9 +815,56 @@ fn verify_judgment_omits_reason_still_deserializes() {
     );
 
     // End-to-end: a reason-less judgment still yields a clean decision.
-    assert_eq!(parse_judgment(&body), Some(false));
+    assert_eq!(parse_judgment(&body), Some(Judgment::Refuted));
 }
 
 // Liveness gate decision logic is tested in `verify_liveness.rs::tests`
 // (`liveness_alive_allows_start`, `liveness_model_unavailable_refuses`, etc.)
 // to keep this file under the 500-line cap and respect module ownership.
+
+// ── Third judgment (#5309) ────────────────────────────────────────────────────
+
+/// The verifier's UNVERIFIABLE answer must parse as its own judgment, not fall
+/// through to the CONFIRMED keyword scan.
+#[test]
+fn parse_judgment_unverifiable() {
+    let body = serde_json::json!({ "judgment": "UNVERIFIABLE", "reason": "signature is outside the diff" })
+        .to_string();
+    assert_eq!(parse_judgment(&body), Some(Judgment::Unverifiable));
+
+    // A provider that ignored the schema and answered in prose containing both
+    // tokens must still resolve to the reading that does not confirm.
+    assert_eq!(
+        parse_judgment("not CONFIRMED — UNVERIFIABLE from this diff"),
+        Some(Judgment::Unverifiable)
+    );
+}
+
+/// #5309: an `Unverifiable` outcome must strip the signals that let a finding
+/// pin the BLOCK floor — the same demotion the hygiene passes apply when they
+/// pre-stamp it — so a claim carries identical weight whichever route
+/// classified it.
+#[test]
+fn apply_outcome_unverifiable_strips_block_floor_signals() {
+    let mut f = finding(Effort::High, 0.72);
+    assert!(
+        crate::pipeline::grade::drives_block_floor(&f),
+        "precondition: it would pin the BLOCK floor"
+    );
+    apply_outcome(
+        &mut f,
+        VerifyOutcome::Unverifiable {
+            reason: "outside the diff".to_string(),
+        },
+    );
+    assert!(
+        !crate::pipeline::grade::drives_block_floor(&f),
+        "an unchecked claim must not drive BLOCK"
+    );
+    assert!(!f.code_provable);
+    assert!(
+        f.confidence <= 0.65,
+        "confidence capped, got {}",
+        f.confidence
+    );
+}

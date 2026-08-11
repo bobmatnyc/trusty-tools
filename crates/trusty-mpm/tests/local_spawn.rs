@@ -303,10 +303,10 @@ fn workspace_subpath_produces_owner_repo_path() {
     use trusty_common::github_path::GithubPath;
     use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_subpath};
 
-    let cfg = TrustyToolsConfig {
-        workspace_root_template: Some("/tmp/test-projects".into()),
-        ..Default::default()
-    };
+    // #5204: `TrustyToolsConfig` is `#[non_exhaustive]`, so build-then-assign
+    // (the shape any out-of-crate consumer must use), not a struct literal.
+    let mut cfg = TrustyToolsConfig::default();
+    cfg.workspace_root_template = Some("/tmp/test-projects".into());
     let gh = GithubPath {
         owner: "myorg".into(),
         repo: "myrepo".into(),
@@ -391,10 +391,9 @@ fn spawn_managed_local_redirects_to_managed_clone() {
     // `preseed_home_trust` fires unconditionally in `provision_in` below,
     // even under `without_prepare()`.
     let _home = HomeGuard::set(managed_root.path());
-    let cfg = TrustyToolsConfig {
-        workspace_root_template: Some(managed_root.path().to_string_lossy().into_owned()),
-        ..Default::default()
-    };
+    // #5204: see the note above on `#[non_exhaustive]`.
+    let mut cfg = TrustyToolsConfig::default();
+    cfg.workspace_root_template = Some(managed_root.path().to_string_lossy().into_owned());
     let project_dir = workspace_subpath(&cfg, &gh);
     // project_dir is <managed_root>/<owner>/<repo>, i.e. managed_root/test-owner/test-repo
 

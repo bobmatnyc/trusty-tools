@@ -66,6 +66,34 @@ matching marker never receives them. Which agents exist at all is declared in
 before routing. When no dedicated ops agent exists for a platform, use
 `local-ops` or tell the user.
 
+## The Full Routing Table
+
+This is the authoritative per-agent routing surface. It was resident in the PM
+prompt until #5087 moved it here; the prompt keeps only the four choices that
+get made wrong, plus the roster of agents this project actually received. Route
+to a name only if the roster lists it.
+
+Every name in the first column is the deployed `subagent_type`, spelled exactly
+as the Agent tool takes it. Pass it verbatim — a prose title like "Documentation
+Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
+
+| `subagent_type` | Delegate when — triggers | Model | Notes |
+|---|---|---|---|
+| `research` | codebase understanding, investigating approaches, analyzing files, architecture, system design, RFC drafting, technical roadmap, implementation plan, feature decomposition, trade-off analysis | sonnet | Grep, Glob, multi-file Read, WebSearch |
+| `engineer` (or `rust-engineer`, `python-engineer`, `typescript-engineer`, … per language) | code changes, implementation, refactor | opus | Prefer the language-specific engineer whenever one exists |
+| `code-analyzer` | reviewing a proposed solution BEFORE implementation; static analysis, correctness, architectural health | sonnet | The phase-2 "Code Analysis" agent; verdict APPROVED / NEEDS_IMPROVEMENT / BLOCKED. `code-analyzer` and `code-critic` are separate agents, not interchangeable |
+| `code-critic` | adversarial review of code that already exists and passes its tests; APPROVE/WARN/BLOCK verdict | opus | Dispatch-gated by test-ladder rung — see "code-critic Dispatch Standard" below. NOT design critique, NOT every engineer dispatch |
+| `local-ops` | localhost, PM2, npm, docker / docker-compose, ports, processes; every `make` and `mise run` target; build, dist, clean, install, setup; version, bump, release, publish, deploy (`pyproject.toml`, `package.json`) | sonnet | Default fallback for ops / infra / build, including anything unknown or ambiguous. The generic `ops` agent is DEPRECATED |
+| `qa`, `web-qa`, `api-qa` | test, verify, check, regression, deployment verification; `make`/`mise run` `test`, `lint`, `check` (or `engineer`); browser, screenshot, click, navigate, DOM, console errors → `web-qa`; APIs → `api-qa` | sonnet | For browser work use `web-qa` — never chrome-devtools, claude-in-chrome, or playwright directly |
+| `documentation` | docs, README, API docs, guides | haiku | Style consistency, organization standards |
+| `ticketing` | every Issue operation — create, update, close, label, assign, milestone, comment, dedupe (P6) | sonnet | Route by artifact: the Issue is always ticketing's, and no PR mutation ever is. See `tm-ticketing` |
+| `version-control` | the whole PR lifecycle incl. its title and body, plus branches, push/rebase/merge/tag, complex git, stacked PRs (P7) | haiku | Check git user for main-branch access. Policy comes from `tm-workflow` via the PM |
+| `security` | pre-push credential scan, vulnerability assessment | sonnet | Secret scanning, attack-vector detection |
+| `mpm-skills-manager` | creating/improving skills, recommending skills, stack detection | sonnet | Triggers: "skill", "stack", "framework" |
+
+When the user says "just do it" or "handle it", delegate the full pipeline:
+`research` → `engineer` → `local-ops` → `qa` → `documentation`.
+
 ## Agent Selection by Trigger Keyword
 
 | Keywords | Agent |
@@ -76,7 +104,7 @@ before routing. When no dedicated ops agent exists for a platform, use
 | browser, screenshot, click, navigate, DOM, console errors | `web-qa` |
 | API, endpoint, HTTP, curl-shaped verification | `api-qa` |
 | ticket, issue, PROJ-123, #123 | `ticketing` (see `tm-ticketing`) |
-| PR, branch, merge, stacked | `version-control` (see `tm-pr-workflow`) |
+| PR, branch, merge, stacked | `version-control` (see `tm-workflow`) |
 | skill authoring, skill catalog | `mpm-skills-manager` |
 | agent authoring, agent catalog | `mpm-agent-manager` |
 | code review, adversarial verdict | `code-critic` |
@@ -88,6 +116,131 @@ in the **Deploys When** column of `tm-capabilities`'s `references/agents.md` —
 read it there rather than from a prose copy. The launch prompt's **Detected
 Project Stack** section already states this project's answer. When the stack is
 unknown, Research is mandatory (never default to a guess).
+
+## Task Complexity: One Delegation or Several
+
+Size the task before choosing a shape. The signals:
+
+| Signal | Simple (1 delegation) | Complex (multi-phase) |
+|--------|----------------------|----------------------|
+| Scope | <200 lines, 1 file type | >500 lines, multi-service |
+| External deps | None or 1 framework | DB + APIs + Docker + scheduler |
+| Endpoints | ≤6 | >6 with auth, roles, events |
+| Time estimate | <30 min | >1 hour |
+
+**Simple → ONE engineer delegation carrying the full scope:** "Build this, write
+tests, create README, run linters, verify all tests pass, commit." The engineer
+handles everything; the Research, Code Analysis, QA and Documentation phases are
+skipped under the skip conditions in the instruction package's phase table.
+
+**Complex → the normal multi-phase workflow.**
+
+## Batching: the Anti-Patterns
+
+The instruction package states the target (5-7 delegations per session, ~95K of
+context reloaded by each). These are the specific splits to collapse:
+
+| Anti-pattern | Fix |
+|---|---|
+| Research then implement (2 delegations) | `engineer` can research + implement (1) |
+| Implement then fix lint (2) | Include "fix lint" in the impl task (1) |
+| Implement then commit (2) | Include "commit when done" in the task (1) |
+| Sequential fixes to the same agent (N) | One delegation with full scope (1) |
+| A separate docs agent for a per-task README | Include the README in the engineer delegation |
+
+## Retry Protocol (delegated work came back failing)
+
+1. **`SendMessage` the SAME agent** — never open a new delegation to fix a
+   previous one. The agent fixes and re-verifies inside its own context, at zero
+   context-reload cost.
+2. Only re-delegate once that agent has failed 3+ times on the same issue
+   (CB#10).
+
+| Scenario | Action |
+|----------|--------|
+| Build/test/lint failure | `SendMessage` the originating agent with the error output |
+| `engineer` reports "tests pass" with no raw output | `SendMessage`: "show raw test output" |
+| Agent failed 3+ times on the same issue | Re-delegate to a different agent, or escalate |
+| A named deliverable is missing | `SendMessage`: "the prompt requires <deliverable>, please create it" |
+
+## Structural Delegation Brief
+
+```
+Task: [Specific measurable action]
+Agent: [deployed subagent_type]
+Requirements:
+  Objective: [Measurable outcome]
+  Success Criteria: [Testable conditions]
+  Testing: MANDATORY - Provide logs
+  Constraints: [Performance, security, timeline]
+  Verification: Evidence of criteria met
+```
+
+## Per-Agent Model Overrides and the Cost Model
+
+The instruction package's Model Selection table is the default routing, and an
+explicit `model=` in an Agent call always wins. Standing per-agent defaults are
+set in `~/.trusty-mpm/config.toml`, taking priority over built-in defaults and
+agent frontmatter but not over an explicit `model=`:
+
+```toml
+[models.agents]
+engineer = "opus"
+research = "sonnet"
+```
+
+The tier aliases `haiku` / `sonnet` / `opus` are resolved to concrete models at
+dispatch by `expand_model_alias`, reading `[models.tiers]` from that same file
+and falling back to the built-in defaults in `core/config.rs`. Configuration is
+the source of truth for what each tier means — never a model id memorized from a
+prompt (#4594).
+
+Cost rises steeply haiku → sonnet → opus. Coding tasks pay for opus because
+quality dominates there; routing everything else down-tier is where the savings
+come from. Read current per-token pricing from the provider rather than a ratio
+pinned in a prompt.
+
+## code-critic Dispatch Standard
+
+The critic tier keys off the project's test-ladder rung (this repo's Rust Test
+Ladder in `CLAUDE.md`) — never a parallel risk axis invented for the decision.
+
+| Rung | Change class | Dispatch code-critic? |
+|---|---|---|
+| 1–2 | Docs, comments, changelog, test-only stabilization | Never |
+| 3 | Localized behavior inside one crate | No — the PM reviews the diff |
+| 4 | Cross-crate, public API, shared library | Only if a contract changes. Mechanical propagation does not qualify |
+| 5–6 | Cross-crate contract, persistence, security, process lifecycle, release tooling, UI/API surface | Required |
+
+Enum changes and spelling fixes are rung 1–3. No critic.
+
+**Escalate to required regardless of rung:** the change can start, refuse, or
+gate a session; it touches a trust boundary or an injection defense; it rewrites
+history or force-pushes; or the PR is already at review round 3+ — evidence
+something is being missed.
+
+**Not a reason to dispatch:** a design question (send it to the owner, or the PM
+decides), the PM wanting a second opinion, or confirming green CI.
+
+## Worktree Isolation on a Dispatch
+
+Pass `isolation: "worktree"` on Agent tool calls when spawning 2+ parallel
+agents that modify files. Not needed for sequential agents, read-only research,
+or separate file trees. Use `run_in_background: true` for fire-and-forget
+parallel work.
+
+## Cross-Workstream Coordination (memory claim drawers, DOC-53)
+
+Memory is awareness only — never a lock, never a message channel. git/GitHub
+branch/PR/label state is the authoritative claim; the event bus (#3168 BUS-7) is
+the real-time channel. Before dispatching multi-agent work on an area:
+
+1. `memory_list(tag: "ws-claim")`, then verify any hit against live git state —
+   a claim whose branch/PR is gone is void.
+2. Write a claim drawer when dispatching: title `WS-CLAIM <workstream>: <area>`,
+   tags `ws-claim`, `ws:<name>`, `area:<slug>`; body = scope, branch, PR/issue
+   refs, expected-land condition.
+3. Supersede (or `memory_forget`) the claim once the work lands or is abandoned.
 
 ## Long-Wait Delegation (issues #2833, #4792)
 
@@ -196,6 +349,16 @@ doing identical work.
 Not covered by this rule: re-engaging a parked agent with the outcome of work it
 already owns (`SendMessage` after CI settles — Long-Wait Delegation item 4
 above). That closes existing scope; it does not add new scope.
+
+## Architecture Suggestions From Agents
+
+Agents surface improvement opportunities as part of their normal reporting. Cap
+what reaches the user at **1-2 per session**, keep each specific rather than
+vague, and ask before implementing any of them:
+
+```
+[Agent] found [issue]. Consider: [fix] -- [benefit]. Effort: [S/M/L]. Implement?
+```
 
 ## Delegation Best Practices
 

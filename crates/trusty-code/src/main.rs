@@ -196,8 +196,8 @@ enum Command {
 
     /// Execute a named MPM workflow end-to-end.
     ///
-    /// Loads the workflow definition from `.claude/workflows/<name>.toml` (or
-    /// `.open-mpm/workflows/<name>.toml`) and runs it through the PM main-loop.
+    /// Loads the workflow definition from `.claude/workflows/<name>.toml` and
+    /// runs it through the PM main-loop.
     RunWorkflow {
         /// Workflow name (matches the filename without extension).
         name: String,

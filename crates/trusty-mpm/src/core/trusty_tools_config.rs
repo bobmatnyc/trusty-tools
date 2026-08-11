@@ -59,21 +59,13 @@ pub const CRATE_NAME: &str = "trusty-mpm";
 /// Test: `managed_claude_config_dir_nests_under_trusty_tools`.
 pub const MANAGED_CLAUDE_CONFIG_SUBDIR: &str = "claude-config";
 
-/// Built-in default workspace-root directory name under `$HOME` (#1220).
-///
-/// Why: #1220 fixes the new default at `~/trusty-mpm-projects/`. Naming it once
-/// keeps the resolver and the migration scan in agreement.
-/// What: `"trusty-mpm-projects"`.
-/// Test: `default_template_is_trusty_mpm_projects`.
-pub const DEFAULT_WORKSPACE_DIR: &str = "trusty-mpm-projects";
-
-/// Environment variable that overrides the resolved workspace root.
-///
-/// Why: operators (and tests) need an escape hatch that wins over the config file,
-/// matching the pre-#1220 behaviour where this env var alone selected the root.
-/// What: `"TRUSTY_MPM_WORKSPACE_ROOT"`.
-/// Test: `env_overrides_config_and_default`.
-pub const WORKSPACE_ROOT_ENV: &str = "TRUSTY_MPM_WORKSPACE_ROOT";
+// #5203: the layout constants live with the resolver in trusty-common so the
+// crates that cannot depend on trusty-mpm read the same values. Re-exported
+// here (rather than redeclared) to keep every existing `trusty_tools_config::`
+// spelling working.
+pub use trusty_common::workspace_layout::{
+    DEFAULT_WORKSPACE_DIR, DEFAULT_WORKTREES_DIRNAME, WORKSPACE_ROOT_ENV, WORKTREES_DIRNAME_ENV,
+};
 
 /// trusty-mpm's slice of the `~/.trusty-tools/<crate>/config.yaml` convention.
 ///
@@ -86,6 +78,12 @@ pub const WORKSPACE_ROOT_ENV: &str = "TRUSTY_MPM_WORKSPACE_ROOT";
 /// built-in default. `workspace_root_template` may contain a leading `~`.
 /// Test: `config_template_used_when_no_env`, the `crate_config` round-trip tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+// #5204: `#[non_exhaustive]` so adding a settings field stays non-breaking.
+// Without it, every new `pub` field on this all-public struct is a
+// `constructible_struct_adds_field` major under cargo-semver-checks — the
+// #4088 class of break, which a workspace `cargo check` cannot catch because
+// the root path override pairs local source with local dependency.
+#[non_exhaustive]
 pub struct TrustyToolsConfig {
     /// Template directory for managed-session workspace roots.
     ///
@@ -94,6 +92,20 @@ pub struct TrustyToolsConfig {
     /// `<this>/<owner>/<repo>/<session-id>/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_root_template: Option<String>,
+
+    /// Directory name under a project checkout that holds session worktrees.
+    ///
+    /// `None` → the built-in default `.worktrees`. Must be a single path
+    /// component; anything else is rejected back to the default rather than
+    /// allowed to escape the checkout.
+    ///
+    /// #5204: host-level rather than project-level for the same structural
+    /// reason `workspace_root` is (see `core::project_config`'s module doc) —
+    /// the detection sites in trusty-search and trusty-memory are handed an
+    /// opaque path and must identify the worktree base BEFORE they could locate
+    /// the project whose config would answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktrees_dirname: Option<String>,
 
     /// Default supervisor auto-resume preference surfaced in the console Config UI.
     ///
@@ -156,9 +168,10 @@ pub struct TrustyToolsConfig {
     /// Managed-tmux scrollback + mouse ergonomics (the `tmux:` YAML section,
     /// #2398).
     ///
-    /// `None` → the built-in defaults apply: a 100,000-line `history-limit`
-    /// and `mouse on`. See [`resolve_tmux_options`] for the full precedence
-    /// and [`TmuxConfig`] for the field-level docs.
+    /// `None` → the built-in defaults apply: a 100,000-line `history-limit`,
+    /// `mouse on`, and `alternate-screen off` (#5364). See
+    /// [`resolve_tmux_options`] for the full precedence and [`TmuxConfig`] for
+    /// the field-level docs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<TmuxConfig>,
 }
@@ -190,14 +203,15 @@ pub struct DaemonConfig {
     pub allow_mcp_spawn: Option<bool>,
 }
 
-/// Built-in default tmux `history-limit`/`mouse` (#2398), now the single
-/// shared source of truth in `trusty_common::tmux` (#3004) so
-/// trusty-agents' independent tmux implementation uses the identical
-/// defaults. Re-exported here so every existing reference to
-/// `DEFAULT_TMUX_HISTORY_LIMIT`/`DEFAULT_TMUX_MOUSE` in this module keeps
-/// compiling unchanged.
+/// Built-in default tmux `history-limit`/`mouse` (#2398) and
+/// `alternate-screen` (#5151), now the single shared source of truth in
+/// `trusty_common::tmux` (#3004) so trusty-agents' independent tmux
+/// implementation uses the identical defaults. Re-exported here so every
+/// existing reference in this module keeps compiling unchanged.
 /// Test: `tmux_options_default_when_no_config`.
-pub use trusty_common::tmux::{DEFAULT_TMUX_HISTORY_LIMIT, DEFAULT_TMUX_MOUSE};
+pub use trusty_common::tmux::{
+    DEFAULT_TMUX_ALTERNATE_SCREEN, DEFAULT_TMUX_HISTORY_LIMIT, DEFAULT_TMUX_MOUSE,
+};
 
 /// Minimum tmux `history-limit` accepted from config (#2398 QA finding).
 ///
@@ -216,18 +230,31 @@ pub use trusty_common::tmux::{DEFAULT_TMUX_HISTORY_LIMIT, DEFAULT_TMUX_MOUSE};
 /// `tmux_options_clamps_below_minimum`.
 pub const MIN_TMUX_HISTORY_LIMIT: u32 = 1_000;
 
-/// The `tmux:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#2398).
+/// The `tmux:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#2398,
+/// extended by #5151).
 ///
 /// Why: managed sessions inherited tmux's tiny default `history-limit`
-/// (2000 lines), making long PM sessions unscrollable. Both fields are
+/// (2000 lines), making long PM sessions unscrollable. Every field is
 /// optional so an absent section (or a partly-filled one) falls back to the
 /// built-in defaults — no regression for existing configs.
-/// What: `history_limit` (scrollback lines retained per pane) and `mouse`
-/// (server-wide wheel-scroll/copy-mode toggle). Resolution precedence
-/// (config > built-in default, clamped to [`MIN_TMUX_HISTORY_LIMIT`]) lives
-/// in [`resolve_tmux_options`], not here — this is purely the on-disk shape.
+/// What: `history_limit` (scrollback lines retained per pane), `mouse`
+/// (server-wide wheel-scroll/copy-mode toggle), and `alternate_screen`
+/// (whether panes may use the terminal alternate screen buffer). Resolution
+/// precedence (config > built-in default, clamped to
+/// [`MIN_TMUX_HISTORY_LIMIT`]) lives in [`resolve_tmux_options`], not here —
+/// this is purely the on-disk shape.
 /// Test: `tmux_config_yaml_round_trip`.
+///
+/// `#[non_exhaustive]` (#5151): this section is designed to grow — it went from
+/// two fields to three when `alternate_screen` landed, and adding a `pub` field
+/// to an exhaustively-constructible struct is a SemVer break, because external
+/// code can no longer use a struct literal. Marking it non-exhaustive makes
+/// every future field addition non-breaking by construction. Downstream code
+/// builds one via [`Default`] plus field assignment, or gets one from
+/// [`TrustyToolsConfig::load`]; reading fields is unaffected. Same treatment
+/// `trusty-common`'s `IndexOptions` got in #5065.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TmuxConfig {
     /// Scrollback lines retained per pane (tmux `history-limit`).
     ///
@@ -246,6 +273,34 @@ pub struct TmuxConfig {
     /// `None` → [`DEFAULT_TMUX_MOUSE`] (`true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mouse: Option<bool>,
+
+    /// Whether programs in a pane may use the terminal alternate screen
+    /// buffer (tmux `alternate-screen`). `None` →
+    /// [`DEFAULT_TMUX_ALTERNATE_SCREEN`], which is `false` since #5364 — set
+    /// `alternate_screen: true` to restore tmux's factory behaviour.
+    ///
+    /// **Why the default is `false`.** A full-screen TUI (Claude Code
+    /// included) draws into the alternate screen, and tmux discards that
+    /// buffer instead of appending it to the pane's scrollback. That is why a
+    /// `tm` session can hold tens of thousands of lines of `history-limit` and
+    /// still show you nothing to scroll back through: the history is not
+    /// missing, it was never written to the pane. `false` makes the TUI draw
+    /// into the normal buffer, so its output lands in scrollback. #5151 added
+    /// this knob but defaulted it to `true`, leaving the bug in place for
+    /// anyone who never found it; #5364 flipped the default so a managed
+    /// session scrolls out of the box.
+    ///
+    /// **What that costs — the accepted tradeoff.** The effect is
+    /// server-wide, and every trusty-* managed session shares ONE tmux server,
+    /// so this changes every pane on it, not just the ones running an agent.
+    /// `vim`, `less`, `htop` and `man` all stop restoring the screen they
+    /// covered: each leaves its final frame behind, smeared into the
+    /// scrollback on exit, sometimes with redraw garbage from partial
+    /// repaints. The repo owner accepted that in exchange for working
+    /// scrollback (#5364). It is also not retroactive — anything already
+    /// written while the alternate screen was up stays unrecoverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternate_screen: Option<bool>,
 }
 
 /// Resolved tmux scrollback + mouse ergonomics, after applying config
@@ -254,14 +309,23 @@ pub struct TmuxConfig {
 /// Why: [`crate::daemon::tmux::TmuxDriver::apply_scrollback_options`] needs
 /// concrete `u32`/`bool` values, not the optional on-disk shape; resolving
 /// once here keeps the precedence logic in a single tested place.
-/// What: `history_limit` and `mouse`, both always populated.
+/// What: `history_limit`, `mouse` and `alternate_screen`, all always
+/// populated.
 /// Test: `tmux_options_default_when_no_config`, `tmux_options_config_override`.
+///
+/// `#[non_exhaustive]` (#5151): tracks [`TmuxConfig`] field-for-field, so it
+/// grows whenever that does — see its doc for why the attribute is here.
+/// [`resolve_tmux_options`] is the only intended way to obtain one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolvedTmuxOptions {
     /// Scrollback lines retained per pane.
     pub history_limit: u32,
     /// Whether mouse-wheel scrolling / copy-mode is enabled.
     pub mouse: bool,
+    /// Whether panes may use the terminal alternate screen buffer (#5151).
+    /// See [`TmuxConfig::alternate_screen`] for what turning it off costs.
+    pub alternate_screen: bool,
 }
 
 /// Resolve the effective tmux scrollback + mouse options for managed
@@ -271,14 +335,21 @@ pub struct ResolvedTmuxOptions {
 /// restart, GUI spawn-mode, config-restart, and the CLI/TUI paths that create
 /// sessions directly) a single answer, so a future config change cannot land
 /// in one call site and be forgotten in another.
-/// What: applies precedence **config `tmux.history_limit`/`tmux.mouse`
-/// override > built-in default** ([`DEFAULT_TMUX_HISTORY_LIMIT`] /
-/// [`DEFAULT_TMUX_MOUSE`]) for each field independently, then clamps
-/// `history_limit` up to [`MIN_TMUX_HISTORY_LIMIT`] — a configured `0` (or
-/// any other near-zero value) does NOT mean "unlimited" in tmux, so it is
+/// What: applies precedence **config override > built-in default**
+/// ([`DEFAULT_TMUX_HISTORY_LIMIT`] / [`DEFAULT_TMUX_MOUSE`] /
+/// [`DEFAULT_TMUX_ALTERNATE_SCREEN`]) for each field independently, then
+/// clamps `history_limit` up to [`MIN_TMUX_HISTORY_LIMIT`] — a configured `0`
+/// (or any other near-zero value) does NOT mean "unlimited" in tmux, so it is
 /// corrected rather than honoured verbatim (#2398 QA finding).
+/// `alternate_screen` is NOT clamped or corrected: both values are legitimate,
+/// so a configured value is honoured verbatim. Its default is `false` (#5364),
+/// which is deliberately NOT tmux's factory value — see
+/// [`TmuxConfig::alternate_screen`] for the scrollback it buys and the
+/// screen-restore behaviour it gives up server-wide.
 /// Test: `tmux_options_default_when_no_config`, `tmux_options_config_override`,
-/// `tmux_options_clamps_zero_history_limit`, `tmux_options_clamps_below_minimum`.
+/// `tmux_options_clamps_zero_history_limit`, `tmux_options_clamps_below_minimum`,
+/// `tmux_options_alternate_screen_defaults_off`,
+/// `tmux_options_alternate_screen_config_override`.
 pub fn resolve_tmux_options(config: &TrustyToolsConfig) -> ResolvedTmuxOptions {
     let section = config.tmux.as_ref();
     let history_limit = section
@@ -288,6 +359,11 @@ pub fn resolve_tmux_options(config: &TrustyToolsConfig) -> ResolvedTmuxOptions {
     ResolvedTmuxOptions {
         history_limit,
         mouse: section.and_then(|t| t.mouse).unwrap_or(DEFAULT_TMUX_MOUSE),
+        // #5364: absent config now resolves to `off` so scrollback works
+        // without the operator opting in; `true` restores tmux's factory value.
+        alternate_screen: section
+            .and_then(|t| t.alternate_screen)
+            .unwrap_or(DEFAULT_TMUX_ALTERNATE_SCREEN),
     }
 }
 
@@ -519,7 +595,17 @@ impl TrustyToolsConfig {
     /// [`CRATE_NAME`].
     /// Test: `config_template_used_when_no_env` (round-trips via `crate_config`).
     pub fn load() -> Self {
-        trusty_common::crate_config::load_or_default::<Self>(CRATE_NAME)
+        let cfg = trusty_common::crate_config::load_or_default::<Self>(CRATE_NAME);
+        // #5207: the parse above is LENIENT and stays that way — see
+        // `core::config_keys` for why `deny_unknown_fields` on this struct would
+        // turn one typo into a whole-file discard. Report what it dropped.
+        if let Some(path) = trusty_common::crate_config::crate_config_path(CRATE_NAME)
+            && let Ok(raw) = std::fs::read_to_string(&path)
+            && let Some(doc) = crate::core::config_keys::yaml_document(&raw)
+        {
+            crate::core::config_keys::report_unknown_keys(&path.display().to_string(), &doc, &cfg);
+        }
+        cfg
     }
 }
 
@@ -553,66 +639,41 @@ pub fn managed_claude_config_dir_at(base: &Path) -> PathBuf {
         .join(MANAGED_CLAUDE_CONFIG_SUBDIR)
 }
 
-/// Expand a leading `~` in a path template to the home directory.
-///
-/// Why: config templates and the built-in default are written home-relative
-/// (`~/trusty-mpm-projects`); the resolver must turn them into absolute paths.
-/// What: replaces a leading `~` (optionally `~/`) with `home`; other paths pass
-/// through unchanged. Absolute paths and templates without `~` are returned as-is.
-/// Test: `tilde_expansion`.
-fn expand_tilde(template: &str, home: &Path) -> PathBuf {
-    if let Some(rest) = template.strip_prefix("~/") {
-        home.join(rest)
-    } else if template == "~" {
-        home.to_path_buf()
-    } else {
-        PathBuf::from(template)
-    }
-}
-
 /// Resolve the absolute workspace root for managed sessions.
 ///
 /// Why: the spawn path needs ONE answer for "where do session workspaces live?"
 /// with #1220's new default and an env/config override, in a tested place so the
 /// HTTP route and the MCP tool cannot diverge.
-/// What: applies the precedence **`TRUSTY_MPM_WORKSPACE_ROOT` env > config
-/// `workspace_root_template` > built-in `~/trusty-mpm-projects`**, expanding a
-/// leading `~`. Falls back to `/tmp/trusty-mpm-projects` only when the home
-/// directory is unresolvable AND nothing absolute was supplied.
+/// What: #5203 moved the precedence chain itself into
+/// [`trusty_common::workspace_layout::resolve_workspace_root`] so `trusty-code`
+/// — which cannot depend on this crate — resolves the identical value. This
+/// function is now the trusty-mpm-shaped façade over it: unwrap the template
+/// from [`TrustyToolsConfig`] and delegate. The precedence is unchanged
+/// (**`TRUSTY_MPM_WORKSPACE_ROOT` env > config `workspace_root_template` >
+/// built-in `~/trusty-mpm-projects`**).
 /// Test: `default_template_is_trusty_mpm_projects`, `env_overrides_config_and_default`,
 /// `config_template_used_when_no_env`.
 pub fn workspace_root(config: &TrustyToolsConfig) -> PathBuf {
-    let home = dirs::home_dir();
+    // #5203: one resolver, in trusty-common, for every consumer.
+    trusty_common::workspace_layout::resolve_workspace_root(
+        config.workspace_root_template.as_deref(),
+    )
+}
 
-    // 1. Env override wins (back-compat with the pre-#1220 behaviour).
-    if let Ok(raw) = std::env::var(WORKSPACE_ROOT_ENV) {
-        let raw = raw.trim();
-        if !raw.is_empty() {
-            return match &home {
-                Some(h) => expand_tilde(raw, h),
-                None => PathBuf::from(raw),
-            };
-        }
-    }
-
-    // 2. Config template (from ~/.trusty-tools/trusty-mpm/config.yaml).
-    if let Some(template) = config
-        .workspace_root_template
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return match &home {
-            Some(h) => expand_tilde(template, h),
-            None => PathBuf::from(template),
-        };
-    }
-
-    // 3. Built-in default: ~/trusty-mpm-projects.
-    match home {
-        Some(h) => h.join(DEFAULT_WORKSPACE_DIR),
-        None => PathBuf::from("/tmp").join(DEFAULT_WORKSPACE_DIR),
-    }
+/// Resolve the session-worktree base directory name (#5204).
+///
+/// Why: the creation sites (`provisioner::workspace`,
+/// `daemon::managed_routes::inproject`) need the single name new worktrees are
+/// created under. Detection sites must use [`worktree_dir_names`] instead —
+/// see that function for why the two differ.
+/// What: delegates to [`trusty_common::workspace_layout::worktrees_dirname`],
+/// which applies **`TRUSTY_MPM_WORKTREES_DIRNAME` env > config
+/// `worktrees_dirname` > built-in `.worktrees`**.
+/// Test: `worktrees_dirname_defaults_to_dot_worktrees`,
+/// `worktrees_dirname_honours_config`.
+pub fn worktrees_dirname(config: &TrustyToolsConfig) -> String {
+    // #5203/#5204: one resolver, in trusty-common, for every consumer.
+    trusty_common::workspace_layout::resolve_worktrees_dirname(config.worktrees_dirname.as_deref())
 }
 
 /// Join a project's `<owner>/<repo>` identity onto the workspace root.
@@ -646,427 +707,5 @@ pub(crate) fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Serialise env mutation so the env-reading tests cannot race each other
-    /// across the shared test process. Delegates to the crate-wide
-    /// [`super::env_test_lock`] so env tests in OTHER modules are serialised too.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        super::env_test_lock()
-    }
-
-    /// Why (DOC-34): the managed `CLAUDE_CONFIG_DIR` MUST resolve under the
-    /// shared `~/.trusty-tools/trusty-mpm/` base (never `~/.trusty-mpm` or the
-    /// project). Pinning the exact layout guards the segregation guarantee.
-    /// Test: itself.
-    #[test]
-    fn managed_claude_config_dir_nests_under_trusty_tools() {
-        let base = PathBuf::from("/home/bob");
-        assert_eq!(
-            managed_claude_config_dir_at(&base),
-            PathBuf::from("/home/bob/.trusty-tools/trusty-mpm/claude-config")
-        );
-        // The production accessor, when home resolves, must agree with the
-        // hermetic `_at` variant on the trailing `.trusty-tools/trusty-mpm/...`
-        // segments regardless of the actual home directory.
-        if let Some(dir) = managed_claude_config_dir() {
-            assert!(
-                dir.ends_with("trusty-mpm/claude-config"),
-                "managed config dir must end with trusty-mpm/claude-config, got {}",
-                dir.display()
-            );
-            assert!(
-                dir.to_string_lossy().contains(".trusty-tools"),
-                "managed config dir must live under .trusty-tools, got {}",
-                dir.display()
-            );
-        }
-    }
-
-    /// Why: the built-in default (no env, no config) must be the #1220 path.
-    /// Test: itself.
-    #[test]
-    fn default_template_is_trusty_mpm_projects() {
-        let _g = env_lock();
-        // SAFETY: guarded by env_lock; restored below.
-        unsafe { std::env::remove_var(WORKSPACE_ROOT_ENV) };
-        let root = workspace_root(&TrustyToolsConfig::default());
-        assert!(
-            root.ends_with(DEFAULT_WORKSPACE_DIR),
-            "expected …/{DEFAULT_WORKSPACE_DIR}, got {}",
-            root.display()
-        );
-    }
-
-    /// Why: the env var must win over both the config template and the default.
-    /// Test: itself.
-    #[test]
-    fn env_overrides_config_and_default() {
-        let _g = env_lock();
-        let cfg = TrustyToolsConfig {
-            workspace_root_template: Some("~/from-config".into()),
-            ..Default::default()
-        };
-        // SAFETY: guarded by env_lock; removed at end.
-        unsafe { std::env::set_var(WORKSPACE_ROOT_ENV, "/explicit/env/root") };
-        let root = workspace_root(&cfg);
-        unsafe { std::env::remove_var(WORKSPACE_ROOT_ENV) };
-        assert_eq!(root, PathBuf::from("/explicit/env/root"));
-    }
-
-    /// Why: with no env override, the config template must be used (and `~`
-    /// expanded), beating the built-in default.
-    /// Test: itself.
-    #[test]
-    fn config_template_used_when_no_env() {
-        let _g = env_lock();
-        unsafe { std::env::remove_var(WORKSPACE_ROOT_ENV) };
-        let cfg = TrustyToolsConfig {
-            workspace_root_template: Some("/custom/projects".into()),
-            ..Default::default()
-        };
-        let root = workspace_root(&cfg);
-        assert_eq!(root, PathBuf::from("/custom/projects"));
-    }
-
-    /// Why: a leading `~` in a template must expand to the home directory.
-    /// Test: itself.
-    #[test]
-    fn tilde_expansion() {
-        let home = PathBuf::from("/home/bob");
-        assert_eq!(
-            expand_tilde("~/trusty-mpm-projects", &home),
-            PathBuf::from("/home/bob/trusty-mpm-projects")
-        );
-        assert_eq!(expand_tilde("~", &home), home);
-        assert_eq!(expand_tilde("/abs/path", &home), PathBuf::from("/abs/path"));
-    }
-
-    /// Why: the `github:` section must round-trip through YAML so an operator's
-    /// declarative binding survives load/save unchanged (and absent fields stay
-    /// absent rather than serialising as nulls).
-    /// Test: itself.
-    #[test]
-    fn github_config_yaml_round_trip() {
-        let cfg = TrustyToolsConfig {
-            github: Some(GithubConfig {
-                config_dir: Some(PathBuf::from("/home/bob/.config/gh-work")),
-                token_env: Some("WORK_GH_TOKEN".into()),
-                account: Some("bob-work".into()),
-                host: Some("github.example.com".into()),
-            }),
-            ..Default::default()
-        };
-        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
-        let back: TrustyToolsConfig = serde_yaml::from_str(&yaml).expect("deserialise");
-        assert_eq!(cfg, back);
-        // Absent top-level fields must not appear in the YAML.
-        assert!(!yaml.contains("workspace_root_template"), "yaml: {yaml}");
-        assert!(yaml.contains("github:"), "yaml: {yaml}");
-    }
-
-    /// Why: the #1265 no-plaintext-token guarantee — the config stores only the
-    /// NAME of the env var, never the secret value. A reviewer must be able to
-    /// assert this invariant mechanically.
-    /// Test: itself.
-    #[test]
-    fn github_config_stores_only_env_name() {
-        let cfg = GithubConfig {
-            token_env: Some("MY_GH_TOKEN".into()),
-            ..Default::default()
-        };
-        // The struct field is named `token_env` and holds the var NAME; there is
-        // no field that could hold a token value. Serialised form proves it.
-        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
-        assert!(yaml.contains("token_env"), "yaml: {yaml}");
-        assert!(yaml.contains("MY_GH_TOKEN"), "yaml: {yaml}");
-        assert!(
-            !yaml.contains("token:"),
-            "must not have a bare token field: {yaml}"
-        );
-    }
-
-    /// Why (#2081): a `projects:` entry's `gh_user` preference must round-trip
-    /// through YAML, and an absent `gh_user` must not serialise (matching every
-    /// other optional field on `ProjectConfig`) so existing configs deserialise
-    /// unchanged.
-    /// Test: itself.
-    #[test]
-    fn project_config_gh_user_yaml_round_trip() {
-        let cfg = TrustyToolsConfig {
-            projects: vec![ProjectConfig {
-                name: "trusty-tools".into(),
-                repo_url: "https://github.com/bobmatnyc/trusty-tools".into(),
-                default_branch: Some("main".into()),
-                stack_hint: None,
-                tags: None,
-                description: None,
-                gh_user: Some("bobmatnyc".into()),
-                gh_account: Some("bobmatnyc".into()),
-                github: None,
-                commit_name: None,
-                commit_email: None,
-                untracked_sync: None,
-                worktree: None,
-            }],
-            ..Default::default()
-        };
-        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
-        assert!(yaml.contains("gh_user"), "yaml: {yaml}");
-        assert!(yaml.contains("gh_account"), "yaml: {yaml}");
-        let back: TrustyToolsConfig = serde_yaml::from_str(&yaml).expect("deserialise");
-        assert_eq!(cfg, back);
-
-        // Absent gh_user/gh_account must not serialise.
-        let no_pref = TrustyToolsConfig {
-            projects: vec![ProjectConfig {
-                name: "other".into(),
-                repo_url: "https://github.com/o/other".into(),
-                default_branch: None,
-                stack_hint: None,
-                tags: None,
-                description: None,
-                gh_user: None,
-                gh_account: None,
-                github: None,
-                commit_name: None,
-                commit_email: None,
-                untracked_sync: None,
-                worktree: None,
-            }],
-            ..Default::default()
-        };
-        let yaml_no_pref = serde_yaml::to_string(&no_pref).expect("serialise");
-        assert!(!yaml_no_pref.contains("gh_user"), "yaml: {yaml_no_pref}");
-        assert!(!yaml_no_pref.contains("gh_account"), "yaml: {yaml_no_pref}");
-    }
-
-    /// Why (#2184): a project's per-project `github:` binding and commit
-    /// identity (`commit_name`/`commit_email`) must round-trip through YAML,
-    /// and absent fields must not serialise — matching every other optional
-    /// `ProjectConfig` field so existing configs deserialise unchanged.
-    /// Test: itself.
-    #[test]
-    fn project_config_github_and_commit_identity_yaml_round_trip() {
-        let cfg = TrustyToolsConfig {
-            projects: vec![ProjectConfig {
-                name: "work-repo".into(),
-                repo_url: "https://github.com/acme/work-repo".into(),
-                default_branch: None,
-                stack_hint: None,
-                tags: None,
-                description: None,
-                gh_user: None,
-                gh_account: None,
-                github: Some(GithubConfig {
-                    config_dir: Some(PathBuf::from("/home/bob/.config/gh-work")),
-                    token_env: None,
-                    account: Some("bob-work".into()),
-                    host: None,
-                }),
-                commit_name: Some("Bob (work bot)".into()),
-                commit_email: Some("bob@acme.example.com".into()),
-                untracked_sync: None,
-                worktree: None,
-            }],
-            ..Default::default()
-        };
-        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
-        assert!(yaml.contains("github:"), "yaml: {yaml}");
-        assert!(yaml.contains("commit_name"), "yaml: {yaml}");
-        assert!(yaml.contains("commit_email"), "yaml: {yaml}");
-        let back: TrustyToolsConfig = serde_yaml::from_str(&yaml).expect("deserialise");
-        assert_eq!(cfg, back);
-
-        // Absent per-project github/commit fields must not serialise.
-        let minimal = TrustyToolsConfig {
-            projects: vec![ProjectConfig {
-                name: "minimal".into(),
-                repo_url: "https://github.com/o/minimal".into(),
-                default_branch: None,
-                stack_hint: None,
-                tags: None,
-                description: None,
-                gh_user: None,
-                gh_account: None,
-                github: None,
-                commit_name: None,
-                commit_email: None,
-                untracked_sync: None,
-                worktree: None,
-            }],
-            ..Default::default()
-        };
-        let yaml_minimal = serde_yaml::to_string(&minimal).expect("serialise");
-        assert!(!yaml_minimal.contains("github:"), "yaml: {yaml_minimal}");
-        assert!(
-            !yaml_minimal.contains("commit_name"),
-            "yaml: {yaml_minimal}"
-        );
-        assert!(
-            !yaml_minimal.contains("commit_email"),
-            "yaml: {yaml_minimal}"
-        );
-    }
-
-    /// Why: the `daemon:` section (#1836) must round-trip through YAML, and an
-    /// absent section must not serialise at all (matching every other optional
-    /// top-level section).
-    /// Test: itself.
-    #[test]
-    fn daemon_config_yaml_round_trip() {
-        let cfg = TrustyToolsConfig {
-            daemon: Some(DaemonConfig {
-                allow_mcp_spawn: Some(true),
-            }),
-            ..Default::default()
-        };
-        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
-        let back: TrustyToolsConfig = serde_yaml::from_str(&yaml).expect("deserialise");
-        assert_eq!(cfg, back);
-        assert!(yaml.contains("allow_mcp_spawn"), "yaml: {yaml}");
-
-        // Absent daemon section must not serialise.
-        let empty = TrustyToolsConfig::default();
-        let yaml_empty = serde_yaml::to_string(&empty).expect("serialise");
-        assert!(!yaml_empty.contains("daemon"), "yaml: {yaml_empty}");
-    }
-
-    /// Why: the `tmux:` section (#2398) must round-trip through YAML, and an
-    /// absent section must not serialise at all (matching every other
-    /// optional top-level section).
-    /// Test: itself.
-    #[test]
-    fn tmux_config_yaml_round_trip() {
-        let cfg = TrustyToolsConfig {
-            tmux: Some(TmuxConfig {
-                history_limit: Some(50_000),
-                mouse: Some(false),
-            }),
-            ..Default::default()
-        };
-        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
-        let back: TrustyToolsConfig = serde_yaml::from_str(&yaml).expect("deserialise");
-        assert_eq!(cfg, back);
-        assert!(yaml.contains("history_limit"), "yaml: {yaml}");
-        assert!(yaml.contains("mouse"), "yaml: {yaml}");
-
-        // Absent tmux section must not serialise.
-        let empty = TrustyToolsConfig::default();
-        let yaml_empty = serde_yaml::to_string(&empty).expect("serialise");
-        assert!(!yaml_empty.contains("tmux"), "yaml: {yaml_empty}");
-    }
-
-    /// Why: with no `tmux:` section at all, resolution must fall back to the
-    /// built-in defaults (100,000-line history-limit, mouse on).
-    /// Test: itself.
-    #[test]
-    fn tmux_options_default_when_no_config() {
-        let opts = resolve_tmux_options(&TrustyToolsConfig::default());
-        assert_eq!(opts.history_limit, DEFAULT_TMUX_HISTORY_LIMIT);
-        assert_eq!(opts.mouse, DEFAULT_TMUX_MOUSE);
-    }
-
-    /// Why: an explicit `tmux:` section must override the built-in defaults,
-    /// field-by-field (a partial section still falls back per-field).
-    /// Test: itself.
-    #[test]
-    fn tmux_options_config_override() {
-        let cfg = TrustyToolsConfig {
-            tmux: Some(TmuxConfig {
-                history_limit: Some(250_000),
-                mouse: Some(false),
-            }),
-            ..Default::default()
-        };
-        let opts = resolve_tmux_options(&cfg);
-        assert_eq!(opts.history_limit, 250_000);
-        assert!(!opts.mouse);
-
-        // Partial override: only history_limit set, mouse falls back to default.
-        let partial = TrustyToolsConfig {
-            tmux: Some(TmuxConfig {
-                history_limit: Some(10_000),
-                mouse: None,
-            }),
-            ..Default::default()
-        };
-        let opts = resolve_tmux_options(&partial);
-        assert_eq!(opts.history_limit, 10_000);
-        assert_eq!(opts.mouse, DEFAULT_TMUX_MOUSE);
-    }
-
-    /// Why (#2398 QA finding): `history-limit 0` means "no scrollback" in
-    /// tmux, not "unlimited" — a configured `0` must be clamped up to
-    /// [`MIN_TMUX_HISTORY_LIMIT`] rather than honoured verbatim, which would
-    /// silently reintroduce the unscrollable-session problem this feature
-    /// exists to fix.
-    /// Test: itself.
-    #[test]
-    fn tmux_options_clamps_zero_history_limit() {
-        let cfg = TrustyToolsConfig {
-            tmux: Some(TmuxConfig {
-                history_limit: Some(0),
-                mouse: None,
-            }),
-            ..Default::default()
-        };
-        let opts = resolve_tmux_options(&cfg);
-        assert_eq!(opts.history_limit, MIN_TMUX_HISTORY_LIMIT);
-    }
-
-    /// Why: any near-zero configured value below the floor is clamped, not
-    /// just the literal `0` case.
-    /// Test: itself.
-    #[test]
-    fn tmux_options_clamps_below_minimum() {
-        let cfg = TrustyToolsConfig {
-            tmux: Some(TmuxConfig {
-                history_limit: Some(42),
-                mouse: None,
-            }),
-            ..Default::default()
-        };
-        let opts = resolve_tmux_options(&cfg);
-        assert_eq!(opts.history_limit, MIN_TMUX_HISTORY_LIMIT);
-
-        // A value AT the floor is left untouched (not bumped further).
-        let at_floor = TrustyToolsConfig {
-            tmux: Some(TmuxConfig {
-                history_limit: Some(MIN_TMUX_HISTORY_LIMIT),
-                mouse: None,
-            }),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_tmux_options(&at_floor).history_limit,
-            MIN_TMUX_HISTORY_LIMIT
-        );
-    }
-
-    /// Why: the project subpath must nest `<owner>/<repo>` under the root in that
-    /// order (the #1220 layout the migration scan also relies on).
-    /// Test: itself.
-    #[test]
-    fn subpath_nests_owner_repo() {
-        let _g = env_lock();
-        unsafe { std::env::remove_var(WORKSPACE_ROOT_ENV) };
-        let cfg = TrustyToolsConfig {
-            workspace_root_template: Some("/projects".into()),
-            ..Default::default()
-        };
-        let gh = GithubPath {
-            owner: "bobmatnyc".into(),
-            repo: "trusty-tools".into(),
-        };
-        assert_eq!(
-            workspace_subpath(&cfg, &gh),
-            PathBuf::from("/projects/bobmatnyc/trusty-tools")
-        );
-    }
-
-    // untracked_sync (#2196) resolution + YAML round-trip tests live in
-    // `untracked_sync::tests` (split out to keep this file under the
-    // 500-SLOC cap; see that module's doc).
-}
+#[path = "trusty_tools_config_tests.rs"]
+mod trusty_tools_config_tests;

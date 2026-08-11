@@ -6,6 +6,183 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2.14.0] — 2026-08-10
+
+### Fixed
+
+- A repository `tga audit` collected from stale local refs is now named in the
+  report's Gaps & Caveats section, with its remote and the fetch error, and
+  states that its data may be behind the true remote state. The sweep hard-codes
+  `--allow-stale`, so an unreachable remote leaves the `collect` stage reporting
+  `ok`; the per-repository fetch outcomes were printed to stderr and dropped, and
+  a report over months-old refs was indistinguishable from a current one (#5321,
+  DOC-67 §9). `commands::collect::run_reporting_fetch` is the new entry point
+  that returns those outcomes — `run` and `run_with_progress` are unchanged and
+  still return `()`. The sweep's terminal table qualifies the same stage as
+  `ok (N stale)`; a run where every remote was reached renders as before.
+- `audit::run_full_sweep` now reports every stage on the `ProgressBus` it is
+  given, instead of discarding the parameter. Each of the eight stages emits a
+  start event (naming the stage and its position in the run) and a
+  completed/failed event under the new `Stage::Audit`, and the collection stage
+  is handed that same bus so its per-repository events land there too. A `None`
+  or disabled bus stays a no-op.
+
+## [2.13.0] — 2026-08-10
+
+### Added
+
+- `tga audit` now produces the report, not just the data. After the sweep it writes a `manifest.toml` into the output directory and invokes `trusty-review report --manifest <path> --analyze --out <dir>`, then prints the rendered artifact paths (#5236, #5238, DOC-67 §6).
+- `tga::report::dd_manifest::build_dd_manifest` — the DD-manifest adapter, a pure function mapping the resolved config onto trusty-review's manifest schema per DOC-67 §6's field table. Writing the file is the caller's job, so the mapping, its determinism (the same config yields byte-identical TOML), and its credential handling are all unit-testable. Every string it emits is scrubbed of the credentials the config holds, so a token that reached a repository name, a report title, or a stage's error message cannot reach the artifact.
+- A collection stage that did not complete is now named in the report's Gaps & Caveats section instead of only on stderr, so a missing dimension reads as unassessed rather than clean (#5239, DOC-67 §9).
+- The report carries a placeholder data-handling statement recording that a formal data-retention attestation is pending (#5244, #5218, DOC-67 §10).
+- A missing `trusty-review` binary is reported as a named, actionable error naming `TRUSTY_REVIEW_BIN`, the install command, and the manifest that was already written — never a panic or a silent skip. `TRUSTY_REVIEW_BIN` overrides the PATH lookup.
+- `tga audit` — a strictly non-interactive acquisition-diligence command taking `--org`, `--title`, `--analyst`, `--client`, `--output`, and `--weeks`. Once started it never prompts, confirms, or waits for input (#5235, DOC-67 §2).
+- `tga::audit::run_full_sweep` — a library entry point that drives the eight data-collection subcommands (collect, classify, jira sync, deployments, incidents, dora, pr-metrics, report) end to end with no TTY and no clap. It returns per-stage outcomes, so a failed stage is named rather than aborting the run or reading as a clean pass (#5217, DOC-67 §9). `tga audit` calls it instead of re-sequencing the subcommands itself (#5237).
+- `tga::commands` is now part of the library rather than private to the binary, so the sweep reuses each subcommand's existing `run` function instead of a second copy of its logic.
+
+### Fixed
+
+- Three dangling `Test:` doc-comment pointers in `src/commands/audit.rs` are corrected (#5303). `audit_command_needs_no_positional_arguments` never matched a real test; it's repointed at the actual `audit_takes_no_positional_arguments`. `audit_command_reports_each_stage`, cited by both `run` and `print_stage_report` for two different claims, never had a matching test at all: `run`'s "exit `Ok` despite a failed stage" claim is repointed at `sweep_runs_every_stage_in_order_and_survives_failures`, the sweep-layer test that actually establishes it; `print_stage_report`'s own per-stage stdout/stderr formatting claim gets a real test, `audit_command_reports_each_stage`, backed by splitting the function into a writer-parameterised `write_stage_report` so the output is observable without capturing process file descriptors.
+- `tga deployments collect` no longer fails with `unknown deployment_source ''` when `config.yaml` has no `dora:` block (#5304). `DoraConfig`'s derived `Default` zeroed `deployment_source`, and the `#[serde(default = "…")]` fallbacks only fire when a `dora:` mapping is actually present — so the `unwrap_or_default()` path bypassed them. `Default` is now hand-written through the same `default_*` functions, and an audit of a repo set without DORA configured no longer reports a failed stage.
+
+### Changed
+
+- The `trusty-review` binary AUDIT invokes is resolved by a pure function over the `TRUSTY_REVIEW_BIN` value, and `run_review_report` reads the environment exactly once at its entry point. Behaviour is unchanged — an override wins unless it is empty, otherwise `trusty-review` is looked up on PATH — but the resolution rule and the spawn path are now testable without mutating the process environment, which `std::env::set_var` cannot do soundly under a parallel test harness.
+
+### Security
+
+- `tga audit` now redacts a failed stage's error text before excerpting it, so a credential that spans the 160-character excerpt boundary can no longer survive as a prefix fragment in the generated `manifest.toml` or the due-diligence report handed to a third party. `sweep_gap_lines` takes the credential set as a required argument, and `report::dd_manifest::configured_secrets` is public so the sweep and the manifest builder redact against the same values.
+
+## [2.12.0] — 2026-08-10
+
+### Breaking
+
+- MINOR, not patch. `Config` gained a public field and its fields are all public
+  with no `#[non_exhaustive]`, and the new default flips identity-resolution
+  behaviour for every existing `aliases_file` deployment on upgrade.
+
+### Added
+
+- `fuzzy_identity_fallback` config key (#4251). Unset (default) disables the
+  Tier-3/4 fuzzy fallback only when a declared `aliases_file` successfully
+  loaded a non-empty alias table; `true` forces it on, `false` forces it off.
+  A declared `aliases_file` that fails to load, or resolves empty, leaves the
+  fallback ON and logs at `error!` rather than silently fragmenting every
+  identity. `IdentityResolver` gained the matching `with_fuzzy_fallback()`
+  builder and `fuzzy_fallback()` accessor for callers that construct a
+  resolver outside `from_config`.
+- The behaviour flip is announced once at `info!` when it takes effect.
+- `tga tui` — an interactive terminal view over collection and correlation
+  (#5197). Three panes: a repo picker over the existing config surface
+  (`repositories[]` entries are selectable; `github.orgs` entries are listed as
+  discovery sources), live per-repository progress while a run is in flight, and
+  a correlation results view showing which commits linked to which board items
+  and which did not. Built on ratatui 0.29 / crossterm 0.28 — the workspace
+  versions, matching `trusty-common`'s `monitor-tui` feature — so there is one
+  ratatui major in the build graph. Raw mode and the alternate screen are
+  restored on normal exit, on error, and on panic.
+- Zero inference is the default and is enforced: every view, the correlation
+  pass, and the pull all run with no model configured and no API key present.
+  `[c]` (and `tga tui --correlate-only`) runs the deterministic
+  commit-to-board-item link pass with no network at all.
+- `tga::core::progress` — an optional, non-blocking progress bus. Pipelines
+  publish `ProgressEvent`s carrying stage, target, counters, and a terminal
+  outcome; delivery is bounded and drop-oldest, so a slow or absent consumer can
+  never stall or fail a pipeline. The bus is opt-in at every emit site
+  (`ProgressBus::disabled()` is what all existing CLI paths pass and makes every
+  emit a no-op), so CLI behaviour including the `indicatif` bars is unchanged.
+  `ProgressAggregate` folds the event stream into renderable rows.
+- `tga::collect::correlate_commits` — the deterministic commit ↔ board-item
+  link pass, plus `tga::core::db::correlation` read views (`correlation_counts`,
+  `correlation_rows`, `CorrelationFilter`). The pass links a commit only when
+  its ticket key matches a `work_items` row that is already present; a key with
+  no matching item is reported as a gap, never invented. Idempotent. The
+  `work_items` / `commit_work_items` schema is unchanged.
+- `CollectionPipeline::with_progress` attaches a bus to the per-repository
+  collect loop. Every configured repository reaches a terminal event, including
+  one that cannot be opened.
+
+### Fixed
+
+- Identity resolution no longer runs the Tier-3/4 Jaro-Winkler fuzzy fallback
+  when a comprehensive `aliases_file` is configured (#4251). As the alias
+  roster grew from 130 to 177 entries, the fuzzy tiers began collapsing
+  distinct people onto similarly-spelled colleagues — `Cristian Dominguez` →
+  `Crislaine Tripoli`, `Ravi Chandrasekaran` → `Ravi Pandey`, `Gauri Saykar` →
+  `Gaurav Sharma`, `Josh Taylor` and `Joseph Ku` → `Joshua Lepage` — none of
+  which had a declared alias explaining the match. An author that matches no
+  declared alias is now reported under its own raw name instead of being
+  guessed. Tier-1/2 exact alias resolution and the #2253 email-domain gate are
+  unchanged.
+- Identity resolver tests now use `tempfile::TempDir` instead of a hand-rolled
+  `process::id() + SystemTime` directory name. The old scheme was not unique
+  within a test binary — `process::id()` is constant across parallel tests and
+  the `SystemTime` remainder is coarser than a nanosecond — so tests collided
+  and each one's cleanup deleted a directory another was still using. Because
+  `Config::resolved_aliases()` swallows alias-file load errors, the victim got
+  a resolver with zero members, which returns every input unchanged and so
+  satisfied the #4251 pass-through assertions *vacuously*. Measured at 10
+  failures per 100 runs. The affected tests now also carry an explicit
+  non-vacuity assertion that the roster loaded.
+
+---
+- A repository whose weekly walks failed reported `Completed` — "ok, 1 commit" —
+  to the progress bus. Per-week failures (a `collect_window` error, a
+  `collection_runs` lookup or record failure) reached `stats.errors` and the
+  terminal event was emitted unconditionally, so `Outcome::Failed` was
+  unreachable from that path. It now reports `Failed` with the error count and
+  the first message, still exactly one terminal event per repository.
+- `tga tui` had no surface at all for a collection error: the run summary read
+  only `commits_collected`. It now reads `collected N commit(s), M error(s); …`,
+  which is what the `Finished` status line shows.
+- Quitting `tga tui` mid-run abandoned the worker silently — it is a detached
+  thread nothing joins, so `q` / `Esc` / `Ctrl-C` cut an in-flight fetch or
+  per-week write off at process exit with status 0. A quit during a run now
+  takes a confirming second press, and says so.
+- The pre-walk progress event tagged position-among-repositories onto the
+  repository's own row, so a large repo mid-walk displayed "4/5" as if it were
+  80% through itself. Nothing emits intra-repo progress, so the row is now
+  "in flight, size unknown" until its terminal event; the how-many-repos
+  roll-up stays in the stage header.
+- The first `tga tui` frame against an unmigrated database rendered corrupted:
+  the migration log lines printed before the alternate screen showed through
+  ratatui's diff-rendered output and persisted across redraws. The TUI now
+  clears the screen before its first draw.
+- `tga tui`'s screen was corrupted for the entire duration of every `[r]`
+  pull+correlate, permanently — three writers reached the terminal behind
+  ratatui's back, and its diff renderer never repaints a cell it believes
+  unchanged, so the garbling survived every later redraw and lasted the whole
+  session. All three are now suppressed or rerouted for exactly as long as the
+  TUI owns the screen, and each keeps its previous behaviour on every non-TUI
+  path:
+  - the revwalk's `indicatif` spinner (a 100 ms steady tick for the length of
+    the walk) draws to `ProgressDrawTarget::hidden()` whenever a progress bus is
+    attached, via the new `GitCollector::with_progress`;
+  - the collect pipeline's `println!` / `eprintln!` operator lines — the
+    per-week `Collected W31 2026: …` line among them — are published to the bus
+    as `Collect` detail events instead;
+  - the `tracing` subscriber's writer becomes an in-memory capture for the
+    `tui` subcommand only, drained once per render tick into the ACTIVITY pane,
+    so warnings that used to be written over the frame are now read in it. This
+    matters at the default level with no `RUST_LOG` and no `-v`: a bare
+    worktree whose `origin` is not fetchable emits the fetch-failure `WARN`.
+    Every other subcommand keeps the byte-identical stderr path, which is what
+    keeps stdout clean for MCP framing.
+
+### Changed
+
+- **MSRV raised to Rust 1.94** (was 1.91). `aws-config` >= 1.9.0 and
+  `aws-sdk-bedrockruntime` >= 1.136.0, published 2026-07-08, declare
+  `rust-version = "1.94.1"`; because those are unpinned caret ranges in the
+  workspace manifest, `cargo install` **without `--locked`** re-resolves into
+  them and then refuses to build on rustc below 1.94.1 — the reported
+  `cargo install trusty-code` failure on rustc 1.91.1. Users on rustc
+  1.91-1.93 must `rustup update` before installing any `trusty-*` crate. See
+  [ADR-0029](../../docs/adr/0029-msrv-1-94-and-edition-policy.md)
+  ([#4928](https://github.com/bobmatnyc/trusty-tools/pull/4928))
+- `indicatif` now resolves through `[workspace.dependencies]` instead of a
+  duplicate local `0.17` pin.
+
 ## [2.10.0] — 2026-07-27
 
 MINOR, not patch. The JIRA ingestion work (#3966, #4084) landed on `main`

@@ -726,6 +726,57 @@ fn finding_fields_have_own_labeled_lines() {
     assert!(md.contains("- **Remediation:**"));
 }
 
+/// Why (#5317): every analyze-derived finding rendered its description and
+/// remediation as `not stated in source data` even when the daemon had returned
+/// both. Those two are deterministic tool output — the row must state them
+/// without waiting for synthesis.
+/// What: renders a metrics fixture carrying `description` and `remediation` and
+/// asserts both reach the page, and that neither slot falls to the marker.
+/// Test: this test itself.
+#[test]
+fn reporter_renders_metric_description_and_remediation() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let metrics = r#"{
+      "findings": [
+        { "title": "Extract method", "severity": "amber", "category": "maintainability",
+          "component": "src/hiargs.rs",
+          "description": "cyclomatic complexity 31 (grade F)",
+          "remediation": "Extract the body of 'from_low_args' into 2-3 smaller functions" }
+      ]
+    }"#;
+    std::fs::write(tmp.path().join("acme.json"), metrics).expect("write metrics");
+    let toml = r#"
+        [report]
+        title = "Acme Due Diligence"
+
+        [[repositories]]
+        name = "Acme Web"
+        path = "/nonexistent/acme-web"
+        metrics = "acme.json"
+    "#;
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("build model");
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(
+        md.contains("cyclomatic complexity 31 (grade F)"),
+        "the tool's own observation must render: {md}"
+    );
+    assert!(
+        md.contains("Extract the body of 'from_low_args' into 2-3 smaller functions"),
+        "the tool's own suggested action must render: {md}"
+    );
+    assert!(
+        !md.contains(&format!("**Remediation:** {HONESTY_MARKER}")),
+        "remediation must not fall to the honesty marker when the source stated it: {md}"
+    );
+}
+
 /// Why: with no findings metrics, the RED/AMBER/GREEN sections must not be
 /// fabricated — under the #2342 omit-empty default they collapse to a single line
 /// (no wall of honesty markers) and the empty sections are recorded under gaps.
@@ -1593,4 +1644,218 @@ fn stem_is_date_slug() {
     let stem = report_stem(&model);
     assert!(stem.ends_with("-acme-due-diligence"));
     assert_eq!(stem, format!("{}-acme-due-diligence", model.generated_date));
+}
+
+// ─── #5318: §2 renders without synthesis ─────────────────────────────────────
+
+/// The rendered §2 body, from its heading up to the next `##` heading
+/// (so it includes the `### Top Risks` child).
+fn executive_summary_section(md: &str) -> String {
+    let start = md
+        .find("## 2. Executive Summary")
+        .unwrap_or_else(|| panic!("no §2 heading in:\n{md}"));
+    let rest = &md[start..];
+    let end = rest[3..].find("\n## ").map(|i| i + 3).unwrap_or(rest.len());
+    rest[..end].to_string()
+}
+
+/// Just the §2 paragraph — the heading through the `### Top Risks` child, which
+/// has its own data source and its own emptiness verdict.
+fn executive_summary_paragraph(md: &str) -> String {
+    let section = executive_summary_section(md);
+    match section.find("\n### ") {
+        Some(i) => section[..i].to_string(),
+        None => section,
+    }
+}
+
+/// Why: issue #5318 — every `tga audit` report collapsed §2 to
+/// `_No data available — see Gaps & Caveats._` because the executive summary
+/// was filled ONLY from `--synthesize` prose, while the same report listed a
+/// RED and an AMBER finding in §5. This is the regression guard: a
+/// deterministic run over findings data must populate §2.
+/// What: renders the findings fixture with NO synthesis attached and asserts
+/// the paragraph, the severity counts, the Top Risks rows, and the absence of
+/// the collapse line anywhere in §2.
+/// Test: this test itself.
+#[test]
+fn reporter_fills_executive_summary_without_synthesis() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_findings(tmp.path());
+    assert!(model.synthesis.is_none(), "fixture must be synthesis-free");
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    let section = executive_summary_section(&md);
+
+    assert!(
+        !section.contains("No data available"),
+        "§2 collapsed on a run that had findings:\n{section}"
+    );
+    assert!(
+        section.contains("Repository inspection covered 1 application (Acme Web)"),
+        "no roll-up paragraph:\n{section}"
+    );
+    assert!(
+        section.contains("1 RED (critical) and 1 AMBER (medium-risk) findings"),
+        "severity counts missing:\n{section}"
+    );
+    // Top Risks fills from the same findings, RED first.
+    assert!(
+        section.contains("SQL injection"),
+        "RED finding missing from Top Risks:\n{section}"
+    );
+    assert!(
+        section.contains("Stale dependency"),
+        "AMBER finding missing from Top Risks:\n{section}"
+    );
+    assert!(!md.contains("{{"), "no raw placeholder survives");
+}
+
+/// Why: closure condition 2 of #5318 — when §2 genuinely cannot be produced the
+/// report must name the missing input rather than pointing at Gaps & Caveats.
+/// What: renders a remote-only manifest (nothing to scan, no metrics) and
+/// asserts the §2 paragraph names each absent input instead of collapsing. The
+/// `### Top Risks` child legitimately stays empty here — a report with no
+/// findings has no risks to rank — so the assertion is scoped to the paragraph.
+/// Test: this test itself.
+#[test]
+fn reporter_names_missing_inputs_when_nothing_measured() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let toml = r#"
+        [report]
+        title = "Remote Only"
+
+        [[repositories]]
+        name = "Remote App"
+        remote = "acme/remote-app"
+    "#;
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("model builds");
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    let paragraph = executive_summary_paragraph(&md);
+
+    assert!(
+        !paragraph.contains("No data available"),
+        "§2 must state the missing input, not collapse:\n{paragraph}"
+    );
+    assert!(paragraph.contains("`metrics` file"), "got:\n{paragraph}");
+    assert!(paragraph.contains("`--analyze`"), "got:\n{paragraph}");
+}
+
+/// Why: the deterministic roll-up is a floor, never a replacement — verified
+/// synthesis prose must still win, and the Top Risks table must never carry
+/// both sets of rows.
+/// What: attaches an available synthesis with its own exec summary and one top
+/// risk over a fixture that also has findings, then asserts the synthesized
+/// prose renders, the roll-up does not, and exactly one risk row is present.
+/// Test: this test itself.
+#[test]
+fn reporter_prefers_synthesis_over_deterministic_summary() {
+    use crate::report::synthesize::{RiskRow, Synthesis, SynthesisStatus};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model_with_findings(tmp.path());
+    model.synthesis = Some(Synthesis {
+        status: SynthesisStatus::Available,
+        executive_summary: Some("An acquirer-relevant judgement.".to_string()),
+        top_risks: vec![RiskRow {
+            description: "Credential exposure".to_string(),
+            severity: "RED".to_string(),
+            cost: "2 weeks".to_string(),
+            apps: "Acme Web".to_string(),
+        }],
+        findings: vec![],
+        notes: vec![],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    let section = executive_summary_section(&md);
+
+    assert!(section.contains("An acquirer-relevant judgement."));
+    assert!(
+        !section.contains("Repository inspection covered"),
+        "synthesis must overwrite the roll-up:\n{section}"
+    );
+    assert!(section.contains("Credential exposure"));
+    assert!(
+        !section.contains("SQL injection"),
+        "deterministic rows must not stack under synthesized rows:\n{section}"
+    );
+}
+
+/// Why: the Top Risks table is capped at five rows, and an acquirer who skims
+/// the table without the paragraph above it would otherwise read those five as
+/// the entire risk picture. A silently capped top-risks table has shipped as a
+/// defect once already (#2373).
+/// What: renders seven RED/AMBER findings and asserts the rendered table carries
+/// the "Top 5 of 7" caption row; then renders a fixture with two findings and
+/// asserts no caption appears.
+/// Test: this test itself.
+#[test]
+fn reporter_captions_a_truncated_top_risks_table() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let metrics = r#"{
+      "findings": [
+        { "title": "A1", "severity": "amber", "category": "x", "component": "a1.rs" },
+        { "title": "A2", "severity": "amber", "category": "x", "component": "a2.rs" },
+        { "title": "A3", "severity": "amber", "category": "x", "component": "a3.rs" },
+        { "title": "A4", "severity": "amber", "category": "x", "component": "a4.rs" },
+        { "title": "A5", "severity": "amber", "category": "x", "component": "a5.rs" },
+        { "title": "R1", "severity": "red", "category": "security", "component": "r1.rs" },
+        { "title": "R2", "severity": "red", "category": "security", "component": "r2.rs" }
+      ]
+    }"#;
+    std::fs::write(tmp.path().join("acme.json"), metrics).expect("write metrics");
+    let toml = r#"
+        [report]
+        title = "Acme Due Diligence"
+
+        [[repositories]]
+        name = "Acme Web"
+        path = "/nonexistent/acme-web"
+        metrics = "acme.json"
+    "#;
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
+    let model = ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None)
+        .expect("model builds");
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let section = executive_summary_section(&Reporter::new(tmp.path()).render(&model, &template));
+
+    assert!(
+        section.contains("**Top 5 of 7**"),
+        "truncated table must caption itself:\n{section}"
+    );
+    assert!(
+        section.contains("2 further RED/AMBER finding(s) are not listed here"),
+        "caption must name what is missing:\n{section}"
+    );
+    assert!(
+        !section.contains("| 6 |"),
+        "the caption row must not be numbered as a sixth risk:\n{section}"
+    );
+
+    // A fixture the cap never touches must carry no caption.
+    let untruncated = fixture_model_with_findings(tmp.path());
+    let plain =
+        executive_summary_section(&Reporter::new(tmp.path()).render(&untruncated, &template));
+    assert!(
+        !plain.contains("Top 5 of"),
+        "an untruncated table must not claim truncation:\n{plain}"
+    );
 }

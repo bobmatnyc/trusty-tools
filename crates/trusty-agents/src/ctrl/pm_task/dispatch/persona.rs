@@ -103,7 +103,8 @@ pub async fn run_pm_task_with_persona(
 
     if let Some(ref m) = overrides.model {
         tracing::debug!(persona = %persona_name, model = %m, "applying /model override");
-        persona_cfg.agent.model = m.clone();
+        // #3765: re-pins the override when the agent declares a provider.
+        persona_cfg.override_model(m)?;
     }
 
     let creds = resolve_overridden_credentials(&mut persona_cfg, overrides.provider.as_deref())?;

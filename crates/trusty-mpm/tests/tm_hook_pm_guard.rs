@@ -829,3 +829,540 @@ fn pm_guard_subagent_keeps_its_working_tool_surface() {
     let read = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Read","tool_input":{"file_path":"/x/a.rs"}}"#;
     assert_eq!(run_pm_guard(read, &[]).trim(), "");
 }
+
+// ---------------------------------------------------------------------------
+// #4480 — concurrent shared-working-tree dispatch denial
+// ---------------------------------------------------------------------------
+
+/// Spawn `tm hook --pm-guard` against a chosen daemon URL, from a chosen cwd.
+///
+/// Why: the #4480 guard's verdict depends on two things
+/// [`run_pm_guard`] fixes by design — the daemon URL (it pins an unreachable
+/// one, which is the fail-open case) and the process working directory (the
+/// guard compares it against what the daemon recorded). Both have to be
+/// controllable to exercise the DENY arm end to end.
+/// What: as [`run_pm_guard`], plus an explicit `--url` and `current_dir`.
+fn run_pm_guard_at(stdin_json: &str, url: &str, cwd: &std::path::Path) -> String {
+    let bin = env!("CARGO_BIN_EXE_tm");
+    let mut child = Command::new(bin)
+        .args(["--url", url, "hook", "--pm-guard"])
+        .current_dir(cwd)
+        .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
+        .env_remove("CLAUDE_MPM_SUB_AGENT")
+        .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
+        .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT")
+        .env_remove("TM_MANAGED_SESSION_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn `tm hook --pm-guard`");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(stdin_json.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait");
+    assert!(
+        output.status.success(),
+        "tm hook --pm-guard must always exit 0 (fail-open): stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout is utf8")
+}
+
+/// A one-shot HTTP stand-in for the daemon's shared-tree-dispatch route.
+///
+/// Why: the DENY arm cannot be reached without a daemon that answers, and a
+/// real daemon is far too much machinery for one route's wire contract. A raw
+/// [`std::net::TcpListener`] is the lightest dependency-free mock and mirrors
+/// the technique `pm_guard_deny_by_default`'s tests already use.
+/// What: binds an ephemeral port, serves ONE request with the given JSON body,
+/// and returns the `http://127.0.0.1:PORT` base URL. The accept loop runs on a
+/// detached thread; the process exits with the test binary.
+fn spawn_writers_mock(body: &'static str) -> String {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+#[test]
+fn pm_guard_denies_a_second_unisolated_engineer_dispatch() {
+    // Causality (#4480): against PRE-FIX code this payload is allowed with no
+    // output at all — `evaluate_tool` allows `Agent` unconditionally and no
+    // branch ever consults the daemon. The deny below can only come from the
+    // new guard.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"python-engineer","count":1}],"total":1}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_second","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
+
+    let stdout = run_pm_guard_at(payload, &url, cwd.path());
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("deny stdout must be valid JSON");
+    assert_eq!(
+        parsed["hookSpecificOutput"]["permissionDecision"].as_str(),
+        Some("deny")
+    );
+    let reason = parsed["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(
+        reason.contains("#4480") && reason.contains("python-engineer"),
+        "the deny must name the rule and the agent already in the tree, got: {reason}"
+    );
+}
+
+#[test]
+fn pm_guard_allows_an_isolated_engineer_dispatch() {
+    // The remedy the deny asks for must work even with a sibling in the tree,
+    // and it must not even reach the daemon — the mock is deliberately never
+    // consumed here.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"python-engineer","count":1}],"total":1}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_iso","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","isolation":"worktree","prompt":"go"}}"#;
+    assert_eq!(run_pm_guard_at(payload, &url, cwd.path()).trim(), "");
+}
+
+#[test]
+fn pm_guard_allows_a_read_only_dispatch_beside_a_running_engineer() {
+    // Research/review fan-out beside a running engineer is the ordinary
+    // workflow; denying it would be a far worse regression than the race.
+    let url = spawn_writers_mock(r#"{"agents":[{"agent":"rust-engineer","count":1}],"total":1}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_res","tool_name":"Agent","tool_input":{"subagent_type":"research","prompt":"go"}}"#;
+    assert_eq!(run_pm_guard_at(payload, &url, cwd.path()).trim(), "");
+}
+
+#[test]
+fn pm_guard_allows_an_engineer_dispatch_into_an_empty_tree() {
+    // The first dispatch of a session — the overwhelmingly common case.
+    let url = spawn_writers_mock(r#"{"agents":[],"total":0}"#);
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_first","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
+    assert_eq!(run_pm_guard_at(payload, &url, cwd.path()).trim(), "");
+}
+
+/// A one-shot HTTP mock returning an arbitrary status line and body.
+///
+/// Why: [`spawn_writers_mock`] always answers 200 with a well-formed body, so
+/// it cannot drive the guard's malformed-response fail-open branch.
+/// What: as [`spawn_writers_mock`], but the caller supplies the status line
+/// (e.g. `"500 Internal Server Error"`) and the raw body bytes.
+fn spawn_writers_mock_with(status_line: &'static str, body: &'static str) -> String {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes());
+        }
+    });
+    url
+}
+
+#[test]
+fn pm_guard_allows_when_the_daemon_answer_is_malformed() {
+    // Declared fail-open branch: every unusable answer — a 5xx, a body that is
+    // not JSON, and well-formed JSON of the wrong shape — must ALLOW. A false
+    // deny here lands on the PM and halts every dispatch in the system.
+    let cases: [(&'static str, &'static str); 4] = [
+        (
+            "500 Internal Server Error",
+            r#"{"agents":[{"agent":"rust-engineer"}]}"#,
+        ),
+        ("200 OK", "not json at all"),
+        ("200 OK", r#"{"agents":"rust-engineer"}"#),
+        ("200 OK", r#"{"unexpected":"shape"}"#),
+    ];
+    for (status_line, body) in cases {
+        let url = spawn_writers_mock_with(status_line, body);
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let payload = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_bad","tool_name":"Agent","tool_input":{"subagent_type":"rust-engineer","prompt":"go"}}"#;
+        assert_eq!(
+            run_pm_guard_at(payload, &url, cwd.path()).trim(),
+            "",
+            "a {status_line} / {body} answer must fail OPEN"
+        );
+    }
+}
+
+/// Serve the REAL delegation router, releasing requests only once `expected` of
+/// them have arrived (#5324).
+///
+/// Why: the race this probes is "two dispatches both reach the daemon before
+/// either is recorded". Creating that window with a sleep would make the test's
+/// outcome depend on scheduling; holding every request at a barrier until all
+/// `expected` are in makes it a property of the harness's control flow instead.
+/// No clock, virtual or real, is involved — deliberately, since tokio's
+/// `start_paused` auto-advances virtual time whenever all tasks are idle and
+/// would make an inserted delay evaporate (#3494).
+///
+/// Why the real router and not a canned mock: before #5324 the whole decision
+/// lived in the guard, so a mock that always answered "nobody here" was enough
+/// to pin it. The fix moved the deciding half into the daemon — the answer and
+/// the record are now one operation — so a mock could only re-implement the
+/// thing under test. This stands up `delegation_routes::router()` over a real
+/// [`DaemonState`], which is what actually holds the claim.
+///
+/// What: binds an ephemeral port, serves the delegation sub-router behind a
+/// [`tokio::sync::Barrier`] applied with `route_layer` — matched routes only, so
+/// the deny path's best-effort audit POST to the unrouted `/hooks` 404s
+/// immediately instead of waiting on a barrier no one else will reach. Returns
+/// the base URL and the temp dir backing the hermetic state.
+fn serve_delegation_router_behind_a_barrier(expected: usize) -> (String, tempfile::TempDir) {
+    use std::future::IntoFuture;
+    use std::sync::Arc;
+
+    use trusty_mpm::core::paths::FrameworkPaths;
+    use trusty_mpm::daemon::{delegation_routes, state::DaemonState};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
+    let barrier = Arc::new(tokio::sync::Barrier::new(expected));
+
+    let app = delegation_routes::router()
+        .route_layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let barrier = Arc::clone(&barrier);
+                async move {
+                    // Barrier passed: every guard's claim has reached the
+                    // daemon and none has been served. This is the exact state
+                    // the race needs; only the daemon's own critical section
+                    // decides what happens next.
+                    barrier.wait().await;
+                    next.run(req).await
+                }
+            },
+        ))
+        .with_state(state);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let addr = listener.local_addr().expect("addr");
+    let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+    tokio::spawn(axum::serve(listener, app).into_future());
+    (format!("http://{addr}"), dir)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pm_guard_denies_the_second_of_two_simultaneous_dispatches() {
+    // #5324, the window #4480 left open. Two `Agent` dispatches issued in one PM
+    // turn — the framework's own documented pattern for parallel work — both
+    // reach the daemon before either is recorded. Pre-fix the daemon only
+    // ANSWERED, so both saw an empty set and both were ALLOWED, which is the
+    // collision the guard exists to prevent. The claim is now taken inside the
+    // same critical section that produced the answer, so exactly one is
+    // admitted.
+    //
+    // The interleaving is forced, not timed: the barrier holds both claims until
+    // both have arrived, so the pre-fix code cannot pass by winning a race.
+    // Which of the two is denied is genuinely arbitrary — that is the point of a
+    // mutual exclusion — so the assertion counts verdicts rather than ordering
+    // them.
+    //
+    // What this pins, precisely: that a claim is taken at all, end to end,
+    // through the real binary and the real router. It does NOT pin atomicity.
+    // The barrier releases both requests into the handler and stops there, so
+    // how far each gets before the other resumes is the scheduler's business —
+    // moving `record` back outside the mutex fails this test at a 300 ms
+    // handler gap but PASSED at 50 ms. Atomicity is pinned deterministically by
+    // `shared_tree_dispatch_route_denies_the_second_claim`
+    // (`src/daemon/delegation_routes_tests.rs`), which drives the two claims
+    // through `claim_shared_tree_dispatch` directly with no scheduler in the
+    // way. Treat the two as a pair: this one proves the wiring, that one proves
+    // the mutual exclusion.
+    let (url, _dir) = serve_delegation_router_behind_a_barrier(2);
+    let cwd = tempfile::tempdir().expect("tempdir");
+
+    let mut children = Vec::new();
+    for tool_use_id in ["toolu_race_a", "toolu_race_b"] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"{tool_use_id}","tool_name":"Agent","tool_input":{{"subagent_type":"rust-engineer","prompt":"go"}}}}"#
+        );
+        let url = url.clone();
+        let dir = cwd.path().to_path_buf();
+        children.push(std::thread::spawn(move || {
+            run_pm_guard_at(&payload, &url, &dir)
+        }));
+    }
+
+    let verdicts: Vec<String> = children
+        .into_iter()
+        .map(|h| h.join().expect("guard thread").trim().to_string())
+        .collect();
+
+    let allowed = verdicts.iter().filter(|v| v.is_empty()).count();
+    let denied: Vec<&String> = verdicts.iter().filter(|v| !v.is_empty()).collect();
+    assert_eq!(
+        allowed, 1,
+        "exactly one of two simultaneous dispatches may be admitted, got: {verdicts:?}"
+    );
+    assert_eq!(denied.len(), 1, "and exactly one must be denied");
+    assert_denied(denied[0]);
+    let reason: serde_json::Value =
+        serde_json::from_str(denied[0]).expect("deny stdout must be valid JSON");
+    let reason = reason["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("reason is a string");
+    assert!(
+        reason.contains("#4480") && reason.contains("rust-engineer"),
+        "the deny must name the rule and the sibling already in the tree, got: {reason}"
+    );
+}
+
+// ── Main-checkout destructive-git guard (ADR-0037) ──────────────────────────
+//
+// The rule these exercise pierces Guard 1 and Guard 4 exactly like the
+// worktree-tmp guard above, so the load-bearing case is a SUBAGENT-marked
+// payload: without the piercing, Guard 4 returns ALLOW before the Bash
+// classifier is ever reached and the guard does nothing for the incident it
+// was built from. Every case drives the working directory through the
+// payload's `cwd` field, which `pm_guard` reads ahead of the process
+// directory — the test binary's own cwd is inside a real checkout and would
+// otherwise decide the verdict.
+
+/// A directory that classifies as a project MAIN CHECKOUT: `.git` is a
+/// directory. Returns the `TempDir` guard (which must outlive the test) and
+/// the checkout path inside it.
+fn main_checkout_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+    std::fs::create_dir_all(repo.join("crates/trusty-mpm/src")).expect("mkdir src");
+    (dir, repo)
+}
+
+/// A `PreToolUse` Bash payload running `command` in `cwd`, with any extra
+/// top-level JSON fields (e.g. an `agent_id`) spliced in.
+fn bash_payload_at(command: &str, cwd: &std::path::Path, extra_fields: &str) -> String {
+    format!(
+        r#"{{"hook_event_name":"PreToolUse",{extra_fields}"cwd":"{}","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#,
+        cwd.display()
+    )
+}
+
+#[test]
+fn pm_guard_denies_the_incident_commands_in_a_main_checkout() {
+    // The 2026-08-10 incident, verbatim. Two of the three commands are this
+    // rule's business; `git reset HEAD` is deliberately NOT denied — the
+    // default `--mixed` unstages and destroys nothing, and the owner's
+    // boundary lists it as an explicit allow. Denying it would widen the rule
+    // past "irreversible destruction" into ordinary git work.
+    let (_dir, repo) = main_checkout_fixture();
+
+    for command in [
+        "git checkout a1b2c3d -- .",
+        "git clean -fdx -- crates/ docs/",
+    ] {
+        let stdout = run_pm_guard(&bash_payload_at(command, &repo, ""), &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("ADR-0037"),
+            "the deny must cite the ADR it enforces: {stdout}"
+        );
+        assert!(
+            stdout.contains(&repo.display().to_string()),
+            "the deny must name the directory it protected: {stdout}"
+        );
+    }
+
+    let reset = run_pm_guard(&bash_payload_at("git reset HEAD", &repo, ""), &[]);
+    assert_eq!(
+        reset.trim(),
+        "",
+        "`git reset HEAD` unstages without destroying anything and must stay allowed"
+    );
+}
+
+#[test]
+fn pm_guard_denies_every_destructive_form_in_a_main_checkout() {
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "git reset --hard origin/main",
+        "git reset --merge HEAD",
+        "git reset --keep HEAD~2",
+        "git checkout -- crates/",
+        "git checkout .",
+        "git checkout -f main",
+        "git restore src/lib.rs",
+        "git restore --staged --worktree src/",
+        "git clean -f",
+        "git clean -fdx",
+        "git switch --discard-changes main",
+        // Composition must not hide the verb behind a benign first segment.
+        "git status --short && git reset --hard",
+    ] {
+        let stdout = run_pm_guard(&bash_payload_at(command, &repo, ""), &[]);
+        assert_denied(&stdout);
+    }
+}
+
+#[test]
+fn pm_guard_allows_read_only_and_near_miss_git_in_a_main_checkout() {
+    // The false-positive boundary. #5356 is an OPEN P2 filed because pm_guard
+    // denied a turn of purely read-only `git status`/`git log`/`ls` calls;
+    // this rule must not add to it.
+    let (_dir, repo) = main_checkout_fixture();
+    for command in [
+        "git status",
+        "git status --short",
+        "git log --oneline -20",
+        "git diff HEAD~1 --stat",
+        "ls -la",
+        "git checkout -b feature/x",
+        "git checkout main",
+        "git reset",
+        "git reset --soft HEAD~1",
+        "git restore --staged src/lib.rs",
+        "git clean -n",
+        "git clean --dry-run -fdx",
+        "git switch main",
+        "git add -A",
+        "git stash list",
+    ] {
+        let stdout = run_pm_guard(&bash_payload_at(command, &repo, ""), &[]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "`{command}` must be allowed in a main checkout, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_main_checkout_destructive_git_from_a_subagent_payload() {
+    // THE load-bearing case, and the shape of the actual incident: a native
+    // Task/Agent-dispatched subagent (agent_id present) running the
+    // destructive command in a main checkout. Guard 4 exempts this payload
+    // shape from every ordinary Bash rule (see
+    // `pm_guard_native_subagent_dispatch_allows_bash` above), so a deny here
+    // can only come from the check running BEFORE that exemption. Remove the
+    // piercing and this test is the one that goes green-to-red.
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = bash_payload_at(
+        "git clean -fdx -- crates/ docs/",
+        &repo,
+        r#""agent_id":"agent-xyz789","agent_type":"local-ops","#,
+    );
+    let stdout = run_pm_guard(&payload, &[]);
+    assert_denied(&stdout);
+    assert!(stdout.contains("ADR-0037"), "{stdout}");
+}
+
+#[test]
+fn pm_guard_denies_main_checkout_destructive_git_from_the_mpm_subagent_env() {
+    // The other automatic marker: `CLAUDE_MPM_SUB_AGENT=1`, stamped by
+    // trusty-agents on every subagent process it spawns out-of-band. Guard 1
+    // exempts it from everything else, and must not exempt it from this.
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = bash_payload_at("git reset --hard origin/main", &repo, "");
+    let stdout = run_pm_guard(&payload, &[("CLAUDE_MPM_SUB_AGENT", "1")]);
+    assert_denied(&stdout);
+    assert!(stdout.contains("ADR-0037"), "{stdout}");
+}
+
+#[test]
+fn pm_guard_allows_destructive_git_inside_a_worktree() {
+    // Delegated work happens in worktrees and must stay fully writable — this
+    // is the exemption the whole rule is scoped around. Asserted for both
+    // worktree signals, and from a subagent payload, because that is who is
+    // actually working there.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let claude_wt = dir.path().join("repo/.claude/worktrees/wt-x");
+    std::fs::create_dir_all(claude_wt.join(".git")).expect("mkdir worktree");
+    let linked_wt = dir.path().join("linked-wt");
+    std::fs::create_dir_all(&linked_wt).expect("mkdir linked");
+    std::fs::write(linked_wt.join(".git"), "gitdir: /repo/.git/worktrees/x").expect("write .git");
+
+    for cwd in [&claude_wt, &linked_wt] {
+        for command in [
+            "git reset --hard origin/main",
+            "git clean -fdx",
+            "git checkout -- .",
+        ] {
+            let payload = bash_payload_at(command, cwd, r#""agent_id":"agent-xyz789","#);
+            let stdout = run_pm_guard(&payload, &[]);
+            assert_eq!(
+                stdout.trim(),
+                "",
+                "`{command}` in the worktree {} must be allowed, got: {stdout}",
+                cwd.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn pm_guard_allows_destructive_git_outside_any_checkout() {
+    // A declared fail-open arm: a directory with no `.git` ancestor is not a
+    // checkout, so there is nothing for this rule to protect and it stays out
+    // of the way. A path that does not exist resolves the same way.
+    let dir = tempfile::tempdir().expect("tempdir");
+    for cwd in [dir.path().to_path_buf(), dir.path().join("no/such/dir")] {
+        let stdout = run_pm_guard(&bash_payload_at("git clean -fdx", &cwd, ""), &[]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "a non-repository directory must be allowed, got: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_denies_main_checkout_destructive_git_with_the_daemon_unreachable() {
+    // The fail-open check this rule most had to get right. Every other
+    // daemon-consulting guard in pm_guard answers ALLOW when the daemon is
+    // down; this one consults no daemon at all, so an unreachable daemon
+    // cannot weaken it. `run_pm_guard` always points `--url` at
+    // http://127.0.0.1:1 (nothing listens there), which is exactly that
+    // condition — the deny below is produced with no daemon in the picture,
+    // and the best-effort audit POST failing changes nothing.
+    let (_dir, repo) = main_checkout_fixture();
+    let stdout = run_pm_guard(&bash_payload_at("git clean -fdx", &repo, ""), &[]);
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_operator_escape_hatches_still_allow_main_checkout_destructive_git() {
+    // `TRUSTY_MPM_DISABLE_HOOKS` and `TRUSTY_MPM_PM_UNRESTRICTED=1` are human
+    // escape hatches, never set programmatically anywhere in this codebase.
+    // They are deliberately NOT pierced — an operator who lifts enforcement
+    // gets exactly that, the same contract the worktree-tmp guard keeps.
+    let (_dir, repo) = main_checkout_fixture();
+    let payload = bash_payload_at("git clean -fdx", &repo, "");
+    for env in [
+        ("TRUSTY_MPM_DISABLE_HOOKS", "1"),
+        ("TRUSTY_MPM_PM_UNRESTRICTED", "1"),
+    ] {
+        let stdout = run_pm_guard(&payload, &[env]);
+        assert_eq!(
+            stdout.trim(),
+            "",
+            "{} must lift this guard along with every other",
+            env.0
+        );
+    }
+}

@@ -65,6 +65,20 @@ pub struct ClaudeMpmSession {
     /// Absolute path of the project directory this session belongs to.
     #[serde(default)]
     pub project_path: Option<String>,
+    /// Modification time of the file this session was parsed from, stamped by
+    /// [`parse_session_file`] — never present in the JSON itself.
+    ///
+    /// Why: `paused_at` is `#[serde(default)]`, so a session JSON carrying only
+    /// `session_id` loads with no timestamp at all. Such a record is undatable,
+    /// and `filter_sessions_since` drops undatable records from every
+    /// watermark-filtered digest — which would silently retire exactly those
+    /// legacy sessions. This is the same mtime rescue the native `TrustyMpm`
+    /// arm gets, so fail-closed applies symmetrically to both variants (#5072).
+    /// What: `None` only for a session constructed in memory rather than read
+    /// from disk.
+    /// Test: `claude_mpm_session_with_no_paused_at_is_dated_by_mtime`.
+    #[serde(skip)]
+    pub source_mtime: Option<chrono::DateTime<chrono::Utc>>,
     // `conversation`, `active_context`, `performance_metrics`, `version`, `build`
     // are intentionally NOT present; serde_json silently ignores unknown fields.
 }
@@ -146,16 +160,22 @@ pub fn load_all_claude_mpm_sessions(project_dir: &Path) -> anyhow::Result<Vec<Cl
 
 /// Parse a single claude-mpm session JSON file.
 ///
-/// Why: isolates the JSON parsing so callers handle errors uniformly.
-/// What: reads the file at `path` and deserialises it into [`ClaudeMpmSession`].
-/// Test: `roundtrip_full_json`.
+/// Why: isolates the JSON parsing so callers handle errors uniformly, and is
+/// the single place [`ClaudeMpmSession::source_mtime`] gets stamped so both
+/// loading entry points inherit the fallback timestamp (#5072).
+/// What: reads the file at `path`, deserialises it into [`ClaudeMpmSession`],
+/// then records the file's modification time.
+/// Test: `roundtrip_full_json`,
+/// `claude_mpm_session_with_no_paused_at_is_dated_by_mtime`.
 ///
 // CUTOVER BRIDGE — remove post-migration (#1762)
 fn parse_session_file(path: &Path) -> anyhow::Result<ClaudeMpmSession> {
     let bytes =
         std::fs::read(path).with_context(|| format!("reading session file {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing session file {}", path.display()))
+    let mut session: ClaudeMpmSession = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing session file {}", path.display()))?;
+    session.source_mtime = crate::catchup::session_finder::mtime_utc(path);
+    Ok(session)
 }
 
 #[cfg(test)]

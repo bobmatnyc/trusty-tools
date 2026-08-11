@@ -1,6 +1,6 @@
 # 0011. `tctl` owns service lifecycle (headless control plane); `trusty-console` owns the single HTTP surface
 
-- **Status:** Amended by 0018
+- **Status:** Amended by [0032](0032-no-service-owns-http-console-is-the-only-http-surface.md)
 - **Date:** 2026-06-15
 - **Accepted:** 2026-06-15 (owner sign-off via PR #1240 merge)
 - **Scope:** Workspace-wide (trusty-controller boot model; reconciles DOC-7 with
@@ -11,17 +11,11 @@
   UI" *surface* decision (DOC-7 content relocates to trusty-console; DOC-7 to be
   re-statused Superseded).
 
-> **Amendment note (2026-07-19, see ADR-0018):** point 2's "HTTP is implemented
-> exactly once — in `trusty-console`" is refined by
-> **[ADR-0018 — Loopback-only doctrine](./0018-loopback-only-doctrine.md)**:
-> sibling daemons (search, memory, analyze, review, agents, mpm) may each run
-> their own **loopback-only** HTTP server for CLI use, MCP stdio-bridge
-> proxying, and same-machine GUI clients — a supported pattern, not a
-> violation of this ADR. Only `trusty-console` may bind off-loopback. This
-> section and the rest of this ADR are left as originally accepted (ADRs are
-> immutable — DOC-46 §4); see ADR-0018 for the current, controlling statement
-> of the doctrine and `docs/reference/threat-model.md` for the per-daemon
-> compliance inventory.
+> **Current amendment (2026-08-07, see ADR-0032):** ADR-0018 temporarily
+> introduced a loopback-HTTP carve-out, but ADR-0032 superseded that carve-out
+> and restored this ADR's one-HTTP-surface rule in stronger form: sibling
+> services use UDS and `trusty-console` is the only HTTP surface. ADR-0032 is
+> the current controlling statement.
 
 ## Context
 

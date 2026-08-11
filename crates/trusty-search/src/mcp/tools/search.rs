@@ -89,9 +89,10 @@ pub(super) async fn dispatch_search_tool(
             // (#1373); an explicit caller-supplied id still wins.
             let index_id = match server.resolve_index_id(args) {
                 Some(v) => v,
+                // #5213: name `list_indexes`, not just the missing field.
                 None => {
                     return Some(Err(DispatchError::InvalidParams(
-                        "missing required string field: index_id".into(),
+                        super::types::MISSING_INDEX_ID.into(),
                     )))
                 }
             };
@@ -148,8 +149,14 @@ pub(super) async fn dispatch_search_tool(
                     )))
                 }
             };
+            // Issue #4715: scoped POST so a 404 on the session's advertised
+            // index surfaces as INDEX_NOT_READY, not "unknown index".
             let resp = match server
-                .post(&format!("/indexes/{index_id}/search"), &body)
+                .post_scoped(
+                    &format!("/indexes/{index_id}/search"),
+                    &body,
+                    Some(&index_id),
+                )
                 .await
             {
                 Ok(v) => v,
@@ -237,16 +244,21 @@ impl McpServer {
     ) -> Result<Value, DispatchError> {
         // Default `index_id` to the session's pinned index when omitted (#1373);
         // an explicit caller-supplied id still wins.
-        let index_id = self.resolve_index_id(args).ok_or_else(|| {
-            DispatchError::InvalidParams("missing required string field: index_id".into())
-        })?;
+        // #5213: name `list_indexes`, not just the missing field.
+        let index_id = self
+            .resolve_index_id(args)
+            .ok_or_else(|| DispatchError::InvalidParams(super::types::MISSING_INDEX_ID.into()))?;
         let query_text = require_str(args, "query")?;
 
         // Pre-flight stage check for lanes that need Stage 2 or Stage 3.
         // The lexical and `search_all` tools always work — they degrade
         // gracefully through the daemon's adaptive routing.
         if let Some(required) = lane.required_capability() {
-            let status = self.get(&format!("/indexes/{index_id}/status")).await?;
+            // #4715: index-scoped, so a never-indexed pin answers "too early"
+            // rather than leaking the daemon's "unknown index" 404.
+            let status = self
+                .get_scoped(&format!("/indexes/{index_id}/status"), Some(&index_id))
+                .await?;
             let caps: Vec<String> = status
                 .get("search_capabilities")
                 .and_then(Value::as_array)
@@ -336,7 +348,11 @@ impl McpServer {
         }
 
         let resp = self
-            .post(&format!("/indexes/{index_id}/search"), &body)
+            .post_scoped(
+                &format!("/indexes/{index_id}/search"),
+                &body,
+                Some(&index_id),
+            )
             .await?;
         // Mirror the daemon's per-query INFO log.
         let log_intent = resp

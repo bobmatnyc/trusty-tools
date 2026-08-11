@@ -23,6 +23,7 @@ mod project_hooks;
 mod quarantine_shadows;
 mod search_index;
 mod settings;
+mod skills;
 mod sync_assets;
 #[cfg(test)]
 mod tests;
@@ -93,13 +94,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered, retract_framework_agents};
-use crate::core::agent_skill_codeploy::{co_deploy_skill_set, log_declared_skills};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::DeployStats;
-use crate::core::skill_tiers::{
-    deploy_all_skill_tiers, list_project_custom_stems, list_source_stems,
-};
 use custom_mcp::inject_custom_trusty_mcps;
 use native_mcp::inject_native_trusty_mcps;
 use settings::{
@@ -167,6 +164,22 @@ pub(crate) use search_index::{inject_trusty_search_mcp, register_project_index};
 pub(crate) use settings::{
     inject_trusty_memory_mcp, inject_trusty_mpm_mcp, inject_trusty_review_mcp,
 };
+
+/// Re-export of the `.mcp.json` git-exclusion guard (#4181) for the OTHER
+/// site that runs the injectors.
+///
+/// Why: `prepare_session_inner` is not the only writer.
+/// `runtime::claude_code::prepare_managed_config` re-runs the same four
+/// injectors on every spawn/resume, and `spawn_resume` /
+/// `build_inplace_resume_command` reach it with no `prepare_session*` in their
+/// chain at all. Exporting the guard is what lets that second site hold the
+/// same invariant instead of silently reintroducing a dirty tracked file.
+/// What: re-exports [`native_mcp::exclude_mcp_json_from_git`] — a plain
+/// re-export, no logic of its own.
+/// Test: the guard's own behavior is pinned by
+/// `ensure_git_excluded_adds_mcp_json`; the second call site by
+/// `prepare_managed_config_excludes_mcp_json_from_git`.
+pub(crate) use native_mcp::exclude_mcp_json_from_git;
 
 /// Re-export of the resume-time worktree/upstream sync primitives (issue
 /// #2647) for reuse by `daemon::managed_routes::lifecycle::resume_managed`.
@@ -817,73 +830,13 @@ fn prepare_session_inner(
         tracing::warn!("failed to refresh skill source directory: {err}");
     }
 
-    // Surface pre-deploy skill staleness (issue #2876). Reading the deployed
-    // manifest BEFORE the refresh below tells us which bundled skills this
-    // workspace was serving STALE — a long-lived worktree that never
-    // re-provisioned keeps the old skill text (e.g. an outdated attribution
-    // footer) until this very deploy self-heals it. The deploy below fixes it;
-    // the warn makes the drift auditable so an operator can see a workspace was
-    // running behind the installed binary's assets. Non-fatal and read-only.
-    let stale =
-        crate::core::skill_staleness::stale_skills(&plan.skill_source, &fw.claude_skills_dir());
-    if !stale.is_empty() {
-        tracing::warn!(
-            project_dir = %project_dir.display(),
-            stale_skills = %stale.join(", "),
-            "deployed skills were stale relative to bundled assets — refreshing now \
-             (run `tm doctor` to audit; long-lived worktrees drift until re-provisioned)"
-        );
-    }
-
-    // DOC-42 (issue #2889): fold every deployed agent's declared `skills:`
-    // into the bundled-tier `select` predicate below, so a skill the harness
-    // manifest would otherwise exclude still deploys when an agent depends on
-    // it (§SPEC-AGENTSKILLS-02 co-deploy guarantee). Resolving the stem sets
-    // ONCE here (rather than inside `deploy_all_skill_tiers`) lets the same
-    // sets drive both the co-deploy `select` override AND the resolution
-    // logging below, without a second directory scan.
-    let bundled_stems = list_source_stems(&plan.skill_source).unwrap_or_default();
-    let user_stems = list_source_stems(&fw.user_skill_source_dir()).unwrap_or_default();
-    let project_stems = list_project_custom_stems(&fw.claude_skills_dir()).unwrap_or_default();
-    let co_deploy_skills = co_deploy_skill_set(&deploy.declared_skills);
-    log_declared_skills(
+    let skill_deploy = skills::deploy_session_skills(
+        fw,
+        &plan,
+        project_dir,
         &deploy.declared_skills,
-        &project_stems,
-        &user_stems,
-        &bundled_stems,
+        &mut roster_errors,
     );
-
-    // Deploy skill files — Claude Code reads `~/.claude/skills/` at startup.
-    // Skills carry no inheritance, so this is a manifest-tracked content copy.
-    // Three tiers merge here with precedence project-custom > user-custom >
-    // bundled (#2816): the manifest's skill-set selection restricts WHICH
-    // BUNDLED source skills deploy — OR'd with `co_deploy_skills` (DOC-42) so
-    // an agent-declared dependency still deploys even when the manifest
-    // wouldn't otherwise select it; the user-custom tier
-    // (`~/.trusty-mpm/skills/`) is deployed in full and overrides a same-named
-    // bundled skill; a skill the user hand-placed in the project's
-    // `.claude/skills/` (absent from the deploy manifest) outranks both and is
-    // never overwritten. See `core::skill_tiers`.
-    crate::core::provisioning_stage::emit(
-        crate::core::provisioning_stage::ProvisioningStage::DeployingSkills,
-    );
-    let skill_deploy = match deploy_all_skill_tiers(
-        &plan.skill_source,
-        &fw.user_skill_source_dir(),
-        &fw.claude_skills_dir(),
-        |name| plan.skill_selected(name) || co_deploy_skills.contains(name),
-    ) {
-        Ok(result) => result.stats,
-        Err(err) => {
-            tracing::error!(
-                project_dir = %project_dir.display(),
-                "skill deploy FAILED — session will launch WITHOUT the tm/mpm skill \
-                 set: {err}. Identity/output-style provisioning continues regardless."
-            );
-            roster_errors.push(format!("skill deploy failed: {err}"));
-            DeployStats::default()
-        }
-    };
 
     // Compose the effective launch instructions (framework + delegation
     // authority + project CLAUDE.md); this loads or creates the project
@@ -1012,7 +965,11 @@ fn prepare_session_inner(
     // daemon's managed launch excludes the user tier where that triad would
     // otherwise be provisioned. Non-fatal: the session still launches, it
     // just won't record memory or lifecycle events via the hooks.
-    let hooks_written = match write_project_hooks(project_dir) {
+    //
+    // #5034: `[hooks] prompt_context = false` suppresses the per-prompt
+    // `trusty-memory prompt-context` injection (and strips one a prior launch
+    // wrote). Default `true` — every other hook is written either way.
+    let hooks_written = match write_project_hooks(project_dir, config.hooks.prompt_context) {
         Ok(()) => true,
         Err(err) => {
             tracing::warn!("failed to write trusty-mpm project hooks: {err}");
@@ -1035,6 +992,12 @@ fn prepare_session_inner(
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::ConfiguringMcp,
     );
+
+    // #4181: keep `.mcp.json` out of git's index BEFORE any injector writes to
+    // it — see `native_mcp::exclude_mcp_json_from_git` for why, and why a
+    // failure here must not stop the injectors below.
+    native_mcp::exclude_mcp_json_from_git(project_dir);
+
     let mut trusty_memory_injected = false;
     if plan.inject_trusty_memory {
         // Pin the project's palace via `env.TRUSTY_MEMORY_PALACE` (issue #1605).

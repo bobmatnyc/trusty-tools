@@ -181,8 +181,9 @@ fn fails_on_duplicate_installs() {
 
 #[test]
 fn fails_on_version_disagreement() {
-    // The running binary is not the one cargo tracks — an upgrade would not
-    // replace what is actually running.
+    // The running binary is OLDER than the version cargo recorded at the same
+    // path: an older file is sitting on top of a newer install, so an upgrade
+    // the ledger says landed is not what executes. #4964 keeps this a Fail.
     let ledger = parse_cargo_installs(LEDGER).unwrap();
     let (status, msg) = provenance_report(
         "tm",
@@ -195,6 +196,158 @@ fn fails_on_version_disagreement() {
     assert_eq!(status, CheckStatus::Fail, "message: {msg}");
     assert!(msg.contains("1.2.3"), "message: {msg}");
     assert!(msg.contains("1.3.1"), "message: {msg}");
+    assert!(
+        msg.contains("OLDER"),
+        "message must name the direction: {msg}"
+    );
+}
+
+/// #4964's new provenance class: the prebuilt downloader placed a NEWER binary
+/// at the exact path a stale cargo record describes.
+///
+/// Why: after #4964 Phase 1 (daemon upgrades stop invoking cargo) and Phase 3
+/// (destination flips to `$CARGO_HOME/bin`), this is what a clean, successful,
+/// cargo-free `tctl upgrade` leaves behind. Before this change the path match
+/// succeeded, the versions disagreed, and doctor reported `Fail` on exactly the
+/// upgrade those phases exist to produce.
+/// Test: this test.
+#[test]
+fn unknown_when_downloader_replaced_the_cargo_install() {
+    let ledger = parse_cargo_installs(LEDGER).unwrap();
+    // Ledger records tm 1.3.1; the downloader wrote 1.4.0 over it in place.
+    let (status, msg) = provenance_report(
+        "tm",
+        "1.4.0",
+        &installed("tm"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
+    assert_eq!(
+        status,
+        CheckStatus::Unknown,
+        "a successful cargo-free upgrade must not read as a health failure: {msg}"
+    );
+    assert!(
+        msg.contains("NEWER"),
+        "message must name the direction: {msg}"
+    );
+    assert!(
+        msg.contains("prebuilt installer"),
+        "message must name the likely writer: {msg}"
+    );
+    assert!(msg.contains("#4964"), "message: {msg}");
+}
+
+/// The verdict must not change merely because #4964 moves the destination.
+///
+/// Why: the same downloader-placed file reports `Unknown` today from
+/// `~/.local/bin` (it fails the path match). After Phase 3 it sits in
+/// `$CARGO_HOME/bin` instead. Its provenance is exactly as verifiable in both
+/// places — nothing about the binary changed — so the severity must not either.
+/// This is the property that keeps Phase 3 from turning the owner's daily-driver
+/// `tm doctor` red.
+/// Test: this test.
+#[test]
+fn downloader_placed_binary_is_unknown_in_either_directory() {
+    let ledger = parse_cargo_installs(LEDGER).unwrap();
+    let (before, before_msg) = provenance_report(
+        "tm",
+        "1.4.0",
+        Path::new("/Users/masa/.local/bin/tm"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
+    let (after, after_msg) = provenance_report(
+        "tm",
+        "1.4.0",
+        &installed("tm"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
+    assert_eq!(before, CheckStatus::Unknown, "pre-Phase-3: {before_msg}");
+    assert_eq!(after, CheckStatus::Unknown, "post-Phase-3: {after_msg}");
+    assert_eq!(
+        before, after,
+        "the destination flip must not change severity"
+    );
+}
+
+/// A version pair that is not orderable stays a `Fail` — an unverifiable
+/// mismatch is still a mismatch, and guessing a direction would be a claim.
+#[test]
+fn fails_when_versions_cannot_be_ordered() {
+    let ledger = vec![CargoInstall {
+        package: "trusty-mpm".into(),
+        version: "not-a-version".into(),
+        source: InstallSource::Registry,
+        bins: vec!["tm".into()],
+    }];
+    let (status, msg) = provenance_report(
+        "tm",
+        "1.4.0",
+        &installed("tm"),
+        Path::new(CARGO_BIN),
+        Some(&ledger),
+        &always_exists,
+    );
+    assert_eq!(status, CheckStatus::Fail, "message: {msg}");
+    assert!(msg.contains("cannot be ordered"), "message: {msg}");
+}
+
+#[test]
+fn skew_is_ledger_stale_when_running_is_newer() {
+    assert_eq!(
+        classify_version_skew("1.3.1", "1.4.0"),
+        VersionSkew::LedgerStale
+    );
+}
+
+#[test]
+fn skew_is_running_stale_when_ledger_is_newer() {
+    assert_eq!(
+        classify_version_skew("1.4.0", "1.3.1"),
+        VersionSkew::RunningStale
+    );
+}
+
+#[test]
+fn skew_is_unordered_for_unparseable_versions() {
+    // Either side unparseable, or an equal pair the caller should never send:
+    // all three are "no direction", never a guessed one.
+    assert_eq!(
+        classify_version_skew("1.3", "1.4.0"),
+        VersionSkew::Unordered,
+        "a two-component version is not semver and must not be guessed at"
+    );
+    assert_eq!(
+        classify_version_skew("1.3.1", "wat"),
+        VersionSkew::Unordered
+    );
+    assert_eq!(
+        classify_version_skew("1.3.1", "1.3.1"),
+        VersionSkew::Unordered
+    );
+}
+
+/// Pre-release ordering must follow semver, not string comparison.
+///
+/// Why: `1.4.0-rc.1` sorts AFTER `1.4.0` as a string and BEFORE it as a
+/// version. A downgrade from `1.4.0` to `1.4.0-rc.1` is a real regression and
+/// must stay `Fail`, not be excused as a stale ledger.
+/// Test: this test.
+#[test]
+fn skew_orders_prereleases_by_semver_not_string() {
+    assert_eq!(
+        classify_version_skew("1.4.0", "1.4.0-rc.1"),
+        VersionSkew::RunningStale
+    );
+    assert_eq!(
+        classify_version_skew("1.4.0-rc.1", "1.4.0"),
+        VersionSkew::LedgerStale
+    );
 }
 
 #[test]

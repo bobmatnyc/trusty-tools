@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 
 use crate::index::PalaceBm25Index;
-use crate::protocol::SearchHit;
+use crate::protocol::{SearchHit, StatsResult};
 
 /// Default write-coalescing window — how long the worker waits to coalesce
 /// more write ops after seeing the first one.
@@ -71,6 +71,16 @@ enum Op {
         query: String,
         top_k: usize,
         reply: oneshot::Sender<Result<Vec<SearchHit>>>,
+    },
+    Stats {
+        reply: oneshot::Sender<Result<StatsResult>>,
+    },
+    Flush {
+        reply: oneshot::Sender<Result<usize>>,
+    },
+    MissingDocs {
+        doc_ids: Vec<String>,
+        reply: oneshot::Sender<Result<Vec<String>>>,
     },
 }
 
@@ -188,6 +198,77 @@ impl BatchQueue {
             .map_err(|_| anyhow!("bm25 batch worker dropped reply channel"))?
     }
 
+    /// Force the snapshot to disk and return the document count written.
+    ///
+    /// Why: the worker flushes at the end of each write batch, so a process
+    /// that exits mid-window loses that window's writes. That was survivable
+    /// while SIGTERM only arrived at daemon shutdown; it is not survivable now
+    /// that the supervisor reaps daemons routinely to stay within its cap. A
+    /// reap that silently discarded the last batch would make backfill
+    /// coverage depend on how recently a palace was evicted — the exact class
+    /// of invisible partial state this work exists to remove.
+    /// What: sends `Op::Flush`; the worker runs `index.flush()` inline (like
+    /// `Search` and `Stats`, so it never queues behind the write window) and
+    /// replies with the live document count. A no-op when nothing is dirty.
+    /// Test: `batch_queue_flush_persists_within_the_write_window`.
+    pub async fn flush_now(&self) -> Result<usize> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Op::Flush { reply: reply_tx })
+            .await
+            .map_err(|_| anyhow!("bm25 batch worker channel closed"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("bm25 batch worker dropped reply channel"))?
+    }
+
+    /// Report the live corpus size.
+    ///
+    /// Why: a backfiller needs a cheap, authoritative answer to "how much of
+    /// this palace does the daemon already hold" before deciding to skip,
+    /// repair, or run in full — and after the run, to confirm what landed.
+    /// Reading it through the queue (rather than a side channel) means the
+    /// answer reflects every write applied so far, including ones still
+    /// inside an unflushed batch.
+    /// What: sends `Op::Stats`; the worker answers it inline, like `Search`,
+    /// so it never waits out the write-coalescing window.
+    /// Test: `batch_queue_stats_reflect_pending_writes`.
+    pub async fn stats(&self) -> Result<StatsResult> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Op::Stats { reply: reply_tx })
+            .await
+            .map_err(|_| anyhow!("bm25 batch worker channel closed"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("bm25 batch worker dropped reply channel"))?
+    }
+
+    /// Which of `doc_ids` the live index does not hold.
+    ///
+    /// Why: this is the coverage question `stats` cannot answer. A backfiller
+    /// comparing counts declares a palace covered as soon as the daemon holds
+    /// enough documents, regardless of WHICH documents those are — so a corpus
+    /// carrying stale entries reads as complete over drawers it has never
+    /// seen. Asking by id removes the inference entirely.
+    /// What: sends `Op::MissingDocs`; the worker answers it inline (like
+    /// `Search` and `Stats`) so it never waits out the write-coalescing
+    /// window, and so the answer includes writes acked but not yet flushed.
+    /// Test: `batch_queue_missing_docs_sees_pending_writes`.
+    pub async fn missing_docs(&self, doc_ids: Vec<String>) -> Result<Vec<String>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Op::MissingDocs {
+                doc_ids,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow!("bm25 batch worker channel closed"))?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow!("bm25 batch worker dropped reply channel"))?
+    }
+
     /// Run a BM25 search against the live index.
     ///
     /// Why: search is read-only but still flows through the worker so the
@@ -257,6 +338,18 @@ async fn batch_worker(mut rx: mpsc::Receiver<Op>, mut index: PalaceBm25Index, co
                 let _ = reply.send(Ok(hits));
                 continue;
             }
+            Op::Stats { reply } => {
+                let _ = reply.send(Ok(stats_of(&index)));
+                continue;
+            }
+            Op::Flush { reply } => {
+                let _ = reply.send(flush_now(&mut index));
+                continue;
+            }
+            Op::MissingDocs { doc_ids, reply } => {
+                let _ = reply.send(Ok(index.missing_docs(&doc_ids)));
+                continue;
+            }
             Op::Rebuild { reply } => {
                 let new_count = index.rebuild();
                 let flush_result = index
@@ -291,6 +384,28 @@ async fn batch_worker(mut rx: mpsc::Receiver<Op>, mut index: PalaceBm25Index, co
                         // race-free.
                         let hits = index.search(&query, top_k);
                         let _ = reply.send(Ok(hits));
+                    }
+                    Some(Op::Stats { reply }) => {
+                        // Same race-freedom argument as `Search`: every write
+                        // dispatched before this op is already applied, so the
+                        // figures a backfiller reads mid-run never lag behind
+                        // the acks it has already collected.
+                        let _ = reply.send(Ok(stats_of(&index)));
+                    }
+                    Some(Op::MissingDocs { doc_ids, reply }) => {
+                        // Same race-freedom argument as `Search` and `Stats`:
+                        // every write dispatched before this op is already
+                        // applied, so a coverage check taken mid-run never
+                        // reports a document missing that was already acked.
+                        let _ = reply.send(Ok(index.missing_docs(&doc_ids)));
+                    }
+                    Some(Op::Flush { reply }) => {
+                        // Flushing mid-batch is safe and is the whole point:
+                        // the caller is usually a shutdown or reap path that
+                        // must not lose the window's writes. The outer loop
+                        // still flushes at the window's end; `flush` is a
+                        // no-op once the dirty bit is clear.
+                        let _ = reply.send(flush_now(&mut index));
                     }
                     Some(Op::Rebuild { reply }) => {
                         // Honour the rebuild atomically. Flush the pending
@@ -344,6 +459,33 @@ async fn batch_worker(mut rx: mpsc::Receiver<Op>, mut index: PalaceBm25Index, co
     }
 }
 
+/// Snapshot the two corpus figures the `stats` op reports.
+///
+/// Why: the worker answers `Op::Stats` from two places (cold path and
+/// mid-batch), and the two must not drift into different definitions of
+/// "indexed".
+/// What: reads `doc_count` + `total_text_bytes` off the live index. Pure.
+/// Test: `batch_queue_stats_reflect_pending_writes`.
+fn stats_of(index: &PalaceBm25Index) -> StatsResult {
+    StatsResult {
+        doc_count: index.doc_count(),
+        total_text_bytes: index.total_text_bytes(),
+    }
+}
+
+/// Flush the snapshot and report the resulting document count.
+///
+/// Why: the worker answers `Op::Flush` from two places and both must report
+/// the same thing — the count that is now ON DISK, so a caller can treat a
+/// successful flush as durability and not merely as "the call returned".
+/// What: `index.flush()` then `doc_count()`. A clean index flushes nothing and
+/// still reports its count.
+/// Test: `batch_queue_flush_persists_within_the_write_window`.
+fn flush_now(index: &mut PalaceBm25Index) -> Result<usize> {
+    index.flush()?;
+    Ok(index.doc_count())
+}
+
 /// Apply one write op to the index, forwarding the typed reply.
 ///
 /// Why: factored out so the worker loop reads top-to-bottom and the per-op
@@ -368,7 +510,11 @@ fn apply_write_op(index: &mut PalaceBm25Index, op: Op) {
         }
         // Caller guarantees only write ops reach here; treat anything else
         // as a programmer error in this module.
-        Op::Search { .. } | Op::Rebuild { .. } => {
+        Op::Search { .. }
+        | Op::Rebuild { .. }
+        | Op::Stats { .. }
+        | Op::Flush { .. }
+        | Op::MissingDocs { .. } => {
             tracing::error!("apply_write_op called with non-write op — this is a bug");
         }
     }
@@ -444,6 +590,104 @@ mod tests {
         }
         let hits = q.search("shared".into(), 2).await.unwrap();
         assert!(hits.len() <= 2);
+    }
+
+    /// Why: `stats` is only useful to a backfiller if it reflects writes the
+    /// daemon has already acked but not yet flushed. If it read from the
+    /// snapshot on disk instead of the live index, a backfiller would see
+    /// stale counts inside the 50 ms write window and re-send work it had
+    /// already landed — or worse, declare a palace unindexed that isn't.
+    /// What: indexes three docs, immediately (inside the write window) asks
+    /// for stats, and asserts both figures already include all three.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn batch_queue_stats_reflect_pending_writes() {
+        let (q, _dir) = fresh_queue();
+        let empty = q.stats().await.unwrap();
+        assert_eq!(empty.doc_count, 0);
+        assert_eq!(empty.total_text_bytes, 0);
+
+        q.index_doc("d1".into(), "alpha".into()).await.unwrap();
+        q.index_doc("d2".into(), "beta".into()).await.unwrap();
+        q.index_doc("d3".into(), "gamma".into()).await.unwrap();
+
+        // No sleep — this deliberately lands inside the coalescing window,
+        // before any snapshot flush.
+        let s = q.stats().await.unwrap();
+        assert_eq!(s.doc_count, 3, "stats must see un-flushed writes");
+        assert_eq!(s.total_text_bytes, 14);
+    }
+
+    /// Why: a coverage check taken while a backfill is still running must see
+    /// every document the daemon has already acked, otherwise the backfiller
+    /// re-sends work it landed — or, on the post-run check, reports a document
+    /// missing that is sitting un-flushed in the open write window and marks a
+    /// complete palace incomplete.
+    /// What: indexes two docs and asks about three WITHOUT sleeping past the
+    /// coalescing window; only the never-sent id comes back.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn batch_queue_missing_docs_sees_pending_writes() {
+        let (q, _dir) = fresh_queue();
+        let asked = vec!["d1".to_string(), "d2".to_string(), "d3".to_string()];
+        assert_eq!(q.missing_docs(asked.clone()).await.unwrap(), asked);
+
+        q.index_doc("d1".into(), "alpha".into()).await.unwrap();
+        q.index_doc("d2".into(), "beta".into()).await.unwrap();
+
+        // No sleep — deliberately inside the coalescing window.
+        assert_eq!(
+            q.missing_docs(asked).await.unwrap(),
+            vec!["d3".to_string()],
+            "missing_docs must see un-flushed writes"
+        );
+    }
+
+    /// Why: a backfiller distinguishes "not indexed" from "indexed, no hits"
+    /// purely by `doc_count`, so a `rebuild` that left the count stale would
+    /// make a wiped palace read as fully indexed and never get repaired.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn batch_queue_stats_go_to_zero_after_rebuild() {
+        let (q, _dir) = fresh_queue();
+        q.index_doc("d1".into(), "alpha".into()).await.unwrap();
+        assert_eq!(q.stats().await.unwrap().doc_count, 1);
+        q.rebuild().await.unwrap();
+        let s = q.stats().await.unwrap();
+        assert_eq!(s.doc_count, 0);
+        assert_eq!(s.total_text_bytes, 0);
+    }
+
+    /// Why: the worker only writes the snapshot at the end of a write batch,
+    /// so anything indexed inside the still-open window exists in memory
+    /// only. That was survivable while the only thing that ended a daemon was
+    /// a deliberate shutdown; it stopped being survivable once the supervisor
+    /// began reaping daemons routinely to hold its process cap. Without an
+    /// explicit flush, a reaped palace silently loses its last window — this
+    /// asserts it does not.
+    /// What: indexes a doc and, WITHOUT sleeping past the 50 ms window, calls
+    /// `flush_now`, then reads the snapshot straight off disk.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn batch_queue_flush_persists_within_the_write_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index = PalaceBm25Index::load_or_create(dir.path()).expect("load palace index");
+        let snapshot = index.snapshot_path().to_path_buf();
+        let q = BatchQueue::new(index, BatchConfig::default());
+
+        q.index_doc("d1".into(), "phoenix rising".into())
+            .await
+            .unwrap();
+        assert!(
+            !snapshot.exists(),
+            "precondition: nothing is on disk until a flush happens"
+        );
+
+        let doc_count = q.flush_now().await.expect("explicit flush must succeed");
+        assert_eq!(doc_count, 1);
+
+        let raw = std::fs::read_to_string(&snapshot).expect("snapshot must exist after flush");
+        assert!(raw.contains("phoenix rising"), "got: {raw}");
     }
 
     #[tokio::test]

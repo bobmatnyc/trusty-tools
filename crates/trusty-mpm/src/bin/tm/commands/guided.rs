@@ -1289,5 +1289,8 @@ async fn launch_protected_workspace(
     .await?;
 
     let dir = workspace.path().to_string_lossy().to_string();
-    super::launch::launch(client, url, Some(dir), None).await
+    // #5274: the fallback already provisioned the protected worktree it
+    // wants this session to run in, and passes it as `dir`; `launch` must not
+    // provision a SECOND one on top, so the worktree request stays `false`.
+    super::launch::launch(client, url, Some(dir), None, false).await
 }

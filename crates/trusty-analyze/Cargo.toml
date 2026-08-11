@@ -1,6 +1,6 @@
 [package]
 name        = "trusty-analyze"
-version     = "0.8.0"
+version     = "0.9.0"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true
@@ -76,7 +76,10 @@ redb               = { workspace = true }
 dashmap            = { workspace = true }
 rust-embed         = { workspace = true }
 mime_guess         = { workspace = true }
-trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock", "mcp", "console-metrics", "config-cli"] }
+# `webhook-relay` (#5182): the console->target relay wire contract AND its
+# receive half — the durable inbox, the listener, and the hardened UDS bind
+# this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
+trusty-common      = { workspace = true, features = ["symgraph", "cli-help", "update-check", "bedrock", "mcp", "console-metrics", "config-cli", "webhook-relay"] }
 tree-sitter            = { workspace = true }
 tree-sitter-rust       = { workspace = true }
 tree-sitter-typescript = { workspace = true }
@@ -97,15 +100,16 @@ scip               = { workspace = true }
 protobuf           = { workspace = true }
 xxhash-rust        = { workspace = true }
 base64             = { workspace = true }
-hmac               = { workspace = true }
-sha2               = { workspace = true }
-hex                = { workspace = true }
-# Why (issue #536): fastembed is now optional so callers can select the ORT
-#      backend via Cargo features instead of having ort-download-binaries
-#      hardcoded.  The base features list only includes the TLS stack needed
-#      to fetch the ONNX model; the ORT backend feature is added by one of
-#      the bundled-ort / load-dynamic / cuda sub-features below.
-fastembed  = { workspace = true, features = ["hf-hub-rustls-tls"], optional = true }
+# Why (#5181): `hmac`/`sha2`/`hex` were REMOVED with `verify_webhook_signature`.
+#      `trusty-console` verifies a GitHub delivery's HMAC once, before relaying
+#      (ADR-0034 §3); this crate has no signature to check any more.
+# Why (#5067): the `fastembed` dependency was REMOVED. It backed a neural
+#      concept-clustering embedder that no caller ever selected, yet
+#      `NeuralEmbedder::new()` ran at every daemon boot and made an untimed
+#      hf-hub request that blocked startup for as long as that request took
+#      (31m46s measured in production). `ort`/`tokenizers` stay because the
+#      unrelated, off-by-default `ner` feature uses them; neither is on the
+#      boot path.
 ort        = { workspace = true, optional = true }
 tokenizers = { workspace = true, optional = true }
 # Why (#630): trusty-review provides the reusable LLM review pipeline + MCP tool
@@ -125,31 +129,21 @@ trusty-review = { workspace = true, optional = true }
 #      exactly as before. Library consumers that only want the dispatcher /
 #      CLI types override with `default-features = false`.
 #
-# Why (issue #536): `bundled-ort` is now part of the default set so existing
-#      installs (`cargo install trusty-analyze`) keep the same behaviour (static
-#      ORT libs bundled, glibc ≥ 2.38 hosts).  To install on glibc < 2.38
-#      (e.g. Amazon Linux 2023 / glibc 2.34) use:
-#        cargo install trusty-analyze \
-#          --no-default-features --features http-server,load-dynamic
-#      and set ORT_DYLIB_PATH to the system libonnxruntime.so path at runtime.
-default = ["http-server", "bundled-ort"]
+# Why (#5067): `bundled-ort` (and its `load-dynamic` / `cuda` siblings) were
+#      REMOVED from the default set and from the crate. They existed only to
+#      pick an ONNX Runtime backend for the neural clustering embedder, which
+#      no caller selected and which cost every boot an untimed hf-hub request.
+#      Removing them also removes ONNX Runtime from the shipped binary, which
+#      is why `trusty-analyze` no longer needs the AL2023 load-dynamic release
+#      asset or the installer's glibc-aware asset routing.
+default = ["http-server"]
 # Enables the axum HTTP daemon surface (the `service` module and the
 # `mcp::sse` HTTP/SSE transport). Pulls in `axum`, `tower-http`, and the
 # matching `trusty-common/axum-server` feature flag.
 http-server = ["dep:axum", "dep:tower-http", "trusty-common/axum-server"]
-# Bundle the static ORT libs downloaded by fastembed (glibc ≥ 2.38 hosts,
-# macOS). This is the default ORT backend. Mutually exclusive with
-# load-dynamic and cuda at the ort-sys level.
-bundled-ort  = ["dep:fastembed", "fastembed/ort-download-binaries"]
-# Dynamic ORT loading — no bundled static libs. Use on glibc < 2.38 hosts
-# (e.g. Amazon Linux 2023) with a system ONNX Runtime installation.
-# Build: cargo install trusty-analyze --no-default-features \
-#                                     --features http-server,load-dynamic
-# Runtime: export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
-load-dynamic = ["dep:fastembed", "fastembed/ort-load-dynamic"]
-# GPU-accelerated embedding via the ONNX Runtime CUDA execution provider.
-# Always pair with --no-default-features so bundled-ort is dropped.
-cuda         = ["dep:fastembed", "fastembed/cuda", "fastembed/ort-load-dynamic"]
+# Optional ONNX NER over doc comments (`core::ner`). OFF by default and not on
+# the boot path — `NerExtractor::try_load` is only reached from entity
+# extraction, and it is a no-op unless the operator drops a model into place.
 ner     = ["dep:ort", "dep:tokenizers"]
 # Why (#630): exposes the trusty-review LLM review pipeline as MCP tools
 #      (`tr_review_pr`, `tr_review_diff`, `tr_review_health`). OFF by default so
@@ -169,3 +163,7 @@ features = ["http-server"]
 tempfile       = { workspace = true }
 tower          = { workspace = true }
 http-body-util = { workspace = true }
+# docgen (#5205 follow-up): `tests/generated_docs.rs` renders the MCP tool
+# section of README.md / CLAUDE.md from the descriptor functions. Test-facing
+# only, so the feature is enabled here rather than on the production dep.
+trusty-common     = { workspace = true, features = ["docgen"] }

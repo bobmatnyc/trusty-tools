@@ -27,7 +27,7 @@ mod config;
 mod writer;
 
 pub use config::{
-    PromptLogConfig, PromptLogEntry, DEFAULT_MAX_BYTES, DEFAULT_RETENTION_DAYS, ENV_DIR,
-    ENV_ENABLED, ENV_HASH_PROMPTS, ENV_MAX_BYTES, ENV_RETENTION_DAYS,
+    PromptLogConfig, PromptLogEntry, RecallQueryShape, DEFAULT_MAX_BYTES, DEFAULT_RETENTION_DAYS,
+    ENV_DIR, ENV_ENABLED, ENV_HASH_PROMPTS, ENV_MAX_BYTES, ENV_RETENTION_DAYS,
 };
 pub use writer::PromptLogger;

@@ -31,7 +31,7 @@ dependencies.
 ### Option 1: `cargo install` (recommended)
 
 ```bash
-cargo install trusty-git-analytics
+cargo install tga
 ```
 
 This installs the `tga` binary into `~/.cargo/bin`. Make sure that
@@ -40,16 +40,16 @@ directory is on your `PATH`.
 ### Option 2: Build from source
 
 ```bash
-git clone https://github.com/bobmatnyc/trusty-git-analytics
-cd trusty-git-analytics
-cargo build --release
+git clone https://github.com/bobmatnyc/trusty-tools
+cd trusty-tools
+cargo build --release -p tga
 # Binary at ./target/release/tga
 ```
 
 ### Option 3: Pre-built binaries
 
 Pre-built binaries for macOS, Linux, and Windows are published on the
-[GitHub Releases page](https://github.com/bobmatnyc/trusty-git-analytics/releases).
+[GitHub Releases page](https://github.com/bobmatnyc/trusty-tools/releases).
 Download, `chmod +x`, and move into `PATH`.
 
 ### Verify
@@ -276,7 +276,7 @@ cargo build --release
 
 ## Getting Help
 
-- **Issue tracker**: https://github.com/bobmatnyc/trusty-git-analytics/issues
+- **Issue tracker**: https://github.com/bobmatnyc/trusty-tools/issues
 - **Requirements docs**: `docs/trusty-git-analytics/requirements/` (full schema specs)
 - **Architecture notes**: `docs/trusty-git-analytics/developer/architecture.md`
 

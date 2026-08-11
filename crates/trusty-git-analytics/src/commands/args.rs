@@ -129,7 +129,8 @@ pub struct AnalyzeArgs {
 }
 
 /// Arguments for `tga collect`.
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Collect commits from git repositories into the database (Stage 1).",
     long_about = "Walk configured git repositories and persist commit metadata, diff statistics,\n\
@@ -318,7 +319,8 @@ pub struct CollectArgs {
 /// `classification.sources:` block in `config.yaml`. They are consulted
 /// between the manual-override tier and custom rules. Pass `--no-external`
 /// to disable all external lookups (useful in CI or offline environments).
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Classify collected commits using the four-tier cascade (Stage 2).",
     long_about = "Run the classification cascade over commits already in the database.\n\n\
@@ -412,7 +414,8 @@ pub struct ClassifyArgs {
 }
 
 /// Arguments for `tga report`.
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Generate productivity reports from classified commits (Stage 3).",
     long_about = "Produce CSV, JSON, and/or Markdown reports from the classified commits\n\
@@ -447,4 +450,35 @@ pub struct ReportArgs {
     /// exits non-zero and suggests `tga aliases list`.
     #[arg(long, value_name = "EMAIL")]
     pub author: Option<String>,
+}
+
+/// Arguments for `tga tui` (issue #5197).
+#[derive(Args, Debug, Default)]
+#[command(
+    about = "Interactive terminal view: repo picker, live progress, correlation results.",
+    long_about = "Open a terminal UI over the existing collect / correlate state.\n\n\
+Three views, switched with [Tab]:\n\
+  Repos     -- pick which configured repositories the next run walks.\n\
+                Org entries from `github.orgs` are listed for context; they\n\
+                need a token before discovery can turn them into repos.\n\
+  Progress  -- live per-repository progress while a run is in flight.\n\
+  Results   -- which commits linked to which board items, and what did not.\n\n\
+Everything here is deterministic. No model and no API key are required, and\n\
+none is consulted. `[c]` runs the commit-to-board-item correlation pass with\n\
+no network at all; --correlate-only disables the pull action for the whole\n\
+session.",
+    after_help = "EXAMPLES:\n\
+  # Pick repos, pull, and watch the correlation land\n\
+  tga tui\n\n\
+  # Offline: correlate and browse what is already in the database\n\
+  tga tui --correlate-only"
+)]
+pub struct TuiArgs {
+    /// Disable the pull action for this session; `[c]` (correlate) still works.
+    ///
+    /// Use this on a machine with no credentials, or when you only want to
+    /// re-run the deterministic commit-to-board-item link pass over data that
+    /// is already collected.
+    #[arg(long, default_value_t = false)]
+    pub correlate_only: bool,
 }

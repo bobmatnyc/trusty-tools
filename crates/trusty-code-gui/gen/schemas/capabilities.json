@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Grants nothing, deliberately. This crate has always run with zero ACL permissions (its own #[tauri::command] handlers are outside the ACL) and still does; the file exists so the `capabilities` directory tauri_build declares under cargo:rerun-if-changed is present. See build.rs and #4699. Add entries only as a deliberate permission grant.","local":true,"windows":["main"],"permissions":[]}}

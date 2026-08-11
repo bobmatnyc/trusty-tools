@@ -240,8 +240,8 @@ fn parse_owner_repo(repo_url: &str) -> Option<(String, String)> {
     Some((owner.to_string(), repo.to_string()))
 }
 
-/// Resolve `<home>/trusty-mpm-projects/<owner>/<repo>` to an existing local
-/// git-repo checkout, or `None` if it isn't one.
+/// Resolve `<workspace_root>/<owner>/<repo>` to an existing local git-repo
+/// checkout, or `None` if it isn't one.
 ///
 /// Why: a registry entry with no local checkout on THIS machine has nothing
 /// the picker could bind to — see module docs on why such an entry is
@@ -249,10 +249,15 @@ fn parse_owner_repo(repo_url: &str) -> Option<(String, String)> {
 /// What: reuses [`super::is_git_repo`] — the identical discriminator
 /// `super::roster`'s own scan already filters on, so a registered project is
 /// held to the same "must be a real git checkout" bar as a discovered one.
+///
+/// #5203 changed the first parameter from `home` to the RESOLVED workspace
+/// root. Joining `trusty-mpm-projects` onto `home` here was the second half of
+/// the bug: with a retargeted root every registered project failed this
+/// existence check and was silently dropped from the picker.
 /// Test: `tests::merge_marks_registered_projects_with_local_checkout`,
 /// `tests::merge_skips_registry_projects_without_local_checkout`.
-fn resolve_local_path(home: &Path, owner: &str, repo: &str) -> Option<PathBuf> {
-    let candidate = home.join("trusty-mpm-projects").join(owner).join(repo);
+fn resolve_local_path(workspace_root: &Path, owner: &str, repo: &str) -> Option<PathBuf> {
+    let candidate = workspace_root.join(owner).join(repo);
     (candidate.is_dir() && is_git_repo(&candidate)).then_some(candidate)
 }
 
@@ -316,10 +321,11 @@ fn normalize_for_comparison(path: &Path) -> String {
 fn merge(
     fs_roster: ProjectRoster,
     registry_projects: &[RegistryProject],
-    home: Option<&Path>,
+    workspace_root: Option<&Path>,
 ) -> ProjectRoster {
     let mut entries = fs_roster.entries;
-    if let Some(home) = home {
+    // #5203: resolve registry entries under the CONFIGURED workspace root.
+    if let Some(workspace_root) = workspace_root {
         let mut path_index: HashMap<String, usize> = entries
             .iter()
             .enumerate()
@@ -329,7 +335,7 @@ fn merge(
             let Some((owner, repo)) = parse_owner_repo(&rp.repo_url) else {
                 continue;
             };
-            let Some(path) = resolve_local_path(home, &owner, &repo) else {
+            let Some(path) = resolve_local_path(workspace_root, &owner, &repo) else {
                 continue;
             };
             let normalized = normalize_for_comparison(&path);
@@ -377,10 +383,10 @@ async fn merged_roster_with(
     client: &reqwest::Client,
     base_url: &str,
     fs_roster: ProjectRoster,
-    home: Option<&Path>,
+    workspace_root: Option<&Path>,
 ) -> ProjectRoster {
     match fetch_registry_projects(client, base_url).await {
-        Ok(registry_projects) => merge(fs_roster, &registry_projects, home),
+        Ok(registry_projects) => merge(fs_roster, &registry_projects, workspace_root),
         Err(error) => {
             tracing::warn!(
                 error = %error,
@@ -413,7 +419,8 @@ pub async fn merged_roster() -> ProjectRoster {
         &reqwest::Client::new(),
         &mpm_daemon_url(),
         super::roster::list_projects(),
-        dirs::home_dir().as_deref(),
+        // #5203: the same resolver `roster::list_projects` scans with.
+        Some(trusty_common::workspace_layout::workspace_root().as_path()),
     )
     .await
 }
@@ -508,13 +515,20 @@ mod tests {
                 .join("bobmatnyc")
                 .join("trusty-tools"),
         );
-        let fs_roster = super::super::roster::list_projects_in(home.path());
+        let fs_roster = super::super::roster::list_projects_in(
+            home.path(),
+            &home.path().join("trusty-mpm-projects"),
+        );
         let registry = vec![RegistryProject {
             name: "trusty-tools".to_string(),
             repo_url: "https://github.com/bobmatnyc/trusty-tools".to_string(),
         }];
 
-        let merged = merge(fs_roster, &registry, Some(home.path()));
+        let merged = merge(
+            fs_roster,
+            &registry,
+            Some(&home.path().join("trusty-mpm-projects")),
+        );
 
         assert_eq!(merged.entries.len(), 1);
         assert!(merged.entries[0].registered, "must be marked registered");
@@ -535,9 +549,16 @@ mod tests {
                 .join("bobmatnyc")
                 .join("bakeoff-l1"),
         );
-        let fs_roster = super::super::roster::list_projects_in(home.path());
+        let fs_roster = super::super::roster::list_projects_in(
+            home.path(),
+            &home.path().join("trusty-mpm-projects"),
+        );
 
-        let merged = merge(fs_roster, &[], Some(home.path()));
+        let merged = merge(
+            fs_roster,
+            &[],
+            Some(&home.path().join("trusty-mpm-projects")),
+        );
 
         assert_eq!(merged.entries.len(), 1);
         assert!(!merged.entries[0].registered, "must stay unregistered");
@@ -551,13 +572,20 @@ mod tests {
     fn merge_skips_registry_projects_without_local_checkout() {
         let home = tempfile::tempdir().expect("tempdir");
         // No `trusty-mpm-projects` dir at all on this machine.
-        let fs_roster = super::super::roster::list_projects_in(home.path());
+        let fs_roster = super::super::roster::list_projects_in(
+            home.path(),
+            &home.path().join("trusty-mpm-projects"),
+        );
         let registry = vec![RegistryProject {
             name: "ghost-project".to_string(),
             repo_url: "https://github.com/someone/ghost-project".to_string(),
         }];
 
-        let merged = merge(fs_roster, &registry, Some(home.path()));
+        let merged = merge(
+            fs_roster,
+            &registry,
+            Some(&home.path().join("trusty-mpm-projects")),
+        );
 
         assert!(merged.entries.is_empty());
     }
@@ -600,7 +628,10 @@ mod tests {
                 .join("bobmatnyc")
                 .join("Trusty-Tools"),
         );
-        let fs_roster = super::super::roster::list_projects_in(home.path());
+        let fs_roster = super::super::roster::list_projects_in(
+            home.path(),
+            &home.path().join("trusty-mpm-projects"),
+        );
         assert_eq!(fs_roster.entries.len(), 1, "fs scan must find the repo");
 
         // The registry's repo_url carries a DIFFERENT casing for the same repo.
@@ -609,7 +640,11 @@ mod tests {
             repo_url: "https://github.com/bobmatnyc/trusty-tools".to_string(),
         }];
 
-        let merged = merge(fs_roster, &registry, Some(home.path()));
+        let merged = merge(
+            fs_roster,
+            &registry,
+            Some(&home.path().join("trusty-mpm-projects")),
+        );
 
         assert_eq!(
             merged.entries.len(),
@@ -637,7 +672,10 @@ mod tests {
                 .join("bobmatnyc")
                 .join("trusty-tools"),
         );
-        let fs_roster = super::super::roster::list_projects_in(real_home.path());
+        let fs_roster = super::super::roster::list_projects_in(
+            real_home.path(),
+            &real_home.path().join("trusty-mpm-projects"),
+        );
         assert_eq!(fs_roster.entries.len(), 1, "fs scan must find the repo");
 
         let parent = real_home.path().parent().expect("tempdir has a parent");
@@ -658,7 +696,11 @@ mod tests {
 
         // `merge` resolves the registry entry against the ALIAS, not the
         // real path the fs scan used.
-        let merged = merge(fs_roster, &registry, Some(&alias));
+        let merged = merge(
+            fs_roster,
+            &registry,
+            Some(&alias.join("trusty-mpm-projects")),
+        );
         let _ = std::fs::remove_file(&alias);
 
         assert_eq!(
@@ -701,7 +743,10 @@ mod tests {
                 .join("bobmatnyc")
                 .join("trusty-tools"),
         );
-        let fs_roster = super::super::roster::list_projects_in(home.path());
+        let fs_roster = super::super::roster::list_projects_in(
+            home.path(),
+            &home.path().join("trusty-mpm-projects"),
+        );
         let base_url = spawn_mock_mpm(json!([
             {"name": "trusty-tools", "repo_url": "https://github.com/bobmatnyc/trusty-tools"}
         ]))
@@ -711,7 +756,7 @@ mod tests {
             &reqwest::Client::new(),
             &base_url,
             fs_roster,
-            Some(home.path()),
+            Some(&home.path().join("trusty-mpm-projects")),
         )
         .await;
 
@@ -737,7 +782,10 @@ mod tests {
                 .join("bobmatnyc")
                 .join("trusty-tools"),
         );
-        let fs_roster = super::super::roster::list_projects_in(home.path());
+        let fs_roster = super::super::roster::list_projects_in(
+            home.path(),
+            &home.path().join("trusty-mpm-projects"),
+        );
 
         // Grab a port and immediately drop the listener so nothing answers —
         // a fast, deterministic "connection refused" rather than a real
@@ -751,7 +799,7 @@ mod tests {
             &reqwest::Client::new(),
             &dead_url,
             fs_roster,
-            Some(home.path()),
+            Some(&home.path().join("trusty-mpm-projects")),
         )
         .await;
 

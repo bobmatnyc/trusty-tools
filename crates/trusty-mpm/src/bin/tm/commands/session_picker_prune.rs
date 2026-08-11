@@ -492,6 +492,12 @@ const WORKTREE_CONTAINER_MARKERS: [(&str, &str); 2] =
 /// What: matches the LAST TWO path components against
 /// [`WORKTREE_CONTAINER_MARKERS`], so it holds for any checkout location and for
 /// nested worktrees alike.
+///
+/// #5204: the tm-session container's NAME is configurable, so that marker's
+/// container component is compared through the shared resolver (configured name
+/// OR the built-in `.worktrees`). The `.claude/worktrees` marker is Claude
+/// Code's own agent-worktree store (ADR-0020) and deliberately stays a fixed
+/// literal — retargeting tm's session base must never reclassify it.
 /// Test: `auto_prune_clears_record_whose_worktree_root_survived_the_removal`.
 fn is_worktree_container(dir: &Path) -> bool {
     let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
@@ -504,9 +510,15 @@ fn is_worktree_container(dir: &Path) -> bool {
     else {
         return false;
     };
-    WORKTREE_CONTAINER_MARKERS
-        .iter()
-        .any(|(p, c)| *p == parent && *c == name)
+    let tm_names = trusty_common::workspace_layout::WorktreeDirNames::resolve();
+    WORKTREE_CONTAINER_MARKERS.iter().any(|(p, c)| {
+        *p == parent
+            && if *c == trusty_common::workspace_layout::DEFAULT_WORKTREES_DIRNAME {
+                tm_names.matches(name)
+            } else {
+                *c == name
+            }
+    })
 }
 
 /// Decide whether an absent `candidate` is absent because something was DELETED

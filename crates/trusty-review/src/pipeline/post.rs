@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     config::ReviewConfig,
@@ -218,6 +218,16 @@ pub async fn finalize_review(
     // paths, which both funnel through `finalize_run` → here).
     result.findings_count = result.findings.len();
 
+    // #4044: the narrative summary was written BEFORE the verification round on
+    // both paths, so it can still cite a finding the verifier refuted as a merge
+    // blocker.  Prepend the correction here — the one exit both paths funnel
+    // through — so the qualifier reaches the posted comment and the returned
+    // result alike.  No-op when nothing was refuted.
+    result.review_body = crate::pipeline::verification_notice::prepend_verification_notice(
+        &result.review_body,
+        &result.findings,
+    );
+
     // Append the metadata footer to review_body BEFORE the post/log branch so
     // the footer is identical in the live GitHub comment (which reads
     // result.review_body via build_review_comment_body) and in the returned
@@ -254,15 +264,20 @@ pub async fn finalize_review(
                     // Mark the dedup claim complete so retries are suppressed.
                     if let Some(store) = post_ctx.dedup
                         && !post_ctx.head_sha.is_empty()
-                        && let Err(e) = store.complete(
-                            post_ctx.owner,
-                            post_ctx.repo,
-                            post_ctx.pr,
-                            post_ctx.head_sha,
-                        )
+                        && let Err(e) = store
+                            .complete(
+                                post_ctx.owner,
+                                post_ctx.repo,
+                                post_ctx.pr,
+                                post_ctx.head_sha,
+                            )
+                            .await
                     {
-                        // Fail-safe: a dedup write failure must not fail the review.
-                        warn!("dedup complete() failed (non-fatal): {e}");
+                        // #5064: the comment is already posted, so there is
+                        // nothing left to fail closed on. The InProgress claim
+                        // still suppresses redelivery until it ages out, but an
+                        // operator needs to see this, so it is an error.
+                        error!("dedup complete() failed after a live post: {e}");
                     }
                 }
                 Err(e) => {

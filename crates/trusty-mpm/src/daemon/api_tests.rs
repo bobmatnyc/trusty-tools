@@ -1173,7 +1173,9 @@ async fn doctor_endpoint_returns_report() {
     // added the output_style_staleness check; issue #2997 added the tcc_taint
     // check; issue #3453 part 2 added the output_style_legacy_ids check;
     // issue #3427 added the scaffold_tracking check; issue #4442 added the
-    // asset_tier check; issue #4033 added the binary_provenance check).
+    // asset_tier check; issue #4033 added the binary_provenance check; issue
+    // #5045 added the search_index_pin check; the stray-`.mcp.json` probe
+    // added the stray_mcp_json check).
     // #1905's stale-skill
     // cleanup is a one-time migration, not a `run_doctor` probe, so it does
     // not appear here; the per-check statuses carry the diagnosis, not the
@@ -1201,6 +1203,7 @@ async fn doctor_endpoint_returns_report() {
         "agent_skills_prose_hints",
         "memory",
         "search",
+        "search_index_pin",
         "worktrees",
         "worktree_disk",
         "gh_account",
@@ -1211,6 +1214,9 @@ async fn doctor_endpoint_returns_report() {
         "scaffold_tracking",
         "push_guard",
         "binary_provenance",
+        // #5007: `sessions.json` integrity — a corrupt store blocks every write.
+        "session_store",
+        "stray_mcp_json",
     ];
     assert_eq!(names, expected);
     // Count derived from the list above, never a standalone literal:

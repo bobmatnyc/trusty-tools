@@ -133,7 +133,7 @@ crates/trusty-review/
         ├── mod.rs          build_router(), serve(), DEFAULT_PORT=7880
         ├── handlers.rs     AppState, handle_health(), handle_status(), handle_review()
         ├── handlers_tests.rs
-        └── webhook.rs      handle_github_webhook() — HMAC-validated GitHub events
+        (webhook.rs removed in #5181 — GitHub events arrive over UDS, see webhook_listener.rs)
 ```
 
 **Key invariants (enforced by code structure):**

@@ -103,7 +103,7 @@ impl AgentConfig {
         }
         let lookup = |n: &str| Self::by_name_unresolved_in(dirs, n).ok();
         match crate::agents::extends::resolve(name, &lookup) {
-            Ok(resolved) => Ok(resolved.finalize_extends()),
+            Ok(resolved) => resolved.finalize_extends(),
             Err(e) => Self::extends_shadow_fallback_in(dirs, name, from_package, e),
         }
     }
@@ -271,7 +271,7 @@ impl AgentConfig {
         let resolved = crate::agents::extends::resolve(name, &lookup).with_context(|| {
             format!("failed to resolve flat `<name>.toml` extends for '{name}'")
         })?;
-        Ok(resolved.finalize_extends())
+        resolved.finalize_extends()
     }
 
     /// Re-run model + adapter resolution after an `extends` merge (#3055).
@@ -283,18 +283,105 @@ impl AgentConfig {
     /// through `resolve_model` (for `TAGENT_MODEL_*` / default-env overrides
     /// keyed on the FINAL agent name) and re-derive the provider adapter so it
     /// matches a normally-loaded config.
-    /// What: resolves `agent.model` via [`resolve_model`] and rebuilds
-    /// `adapter` from the result. Idempotent for an already-resolved model.
+    /// What: resolves `agent.model` via [`resolve_model`], re-applies the
+    /// provider pin ([`AgentConfig::apply_provider_pin`], #3765 — the merged
+    /// `provider_id` may have come from the base) and rebuilds `adapter` from
+    /// the result. Idempotent for an already-resolved model and an
+    /// already-pinned slug. Returns `Err` when the merged config declares a
+    /// pin that cannot be honoured — the same fail-closed contract a directly
+    /// loaded agent gets, rather than a silently unpinned child.
     /// Test: `extends_resolved_child_inherits_base_model` (registry tests).
-    pub(crate) fn finalize_extends(mut self) -> Self {
+    pub(crate) fn finalize_extends(mut self) -> Result<Self> {
         let (resolved, _src) = resolve_model(
             &self.agent.name,
             &self.agent.model,
             self.llm.model_override.as_deref(),
         );
         self.agent.model = resolved;
+        self.apply_provider_pin()?;
         self.adapter = Arc::from(adapter_for_model(&self.agent.model));
-        self
+        Ok(self)
+    }
+
+    /// Apply `[agent].provider_id` to this config's routing (#3765).
+    ///
+    /// Why: the pin has to change something the dispatch path actually reads,
+    /// or it is the same inert key #3765 was filed about. Two things carry
+    /// provider identity through this crate: the model slug (which
+    /// [`adapter_for_model`] resolves an adapter from, at a dozen call sites)
+    /// and `[llm].use_anthropic_direct` (which decides whether the Anthropic
+    /// adapter dials api.anthropic.com or falls back to OpenRouter). A pin
+    /// that set only one of the two would leave the other free to contradict
+    /// it, so this sets both, together, in one place.
+    /// What: no-ops for an unpinned agent — its model and
+    /// `use_anthropic_direct` are left exactly as loaded, so #3765 changes
+    /// nothing for agents that do not opt in. For a pinned agent,
+    /// [`crate::llm::provider_pin::resolve`] validates the pin (unknown /
+    /// undispatchable / uncredentialed all fail closed with an actionable
+    /// message), [`crate::llm::provider_pin::pinned_model_slug`] rewrites the
+    /// model so the pinned provider's routing marker leads it, and
+    /// `use_anthropic_direct` is forced to `pin == Anthropic` — a pin to any
+    /// other provider can no longer be hijacked by an ambient
+    /// `ANTHROPIC_API_KEY`, and a pin TO Anthropic no longer depends on one
+    /// being noticed.
+    /// Test: `agent_config_honours_a_provider_pin`,
+    /// `agent_config_pin_beats_the_model_slug_prefix`,
+    /// `agent_config_without_a_pin_is_unchanged`,
+    /// `agent_config_rejects_a_pin_with_no_credential`.
+    pub(crate) fn apply_provider_pin(&mut self) -> Result<()> {
+        let Some(pin) =
+            crate::llm::provider_pin::resolve(&self.agent.name, self.agent.provider_id.as_deref())?
+        else {
+            return Ok(());
+        };
+        let pinned = crate::llm::provider_pin::pinned_model_slug(pin, &self.agent.model);
+        if pinned != self.agent.model {
+            tracing::debug!(
+                agent = %self.agent.name,
+                provider = %pin,
+                from = %self.agent.model,
+                to = %pinned,
+                "provider pin rewrote the model slug"
+            );
+            self.agent.model = pinned;
+        }
+        self.llm.use_anthropic_direct =
+            pin == trusty_common::inference::registry::ProviderId::Anthropic;
+        Ok(())
+    }
+
+    /// Replace this config's model AFTER load, re-applying the provider pin.
+    ///
+    /// Why (#3765): four call sites replaced `cfg.agent.model` post-load and
+    /// rebuilt the adapter from the raw string — the in-process runner's
+    /// `RunContext.model` (workflow phase model / retry escalation) and the
+    /// three ctrl dispatch paths' `/model` session override, which is
+    /// reachable from an HTTP request body via `TaskRequest.model_id`. Each
+    /// one silently discarded the pin: a pinned agent handed
+    /// `claude-sonnet-4-6` would route to Anthropic no matter what its
+    /// `provider_id` said. A fail-closed guarantee with four bypasses is not a
+    /// guarantee, so every post-load model change now goes through this one
+    /// function instead of assigning the field directly.
+    ///
+    /// A model override is RE-PINNED rather than refused, because the two
+    /// statements are compatible and specific: the operator pinned a PROVIDER,
+    /// the caller chose a MODEL on it. Refusing would break the workflow
+    /// engine's retry escalation for every pinned agent while adding no
+    /// safety — a re-pinned override still cannot reach an unpinned provider,
+    /// which is the property that matters. A PROVIDER override is the opposite
+    /// case and IS refused; see `ctrl::config::resolve_overridden_credentials`.
+    /// What: assigns `model`, re-runs [`Self::apply_provider_pin`] (which also
+    /// re-validates the pinned provider's credential, so the fail-closed check
+    /// applies at dispatch and not only at load), then rebuilds `adapter` from
+    /// the resulting slug. For an UNPINNED agent this is exactly the old
+    /// behaviour: assign, rebuild, no validation.
+    /// Test: `override_model_repins_a_pinned_agent`,
+    /// `override_model_leaves_an_unpinned_agent_alone`.
+    pub(crate) fn override_model(&mut self, model: &str) -> Result<()> {
+        self.agent.model = model.to_string();
+        self.apply_provider_pin()?;
+        self.adapter = Arc::from(adapter_for_model(&self.agent.model));
+        Ok(())
     }
 
     /// Built-in default `ctrl` agent config used when no `ctrl.toml` /
@@ -347,7 +434,7 @@ impl AgentConfig {
         }
         let lookup = |n: &str| Self::by_name_unresolved_in(&dirs, n).ok();
         match crate::agents::extends::resolve(name, &lookup) {
-            Ok(resolved) => Ok(resolved.finalize_extends()),
+            Ok(resolved) => resolved.finalize_extends(),
             Err(e) => Self::extends_shadow_fallback_in(&dirs, name, from_package, e),
         }
     }
@@ -486,6 +573,12 @@ impl AgentConfig {
             cfg.llm.model_override.as_deref(),
         );
         cfg.agent.model = resolved;
+        // #3765: the pin runs AFTER `resolve_model` (so a `TAGENT_MODEL_*`
+        // override is still honoured for the model NAME) and BEFORE the
+        // adapter is derived (so the adapter is chosen from the pinned slug,
+        // never the pre-pin one).
+        cfg.apply_provider_pin()
+            .with_context(|| format!("in {}", path.display()))?;
         cfg.adapter = Arc::from(adapter_for_model(&cfg.agent.model));
         // Validate stop_sequences against API limits (#327).
         // Anthropic caps at 8 sequences (≤ 8191 chars each); Bedrock at 4.

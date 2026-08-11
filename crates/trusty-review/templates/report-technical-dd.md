@@ -175,6 +175,12 @@ report against others normalized through this same template.
 
 ### 6.1 Security Violations
 
+*This table counts findings from general-purpose lint tools (clippy, ruff,
+biome, rubocop, PMD, and similar per language) that happened to be graded
+`error` or `critical`. It is not a SAST scan, not a dependency/CVE scan, and
+not a secrets scan. Treat it as a proxy for code-hygiene risk, not as
+evidence the codebase has been screened for exploitable vulnerabilities.*
+
 <!-- BEGIN security_violations_table -->
 | Application | Domain | Total violations |
 |---|---|---|

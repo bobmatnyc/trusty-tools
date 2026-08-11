@@ -1,9 +1,13 @@
 # 0001 — Gate axum/tower-http behind an `http-server` cargo feature
 
-> **Status:** Accepted
+> **Status:** Superseded by [workspace ADR-0032](../../adr/0032-no-service-owns-http-console-is-the-only-http-surface.md)
 > **Date:** 2026-05-26
 > **Decided in:** issue [#249](https://github.com/bobmatnyc/trusty-tools/issues/249), PR [#262](https://github.com/bobmatnyc/trusty-tools/pull/262)
 > **Last reviewed:** 2026-05-29
+
+The library-dependency goal remains useful historical context, but ADR-0032
+removes the service-owned HTTP daemon and therefore supersedes this default-on
+HTTP surface decision.
 
 ## Context
 

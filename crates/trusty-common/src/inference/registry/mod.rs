@@ -338,8 +338,24 @@ const SEED: [ProviderCapabilities; 8] = [
     // place `cache_control` breakpoints) and `detailed_usage_accounting = false`
     // (the `usage:{include:true}` directive is OpenRouter-specific — a live probe
     // is confirming AtlasCloud's `usage` shape; flip this only if it reports
-    // cost/cache fields). Default model + context window are AtlasCloud's own
-    // catalog numbers for `openai/gpt-5.6-sol` (1.05M-token window).
+    // cost/cache fields).
+    //
+    // #3765: `default_model` was `openai/gpt-5.6-sol`, taken from AtlasCloud's
+    // published catalog. A live probe found that AtlasCloud gates its catalog
+    // by ACCOUNT PLAN, not only by key validity: a Coding-Plan key answers
+    // `403 {"msg":"invalid token for coding plan, this model not support
+    // coding plan"}` for `openai/gpt-5.6-sol` and for most of the catalog,
+    // even though `GET /v1/models` lists them all. So the published default
+    // was not callable and made "just pick AtlasCloud" fail on a valid key.
+    // `deepseek-ai/deepseek-v4-flash` was verified live on such a key: a real
+    // completion plus a real OpenAI-style `tool_calls` response, 1,048,576-token
+    // context, and the cheapest prompt/completion rates of the callable set —
+    // the same cheap-but-capable posture as OpenRouter's `gpt-4o-mini` default
+    // above. Read this as Coding-Plan-oriented: it is informed by one account's
+    // plan because that is the only evidence available, and a different plan
+    // may well be able to call a stronger model. `max_context_window` stays
+    // 1_050_000 — it is the PROVIDER-level fallback for a model `context_window`
+    // does not recognise, not this model's own window.
     ProviderCapabilities {
         id: ProviderId::AtlasCloud,
         native_tool_calling: true,
@@ -350,7 +366,7 @@ const SEED: [ProviderCapabilities; 8] = [
         vision: false,
         detailed_usage_accounting: false,
         max_context_window: 1_050_000,
-        default_model: "openai/gpt-5.6-sol",
+        default_model: "deepseek-ai/deepseek-v4-flash",
         credential_env: Some("ATLASCLOUD_API_KEY"),
     },
     // Local / OpenAI-compatible (#3247) — a thin config over the shared
@@ -653,9 +669,12 @@ mod tests {
     /// Why: AtlasCloud (#2536) must resolve by id, by name, and by slug prefix,
     /// carry its OpenAI-compat capability posture (native tools, OpenAI dialect,
     /// `ATLASCLOUD_API_KEY` credential env), and expose its catalog defaults
-    /// (`openai/gpt-5.6-sol`, 1.05M-token window). The nested `openai/`-shaped
-    /// default model must NOT trip the prefix resolver — the routing prefix is
-    /// `atlascloud/`, not the model id.
+    /// (`deepseek-ai/deepseek-v4-flash` since #3765 — see the seed entry for why
+    /// the published `openai/gpt-5.6-sol` was not callable — and the 1.05M-token
+    /// provider-level window). The nested `vendor/model`-shaped default must NOT
+    /// trip the prefix resolver — the routing prefix is `atlascloud/`, not the
+    /// model id, and `openai/gpt-5.6-sol` is retained in the slug assertions
+    /// below precisely because its `openai/` head is the adversarial case.
     /// Test: itself.
     #[test]
     fn atlascloud_seeded_with_openai_compat_posture() {
@@ -673,7 +692,14 @@ mod tests {
         assert_eq!(caps.tool_dialect, ToolDialect::OpenAiFunctions);
         assert!(!caps.detailed_usage_accounting);
         assert_eq!(caps.credential_env, Some("ATLASCLOUD_API_KEY"));
-        assert_eq!(caps.default_model, "openai/gpt-5.6-sol");
+        assert_eq!(caps.default_model, "deepseek-ai/deepseek-v4-flash");
+        // #3765: the default is itself `vendor/model`, so it must survive the
+        // one-marker strip intact — the same property `openai/gpt-5.6-sol`
+        // guarded before it.
+        assert_eq!(
+            ProviderId::AtlasCloud.wire_model_id("atlascloud/deepseek-ai/deepseek-v4-flash"),
+            "deepseek-ai/deepseek-v4-flash"
+        );
         assert_eq!(caps.max_context_window, 1_050_000);
         assert_eq!(
             capabilities_for("AtlasCloud").map(|c| c.id),

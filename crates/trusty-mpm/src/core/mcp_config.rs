@@ -35,6 +35,17 @@ use serde_json::{Map, Value};
 /// Basename of the user-scope config file inside a `CLAUDE_CONFIG_DIR`.
 const CLAUDE_JSON: &str = ".claude.json";
 
+/// Basename of the PROJECT-scope MCP config Claude Code reads from its cwd.
+///
+/// Why (#4181): four places joined this literal onto a directory — the
+/// reader below, the shared injector write path, and the `.git/info/exclude`
+/// call that keeps the written file out of the index. A writer that spells it
+/// differently from the excluder silently reintroduces the tracked-file defect,
+/// so there is one literal.
+/// What: `.mcp.json`.
+/// Test: `mcp_server_names_reads_workspace_mcp_json`.
+pub const MCP_JSON: &str = ".mcp.json";
+
 /// The MCP servers tm always provisions into the managed config dir.
 ///
 /// Why: [`managed_mcp_server_names`] must always keep the framework servers
@@ -485,7 +496,7 @@ pub fn resolve_conditional_mcp_toggles(
 /// Test: `mcp_server_names_reads_workspace_mcp_json`,
 /// `mcp_server_names_empty_when_absent`.
 pub fn mcp_server_names(workspace: &Path) -> Vec<String> {
-    let mcp_path = workspace.join(".mcp.json");
+    let mcp_path = workspace.join(MCP_JSON);
     let Ok(text) = std::fs::read_to_string(&mcp_path) else {
         return Vec::new();
     };

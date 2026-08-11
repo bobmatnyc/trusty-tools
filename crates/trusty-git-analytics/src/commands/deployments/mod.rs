@@ -52,7 +52,8 @@ pub(super) const PAGE_SIZE: u32 = 100;
 pub(super) const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
 
 /// Arguments for `tga deployments collect`.
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Ingest deployment events into fact_deployments.",
     long_about = "Walk the configured deployment source and persist deployment events into\n\

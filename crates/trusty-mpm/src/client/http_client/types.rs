@@ -597,6 +597,36 @@ pub struct ManagedListResponse {
     /// All managed sessions as summaries.
     #[serde(default)]
     pub sessions: Vec<ManagedSessionSummary>,
+    /// Set when the daemon served this list from its last-known in-memory set
+    /// because it could not read `sessions.json` (#5007).
+    ///
+    /// Why: the list looks completely normal in that case — that is exactly why
+    /// a wedged store went unnoticed. Every client that renders a listing has
+    /// to be able to see the disclosure, so it rides on the shared response
+    /// type rather than being re-derived per call site.
+    /// What: `#[serde(default)]` keeps the client working against an older
+    /// daemon that never sends the field.
+    /// Test: `managed_list_response_carries_store_health_when_degraded`.
+    #[serde(default)]
+    pub store_health: Option<ManagedStoreHealth>,
+}
+
+/// The `store_health` disclosure on a degraded list response (#5007).
+///
+/// Why: see [`ManagedListResponse::store_health`].
+/// What: mirrors `daemon::managed_routes::StoreHealthPayload`.
+/// Test: `managed_list_response_carries_store_health_when_degraded`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedStoreHealth {
+    /// The daemon's rendered store error.
+    #[serde(default)]
+    pub message: String,
+    /// Whether the store file is corrupt rather than transiently unreadable.
+    #[serde(default)]
+    pub corrupt: bool,
+    /// RFC3339 timestamp of the observation.
+    #[serde(default)]
+    pub observed_at: String,
 }
 
 /// Request body for `POST /api/v1/sessions/managed` (spawn).

@@ -108,6 +108,22 @@ impl CodeIndexer {
         store.len().await.ok()
     }
 
+    /// Whether a vector store is wired at all.
+    ///
+    /// Why (#4787 review): `vector_count()` returns `None` for two unrelated
+    /// states — no store wired (BM25-only / `skip_vector` / test indexer) and a
+    /// store whose `len()` errored. Reporting a failed read as "not applicable"
+    /// is the same conflation #4787 exists to remove, one level down. This
+    /// predicate lets a caller separate them without changing
+    /// `vector_count`'s signature, which the reindex readiness gate (#4707)
+    /// also depends on.
+    /// What: `true` iff a store is attached; says nothing about whether it can
+    /// be read.
+    /// Test: `status_semantic_coverage_distinguishes_absent_from_unreadable`.
+    pub fn has_vector_store(&self) -> bool {
+        self.store.is_some()
+    }
+
     /// Compose the BM25 document text for a chunk: body + virtual_terms,
     /// matching the layout the per-query rebuild used to construct.
     pub(crate) fn bm25_doc_text(chunk: &RawChunk) -> String {

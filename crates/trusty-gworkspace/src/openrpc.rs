@@ -1,6 +1,6 @@
 //! OpenRPC 1.3.2 service description for `gworkspace-mcp`.
 //!
-//! Why: Orchestrators such as open-mpm need a machine-readable manifest of
+//! Why: Orchestrators such as trusty-agents need a machine-readable manifest of
 //! every tool the server exposes — including the Google OAuth scopes each
 //! tool requires — so they can route tasks and prepare scope-aware auth
 //! flows without bespoke per-server adapters. OpenRPC's `rpc.discover`
@@ -48,7 +48,7 @@ mod scopes {
 
 /// Return the OAuth scopes a given tool requires.
 ///
-/// Why: open-mpm and other clients need to know which Google scopes must
+/// Why: trusty-agents and other clients need to know which Google scopes must
 /// be present in the user's credential before invoking a tool, so they can
 /// either prompt for incremental consent or fail fast with a useful error.
 /// What: Maps every tool name in the registry to a slice of canonical
@@ -142,7 +142,7 @@ pub fn scopes_for_tool(name: &str) -> &'static [&'static str] {
 ///
 /// Why: Produces the value placed in the `result` field of a
 /// `rpc.discover` JSON-RPC response, satisfying the OpenRPC spec for
-/// discovery so any compliant client (including open-mpm) can introspect
+/// discovery so any compliant client (including trusty-agents) can introspect
 /// every method, its parameters, and required scopes.
 /// What: Walks `tool_list_response()`, converts each tool into an OpenRPC
 /// `Method` object — flattening the JSON Schema properties into named

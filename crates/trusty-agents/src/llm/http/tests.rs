@@ -575,3 +575,163 @@ fn transport_error_rejects_non_http_error() {
     let err = anyhow::anyhow!("model returned malformed tool call");
     assert!(!super::is_transport_error(&err));
 }
+
+// ── AtlasCloud (#3765) ───────────────────────────────────────────────────────
+
+/// Why: the AtlasCloud counterpart of
+/// `send_raw_completion_fireworks_missing_key_errors_with_fireworks_name`. A
+/// keyless AtlasCloud call previously reported "openrouter credential not
+/// found" — the wrong provider, the wrong env var, and the wrong config
+/// command — because `credential_hint` had no arm for it.
+/// Test: itself.
+#[test]
+fn send_raw_completion_atlascloud_missing_key_errors_with_atlascloud_name() {
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::lock_home();
+    crate::test_env::force_env_local_loaded();
+    let prev_key = std::env::var_os("ATLASCLOUD_API_KEY");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: ENV_LOCK + HOME_LOCK held for the whole test body.
+    unsafe {
+        std::env::remove_var("ATLASCLOUD_API_KEY");
+    }
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    // No store seeded — every tier is absent.
+
+    let adapter = crate::llm::adapter::AtlasCloudAdapter {
+        model_id: "openai/gpt-5.6-sol".to_string(),
+    };
+    let body = serde_json::json!({"model": "openai/gpt-5.6-sol", "messages": []});
+    let err = block_on(send_raw_completion(&body, &adapter))
+        .expect_err("no atlascloud credential anywhere must error, not send an empty key");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("atlascloud") && msg.contains("credential not found"),
+        "error must name atlascloud, not openrouter: {msg}"
+    );
+    assert!(
+        msg.contains("ATLASCLOUD_API_KEY"),
+        "error must hint the correct env var: {msg}"
+    );
+
+    // SAFETY: still holding ENV_LOCK + HOME_LOCK.
+    unsafe {
+        match prev_key {
+            Some(v) => std::env::set_var("ATLASCLOUD_API_KEY", v),
+            None => std::env::remove_var("ATLASCLOUD_API_KEY"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+/// Live smoke test: one real completion through the AtlasCloud adapter.
+///
+/// Why: every other AtlasCloud assertion in this PR is offline — they prove
+/// the routing, not that `api.atlascloud.ai` actually accepts the body
+/// `send_raw_completion` builds. The OpenAI-compatible shape is INFERRED from
+/// the registry seed and `providers::atlascloud`; this is what turns that
+/// inference into an observation.
+/// What: resolves the credential through the normal 3-tier resolver (never a
+/// hardcoded key) and SKIPS — does not fail — when it is absent, so CI, which
+/// has no AtlasCloud key, stays green. `#[ignore]` for the same reason the
+/// ONNX embedder tests are ignored: it needs an environment CI does not have.
+///
+/// The model comes from `ATLASCLOUD_TEST_MODEL` when set, else the registry
+/// seed default. The override exists because AtlasCloud scopes its catalog by
+/// ACCOUNT PLAN, not just by key validity: a Coding-Plan key answers
+/// `403 {"msg":"invalid token for coding plan, this model not support coding
+/// plan"}` for catalog ids it can see but not call, including the seeded
+/// default. That is a property of the account, not of this adapter, so the
+/// test lets the operator name a model their key can actually reach rather
+/// than pinning the registry seed to one plan's subset.
+/// Run it with:
+/// `cargo test -p trusty-agents --lib atlascloud_live -- --ignored --nocapture`
+/// Test: itself.
+#[test]
+#[ignore = "requires ATLASCLOUD_API_KEY; skipped in CI"]
+fn atlascloud_live_completion_round_trips() {
+    crate::test_env::force_env_local_loaded();
+    if trusty_common::credentials::resolve_key("atlascloud").is_none() {
+        eprintln!("ATLASCLOUD_API_KEY not resolvable — skipping live test");
+        return;
+    }
+    let model = std::env::var("ATLASCLOUD_TEST_MODEL").unwrap_or_else(|_| {
+        trusty_common::inference::registry::capabilities_for("atlascloud")
+            .expect("seeded")
+            .default_model
+            .to_string()
+    });
+    let slug = format!("atlascloud/{model}");
+    let adapter = crate::llm::adapter::adapter_for_model(&slug);
+    assert_eq!(
+        adapter.provider(),
+        crate::llm::adapter::Provider::AtlasCloud
+    );
+    assert_eq!(adapter.wire_model_id(&slug), model);
+    let body = serde_json::json!({
+        "model": adapter.wire_model_id(&slug),
+        "messages": [
+            {"role": "system", "content": "You are a concise assistant."},
+            {"role": "user", "content": "Reply with exactly the word: pong"}
+        ],
+        "max_tokens": 256,
+        "temperature": 0.0,
+    });
+    let (text, _tool_calls, usage) =
+        block_on(send_raw_completion(&body, &*adapter)).expect("live atlascloud completion");
+    assert!(
+        usage.prompt_tokens > 0 && usage.completion_tokens > 0,
+        "usage must parse from the OpenAI-compatible shape: {usage:?}"
+    );
+    eprintln!("live atlascloud ok — model={model} text={text:?} usage={usage:?}");
+}
+
+/// Live control for `atlascloud_live_completion_round_trips`.
+///
+/// Why: Fireworks reached its own endpoint before this PR, so if #3765's
+/// `wire_model_id`/`requires_raw_http` refactor broke the prefix-stripping it
+/// generalised, THIS is where it shows — an unchanged provider failing is a
+/// regression, not a new-provider unknown.
+/// What: same credential-gated skip and `#[ignore]` policy as above.
+/// Test: itself.
+#[test]
+#[ignore = "requires FIREWORKS_API_KEY; skipped in CI"]
+fn fireworks_live_completion_still_round_trips() {
+    crate::test_env::force_env_local_loaded();
+    if trusty_common::credentials::resolve_key("fireworks").is_none() {
+        eprintln!("FIREWORKS_API_KEY not resolvable — skipping live test");
+        return;
+    }
+    // Overridable for the same reason as the AtlasCloud test above, and with
+    // an additional one: Fireworks RETIRES model ids (the long-standing
+    // `llama-v3p1-8b-instruct` fixture now answers 404), so a hardcoded slug
+    // rots into a false failure.
+    let model = std::env::var("FIREWORKS_TEST_MODEL")
+        .unwrap_or_else(|_| "accounts/fireworks/models/gpt-oss-20b".to_string());
+    let slug = format!("fireworks/{model}");
+    let slug = slug.as_str();
+    let adapter = crate::llm::adapter::adapter_for_model(slug);
+    let body = serde_json::json!({
+        "model": adapter.wire_model_id(slug),
+        "messages": [
+            {"role": "system", "content": "You are a concise assistant."},
+            {"role": "user", "content": "Reply with exactly the word: pong"}
+        ],
+        "max_tokens": 64,
+        "temperature": 0.0,
+    });
+    let (text, _tool_calls, usage) =
+        block_on(send_raw_completion(&body, &*adapter)).expect("live fireworks completion");
+    let text = text.expect("assistant text");
+    assert!(!text.trim().is_empty());
+    assert!(usage.prompt_tokens > 0, "{usage:?}");
+    eprintln!("live fireworks ok — model={model} text={text:?} usage={usage:?}");
+}

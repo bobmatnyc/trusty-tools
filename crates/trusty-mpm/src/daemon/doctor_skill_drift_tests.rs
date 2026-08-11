@@ -73,15 +73,17 @@ fn staleness_catches_drift_the_stale_cache_hid() {
     let tmp = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
     // Deployed 07-29; manifest agrees with the file, as it did in the incident.
+    // #5202: this case needs an ORDINARY skill — `tm-workflow` became
+    // conventions-bearing when it absorbed `tm-pr-workflow`, and would now Fail.
     let _src = deploy_real(
         &paths.claude_skills_dir(),
-        "tm-workflow",
+        "tm-delegation-patterns",
         "v1 mentions PM_INSTRUCTIONS.md",
         None,
     );
 
     let check = report(
-        &reference_of(&[("tm-workflow", "v2 describes the JSON manifest")]),
+        &reference_of(&[("tm-delegation-patterns", "v2 describes the JSON manifest")]),
         &paths,
         None,
     );
@@ -91,7 +93,11 @@ fn staleness_catches_drift_the_stale_cache_hid() {
         "message: {}",
         check.message
     );
-    assert!(check.message.contains("tm-workflow"), "{}", check.message);
+    assert!(
+        check.message.contains("tm-delegation-patterns"),
+        "{}",
+        check.message
+    );
     assert!(check.message.contains("REPAIRABLE"), "{}", check.message);
 }
 
@@ -99,20 +105,16 @@ fn staleness_catches_drift_the_stale_cache_hid() {
 fn staleness_escalates_when_conventions_skill_drifts() {
     let tmp = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
-    let _src = deploy_real(&paths.claude_skills_dir(), "tm-pr-workflow", "v1", None);
+    let _src = deploy_real(&paths.claude_skills_dir(), "tm-workflow", "v1", None);
 
-    let check = report(&reference_of(&[("tm-pr-workflow", "v2")]), &paths, None);
+    let check = report(&reference_of(&[("tm-workflow", "v2")]), &paths, None);
     assert_eq!(
         check.status,
         CheckStatus::Fail,
         "message: {}",
         check.message
     );
-    assert!(
-        check.message.contains("tm-pr-workflow"),
-        "{}",
-        check.message
-    );
+    assert!(check.message.contains("tm-workflow"), "{}", check.message);
     assert!(
         check.message.to_lowercase().contains("convention"),
         "{}",
@@ -128,10 +130,10 @@ fn staleness_warns_when_ordinary_skill_drifts() {
     let paths = paths_under(&tmp);
     let dest = paths.claude_skills_dir();
     let _a = deploy_real(&dest, "tm-doctor", "v1", None);
-    let _b = deploy_real(&dest, "tm-pr-workflow", "v2", None);
+    let _b = deploy_real(&dest, "tm-workflow", "v2", None);
 
     let check = report(
-        &reference_of(&[("tm-doctor", "v2"), ("tm-pr-workflow", "v2")]),
+        &reference_of(&[("tm-doctor", "v2"), ("tm-workflow", "v2")]),
         &paths,
         None,
     );
@@ -234,9 +236,15 @@ fn staleness_covers_the_managed_config_tier() {
     let tmp = TempDir::new().unwrap();
     let paths = paths_under(&tmp);
     let managed = paths.agent_deploy_dir().parent().unwrap().join("skills");
-    let _src = deploy_real(&managed, "tm-workflow", "v1", None);
+    // #5202: an ORDINARY skill — `tm-workflow` is conventions-bearing now, and
+    // would raise this to Fail for a reason unrelated to what the test measures.
+    let _src = deploy_real(&managed, "tm-delegation-patterns", "v1", None);
 
-    let check = report(&reference_of(&[("tm-workflow", "v2")]), &paths, None);
+    let check = report(
+        &reference_of(&[("tm-delegation-patterns", "v2")]),
+        &paths,
+        None,
+    );
     assert_eq!(
         check.status,
         CheckStatus::Warn,
@@ -244,7 +252,9 @@ fn staleness_covers_the_managed_config_tier() {
         check.message
     );
     assert!(
-        check.message.contains("managed config/tm-workflow"),
+        check
+            .message
+            .contains("managed config/tm-delegation-patterns"),
         "the managed-config tier must be named: {}",
         check.message
     );
@@ -379,5 +389,49 @@ fn staleness_is_unknown_when_a_tier_has_no_ledger() {
         CheckStatus::Unknown,
         "message: {}",
         check.message
+    );
+}
+
+/// #5224, the concrete PR #5221 case: retiring a bundled skill leaves an
+/// orphaned deployed copy whose ledger key has no reference asset, and that ONE
+/// orphan folds the whole check to Unknown — a check that has stopped
+/// protecting anything. The retirement sweep must restore it to Ok.
+#[test]
+fn a_retired_skill_no_longer_pins_staleness_to_unknown() {
+    let tmp = TempDir::new().unwrap();
+    let paths = paths_under(&tmp);
+    let dest = paths.claude_skills_dir();
+    let _current = deploy_real(&dest, "tm-workflow", "v2", None);
+    // The skill PR #5221 deletes from the bundle, still deployed here.
+    let _retired = deploy_real(&dest, "tm-pr-workflow", "the retired workflow skill", None);
+
+    // The new binary's reference no longer carries `tm-pr-workflow`.
+    let reference = reference_of(&[("tm-workflow", "v2")]);
+
+    let before = report(&reference, &paths, None);
+    assert_eq!(
+        before.status,
+        CheckStatus::Unknown,
+        "expected the #5224 defect, got: {}",
+        before.message
+    );
+    assert!(
+        before.message.contains("tm-pr-workflow"),
+        "{}",
+        before.message
+    );
+
+    let live: std::collections::BTreeSet<String> = ["tm-workflow".to_string()].into();
+    let retired =
+        crate::core::skill_retire::retire_orphans_in("operator home", &dest, &live).unwrap();
+    assert_eq!(retired.len(), 1, "{retired:?}");
+    assert!(retired[0].removed, "{retired:?}");
+
+    let after = report(&reference, &paths, None);
+    assert_eq!(
+        after.status,
+        CheckStatus::Ok,
+        "the check is still degraded after the orphan was retired: {}",
+        after.message
     );
 }

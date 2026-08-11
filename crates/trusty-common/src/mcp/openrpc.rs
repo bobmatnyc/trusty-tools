@@ -3,7 +3,7 @@
 //! Why: Every trusty-* MCP server (trusty-memory, trusty-search,
 //! trusty-gworkspace, …) exposes the same JSON-RPC method names for its
 //! tools and benefits from a machine-readable `rpc.discover` manifest so
-//! orchestrators such as open-mpm can route requests and reason about
+//! orchestrators such as trusty-agents can route requests and reason about
 //! per-tool scopes without bespoke adapters. The OpenRPC document shape is
 //! identical across servers — only the title/version and the scope mapping
 //! differ. Consolidating the builder here removes ~100 lines of duplication
@@ -85,7 +85,7 @@ impl OpenRpcBuilder {
 
     /// Build a merged OpenRPC document from a list of `ServiceDescriptor`s.
     ///
-    /// Why: The host process (e.g. open-mpm / a unified trusty daemon) links
+    /// Why: The host process (e.g. trusty-agents / a unified trusty daemon) links
     /// several MCP services into one binary and needs a single `rpc.discover`
     /// document covering all of them. This constructor accepts a slice of
     /// trait objects, iterates each service's tools, and produces one merged

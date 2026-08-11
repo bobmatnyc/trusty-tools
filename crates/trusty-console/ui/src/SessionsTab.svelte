@@ -1,6 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import RefreshHeader from './RefreshHeader.svelte';
+  import { autoResumeEffective, autoResumeLabel } from './autoResume.js';
 
   /**
    * Why: The Sessions tab renders the trusty-mpm managed-session fleet natively
@@ -184,7 +185,10 @@
   }
 
   async function toggleAutoResume() {
-    const next = !(supervisor?.auto_resume?.desired);
+    // #5208: flip what is actually in force, not what the file happens to say.
+    // With no override file and an env-enabled supervisor, `!desired` would send
+    // `enabled: true` for a button that reads "Disable".
+    const next = !effectiveAutoResume();
     try {
       const resp = await fetch('/api/console/sessions/supervisor/auto-resume', {
         method: 'POST',
@@ -208,13 +212,10 @@
   onMount(async () => { await fetchAll(); restartTimer(); });
   onDestroy(() => clearInterval(timer));
 
-  function autoResumeLabel() {
-    const ar = supervisor?.auto_resume;
-    if (!ar) return '—';
-    if (ar.desired && ar.pending_restart) return 'on (restart pending)';
-    if (!ar.desired && ar.pending_restart) return 'off (restart pending)';
-    return ar.desired ? 'on' : 'off';
-  }
+  // #5208: the label and the button both read `effective` (see ./autoResume.js),
+  // not `desired` — the latter is only the toggle's saved value and reads "off"
+  // while an env-enabled supervisor is actively resuming.
+  const effectiveAutoResume = () => autoResumeEffective(supervisor);
 </script>
 
 <div class="tab-content">
@@ -254,9 +255,16 @@
         <span class="count total">{supervisor.fleet?.total ?? 0} total</span>
       </div>
       <div class="auto-resume">
-        <span class="ar-label">Auto-resume: <strong>{autoResumeLabel()}</strong></span>
-        <button class="ar-toggle" onclick={toggleAutoResume}>
-          {supervisor.auto_resume?.desired ? 'Disable' : 'Enable'}
+        <span
+          class="ar-label"
+          title="What the supervisor's next sweep will do. With no saved setting this is inferred from the daemon's own environment, which the supervisor process may not share."
+        >Auto-resume: <strong>{autoResumeLabel(supervisor)}</strong></span>
+        <button
+          class="ar-toggle"
+          onclick={toggleAutoResume}
+          disabled={!!supervisor.auto_resume?.read_error}
+        >
+          {effectiveAutoResume() ? 'Disable' : 'Enable'}
         </button>
       </div>
     </div>

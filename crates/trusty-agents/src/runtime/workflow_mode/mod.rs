@@ -116,7 +116,7 @@ mod resume;
 use helpers::{
     build_init_context, build_runner_for_workflow, check_workflow_project_dirs,
     collect_modified_files, load_skill_registry, load_tag_skill_registry, load_user_memory_suffix,
-    read_current_build_number, refresh_global_skills_cache, resolve_out_dir,
+    read_current_build_number, refresh_global_skills_cache, resolve_out_dir, resolve_workflows_dir,
 };
 
 pub(super) use resume::run_resume_subcommand;
@@ -324,7 +324,12 @@ pub(super) async fn run_workflow(
     // bundled+local skills.
     let tag_skill_registry = load_tag_skill_registry();
 
-    let mut engine = WorkflowEngine::new(runner, PathBuf::from(".trusty-agents/workflows"))
+    // #5227: the workflows dir resolves hierarchically (project -> $HOME ->
+    // bundled), so a process whose CWD has no `.trusty-agents/` still finds
+    // the definition instead of failing `WorkflowNotFound`.
+    let workflows_dir = resolve_workflows_dir(name);
+
+    let mut engine = WorkflowEngine::new(runner, workflows_dir.clone())
         .with_build(build_num)
         .with_perf_dir(Some(perf_dir))
         .with_indexer(Some(indexer))
@@ -343,7 +348,7 @@ pub(super) async fn run_workflow(
         let wf_path = if name.ends_with(".json") || name.contains('/') {
             PathBuf::from(name)
         } else {
-            PathBuf::from(".trusty-agents/workflows").join(format!("{name}.json"))
+            workflows_dir.join(format!("{name}.json"))
         };
         if let Ok(def) = workflow::WorkflowDef::load(&wf_path)
             && let Some(tm_cfg) = def.ticket_management.clone()

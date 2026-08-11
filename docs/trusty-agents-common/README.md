@@ -1,6 +1,6 @@
-# open-mpm-agent-api Documentation
+# trusty-agents-common Documentation
 
-Index of documentation for the MPM agent API types.
+Index of documentation for the trusty-agents shared API types.
 
 - **SPEC.md** — Single-file architecture specification
-- See `crates/open-mpm-agent-api/README.md` for full API reference
+- See [`crates/trusty-agents-common/README.md`](../../crates/trusty-agents-common/README.md) for full API reference

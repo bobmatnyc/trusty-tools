@@ -89,6 +89,30 @@ fn inject_trusty_mpm_mcp_is_idempotent() {
     );
 }
 
+/// #4181: the shared injector write path ends the file with a newline.
+///
+/// Why: `.mcp.json` is rewritten on every managed launch. Without a trailing
+/// newline a repository that tracks it reports "\ No newline at end of file"
+/// on every rewrite, on top of whatever actually changed.
+#[test]
+fn inject_mcp_server_writes_trailing_newline() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    inject_trusty_mpm_mcp(project).expect("injection succeeds");
+
+    let text = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
+    assert!(
+        text.ends_with("}\n"),
+        "the written .mcp.json must end with a newline, got tail: {:?}",
+        &text[text.len().saturating_sub(8)..]
+    );
+    assert!(
+        !text.ends_with("\n\n"),
+        "exactly one trailing newline, not a growing run"
+    );
+}
+
 #[test]
 fn inject_trusty_review_mcp_creates_entry_when_absent() {
     // Why: `trusty-review` has the identical pre-existing gap (predates the

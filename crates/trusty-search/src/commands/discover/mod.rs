@@ -122,17 +122,20 @@ pub async fn auto_discover_and_index() {
                 continue;
             }
         };
+        // #5204: resolve once per scan root, not per entry.
+        let ephemeral = crate::service::constants::ephemeral_dir_names();
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
                 continue;
             }
-            // Skip ephemeral session dirs (`.worktrees/`) so throwaway MPM
-            // worktrees are never auto-registered (orphan self-heal).
+            // Skip ephemeral session dirs (the configured worktree base, or the
+            // built-in `.worktrees`) so throwaway MPM worktrees are never
+            // auto-registered (orphan self-heal).
             if path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(crate::service::constants::is_ephemeral_dir_name)
+                .is_some_and(|n| ephemeral.matches(n))
             {
                 continue;
             }

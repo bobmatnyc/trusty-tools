@@ -1,6 +1,6 @@
 //! OpenRPC 1.3.2 service description for `trusty-search` MCP.
 //!
-//! Why: Orchestrators such as open-mpm need a machine-readable manifest of
+//! Why: Orchestrators such as trusty-agents need a machine-readable manifest of
 //! every search tool the daemon exposes — including the logical scopes
 //! (`search.read` / `search.write`) each tool requires — so they can route
 //! tasks and enforce per-tool authorisation without bespoke per-server
@@ -39,7 +39,7 @@ mod scopes {
 
 /// Return the logical scopes a given search tool requires.
 ///
-/// Why: open-mpm needs to know whether a tool mutates index state so it
+/// Why: trusty-agents needs to know whether a tool mutates index state so it
 /// can enforce least-privilege authorisation before dispatching the call.
 /// What: Read-only tools → `["search.read"]`; index-mutating tools →
 /// `["search.write"]`. Unknown names return an empty slice; the unit

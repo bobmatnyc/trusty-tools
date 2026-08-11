@@ -24,7 +24,7 @@ use axum::http::{Method, Request, StatusCode};
 use tower::ServiceExt;
 
 use crate::api::server::routes::build_router;
-use crate::api::server::state::{AppState, MAX_RETAINED};
+use crate::api::server::state::{AppState, MAX_RETAINED_PER_AGENT};
 use crate::api::types::{PmResponse, PmStatus};
 
 fn router(state: AppState) -> Router {
@@ -202,7 +202,7 @@ async fn clear_recent_tasks_removes_terminal_only() {
 /// Regression test for the FIFO-eviction bug found in code review (#3063):
 /// `insert_and_trim` used to evict strictly by insertion order (index 0),
 /// so a long-running task submitted first and left running while
-/// `MAX_RETAINED` unrelated tasks completed would get silently evicted from
+/// `MAX_RETAINED_PER_AGENT` unrelated tasks completed would get silently evicted from
 /// `responses`/`order` — orphaning its `AbortHandle` in `handles` forever
 /// and making `DELETE /api/task/:id` 404 a task that was genuinely still
 /// running. `insert_and_trim` now walks forward past `Running` rows to
@@ -212,10 +212,10 @@ async fn cancel_survives_fifo_eviction_pressure() {
     let state = AppState::default();
     let completed = spawn_fake_running_task(&state, "long-runner").await;
 
-    // Push MAX_RETAINED more terminal tasks after it. Under naive index-0
+    // Push MAX_RETAINED_PER_AGENT more terminal tasks after it. Under naive index-0
     // FIFO this alone would already have evicted "long-runner" (the oldest
     // entry) before we ever get a chance to cancel it.
-    for i in 0..MAX_RETAINED {
+    for i in 0..MAX_RETAINED_PER_AGENT {
         let id = format!("filler-{i}");
         let mut r = PmResponse::running(&id);
         r.status = PmStatus::Success;

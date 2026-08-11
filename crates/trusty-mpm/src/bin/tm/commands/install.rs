@@ -203,6 +203,25 @@ pub(crate) async fn install(
         println!("  {line}");
     }
 
+    // #5224: the deploy above only ever WRITES, so a skill this binary stopped
+    // shipping keeps its deployed directory and its ledger entry — which pins
+    // `tm doctor`'s `skill_staleness` check to Unknown. Sweep every deploy
+    // tier, not just the one deployed into above; the orphan occurs at each one
+    // independently.
+    for retired in trusty_mpm::core::skill_retire::retire_orphaned_skills(&paths, None) {
+        match &retired.reason {
+            None => println!(
+                "  - {} removed from {} (no longer shipped)",
+                retired.stem, retired.tier
+            ),
+            Some(why) => println!(
+                "  ! {} is no longer shipped but its files were kept at {} ({why}) — \
+                 trusty-mpm no longer tracks them",
+                retired.stem, retired.tier
+            ),
+        }
+    }
+
     // Issue #4605: the deploy above is structurally unable to mention a
     // bundled skill that its target's manifest does not track — the tier
     // planner classifies it project-custom and drops it before

@@ -12,12 +12,14 @@ use crate::collect::errors::Result;
 use crate::collect::git::GitCollector;
 use crate::collect::github::GitHubClient;
 use crate::collect::identity::IdentityResolver;
-use crate::collect::linear::LinearClient;
+use crate::collect::linear_pipeline;
+use crate::collect::notify;
 use crate::collect::pr_provider::PrProvider;
 use crate::collect::weeks::{clamp_week_to_range, weeks_in_range};
 use crate::core::config::Config;
 use crate::core::db::{self, Database};
 use crate::core::models::PullRequest;
+use crate::core::progress::{ProgressBus, ProgressEvent, Stage};
 
 /// Outcome of a `git fetch origin` attempt for a single repository.
 ///
@@ -140,6 +142,10 @@ pub struct CollectionPipeline {
     /// When `true`, print a success line for every fetched repo in the summary
     /// (not just failures). Default `false` — only failures are printed.
     verbose_fetch: bool,
+    /// #5197: optional live-progress sink. Defaults to
+    /// [`ProgressBus::disabled`], on which every emit is a no-op — so the CLI
+    /// path, including its `indicatif` bars, behaves exactly as before.
+    progress: ProgressBus,
 }
 
 impl CollectionPipeline {
@@ -161,7 +167,24 @@ impl CollectionPipeline {
             branches: Vec::new(),
             strict_fetch: false,
             verbose_fetch: false,
+            progress: ProgressBus::disabled(),
         }
+    }
+
+    /// Attach a live-progress sink for the per-repository collect loop.
+    ///
+    /// Why: `tga tui` (#5197) needs to show which repository is being walked
+    /// and how each one ended, while the walk is still running. Nothing else
+    /// does, so the bus is opt-in and defaults to
+    /// [`ProgressBus::disabled`] — on which every emit returns immediately,
+    /// leaving the CLI path byte-identical to before this existed.
+    /// What: builder setter for the pipeline's progress bus.
+    /// Test: `tests::progress_is_disabled_by_default` and
+    /// `tests::run_emits_a_terminal_event_per_repo`.
+    #[must_use]
+    pub fn with_progress(mut self, progress: ProgressBus) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Enable forced re-collection: every `(repo, ISO-week)` pair is
@@ -295,7 +318,24 @@ impl CollectionPipeline {
 
         let resolver = IdentityResolver::from_config(&self.config);
 
-        for repo_cfg in &self.config.repositories {
+        // #5197: one progress row per configured repository, in walk order.
+        for repo_cfg in self.config.repositories.iter() {
+            let repo_label = repo_cfg
+                .name
+                .clone()
+                .unwrap_or_else(|| repo_cfg.path.display().to_string());
+            // #5197: `started` with no total, not `advanced(repo_index,
+            // repo_total)` — position among repositories shares this repo's
+            // target, so the aggregate folded it into this row and a mid-walk
+            // repo displayed "4/5" as if it were 80% through ITSELF. Nothing
+            // emits intra-repo progress, so the honest statement is "in
+            // flight, size unknown"; the how-many-repos roll-up is the stage
+            // header, which counts done / failed / skipped / running rows.
+            self.progress.emit(ProgressEvent::started(
+                Stage::Collect,
+                repo_label.clone(),
+                None,
+            ));
             // Per-repo head_only is OR-ed with the global pipeline flag: if
             // either is true, that repo walks HEAD only.  This lets operators
             // set `--head-only` globally (the CLI flag) or `head_only: true`
@@ -313,6 +353,13 @@ impl CollectionPipeline {
                 Err(e) => {
                     let msg = format!("failed to open repo {}: {e}", repo_cfg.path.display());
                     warn!("{msg}");
+                    // #5197: a repo that never opens must still reach a
+                    // terminal state, or its row spins forever in the TUI.
+                    self.progress.emit(ProgressEvent::failed(
+                        Stage::Collect,
+                        repo_label.clone(),
+                        msg.clone(),
+                    ));
                     stats.errors.push(msg);
                     continue;
                 }
@@ -327,15 +374,40 @@ impl CollectionPipeline {
                 Ok(c) => c
                     .no_fetch(true)
                     .with_head_only(effective_head_only)
-                    .with_explicit_branches(self.branches.clone()),
+                    .with_explicit_branches(self.branches.clone())
+                    // #5197: an attached bus means a TUI owns the terminal, so
+                    // the walk's indicatif spinner must not draw over it.
+                    .with_progress(self.progress.clone()),
                 Err(e) => {
                     let msg = format!("failed to open repo {}: {e}", repo_cfg.path.display());
                     warn!("{msg}");
+                    // #5197: a repo that never opens must still reach a
+                    // terminal state, or its row spins forever in the TUI.
+                    self.progress.emit(ProgressEvent::failed(
+                        Stage::Collect,
+                        repo_label.clone(),
+                        msg.clone(),
+                    ));
                     stats.errors.push(msg);
                     continue;
                 }
             };
-            self.collect_repo_by_week(db, &collector, &mut stats);
+            let before = stats.commits_collected as u64;
+            let errors_before = stats.errors.len();
+            let failures = self.collect_repo_by_week(db, &collector, &mut stats);
+            let collected = stats.commits_collected as u64 - before;
+            // #5197: a repo whose weeks failed reported `Completed` — "ok, 1
+            // commit" — because the walk's errors only reached stats.errors.
+            self.progress.emit(if failures == 0 {
+                ProgressEvent::completed(Stage::Collect, repo_label, collected)
+            } else {
+                let first = stats.errors.get(errors_before).map_or("", String::as_str);
+                ProgressEvent::failed(
+                    Stage::Collect,
+                    repo_label,
+                    format!("{failures} error(s), {collected} commit(s) collected; {first}"),
+                )
+            });
         }
 
         // Tag and release-branch reachability scan (issue #279).
@@ -361,7 +433,7 @@ impl CollectionPipeline {
                      `developer_aliases` in the config to map missing identities."
                 );
                 warn!("{msg}");
-                eprintln!("{msg}");
+                notify::warning(&self.progress, "collect", &msg);
             }
         }
 
@@ -406,69 +478,7 @@ impl CollectionPipeline {
             }
         }
 
-        // Optional: Linear issue enrichment.
-        if let Some(linear_cfg) = &self.config.linear {
-            if linear_cfg.fetch_on_reference {
-                match LinearClient::new(linear_cfg) {
-                    Ok(client) => {
-                        // Collect commit messages from DB.
-                        let messages: Vec<String> = {
-                            let conn = db.connection();
-                            let mut stmt = match conn.prepare("SELECT message FROM commits") {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    stats
-                                        .errors
-                                        .push(format!("Linear: query commits failed: {e}"));
-                                    return Ok(stats);
-                                }
-                            };
-                            let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    stats
-                                        .errors
-                                        .push(format!("Linear: read commits failed: {e}"));
-                                    return Ok(stats);
-                                }
-                            };
-                            let mut out = Vec::new();
-                            for r in rows.flatten() {
-                                out.push(r);
-                            }
-                            out
-                        };
-
-                        let msg_refs: Vec<&str> = messages.iter().map(String::as_str).collect();
-                        let issues = client
-                            .fetch_referenced_issues(&msg_refs, &linear_cfg.team_keys)
-                            .await;
-                        for issue in &issues {
-                            info!(
-                                id = %issue.identifier,
-                                state = %issue.state,
-                                team = %issue.team,
-                                "Linear issue fetched"
-                            );
-                        }
-                        match client.store_issues(db, &issues) {
-                            Ok(n) => {
-                                info!(stored = n, "persisted linear_issues rows");
-                                stats.linear_issues_fetched += n;
-                            }
-                            Err(e) => {
-                                stats
-                                    .errors
-                                    .push(format!("Linear: store issues failed: {e}"));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        stats.errors.push(format!("Linear client init failed: {e}"));
-                    }
-                }
-            }
-        }
+        linear_pipeline::fetch_and_store_linear_issues(db, &self.config, &mut stats).await;
 
         Ok(stats)
     }
@@ -580,7 +590,7 @@ impl CollectionPipeline {
                                rate-limits to 60 requests/hour and most PRs will be \
                                missed.";
                     warn!("{msg}");
-                    eprintln!("warning: {msg}");
+                    notify::warning(&self.progress, "collect", &format!("warning: {msg}"));
                     info!(
                         repo_count = repos.len(),
                         "GitHub PR fetcher will scan {} repo(s) anonymously",
@@ -747,12 +757,19 @@ impl CollectionPipeline {
     /// pairs that already have a row in `collection_runs` unless `force` is
     /// set. All non-fatal errors are pushed into `stats.errors` so that one
     /// bad week (or bad repo) does not abort the entire run.
+    ///
+    /// Returns how many errors this call appended to `stats.errors` — a
+    /// non-zero count is what makes the caller emit
+    /// [`ProgressEvent::failed`] instead of a success this repo did not earn
+    /// (#5197).
+    /// Test: `crate::collect::tests::run_reports_failed_when_a_week_fails`.
     fn collect_repo_by_week(
         &self,
         db: &mut Database,
         collector: &GitCollector,
         stats: &mut CollectionStats,
-    ) {
+    ) -> usize {
+        let errors_before = stats.errors.len();
         let repo_name = collector.name().to_string();
 
         // Derive the [from, to] NaiveDate window from the collector's
@@ -780,9 +797,13 @@ impl CollectionPipeline {
                     "until_date set without since_date — collecting full git history. \
                      Use --weeks N or set analysis.since_date in config to limit scope."
                 );
-                eprintln!(
+                notify::warning(
+                    &self.progress,
+                    &repo_name,
+                    &format!(
                     "warning: [{repo_name}] no since_date / --weeks — collecting FULL git history. \
                      Set analysis.since_date or pass --weeks N to limit scope."
+                ),
                 );
                 match collector.collect_window(db, None, Some(u)) {
                     Ok(n) => {
@@ -795,7 +816,7 @@ impl CollectionPipeline {
                         stats.errors.push(msg);
                     }
                 }
-                return;
+                return stats.errors.len() - errors_before;
             }
             (None, None) => {
                 // Fully unbounded — full history traversal with no week
@@ -805,9 +826,13 @@ impl CollectionPipeline {
                     "no since_date or --weeks flag set — collecting full git history. \
                      Use --weeks N or set analysis.since_date in config to limit scope."
                 );
-                eprintln!(
+                notify::warning(
+                    &self.progress,
+                    &repo_name,
+                    &format!(
                     "warning: [{repo_name}] no since_date / --weeks — collecting FULL git history. \
                      Set analysis.since_date or pass --weeks N to limit scope."
+                ),
                 );
                 match collector.collect(db) {
                     Ok(n) => {
@@ -820,7 +845,7 @@ impl CollectionPipeline {
                         stats.errors.push(msg);
                     }
                 }
-                return;
+                return stats.errors.len() - errors_before;
             }
         };
 
@@ -831,9 +856,13 @@ impl CollectionPipeline {
                 match db::is_week_collected(db, &repo_name, year, week_no) {
                     Ok(true) => {
                         info!("Skipping {repo_name} W{week_no} {year} — already collected");
-                        println!(
-                            "Skipped   W{week_no:02} {year}: already collected \
+                        notify::progress(
+                            &self.progress,
+                            &repo_name,
+                            &format!(
+                                "Skipped   W{week_no:02} {year}: already collected \
                              (use --force to re-collect) [{repo_name}]"
+                            ),
                         );
                         stats.weeks_skipped += 1;
                         continue;
@@ -865,7 +894,8 @@ impl CollectionPipeline {
                         commits = n,
                         "extracted week"
                     );
-                    println!("Collected W{week_no:02} {year}: {n} commits [{repo_name}]");
+                    let line = format!("Collected W{week_no:02} {year}: {n} commits [{repo_name}]");
+                    notify::progress(&self.progress, &repo_name, &line);
                     stats.commits_collected += n;
                     stats.weeks_collected += 1;
                     let repo_count = self.config.repositories.len();
@@ -886,6 +916,7 @@ impl CollectionPipeline {
                 }
             }
         }
+        stats.errors.len() - errors_before
     }
 
     /// Read distinct `(author_name, author_email)` pairs from `commits`

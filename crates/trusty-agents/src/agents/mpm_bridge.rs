@@ -354,6 +354,8 @@ fn project_mpm_agent(default_name: &str, meta: AgentMetadata, body: String) -> A
             extends: None,
             // Derived, never declared: see this function's doc comment.
             tier: None,
+            // #3765: no provider pin on this construction path.
+            provider_id: None,
         },
         llm: LlmParams {
             temperature: 0.2,

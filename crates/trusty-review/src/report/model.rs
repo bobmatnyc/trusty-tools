@@ -69,6 +69,22 @@ pub struct ReportModel {
     pub manifest_path: String,
     /// One report per repository, in manifest order.
     pub repositories: Vec<RepositoryReport>,
+    /// Named Gaps & Caveats lines for areas this report did not assess (#5239).
+    ///
+    /// Why: fail-open enrichment must not be fail-silent. A repository whose
+    /// metrics are absent because the analyze daemon was unreachable, and a
+    /// repository that is genuinely clean, must not look the same to a reader
+    /// (DOC-67 §9). Recording the lines on the model — not only in the rendered
+    /// markdown — also keeps the JSON twin a faithful record of what was NOT
+    /// assessed.
+    /// What: seeded from the manifest's `[report].gaps` (an upstream
+    /// orchestrator's own unassessed areas) and appended to at run time by
+    /// [`super::analyze_adapter::enrich_with_analyze_gaps`]. Empty is the
+    /// common case and renders exactly as before.
+    /// Test: `analyze_adapter_tests.rs::enrich_names_unreachable_repositories`,
+    /// `polish_tests.rs::declared_gaps_render_as_bullets`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<String>,
     /// Optional M2 LLM synthesis result (present only under `--synthesize`).
     ///
     /// Why: recording the synthesis outcome on the model keeps the JSON twin a
@@ -171,9 +187,19 @@ impl ReportModel {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
 
+        // #5323: a declared metrics JSON is producer-supplied text bound for an
+        // acquirer-facing artifact, so it crosses the redaction boundary like
+        // every other finding source. Resolved once per build (it touches the
+        // filesystem), and only when some entry actually declares a file.
+        let secrets = if manifest.repositories.iter().any(|e| e.metrics.is_some()) {
+            super::redact::report_secrets()
+        } else {
+            Vec::new()
+        };
+
         let mut repositories = Vec::with_capacity(manifest.repositories.len());
         for entry in &manifest.repositories {
-            repositories.push(build_repository(entry, manifest_dir)?);
+            repositories.push(build_repository(entry, manifest_dir, &secrets)?);
         }
 
         Ok(ReportModel {
@@ -188,6 +214,9 @@ impl ReportModel {
             generated_date: today,
             manifest_path: manifest_path.display().to_string(),
             repositories,
+            // #5239: the manifest author's own unassessed areas travel with the
+            // report; the analyze pass appends its named gaps to the same list.
+            gaps: manifest.report.gaps.clone(),
             synthesis: None,
             benchmark: None,
             investigation: None,
@@ -200,9 +229,15 @@ impl ReportModel {
 ///
 /// Why: keeps `ReportModel::build` readable by isolating per-entry enrichment.
 /// What: records source kind/origin, gathers git info for local checkouts, and
-/// loads metrics (relative paths resolved against `manifest_dir`).
-/// Test: exercised by `reporter_tests.rs::build_model_from_manifest`.
-fn build_repository(entry: &RepositoryEntry, manifest_dir: &Path) -> Result<RepositoryReport> {
+/// loads metrics (relative paths resolved against `manifest_dir`), scrubbing the
+/// loaded metrics against `secrets` before they reach the model (#5323).
+/// Test: exercised by `build_model_from_manifest` and
+/// `declared_metrics_file_findings_are_scrubbed`.
+fn build_repository(
+    entry: &RepositoryEntry,
+    manifest_dir: &Path,
+    secrets: &[String],
+) -> Result<RepositoryReport> {
     let (source_kind, git_info, scan, local_path) = match &entry.source {
         RepositorySource::LocalPath { path } => {
             let resolved = resolve(manifest_dir, path);
@@ -218,7 +253,12 @@ fn build_repository(entry: &RepositoryEntry, manifest_dir: &Path) -> Result<Repo
     };
 
     let metrics = match &entry.metrics {
-        Some(p) => Some(load_metrics(&resolve(manifest_dir, p))?),
+        Some(p) => {
+            let mut m = load_metrics(&resolve(manifest_dir, p))?;
+            // #5323: scrub at ingest, ahead of every downstream truncation.
+            super::redact::scrub_metrics(&mut m, secrets);
+            Some(m)
+        }
         None => None,
     };
 

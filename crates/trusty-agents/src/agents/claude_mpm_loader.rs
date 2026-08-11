@@ -122,6 +122,8 @@ impl ClaudeMpmAgent {
                 prompt_label: None,
                 extends: None,
                 tier: None,
+                // #3765: no provider pin on this construction path.
+                provider_id: None,
             },
             llm: LlmParams {
                 temperature: 0.3,
