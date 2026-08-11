@@ -7,7 +7,9 @@
 //! What: two handlers —
 //! - `POST /indexes/{id}/graph`: replace-per-producer ingest of a contributed
 //!   graph document into the `kg_contrib` redb table, followed by a serving-
-//!   graph rebuild so the contribution is immediately queryable.
+//!   graph rebuild so the contribution is immediately queryable. "Queryable"
+//!   is the thing being reported: if the rebuild cannot merge, the endpoint
+//!   says so with `503 contrib_not_merged` instead of a `200` (#5505).
 //! - `GET /indexes/{id}/graph/neighbors`: BFS over the merged graph with
 //!   direction control, edge-kind filtering, and a bounded hop count.
 //!
@@ -60,6 +62,12 @@ pub(super) struct IngestGraphResponse {
     pub graph_edges: usize,
     /// Edges dropped across the merge for unresolvable kinds (#816 counter).
     pub unknown_edge_tags_dropped: usize,
+    /// Present only when the merged graph could not be written back to the
+    /// `kg_*` tables (#5505). The contribution IS merged and queryable — this
+    /// says the derived graph will be stale after the next daemon restart
+    /// until a reindex rewrites it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_graph_persist_degraded: Option<String>,
 }
 
 /// `POST /indexes/{id}/graph` — ingest one producer's contributed graph.
@@ -72,9 +80,13 @@ pub(super) struct IngestGraphResponse {
 /// What: validates the request, stores the [`ContribGraph`] blob (one redb
 /// row per producer), then rebuilds the serving graph (derived-from-chunks +
 /// every stored contribution) so the data is immediately traversable. Returns
-/// post-merge graph totals.
+/// post-merge graph totals — but only when the merge actually happened: a
+/// failed merge answers `503 contrib_not_merged` rather than a `200` whose
+/// totals exclude the contribution just ingested (#5505).
 /// Test: `ingest_then_neighbors_round_trip`, `ingest_unknown_index_404`,
-/// `ingest_empty_producer_400` in `tests_contrib_graph`.
+/// `ingest_empty_producer_400`,
+/// `ingest_reports_503_when_the_contributed_overlay_cannot_be_merged` in
+/// `tests_contrib_graph`.
 pub(super) async fn ingest_graph_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -143,9 +155,23 @@ pub(super) async fn ingest_graph_handler(
 
     // Fold into the serving graph: rebuild derived-from-chunks (rehydrates an
     // idle-evicted chunk map internally) + merge every stored contribution.
+    let outcome = {
+        let indexer = handle.indexer.read().await;
+        indexer.rebuild_symbol_graph_now().await
+    };
+    // #5505: the contribution is durable but not queryable. Answering 200 with
+    // totals that exclude it reports a success the caller cannot observe.
+    if let Some(reason) = outcome.merge_error {
+        return Err(super::degraded::contrib_not_merged_response(
+            &index_id.to_string(),
+            &req.producer,
+            replaced,
+            &reason,
+            outcome.blocking_producer.as_deref(),
+        ));
+    }
     let graph = {
         let indexer = handle.indexer.read().await;
-        indexer.rebuild_symbol_graph_now().await;
         indexer.snapshot_symbol_graph().await
     };
 
@@ -157,6 +183,7 @@ pub(super) async fn ingest_graph_handler(
         graph_nodes: graph.node_count(),
         graph_edges: graph.edge_count(),
         unknown_edge_tags_dropped: graph.unknown_edge_tags_dropped(),
+        derived_graph_persist_degraded: outcome.persist_error,
     }))
 }
 

@@ -264,6 +264,25 @@ pub(crate) async fn mark_graph_ready(handle: &Arc<IndexHandle>) {
     stages.graph.completed_at = Some(now_rfc3339());
 }
 
+/// Flip ONLY the graph stage to `Failed`, carrying the reason (#5505).
+///
+/// Why: distinct from [`mark_reindex_failed`], which also fails the semantic
+/// stage. A contributed-overlay merge failure leaves the lexical AND vector
+/// lanes genuinely rebuilt and queryable — only the graph lane is stale, so
+/// failing the other two would overstate the damage. Without this the reindex
+/// flipped `graph` to `Ready` after installing no graph at all, reporting a
+/// pre-reindex graph as this run's product.
+/// What: write-locks stages and sets `graph = StageState::failed(reason)`,
+/// skipping indexes whose graph stage is legitimately `Skipped`.
+/// Test: `reindex_does_not_report_ready_when_the_contrib_merge_fails`.
+pub(crate) async fn mark_graph_failed(handle: &Arc<IndexHandle>, reason: &str) {
+    if handle.lexical_only || handle.skip_kg {
+        return;
+    }
+    let mut stages = handle.stages.write().await;
+    stages.graph = StageState::failed(reason);
+}
+
 /// Schedule deferred GC of the `reindex_progress` map entry for this index.
 ///
 /// Why: issue #75 — bounds long-running daemon memory by GC'ing stale progress

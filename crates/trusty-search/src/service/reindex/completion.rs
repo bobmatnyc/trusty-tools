@@ -29,6 +29,11 @@ pub(super) struct KgRebuildOutcome {
     pub edge_count: usize,
     pub kg_ms: u64,
     pub kg_skipped: bool,
+    /// #5505: why the rebuild did not install a graph, when it did not. The
+    /// counts above then describe the graph the daemon was ALREADY serving —
+    /// not one this reindex produced — so the caller must not report a plain
+    /// success. `None` on the healthy path.
+    pub contrib_merge_error: Option<String>,
 }
 
 /// Run-level timing + memory totals collected across every batch.
@@ -67,18 +72,23 @@ pub(super) struct RunTotals {
 /// `TRUSTY_MAX_KG_NODES`, and it is independent of the embedding pipeline
 /// that caused the abort.
 /// What: acquires the indexer read lock and calls `rebuild_symbol_graph_now`.
-/// Returns `KgRebuildOutcome` with node/edge counts and wall-clock time.
-/// Test: `symbol_count > 0` assertion in integration tests that index Rust files.
+/// Returns `KgRebuildOutcome` with node/edge counts and wall-clock time, plus
+/// the #5505 `contrib_merge_error` — a rebuild that could not merge the
+/// contributed overlay installs no graph, so the counts read off a graph this
+/// reindex did not build and the caller must not call that `Ready`.
+/// Test: `symbol_count > 0` assertion in integration tests that index Rust
+/// files; `reindex_does_not_report_ready_when_the_contrib_merge_fails`.
 pub(super) async fn rebuild_symbol_graph_for_reindex(handle: &IndexHandle) -> KgRebuildOutcome {
     let kg_start = Instant::now();
     let indexer = handle.indexer.read().await;
-    indexer.rebuild_symbol_graph_now().await;
+    let contrib = indexer.rebuild_symbol_graph_now().await;
     let g = indexer.symbol_graph().await;
     KgRebuildOutcome {
         symbol_count: g.node_count(),
         edge_count: g.edge_count(),
         kg_ms: kg_start.elapsed().as_millis() as u64,
         kg_skipped: false,
+        contrib_merge_error: contrib.merge_error,
     }
 }
 
@@ -140,6 +150,9 @@ pub(super) async fn emit_complete_event(
         "walk_truncated_by_budget": totals.chunks_dropped_by_cap > 0,
         "chunks_dropped_by_cap": totals.chunks_dropped_by_cap,
         "kg_skipped": kg.kg_skipped,
+        // #5505: the graph stage is NOT ready when this is set — `symbol_count`
+        // and `edge_count` below describe the previously-served graph.
+        "kg_contrib_merge_error": kg.contrib_merge_error,
         "timings": {
             "walk_ms": totals.walk_ms,
             "parse_ms": totals.parse_ms,

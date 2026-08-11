@@ -29,7 +29,8 @@ use super::CorpusStore;
 /// the ingest contract is replace-per-producer (ADR-0009 + #819 discussion),
 /// so the natural unit of storage is the producer's entire contribution.
 /// Replace = one insert; delete = one remove; load = iterate producers.
-const KG_CONTRIB_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("kg_contrib");
+pub(super) const KG_CONTRIB_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("kg_contrib");
 
 /// One contributed node: extractor-minted canonical identity.
 ///
@@ -83,6 +84,23 @@ pub struct ContribGraph {
     pub edges: Vec<ContribEdge>,
 }
 
+/// One stored contribution that will not deserialize, named by its producer.
+///
+/// Why: `load_contrib_graphs` fails the WHOLE load on the first bad row, and
+/// the resulting 503 used to say only "deserialize contrib graph" — a caller
+/// retrying its own ingest could not learn that a different producer's row was
+/// the blocker, so it would retry forever (#5505). Carried inside the
+/// `anyhow::Error` so no signature changes; recover it with `downcast_ref`.
+/// What: the producer key of the offending row plus the serde failure.
+/// Test: `contrib_load_failure_names_the_blocking_producer`.
+#[derive(Debug, thiserror::Error)]
+#[error("contrib row for producer '{producer}' is unreadable: {source}")]
+pub struct ContribRowError {
+    pub producer: String,
+    #[source]
+    pub source: serde_json::Error,
+}
+
 impl CorpusStore {
     /// Replace `graph.producer`'s contribution with `graph` (ADR-0009).
     ///
@@ -131,9 +149,13 @@ impl CorpusStore {
         };
         let mut out: Vec<ContribGraph> = Vec::new();
         for entry in table.iter().context("iterate kg_contrib")? {
-            let (_, value) = entry.context("read kg_contrib row")?;
-            let graph: ContribGraph =
-                serde_json::from_slice(value.value()).context("deserialize contrib graph")?;
+            let (key, value) = entry.context("read kg_contrib row")?;
+            // #5505: keep the row's producer key. One unreadable row fails the
+            // whole load, so an error that does not name it leaves the caller
+            // with nothing to act on.
+            let producer = key.value().to_string();
+            let graph: ContribGraph = serde_json::from_slice(value.value())
+                .map_err(|source| ContribRowError { producer, source })?;
             out.push(graph);
         }
         out.sort_by(|a, b| a.producer.cmp(&b.producer));

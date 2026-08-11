@@ -36,9 +36,9 @@ use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
 use super::stage_timings::StageTimings;
 use super::stages::{
-    mark_graph_ready, mark_lexical_ready_semantic_in_progress, mark_reindex_failed,
-    mark_semantic_ready_graph_in_progress, now_rfc3339, refresh_context_embedding,
-    schedule_progress_cleanup,
+    mark_graph_failed, mark_graph_ready, mark_lexical_ready_semantic_in_progress,
+    mark_reindex_failed, mark_semantic_ready_graph_in_progress, now_rfc3339,
+    refresh_context_embedding, schedule_progress_cleanup,
 };
 use super::staging;
 use super::validate;
@@ -665,6 +665,7 @@ async fn rebuild_kg(
             edge_count: 0,
             kg_ms: 0,
             kg_skipped: true,
+            contrib_merge_error: None,
         };
     }
 
@@ -686,10 +687,25 @@ async fn rebuild_kg(
             "kg_ms": outcome.kg_ms,
             "symbol_count": outcome.symbol_count,
             "edge_count": outcome.edge_count,
+            // #5505: set ⇒ the counts above are the PREVIOUS graph's.
+            "contrib_merge_error": outcome.contrib_merge_error,
         }))
         .await;
 
-    mark_graph_ready(handle).await;
+    // #5505: a rebuild that installed no graph did not make this index's graph
+    // lane current — flipping it to Ready would report a stale graph as this
+    // reindex's product. Fail the stage with the reason instead.
+    match &outcome.contrib_merge_error {
+        None => mark_graph_ready(handle).await,
+        Some(reason) => {
+            tracing::error!(
+                "reindex[{}]: graph stage NOT ready — contributed overlay not merged \
+                 ({reason}); the serving graph is the one from before this reindex",
+                index_id.0,
+            );
+            mark_graph_failed(handle, reason).await;
+        }
+    }
     if mem_limit_hit || mem_abort.load(AtomicOrdering::Acquire) {
         tracing::warn!(
             "reindex: memory limit was breached during batch processing for \

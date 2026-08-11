@@ -112,6 +112,7 @@ pub struct CodeChunk {
   | `embedder_initializing` | 503 | `true` | Retry once `/health` reports `embedder: "ready"`. |
   | `index_corpus_unavailable` | 503 | see `transient` | Durable corpus failed to open (#4087); carries the #4333 `failure_kind`. |
   | `vector_unavailable` | 503 | per `reason` | Semantic lane cannot serve this query — see `POST /indexes/:id/search`. |
+  | `contrib_not_merged` | 503 | earned | `POST /indexes/:id/graph` only (#5505). The contributed graph was stored durably (`persisted: true`, plus `producer` / `replaced` / `reason`) but could not be folded into the serving graph, so it is not queryable yet. One unreadable `kg_contrib` row fails the whole load, so `blocking_producer` names the row to fix when one is to blame: `retryable` is `true` only when no row is implicated or when the blocker is THIS producer's row (a re-send replaces it), and `false` when another producer's row is the blocker — retrying then fails identically forever. |
 
   `restore_via` on `index_not_resident` names `POST /indexes/{id}/search`, the
   only endpoint that reloads a cold-parked index. `status`, `chunks`, `grep`,
