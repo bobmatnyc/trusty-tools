@@ -286,10 +286,12 @@ fn apply_daemon_env(skip: &[&str]) {
     let (pairs, malformed) = parse_daemon_env(&content);
     for (lineno, line) in &malformed {
         // #4827: a line with no `=` was dropped without a word, so a typo cost
-        // the operator the setting and told them nothing.
+        // the operator the setting and told them nothing. The line itself is
+        // never logged — see `malformed_line_summary`.
         tracing::warn!(
-            "daemon.env {}:{lineno}: ignoring malformed line (expected key=value): {line}",
-            path.display()
+            "daemon.env {}:{lineno}: ignoring malformed line (expected key=value): {}",
+            path.display(),
+            malformed_line_summary(line)
         );
     }
     let mut loaded = Vec::new();
@@ -307,6 +309,37 @@ fn apply_daemon_env(skip: &[&str]) {
     }
     if !loaded.is_empty() {
         tracing::info!("sourced settings from daemon.env: {}", loaded.join(", "));
+    }
+}
+
+/// Describe a malformed `daemon.env` line without reproducing its contents.
+///
+/// Why: `daemon.env` is an operator file holding live credentials, and a typo'd
+/// credential assignment — a space where the `=` belongs, as in
+/// `OPENROUTER_API_KEY sk-or-v1-…` — is precisely the shape that reaches the
+/// malformed arm. Logging the raw line wrote that secret to the daemon log in
+/// cleartext. The success path has always logged loaded key NAMES and never
+/// values; this brings the failure path to the same discipline.
+/// What: reports the line's character count, plus its leading token when that
+/// token has the shape of a conventional environment-variable name
+/// (`[A-Z_][A-Z0-9_]*`) — enough to name the setting the operator fumbled. A
+/// bare secret pasted on its own line does not match that shape (real tokens
+/// carry lowercase, `-`, `.` or `/`), so it degrades to the length alone.
+/// Test: `malformed_line_summary_redacts_a_typod_credential`,
+/// `malformed_line_summary_redacts_a_bare_secret`,
+/// `malformed_line_summary_names_a_conventional_key`.
+fn malformed_line_summary(line: &str) -> String {
+    let len = line.chars().count();
+    let leading = line.split_whitespace().next().unwrap_or_default();
+    let looks_like_env_key = !leading.is_empty()
+        && leading.starts_with(|c: char| c.is_ascii_uppercase() || c == '_')
+        && leading
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if looks_like_env_key {
+        format!("{len} chars, starting with `{leading}`")
+    } else {
+        format!("{len} chars")
     }
 }
 

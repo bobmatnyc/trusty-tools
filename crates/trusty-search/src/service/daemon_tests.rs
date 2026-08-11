@@ -381,6 +381,57 @@ fn parse_daemon_env_reports_malformed_lines() {
     );
 }
 
+/// A typo'd credential assignment must not put the secret in the log.
+///
+/// `daemon.env` holds live provider keys. Writing `OPENROUTER_API_KEY sk-…`
+/// instead of `OPENROUTER_API_KEY=sk-…` lands in the malformed arm, which used
+/// to log the line verbatim — leaking the key in cleartext to anyone who can
+/// read the daemon log.
+#[test]
+fn malformed_line_summary_redacts_a_typod_credential() {
+    let secret = "sk-or-v1-0123456789abcdef0123456789abcdef";
+    let summary = super::malformed_line_summary(&format!("OPENROUTER_API_KEY {secret}"));
+
+    assert!(
+        !summary.contains(secret),
+        "the secret must never reach the log, got: {summary}"
+    );
+    assert!(
+        !summary.contains("sk-or"),
+        "not even a prefix of the secret may survive, got: {summary}"
+    );
+    assert!(
+        summary.contains("OPENROUTER_API_KEY"),
+        "the key name is the whole point of the diagnostic, got: {summary}"
+    );
+}
+
+/// A bare token on its own line has no key name to report, so nothing but the
+/// length may be logged — the leading token IS the secret in that case.
+#[test]
+fn malformed_line_summary_redacts_a_bare_secret() {
+    let secret = "sk-or-v1-0123456789abcdef";
+    let summary = super::malformed_line_summary(secret);
+
+    assert!(
+        !summary.contains(secret) && !summary.contains("sk-or"),
+        "a bare secret must degrade to a length-only summary, got: {summary}"
+    );
+    assert_eq!(summary, "25 chars", "got: {summary}");
+}
+
+/// The common case — a fumbled separator on an ordinary setting — must still
+/// name the setting, or the warning tells the operator nothing actionable.
+#[test]
+fn malformed_line_summary_names_a_conventional_key() {
+    let summary = super::malformed_line_summary("TRUSTY_MAX_CHUNKS 100000");
+    assert!(summary.contains("TRUSTY_MAX_CHUNKS"), "got: {summary}");
+    assert!(
+        !summary.contains("100000"),
+        "the value is never this function's to reproduce, got: {summary}"
+    );
+}
+
 /// #4827: the early pass must skip exactly the keys whose value a CLI flag
 /// stamps in after parsing, plus `TRUSTY_DATA_DIR` — which decides where
 /// `daemon.env` itself lives, so applying it early would let the production
