@@ -173,7 +173,7 @@ impl CorpusStore {
     /// reindex by construction. Separate from
     /// [`CorpusStore::copy_all_from`](CorpusStore::copy_all_from) because a
     /// force reindex deliberately seeds no chunks and must still carry
-    /// contributions forward.
+    /// contributions forward. See PR #5527.
     ///
     /// What: streams every `kg_contrib` row from `source` into `self` in one
     /// write transaction, returning the number of producers copied. A `source`

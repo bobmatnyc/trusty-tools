@@ -157,7 +157,7 @@ pub(super) async fn begin_staged_corpus_swap(
                     )
                 })?;
             }
-            // ADR-0009: the promotion is a rename, so a contribution absent
+            // See PR #5527. ADR-0009: the promotion is a rename, so a contribution absent
             // from staging is destroyed by it — and nothing regenerates
             // `kg_contrib` the way the chunk rebuild regenerates `kg_nodes` /
             // `kg_edges`. Unconditional, because force is the path that

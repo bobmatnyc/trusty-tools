@@ -341,7 +341,7 @@ impl CorpusStore {
     /// `begin_staged_corpus_swap` calls on the force path as well as this one —
     /// reading an absent `kg_contrib` here as "it gets rebuilt" is what let
     /// every reindex silently discard every contribution while reporting
-    /// success.
+    /// success. See PR #5527.
     ///
     /// `META_KEY_REINDEX_CHECKPOINT` is likewise and deliberately NOT in the
     /// copied-key list (#3979): the checkpoint describes the run building
