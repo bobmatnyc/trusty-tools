@@ -107,7 +107,7 @@ async fn legacy_palace_migrates_on_open_and_accepts_multi_valued_writes() {
 
     // Hydration ran over the migrated rows, so the graph sees all three edges.
     assert_eq!(kg.edge_count(), 3);
-    assert_eq!(kg.count_active_triples(), 3);
+    assert_eq!(kg.count_active_triples().unwrap(), 3);
 
     // Multi-valued predicate: the new member joins the room.
     kg.assert(triple("room:General", "contains", "drawer:b"))
