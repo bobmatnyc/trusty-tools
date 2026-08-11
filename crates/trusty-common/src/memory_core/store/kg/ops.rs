@@ -8,8 +8,8 @@
 //! `node_count`, `edge_count`, `community_count`, `checkpoint`,
 //! `upsert_drawer`, `delete_drawer`, `delete_drawer_sync`, `load_drawer_ids`,
 //! `load_drawers`, `knowledge_gaps`, `is_read_only`,
-//! `cascade_delete_by_drawer`, `assert_sync`, `upsert_drawer_sync`, `store`,
-//! `dump_all_triples`.
+//! `cascade_delete_by_drawer`, `retract_triple`, `assert_sync`,
+//! `upsert_drawer_sync`, `store`, `dump_all_triples`.
 //! Test: See kg/tests.rs for comprehensive storage round-trip tests.
 
 use super::graph::KnowledgeGraph;
@@ -305,6 +305,52 @@ impl KnowledgeGraph {
                     adj.graph.remove_edge(eid);
                 }
             }
+        }
+        Ok(closed)
+    }
+
+    /// Close the active triple `subject --predicate--> object`, leaving every
+    /// other object at that pair live. Returns 1 when a row was closed, 0 when
+    /// there was none.
+    ///
+    /// Why: [`KnowledgeGraph::retract`] closes the WHOLE `(subject, predicate)`
+    /// pair, so removing one wrong object took the correct siblings with it
+    /// (#5396). Re-asserting is no escape either — `is-a`, `works-at`, `uses`
+    /// and `depends-on` are absent from `FUNCTIONAL_PREDICATES`, so a new object
+    /// joins the bad one rather than displacing it.
+    /// What: delegates to [`KgStoreRedb::retract_triple`] on the blocking pool,
+    /// then drops the single matching edge from the in-memory adjacency so
+    /// `neighbors` and the graph views agree with storage without a restart.
+    /// It writes directly rather than through the coalescing `KgWriter`,
+    /// matching `cascade_delete_by_drawer` — `BatchWriteOp` is a public
+    /// non-`#[non_exhaustive]` enum, so a new variant would be a breaking change
+    /// for a path that is a maintenance sweep, not a hot write. redb serialises
+    /// write transactions, so a concurrent batch is ordered, not raced.
+    /// Test: `retract_triple_drops_one_edge_and_keeps_the_siblings`.
+    pub async fn retract_triple(
+        &self,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> Result<usize> {
+        // #5396: remove one object without collateral loss of its siblings.
+        let store = self.store.clone();
+        let (s, p, o) = (
+            subject.to_string(),
+            predicate.to_string(),
+            object.to_string(),
+        );
+        let (sc, pc, oc) = (s.clone(), p.clone(), o.clone());
+        let closed = tokio::task::spawn_blocking(move || store.retract_triple(&sc, &pc, &oc))
+            .await
+            .context("retract_triple spawn_blocking join error")??;
+
+        if closed > 0 {
+            let mut adj = self
+                .adj
+                .write()
+                .map_err(|_| anyhow::anyhow!("kg adjacency lock poisoned"))?;
+            adj.remove_edge_to(&s, &p, &o);
         }
         Ok(closed)
     }
