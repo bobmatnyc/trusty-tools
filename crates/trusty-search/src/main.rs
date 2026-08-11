@@ -588,6 +588,15 @@ enum Commands {
         /// `list_indexes` and guess. Without this flag, behaviour is unchanged
         /// (callers must supply `index_id`; fan-out sweeps all). Wins over
         /// `--project` when both are given.
+        ///
+        /// Also reads `TRUSTY_INDEX`, which is what lets ADR-0042 share one
+        /// argless `["serve"]` MCP declaration across projects. The `env` is
+        /// declared once on the global `Cli::index`; this field spells the same
+        /// clap id, so clap fills it from that one arg rather than treating it
+        /// as a second, environment-blind one.
+        // #4181: the shared id is what carries TRUSTY_INDEX here — renaming
+        // either field, or dropping `global` from Cli::index, breaks it.
+        // Precedence is pinned by `commands::serve::index_env_tests`.
         #[arg(long)]
         index: Option<String>,
 
@@ -1419,16 +1428,7 @@ async fn run() -> Result<()> {
             index,
             project,
         } => {
-            // Resolve the pinned index id (#1373): `--index` wins; otherwise
-            // derive it from `--project` via the shared derivation so it
-            // matches the CLI / trusty-mpm.
-            let pinned_index = index.or_else(|| {
-                project.map(|p| {
-                    let start = std::path::PathBuf::from(&p);
-                    let root = trusty_common::resolve_project_root(&start);
-                    trusty_common::derive_index_id(&root)
-                })
-            });
+            let pinned_index = commands::serve::resolve_pinned_index(index, project);
             commands::serve::handle_serve(with_http, port, http, pinned_index).await?;
         }
 
