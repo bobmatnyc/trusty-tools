@@ -35,6 +35,12 @@ pub const HEALTH_DAEMON_ERROR: &str = "daemon_error";
 pub const HEALTH_INDEX_NOT_REGISTERED: &str = "index_not_registered";
 /// The index is registered on the daemon but holds zero chunks.
 pub const HEALTH_INDEX_EMPTY: &str = "index_empty";
+/// No index could be named, so the project-level check never ran.
+///
+/// Why: this is not `ok`. Reporting the daemon healthy when the caller's own
+/// project was never checked is the same unverified-green this tool exists to
+/// stop, moved one layer down from the daemon to the index.
+pub const HEALTH_INDEX_UNKNOWN: &str = "index_unknown";
 
 /// Longest response-body excerpt echoed back in a diagnostic.
 const BODY_EXCERPT_CHARS: usize = 400;
@@ -70,8 +76,26 @@ const DAEMON_IDENTITY_FIELDS: &[&str] = &[
 /// Test: `search_health_reports_daemon_unreachable_with_remediation`,
 /// `search_health_reports_a_non_2xx_daemon`,
 /// `search_health_reports_an_unregistered_project_index`,
-/// `search_health_names_the_answering_daemon`.
+/// `search_health_names_the_answering_daemon`,
+/// `search_health_does_not_report_ok_when_no_index_could_be_resolved`.
 pub(super) async fn handle_search_health(server: &McpServer, args: &Value) -> Value {
+    report_health(server, resolve_scope(server, args)).await
+}
+
+/// Pure-ish core of [`handle_search_health`], taking the resolved index scope
+/// as a parameter instead of deriving it from process state.
+///
+/// Why: `resolve_scope`'s last fallback reads `std::env::current_dir()`, so the
+/// "no index could be named" branch is unreachable from an in-process test —
+/// the working directory always yields an id. Injecting the scope mirrors
+/// `doctor_data_dir_from`'s split in `commands::doctor_checks` and makes that
+/// branch directly assertable.
+/// What: identical to the wrapper except that `scope` is supplied.
+/// Test: `search_health_does_not_report_ok_when_no_index_could_be_resolved`.
+pub(super) async fn report_health(
+    server: &McpServer,
+    scope: Option<(String, &'static str)>,
+) -> Value {
     let base = server.base_url.clone();
 
     let health = match probe_daemon(server).await {
@@ -117,17 +141,23 @@ pub(super) async fn handle_search_health(server: &McpServer, args: &Value) -> Va
     let daemon = daemon_identity(&base, &health);
     let answered = summarize_daemon(&base, &daemon);
 
-    let Some((index_id, source)) = resolve_scope(server, args) else {
+    // #5264: the daemon is fine, but nothing about the CALLER's project was
+    // verified. Reporting `ok`/`healthy: true` here would be a green verdict on
+    // a check that never ran — the same defect this tool fixes at the daemon
+    // layer, one level down.
+    let Some((index_id, source)) = scope else {
         return report(
-            HEALTH_OK,
+            HEALTH_INDEX_UNKNOWN,
             daemon,
             Value::Null,
             format!(
-                "{answered} This session named no index and none could be derived \
-                 from the working directory, so no project-level check ran."
+                "{answered} No index could be named — this session has no pin, no \
+                 `index_id` was given, and none could be derived from the working \
+                 directory — so NO project-level check ran and this reports nothing \
+                 about whether your searches will find anything."
             ),
-            "Call `list_indexes` to see what this daemon serves, then pass an \
-             explicit `index_id` to `search_health` to check one project.",
+            "Call `list_indexes` to see what this daemon serves, then re-run \
+             `search_health` with an explicit `index_id`.",
         );
     };
 

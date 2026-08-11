@@ -18,8 +18,9 @@
 //! files. `setup` also patches per-project `.claude/settings.json` files found
 //! by an eight-deep `$HOME` walk; doctor deliberately does not repeat that walk,
 //! because a diagnostic that takes tens of seconds on a large `$HOME` would not
-//! get run. The report says so rather than implying the global files are all
-//! that exist.
+//! get run. [`check_claude_registrations`] states that limit in an actual
+//! `CheckResult` when no global file exists, so a machine whose only
+//! registration is project-local reads a warning rather than nothing at all.
 //!
 //! Test: the inline `tests` module below.
 
@@ -226,10 +227,63 @@ pub fn read_codex_registration(home: &Path, server_key: &str) -> Option<McpRegis
 }
 
 /// The two Claude Code settings files that exist independently of any project.
-pub fn claude_global_settings_paths(home: &Path) -> Vec<PathBuf> {
+fn claude_global_settings_paths(home: &Path) -> Vec<PathBuf> {
     ["settings.json", "settings.local.json"]
         .iter()
         .map(|n| home.join(".claude").join(n))
+        .collect()
+}
+
+/// Every Claude Code verdict for this machine — never an empty list.
+///
+/// Why (#5264): the earlier loop skipped a settings file that did not exist and
+/// emitted nothing when neither did, so a machine whose ONLY registration is
+/// project-local got no Claude Code line at all. That is not exotic — `setup`
+/// patches project-local `.claude/settings.json` files it finds by an eight-deep
+/// `$HOME` walk, so zero global files is a normal state. A broken project-local
+/// registration would then be reported by nothing on the machine, which is the
+/// failure #5264 was filed about, reproduced for the client this check added.
+/// What: one verdict per existing global file; when neither exists, a single
+/// `Warn` that names the scope limit, so the operator reads "doctor did not
+/// check project-local files" rather than silence.
+/// Test: `absent_global_claude_files_still_emit_a_scope_warning`,
+/// `existing_global_claude_file_is_checked`.
+pub fn check_claude_registrations(
+    home: &Path,
+    server_key: &str,
+    probed_base: &str,
+    version_of: &dyn Fn(Option<&McpRegistration>) -> String,
+) -> Vec<CheckResult> {
+    let paths = claude_global_settings_paths(home);
+    let existing: Vec<&PathBuf> = paths.iter().filter(|p| p.is_file()).collect();
+
+    if existing.is_empty() {
+        return vec![CheckResult::Warn(format!(
+            "Claude Code MCP registration: neither global settings file exists ({}) \
+             — nothing was checked for this client. `trusty-search setup` also \
+             patches PROJECT-LOCAL .claude/settings.json files, which doctor does \
+             not scan; check those by hand, or run `trusty-search setup` to \
+             (re)register everywhere.",
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))];
+    }
+
+    existing
+        .into_iter()
+        .map(|path| {
+            let reg = read_claude_registration(path, server_key);
+            check_registration(
+                reg.as_ref(),
+                "Claude Code",
+                path,
+                &version_of(reg.as_ref()),
+                probed_base,
+            )
+        })
         .collect()
 }
 
@@ -399,6 +453,75 @@ mod tests {
     fn codex_missing_file_is_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(read_codex_registration(tmp.path(), "trusty-search").is_none());
+    }
+
+    /// The scope limit must reach the operator as a verdict, not as silence.
+    ///
+    /// Why (#5264): `setup` patches project-local `.claude/settings.json` files
+    /// found by an eight-deep `$HOME` walk, so a machine with zero GLOBAL files
+    /// is a normal state, not an edge case. Emitting nothing there means a
+    /// broken project-local registration is reported by nothing on the machine
+    /// — the exact failure this check was added to end.
+    /// What: a `$HOME` with no `.claude` directory at all must still produce one
+    /// result, and that result must name the unscanned project-local files.
+    #[test]
+    fn absent_global_claude_files_still_emit_a_scope_warning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let version = |_: Option<&McpRegistration>| "v".to_string();
+
+        let results = check_claude_registrations(
+            tmp.path(),
+            "trusty-search",
+            "http://127.0.0.1:7878",
+            &version,
+        );
+
+        assert_eq!(
+            results.len(),
+            1,
+            "silence is the defect; expected one verdict, got {results:?}"
+        );
+        assert!(results[0].is_warn(), "expected Warn, got {:?}", results[0]);
+        let CheckResult::Warn(msg) = &results[0] else {
+            unreachable!()
+        };
+        assert!(
+            msg.contains("PROJECT-LOCAL"),
+            "must name what was NOT scanned: {msg}"
+        );
+        assert!(
+            msg.contains("trusty-search setup"),
+            "must name the repair: {msg}"
+        );
+    }
+
+    /// An existing global file is checked on its merits, and a broken one is an
+    /// error rather than the scope warning.
+    #[test]
+    fn existing_global_claude_file_is_checked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"mcpServers":{"trusty-search":{"command":"trusty-search","args":[]}}}"#,
+        )
+        .unwrap();
+        let version = |_: Option<&McpRegistration>| "v".to_string();
+
+        let results = check_claude_registrations(
+            tmp.path(),
+            "trusty-search",
+            "http://127.0.0.1:7878",
+            &version,
+        );
+
+        assert_eq!(results.len(), 1, "one verdict per existing file");
+        assert!(
+            results[0].is_error(),
+            "an empty args vector is the #5264 defect: {:?}",
+            results[0]
+        );
     }
 
     #[test]

@@ -16,8 +16,8 @@
 
 use super::daemon_utils::daemon_base_url;
 use super::doctor_checks::mcp_registration::{
-    check_registration, claude_global_settings_paths, read_claude_registration,
-    read_codex_registration, registered_exe_version, McpRegistration,
+    check_claude_registrations, check_registration, read_codex_registration,
+    registered_exe_version, McpRegistration,
 };
 use super::doctor_checks::{
     check_daemon_running, check_data_dir, check_lock_file, check_log_rotation, check_model_cache,
@@ -294,21 +294,12 @@ impl DoctorCheck for McpRegistrationCheck {
             &state.base,
         )];
 
-        for path in claude_global_settings_paths(&home) {
-            // A global Claude settings file that does not exist is not a
-            // finding — `setup` creates one only when no others were found.
-            if !path.is_file() {
-                continue;
-            }
-            let reg = read_claude_registration(&path, MCP_SERVER_KEY);
-            results.push(check_registration(
-                reg.as_ref(),
-                "Claude Code",
-                &path,
-                &version_of(reg.as_ref()),
-                &state.base,
-            ));
-        }
+        results.extend(check_claude_registrations(
+            &home,
+            MCP_SERVER_KEY,
+            &state.base,
+            &version_of,
+        ));
         results
     }
 }

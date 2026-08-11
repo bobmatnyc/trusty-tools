@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use super::tests::req;
 use super::{
     McpServer, HEALTH_DAEMON_ERROR, HEALTH_DAEMON_UNREACHABLE, HEALTH_INDEX_EMPTY,
-    HEALTH_INDEX_NOT_REGISTERED, HEALTH_OK,
+    HEALTH_INDEX_NOT_REGISTERED, HEALTH_INDEX_UNKNOWN, HEALTH_OK,
 };
 
 /// A loopback daemon whose `/health` and `/indexes/{id}/status` responses are
@@ -234,6 +234,43 @@ async fn search_health_names_the_answering_daemon() {
     assert!(
         message.contains(&base) && message.contains("42") && message.contains("430000"),
         "the prose must identify the responder too: {message}"
+    );
+}
+
+/// A daemon that is up tells you nothing about a project that was never
+/// checked, so the unresolvable-scope branch must not report `ok`.
+///
+/// Why: `resolve_scope` returns `None` when there is no explicit `index_id`, no
+/// session pin, and no id derivable from the working directory. Returning
+/// `HEALTH_OK` there was a green verdict on a check that never ran — the same
+/// unverified-green this tool exists to stop, one layer down from the daemon.
+/// What: calls the injectable core with `scope: None` against a demonstrably
+/// healthy daemon, and asserts the verdict is neither `ok` nor `healthy`.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn search_health_does_not_report_ok_when_no_index_could_be_resolved() {
+    let base = spawn_health_daemon(
+        (200, healthy_body(42, 430_000)),
+        (200, json!({ "chunk_count": 1 })),
+    )
+    .await;
+    let server = McpServer::new(base);
+
+    let report = super::health::report_health(&server, None).await;
+
+    assert_eq!(report["status"], HEALTH_INDEX_UNKNOWN);
+    assert_eq!(
+        report["healthy"],
+        Value::Bool(false),
+        "a project that was never checked must not read as healthy: {report}"
+    );
+    assert_eq!(report["index"], Value::Null);
+    // The daemon half still reports truthfully — it WAS reached.
+    assert_eq!(report["daemon"]["reachable"], Value::Bool(true));
+    let message = report["message"].as_str().expect("message");
+    assert!(
+        message.contains("NO project-level check ran"),
+        "the message must say the project was not checked: {message}"
     );
 }
 

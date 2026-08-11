@@ -51,7 +51,7 @@ pub(crate) mod unavailable;
 pub use descriptors::{tool_descriptors, tool_descriptors_pinned};
 pub use health::{
     HEALTH_DAEMON_ERROR, HEALTH_DAEMON_UNREACHABLE, HEALTH_INDEX_EMPTY,
-    HEALTH_INDEX_NOT_REGISTERED, HEALTH_OK,
+    HEALTH_INDEX_NOT_REGISTERED, HEALTH_INDEX_UNKNOWN, HEALTH_OK,
 };
 pub use not_ready::{INDEX_NOT_READY, INDEX_NOT_READY_CODE};
 pub use unavailable::{INDEX_UNAVAILABLE, INDEX_UNAVAILABLE_CODE};
