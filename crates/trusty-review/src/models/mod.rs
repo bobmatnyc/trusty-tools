@@ -206,6 +206,54 @@ pub enum VerifyOutcome {
     },
 }
 
+impl VerifyOutcome {
+    /// The caveat a reader is owed when a finding carrying this outcome is
+    /// shown to them, or `None` when the finding stands unqualified (#5312).
+    ///
+    /// Why: every surface that renders a finding to a human — the summary
+    /// banner (#5316), the inline PR comment (#5312) — needs the same answer to
+    /// "does the pipeline stand behind this claim?", and each surface that
+    /// answered it locally got it wrong once. #4212 keyed the earlier fix on the
+    /// claim's *subject*, which covered only the subjects already burned; the
+    /// recurrence on the inline surface is what that costs. Keying on the
+    /// finding's own recorded epistemic outcome is subject-agnostic, and living
+    /// on the outcome itself means a new renderer asks the finding rather than
+    /// reimplementing the judgment.
+    /// What: exhaustive match — deliberately no `_` arm, so a new
+    /// `VerifyOutcome` variant cannot render as an unqualified claim by
+    /// default; the compiler forces the decision here. `Refuted` is the only
+    /// disproof; the two error variants mean "unable to verify" (#726, #1876)
+    /// and say so rather than claiming the finding is wrong. `Confirmed` and
+    /// `Skipped` return `None` — `Skipped` means the finding never cleared the
+    /// candidate-confidence floor, the same state as the `verified: None`
+    /// majority, and marking it would mark nearly every finding.
+    /// Test: `caveat_refuted_is_a_disproof`,
+    /// `caveat_error_refuted_is_unable_to_verify`,
+    /// `caveat_confirmed_and_skipped_are_unqualified`.
+    pub(crate) fn reader_caveat(&self) -> Option<String> {
+        match self {
+            Self::Confirmed | Self::Skipped => None,
+            Self::Refuted => Some(
+                "the verifier examined this claim and REFUTED it — it does not support the \
+                 verdict and is not a merge blocker."
+                    .to_string(),
+            ),
+            Self::ErrorRefuted { error_class } => Some(format!(
+                "the verifier could not be reached ({error_class}), so this claim is \
+                 UNVERIFIED — it was not disproved, and it was not confirmed either."
+            )),
+            Self::TruncationRefuted => Some(
+                "the verifier's response was truncated, so this claim is UNVERIFIED — it was \
+                 not disproved, and it was not confirmed either."
+                    .to_string(),
+            ),
+            Self::Unverifiable { reason } => {
+                Some(format!("this claim was never verified — {reason}"))
+            }
+        }
+    }
+}
+
 // ─── Finding category ──────────────────────────────────────────────────────────
 
 /// The axis a finding speaks to: code correctness vs. intent/method conformance.
