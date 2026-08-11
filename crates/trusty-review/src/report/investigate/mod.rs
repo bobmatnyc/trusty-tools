@@ -34,7 +34,7 @@ use serde::Serialize;
 use crate::llm::LlmProvider;
 use crate::report::metrics::{AnalyzeMetrics, MetricFinding, Severity};
 use crate::report::model::ReportModel;
-use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+use crate::report::synthesize::{FindingProse, Synthesis};
 
 pub use batch::BatchStatus;
 pub use deps::{Dependency, DependencyInventory};
@@ -398,13 +398,12 @@ fn component_ref(f: &VerifiedFinding) -> String {
 /// Why: the RED/AMBER finding rows render prose from `Synthesis::findings`; the
 /// investigation's prose is the trustworthy one (its evidence is guardrail-
 /// verified verbatim), so it must WIN over any synthesis prose for the same
-/// finding and carry the measured-evidence flag.  Marking the synthesis available
-/// when investigation produced findings ensures they render even if the synthesis
-/// narrative pass itself failed closed.
+/// finding and carry the measured-evidence flag.
 /// What: for each verified RED/AMBER finding, removes any synthesis finding with
 /// the same `(slug, title)` and pushes a credential-scrubbed `FindingProse`
-/// (#5323, see [`scrubbed_prose`]) with `evidence_measured = true`; flips the
-/// status to `Available` when any finding was added.
+/// (#5323, see [`scrubbed_prose`]) with `evidence_measured = true`.  #5454 dropped
+/// the status flip this used to perform: a `Synthesis` only exists when the
+/// narrative pass succeeded, so there is no failed-closed status left to rescue.
 /// Test: `tests/report_investigate.rs` asserts measured evidence + inferred
 /// prose; `investigation_credentials_never_reach_the_rendered_report` asserts
 /// the scrub on the rendered markdown and the JSON twin.
@@ -412,7 +411,6 @@ pub fn merge_investigation_prose(synthesis: &mut Synthesis, inv: &Investigation)
     // #5323: this sink bypasses the metrics scrub entirely, and `merge_prose`
     // overwrites the metrics prose with what lands here.
     let secrets = super::redact::report_secrets();
-    let mut added = false;
     for repo_inv in &inv.repos {
         for f in &repo_inv.findings {
             if f.severity == Severity::Green {
@@ -429,11 +427,7 @@ pub fn merge_investigation_prose(synthesis: &mut Synthesis, inv: &Investigation)
             synthesis
                 .findings
                 .push(scrubbed_prose(&repo_inv.slug, band, f, &secrets));
-            added = true;
         }
-    }
-    if added && !matches!(synthesis.status, SynthesisStatus::Available) {
-        synthesis.status = SynthesisStatus::Available;
     }
 }
 

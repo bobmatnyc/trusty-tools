@@ -190,7 +190,7 @@ where
         if let Some(handle) = state.registry.peek(id) {
             total_drawers = total_drawers.saturating_add(handle.drawers.read().len());
             total_vectors = total_vectors.saturating_add(handle.vector_store.index_size());
-            total_kg_triples = total_kg_triples.saturating_add(handle.kg.count_active_triples());
+            total_kg_triples = total_kg_triples.saturating_add(kg_triple_count_or_zero(&handle));
             cached_palace_count += 1;
         }
     }
@@ -318,6 +318,32 @@ fn wing_registry_count(handle: &Arc<PalaceHandle>) -> Option<usize> {
     }
 }
 
+/// Active-triple count for a diagnostic roll-up, or `0` when the read fails.
+///
+/// Why (#5384): `count_active_triples` is fallible so the callers whose answer
+/// depends on it — `kg_query`'s `graph_state`, `kg_graph`'s `truncated`, the
+/// REST count — surface a broken read instead of reporting an empty graph. The
+/// status/metrics roll-ups have no field to carry "unknown", and #4637 already
+/// fixed 0 as "unknown, never empty" for those totals, so they degrade. Keeping
+/// the degrade in one named helper is what stops it from sinking back into the
+/// store where no caller can see it.
+/// What: logs the error at warn with the palace id and returns 0.
+/// Test: `status_does_not_open_uncached_palaces`. The read error this converts
+/// is covered cross-crate, in
+/// `crates/trusty-common/src/memory_core/store/kg_redb/tests.rs`, by
+/// `count_active_triples_surfaces_read_failure` — named in prose because
+/// `scripts/check_test_pointers.sh` resolves a cited name only within the
+/// citing crate.
+pub(crate) fn kg_triple_count_or_zero(handle: &Arc<PalaceHandle>) -> usize {
+    match handle.kg.count_active_triples() {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(palace = %handle.id, "kg_triple_count unavailable: {e:#}");
+            0
+        }
+    }
+}
+
 pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> PalaceInfo {
     let (
         drawer_count,
@@ -355,7 +381,7 @@ pub fn palace_info_from(palace: &Palace, handle: Option<&Arc<PalaceHandle>>) -> 
         (
             drawers.len(),
             h.vector_store.index_size(),
-            h.kg.count_active_triples(),
+            kg_triple_count_or_zero(h),
             rooms,
             wings,
             last_write,

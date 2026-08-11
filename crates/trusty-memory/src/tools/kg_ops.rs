@@ -81,6 +81,74 @@ pub(crate) async fn handle_kg_assert(state: &AppState, args: Value) -> Result<Va
     Ok(json!({ "status": "asserted" }))
 }
 
+/// MCP `kg_retract_triple` tool — close exactly one active triple.
+///
+/// Why: `kg_assert` had no inverse on the MCP surface. The only retraction a
+/// tool caller could reach was `remove_prompt_fact`, which is scoped to hot
+/// predicates, spans every palace, and closes the whole `(subject, predicate)`
+/// pair — so an agent that asserted a wrong object could not take it back.
+/// Re-asserting is not an escape either: outside `FUNCTIONAL_PREDICATES` a new
+/// object joins the wrong one instead of displacing it.
+/// What: resolves the palace, then calls
+/// [`trusty_common::memory_core::store::kg::KnowledgeGraph::retract_triple`],
+/// which targets the full `(subject, predicate, object)` key and leaves every
+/// sibling object at that pair active. Returns the `closed` count so a caller
+/// can tell a retraction (`1`) from a miss (`0`); a miss is a genuine no-op,
+/// carries `reason`, and is not an error, which makes the call idempotent.
+/// Rebuilds the prompt cache when a hot-predicate triple was actually closed —
+/// otherwise a retracted Tier S fact keeps being injected until the next write.
+/// Test: `dispatch_kg_retract_triple_closes_one_object_and_keeps_siblings`,
+/// `dispatch_kg_retract_triple_missing_triple_is_a_legible_noop`,
+/// `dispatch_kg_retract_triple_requires_object`.
+pub(crate) async fn handle_kg_retract_triple(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "kg_retract_triple")?;
+    let subject = args
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("kg_retract_triple: missing 'subject'"))?
+        .to_string();
+    let predicate = args
+        .get("predicate")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("kg_retract_triple: missing 'predicate'"))?
+        .to_string();
+    let object = args
+        .get("object")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("kg_retract_triple: missing 'object'"))?
+        .to_string();
+
+    let handle = open_palace_handle(state, &palace)?;
+    let closed = handle
+        .kg
+        .retract_triple(&subject, &predicate, &object)
+        .await
+        .context("kg.retract_triple")?;
+
+    if closed > 0 && crate::prompt_facts::is_hot_predicate(&predicate) {
+        // Mirrors `handle_kg_assert`: the write landed either way, the cache is
+        // only a denormalisation, so a rebuild failure is logged, not fatal.
+        if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
+            tracing::warn!("rebuild_prompt_cache after kg_retract_triple failed: {e:#}");
+        }
+    }
+
+    let mut response = json!({
+        "palace": palace,
+        "subject": subject,
+        "predicate": predicate,
+        "object": object,
+        "closed": closed,
+        "retracted": closed > 0,
+    });
+    if closed == 0 {
+        response["reason"] = Value::String(
+            "no active triple with that exact (subject, predicate, object)".to_string(),
+        );
+    }
+    Ok(response)
+}
+
 pub(crate) async fn handle_add_alias(state: &AppState, args: Value) -> Result<Value> {
     let short = args
         .get("short")
@@ -207,7 +275,9 @@ pub(crate) async fn handle_remove_prompt_fact(state: &AppState, args: Value) -> 
 /// hits and misses alike. On a miss it adds `graph_state` —
 /// `"subject_not_found"` or `"graph_empty"` — and the matching `hint`; a hit
 /// carries neither, so their absence means the subject was found. See
-/// [`crate::bootstrap::KgMiss`] for the classification.
+/// [`crate::bootstrap::KgMiss`] for the classification. A failed count read is
+/// an error (#5384), never a `graph_empty` verdict — the classifier only ever
+/// sees a total it actually read.
 /// Test: `kg_query_reports_subject_not_found_when_graph_has_other_subjects`,
 /// `kg_query_reports_graph_empty_when_graph_has_no_triples`,
 /// `dispatch_kg_assert_then_query`.
@@ -239,7 +309,12 @@ pub(crate) async fn handle_kg_query(state: &AppState, args: Value) -> Result<Val
         .collect();
     // #4775: read the whole-graph total so a miss can name which miss it is
     // instead of asserting emptiness the handler can disprove.
-    let total_active = handle.kg.count_active_triples();
+    // #5384: propagate a failed count read — classifying on a fail-open 0
+    // would report `graph_empty`, the claim #4775 exists to prevent.
+    let total_active = handle
+        .kg
+        .count_active_triples()
+        .with_context(|| format!("kg.count_active_triples for palace {palace}"))?;
     let mut response = json!({
         "subject": subject,
         "triples": payload,

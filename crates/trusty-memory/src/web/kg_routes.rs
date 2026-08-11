@@ -184,7 +184,8 @@ pub(super) async fn kg_list_all(
 /// Why: The KG Explorer header shows a quick "N triples" badge; computing the
 /// count server-side avoids fetching every triple to count them.
 /// What: returns `{ "active": N }` where N is `count_active_triples()` on the
-/// palace's KG.
+/// palace's KG. A failed store read is a 500 (#5384): the badge cannot tell
+/// `{"active": 0}` apart from a count that was never read.
 /// Test: indirectly via the same palace counts surfaced on `/api/v1/status`.
 pub(super) async fn kg_count(
     State(state): State<AppState>,
