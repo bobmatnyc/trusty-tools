@@ -24,17 +24,17 @@
 //! | [`workdir`] | the directory tree this crate owns on the recipient's machine |
 //! | [`config`] | the engagement config that ships TO the recipient — and the key it carries |
 //! | [`manifest`] | reading tga's `manifest.toml` rather than duplicating it |
-//! | [`tools`] | which pinned tools are needed, and the seam where #5491 installs them |
+//! | [`tools`] | which pinned tools are needed, and the call that installs them |
 //!
 //! ## What this milestone is not
 //!
-//! Scaffold only. The audit sweep, package assembly, signing and the GUI are
-//! later milestones on #5473/#5477's tree. [`tools::install`] is a seam that
-//! fails closed rather than a download implementation — downloads belong to
-//! `trusty-installer` (#5491), and a second implementation here would be a
-//! defect under CLAUDE.md's common-entry-point rule.
+//! The audit sweep, package assembly, signing and the GUI are later milestones
+//! on #5473/#5477's tree. [`tools::install`] fetches the pinned triple, but it
+//! contains no download implementation — it calls `trusty-installer`'s pinned,
+//! fail-closed entry point (#5491, #5495), because a second implementation here
+//! would be a defect under CLAUDE.md's common-entry-point rule.
 //!
-//! ## Two properties worth checking before trusting this crate with a codebase
+//! ## Three properties worth checking before trusting this crate with a codebase
 //!
 //! **Everything it writes is under one root.** `rm -rf <work-dir>` is a complete
 //! uninstall — see [`workdir`], where the containment property is a test.
@@ -43,6 +43,10 @@
 //! carries a spend-capped OpenRouter key; the deliverable that goes back carries
 //! none. [`config::SecretKey`] implements `Deserialize` and not `Serialize`, so
 //! that is a compile error rather than a review catch.
+//!
+//! **Nothing runs at a version the engagement did not pin.** The tool triple is
+//! required config with no default, all three install or none do, and the
+//! versions that were verified are recorded — see [`tools`].
 //!
 //! Test: each module carries its own `#[cfg(test)]` tests.
 

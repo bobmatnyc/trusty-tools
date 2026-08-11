@@ -11326,7 +11326,9 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror 1.0.69",
+ "tokio",
  "toml 0.8.23",
+ "trusty-installer",
 ]
 
 [[package]]
@@ -11593,7 +11595,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",

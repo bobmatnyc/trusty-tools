@@ -46,6 +46,15 @@ serde = { workspace = true }
 toml = { workspace = true }
 # Library error type.
 thiserror = { workspace = true }
+# #5495: the pinned, fail-closed download entry point. Downloading, verifying
+# and placing binaries is this crate's domain, not ours — CLAUDE.md's
+# common-entry-point rule makes a second implementation here a defect. It also
+# supplies the HTTP client (`download::http_client`), which is why `reqwest` is
+# deliberately absent from this manifest.
+trusty-installer = { workspace = true }
+# Async runtime for the binary. `Session::execute` is async because installing
+# the pinned tools downloads; the Tauri shell will drive the same future.
+tokio = { workspace = true }
 
 [dev-dependencies]
 # Real directories for the working-directory creation tests.

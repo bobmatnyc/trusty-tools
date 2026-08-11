@@ -3,9 +3,15 @@
 //! Why: `trusty-audit` is a library with a thin CLI over it (#5502), so the
 //! library owes callers a structured error rather than `anyhow` — the CLI, and
 //! later the Tauri shell, each render failures their own way.
-//! What: one `#[non_exhaustive]` enum covering the three things the scaffold can
-//! fail at — touching the working directory, reading the companion files, and
-//! being asked for a capability that is not built yet.
+//! What: one `#[non_exhaustive]` enum covering what this crate can fail at —
+//! touching the working directory, reading the companion files, installing the
+//! pinned tools, and being asked for a capability that is not built yet.
+//!
+//! Every install-side variant is a REFUSAL, never a degraded success (#5495).
+//! [`AuditError::Install`] keeps `trusty-installer`'s structured
+//! `PinnedError` rather than flattening it to a string, because that type
+//! already states whether the install directory is clean, and a front end
+//! deciding what to tell the operator needs that distinction intact.
 //! Test: `super::error_tests`.
 
 use std::path::PathBuf;
@@ -57,12 +63,74 @@ pub enum AuditError {
         source: Box<toml::de::Error>,
     },
 
+    /// The pinned install refused. Carries `trusty-installer`'s own reason.
+    ///
+    /// Why: #5495 routes downloading through `trusty-installer`'s fail-closed
+    /// entry point, and that entry point's error already says what was pinned,
+    /// what arrived, and whether the install directory is clean. Re-describing
+    /// it here would lose the one field that matters most —
+    /// `PinnedError::PlacementInterrupted` names files left on disk, and a
+    /// caller that flattened it to a string would report a clean directory that
+    /// is not clean.
+    /// What: a transparent wrapper. Boxed because `PinnedError` carries
+    /// `anyhow::Error` and several `Vec`s, and an unboxed variant makes every
+    /// `Result<_, AuditError>` in the crate trip `clippy::result_large_err`.
+    /// Test: `crate::tools::tool_tests::install_errors_keep_the_installers_reason`.
+    #[error(transparent)]
+    Install {
+        /// Why the pinned install refused, verbatim from `trusty-installer`.
+        #[from]
+        source: Box<trusty_installer::download::pinned::PinnedError>,
+    },
+
+    /// An installed binary does not report the version the config pinned.
+    ///
+    /// Why: `trusty-installer` proves the pin before placing anything, so this
+    /// is the client's own second look at what it was handed — belt and braces
+    /// on the exact defect class #5454 closed from the run side. Reaching it
+    /// means the installer's postcondition did not hold, which is worth an
+    /// explicit refusal rather than a silent acceptance.
+    /// What: names the tool, the pin, and what came back.
+    /// Test: `crate::tools::tool_tests::a_version_that_drifts_from_the_pin_is_refused`.
+    #[error(
+        "{tool}: the engagement pins {pinned} but the installed binary is {installed}; \
+         nothing will run at a version this engagement did not pin"
+    )]
+    VersionMismatch {
+        /// The tool whose version drifted.
+        tool: &'static str,
+        /// What the engagement config pinned.
+        pinned: String,
+        /// What was actually installed.
+        installed: String,
+    },
+
+    /// The working directory's `tools/` area is not a real directory.
+    ///
+    /// Why: [`crate::workdir`] promises that `rm -rf <root>` removes everything
+    /// this client wrote, which holds only while every area is a directory
+    /// inside the root. A symlink planted at `tools/` before the first run
+    /// redirects the install elsewhere and survives the delete. That was inert
+    /// while nothing installed; #5495 is what makes it live, so #5495 checks it.
+    /// What: names the path and what it is instead.
+    /// Test: `crate::tools::tool_tests::a_symlinked_tools_area_is_refused`.
+    #[error(
+        "{path} is not a real directory (it is a {kind}), so installing there would \
+         write outside the working directory; nothing was installed"
+    )]
+    UnsafeToolsDir {
+        /// The path that failed the check.
+        path: PathBuf,
+        /// What it is instead — `"symlink"`, `"file"`.
+        kind: &'static str,
+    },
+
     /// A capability this scaffold declares but does not yet implement.
     ///
-    /// Why: the scaffold must fail closed. Returning an explicit error keeps a
-    /// half-built capability from silently reporting success, and — for tool
-    /// downloads specifically — keeps this crate from ever growing a bespoke
-    /// download path while #5491's entry point is still being built.
+    /// Why: a half-built capability must fail closed rather than silently
+    /// report success. The tool-download seam this variant originally guarded
+    /// is now implemented (#5495, via `trusty-installer`'s pinned entry point);
+    /// the variant remains for the capabilities later milestones add.
     #[error("{capability} is not implemented yet — tracked in #{issue}")]
     NotImplemented {
         /// Human-readable capability name.

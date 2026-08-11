@@ -22,9 +22,10 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::config::EngagementConfig;
 use crate::error::AuditError;
 use crate::manifest::{AuditManifest, RepositoryEntry};
-use crate::tools::{self, RequiredTool, ToolStatus};
+use crate::tools::{self, InstalledTool, RequiredTool, ToolStatus};
 use crate::workdir::{Area, WorkDir};
 
 /// Everything `trusty-audit` can be asked to do.
@@ -43,8 +44,10 @@ pub enum Command {
     WorkDir,
     /// Read the companion `manifest.toml` and report the engagement metadata.
     Manifest,
-    /// Report which pinned tools are installed.
+    /// Report which pinned tools are installed, and at which verified versions.
     Tools,
+    /// Download and verify the pinned tool triple, or install none of it (#5495).
+    InstallTools,
     /// List the repositories the engagement is configured to audit.
     Repos,
 }
@@ -111,6 +114,8 @@ pub enum Outcome {
     Manifest(AuditManifest),
     /// From [`Command::Tools`].
     Tools(Vec<ToolStatus>),
+    /// From [`Command::InstallTools`] — the exact triple now on disk.
+    Installed(Vec<InstalledTool>),
     /// From [`Command::Repos`].
     Repos(Vec<RepositoryEntry>),
 }
@@ -118,24 +123,35 @@ pub enum Outcome {
 /// One audit engagement, rooted at a working directory.
 ///
 /// Why: the front ends share this and nothing else.
-/// What: the resolved working directory plus the path of the companion
-/// `manifest.toml`, which defaults inside the working directory's output area
-/// and is overridable so an operator can point at a manifest a previous run
-/// wrote elsewhere.
+/// What: the resolved working directory, the path of the companion
+/// `manifest.toml` (which defaults inside the working directory's output area),
+/// and the path of the engagement config that arrived with the handoff package.
+/// Both are overridable, so an operator can point at files a previous run or a
+/// different package left elsewhere.
 /// Test: `super::session_tests`.
 #[derive(Debug, Clone)]
 pub struct Session {
     work: WorkDir,
     manifest_path: PathBuf,
+    config_path: PathBuf,
 }
 
 impl Session {
-    /// Build a session over `work`, with the default manifest location.
+    /// Build a session over `work`, with the default companion-file locations.
+    ///
+    /// The engagement config travels with the handoff package rather than with
+    /// the working directory, so a front end that knows where the package was
+    /// unzipped should say so via [`Session::with_config_path`]; the CLI does
+    /// (`EngagementConfig::resolve_path`). The default here is the working
+    /// directory's root, which is where the file ends up if the recipient never
+    /// moves anything.
     pub fn new(work: WorkDir) -> Self {
         let manifest_path = work.path(Area::Output).join(AuditManifest::FILE_NAME);
+        let config_path = work.root().join(EngagementConfig::FILE_NAME);
         Self {
             work,
             manifest_path,
+            config_path,
         }
     }
 
@@ -143,6 +159,13 @@ impl Session {
     #[must_use]
     pub fn with_manifest_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.manifest_path = path.into();
+        self
+    }
+
+    /// Point at the engagement config that came with the handoff package.
+    #[must_use]
+    pub fn with_config_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config_path = path.into();
         self
     }
 
@@ -156,10 +179,23 @@ impl Session {
         &self.manifest_path
     }
 
+    /// Where this session expects the engagement config.
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
     /// Run one capability.
     ///
     /// Why: the single entry point. Every front end goes through here, so a
     /// capability cannot exist for one and not the other.
+    ///
+    /// It is `async` because one capability — installing the pinned tools —
+    /// downloads over the network, and `trusty-installer`'s entry point is
+    /// async. Blocking on a runtime inside a sync `execute` would work for the
+    /// CLI and then panic inside the Tauri shell, which calls from an async
+    /// context; making the seam itself async is what keeps the two front ends
+    /// on one path (#5495).
+    ///
     /// What: dispatches to a private helper per variant. Each helper creates the
     /// working directory first when it needs it, so a first run works with no
     /// setup step the operator has to remember.
@@ -168,16 +204,28 @@ impl Session {
     /// # Errors
     ///
     /// [`AuditError`] from the underlying operation — a working directory that
-    /// cannot be created, a companion file that cannot be read or parsed, or
-    /// [`AuditError::NotImplemented`] for a capability a later milestone lands.
-    pub fn execute(&self, command: Command) -> Result<Outcome, AuditError> {
+    /// cannot be created, a companion file that cannot be read or parsed, a
+    /// pinned install that refused, or [`AuditError::NotImplemented`] for a
+    /// capability a later milestone lands.
+    pub async fn execute(&self, command: Command) -> Result<Outcome, AuditError> {
         match command {
             Command::Guided => self.guided().map(Outcome::Guided),
             Command::WorkDir => self.work_dir_report().map(Outcome::WorkDir),
             Command::Manifest => AuditManifest::load(&self.manifest_path).map(Outcome::Manifest),
-            Command::Tools => Ok(Outcome::Tools(tools::status(&self.work))),
+            Command::Tools => tools::status(&self.work).map(Outcome::Tools),
+            Command::InstallTools => self.install_tools().await.map(Outcome::Installed),
             Command::Repos => self.repos().map(Outcome::Repos),
         }
+    }
+
+    /// Read the engagement's pins, then install exactly those.
+    ///
+    /// The config is loaded rather than defaulted: an absent or unreadable
+    /// engagement config is a refusal, because the alternative — installing
+    /// "latest" — is the version-skew defect #5454 closed (#5495).
+    async fn install_tools(&self) -> Result<Vec<InstalledTool>, AuditError> {
+        let config = EngagementConfig::load(&self.config_path)?;
+        tools::install(&self.work, &config.tools).await
     }
 
     fn work_dir_report(&self) -> Result<WorkDirReport, AuditError> {
@@ -197,7 +245,7 @@ impl Session {
     fn guided(&self) -> Result<GuidedStatus, AuditError> {
         self.work.create()?;
         let manifest = AuditManifest::load_if_present(&self.manifest_path)?;
-        let tools = tools::status(&self.work);
+        let tools = tools::status(&self.work)?;
 
         // #5502: the epic's pre-sweep order is repo selection, then tooling —
         // so a missing repository set outranks a missing binary.
@@ -250,12 +298,31 @@ path = "/work/repos/acme-api"
         std::fs::write(path, text).expect("write manifest");
     }
 
-    #[test]
-    fn work_dir_command_creates_the_tree_and_reports_it() {
+    /// An engagement config carrying a version that was never published, so the
+    /// install refuses at the release lookup without a plausible download.
+    const UNPUBLISHABLE_CONFIG: &str = r#"
+openrouter_key = "sk-or-v1-not-a-real-key"
+instructions = "Assess the last 52 weeks."
+
+[tools]
+tga = "0.0.0-never-published"
+trusty-analyze = "0.0.0-never-published"
+trusty-review = "0.0.0-never-published"
+"#;
+
+    fn session_with_config(dir: &Path, text: &str) -> Session {
+        let path = dir.join("engagement.toml");
+        std::fs::write(&path, text).expect("write engagement config");
+        session_in(dir).with_config_path(path)
+    }
+
+    #[tokio::test]
+    async fn work_dir_command_creates_the_tree_and_reports_it() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = session_in(tmp.path());
 
-        let Outcome::WorkDir(report) = session.execute(Command::WorkDir).expect("runs") else {
+        let Outcome::WorkDir(report) = session.execute(Command::WorkDir).await.expect("runs")
+        else {
             panic!("WorkDir command must yield a WorkDir outcome");
         };
         assert_eq!(report.areas.len(), Area::ALL.len());
@@ -264,12 +331,12 @@ path = "/work/repos/acme-api"
         }
     }
 
-    #[test]
-    fn guided_asks_for_repositories_before_tools() {
+    #[tokio::test]
+    async fn guided_asks_for_repositories_before_tools() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = session_in(tmp.path());
 
-        let Outcome::Guided(status) = session.execute(Command::Guided).expect("runs") else {
+        let Outcome::Guided(status) = session.execute(Command::Guided).await.expect("runs") else {
             panic!("Guided command must yield a Guided outcome");
         };
         // No manifest and no tools: selection is still the step that comes first.
@@ -278,14 +345,17 @@ path = "/work/repos/acme-api"
         assert!(status.tools.iter().all(|s| !s.installed));
     }
 
-    #[test]
-    fn guided_asks_for_tools_once_repositories_are_known() {
+    #[tokio::test]
+    async fn guided_asks_for_tools_once_repositories_are_known() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = session_in(tmp.path());
-        session.execute(Command::WorkDir).expect("create tree");
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
         write_manifest(&session, MANIFEST);
 
-        let Outcome::Guided(status) = session.execute(Command::Guided).expect("runs") else {
+        let Outcome::Guided(status) = session.execute(Command::Guided).await.expect("runs") else {
             panic!("Guided command must yield a Guided outcome");
         };
         assert_eq!(
@@ -294,67 +364,144 @@ path = "/work/repos/acme-api"
         );
     }
 
-    #[test]
-    fn guided_is_ready_once_repositories_and_tools_are_both_in_place() {
+    #[tokio::test]
+    async fn guided_is_ready_once_repositories_and_tools_are_both_in_place() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = session_in(tmp.path());
-        session.execute(Command::WorkDir).expect("create tree");
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
         write_manifest(&session, MANIFEST);
         for tool in RequiredTool::ALL {
             std::fs::write(tool.path_in(session.work_dir()), b"stub").expect("stub binary");
         }
 
-        let Outcome::Guided(status) = session.execute(Command::Guided).expect("runs") else {
+        let Outcome::Guided(status) = session.execute(Command::Guided).await.expect("runs") else {
             panic!("Guided command must yield a Guided outcome");
         };
         assert_eq!(status.next, NextStep::ReadyForRun);
     }
 
-    #[test]
-    fn repos_reads_the_manifest_rather_than_a_second_copy() {
+    #[tokio::test]
+    async fn repos_reads_the_manifest_rather_than_a_second_copy() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = session_in(tmp.path());
-        session.execute(Command::WorkDir).expect("create tree");
+        session
+            .execute(Command::WorkDir)
+            .await
+            .expect("create tree");
         write_manifest(&session, MANIFEST);
 
-        let Outcome::Repos(repos) = session.execute(Command::Repos).expect("runs") else {
+        let Outcome::Repos(repos) = session.execute(Command::Repos).await.expect("runs") else {
             panic!("Repos command must yield a Repos outcome");
         };
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name, "acme-api");
     }
 
-    #[test]
-    fn repos_is_empty_rather_than_an_error_before_any_run() {
+    #[tokio::test]
+    async fn repos_is_empty_rather_than_an_error_before_any_run() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = session_in(tmp.path());
-        let Outcome::Repos(repos) = session.execute(Command::Repos).expect("runs") else {
+        let Outcome::Repos(repos) = session.execute(Command::Repos).await.expect("runs") else {
             panic!("Repos command must yield a Repos outcome");
         };
         assert!(repos.is_empty());
     }
 
-    #[test]
-    fn manifest_command_is_an_error_when_the_file_is_absent() {
+    #[tokio::test]
+    async fn manifest_command_is_an_error_when_the_file_is_absent() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = session_in(tmp.path());
         let err = session
             .execute(Command::Manifest)
+            .await
             .expect_err("asking for a manifest that is not there is an error");
         assert!(matches!(err, AuditError::Read { .. }));
     }
 
-    #[test]
-    fn the_manifest_path_can_point_outside_the_working_directory() {
+    #[tokio::test]
+    async fn the_manifest_path_can_point_outside_the_working_directory() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let elsewhere = tmp.path().join("previous-run/manifest.toml");
         std::fs::create_dir_all(elsewhere.parent().expect("parent")).expect("mkdir");
         std::fs::write(&elsewhere, MANIFEST).expect("write");
 
         let session = session_in(tmp.path()).with_manifest_path(&elsewhere);
-        let Outcome::Manifest(manifest) = session.execute(Command::Manifest).expect("runs") else {
+        let Outcome::Manifest(manifest) = session.execute(Command::Manifest).await.expect("runs")
+        else {
             panic!("Manifest command must yield a Manifest outcome");
         };
         assert_eq!(manifest.report.title, "Acme — Technical Due Diligence");
+    }
+
+    /// No config means no pins, and no pins must never mean "fetch latest".
+    #[tokio::test]
+    async fn installing_without_an_engagement_config_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_in(tmp.path());
+
+        let err = session
+            .execute(Command::InstallTools)
+            .await
+            .expect_err("there is nothing to pin to");
+        assert!(matches!(err, AuditError::Read { .. }), "{err:?}");
+        assert!(
+            tools::read_record(session.work_dir())
+                .expect("no record")
+                .is_empty()
+        );
+    }
+
+    /// A config the generator wrote without the triple is refused at parse time.
+    #[tokio::test]
+    async fn installing_from_a_config_with_no_pins_is_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(
+            tmp.path(),
+            "openrouter_key = \"sk-or-v1-x\"\ninstructions = \"assess\"\n",
+        );
+
+        let err = session
+            .execute(Command::InstallTools)
+            .await
+            .expect_err("an unpinned config must not install anything");
+        assert!(matches!(err, AuditError::Parse { .. }), "{err:?}");
+    }
+
+    /// The whole path against the real release host: a version that cannot
+    /// resolve installs nothing, records nothing, and hands back the
+    /// installer's own reason.
+    ///
+    /// `#[ignore]` because it reaches the network — `cargo test -p trusty-audit
+    /// -- --include-ignored` runs it. The offline half of the same guarantee is
+    /// the two tests above and `crate::tools::tool_tests`.
+    #[tokio::test]
+    #[ignore = "reaches the GitHub release API; run with --include-ignored"]
+    async fn an_unresolvable_pin_installs_nothing_and_records_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = session_with_config(tmp.path(), UNPUBLISHABLE_CONFIG);
+
+        let err = session
+            .execute(Command::InstallTools)
+            .await
+            .expect_err("a version that was never published cannot install");
+        // Which refusal depends on the host — unreachable network is
+        // ReleaseLookupFailed, reachable is VersionNotPublished, a non-Tier-1
+        // host is UnsupportedTarget. All are `Install`; all install nothing.
+        assert!(matches!(err, AuditError::Install { .. }), "{err:?}");
+
+        let statuses = tools::status(session.work_dir()).expect("status reads");
+        assert!(
+            statuses.iter().all(|s| !s.installed && s.version.is_none()),
+            "a refused install must leave the tools area empty: {statuses:?}"
+        );
+        assert!(
+            tools::read_record(session.work_dir())
+                .expect("no record")
+                .is_empty(),
+            "a refused install must not record a version"
+        );
     }
 }
