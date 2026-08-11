@@ -5,6 +5,31 @@ use anyhow::Result;
 use colored::Colorize;
 use trusty_common::mcp::DaemonBridgeConfig;
 
+/// Resolve the index an MCP session pins to (issue #1373), from the `serve`
+/// subcommand's parsed `--index` and `--project`.
+///
+/// Why: precedence here decides which index every tool call in the session
+/// defaults to, and getting it wrong is exactly the wrong-index defect #1373
+/// fixed. Holding it in one function keeps `main`'s match arm thin and lets the
+/// precedence be asserted directly rather than re-implemented in a test.
+/// What: an index from any source wins; otherwise the id is derived from
+/// `--project` the same way the CLI and trusty-mpm derive it; otherwise the
+/// session is unpinned and callers must supply `index_id`. `index` carries the
+/// `TRUSTY_INDEX` environment value as well as the explicit flag — clap
+/// resolves that precedence at parse time, flag over environment.
+/// Test: `commands::serve::index_env_tests`.
+pub(crate) fn resolve_pinned_index(
+    index: Option<String>,
+    project: Option<String>,
+) -> Option<String> {
+    index.or_else(|| {
+        project.map(|p| {
+            let root = trusty_common::resolve_project_root(&std::path::PathBuf::from(&p));
+            trusty_common::derive_index_id(&root)
+        })
+    })
+}
+
 /// Why: extracted from `main()`. The HTTP path involves a discovery file
 /// (`~/.trusty-search/mcp_http_addr`) and cleanup-on-exit logic that's easier
 /// to follow in isolation.
@@ -173,3 +198,8 @@ async fn serve_http(server: crate::mcp::McpServer, addr: String, daemon_url: &st
     serve_result?;
     Ok(())
 }
+
+/// Index-pin precedence tests — see `serve_index_env_tests.rs`.
+#[cfg(test)]
+#[path = "serve_index_env_tests.rs"]
+mod index_env_tests;
