@@ -26,6 +26,10 @@
 
 pub mod fetch;
 pub mod glibc;
+// #5491: pinned-version, fail-closed install path for consumers that pin exact
+// versions — additive; `try_install_prebuilt` below keeps its latest+fallback
+// semantics for its existing callers.
+pub mod pinned;
 pub mod platform;
 pub mod release;
 
