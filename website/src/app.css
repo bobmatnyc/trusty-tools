@@ -255,7 +255,12 @@
 	   comment onward and asserts the warning token appears nowhere in the
 	   slice. Do not repeat that comment's text here — the slice is found by
 	   indexOf, so quoting it verbatim moves the slice's start onto this
-	   comment and drags these rules into it. */
+	   comment and drags these rules into it.
+
+	   Test: `tokens.test.ts`, "the tga audit severity badges" — it recomputes
+	   every ratio above from the canonical tokens and asserts the threshold
+	   each rule depends on, so a token edit fails there rather than quietly
+	   falsifying this comment. */
 	.badge-red {
 		@apply border-foundry-danger text-foundry-danger;
 	}
