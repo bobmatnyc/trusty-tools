@@ -15,7 +15,9 @@
 # What: reads a newline-separated list of changed paths on stdin (or resolves
 #   one itself from git when given a base ref) and answers ONE question: does
 #   every changed path match a pattern that provably cannot affect a cargo
-#   build, test, clippy, or rustfmt result? Emits `docs_only=true|false` on
+#   build, test, clippy, or rustfmt result? Despite the legacy output name,
+#   `docs_only=true` therefore means "Cargo-inert", not literally "only files
+#   below docs/". Emits `docs_only=true|false` on
 #   stdout, and appends the same line to $GITHUB_OUTPUT when that is set.
 #
 #   The classification is a DENYLIST-of-inert, not an allowlist-of-code: a path
@@ -38,14 +40,17 @@
 #     crates/*/README.md
 #     crates/*/CHANGELOG.md
 #     crates/*/changelog.d/*       per-PR changelog fragments (#4476)
+#     selected docs-governance      pure shell gates and their configuration;
+#                                   these validate prose but cannot affect a
+#                                   Cargo result
 #
 #   Deliberately NOT inert, though they look like documentation:
 #     crates/*/src/**/*.md   — bundled agent/skill/instruction assets that are
 #                              compiled into binaries via include_dir!/
 #                              include_str!. Editing one changes program
 #                              output and breaks asset-pin and drift tests.
-#     scripts/**             — invoked by integration tests and by CI itself.
-#     .github/workflows/**   — a CI change must re-verify against real CI.
+#     other scripts/**       — may be invoked by integration tests or builds.
+#     other workflows/**     — unknown workflow changes fail closed.
 #     crates/*/changelog.d/*/*  — a NESTED fragment is already a defect the
 #                              changelog gate rejects; do not also exempt it.
 #
@@ -73,6 +78,31 @@ is_inert_path() {
   local -a seg
   IFS='/' read -r -a seg <<<"$p"
   local n=${#seg[@]}
+
+  # Documentation-governance inputs are executable CI configuration, but they
+  # are pure shell/text checks and cannot change a Rust build. Their own
+  # focused workflows still run, so treating them as Cargo-inert avoids
+  # Clippy/Test/MSRV/UI/CUDA work without weakening their verification.
+  case "$p" in
+    .doc-number-allowlist.tsv | \
+      .sld-lint-allowlist.tsv | \
+      .test-pointer-allowlist.tsv | \
+      scripts/check_adr.sh | \
+      scripts/check_doc_numbers.sh | \
+      scripts/check_sld.sh | \
+      scripts/check_test_pointers.sh | \
+      scripts/check_token_drift.mjs | \
+      scripts/check_token_drift.test.mjs | \
+      scripts/check_capabilities.sh | \
+      .github/workflows/doc-numbers.yml | \
+      .github/workflows/sld-lint.yml | \
+      .github/workflows/test-pointers.yml | \
+      .github/workflows/token-drift.yml | \
+      .github/workflows/capabilities-drift.yml | \
+      .github/workflows/version-parity.yml)
+      return 0
+      ;;
+  esac
 
   # docs/** — the project documentation tree, at any depth.
   if [ "$n" -ge 2 ] && [ "${seg[0]}" = "docs" ]; then

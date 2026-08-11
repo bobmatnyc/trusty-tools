@@ -11,4 +11,6 @@
 // CUTOVER BRIDGE — remove post-migration (#1762)
 
 pub use trusty_common::catchup::*;
-pub use trusty_common::catchup::{git, mpm_registry, mpm_session, palace, session_finder, state};
+pub use trusty_common::catchup::{
+    git, mpm_registry, mpm_session, palace, resolve, session_finder, state,
+};
