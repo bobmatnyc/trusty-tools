@@ -299,8 +299,9 @@ pub(crate) enum ResolveError {
 ///
 /// Test: `tests::select_exact_version_picks_exact`,
 /// `tests::select_exact_version_rejects_absent_version`,
-/// `tests::select_exact_version_ignores_newer_releases`,
-/// `tests::select_exact_version_skips_prerelease`.
+/// `tests::select_exact_version_ignores_other_crates`,
+/// `tests::select_exact_version_skips_prerelease`,
+/// `tests::select_exact_version_rejects_non_semver_pin`.
 fn select_exact_version(
     releases: &[GhRelease],
     crate_name: &str,
