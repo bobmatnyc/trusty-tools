@@ -246,7 +246,7 @@ per-palace conversation store: turns are stored verbatim and bypass the
 `memory_remember` signal/noise and dedup gates.
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **46 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
+The MCP server registers **47 tools**. Authoritative source: `trusty_memory::tools::tool_definitions` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -266,8 +266,9 @@ this table is generated from it, not maintained by hand.
 | `kg_assert` | `palace`, `subject`, `predicate`, `object`, `confidence?`, `provenance?` | Assert a fact in the temporal knowledge graph. |
 | `kg_bootstrap` | `palace?`, `project_path?` | Seed the knowledge graph from well-known project files (Cargo.toml, package.json, pyproject.toml, go.mod, CLAUDE.md, .git/config). |
 | `kg_gaps` | `palace?` | List knowledge gaps detected in the memory palace graph. |
-| `kg_list_subjects` | `palace`, `limit?`, `with_counts?` | List the subjects this palace's knowledge graph actually holds, alphabetically. |
+| `kg_list_subjects` | `palace`, `limit?`, `with_counts?` | List the subjects this palace's knowledge graph actually holds, ordered by subject. |
 | `kg_query` | `palace`, `subject` | Query active knowledge-graph triples for a subject. |
+| `kg_retract_triple` | `palace`, `subject`, `predicate`, `object` | Retract one fact from the temporal knowledge graph — the inverse of kg_assert. |
 | `list_prompt_facts` | — | List every active prompt-fact triple (aliases, conventions, facts, shorthands) across all palaces. |
 | `memory_forget` | `palace`, `drawer_id` | Delete a drawer from a palace by its UUID. |
 | `memory_list` | `palace`, `limit?`, `room?`, `tag?`, `wing?` | List drawers in a palace, optionally filtered by wing, room type, or tag. |

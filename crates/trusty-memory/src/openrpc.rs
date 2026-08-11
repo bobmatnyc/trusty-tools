@@ -83,6 +83,9 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         // #5005: dry-run is read-only but the repair deletes vector keys.
         | "palace_unalias"
         | "kg_assert"
+        // Retraction closes an interval — a KG write, same scope as the
+        // assertion it undoes.
+        | "kg_retract_triple"
         | "add_alias"
         | "remove_prompt_fact"
         | "discover_aliases"
