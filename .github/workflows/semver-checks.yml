@@ -31,6 +31,35 @@
 # blocking-vs-independent split, and the same reasoning, as release.yml's
 # `publish-dry-run` job.
 #
+# THE TRIGGER RACES THE PUBLISH, AND NO LONGER MATTERS (#5296). The tag push
+# comes before `cargo publish` in the documented step order, but this job takes
+# minutes to reach the registry and the publish takes seconds — so by the time
+# it queried crates.io the crate's own version was usually already the latest
+# release there. The gate then compared the crate against ITSELF and reported no
+# change: observed on trusty-agents-common 0.5.0, trusty-progress 0.3.0 and tga
+# 2.12.0 during the 1.3.5 cut. The fix is in check_semver.sh, not here — the
+# baseline is now the greatest release BELOW the crate's declared version, which
+# is the same version before the publish and the correct one after it. This job
+# therefore produces a real verdict wherever in the sequence it lands, and no
+# ordering between tag and publish needs to hold for it to mean anything.
+#
+# AND IT ALSO RUNS ON PULL REQUESTS, WITHOUT RESTORING WHAT #5149 REMOVED
+# (#5311). `Public API / SemVer` is meant to be a required branch-protection
+# context. Tag-push-only means the context does not exist on a pull request at
+# all, and GitHub waits forever on a required context that never reports — so
+# requiring it today makes every PR in the repo unmergeable. The workflow
+# therefore runs on `pull_request` too, unfiltered, and decides INSIDE the job
+# whether there is anything to compare: `scripts/detect-version-bumps.sh` reads
+# the diff and answers "does this branch declare a version it did not start
+# with". No, on the overwhelming majority of PRs — one git diff, then a success
+# that says so. #5149's cost is untouched: the pinned tool and the cold rustdoc
+# cache are installed only once the answer is yes.
+#
+# Yes is a release PR, and running there is the point. This workspace bumps a
+# crate's version in a PR and cuts the `<crate>-v<version>` tag from merged main
+# afterwards, so the bump PR is strictly EARLIER than the trigger above — a
+# break surfaces while the release can still be reworked, with no tag in flight.
+#
 # ON-DEMAND: workflow_dispatch takes a crate name so a break can be checked
 # without cutting a release. `bash scripts/check_semver.sh --crate <crate>`
 # does the same thing locally.
@@ -40,6 +69,12 @@ on:
   push:
     tags:
       - "*-v*"
+  pull_request:
+    # Explicit activity types (#4179), matching ci.yml and version-parity.yml:
+    # `edited` is not in GitHub's default set and is the event a base-branch
+    # RETARGET fires. No `paths` / `paths-ignore` — see #5311 above.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+    branches: [main]
   workflow_dispatch:
     inputs:
       crate:
@@ -49,45 +84,93 @@ on:
 
 concurrency:
   group: semver-checks-${{ github.ref }}
-  cancel-in-progress: true
+  # `edited` is excluded on pull requests (#4179 shape): that run is not
+  # cancelled, so it must be a real one rather than a cheaper answer racing the
+  # run it coexists with.
+  cancel-in-progress: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' }}
 
 jobs:
   semver-checks:
     name: Public API / SemVer
+    # #5311: NO job-level `if:`. A job whose `if:` is false concludes `skipped`,
+    # and a skipped conclusion does not satisfy a required context — the PR waits
+    # on it forever. Whether this gate does any work is decided per-step below,
+    # from the diff.
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # #5311: was 40. The tag path checks one crate; a release PR can declare
+    # several, and they are compared serially in this one job.
+    timeout-minutes: 60
     steps:
+      # fetch-depth: 0 — the pull-request path needs `git merge-base` and
+      # `git show <merge-base>:crates/<X>/Cargo.toml`, neither of which a
+      # shallow checkout can resolve.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      # The tag prefix is whichever accepted form the tagger used —
-      # `tga-v1.4.2` and `trusty-git-analytics-v1.4.2` are both valid tags for
-      # the same crate (#1128). check_semver.sh's `--crate` accepts either, so
-      # no alias table is duplicated here.
-      - name: Resolve crate to check
+      # #4688: diff against the base branch AS IT IS NOW, not the frozen
+      # `base.sha` snapshot, so the merge base cannot lag behind the merge ref's
+      # own first parent and sweep another author's bump into this PR's diff.
+      - name: Refresh the base branch ref
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch --no-tags --quiet origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
+
+      # Three triggers, three ways to name what is under test:
+      #   tag push          — the tag prefix, in whichever accepted form the
+      #                       tagger used. `tga-v1.4.2` and
+      #                       `trusty-git-analytics-v1.4.2` are both valid tags
+      #                       for the same crate (#1128), and `--crate` accepts
+      #                       either, so no alias table is duplicated here.
+      #   workflow_dispatch — the crate the operator typed.
+      #   pull_request      — #5311: every crate whose declared version this
+      #                       branch changed, read from the diff by
+      #                       scripts/detect-version-bumps.sh. None is the
+      #                       normal answer and means no release is under test.
+      - name: Select crates to check
         id: crate
         env:
           TAG: ${{ github.ref_name }}
           INPUT_CRATE: ${{ inputs.crate }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            NAME="$INPUT_CRATE"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            NAMES="$(
+              VERSION_BUMP_BASE="origin/${BASE_REF}" \
+                bash scripts/detect-version-bumps.sh | sed -n 's/^bumped_crates=//p'
+            )"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            NAMES="$INPUT_CRATE"
           else
-            NAME="$(printf '%s' "$TAG" | sed -E 's/-v[0-9].*$//')"
+            NAMES="$(printf '%s' "$TAG" | sed -E 's/-v[0-9].*$//')"
             # An unchanged string means the sed matched nothing, i.e. the ref is
             # not <crate>-v<version>. Resolving it would hand check_semver.sh a
             # crate name that does not exist and read as a tooling error.
-            if [[ "$NAME" == "$TAG" ]]; then
+            if [[ "$NAMES" == "$TAG" ]]; then
               echo "::error::Ref '${TAG}' is not a <crate>-v<version> release tag."
               exit 1
             fi
           fi
-          if [[ -z "$NAME" ]]; then
+          # An empty selection is a legitimate verdict on a pull request and a
+          # tooling error anywhere else — a tag push or a manual dispatch names
+          # its crate by construction, so nothing there can leave this blank.
+          if [[ -z "$NAMES" && "${{ github.event_name }}" != "pull_request" ]]; then
             echo "::error::Empty crate name — nothing to check."
             exit 1
           fi
-          echo "crate=${NAME}" >> "$GITHUB_OUTPUT"
-          echo "Checking crate: ${NAME}"
+          echo "crates=${NAMES}" >> "$GITHUB_OUTPUT"
+          if [[ -n "$NAMES" ]]; then
+            echo "have_work=true" >> "$GITHUB_OUTPUT"
+            echo "Checking crate(s): ${NAMES}"
+          else
+            echo "have_work=false" >> "$GITHUB_OUTPUT"
+            echo "No crate declares a new version in this diff."
+          fi
 
       # STABLE, DELIBERATELY NOT THE MSRV 1.94 THIS REPO PINS (#5289).
       # cargo-semver-checks builds rustdoc in a scratch project that ignores this
@@ -98,7 +181,13 @@ jobs:
       # costs no coverage; MSRV compliance is ci.yml's job and is untouched.
       # check_semver.sh makes the same choice locally by picking the newest
       # installed toolchain, so CI and a developer's machine agree.
+      #
+      # #5311: this step and the three below are the 20+ minutes #5149 refused
+      # to pay on every PR, so they are gated on there being a release under
+      # test. STEP-level, never job-level: a skipped JOB does not satisfy a
+      # required context.
       - name: Install stable toolchain
+        if: steps.crate.outputs.have_work == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       # A prebuilt binary, PINNED. `cargo install cargo-semver-checks` compiles
@@ -108,11 +197,13 @@ jobs:
       # also never touches this workspace's Cargo.lock — refreshing that turns
       # the MSRV 1.94 job red (see CLAUDE.md).
       - name: Install cargo-semver-checks (pinned prebuilt)
+        if: steps.crate.outputs.have_work == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-semver-checks@0.50.0
 
       - name: Cache cargo artifacts
+        if: steps.crate.outputs.have_work == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: semver-checks
@@ -123,6 +214,7 @@ jobs:
       # Runs BEFORE the real gate, matching line-cap.yml's selftest-then-gate
       # ordering: a gate that cannot fail makes the real run's green meaningless.
       - name: SemVer gate selftest (must refuse a blind run)
+        if: steps.crate.outputs.have_work == 'true'
         run: bash scripts/check_semver_selftest.sh
 
       # The two nonzero statuses are annotated differently ON PURPOSE (#5289).
@@ -132,18 +224,39 @@ jobs:
       # pass — but a reader must be able to tell which one they are looking at
       # from the annotation alone.
       - name: Enforce public-API SemVer against crates.io
+        if: steps.crate.outputs.have_work == 'true'
         env:
           SKIP_UI_BUILD: '1'
-          CRATE: ${{ steps.crate.outputs.crate }}
+          CRATES: ${{ steps.crate.outputs.crates }}
         run: |
+          # One `--crate` per selected crate: check_semver.sh accumulates them
+          # and reports a single verdict over the whole set, so a release PR
+          # that bumps several gets one pass through the tool rather than N.
+          args=()
+          for c in $CRATES; do
+            args+=(--crate "$c")
+          done
           rc=0
-          bash scripts/check_semver.sh --crate "$CRATE" || rc=$?
+          bash scripts/check_semver.sh "${args[@]}" || rc=$?
           if [[ "$rc" -eq 0 ]]; then
             exit 0
           fi
           if [[ "$rc" -eq 3 ]]; then
-            echo "::error title=SemVer gate could not run::No verdict was computed for ${CRATE}. cargo-semver-checks never completed a comparison (see the log), so whether this release breaks the public API is UNKNOWN. Do not read this as a required version bump, and do not publish on it."
+            echo "::error title=SemVer gate could not run::No verdict was computed for ${CRATES}. cargo-semver-checks never completed a comparison (see the log), so whether this release breaks the public API is UNKNOWN. Do not read this as a required version bump, and do not publish on it."
           else
-            echo "::error title=SemVer break::${CRATE} has a breaking public-API change without a breaking version bump. See the failing lints in the log."
+            echo "::error title=SemVer break::${CRATES} has a breaking public-API change without a breaking version bump. See the failing lints in the log."
           fi
           exit "$rc"
+
+      # #5311: the no-op path, and it must EXECUTE rather than be skipped —
+      # `skipped` does not satisfy a required context. Nothing in this diff
+      # declares a version, so nothing is being released and there is nothing to
+      # compare against the registry. The verdict for the release itself is
+      # still owned by scripts/preflight-publish.sh CHECK 5 and by the tag-push
+      # run of this same workflow; neither is weakened by this branch.
+      - name: No release under test — nothing to compare
+        if: steps.crate.outputs.have_work != 'true'
+        run: |
+          echo "No crate's declared version changed against the base branch, so this"
+          echo "branch releases nothing and there is no registry baseline to compare."
+          echo "Reporting success rather than not reporting at all — see #5311."

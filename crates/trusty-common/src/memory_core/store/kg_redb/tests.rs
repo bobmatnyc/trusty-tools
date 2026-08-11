@@ -939,6 +939,130 @@ mod tests {
         assert_eq!(kg.retract("room:General", "contains").unwrap(), 0);
     }
 
+    /// Why (#5396): this is the whole reason the three-argument shape exists.
+    /// A test that only checked the bad object was gone would pass against
+    /// two-argument `retract`, which takes the entire pair down with it — so
+    /// the surviving siblings are the assertion that distinguishes the two.
+    #[test]
+    fn retract_triple_closes_one_object_and_leaves_siblings_active() {
+        let (_d, kg) = open_kg();
+        for object in ["drawer:a", "drawer:b", "drawer:c"] {
+            kg.assert(&t("room:General", "contains", object)).unwrap();
+        }
+
+        assert_eq!(
+            kg.retract_triple("room:General", "contains", "drawer:b")
+                .unwrap(),
+            1
+        );
+
+        let mut objects: Vec<String> = kg
+            .query_active("room:General")
+            .unwrap()
+            .into_iter()
+            .map(|x| x.object)
+            .collect();
+        objects.sort();
+        assert_eq!(
+            objects,
+            vec!["drawer:a".to_string(), "drawer:c".to_string()],
+            "the good siblings must survive"
+        );
+        assert_eq!(kg.count_active_triples(), 2);
+
+        // The retracted object is closed, not erased.
+        let closed: Vec<_> = kg
+            .dump_all_triples()
+            .unwrap()
+            .into_iter()
+            .filter(|x| x.object == "drawer:b")
+            .collect();
+        assert_eq!(closed.len(), 1);
+        assert!(closed[0].valid_to.is_some(), "history row carries valid_to");
+    }
+
+    /// Why (#5396): a caller cleaning object-side noise scans for candidates
+    /// and retracts them one at a time. An object that is already gone (or was
+    /// never there) is the normal outcome of a re-run, not an error.
+    #[test]
+    fn retract_triple_on_an_absent_object_is_a_noop() {
+        let (_d, kg) = open_kg();
+        kg.assert(&t("room:General", "contains", "drawer:a"))
+            .unwrap();
+
+        assert_eq!(
+            kg.retract_triple("room:General", "contains", "drawer:zzz")
+                .unwrap(),
+            0,
+            "unknown object"
+        );
+        assert_eq!(
+            kg.retract_triple("room:Other", "contains", "drawer:a")
+                .unwrap(),
+            0,
+            "unknown subject"
+        );
+        assert_eq!(
+            kg.retract_triple("room:General", "mentions", "drawer:a")
+                .unwrap(),
+            0,
+            "unknown predicate"
+        );
+        assert_eq!(kg.query_active("room:General").unwrap().len(), 1);
+        assert_eq!(kg.count_active_triples(), 1);
+    }
+
+    /// Why (#5396): `retract_triple` addresses one row by its full key, so a
+    /// functional predicate gets no special "close every object" treatment —
+    /// naming the wrong object must leave the right one alone even there.
+    #[test]
+    fn retract_triple_on_a_functional_predicate_closes_only_the_named_object() {
+        let (_d, kg) = open_kg();
+        kg.assert(&t("tga", "is_alias_for", "trusty-git-analytics"))
+            .unwrap();
+
+        assert_eq!(
+            kg.retract_triple("tga", "is_alias_for", "something-else")
+                .unwrap(),
+            0
+        );
+        assert_eq!(kg.query_active("tga").unwrap().len(), 1);
+
+        assert_eq!(
+            kg.retract_triple("tga", "is_alias_for", "trusty-git-analytics")
+                .unwrap(),
+            1
+        );
+        assert!(kg.query_active("tga").unwrap().is_empty());
+        assert_eq!(kg.count_active_triples(), 0);
+    }
+
+    /// Why (#5396): the last object at a pair is the boundary case for the
+    /// active-subject counter — it must reach zero and stay there, so a second
+    /// call finds nothing rather than driving the count negative.
+    #[test]
+    fn retract_triple_on_the_only_object_clears_the_active_count() {
+        let (_d, kg) = open_kg();
+        kg.assert(&t("room:General", "contains", "drawer:a"))
+            .unwrap();
+
+        assert_eq!(
+            kg.retract_triple("room:General", "contains", "drawer:a")
+                .unwrap(),
+            1
+        );
+        assert!(kg.query_active("room:General").unwrap().is_empty());
+        assert_eq!(kg.count_active_triples(), 0);
+
+        assert_eq!(
+            kg.retract_triple("room:General", "contains", "drawer:a")
+                .unwrap(),
+            0,
+            "second call is a no-op"
+        );
+        assert_eq!(kg.count_active_triples(), 0);
+    }
+
     /// Why (#4810): `delete_by_subject` collects pairs, and one pair can now
     /// span several rows. Without the dedup it would call `retract` once per
     /// row and double-count what the first call already closed.
@@ -984,6 +1108,133 @@ mod tests {
         let active = primary.query_active("room:General").unwrap();
         assert_eq!(active.len(), 8, "no concurrent assert overwrote another");
         assert_eq!(primary.count_active_triples(), 8);
+    }
+
+    /// Why (#5396): `retract_triple` reads the `(subject, predicate)` range,
+    /// closes the one row whose object matches, then folds a NEGATIVE delta into
+    /// the subject's active counter. Those are two read-modify-writes over rows
+    /// that every concurrent retract at the same pair contends for, and
+    /// `adjust_active_count` clamps with `saturating_sub` — so a lost decrement
+    /// never goes negative and panics. It leaves a phantom count standing over
+    /// zero live rows, silently and permanently.
+    /// `concurrent_asserts_to_one_pair_lose_no_object` pins only the additive
+    /// side of that counter, and closing rows takes a different path than
+    /// inserting them.
+    /// What: eight threads each retract a DIFFERENT object of one eight-valued
+    /// pair through separate (cache-shared) handles. Every call must close
+    /// exactly its own row, every row must end up in history, and the counter
+    /// must reach zero rather than drift.
+    #[test]
+    fn concurrent_retract_triples_at_one_pair_close_every_object() {
+        use std::thread;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        let primary = KgStoreRedb::open(&path).unwrap();
+        for i in 0..8 {
+            primary
+                .assert(&t("room:General", "contains", &format!("drawer:{i}")))
+                .unwrap();
+        }
+        assert_eq!(primary.count_active_triples(), 8, "seeded eight active");
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let store = KgStoreRedb::open(&path).unwrap();
+                thread::spawn(move || {
+                    store
+                        .retract_triple("room:General", "contains", &format!("drawer:{i}"))
+                        .expect("concurrent retract_triple")
+                })
+            })
+            .collect();
+        let closed: Vec<usize> = handles
+            .into_iter()
+            .map(|h| h.join().expect("retract thread panicked"))
+            .collect();
+
+        assert_eq!(
+            closed,
+            vec![1; 8],
+            "each retract closed exactly its own row — no double-close, no lost update"
+        );
+        assert!(
+            primary.query_active("room:General").unwrap().is_empty(),
+            "every object closed"
+        );
+        assert_eq!(
+            primary.count_active_triples(),
+            0,
+            "the counter absorbed all eight decrements"
+        );
+
+        // Every row was closed in place, not dropped: eight history rows remain.
+        let all = primary.dump_all_triples().unwrap();
+        assert_eq!(all.len(), 8, "no retraction lost its history row");
+        assert!(
+            all.iter().all(|tr| tr.valid_to.is_some()),
+            "no row was left active"
+        );
+    }
+
+    /// Why (#5396): the cleanup pass this method exists for runs against a live
+    /// palace, so a retract of one object races an assert of another at the same
+    /// multi-valued pair. Both fold a delta into the same counter row, in
+    /// opposite directions — the interleaving where one side's read-modify-write
+    /// overwrites the other's is exactly what leaves the count disagreeing with
+    /// the rows it counts.
+    /// What: eight threads retract the eight seeded objects while eight more
+    /// assert eight fresh ones. `contains` is multi-valued, so an assert
+    /// supersedes nothing and the two object sets stay disjoint — which makes
+    /// the outcome interleaving-independent: the seeded eight end closed, the
+    /// fresh eight end active, and the counter reads eight.
+    #[test]
+    fn concurrent_retract_triple_and_assert_at_one_pair_agree_on_the_count() {
+        use std::thread;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        let primary = KgStoreRedb::open(&path).unwrap();
+        for i in 0..8 {
+            primary
+                .assert(&t("room:General", "contains", &format!("seeded:{i}")))
+                .unwrap();
+        }
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let store = KgStoreRedb::open(&path).unwrap();
+            handles.push(thread::spawn(move || {
+                store
+                    .retract_triple("room:General", "contains", &format!("seeded:{i}"))
+                    .expect("concurrent retract_triple");
+            }));
+            let store = KgStoreRedb::open(&path).unwrap();
+            handles.push(thread::spawn(move || {
+                store
+                    .assert(&t("room:General", "contains", &format!("fresh:{i}")))
+                    .expect("concurrent assert");
+            }));
+        }
+        for h in handles {
+            h.join().expect("writer thread panicked");
+        }
+
+        let mut active: Vec<String> = primary
+            .query_active("room:General")
+            .unwrap()
+            .into_iter()
+            .map(|tr| tr.object)
+            .collect();
+        active.sort();
+        let expected: Vec<String> = (0..8).map(|i| format!("fresh:{i}")).collect();
+        assert_eq!(
+            active, expected,
+            "the asserted objects survived and the retracted ones did not"
+        );
+        assert_eq!(
+            primary.count_active_triples(),
+            8,
+            "the counter agrees with the rows after eight closes and eight opens"
+        );
     }
 
     /// Why (#4810): a fresh palace has nothing to rewrite but must still record

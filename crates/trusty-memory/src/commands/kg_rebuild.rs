@@ -1095,6 +1095,64 @@ mod tests {
         Ok(())
     }
 
+    /// Why: #5399 — every unit fixture for the noun-phrase walk passes a
+    /// SINGLE LINE, but this function and `auto_extract_and_assert` both hand
+    /// the extractor a whole multi-line drawer body. That gap hid a walk that
+    /// crossed a line break and took its head from the next sentence. The
+    /// consequence is worse here than in a unit test: the KG keeps one ACTIVE
+    /// triple per `(subject, predicate)`, so a rebuild does not accumulate — it
+    /// REWRITES. A regression in the walk therefore supersedes a correct stored
+    /// object with a worse one, and nothing in the pipeline reports it.
+    /// What: stores a two-line drawer whose second line would capture the head
+    /// if the walk were unbounded, rebuilds, and asserts the active `is-a`
+    /// object is the noun from the FIRST line. Against `8402bd8b` this asserted
+    /// `trusty-search --is-a--> builds`.
+    /// Test: This test.
+    #[tokio::test]
+    async fn rebuild_does_not_supersede_a_good_object_from_a_later_line() -> Result<()> {
+        seed_embedder();
+        let tmp = tempfile::tempdir()?;
+        // SAFETY: idempotent constant write "1"; safe across test threads.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
+        let state = AppState::new(tmp.path().to_path_buf());
+        state.set_ready();
+        let _ = crate::tools::dispatch_tool(&state, "palace_create", json!({"name": "a"})).await?;
+        let _ = crate::tools::dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": "a",
+                "text": "trusty-search is a daemon\ncargo builds it from source",
+                "tags": ["infra"],
+            }),
+        )
+        .await?;
+
+        let summaries = rebuild_palaces(&state, Some("a")).await?;
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].error.is_none(), "{:?}", summaries[0].error);
+
+        let handle = state
+            .registry
+            .open_palace(&state.data_root, &PalaceId::new("a"))?;
+        let objects: Vec<String> = handle
+            .kg
+            .query_active("trusty-search")
+            .await?
+            .into_iter()
+            .filter(|t| t.predicate == "is-a")
+            .map(|t| t.object)
+            .collect();
+        assert_eq!(
+            objects,
+            vec!["daemon".to_string()],
+            "the active is-a object must come from the line the marker is on"
+        );
+        Ok(())
+    }
+
     /// Why: The `--palace` flag narrows the rebuild to a single palace; the
     /// caller must not pay for unrelated palaces.
     /// What: Same fixture as the previous test, but call
