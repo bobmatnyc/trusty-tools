@@ -115,7 +115,10 @@ impl MemoryService {
     /// fact keeps being injected until the next write. This mirrors the
     /// `kg_retract_triple` MCP tool so both surfaces agree.
     /// Test: `kg_delete_triple_closes_one_object_and_keeps_siblings`,
-    /// `kg_delete_triple_returns_404_for_missing` in `web::tests`.
+    /// `kg_delete_triple_returns_404_for_missing`,
+    /// `kg_delete_triple_rebuilds_prompt_cache_for_hot_predicate` in
+    /// `web::tests`. Only the third reaches the cache rebuild — the other two
+    /// retract under the predicate `is`, which is not hot.
     pub async fn kg_retract_triple(
         &self,
         id: &str,
@@ -132,6 +135,9 @@ impl MemoryService {
         if closed > 0 && crate::prompt_facts::is_hot_predicate(predicate) {
             // The write landed either way and the cache is only a
             // denormalisation, so a rebuild failure is logged, not fatal.
+            // No test drives this arm: `rebuild_prompt_cache` skips a palace
+            // it cannot read and has no other fallible step, so it cannot
+            // currently return `Err`.
             if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(&self.state).await {
                 tracing::warn!("rebuild_prompt_cache after kg_retract_triple failed: {e:#}");
             }

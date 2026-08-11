@@ -972,3 +972,107 @@ async fn kg_delete_triple_rejects_a_legacy_pair_id() {
         "a rejected legacy id must close nothing"
     );
 }
+
+/// Return the body of `GET /api/v1/kg/prompt-context`, which serves the
+/// in-memory prompt cache verbatim.
+async fn prompt_context(app: &axum::Router) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/kg/prompt-context")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 16_384).await.unwrap();
+    String::from_utf8(bytes.to_vec()).expect("prompt context is utf-8")
+}
+
+/// Why: the other three delete tests all run under the predicate `is`, which
+/// `is_hot_predicate` rejects, so the prompt-cache rebuild in
+/// `MemoryService::kg_retract_triple` (`service/core_kg.rs:132-138`) never
+/// runs in this suite — the same gap that shipped on the MCP side of this
+/// change and is guarded there by
+/// `dispatch_kg_retract_triple_rebuilds_prompt_cache_for_hot_predicate`.
+/// Nothing else stops a later edit from inverting the condition or dropping
+/// the call while every existing test stays green, and the hazard is the one
+/// the method's own doc names: a retracted Tier S fact keeps being injected
+/// into every session's prompt.
+/// What: writes an alias — the one HTTP write that populates the prompt cache
+/// — under the hot predicate `is_alias_for`, confirms
+/// `GET /kg/prompt-context` serves it, DELETEs that triple, and confirms the
+/// endpoint no longer serves it. The cache is only re-read, never re-derived,
+/// so the second read can only change if the delete rebuilt it.
+/// Test: this test.
+#[tokio::test]
+async fn kg_delete_triple_rebuilds_prompt_cache_for_hot_predicate() {
+    use super::super::kg_routes::encode_triple_id;
+
+    let state = test_state();
+    let app = router().with_state(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "name": "kg-hot" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "create palace kg-hot");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/kg/aliases")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "palace": "kg-hot",
+                        "short": "tmhot",
+                        "full": "trusty-memory-hot-fact",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "seed the hot alias");
+
+    let before = prompt_context(&app).await;
+    assert!(
+        before.contains("tmhot → trusty-memory-hot-fact"),
+        "the hot fact must be cached before the delete; got: {before}"
+    );
+
+    let triple_id = encode_triple_id("tmhot", "is_alias_for", "trusty-memory-hot-fact")
+        .expect("encode triple id");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/palaces/kg-hot/kg/triples/{triple_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let after = prompt_context(&app).await;
+    assert!(
+        !after.contains("trusty-memory-hot-fact"),
+        "a retracted hot fact must not still be injected into the prompt; got: {after}"
+    );
+}
