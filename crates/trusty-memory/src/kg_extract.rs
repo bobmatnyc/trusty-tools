@@ -317,6 +317,319 @@ const PATTERN_TABLE: &[(&str, &[&str])] = &[
     ("depends-on", &[" depends on ", " requires "]),
 ];
 
+/// Function words that can never be a KG entity.
+///
+/// Why: #4678 — a [`PATTERN_TABLE`] marker hit says a marker phrase appeared,
+/// not that the tokens either side of it name anything. "calling them is a
+/// no-op" put `them --is-a--> no-op` into the live palace. Grouped by part of
+/// speech because the boundary is grammatical, not statistical: these are the
+/// closed word classes English never coins new members of, so the list is
+/// finite and stable rather than a frequency cut-off that needs re-tuning.
+/// What: a flat lower-case slice, matched exactly against a normalised token
+/// by [`is_stop_token`]. Membership is checked with a linear scan — it runs at
+/// most twice per pattern hit and at most four hits exist per drawer.
+/// Test: `stopwords_are_unique`, `is_stop_token_rejects_every_stopword`.
+const STOPWORDS: &[&str] = &[
+    // Articles and determiners.
+    "a",
+    "an",
+    "the",
+    "this",
+    "that",
+    "these",
+    "those",
+    "some",
+    "any",
+    "each",
+    "every",
+    "all",
+    "both",
+    "either",
+    "neither",
+    "another",
+    "such",
+    "same",
+    "no",
+    "none",
+    // Pronouns.
+    "i",
+    "me",
+    "my",
+    "mine",
+    "myself",
+    "we",
+    "us",
+    "our",
+    "ours",
+    "ourselves",
+    "you",
+    "your",
+    "yours",
+    "yourself",
+    "he",
+    "him",
+    "his",
+    "himself",
+    "she",
+    "her",
+    "hers",
+    "herself",
+    "it",
+    "its",
+    "itself",
+    "they",
+    "them",
+    "their",
+    "theirs",
+    "themselves",
+    "who",
+    "whom",
+    "whose",
+    "which",
+    "what",
+    "one",
+    "ones",
+    "someone",
+    "something",
+    "anyone",
+    "anything",
+    "everyone",
+    "everything",
+    "nobody",
+    "nothing",
+    "others",
+    // Prepositions.
+    "of",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "with",
+    "by",
+    "from",
+    "about",
+    "into",
+    "onto",
+    "over",
+    "under",
+    "below",
+    "above",
+    "between",
+    "among",
+    "through",
+    "during",
+    "before",
+    "after",
+    "across",
+    "against",
+    "within",
+    "without",
+    "upon",
+    "per",
+    "via",
+    "than",
+    "toward",
+    "towards",
+    "off",
+    "out",
+    "up",
+    "down",
+    "near",
+    "around",
+    "behind",
+    "beyond",
+    "beside",
+    "along",
+    "past",
+    "throughout",
+    // Conjunctions and subordinators.
+    "and",
+    "or",
+    "but",
+    "nor",
+    "so",
+    "yet",
+    "if",
+    "then",
+    "else",
+    "because",
+    "while",
+    "when",
+    "where",
+    "whether",
+    "though",
+    "although",
+    "since",
+    "as",
+    "unless",
+    "until",
+    "whereas",
+    // Copulas, auxiliaries and modals.
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "am",
+    "do",
+    "does",
+    "did",
+    "done",
+    "doing",
+    "has",
+    "have",
+    "had",
+    "having",
+    "can",
+    "could",
+    "will",
+    "would",
+    "shall",
+    "should",
+    "may",
+    "might",
+    "must",
+    "ought",
+    "need",
+    "needs",
+    "let",
+    "lets",
+    "get",
+    "gets",
+    "got",
+    "gotten",
+    // Degree, negation and discourse adverbs — closed-class fillers that sit
+    // next to a marker often and name nothing.
+    "not",
+    "only",
+    "just",
+    "also",
+    "very",
+    "too",
+    "still",
+    "already",
+    "always",
+    "never",
+    "often",
+    "again",
+    "here",
+    "there",
+    "now",
+    "actually",
+    "really",
+    "simply",
+    "merely",
+    "quite",
+    "rather",
+    "even",
+    "ever",
+    "once",
+    "yes",
+    "well",
+    "much",
+    "many",
+    "more",
+    "most",
+    "less",
+    "least",
+    "few",
+    "several",
+    "enough",
+    "almost",
+    "perhaps",
+    "maybe",
+    "instead",
+    "otherwise",
+    "hence",
+    "therefore",
+    "however",
+    "thus",
+    "moreover",
+];
+
+/// Minimum character length for a token to be accepted as an entity.
+///
+/// Why: one- and two-character tokens are overwhelmingly punctuation debris,
+/// initials, or list markers rather than entities.
+/// What: `3`. Tokens shorter than this are rejected unless they appear in
+/// [`SHORT_ENTITY_ALLOWLIST`].
+/// Test: `extract_triples_rejects_short_token_off_allowlist`.
+pub const MIN_ENTITY_TOKEN_LEN: usize = 3;
+
+/// Short tokens that are real entities in this workspace's subject matter.
+///
+/// Why: [`MIN_ENTITY_TOKEN_LEN`] would otherwise reject the languages, crate
+/// aliases, and infrastructure abbreviations these palaces actually discuss —
+/// a precision filter that silently drops `Go` and `C` costs recall for
+/// nothing. The crate aliases (`tm`, `ts`, `tc`, `ta`) come from this repo's
+/// own abbreviation table.
+/// What: lower-case tokens of fewer than [`MIN_ENTITY_TOKEN_LEN`] characters
+/// that bypass the length floor. The stopword check still applies first, so an
+/// entry here cannot resurrect a function word.
+/// Test: `extract_triples_keeps_allowlisted_go`,
+/// `extract_triples_keeps_allowlisted_c`,
+/// `short_entity_allowlist_entries_survive_the_length_floor`.
+pub const SHORT_ENTITY_ALLOWLIST: &[&str] = &[
+    // Languages and language-shaped tokens.
+    "go", "c", "c#", "js", "ts", "py", "ml", // Domains and infrastructure.
+    "ai", "kg", "db", "ui", "os", "io", "vm", "ip", // Process and workspace aliases.
+    "pr", "ci", "qa", "pm", "tm", "tc", "ta",
+];
+
+/// Punctuation stripped from a token's edges before it is classified.
+///
+/// Why: `last_token` / `first_token` only strip a trailing run, so a token can
+/// still arrive as `("the` or `` `redb` ``. Comparing that against
+/// [`STOPWORDS`] would miss, and the filter would leak exactly the tokens it
+/// exists to catch.
+/// What: the edge characters [`is_stop_token`] trims before matching. Interior
+/// characters are untouched, so `no-op` and `c#` survive intact.
+/// Test: `is_stop_token_normalises_surrounding_punctuation`.
+const TOKEN_EDGE_PUNCT: &[char] = &[
+    '(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '`', ',', '.', ';', ':', '!', '?', '*', '_',
+    '-', '/', '\\', '|', '—', '–', '…', '“', '”', '‘', '’',
+];
+
+/// Whether `tok` must be refused as a KG entity.
+///
+/// Why: #4678 — the pattern pass treated any whitespace-delimited token beside
+/// a marker as an entity, which is how `them --is-a--> no-op`,
+/// `exhaustiveness --is-a--> hard`, and `squash --is-a--> ancestor` reached the
+/// live graph. This is the single gate both the extractor and the
+/// `--purge-stale-subjects` back-fill consult, so forward extraction and
+/// historical clean-up can never disagree about what counts as garbage.
+/// What: normalises `tok` through [`clean_token`], lower-cases it, and rejects
+/// it when the result is empty, appears in [`STOPWORDS`], or is shorter than
+/// [`MIN_ENTITY_TOKEN_LEN`] without being in [`SHORT_ENTITY_ALLOWLIST`].
+/// Length is counted in `char`s, not bytes, so a multi-byte token is not
+/// mis-measured. Purely lexical: it judges the token alone and knows nothing of
+/// the sentence, so it cannot catch a triple whose tokens are both ordinary
+/// words (see #4678 for the residue).
+///
+/// The normalisation step is NOT redundant with `clean_token`'s use in
+/// `first_token` / `last_token`. Those clean tokens on the way IN, which only
+/// helps content extracted from now on. The `--purge-stale-subjects` path calls
+/// this on subjects read back out of redb, and those were written by the old
+/// extractor with the punctuation already welded on — normalising here is what
+/// lets a stored `("the` be recognised as the stopword it is.
+/// Test: `is_stop_token_rejects_every_stopword`,
+/// `is_stop_token_accepts_ordinary_entities`,
+/// `is_stop_token_normalises_surrounding_punctuation`,
+/// `purge_selects_a_legacy_subject_with_welded_punctuation`.
+pub fn is_stop_token(tok: &str) -> bool {
+    let norm = clean_token(tok).to_lowercase();
+    if norm.is_empty() {
+        return true;
+    }
+    if STOPWORDS.contains(&norm.as_str()) {
+        return true;
+    }
+    norm.chars().count() < MIN_ENTITY_TOKEN_LEN && !SHORT_ENTITY_ALLOWLIST.contains(&norm.as_str())
+}
+
 /// Apply the pattern table to a single content blob.
 ///
 /// Why: Keeps the matching loop out of `extract_triples` so the dispatcher
@@ -324,8 +637,13 @@ const PATTERN_TABLE: &[(&str, &[&str])] = &[
 /// What: For every `(predicate, markers)` row, scan every marker against the
 /// lower-cased content; on the first hit emit `(left_token, predicate,
 /// right_token)` and move on to the next predicate. Only the first hit per
-/// predicate is taken to avoid combinatorial output on long texts.
-/// Test: `extract_triples_extracts_is_a_pattern`.
+/// predicate is taken to avoid combinatorial output on long texts. A hit whose
+/// subject or object fails [`is_stop_token`] emits nothing and still consumes
+/// the predicate's turn, so one rejected hit never cascades into a scan for a
+/// second, lower-quality match later in the blob.
+/// Test: `extract_triples_extracts_is_a_pattern`,
+/// `extract_triples_rejects_pronoun_subject`,
+/// `extract_triples_rejects_stopword_object`.
 fn extract_patterns(content: &str) -> Vec<(String, String, String)> {
     let lower = content.to_lowercase();
     let mut out: Vec<(String, String, String)> = Vec::new();
@@ -337,7 +655,10 @@ fn extract_patterns(content: &str) -> Vec<(String, String, String)> {
                 let right = lower[right_start..].trim();
                 let subject_tok = last_token(left);
                 let object_tok = first_token(right);
-                if !subject_tok.is_empty() && !object_tok.is_empty() {
+                // #4678: a marker hit is not evidence of two entities — reject
+                // the whole triple when either side is a function word or too
+                // short, never half of it.
+                if !is_stop_token(&subject_tok) && !is_stop_token(&object_tok) {
                     out.push((subject_tok, (*predicate).to_string(), object_tok));
                 }
                 break;
@@ -351,12 +672,14 @@ fn extract_patterns(content: &str) -> Vec<(String, String, String)> {
 ///
 /// Why: The left side of a pattern hit can contain arbitrary preamble; the
 /// entity we care about is the noun immediately before the marker.
-/// What: Trims trailing punctuation off the last whitespace-delimited token.
-/// Test: indirectly via `extract_triples_extracts_is_a_pattern`.
+/// What: Returns the last whitespace-delimited token with [`TOKEN_EDGE_PUNCT`]
+/// stripped from both edges.
+/// Test: `extract_triples_extracts_is_a_pattern`,
+/// `extract_triples_strips_punctuation_from_both_token_edges`.
 fn last_token(s: &str) -> String {
     s.split_whitespace()
         .last()
-        .map(|t| t.trim_end_matches([',', '.', ';', ':', '!', '?', '"', '\'']))
+        .map(clean_token)
         .unwrap_or("")
         .to_string()
 }
@@ -364,14 +687,31 @@ fn last_token(s: &str) -> String {
 /// Pull the first whitespace-delimited token from a fragment.
 ///
 /// Why: Mirror of `last_token` for the right side of a pattern hit.
-/// What: Trims leading punctuation off the first whitespace-delimited token.
-/// Test: indirectly via `extract_triples_extracts_is_a_pattern`.
+/// What: Returns the first whitespace-delimited token, cleaned identically.
+/// Test: `extract_triples_extracts_is_a_pattern`,
+/// `extract_triples_strips_punctuation_from_both_token_edges`.
 fn first_token(s: &str) -> String {
     s.split_whitespace()
         .next()
-        .map(|t| t.trim_end_matches([',', '.', ';', ':', '!', '?', '"', '\'']))
+        .map(clean_token)
         .unwrap_or("")
         .to_string()
+}
+
+/// Strip surrounding punctuation from one raw token.
+///
+/// Why: #4678 — `first_token` trimmed a TRAILING run while its doc promised a
+/// leading one, and both helpers used a set that omitted the characters drawer
+/// content actually wraps names in (backticks, brackets, asterisks). So
+/// `` `redb` `` reached the graph verbatim and became a second node for an
+/// entity that already had one. Which SIDE of the marker a token sits on says
+/// nothing about which edge carries punctuation, so both helpers clean both
+/// edges through this one function rather than each guessing.
+/// What: trims whitespace, then [`TOKEN_EDGE_PUNCT`] from both ends. Interior
+/// characters are untouched, so `no-op`, `c#`, and `src/main.rs` survive whole.
+/// Test: `extract_triples_strips_punctuation_from_both_token_edges`.
+fn clean_token(raw: &str) -> &str {
+    raw.trim().trim_matches(TOKEN_EDGE_PUNCT)
 }
 
 #[cfg(test)]
@@ -577,6 +917,330 @@ mod tests {
         assert!(
             triples.is_empty(),
             "upper-cased deny tag must still be blocked"
+        );
+    }
+
+    /// Collect only the triples produced by the [`PATTERN_TABLE`] pass.
+    ///
+    /// Why: every assertion about extraction precision is about the pattern
+    /// pass; the tag / room / hashtag passes always fire and would otherwise
+    /// mask a "zero triples" assertion.
+    /// What: filters by predicate against [`PATTERN_TABLE`].
+    /// Test: used by every precision test below.
+    fn pattern_triples(triples: &[Triple]) -> Vec<(String, String, String)> {
+        let predicates: Vec<&str> = PATTERN_TABLE.iter().map(|(p, _)| *p).collect();
+        triples
+            .iter()
+            .filter(|t| predicates.contains(&t.predicate.as_str()))
+            .map(|t| (t.subject.clone(), t.predicate.clone(), t.object.clone()))
+            .collect()
+    }
+
+    /// Run the extractor over bare content with no tags and no room.
+    ///
+    /// Why: the precision fixtures care only about content; tags and rooms
+    /// would add noise triples to every assertion.
+    /// What: builds an `ExtractInput` with empty tags and no room.
+    /// Test: used by every precision test below.
+    fn patterns_for(content: &str) -> Vec<(String, String, String)> {
+        let triples = extract_triples(&ExtractInput {
+            drawer_id: Uuid::new_v4(),
+            content,
+            tags: &[],
+            room: None,
+        });
+        pattern_triples(&triples)
+    }
+
+    /// Why: `them --is-a--> no-op` is live in the real trusty-tools palace
+    /// (asserted 2026-08-04). A marker hit is not evidence that the tokens
+    /// either side of it are entities; a pronoun never is one.
+    /// What: "calling them is a no-op ..." must yield zero pattern triples.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_rejects_pronoun_subject() {
+        let got = patterns_for("calling them is a no-op when the flag is off");
+        assert!(
+            got.is_empty(),
+            "pronoun subject must reject the whole triple, got {got:?}"
+        );
+    }
+
+    /// Why: a stopword can land on either side of a marker, so filtering only
+    /// the subject would still admit `libpq --depends-on--> the`.
+    /// What: "libpq depends on the license" must yield zero pattern triples —
+    /// the triple is rejected whole, never truncated to a half-triple.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_rejects_stopword_object() {
+        let got = patterns_for("libpq depends on the license header");
+        assert!(
+            got.is_empty(),
+            "stopword object must reject the whole triple, got {got:?}"
+        );
+    }
+
+    /// Why: a one- or two-character token is almost never an entity, and the
+    /// extractor had no length floor at all.
+    /// What: "x is a thing" must yield zero pattern triples.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_rejects_short_token_off_allowlist() {
+        let got = patterns_for("x is a thing worth recording");
+        assert!(
+            got.is_empty(),
+            "short token off the allowlist must be rejected, got {got:?}"
+        );
+    }
+
+    /// Why: the length floor must not swallow the short names this repo
+    /// genuinely discusses — without the allowlist, `Go` and `C` would be
+    /// rejected as noise and the filter would cost real recall.
+    /// What: "Go is a language" still extracts `go --is-a--> language`.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_keeps_allowlisted_go() {
+        let got = patterns_for("Go is a language with green threads");
+        assert!(
+            got.contains(&("go".into(), "is-a".into(), "language".into())),
+            "allowlisted `Go` must survive the length floor, got {got:?}"
+        );
+    }
+
+    /// Why: `C` is the single-character case — the length floor's worst
+    /// false positive if the allowlist is not consulted.
+    /// What: "C is a language" still extracts `c --is-a--> language`.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_keeps_allowlisted_c() {
+        let got = patterns_for("C is a language without a runtime");
+        assert!(
+            got.contains(&("c".into(), "is-a".into(), "language".into())),
+            "allowlisted `C` must survive the length floor, got {got:?}"
+        );
+    }
+
+    /// Why: the filter must not cost recall on ordinary, well-formed content.
+    /// A rejection filter that also rejects the good cases is a regression,
+    /// so every predicate in [`PATTERN_TABLE`] keeps a worked example.
+    /// What: table-driven — each row is `(content, expected triple)` and must
+    /// appear in the extracted pattern set.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_keeps_real_entities_across_all_predicates() {
+        let cases: &[(&str, (&str, &str, &str))] = &[
+            (
+                "tokio is an executor for async rust",
+                ("tokio", "is-a", "executor"),
+            ),
+            (
+                "alice works at initech today",
+                ("alice", "works-at", "initech"),
+            ),
+            (
+                "trusty-memory uses redb for persistence",
+                ("trusty-memory", "uses", "redb"),
+            ),
+            (
+                "trusty-search depends on trusty-common for shared helpers",
+                ("trusty-search", "depends-on", "trusty-common"),
+            ),
+            (
+                "the embedder requires onnxruntime at startup",
+                ("embedder", "depends-on", "onnxruntime"),
+            ),
+        ];
+        for (content, (s, p, o)) in cases {
+            let got = patterns_for(content);
+            let want = ((*s).to_string(), (*p).to_string(), (*o).to_string());
+            assert!(
+                got.contains(&want),
+                "content {content:?} must still extract {want:?}, got {got:?}"
+            );
+        }
+    }
+
+    /// Why: `first_token` trimmed only a TRAILING run while its doc promised it
+    /// stripped the leading one, so an entity quoted the way drawer content
+    /// actually quotes things — markdown backticks, brackets, an opening
+    /// quote — entered the graph with the punctuation welded on: `` `redb ``
+    /// rather than `redb`. Two spellings of one entity are two nodes that never
+    /// join up.
+    /// What: pins the emitted strings. Both helpers strip punctuation from BOTH
+    /// edges, so the subject side (`last_token`) is covered too, and no emitted
+    /// token may retain an edge character.
+    /// Test: This test.
+    #[test]
+    fn extract_triples_strips_punctuation_from_both_token_edges() {
+        let cases: &[(&str, (&str, &str, &str))] = &[
+            // Object side, markdown backticks — the common shape in drawers.
+            (
+                "trusty-memory uses `redb` for persistence",
+                ("trusty-memory", "uses", "redb"),
+            ),
+            // Object side, parenthesised.
+            (
+                "the daemon uses (tantivy) for search",
+                ("daemon", "uses", "tantivy"),
+            ),
+            // Subject side, opening quote with no closing one before the marker.
+            (
+                "he said \"rustc is a compiler for rust",
+                ("rustc", "is-a", "compiler"),
+            ),
+            // Object side, bold markdown.
+            (
+                "trusty-search depends on **trusty-common** for helpers",
+                ("trusty-search", "depends-on", "trusty-common"),
+            ),
+        ];
+        for (content, (s, p, o)) in cases {
+            let got = patterns_for(content);
+            let want = ((*s).to_string(), (*p).to_string(), (*o).to_string());
+            assert!(
+                got.contains(&want),
+                "content {content:?} must emit {want:?}, got {got:?}"
+            );
+            for (subject, _, object) in &got {
+                for tok in [subject, object] {
+                    assert!(
+                        !tok.starts_with(TOKEN_EDGE_PUNCT) && !tok.ends_with(TOKEN_EDGE_PUNCT),
+                        "emitted token {tok:?} still carries edge punctuation"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Why: a duplicated entry is dead weight and a sign the categories drifted
+    /// apart during editing.
+    /// What: every [`STOPWORDS`] entry appears exactly once and is already
+    /// lower-case, which is what [`is_stop_token`] compares against.
+    /// Test: This test.
+    #[test]
+    fn stopwords_are_unique() {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for w in STOPWORDS {
+            assert!(seen.insert(w), "duplicate stopword {w:?}");
+            assert_eq!(*w, w.to_lowercase(), "stopword {w:?} must be lower-case");
+        }
+    }
+
+    /// Why: the rejection contract is only as good as the list behind it.
+    /// What: every [`STOPWORDS`] entry is rejected, in its own case and
+    /// upper-cased, since content reaches the filter lower-cased but the purge
+    /// path reads subjects straight out of the store.
+    /// Test: This test.
+    #[test]
+    fn is_stop_token_rejects_every_stopword() {
+        for w in STOPWORDS {
+            assert!(is_stop_token(w), "{w:?} must be rejected");
+            assert!(
+                is_stop_token(&w.to_uppercase()),
+                "{w:?} must be rejected case-insensitively"
+            );
+        }
+    }
+
+    /// Why: an over-broad filter costs recall, which is the failure mode that
+    /// would make this change a net loss.
+    /// What: ordinary multi-character entity names are accepted.
+    /// Test: This test.
+    #[test]
+    fn is_stop_token_accepts_ordinary_entities() {
+        for tok in [
+            "rustc",
+            "compiler",
+            "trusty-memory",
+            "redb",
+            "no-op",
+            "onnxruntime",
+            "initech",
+        ] {
+            assert!(!is_stop_token(tok), "{tok:?} must be accepted");
+        }
+    }
+
+    /// Why: `first_token` / `last_token` strip only a trailing run, so a token
+    /// can still carry an opening bracket or backtick. Comparing that raw
+    /// against the list would miss the stopword it is meant to catch.
+    /// What: edge punctuation is stripped before matching, interior characters
+    /// are not, and a token that is nothing but punctuation is rejected.
+    /// Test: This test.
+    #[test]
+    fn is_stop_token_normalises_surrounding_punctuation() {
+        assert!(
+            is_stop_token("(the"),
+            "leading bracket must not hide a stopword"
+        );
+        assert!(is_stop_token("`it`"), "backticks must not hide a stopword");
+        assert!(
+            is_stop_token("---"),
+            "punctuation-only token must be rejected"
+        );
+        assert!(
+            is_stop_token("   "),
+            "whitespace-only token must be rejected"
+        );
+        assert!(
+            !is_stop_token("`redb`"),
+            "interior name must survive trimming"
+        );
+        assert!(
+            !is_stop_token("no-op"),
+            "interior hyphen must survive trimming"
+        );
+    }
+
+    /// Why: the allowlist is the length floor's escape hatch; if an entry stops
+    /// working the floor silently starts eating real entities.
+    /// What: every [`SHORT_ENTITY_ALLOWLIST`] entry is accepted, and no entry
+    /// collides with [`STOPWORDS`] (which is checked first and would win).
+    /// Test: This test.
+    #[test]
+    fn short_entity_allowlist_entries_survive_the_length_floor() {
+        for tok in SHORT_ENTITY_ALLOWLIST {
+            assert!(
+                !STOPWORDS.contains(tok),
+                "{tok:?} is on both lists; the stopword check runs first and wins"
+            );
+            assert!(!is_stop_token(tok), "allowlisted {tok:?} must be accepted");
+        }
+    }
+
+    /// Why: #4678 names three live regressions. This filter is lexical — it
+    /// judges one token at a time — so it reaches the first and provably
+    /// cannot reach the other two: `exhaustiveness`, `hard`, `squash` and
+    /// `ancestor` are all ordinary content words, indistinguishable token-wise
+    /// from the `rustc --is-a--> compiler` the extractor is supposed to keep.
+    /// Rejecting them needs sentence-level context or head-noun selection,
+    /// which is a different change from this one.
+    ///
+    /// The owner has ruled that lexical filtering alone therefore does NOT
+    /// satisfy ADR-0038 precondition 3. This test is the standing record of
+    /// that open gate, tracked as its own issue — not a temporary note. Do not
+    /// delete it because it looks like it asserts a bug: it does, deliberately,
+    /// and the gate closes with the issue, not with this file.
+    /// What: pins the residue as CURRENT behaviour — these two still extract.
+    /// Test: This test.
+    #[test]
+    fn lexical_filter_does_not_reach_the_two_content_word_regressions() {
+        assert!(
+            !is_stop_token("exhaustiveness")
+                && !is_stop_token("hard")
+                && !is_stop_token("squash")
+                && !is_stop_token("ancestor"),
+            "these are ordinary words; no lexical filter may reject them"
+        );
+        let exhaustiveness = patterns_for("match exhaustiveness is a hard requirement here");
+        assert!(
+            exhaustiveness.contains(&("exhaustiveness".into(), "is-a".into(), "hard".into())),
+            "known #4678 residue; got {exhaustiveness:?}"
+        );
+        let squash = patterns_for("confirm the squash is an ancestor of origin main");
+        assert!(
+            squash.contains(&("squash".into(), "is-a".into(), "ancestor".into())),
+            "known #4678 residue; got {squash:?}"
         );
     }
 

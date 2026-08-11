@@ -96,11 +96,12 @@ places it at the publish boundary; rungs 4–6 are named there only because they
 are the rungs that reach that boundary. A rung-4 PR does not owe a workspace test
 run to merge.
 
-**Branch protection follows from this.** The CI `Test` job is a pre-build /
-pre-publish gate, not a pre-merge one, and it is not among `main`'s required
-status contexts (`Format check`, `500-line file-size cap`, `Clippy`,
-`trusty-search daemon smoke test`, `MSRV check (1.94)`). Merges proceed with
-`Test` still pending; a **failing** check blocks at every stage.
+**Branch protection follows from this.** The CI `Rust tests (pre-publish gate)`
+job is a pre-build / pre-publish gate, not a pre-merge one, and it is not among
+`main`'s required status contexts (`Format check`, `500-line file-size cap`,
+`Clippy`, `trusty-search daemon smoke test`, `MSRV check`). Merges proceed
+with `Rust tests (pre-publish gate)` still pending; a **failing** check blocks
+at every stage.
 
 🔴 **Scoping down by stage is a claim you must be able to prove**, exactly as
 scoping down by rung is. It is never licence to make a red gate green by
