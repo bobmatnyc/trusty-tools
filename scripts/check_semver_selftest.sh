@@ -62,6 +62,13 @@
 #   9, 11 and 12 fail against the pre-#5296 gate, which is what makes them
 #   regression tests rather than descriptions of current behaviour.
 #
+#   Cases 13-15 pin pre-release handling. `key()` used to strip the pre-release
+#   suffix, so 1.0.0-rc1 and 1.0.0 both keyed to (1, 0, 0) and the tie went to
+#   whichever the index listed first — the reproduction on record picked
+#   1.0.0-rc1 as the baseline for a 1.0.1 release. 13 runs that exact history;
+#   14 pins that a NEARER pre-release still loses to the last stable release;
+#   15 pins that a skip caused by the exclusion names the version it refused.
+#
 # Usage:  bash scripts/check_semver_selftest.sh
 # Exit:   0 when every case behaves; 1 (naming the case) when one does not.
 #
@@ -422,6 +429,65 @@ elif [[ "$out" == *"no breaking changes found"* ]]; then
   fail_case "inventory/blind: a run that produced nothing was reported as clean" "$out"
 else
   pass_case "an inventory that could not run says so, in the line and in the summary"
+fi
+
+# ===========================================================================
+# 13-15. Pre-releases are never a baseline (code-critic on PR #5445).
+#
+# Case 13 is the reproduction ON RECORD, run verbatim: the history
+# ["0.9.9", "1.0.0-rc1", "1.0.0", "1.0.1-beta"] with declared version 1.0.1
+# selected 1.0.0-rc1, because `key()` stripped the pre-release suffix and
+# 1.0.0-rc1 / 1.0.0 tied at (1, 0, 0) with first-seen winning. `--probe-version`
+# supplies the declared version so the case does not depend on any real crate's
+# Cargo.toml sitting at 1.0.1.
+#
+# Case 15 is the fail-open trace: when the ONLY release below the declared
+# version is a pre-release, the skip must NAME it. Sharing the generic "nothing
+# below" message would hide a rejection behind a fact.
+# ===========================================================================
+CRITIC_HISTORY="0.9.9,1.0.0-rc1,1.0.0,1.0.1-beta"
+
+# --- 13. The exact reproduction: the stable 1.0.0 must win over 1.0.0-rc1.
+rc=0
+out="$(cd "$REPO_ROOT" && SEMVER_GATE_INDEX_BASE="http://127.0.0.1:${PORT}/v/${CRITIC_HISTORY}" \
+  bash "$GATE" --probe critic-repro-crate --probe-version 1.0.1 2>&1)" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "prerelease/repro: the probe exited ${rc}" "$out"
+elif [[ "$out" == *"baseline=1.0.0-rc1"* ]]; then
+  fail_case "prerelease/repro: selected the pre-release 1.0.0-rc1 over the stable 1.0.0 it shadows" "$out"
+elif [[ "$out" != *"baseline=1.0.0 "* ]]; then
+  fail_case "prerelease/repro: expected baseline=1.0.0 from ${CRITIC_HISTORY} declared 1.0.1" "$out"
+else
+  pass_case "the stable release wins the baseline slot over a pre-release with the same core"
+fi
+
+# --- 14. A pre-release ABOVE the last stable and below the declared version
+#         (1.0.1-beta) is still not a baseline, and is reported as seen.
+rc=0
+out="$(cd "$REPO_ROOT" && SEMVER_GATE_INDEX_BASE="http://127.0.0.1:${PORT}/v/${CRITIC_HISTORY}" \
+  bash "$GATE" --probe critic-repro-crate --probe-version 1.0.2 2>&1)" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "prerelease/nearest: the probe exited ${rc}" "$out"
+elif [[ "$out" != *"baseline=1.0.0 "* ]]; then
+  fail_case "prerelease/nearest: 1.0.1-beta is nearer to 1.0.2 than 1.0.0, but nothing resolves to it — expected baseline=1.0.0" "$out"
+elif [[ "$out" != *"pre-release below=1.0.1-beta"* ]]; then
+  fail_case "prerelease/nearest: the rejected pre-release was not reported" "$out"
+else
+  pass_case "a nearer pre-release does not displace the last stable release"
+fi
+
+# --- 15. Only a pre-release below the declared version: a skip that NAMES it,
+#         never the generic "nothing below" line.
+rc=0
+out="$(gate_with_index "${STUB_PREV}-rc1" "unreachable=clean.out:0")" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "prerelease/only: a crate whose sole predecessor is a pre-release must be a recorded skip (exit ${rc})" "$out"
+elif [[ "$out" != *"v${STUB_PREV}-rc1 is below it but a pre-release is never a baseline"* ]]; then
+  fail_case "prerelease/only: the skip hid the pre-release it refused behind the generic 'nothing below' message" "$out"
+elif [[ "$out" == *"CHECK ${STUB_CRATE}:"* ]]; then
+  fail_case "prerelease/only: the gate compared against a pre-release" "$out"
+else
+  pass_case "the only-a-pre-release skip names what it refused"
 fi
 
 rm -rf "$STUB_DIR"

@@ -49,9 +49,12 @@
 #                                       cargo-semver-checks can compare)
 #     - registry says 404            -> skip (never published; no baseline exists)
 #     - registry has only yanked vers-> skip (no installable baseline)
-#     - no non-yanked release BELOW
-#       the declared version         -> skip (this is the crate's first release;
-#                                       there is no earlier API to compare to)
+#     - no non-yanked STABLE release
+#       BELOW the declared version   -> skip (no stable predecessor: the crate's
+#                                       first real release, so there is no
+#                                       earlier API a dependent could be on. A
+#                                       pre-release below it is NAMED in the skip
+#                                       line, never silently passed over)
 #     - registry probe fails any
 #       other way (network, 5xx,
 #       malformed index, curl error) -> HARD FAIL, exit non-zero
@@ -122,6 +125,8 @@
 # Usage:
 #   bash scripts/check_semver.sh --crate trusty-common # one crate (release path)
 #   bash scripts/check_semver.sh --probe trusty-common # baseline decision only
+#   bash scripts/check_semver.sh --probe <c> --probe-version 1.0.1
+#                                                      # ...as if it declared 1.0.1
 #   bash scripts/check_semver.sh                       # diff vs origin/main
 #   bash scripts/check_semver.sh --base <ref>          # explicit base
 #   SEMVER_GATE_BASE=<ref> bash scripts/check_semver.sh
@@ -150,8 +155,10 @@
 #   #5297b) add the post-publish shape: a crate whose declared version is already
 #   on crates.io must still be compared against the release BEFORE it, a first
 #   release is a recorded skip, and an already-breaking bump produces an
-#   inventory instead of a skip. The catch itself is demonstrated in PR #5051
-#   against #4088's real shape.
+#   inventory instead of a skip. Cases 13-15 pin pre-release handling: the
+#   reproduction on record is `["0.9.9", "1.0.0-rc1", "1.0.0", "1.0.1-beta"]`
+#   declared 1.0.1, which selected 1.0.0-rc1 before the rank element existed.
+#   The catch itself is demonstrated in PR #5051 against #4088's real shape.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   plus `git`, `curl`, `cargo`, `python3` (JSON parsing only).
@@ -164,6 +171,7 @@ cd "$REPO_ROOT"
 BASE="${SEMVER_GATE_BASE:-origin/main}"
 EXPLICIT_CRATES=""
 PROBE_ONLY=""
+PROBE_VERSION_OVERRIDE=""
 INDEX_BASE="${SEMVER_GATE_INDEX_BASE:-https://index.crates.io}"
 EXCLUSIONS_FILE="${REPO_ROOT}/scripts/semver-checks-feature-exclusions.tsv"
 
@@ -200,6 +208,17 @@ while [[ $# -gt 0 ]]; do
       PROBE_ONLY="$2"
       shift 2
       ;;
+    --probe-version)
+      # Diagnostic only: answer "what would you compare against if the declared
+      # version were X?" without editing a Cargo.toml. It is read ONLY by the
+      # --probe branch, which prints and exits, so it cannot influence a verdict.
+      [[ $# -lt 2 ]] && {
+        echo "ERROR: --probe-version needs a version" >&2
+        exit 2
+      }
+      PROBE_VERSION_OVERRIDE="$2"
+      shift 2
+      ;;
     -h | --help)
       # Prints the contiguous comment block after the shebang, so editing the
       # header above never silently truncates --help against a stale line range.
@@ -214,20 +233,34 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
-# registry_probe <crate> <declared-version-or-empty> — print two lines:
-#     1. the latest non-yanked version on crates.io, or `NONE`
-#     2. the BASELINE: the greatest non-yanked version strictly BELOW
+# registry_probe <crate> <declared-version-or-empty> — print three lines:
+#     1. the latest non-yanked version on crates.io, of any kind, or `NONE`
+#     2. the BASELINE: the greatest non-yanked STABLE version strictly BELOW
 #        <declared-version>, or `NONE`
-# With an empty declared version there is no upper bound, so line 2 repeats
-# line 1 (that is the `--probe` form, which may be handed a crate this workspace
-# does not build).
+#     3. the greatest non-yanked PRE-RELEASE strictly below it, or `NONE` —
+#        diagnostic only, so a skip can name what it declined to use
+# With an empty declared version there is no upper bound, so every release is a
+# candidate (that is the `--probe` form, which may be handed a crate this
+# workspace does not build).
 #
-# Why two lines and not one: the two facts answer different questions and the
-# gate needs both. The baseline is what `cargo semver-checks` compares against
-# (#5296 — using the latest made a published crate compare against itself). The
-# latest is what distinguishes "never published" from "published, but this is
-# the earliest release", and those two skips read very differently to whoever
-# has to trust the run.
+# Why three lines: they answer different questions and the gate needs all three.
+# The baseline is what `cargo semver-checks` compares against (#5296 — using the
+# latest made a published crate compare against itself). The latest separates
+# "never published" from "published, but this is the earliest release", and
+# those two skips read very differently to whoever has to trust the run. Line 3
+# exists so the "nothing below" skip can never be silent about a pre-release it
+# saw and rejected.
+#
+# PRE-RELEASES ARE NEVER A BASELINE (code-critic on PR #5445). A dependent
+# resolves `^1.0` to a stable release; Cargo will not pick `1.0.0-rc1` unless
+# someone names it exactly. So a break measured against a pre-release is a break
+# no ordinary consumer can experience, while a real break against the stable
+# release it shadows goes unreported — and `release_type` strips the suffix, so
+# `1.0.1-beta -> 1.0.1` computes as `none` and the gate would demand a bump over
+# a version nobody resolves to. Ordering pre-releases correctly is not enough on
+# its own; they have to be out of the candidate set. When the ONLY release below
+# the declared version is a pre-release, the gate skips and says which one it
+# refused, because a crate with no stable predecessor has no consumer to break.
 #
 # Why the network handling is spelled out: this is the one place the gate talks
 #   to the network, so it is the one place a fail-open can hide. `curl -f` alone
@@ -261,7 +294,7 @@ registry_probe() {
 
   if [[ "$code" == "404" ]]; then
     rm -f "$body"
-    printf 'NONE\nNONE\n'
+    printf 'NONE\nNONE\nNONE\n'
     return 0
   fi
 
@@ -279,11 +312,25 @@ registry_probe() {
   answer="$(python3 - "$body" "$current" <<'PY'
 import json, sys
 
+def prerelease(v):
+    return "-" in v.split("+")[0]
+
 def key(v):
+    """Total order over version strings.
+
+    The 4th element is the pre-release rank: 0 for a pre-release, 1 for a final
+    release, so 1.0.0-rc1 sorts strictly BELOW 1.0.0 instead of collapsing onto
+    it. Without it both keyed to (1, 0, 0) and the tie went to whichever the
+    index listed first — which is how 1.0.0-rc1 beat 1.0.0 for the baseline
+    slot. The 5th element only makes ties between two pre-releases of the same
+    core deterministic; it compares identifiers as text, not by SemVer's
+    numeric-identifier rule, and nothing but a diagnostic depends on it.
+    """
     core = v.split("+")[0].split("-")[0]
     parts = (core.split(".") + ["0", "0", "0"])[:3]
+    suffix = v.split("+")[0].split("-", 1)[1] if prerelease(v) else ""
     try:
-        return tuple(int(p) for p in parts)
+        return tuple(int(p) for p in parts) + (0 if prerelease(v) else 1, suffix)
     except ValueError:
         raise SystemExit(2)
 
@@ -291,7 +338,7 @@ def key(v):
 # name a crate this workspace does not build and therefore has no version for.
 ceiling = key(sys.argv[2]) if sys.argv[2] else None
 
-latest = prev = None
+latest = prev = pre_below = None
 with open(sys.argv[1]) as fh:
     for line in fh:
         line = line.strip()
@@ -304,14 +351,20 @@ with open(sys.argv[1]) as fh:
         if latest is None or key(v) > key(latest):
             latest = v
         # STRICTLY below: a version equal to the declared one is the release
-        # under test, never its own baseline (#5296).
-        if ceiling is not None and key(v) < ceiling:
-            if prev is None or key(v) > key(prev):
-                prev = v
-if ceiling is None:
-    prev = latest
+        # under test, never its own baseline (#5296). No ceiling means no upper
+        # bound, so every release is a candidate.
+        if ceiling is not None and key(v) >= ceiling:
+            continue
+        if prerelease(v):
+            # Recorded, never selected — see the header. Kept so the caller's
+            # skip message can name the pre-release it refused.
+            if pre_below is None or key(v) > key(pre_below):
+                pre_below = v
+        elif prev is None or key(v) > key(prev):
+            prev = v
 print(latest if latest else "NONE")
 print(prev if prev else "NONE")
+print(pre_below if pre_below else "NONE")
 PY
   )" || rc=$?
 
@@ -635,7 +688,7 @@ if [[ -n "$PROBE_ONLY" ]]; then
   # The declared version is looked up BEST-EFFORT: --probe accepts a crate this
   # workspace does not build (that is how the self-test probes an unpublished
   # name), and an empty version simply means "no upper bound".
-  PROBE_VERSION="$(python3 "$PY_HELPER" field "$META_FILE" "$PROBE_ONLY" version 2>/dev/null || true)"
+  PROBE_VERSION="${PROBE_VERSION_OVERRIDE:-$(python3 "$PY_HELPER" field "$META_FILE" "$PROBE_ONLY" version 2>/dev/null || true)}"
 
   # `registry_probe` runs in a command substitution, i.e. a SUBSHELL, so its
   # `exit 1` cannot terminate this script on its own — it only ends the subshell.
@@ -646,7 +699,8 @@ if [[ -n "$PROBE_ONLY" ]]; then
   fi
   latest="$(printf '%s\n' "$probe" | sed -n 1p)"
   baseline="$(printf '%s\n' "$probe" | sed -n 2p)"
-  echo "probe ${PROBE_ONLY}: baseline=${baseline} (declared=${PROBE_VERSION:-unknown}, latest on crates.io=${latest})"
+  pre_below="$(printf '%s\n' "$probe" | sed -n 3p)"
+  echo "probe ${PROBE_ONLY}: baseline=${baseline} (declared=${PROBE_VERSION:-unknown}, latest on crates.io=${latest}, pre-release below=${pre_below})"
   exit 0
 fi
 
@@ -760,6 +814,7 @@ while IFS= read -r crate; do
   fi
   latest="$(printf '%s\n' "$probe" | sed -n 1p)"
   baseline="$(printf '%s\n' "$probe" | sed -n 2p)"
+  pre_below="$(printf '%s\n' "$probe" | sed -n 3p)"
 
   if [[ "$latest" == "NONE" ]]; then
     echo "SKIP ${crate} v${current}: no installable release on crates.io — no baseline exists"
@@ -767,15 +822,21 @@ while IFS= read -r crate; do
     continue
   fi
 
-  # #5296: the baseline is the greatest release BELOW the declared version, so
-  # this branch means every published release is >= the one under test — i.e.
-  # this is the crate's first release. That is a fact about the crate, and the
-  # only honest comparison (there is no earlier API) is none at all. The `latest`
-  # value is printed because it is what separates this from a version regression:
-  # if it is ABOVE the declared version, the crate is behind the registry and
-  # preflight-publish.sh CHECK 4 is the check that says so.
+  # #5296: the baseline is the greatest STABLE release below the declared
+  # version, so this branch means the crate has no stable predecessor — its
+  # first real release. That is a fact about the crate, and the only honest
+  # comparison (there is no earlier API a dependent could be on) is none at all.
+  # The `latest` value is printed because it is what separates this from a
+  # version regression: if it is ABOVE the declared version, the crate is behind
+  # the registry and preflight-publish.sh CHECK 4 is the check that says so.
   if [[ "$baseline" == "NONE" ]]; then
-    echo "SKIP ${crate} v${current}: no non-yanked release below v${current} (latest on crates.io is v${latest}) — no previous release to compare against"
+    if [[ "$pre_below" != "NONE" ]]; then
+      # Never silent about a rejection. A pre-release IS below the declared
+      # version and was still not used, so the reason has to be on the line.
+      echo "SKIP ${crate} v${current}: no STABLE release below v${current} — v${pre_below} is below it but a pre-release is never a baseline (nothing resolves to it); latest on crates.io is v${latest}"
+    else
+      echo "SKIP ${crate} v${current}: no non-yanked release below v${current} (latest on crates.io is v${latest}) — no previous release to compare against"
+    fi
     skipped=$((skipped + 1))
     continue
   fi
