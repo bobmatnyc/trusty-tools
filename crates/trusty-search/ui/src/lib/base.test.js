@@ -67,6 +67,29 @@ describe('apiUrl — served behind the trusty-console proxy at <prefix>/ui/', ()
   });
 });
 
+// #4980: document.baseURI carries the URL fragment, so on a hash-routed load
+// the `$`-anchored strips silently no-op and every API call is misrouted under
+// /ui/. computeBase() now strips against the parsed pathname instead.
+describe('apiUrl — hash-routed load (fragment present at module init)', () => {
+  it('ignores the #/ fragment when deriving the base', async () => {
+    const { apiUrl, apiBase } = await loadWithBaseURI('http://127.0.0.1:7878/ui/#/');
+    expect(apiBase()).toBe('http://127.0.0.1:7878/');
+    expect(apiUrl('/health')).toBe('http://127.0.0.1:7878/health');
+  });
+
+  it('ignores the fragment behind the console proxy', async () => {
+    const { apiBase } = await loadWithBaseURI(
+      'https://console.local/proxy/search/ui/#/indexes'
+    );
+    expect(apiBase()).toBe('https://console.local/proxy/search/');
+  });
+
+  it('ignores a query string', async () => {
+    const { apiUrl } = await loadWithBaseURI('http://127.0.0.1:7878/ui/?tab=1');
+    expect(apiUrl('/health')).toBe('http://127.0.0.1:7878/health');
+  });
+});
+
 describe('apiUrl — window.__SEARCH_BASE__ override still wins', () => {
   it('honours an injected base global', async () => {
     vi.resetModules();

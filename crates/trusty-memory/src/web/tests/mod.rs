@@ -21,6 +21,16 @@ use crate::AppState;
 /// "warming" error.
 /// Test: Every test that calls `test_state()`.
 pub(crate) fn test_state() -> AppState {
+    // Pre-seed the process-wide `retrieval::shared_embedder()` OnceCell with
+    // `MockEmbedder`. Handlers that write or recall drawers resolve that cell;
+    // whichever caller seeds it first wins for the whole process, so under
+    // `cargo test` a sibling test's seed silently satisfied every test here.
+    // Under per-test process isolation (`cargo nextest run`) each test gets a
+    // virgin cell, reaches for the real ONNX model, and fails on the
+    // HuggingFace download (HTTP 429 in CI) — same defect class as #4413.
+    // `seed_shared_embedder_with_mock` is idempotent, so calling it from the
+    // fixture every test already uses is free and order-independent.
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::mem::forget(tmp);

@@ -57,53 +57,34 @@ user's behalf.
 Some bugs (a skill's documented command no longer exists, a stale path in an
 instruction file, a UX gap the user reports directly) have no corresponding
 daemon-captured error event — `list_recent_errors` will not surface them.
-For these, delegate to the **Ticketing** agent to file a `gh issue
-create` against `bobmatnyc/trusty-tools` directly, using the same
-information standard below (title, labels, structured body). Apply the shipped
-issue defaults — `--assignee @me --label trusty-mpm --label ws/<session-name>`
-(this session's tmux session name; create the labels first if missing:
-`gh label create trusty-mpm --description "Created/managed by a
-trusty-mpm session" --color 8250df` and `gh label create "ws/$WS_NAME"
---description "trusty-mpm workstream $WS_NAME" --color 5319E7`) — **in
-addition to** the `bug` label and any context labels below. The MCP pipeline
-is preferred whenever a fingerprint exists; the manual path is the fallback,
-not the default.
+For these, delegate to the **`ticketing`** agent, which runs its own search/dedup
+gate and applies the shipped issue defaults and label families from
+`tm-ticketing` — do not restate them in the brief. The MCP pipeline is preferred
+whenever a fingerprint exists; the manual path is the fallback, not the default.
 
 ## Bug Report Content Standard
 
 **Title**: brief, descriptive, under ~70 chars. "PM delegates to
 non-existent agent" not "Bug in system".
 
-**Labels**: always `bug`; add context labels as applicable — `agent-error`,
-`skill-error`, `documentation`, `high-priority` (critical functionality
-broken).
+**Labels**: the label families in `tm-ticketing` apply unchanged — a type label
+(`bug` for almost every bug report), the owning component/crate, and a `P0`-`P3`
+priority only when the report itself asserts severity. 🔴 Never invent a label
+the repository does not carry; check `gh label list` first. (`agent-error`,
+`skill-error`, and `high-priority` were named here and exist in no trusty-tools
+repo — #5202.)
 
-**Body structure** (used by both the automated pipeline's scrubbed body and
-the manual Version Control fallback):
-
-```markdown
-## What Happened
-[clear description]
-
-## Expected Behavior
-[what should have happened]
-
-## Steps to Reproduce
-1. ...
-2. ...
-
-## Context
-- Agent/skill: [name if applicable]
-- Error message: [full error if available]
-- Crate/version: [if known]
-
-## Impact
-[how this affects users/workflow]
-```
+**Body**: the sparse form in `tm-ticketing` applies — problem, decisive evidence,
+one to four closure conditions, no `##` headings. A bug report conveys what
+happened, what was expected, how to reproduce it, and the agent/skill/crate
+involved, in prose, in under ten lines. The automated pipeline's scrubbed body is
+generated and is not yours to reshape; this governs the manual fallback.
 
 ## Related Skills
 
 - `tm-postmortem` — session-level orchestration of the same pipeline after a
   work session, plus what's worth reporting vs. not
+- `tm-ticketing` — the canonical label families, sparse-body form, and the
+  search/dedup dispositions this protocol files under
 - `tm-circuit-breaker` — CB#6 covers delegating GitHub issue *operations*
   generally (not the bug-report MCP tools, which the PM may call directly)

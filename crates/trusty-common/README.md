@@ -46,7 +46,7 @@ trusty-common = { version = "0.8", features = ["axum-server", "mcp", "rpc", "emb
 | `symgraph-server` | HTTP server frontend for the symbol graph (implies `symgraph-parser`) |
 | `bm25` | Zero-dependency BM25 lexical index + code-aware tokenizer (issue #156) |
 | `bm25-client` | UDS JSON-RPC client for the per-palace `trusty-bm25-daemon` subprocess |
-| `memory-core` | Memory Palace storage engine — HNSW (usearch), SQLite metadata + KG, dream cycle (formerly `trusty-memory-core`) |
+| `memory-core` | Memory Palace storage engine — HNSW (`hnsw_rs`), redb metadata + KG, dream cycle (formerly `trusty-memory-core`) |
 | `memory-core-kuzu` | Read-only Kùzu graph-DB integration on top of `memory-core` |
 | `tickets` | Unified ticketing MCP server (GitHub / JIRA / Linear backends; formerly `trusty-tickets`) |
 | `monitor-tui` | ratatui + crossterm dashboard TUI for the trusty-search/trusty-memory daemons (formerly `trusty-monitor-tui`) |
@@ -216,7 +216,7 @@ let graph = SymbolGraph::parse_file("src/main.rs")?;
 
 **Important**: `symgraph-parser` brings in the `links = "tree-sitter"` native
 library slot. Enable it in at most one crate per build graph (typically
-`open-mpm`). Downstream crates that only need the data types enable `symgraph`
+`trusty-agents`). Downstream crates that only need the data types enable `symgraph`
 (contracts only) and stop there.
 
 ## Migrations (`migrations` feature)

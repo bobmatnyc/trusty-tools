@@ -106,10 +106,45 @@ pub(crate) fn inject_trusty_search_mcp(
 /// silently registered that throwaway directory against whatever trusty-search
 /// daemon happened to be running on the developer/CI machine — the root cause
 /// of the ephemeral-index leak this issue reports.
+///
+/// `skip_vector` (#5065 review): forwarded from [`worktree_skip_vector`] rather
+/// than left at its `false` default, so launching a session in a worktree
+/// cannot undo the BM25+KG-only decision worktree creation made. See that
+/// function for why the ordering made this a real drift and not a theoretical
+/// one.
 /// Test: `register_project_index_returns_derived_id` (derivation + daemon-down
 /// graceful path) and `register_project_index_never_bypasses_sensitive_path_denylist`
 /// (issue #2914 regression) in `tests.rs`; the promoted logic is unit-tested in
 /// `trusty_common::search_index::tests`.
 pub(crate) fn register_project_index(project_root: &Path) -> Option<String> {
-    trusty_common::search_index::ensure_project_indexed(project_root, false)
+    trusty_common::search_index::ensure_project_indexed_with(
+        project_root,
+        trusty_common::search_index::IndexOptions::default()
+            .with_skip_vector(worktree_skip_vector(project_root)),
+    )
+}
+
+/// Should the index for `project_root` be registered BM25+KG-only (#5065 review)?
+///
+/// Why: BM25+KG-only was not an invariant, only the behaviour of whichever call
+/// happened to land first. #5060 registers a worktree's index with
+/// `skip_vector: true` at CREATION, but session launch reached the same
+/// worktree path through [`register_project_index`] with `skip_vector` at its
+/// `false` default. `POST /indexes` is find-or-create and short-circuits on an
+/// existing id, so ordering decided the outcome: whenever creation-time
+/// indexing failed, was skipped, or simply lost the race, launch minted a
+/// vector-bearing index for the worktree and the daemon persisted that choice.
+/// Deciding it from the path — the one thing both call sites agree on — removes
+/// the ordering dependence entirely.
+/// What: resolves the git-root the index will actually be keyed to (the same
+/// `resolve_project_root` hop `ensure_project_indexed_with` performs
+/// internally) and asks whether THAT directory is a git worktree. Testing
+/// `project_root` itself would answer `false` for a session launched from a
+/// SUBDIRECTORY of a worktree, whose index is still keyed to the worktree root
+/// — reintroducing the same drift through a narrower door.
+/// Test: `worktree_skip_vector_true_for_worktree_root`,
+/// `worktree_skip_vector_true_from_worktree_subdirectory`,
+/// `worktree_skip_vector_false_for_plain_clone`.
+pub(super) fn worktree_skip_vector(project_root: &Path) -> bool {
+    crate::core::worktree_index::is_git_worktree(&trusty_common::resolve_project_root(project_root))
 }

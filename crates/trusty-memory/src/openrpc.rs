@@ -1,6 +1,6 @@
 //! OpenRPC 1.3.2 service description for `trusty-memory-mcp`.
 //!
-//! Why: Orchestrators such as open-mpm need a machine-readable manifest of
+//! Why: Orchestrators such as trusty-agents need a machine-readable manifest of
 //! every memory tool the server exposes — including the logical scopes
 //! (`memory.read` / `memory.write`) each tool requires — so they can route
 //! tasks and enforce per-tool authorisation without bespoke per-server
@@ -41,7 +41,7 @@ mod scopes {
 
 /// Return the logical scopes a given memory tool requires.
 ///
-/// Why: open-mpm and similar orchestrators need to know whether a tool
+/// Why: trusty-agents and similar orchestrators need to know whether a tool
 /// mutates state so they can enforce least-privilege auth before
 /// dispatching the call.
 /// What: Read-only tools → `["memory.read"]`; mutating tools →
@@ -60,6 +60,8 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "palace_list"
         | "palace_info"
         | "kg_query"
+        // #4776: subject enumeration reads the KG and writes nothing.
+        | "kg_list_subjects"
         | "kg_gaps"
         | "list_prompt_facts"
         | "get_prompt_context"
@@ -78,6 +80,8 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "palace_compact"
         // #4906: dry-run is read-only but the repair writes vectors.
         | "palace_reembed"
+        // #5005: dry-run is read-only but the repair deletes vector keys.
+        | "palace_unalias"
         | "kg_assert"
         | "add_alias"
         | "remove_prompt_fact"

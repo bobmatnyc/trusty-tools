@@ -303,6 +303,10 @@ fn strip_service_tier(mut json: serde_json::Value) -> serde_json::Value {
 fn credential_hint(auth_source: &adapter::AuthSource) -> (&'static str, &'static str) {
     match auth_source {
         adapter::AuthSource::Fireworks => ("fireworks", "FIREWORKS_API_KEY"),
+        // #3765: same reasoning as Fireworks above — an AtlasCloud-routed call
+        // with no key must not report "openrouter credential not found",
+        // which names the wrong provider AND the wrong env var.
+        adapter::AuthSource::AtlasCloud => ("atlascloud", "ATLASCLOUD_API_KEY"),
         _ => ("openrouter", "OPENROUTER_API_KEY"),
     }
 }

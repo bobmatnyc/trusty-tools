@@ -59,12 +59,7 @@ pub async fn build_verifier_opt(config: &ReviewConfig) -> Option<Arc<dyn LlmProv
 pub async fn build_verifier_for_serve(
     config: &ReviewConfig,
 ) -> anyhow::Result<Option<Arc<dyn LlmProvider>>> {
-    if !config.verification.enabled {
-        return Ok(None);
-    }
-    let role = &config.role_models.verifier;
-    let p = build_provider(&role.model, &role.provider, config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to build verifier provider: {e}"))?;
-    Ok(Some(p))
+    // #5192: one implementation, in the lib, so the daemon and the webhook
+    // drain build the verifier identically.
+    trusty_review::llm::build_verifier_required(config).await
 }

@@ -1,9 +1,8 @@
-# The `~/.trusty-tools/<crate>/config.yaml` convention (#1220)
+# The `~/.trusty-tools/<crate>/config.yaml` convention
 
-This is the cross-crate configuration standard for the trusty-tools workspace,
-introduced in issue #1220 (P4 of the session-manager arc). It gives every
-trusty-* crate **one** canonical place to read and write its user-facing
-configuration.
+This is the cross-crate configuration standard for the trusty-tools workspace.
+It gives every trusty-* crate **one** canonical place to read and write its
+user-facing configuration.
 
 ## Location & format
 
@@ -12,7 +11,7 @@ configuration.
 ```
 
 - `<crate>` is the crate's package name, e.g. `trusty-mpm`, `trusty-search`.
-- The format is **YAML** (RFC #1225 Q4 decision).
+- The format is **YAML**.
 - An absent file means "no config" → the crate uses its built-in defaults.
 - A malformed file is logged at `warn` (to **stderr**, never stdout) and the
   crate falls back to defaults — a bad config never aborts startup.
@@ -21,54 +20,6 @@ Examples:
 
 - `~/.trusty-tools/trusty-mpm/config.yaml`
 - `~/.trusty-tools/trusty-search/config.yaml` (when that crate adopts it)
-
-## YAML dependency
-
-The convention is parsed by `serde_yaml` **0.9.x**, pinned in the workspace
-`[workspace.dependencies]` table. `serde_yaml` 0.9 resolves to the
-`unsafe-libyaml` backend (dtolnay's c2rust transliteration of libyaml, not the
-pure-Rust `libyaml-safer` fork) — there are no open advisories against it
-today, but the 0.8 line (which has known parsing soundness issues fixed in
-0.9) is explicitly excluded.
-
-`serde_yaml` 0.9 is itself in upstream maintenance mode. `serde_yml` — once
-considered a "maintained successor" per the old #1250 direction — turned out to
-be archived upstream and unsound (GHSA-hhw4-xg65-fp2x / GHSA-gfxp-f68g-8x78,
-Dependabot #42/#43); trusty-agents and trusty-search were migrated back onto
-`serde_yaml` in #2991. `serde_yaml` is the workspace standard going forward. Do
-not relax the `0.9` floor or reintroduce `serde_yml`/`libyml`.
-
-## Adopting the convention in a crate (the shared helper)
-
-`trusty-common` provides the convention behind its `crate-config` feature:
-
-```toml
-# Cargo.toml
-trusty-common = { workspace = true, features = ["crate-config"] }
-```
-
-```rust
-use serde::{Deserialize, Serialize};
-use trusty_common::crate_config;
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct MyConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    some_setting: Option<String>,
-}
-
-// Read (absent / malformed → Default), never panics:
-let cfg: MyConfig = crate_config::load_or_default("trusty-search");
-
-// Write (atomic, creates parent dirs):
-crate_config::save("trusty-search", &cfg)?;
-
-// Resolve the path (e.g. for an "edit this file" hint):
-let path = crate_config::crate_config_path("trusty-search"); // Option<PathBuf>
-```
-
-Path-taking variants (`*_at`) take an explicit base directory and are used by
-tests to stay hermetic.
 
 ## trusty-mpm's settings (the first adopter)
 
@@ -94,20 +45,85 @@ These settings are editable from the **trusty-console Config tab**
 (`/api/console/config/mpm`, backed by the `config_read` / `config_write` MCP
 tools), so operators never hand-edit the YAML unless they want to.
 
-## Workspace-root migration (#1220 dual-root scan)
+## Workspace-root migration
 
-The managed-session workspace root moved from the legacy
-`~/.trusty-mpm/workspaces/<project>/<session-id>/` layout to the new
-`~/trusty-mpm-projects/<owner>/<repo>/<session-id>/` layout. This is a
+The managed-session workspace root moved from a legacy
+`~/.trusty-mpm/workspaces/<project>/<session-id>/` layout to the current
+`~/trusty-mpm-projects/<owner>/<repo>/<session-id>/` layout. This was a
 **migration, not a hard cutover**: `trusty_mpm::core::workspace_scan` discovers
-sessions under **both** roots during the transition, so pre-#1220 workspaces are
-never silently orphaned. The authoritative session state remains
+sessions under **both** roots, so pre-migration workspaces are never silently
+orphaned. The authoritative session state remains
 `~/.trusty-mpm/session-manager/sessions.json`; the dual-root scan is the
 migration-aware filesystem discovery layer.
+
+## The project-level `.trusty-mpm.toml` (#5207)
+
+Every surface above is **per-host**. A project's own conventions — "this repo
+launches on main, never in a worktree" — had to be re-declared by every operator
+on every machine, and could never be reviewed or versioned. Since #5207
+trusty-mpm also reads one file **from the project itself**:
+
+```
+<project>/.trusty-mpm.toml
+```
+
+```toml
+# Do this repo's managed sessions get a per-session git worktree?
+worktree = false
+# Default model id or tier alias for sessions launched in this project.
+default_model = opus
+```
+
+**This file is committed.** It is tracked in git, travels with clones, and shows
+up in PR diffs. That is the point of it, and it is why the file sits at the
+project ROOT rather than inside `<project>/.trusty-mpm/`: that directory holds
+machine-local session state, so projects gitignore it wholesale (this repository
+ignores `.trusty-mpm/*`, which already makes the #4832 `framework/manifest.toml`
+layer untrackable here). A file that must be committed cannot live in a
+directory that exists to hold uncommittable state.
+
+Where a setting appears here, this file is the **top** of its precedence chain:
+
+| Setting | Precedence, highest first |
+|---|---|
+| `worktree` | `.trusty-mpm.toml` → the `projects.json` registry → built-in `true` |
+| `default_model` | `.trusty-mpm.toml` → `config.yaml`'s `default_model` → `config.toml`'s `[models] default` → built-in `sonnet` |
+
+`default_model` is a *default*: an explicit `--model`, a per-agent
+`[models.agents]` entry, and an agent's own frontmatter are all more specific and
+still win over it.
+
+Two settings are deliberately **not** here. `workspace_root` decides where a
+project gets cloned, so it cannot be read from a project that does not exist
+yet — it stays host-level. `auto_resume` is a property of the operator's
+supervisor rather than of the repository.
+
+### Unknown keys
+
+This file is parsed with `serde(deny_unknown_fields)`. `worktre = false` is an
+error, not a silently-ignored key. At spawn time a rejected file contributes
+nothing at all — resolution falls through to the next layer and the parse error
+is logged at `error` level naming the offending key. Nothing in a file that
+failed to parse is trusted, because a typo means the author's intent is unknown
+rather than partially known, and because a committed file is shared: one bad push
+must not brick every operator's session launches.
+
+The two **host** config files are not strict, on purpose. Both answer a parse
+failure by returning defaults, so denying unknown fields there would upgrade "one
+key is ignored" into "the entire file is ignored" — a worse failure than the one
+it fixes. They keep the lenient parse and instead log a warning naming every key
+they dropped.
 
 ## Relationship to the legacy `~/.trusty-mpm/config.toml`
 
 trusty-mpm's older `~/.trusty-mpm/config.toml` (agent sources, per-agent model
-overrides, PM toggles) is **unchanged** and still read. The new YAML convention
-is **additive** — it carries the #1220 settings without disturbing the existing
-TOML.
+overrides, PM toggles) is **unchanged** and still read. The YAML convention
+above is **additive** — it carries its own settings without disturbing the
+existing TOML.
+
+## Adding this convention to a crate
+
+Crate maintainers implementing this convention in a new trusty-* crate should
+see
+[config-convention-internal.md](config-convention-internal.md) for the
+shared `trusty-common` helper and the `serde_yaml` dependency notes.

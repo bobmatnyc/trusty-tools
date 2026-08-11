@@ -924,3 +924,196 @@ fn ollama_adapter_endpoint_uses_shared_host() {
     );
     assert!(ep.base_url.ends_with("/v1"), "got {}", ep.base_url);
 }
+
+// ── AtlasCloud (#3765) ───────────────────────────────────────────────────────
+//
+// AtlasCloud is the `fireworks/` gap one provider over: fully seeded in
+// `trusty_common::inference::registry` since #2536, but with no branch in
+// `adapter_for_model`, so an `atlascloud/*` slug reached `GenericAdapter` and
+// OpenRouter's endpoint carrying a model id OpenRouter does not serve. These
+// tests mirror the Fireworks set exactly.
+
+/// Why: the routing branch is the whole fix. Before #3765 this returned
+/// `Provider::OpenAI` — the `openai` substring in AtlasCloud's own catalog id
+/// (`atlascloud/openai/gpt-5.6-sol`) matched the heuristic — which is why the
+/// prefix check must sit ahead of the heuristics, not after them.
+/// Test: itself.
+#[test]
+fn adapter_for_model_routes_atlascloud() {
+    let a = adapter_for_model("atlascloud/openai/gpt-5.6-sol");
+    assert_eq!(a.provider(), Provider::AtlasCloud);
+}
+
+#[test]
+fn atlascloud_adapter_strips_prefix() {
+    let a = AtlasCloudAdapter {
+        model_id: "openai/gpt-5.6-sol".to_string(),
+    };
+    assert_eq!(a.model_id, "openai/gpt-5.6-sol");
+    assert_eq!(
+        a.wire_model_id("atlascloud/openai/gpt-5.6-sol"),
+        "openai/gpt-5.6-sol"
+    );
+}
+
+#[test]
+fn atlascloud_tool_choice_shapes() {
+    let a = AtlasCloudAdapter {
+        model_id: "x".to_string(),
+    };
+    assert_eq!(a.tool_choice_any(), Some(json!("required")));
+    assert_eq!(a.tool_choice_auto(), Some(json!("auto")));
+}
+
+#[test]
+fn atlascloud_inject_cache_control_is_noop() {
+    let a = AtlasCloudAdapter {
+        model_id: "x".to_string(),
+    };
+    let mut body = json!({"system": "hello", "messages": []});
+    let before = body.clone();
+    a.inject_cache_control(&mut body, true);
+    assert_eq!(body, before);
+}
+
+#[test]
+fn atlascloud_parse_usage_shape() {
+    let a = AtlasCloudAdapter {
+        model_id: "x".to_string(),
+    };
+    let resp = json!({"usage": {"prompt_tokens": 11, "completion_tokens": 5}});
+    let usage = a.parse_usage(&resp);
+    assert_eq!(usage.prompt_tokens, 11);
+    assert_eq!(usage.completion_tokens, 5);
+}
+
+#[test]
+fn atlascloud_api_endpoint_resolves_key_from_store_when_env_absent() {
+    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
+    crate::test_env::force_env_local_loaded();
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let prev_key = std::env::var_os("ATLASCLOUD_API_KEY");
+    let prev_home = std::env::var_os("HOME");
+    // SAFETY: ENDPOINT_ENV_LOCK + ENV_LOCK + HOME_LOCK held for the whole body.
+    unsafe {
+        std::env::remove_var("ATLASCLOUD_API_KEY");
+    }
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    unsafe {
+        std::env::set_var("HOME", tmp.path());
+    }
+    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+    trusty_common::credentials::KeyStore::set(
+        &store,
+        "atlascloud",
+        "ac-FAKE-store-value", // pragma: allowlist secret
+    )
+    .expect("seed store");
+
+    let ep = AtlasCloudAdapter {
+        model_id: "openai/gpt-5.6-sol".to_string(),
+    }
+    .api_endpoint(false);
+    assert_eq!(ep.auth_source, AuthSource::AtlasCloud);
+    assert!(ep.base_url.contains("atlascloud.ai"), "{}", ep.base_url);
+    assert_eq!(
+        ep.auth_header_value, "Bearer ac-FAKE-store-value",
+        "a store-only atlascloud key must reach the built ApiEndpoint"
+    );
+
+    // SAFETY: locks still held.
+    unsafe {
+        match prev_key {
+            Some(v) => std::env::set_var("ATLASCLOUD_API_KEY", v),
+            None => std::env::remove_var("ATLASCLOUD_API_KEY"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[test]
+fn atlascloud_api_endpoint_base_url_override() {
+    with_env(
+        &[
+            ("ATLASCLOUD_API_KEY", Some("ac-test")),
+            ("ATLASCLOUD_BASE_URL", Some("http://127.0.0.1:1/v1")),
+        ],
+        || {
+            let ep = AtlasCloudAdapter {
+                model_id: "x".to_string(),
+            }
+            .api_endpoint(false);
+            assert_eq!(ep.base_url, "http://127.0.0.1:1/v1");
+            assert_eq!(ep.auth_header_value, "Bearer ac-test");
+        },
+    );
+}
+
+/// Why: `tool_loop` used to carry a hardcoded `strip_prefix("ollama/")
+/// .or(strip_prefix("fireworks/"))` chain that a new provider had to remember
+/// to extend. Moving it onto the adapter means the rule travels with the
+/// prefix; this test is what makes that claim checkable.
+/// Test: itself.
+#[test]
+fn wire_model_id_strips_routing_prefixes() {
+    assert_eq!(
+        adapter_for_model("ollama/qwen3:8b").wire_model_id("ollama/qwen3:8b"),
+        "qwen3:8b"
+    );
+    assert_eq!(
+        adapter_for_model("fireworks/accounts/fireworks/models/x")
+            .wire_model_id("fireworks/accounts/fireworks/models/x"),
+        "accounts/fireworks/models/x"
+    );
+    assert_eq!(
+        adapter_for_model("atlascloud/openai/gpt-5.6-sol")
+            .wire_model_id("atlascloud/openai/gpt-5.6-sol"),
+        "openai/gpt-5.6-sol"
+    );
+    // Aggregator and heuristic adapters pass the slug through untouched — an
+    // OpenRouter wire id IS the full `vendor/model` slug.
+    assert_eq!(
+        adapter_for_model("anthropic/claude-sonnet-4-6")
+            .wire_model_id("anthropic/claude-sonnet-4-6"),
+        "anthropic/claude-sonnet-4-6"
+    );
+}
+
+/// Why: an adapter with its own base URL that does NOT force the raw HTTP path
+/// is silently routed to OpenRouter by the shared `async-openai` client — the
+/// exact failure mode #2410 fixed for Fireworks. Asserting the property here
+/// keeps it from regressing for AtlasCloud.
+/// Test: itself.
+#[test]
+fn requires_raw_http_for_own_endpoint_adapters() {
+    for model in [
+        "ollama/qwen3:8b",
+        "fireworks/accounts/fireworks/models/x",
+        "atlascloud/openai/gpt-5.6-sol",
+    ] {
+        assert!(
+            adapter_for_model(model).requires_raw_http(),
+            "{model} has its own base URL and must force the raw path"
+        );
+    }
+    for model in [
+        "anthropic/claude-sonnet-4-6",
+        "openai/gpt-4o-mini",
+        "some-model",
+    ] {
+        assert!(
+            !adapter_for_model(model).requires_raw_http(),
+            "{model} routes through OpenRouter's client"
+        );
+    }
+}

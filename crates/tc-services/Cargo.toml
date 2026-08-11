@@ -28,4 +28,4 @@ reqwest = { workspace = true }
 trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.2.1" }
 # `async-openai` is intentionally NOT a dependency: tc-services only emits
 # OpenAI-compatible function schemas as `serde_json::Value`. Hosts that need
-# the typed async-openai representation (e.g. open-mpm) own that bridge.
+# the typed async-openai representation (e.g. trusty-agents) own that bridge.

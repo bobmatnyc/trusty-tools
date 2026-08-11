@@ -268,6 +268,42 @@ pub struct PmConfig {
     pub circuit_breaker: Option<bool>,
 }
 
+/// `[hooks]` section — per-hook opt-outs for the project-tier hook block
+/// [`crate::core::session_launch`] writes at every session launch.
+///
+/// Why (#5034): the `UserPromptSubmit` → `trusty-memory prompt-context` hook
+/// injects a measured ~1,211 tokens (median 1,252, range 693–1,438) into EVERY
+/// prompt — roughly 24,000 tokens across a 20-turn session, recurring. Issue
+/// #4904 measured the precision of that spend at 0 clean matches out of 17
+/// curated facts across 1,114 real firings, so an operator may reasonably want
+/// it off until relevance improves. Hand-editing `.claude/settings.json` cannot
+/// achieve that: the launch writer re-adds its own entries on every launch.
+/// This section is the supported off switch.
+/// What: boolean toggles, all defaulting to `true`, so an absent `[hooks]`
+/// section (and an absent key within a present section) leaves the shipped
+/// hook block exactly as it was.
+/// Test: `config_hooks_defaults_to_enabled`, `config_hooks_prompt_context_off`,
+/// `config_absent_yields_defaults`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    /// Write the `UserPromptSubmit` → `trusty-memory prompt-context` hook.
+    ///
+    /// `true` (default) → unchanged behavior. `false` → the entry is omitted
+    /// from the project-tier `.claude/settings.json`, and any entry a previous
+    /// launch wrote there is stripped. Every other hook — `SessionStart`, the
+    /// PM guard, and the six-event lifecycle triad — is unaffected either way.
+    pub prompt_context: bool,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            prompt_context: true,
+        }
+    }
+}
+
 // ──────────────────────────────────────────────
 // Root config
 // ──────────────────────────────────────────────
@@ -308,6 +344,13 @@ pub struct MpmConfig {
 
     /// `[pm]` — PM-layer feature toggles.
     pub pm: PmConfig,
+
+    /// `[hooks]` — per-hook opt-outs for the project-tier hook block (#5034).
+    ///
+    /// Absent section → every hook enabled, byte-identical to the pre-#5034
+    /// write. Set `prompt_context = false` to suppress the per-prompt
+    /// `trusty-memory prompt-context` injection.
+    pub hooks: HooksConfig,
 
     /// `[session_manager]` — Session Manager agent config (DOC-14 §10).
     ///
@@ -398,6 +441,17 @@ impl MpmConfig {
             Ok(raw) => match toml::from_str::<Self>(&raw) {
                 Ok(cfg) => {
                     tracing::debug!("loaded config from {}", path.display());
+                    // #5207: this parse is deliberately LENIENT (see
+                    // `core::config_keys` for why `deny_unknown_fields` here
+                    // would be a regression), so a typo'd key is dropped. Report
+                    // it instead of dropping it in silence.
+                    if let Some(doc) = crate::core::config_keys::toml_document(&raw) {
+                        crate::core::config_keys::report_unknown_keys(
+                            &path.display().to_string(),
+                            &doc,
+                            &cfg,
+                        );
+                    }
                     cfg
                 }
                 Err(err) => {
@@ -428,6 +482,89 @@ impl MpmConfig {
                 Self::default()
             }
         }
+    }
+
+    /// Load the config and fold in every OTHER default-model layer (#5207).
+    ///
+    /// Why: `TrustyToolsConfig::default_model` was orphaned — the trusty-console
+    /// Config tab and the `config_write` MCP tool both wrote it, under a field
+    /// whose own placeholder reads "(unset — uses ~/.trusty-mpm/config.toml)",
+    /// and nothing ever read it back. Setting it did nothing. Rather than delete
+    /// an operator-facing field three surfaces already expose, this folds it into
+    /// the ONE model chain [`resolve_agent_model`] already terminates in, which
+    /// is what the owner ruling means by unitary: if it is configurable, every
+    /// system uses it. Folding at LOAD time rather than adding a parameter to
+    /// [`resolve_agent_model`] is what makes it reach every launch path — the PM
+    /// launch, agent delegation, and the daemon — without touching their
+    /// signatures.
+    /// What: precedence for the effective `models.default`, highest first — the
+    /// project's committed `.trusty-mpm.toml`, then
+    /// `~/.trusty-tools/trusty-mpm/config.yaml`'s `default_model`, then this
+    /// file's own `[models] default`. The YAML sits ABOVE the TOML because that
+    /// is the contract its editor already advertises. More SPECIFIC settings — an
+    /// explicit `--model`, a per-agent override, agent frontmatter — still win
+    /// over any of these, since they are all defaults.
+    /// `project_dir` is `None` for a launch with no resolved project.
+    /// Test: `load_effective_applies_the_project_layer`,
+    /// `project_default_model_tops_the_chain`,
+    /// `yaml_default_model_beats_toml_default`,
+    /// `default_model_layers_are_a_no_op_when_unset`.
+    pub fn load_effective(root: &Path, project_dir: Option<&Path>) -> Self {
+        Self::load(root).with_outer_default_model_layers(project_dir)
+    }
+
+    /// [`load_effective`](Self::load_effective) against the canonical
+    /// `~/.trusty-mpm/` root.
+    ///
+    /// Why: `launch()` needs the effective config but must not name
+    /// `FrameworkPaths::default()` itself — the #4203 source-text guard
+    /// (`launch_paths_prepare_through_the_isolated_seam`) forbids that symbol in
+    /// the CLI launch paths, because a self-resolved framework root there is how
+    /// the deploy-tier bug got reintroduced twice. Resolving the root inside the
+    /// config module keeps the guard meaningful instead of merely satisfied.
+    /// What: delegates to [`load_default`](Self::load_default) — same
+    /// home-directory handling, including the stripped-CI fallback — then folds
+    /// on the project and host layers.
+    /// Test: `load_effective_applies_the_project_layer` covers the layering;
+    /// the root resolution is [`load_default`]'s.
+    pub fn load_effective_default(project_dir: Option<&Path>) -> Self {
+        Self::load_default().with_outer_default_model_layers(project_dir)
+    }
+
+    /// Fold the project and host `default_model` layers onto an already-loaded
+    /// config.
+    ///
+    /// Why: shared by [`load_effective`](Self::load_effective) and
+    /// [`load_effective_default`](Self::load_effective_default) so the two entry
+    /// points cannot drift in precedence — only in how they find the root.
+    /// What: reads the project's `.trusty-mpm.toml` and the host YAML, then
+    /// applies [`with_default_model_layers`](Self::with_default_model_layers).
+    /// Test: `load_effective_applies_the_project_layer`.
+    #[must_use]
+    fn with_outer_default_model_layers(self, project_dir: Option<&Path>) -> Self {
+        let project_default = project_dir
+            .and_then(crate::core::project_config::load_or_report)
+            .and_then(|c| c.default_model);
+        let host_default =
+            crate::core::trusty_tools_config::TrustyToolsConfig::load().default_model;
+        self.with_default_model_layers(project_default.as_deref(), host_default.as_deref())
+    }
+
+    /// Overlay the project and host default-model layers onto `[models] default`.
+    ///
+    /// Why: split from [`load_effective`] so the precedence is assertable without
+    /// a home directory or a real config file.
+    /// What: `project` wins over `host`, which wins over whatever `[models]
+    /// default` already held. Both absent → unchanged.
+    /// Test: `project_default_model_tops_the_chain`,
+    /// `yaml_default_model_beats_toml_default`,
+    /// `default_model_layers_are_a_no_op_when_unset`.
+    #[must_use]
+    pub fn with_default_model_layers(mut self, project: Option<&str>, host: Option<&str>) -> Self {
+        if let Some(m) = project.or(host) {
+            self.models.default = Some(m.to_string());
+        }
+        self
     }
 
     /// Expand a tier alias or pass through a full model id.
@@ -524,366 +661,5 @@ pub fn resolve_agent_model(
 // ──────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Helper: write `content` to `<dir>/config.toml` and load from `dir`.
-    fn load_from_str(dir: &Path, content: &str) -> MpmConfig {
-        std::fs::write(dir.join("config.toml"), content).unwrap();
-        MpmConfig::load(dir)
-    }
-
-    #[test]
-    fn config_absent_yields_defaults() {
-        // An absent config.toml must silently yield the default struct.
-        let dir = tempfile::TempDir::new().unwrap();
-        let cfg = MpmConfig::load(dir.path());
-        assert_eq!(cfg, MpmConfig::default());
-        assert!(cfg.agents.sources.is_empty());
-        assert!(cfg.models.agents.is_empty());
-        // SM-1 zero-regression: absent [session_manager] → disabled by default.
-        assert!(!cfg.session_manager.enabled);
-    }
-
-    #[test]
-    fn config_valid_parsed() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let toml = r#"
-[agents]
-sources = ["bundled", "user"]
-
-[models]
-default = "sonnet"
-
-[models.agents]
-engineer = "haiku"
-rust-engineer = "opus"
-
-[models.tiers]
-haiku = "claude-haiku-4-5"
-sonnet = "claude-sonnet-4-5"
-opus = "claude-opus-4-5"
-
-[skills]
-sources = ["bundled"]
-
-[pm]
-circuit_breaker = true
-
-[session_manager]
-enabled = true
-
-[session_manager.inference]
-provider = "anthropic"
-sm_model = "anthropic/claude-sonnet-4-6"
-temperature = 0.4
-
-[session_manager.memory]
-palace = "session-manager"
-recall_top_k = 8
-
-[session_manager.rounds]
-window = 12
-"#;
-        let cfg = load_from_str(dir.path(), toml);
-        assert_eq!(cfg.agents.sources, vec!["bundled", "user"]);
-        assert_eq!(
-            cfg.models.agents.get("engineer").map(|s| s.as_str()),
-            Some("haiku")
-        );
-        assert_eq!(
-            cfg.models.agents.get("rust-engineer").map(|s| s.as_str()),
-            Some("opus")
-        );
-        assert_eq!(cfg.models.tiers.haiku.as_deref(), Some("claude-haiku-4-5"));
-        assert_eq!(cfg.models.default.as_deref(), Some("sonnet"));
-        assert_eq!(cfg.skills.sources, vec!["bundled"]);
-        assert_eq!(cfg.pm.circuit_breaker, Some(true));
-        // [session_manager] parses through MpmConfig (DOC-14 §10).
-        assert!(cfg.session_manager.enabled);
-        assert_eq!(cfg.session_manager.inference.provider, "anthropic");
-        assert_eq!(cfg.session_manager.inference.temperature, 0.4);
-        assert_eq!(cfg.session_manager.memory.recall_top_k, 8);
-        assert_eq!(cfg.session_manager.rounds.window, 12);
-        // A field omitted from the partial inference block keeps its spec default.
-        assert_eq!(cfg.session_manager.inference.context_token_budget, 24_000);
-    }
-
-    #[test]
-    fn config_session_manager_partial_takes_defaults() {
-        // A [session_manager] section that sets only `enabled` must leave every
-        // nested subsection at its spec §10 default.
-        let dir = tempfile::TempDir::new().unwrap();
-        let toml = r#"
-[session_manager]
-enabled = true
-"#;
-        let cfg = load_from_str(dir.path(), toml);
-        assert!(cfg.session_manager.enabled);
-        assert_eq!(cfg.session_manager.inference.provider, "auto");
-        assert_eq!(cfg.session_manager.memory.palace, "session-manager");
-        assert_eq!(cfg.session_manager.rounds.window, 10);
-    }
-
-    #[test]
-    fn config_session_manager_absent_is_noop_default() {
-        // No [session_manager] section at all → the whole struct defaults and
-        // the SM is disabled (zero-regression proof for SM-1).
-        let dir = tempfile::TempDir::new().unwrap();
-        let toml = r#"
-[models.agents]
-engineer = "haiku"
-"#;
-        let cfg = load_from_str(dir.path(), toml);
-        assert_eq!(
-            cfg.session_manager,
-            crate::core::sm::config::SessionManagerConfig::default()
-        );
-        assert!(!cfg.session_manager.enabled);
-    }
-
-    #[test]
-    fn config_manifest_section_parses() {
-        // HR-2: the [manifest] section must parse the catalog source overrides,
-        // and an absent section must leave them all None (no behavior change).
-        let dir = tempfile::TempDir::new().unwrap();
-        let toml = r#"
-[manifest]
-repo = "https://github.com/me/my-fork"
-git_ref = "dev"
-ttl_hours = 6
-"#;
-        let cfg = load_from_str(dir.path(), toml);
-        assert_eq!(
-            cfg.manifest.repo.as_deref(),
-            Some("https://github.com/me/my-fork")
-        );
-        assert_eq!(cfg.manifest.git_ref.as_deref(), Some("dev"));
-        assert_eq!(cfg.manifest.ttl_hours, Some(6));
-
-        // Absent section → all None.
-        let empty = MpmConfig::load(tempfile::TempDir::new().unwrap().path());
-        assert_eq!(empty.manifest, ManifestConfig::default());
-    }
-
-    #[test]
-    fn config_malformed_falls_back() {
-        // A malformed config.toml must log (tested by absence of panic) and
-        // return defaults — the daemon must not crash on a bad file.
-        let dir = tempfile::TempDir::new().unwrap();
-        let cfg = load_from_str(dir.path(), "this is not toml {{{{");
-        assert_eq!(cfg, MpmConfig::default());
-    }
-
-    #[test]
-    fn config_partial_sections_are_fine() {
-        // Users should be able to configure only the sections they care about.
-        let dir = tempfile::TempDir::new().unwrap();
-        let toml = r#"
-[models.agents]
-engineer = "haiku"
-"#;
-        let cfg = load_from_str(dir.path(), toml);
-        assert_eq!(
-            cfg.models.agents.get("engineer").map(|s| s.as_str()),
-            Some("haiku")
-        );
-        // Other sections must yield defaults.
-        assert!(cfg.agents.sources.is_empty());
-        assert!(cfg.pm.circuit_breaker.is_none());
-    }
-
-    #[test]
-    fn tier_alias_expansion() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let toml = r#"
-[models.tiers]
-haiku = "claude-haiku-4-5"
-sonnet = "claude-sonnet-4-7"
-opus = "claude-opus-4-7"
-"#;
-        let cfg = load_from_str(dir.path(), toml);
-        assert_eq!(cfg.expand_model_alias("haiku"), "claude-haiku-4-5");
-        assert_eq!(cfg.expand_model_alias("sonnet"), "claude-sonnet-4-7");
-        assert_eq!(cfg.expand_model_alias("opus"), "claude-opus-4-7");
-        // Full model ids pass through unchanged.
-        assert_eq!(cfg.expand_model_alias("claude-opus-4-7"), "claude-opus-4-7");
-        // "auto" maps to sonnet.
-        assert_eq!(cfg.expand_model_alias("auto"), "claude-sonnet-4-5");
-    }
-
-    #[test]
-    fn tier_alias_defaults_when_not_configured() {
-        // Without explicit tier config, built-in defaults must apply.
-        let cfg = MpmConfig::default();
-        assert_eq!(cfg.expand_model_alias("haiku"), "claude-haiku-4-5");
-        assert_eq!(cfg.expand_model_alias("sonnet"), "claude-sonnet-4-5");
-        assert_eq!(cfg.expand_model_alias("opus"), "claude-opus-4-5");
-    }
-
-    #[test]
-    fn config_catchup_defaults_parse() {
-        // An absent [catchup] section must silently yield the default struct.
-        let dir = tempfile::TempDir::new().unwrap();
-        let cfg = MpmConfig::load(dir.path());
-        assert!(cfg.catchup.auto, "auto defaults to true");
-        assert!(cfg.catchup.include_git, "include_git defaults to true");
-        assert!(
-            cfg.catchup.include_palace,
-            "include_palace defaults to true"
-        );
-        assert_eq!(cfg.catchup.git_limit, 50);
-        assert_eq!(cfg.catchup.drawer_limit, 15);
-    }
-
-    #[test]
-    fn config_catchup_section_parses() {
-        // A full [catchup] section must override all defaults.
-        let dir = tempfile::TempDir::new().unwrap();
-        let toml = r#"
-[catchup]
-auto = false
-include_git = false
-include_palace = true
-git_limit = 25
-drawer_limit = 5
-"#;
-        let cfg = load_from_str(dir.path(), toml);
-        assert!(!cfg.catchup.auto);
-        assert!(!cfg.catchup.include_git);
-        assert!(cfg.catchup.include_palace);
-        assert_eq!(cfg.catchup.git_limit, 25);
-        assert_eq!(cfg.catchup.drawer_limit, 5);
-    }
-
-    #[test]
-    fn config_idle_auto_stop_defaults() {
-        // An absent [idle_auto_stop] section must yield disabled (false) with
-        // sensible numeric defaults — the zero-change guarantee for #1816.
-        let dir = tempfile::TempDir::new().unwrap();
-        let cfg = MpmConfig::load(dir.path());
-        assert!(
-            !cfg.idle_auto_stop.enabled,
-            "idle_auto_stop must default to disabled"
-        );
-        assert!(
-            cfg.idle_auto_stop.dry_run,
-            "idle_auto_stop must default to report-only (dry_run = true) — #1783"
-        );
-        assert_eq!(cfg.idle_auto_stop.poll_interval_secs, 300);
-        assert_eq!(cfg.idle_auto_stop.idle_consecutive_threshold, 3);
-        assert_eq!(cfg.idle_auto_stop.done_consecutive_threshold, 1);
-    }
-
-    #[test]
-    fn config_idle_auto_stop_section_parses() {
-        // A full [idle_auto_stop] section must override all defaults.
-        let dir = tempfile::TempDir::new().unwrap();
-        let toml = r#"
-[idle_auto_stop]
-enabled = true
-dry_run = false
-poll_interval_secs = 120
-idle_consecutive_threshold = 5
-done_consecutive_threshold = 2
-"#;
-        let cfg = load_from_str(dir.path(), toml);
-        assert!(cfg.idle_auto_stop.enabled);
-        assert!(
-            !cfg.idle_auto_stop.dry_run,
-            "explicit dry_run = false must disable report-only mode"
-        );
-        assert_eq!(cfg.idle_auto_stop.poll_interval_secs, 120);
-        assert_eq!(cfg.idle_auto_stop.idle_consecutive_threshold, 5);
-        assert_eq!(cfg.idle_auto_stop.done_consecutive_threshold, 2);
-    }
-
-    #[test]
-    fn config_idle_auto_stop_enabled_only_keeps_defaults() {
-        // Setting only `enabled = true` must leave numeric fields at defaults
-        // AND keep dry_run at its report-only default (the teardown-safe gate).
-        let dir = tempfile::TempDir::new().unwrap();
-        let toml = r#"
-[idle_auto_stop]
-enabled = true
-"#;
-        let cfg = load_from_str(dir.path(), toml);
-        assert!(cfg.idle_auto_stop.enabled);
-        assert!(
-            cfg.idle_auto_stop.dry_run,
-            "enabling the loop alone must NOT enact teardown — dry_run stays true (#1783)"
-        );
-        assert_eq!(cfg.idle_auto_stop.poll_interval_secs, 300);
-        assert_eq!(cfg.idle_auto_stop.idle_consecutive_threshold, 3);
-        assert_eq!(cfg.idle_auto_stop.done_consecutive_threshold, 1);
-    }
-
-    #[test]
-    fn config_idle_nudge_section_parses() {
-        // Absent → disabled defaults (#2621, zero behavior change); a full
-        // section overrides every field; a partial section (only `enabled`)
-        // keeps the caps and message at their conservative defaults.
-        let dir = tempfile::TempDir::new().unwrap();
-        let absent = load_from_str(dir.path(), "");
-        assert!(!absent.idle_nudge.enabled, "must default to disabled");
-        assert_eq!(absent.idle_nudge.max_nudges_per_session, 2);
-        assert_eq!(absent.idle_nudge.cooldown_secs, 300);
-        assert_eq!(
-            absent.idle_nudge.message,
-            crate::core::idle_nudge::DEFAULT_NUDGE_MESSAGE
-        );
-        let full = load_from_str(
-            dir.path(),
-            "[idle_nudge]\nenabled = true\nmax_nudges_per_session = 1\ncooldown_secs = 60\nmessage = \"resume now\"\n",
-        );
-        assert!(full.idle_nudge.enabled);
-        assert_eq!(full.idle_nudge.max_nudges_per_session, 1);
-        assert_eq!(full.idle_nudge.cooldown_secs, 60);
-        assert_eq!(full.idle_nudge.message, "resume now");
-
-        let partial = load_from_str(dir.path(), "[idle_nudge]\nenabled = true\n");
-        assert!(partial.idle_nudge.enabled);
-        assert_eq!(partial.idle_nudge.max_nudges_per_session, 2);
-        assert_eq!(partial.idle_nudge.cooldown_secs, 300);
-        assert_eq!(
-            partial.idle_nudge.message,
-            crate::core::idle_nudge::DEFAULT_NUDGE_MESSAGE
-        );
-    }
-
-    #[test]
-    fn model_resolution_precedence() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let toml = r#"
-[models]
-default = "sonnet"
-
-[models.agents]
-engineer = "haiku"
-"#;
-        let cfg = load_from_str(dir.path(), toml);
-
-        // 1. Explicit override wins over everything.
-        let m = resolve_agent_model(&cfg, "engineer", Some("opus"), Some("claude-opus-4-5"));
-        assert_eq!(m, "claude-opus-4-5");
-
-        // 2. Config per-agent override wins over frontmatter.
-        let m = resolve_agent_model(&cfg, "engineer", Some("opus"), None);
-        // "engineer" maps to "haiku" → default haiku id.
-        assert_eq!(m, "claude-haiku-4-5");
-
-        // 3. Frontmatter hint wins over config default.
-        let m = resolve_agent_model(&cfg, "unknown-agent", Some("opus"), None);
-        assert_eq!(m, "claude-opus-4-5");
-
-        // 4. Config default is the final fallback for unknown agents.
-        let m = resolve_agent_model(&cfg, "unknown-agent", None, None);
-        // "sonnet" tier default expands.
-        assert_eq!(m, "claude-sonnet-4-5");
-
-        // 5. Built-in fallback when neither config default nor anything else matches.
-        let cfg_empty = MpmConfig::default();
-        let m = resolve_agent_model(&cfg_empty, "nobody", None, None);
-        assert_eq!(m, "claude-sonnet-4-5");
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;

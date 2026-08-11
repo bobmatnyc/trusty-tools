@@ -53,9 +53,11 @@ mod tests {
 
     #[test]
     fn assert_supersedes_prior() {
+        // #4810: `is_alias_for` is functional, so a second object closes the
+        // first. Before #4810 every predicate behaved this way.
         let (_d, kg) = open_kg();
-        kg.assert(&t("alice", "works_at", "Acme")).unwrap();
-        kg.assert(&t("alice", "works_at", "Beta")).unwrap();
+        kg.assert(&t("alice", "is_alias_for", "Acme")).unwrap();
+        kg.assert(&t("alice", "is_alias_for", "Beta")).unwrap();
         let active = kg.query_active("alice").unwrap();
         assert_eq!(active.len(), 1, "exactly one active row");
         assert_eq!(active[0].object, "Beta");
@@ -125,16 +127,17 @@ mod tests {
         let (_d, kg) = open_kg();
         assert_eq!(kg.count_active_triples(), 0);
 
-        kg.assert(&t("alice", "works_at", "Acme")).unwrap();
+        kg.assert(&t("alice", "is_alias_for", "Acme")).unwrap();
         assert_eq!(kg.count_active_triples(), 1);
 
-        kg.assert(&t("alice", "works_at", "Beta")).unwrap();
+        // #4810: functional predicate — the supersede keeps the count at 1.
+        kg.assert(&t("alice", "is_alias_for", "Beta")).unwrap();
         assert_eq!(kg.count_active_triples(), 1);
 
-        kg.assert(&t("bob", "works_at", "Gamma")).unwrap();
+        kg.assert(&t("bob", "is_alias_for", "Gamma")).unwrap();
         assert_eq!(kg.count_active_triples(), 2);
 
-        kg.retract("alice", "works_at").unwrap();
+        kg.retract("alice", "is_alias_for").unwrap();
         assert_eq!(kg.count_active_triples(), 1);
     }
 
@@ -581,10 +584,11 @@ mod tests {
     fn apply_batch_groups_asserts_into_single_commit() {
         let (_d, kg) = open_kg();
         let ops = vec![
-            BatchWriteOp::Assert(t("a", "p1", "v1")),
+            BatchWriteOp::Assert(t("a", "is_alias_for", "v1")),
             BatchWriteOp::Assert(t("a", "p2", "v2")),
-            BatchWriteOp::Assert(t("b", "p1", "v3")),
-            BatchWriteOp::Assert(t("a", "p1", "v1b")), // supersedes a/p1
+            BatchWriteOp::Assert(t("b", "is_alias_for", "v3")),
+            // #4810: supersedes only because `is_alias_for` is functional.
+            BatchWriteOp::Assert(t("a", "is_alias_for", "v1b")),
             BatchWriteOp::Retract {
                 subject: "a".to_string(),
                 predicate: "p2".to_string(),
@@ -596,10 +600,11 @@ mod tests {
         assert!(matches!(results[3], BatchOpResult::Asserted));
         assert_eq!(results[4], BatchOpResult::Retracted(1));
 
-        // Active state: a/p1 = v1b (latest), a/p2 retracted, b/p1 = v3.
+        // Active state: a/is_alias_for = v1b (latest), a/p2 retracted,
+        // b/is_alias_for = v3.
         let a_active = kg.query_active("a").unwrap();
         assert_eq!(a_active.len(), 1);
-        assert_eq!(a_active[0].predicate, "p1");
+        assert_eq!(a_active[0].predicate, "is_alias_for");
         assert_eq!(a_active[0].object, "v1b");
 
         let b_active = kg.query_active("b").unwrap();
@@ -766,5 +771,395 @@ mod tests {
         for h in handles {
             h.join().expect("reader thread panicked");
         }
+    }
+    // ---------------------------------------------------------------------
+    // #4810 — the object joins the TRIPLES key
+    // ---------------------------------------------------------------------
+
+    /// Encode a key in the PRE-#4810 shape: `[subject_len][subject][predicate]`,
+    /// with no length prefix on the predicate and no object.
+    ///
+    /// Why: the migration tests must be able to write a palace that looks
+    /// exactly like one written by the old code. Nothing in production emits
+    /// this shape any more, which is precisely why the test has to.
+    fn legacy_triple_key(subject: &str, predicate: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(subject.len() as u16).to_be_bytes());
+        out.extend_from_slice(subject.as_bytes());
+        out.extend_from_slice(predicate.as_bytes());
+        out
+    }
+
+    /// Write `rows` into a fresh redb file using the pre-#4810 key shape and
+    /// leave no `KG_SCHEMA` marker, so the next `KgStoreRedb::open` sees a
+    /// palace that predates the fix.
+    fn seed_legacy_palace(path: &std::path::Path, rows: &[(&str, &str, &str, Option<i64>)]) {
+        use crate::memory_core::store::kg_store::{
+            ACTIVE_SUBJECT_COUNTS, TRIPLES, TripleValue, encode_u64, encode_value,
+        };
+        let db = redb::Database::create(path).expect("create legacy palace");
+        let wtx = db.begin_write().unwrap();
+        {
+            let mut triples = wtx.open_table(TRIPLES).unwrap();
+            let mut counts = wtx.open_table(ACTIVE_SUBJECT_COUNTS).unwrap();
+            let mut per_subject: std::collections::BTreeMap<&str, u64> =
+                std::collections::BTreeMap::new();
+            for (s, p, o, valid_to_ms) in rows {
+                let value = TripleValue {
+                    object: (*o).to_string(),
+                    valid_from_ms: 1_700_000_000_000,
+                    valid_to_ms: *valid_to_ms,
+                    confidence: 1.0,
+                    provenance: None,
+                };
+                let core = legacy_triple_key(s, p);
+                let key = if valid_to_ms.is_some() {
+                    let mut k = Vec::new();
+                    k.extend_from_slice(b"hist:");
+                    k.extend_from_slice(&core);
+                    k.extend_from_slice(&value.valid_from_ms.to_be_bytes());
+                    k
+                } else {
+                    *per_subject.entry(s).or_insert(0) += 1;
+                    core
+                };
+                let bytes = encode_value(&value).unwrap();
+                triples.insert(key.as_slice(), bytes.as_slice()).unwrap();
+            }
+            for (s, n) in per_subject {
+                counts
+                    .insert(s.as_bytes(), encode_u64(n).as_slice())
+                    .unwrap();
+            }
+        }
+        wtx.commit().unwrap();
+        drop(db);
+    }
+
+    /// Assert `backup` is a readable redb image that still holds the row at the
+    /// PRE-migration key — the property that makes it a recovery point, and one
+    /// a byte-count comparison cannot check (the live file grows during open).
+    fn assert_backup_holds_legacy_row(backup: &std::path::Path, subject: &str, predicate: &str) {
+        use crate::memory_core::store::kg_store::TRIPLES;
+        use redb::ReadableDatabase;
+        assert!(backup.is_file(), "backup must be a regular file");
+        let db = redb::Database::create(backup).expect("open backup as redb");
+        let rtx = db.begin_read().unwrap();
+        let triples = rtx.open_table(TRIPLES).unwrap();
+        let key = legacy_triple_key(subject, predicate);
+        assert!(
+            triples.get(key.as_slice()).unwrap().is_some(),
+            "the backup must still carry the pre-migration row"
+        );
+        drop(rtx);
+        drop(db);
+    }
+
+    /// Why (#4810): the defect. `room:General --contains--> drawer:N` keyed on
+    /// `(subject, predicate)` alone, so each new member closed the last one and
+    /// a room of any size reported exactly one drawer. This test FAILS on
+    /// `e2ca949a3`.
+    /// What: three `contains` asserts under one subject; all three must be
+    /// active, and the active counter must agree.
+    #[test]
+    fn assert_multiple_objects_for_multivalued_predicate_all_survive() {
+        let (_d, kg) = open_kg();
+        kg.assert(&t("room:General", "contains", "drawer:a"))
+            .unwrap();
+        kg.assert(&t("room:General", "contains", "drawer:b"))
+            .unwrap();
+        kg.assert(&t("room:General", "contains", "drawer:c"))
+            .unwrap();
+
+        let active = kg.query_active("room:General").unwrap();
+        assert_eq!(active.len(), 3, "every member of the room stays active");
+        let mut objects: Vec<_> = active.iter().map(|x| x.object.as_str()).collect();
+        objects.sort_unstable();
+        assert_eq!(objects, vec!["drawer:a", "drawer:b", "drawer:c"]);
+        assert_eq!(kg.count_active_triples(), 3);
+
+        // Nothing was demoted to history — no object was superseded.
+        let all = kg.dump_all_triples().unwrap();
+        assert_eq!(all.len(), 3, "no history rows for a multi-valued predicate");
+    }
+
+    /// Why (#4810): the other half of the split — a functional predicate must
+    /// keep its one-active-object rule, or `is_alias_for` would accumulate
+    /// every alias a subject ever had and prompt-fact injection would grow
+    /// without bound.
+    /// What: two `is_alias_for` asserts under one subject leave one active row
+    /// carrying the newer object, plus one history row.
+    #[test]
+    fn assert_functional_predicate_still_supersedes() {
+        let (_d, kg) = open_kg();
+        kg.assert(&t("tga", "is_alias_for", "trusty-git-analytics"))
+            .unwrap();
+        kg.assert(&t("tga", "is_alias_for", "trusty-git-analytics-v2"))
+            .unwrap();
+
+        let active = kg.query_active("tga").unwrap();
+        assert_eq!(active.len(), 1, "functional predicate holds one object");
+        assert_eq!(active[0].object, "trusty-git-analytics-v2");
+        assert_eq!(kg.count_active_triples(), 1);
+
+        let all = kg.dump_all_triples().unwrap();
+        assert_eq!(all.len(), 2, "the superseded object is kept as history");
+    }
+
+    /// Why (#4810): re-asserting the SAME triple must stay a re-affirmation —
+    /// a new interval over one row — not an accumulation of duplicates.
+    #[test]
+    fn reasserting_the_same_triple_reaffirms_rather_than_duplicates() {
+        let (_d, kg) = open_kg();
+        kg.assert(&t("room:General", "contains", "drawer:a"))
+            .unwrap();
+        kg.assert(&t("room:General", "contains", "drawer:a"))
+            .unwrap();
+
+        let active = kg.query_active("room:General").unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(kg.count_active_triples(), 1);
+        assert_eq!(kg.dump_all_triples().unwrap().len(), 2, "one history row");
+    }
+
+    /// Why (#4810): `retract(subject, predicate)` kept its two-argument shape,
+    /// so its meaning had to widen from "the active row" to "every active
+    /// row" — otherwise retracting a multi-valued pair would leave the other
+    /// objects live and the caller with no way to reach them.
+    #[test]
+    fn retract_closes_every_object_at_the_pair() {
+        let (_d, kg) = open_kg();
+        for object in ["drawer:a", "drawer:b", "drawer:c"] {
+            kg.assert(&t("room:General", "contains", object)).unwrap();
+        }
+        assert_eq!(kg.retract("room:General", "contains").unwrap(), 3);
+        assert!(kg.query_active("room:General").unwrap().is_empty());
+        assert_eq!(kg.count_active_triples(), 0);
+        // Second retract is a no-op.
+        assert_eq!(kg.retract("room:General", "contains").unwrap(), 0);
+    }
+
+    /// Why (#4810): `delete_by_subject` collects pairs, and one pair can now
+    /// span several rows. Without the dedup it would call `retract` once per
+    /// row and double-count what the first call already closed.
+    #[test]
+    fn cascade_delete_closes_every_object_of_a_multivalued_pair() {
+        let (_d, kg) = open_kg();
+        for object in ["a", "b", "c"] {
+            kg.assert(&t("drawer:x", "mentions", object)).unwrap();
+        }
+        kg.assert(&t("drawer:x", "is_alias_for", "y")).unwrap();
+        assert_eq!(kg.delete_by_subject("drawer:x").unwrap(), 4);
+        assert!(kg.query_active("drawer:x").unwrap().is_empty());
+        assert_eq!(kg.count_active_triples(), 0);
+    }
+
+    /// Why (#4810): the write path reads the `(subject, predicate)` range and
+    /// then mutates it. If two writers could interleave that read-modify-write,
+    /// one object would be lost. redb serialises write transactions, and this
+    /// pins that guarantee to the behaviour that depends on it.
+    /// What: eight threads assert a distinct object under one multi-valued
+    /// pair through separate (cache-shared) handles; all eight must survive.
+    #[test]
+    fn concurrent_asserts_to_one_pair_lose_no_object() {
+        use std::thread;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        let primary = KgStoreRedb::open(&path).unwrap();
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let store = KgStoreRedb::open(&path).unwrap();
+                thread::spawn(move || {
+                    store
+                        .assert(&t("room:General", "contains", &format!("drawer:{i}")))
+                        .expect("concurrent assert");
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("writer thread panicked");
+        }
+
+        let active = primary.query_active("room:General").unwrap();
+        assert_eq!(active.len(), 8, "no concurrent assert overwrote another");
+        assert_eq!(primary.count_active_triples(), 8);
+    }
+
+    /// Why (#4810): a fresh palace has nothing to rewrite but must still record
+    /// which key shape it uses, or every open would re-scan every triple.
+    /// What: a new palace carries the marker; a second open is a no-op and
+    /// leaves no backup behind.
+    #[test]
+    fn migration_stamps_schema_and_is_idempotent() {
+        use crate::memory_core::store::kg_store::{
+            KG_SCHEMA, KG_SCHEMA_TRIPLE_KEY, KG_TRIPLE_KEY_SCHEMA_VERSION, KgSchemaMarker,
+            decode_value,
+        };
+        use redb::ReadableDatabase;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        let read_marker = |p: &std::path::Path| -> Option<u32> {
+            let db = redb::Database::create(p).unwrap();
+            let rtx = db.begin_read().unwrap();
+            let table = rtx.open_table(KG_SCHEMA).unwrap();
+            let out = table.get(KG_SCHEMA_TRIPLE_KEY).unwrap().map(|g| {
+                decode_value::<KgSchemaMarker>(g.value())
+                    .unwrap()
+                    .schema_version
+            });
+            drop(rtx);
+            drop(db);
+            out
+        };
+
+        {
+            let kg = KgStoreRedb::open(&path).unwrap();
+            kg.assert(&t("alice", "knows", "bob")).unwrap();
+        }
+        assert_eq!(read_marker(&path), Some(KG_TRIPLE_KEY_SCHEMA_VERSION));
+
+        // An already-migrated palace is not backed up and not rewritten.
+        {
+            let kg = KgStoreRedb::open(&path).unwrap();
+            assert_eq!(kg.query_active("alice").unwrap().len(), 1);
+        }
+        let backup = dir.path().join("kg.redb.pre-4810.bak");
+        assert!(
+            !backup.exists(),
+            "no backup for a palace with nothing to do"
+        );
+    }
+
+    /// Why (#4810): the whole point of the migration — rows written under the
+    /// old key must be readable, and readable as the facts they were, after
+    /// one open. History rows carry the same key and must move with them.
+    /// What: seeds a legacy palace with two active rows and one closed row —
+    /// note that the legacy key physically CANNOT hold two objects for one
+    /// pair, which is the defect — opens it, and checks every row is
+    /// queryable at its new key and the history survived.
+    #[test]
+    fn migration_rewrites_legacy_keys_and_preserves_history() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        seed_legacy_palace(
+            &path,
+            &[
+                ("room:General", "contains", "drawer:a", None),
+                ("alice", "knows", "bob", None),
+                ("alice", "knows", "carol", Some(1_700_000_100_000)),
+            ],
+        );
+
+        let kg = KgStoreRedb::open(&path).unwrap();
+        let room = kg.query_active("room:General").unwrap();
+        assert_eq!(room.len(), 1);
+        assert_eq!(room[0].object, "drawer:a");
+
+        let alice = kg.query_active("alice").unwrap();
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].object, "bob");
+
+        // The closed row moved with the active ones.
+        let all = kg.dump_all_triples().unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(
+            all.iter()
+                .any(|x| x.object == "carol" && x.valid_to.is_some())
+        );
+
+        // A new member now joins instead of replacing.
+        kg.assert(&t("room:General", "contains", "drawer:b"))
+            .unwrap();
+        assert_eq!(kg.query_active("room:General").unwrap().len(), 2);
+
+        // The pre-migration image was preserved.
+        let backup = dir.path().join("kg.redb.pre-4810.bak");
+        assert_backup_holds_legacy_row(&backup, "room:General", "contains");
+    }
+
+    /// Why (#4810), the fail-open check: the migration rewrites every triple in
+    /// the palace, so its failure branch is the one that must be reviewable.
+    /// A failed attempt must commit nothing, must not stop the palace opening,
+    /// and must be retried on the next open rather than latched off.
+    /// What: makes the backup step fail by putting a DIRECTORY where the `.bak`
+    /// file belongs — `fs::copy` cannot write over it — then asserts the open
+    /// succeeds, the legacy rows are still on disk untouched, and removing the
+    /// blocker lets the next open migrate them for real.
+    #[test]
+    fn migration_failure_leaves_the_palace_openable_and_retries() {
+        use crate::memory_core::store::kg_store::TRIPLES;
+        use redb::ReadableDatabase;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        seed_legacy_palace(
+            &path,
+            &[
+                ("room:General", "contains", "drawer:a", None),
+                ("room:Other", "contains", "drawer:b", None),
+            ],
+        );
+
+        // Block the backup: a directory at the backup path makes `fs::copy`
+        // fail, so the migration aborts before it opens a write transaction.
+        let backup = dir.path().join("kg.redb.pre-4810.bak");
+        std::fs::create_dir(&backup).unwrap();
+
+        {
+            let kg = KgStoreRedb::open(&path).unwrap();
+            assert!(
+                !kg.is_read_only(),
+                "a failed migration must not degrade the handle"
+            );
+            // Un-migrated rows do not decode under the new key, so queries are
+            // empty. That is the documented degraded state — not data loss.
+            assert!(kg.query_active("room:General").unwrap().is_empty());
+        }
+
+        // Nothing was committed: both legacy rows are still there, byte-shaped
+        // exactly as seeded.
+        {
+            let db = redb::Database::create(&path).unwrap();
+            let rtx = db.begin_read().unwrap();
+            let triples = rtx.open_table(TRIPLES).unwrap();
+            let legacy = legacy_triple_key("room:General", "contains");
+            assert!(
+                triples.get(legacy.as_slice()).unwrap().is_some(),
+                "the failed migration must not have removed the legacy row"
+            );
+            drop(rtx);
+            drop(db);
+        }
+
+        // Unblock and reopen: the migration retries rather than staying off.
+        std::fs::remove_dir(&backup).unwrap();
+        let kg = KgStoreRedb::open(&path).unwrap();
+        assert_eq!(kg.query_active("room:General").unwrap().len(), 1);
+        assert_eq!(
+            kg.query_active("room:Other").unwrap().len(),
+            1,
+            "retry migrated every row, not just the first"
+        );
+        assert_backup_holds_legacy_row(&backup, "room:General", "contains");
+    }
+
+    /// Why (#4810): "do not overwrite a `.bak` that verifies good" has a
+    /// mirror obligation — a `.bak` that does NOT verify must be replaced, or
+    /// a truncated leftover would be trusted as the recovery point.
+    #[test]
+    fn migration_replaces_a_backup_that_does_not_verify() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        seed_legacy_palace(&path, &[("alice", "knows", "bob", None)]);
+
+        let backup = dir.path().join("kg.redb.pre-4810.bak");
+        std::fs::write(&backup, b"truncated").unwrap();
+
+        let kg = KgStoreRedb::open(&path).unwrap();
+        assert_eq!(kg.query_active("alice").unwrap().len(), 1);
+        // The short leftover was replaced by a real pre-migration image.
+        assert_backup_holds_legacy_row(&backup, "alice", "knows");
     }
 }

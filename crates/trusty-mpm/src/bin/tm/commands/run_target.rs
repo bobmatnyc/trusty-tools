@@ -218,11 +218,14 @@ async fn run_managed(
         );
     }
 
+    // #5274: `tm run` targets an already-resolved managed checkout, so the
+    // session runs there directly; it carries no operator worktree request.
     super::launch::launch(
         client,
         url,
         Some(checkout.base_path.to_string_lossy().into_owned()),
         None,
+        false,
     )
     .await
 }

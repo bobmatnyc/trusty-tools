@@ -44,9 +44,21 @@
 #    not "loudly".
 name: Version parity
 
+# Optional workflow: PR and push events are limited to crate source/manifests
+# and the checkers themselves. The scheduled authority remains unfiltered and
+# re-asks the complete crates.io parity question every three hours.
 on:
   push:
     branches: [main]
+    paths:
+      - "crates/*/src/**"
+      - "crates/*/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/check-version-parity.sh"
+      - "scripts/check-pr-version-bump.sh"
+      - "scripts/check_scan_floor_selftest.sh"
+      - ".github/workflows/version-parity.yml"
   # Every three hours. Fine-grained enough that a publish is caught in one
   # working session, coarse enough to stay well inside crates.io's API-usage
   # policy (~21 sparse-index GETs + a tarball per published crate, per run).
@@ -60,6 +72,15 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+    paths:
+      - "crates/*/src/**"
+      - "crates/*/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/check-version-parity.sh"
+      - "scripts/check-pr-version-bump.sh"
+      - "scripts/check_scan_floor_selftest.sh"
+      - ".github/workflows/version-parity.yml"
   workflow_dispatch: {}
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
@@ -77,7 +98,7 @@ jobs:
   # minutes the post-merge job costs.
   pr-version-bump:
     name: "PR version bump vs crates.io (issue #4421)"
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

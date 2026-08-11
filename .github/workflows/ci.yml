@@ -1,7 +1,7 @@
 # CI workflow for the trusty-tools Cargo workspace.
 #
 # Jobs:
-#   changes  – classify the diff as docs-only or not, once, for every job
+#   changes  – classify the diff as Cargo-inert or not, once, for every job
 #              below to consult (issue #4468: docs-only PRs ran the full Rust
 #              build). The exemption is applied to STEPS, never to the trigger
 #              or to the job, so required checks always report.
@@ -136,7 +136,7 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # changes: classify the diff as docs-only or not (issue #4468), once, for
+  # changes: classify the diff as Cargo-inert or not (issue #4468), once, for
   # every job below to consult.
   #
   # WHY THIS IS A JOB AND NOT A `paths:` FILTER. Five of this workflow's checks
@@ -155,11 +155,12 @@ jobs:
   # the failure mode if that is wrong is every docs PR blocked forever, so the
   # jobs are kept unconditional and only their steps are gated.
   #
-  # PUSH TO MAIN never takes the exemption: main is the branch everything is
-  # cut from, so it is verified in full regardless of what the diff touched.
+  # PUSH TO MAIN compares the pushed range too. Re-running the complete Rust
+  # suite after a Cargo-inert PR has already passed adds cost but no signal.
+  # A missing/invalid before SHA still fails closed into the full suite.
   # --------------------------------------------------------------------------
   changes:
-    name: Detect docs-only change set
+    name: Detect Cargo-inert change set
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -206,15 +207,28 @@ jobs:
 
       - name: Classify changed paths
         id: detect
-        env:
-          DOCS_ONLY_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "push to ${{ github.ref }} — verifying in full, no docs-only exemption"
+          if [ "${{ github.event_name }}" = "pull_request" ] && \
+             [ "${{ github.event.action }}" = "edited" ] && \
+             [ "${{ toJSON(github.event.changes.base) }}" = "null" ]; then
+            echo "title/body-only PR edit — retaining required contexts without repeating Cargo"
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            DOCS_ONLY_BASE="origin/${{ github.event.pull_request.base.ref }}" \
+              bash scripts/detect-docs-only.sh > /dev/null
+            exit 0
+          fi
+
+          before="${{ github.event.before }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "push has no usable before SHA — verifying in full"
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          bash scripts/detect-docs-only.sh > /dev/null
+          DOCS_ONLY_BASE="$before" bash scripts/detect-docs-only.sh > /dev/null
 
   # --------------------------------------------------------------------------
   # fmt: enforce cargo fmt --all --check (stable toolchain + rustfmt component)
@@ -270,38 +284,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Free disk space (issue #2091): kept in sync with the more aggressive
-      # reclamation in the `test` job (see comment there for rationale).
+      # Free disk space (#2091; prune gated #4402, SDK purge gated #5325).
+      # Reclaims only when `df` says this runner needs it — thresholds, the
+      # three-tier decision, and why the reclamation is gated rather than
+      # deleted all live in the script.
       - name: Free disk space
         if: needs.changes.outputs.docs_only != 'true'
-        run: |
-          echo "Before:"; df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /usr/local/share/boost /usr/local/share/powershell \
-            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
-            /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
-          sudo apt-get clean || true
-          sudo rm -rf /var/lib/apt/lists/* || true
-          # docker image prune reclaims only ~2GB (verified in job logs) but
-          # costs 78-181s (avg ~125s) of wall time on every run — it lists
-          # and deletes every pre-pulled runner image layer by layer. #4402:
-          # 10 sampled runs all showed 87-88GB free / 40% used at this point,
-          # already comfortably above the ~27GB peak the `test` job needs
-          # before the .rcgu.o sweep below runs (that sweep, not this prune,
-          # is the actual #3668 remedy). Gate the prune on measured headroom
-          # instead of removing it outright, so it still fires as a safety
-          # net if a future runner image or heavier test suite erodes the
-          # margin.
-          avail_kb=$(df -k --output=avail / | tail -1 | tr -d ' ')
-          avail_gb=$(( avail_kb / 1024 / 1024 ))
-          echo "Avail after SDK purge: ${avail_gb}G"
-          if [ "$avail_gb" -lt 25 ]; then
-            echo "::warning::only ${avail_gb}G free (< 25G threshold) — running docker image prune"
-            sudo docker image prune --all --force || true
-          else
-            echo "Skipping docker image prune: ${avail_gb}G free (>= 25G threshold, #4402)"
-          fi
-          echo "After:"; df -h /
+        run: bash scripts/ci-free-disk-space.sh
 
       - name: Install stable toolchain with clippy
         if: needs.changes.outputs.docs_only != 'true'
@@ -403,44 +392,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Free disk space (issue #2091): the baseline removal set below still
-      # left the runner exhausting its disk mid-build on `cargo test --workspace`
-      # (onnxruntime/ort, ~a dozen tree-sitter grammars, aws-sdk-bedrock,
-      # usearch, etc. produce an enormous target/ tree). Extend it with more
-      # well-known unused-SDK/cache purges — vcpkg (~5 GB), preinstalled JVMs
-      # (~2-3 GB, unused by this pure-Rust workspace), miniconda (~2-3 GB),
-      # the Azure CLI (~600 MB), and stale apt package caches/lists — none of
-      # which this workspace's build or test steps touch.
+      # Free disk space (#2091; prune gated #4402, SDK purge gated #5325).
+      # This is the job the reclamation exists for — #3668 was a real
+      # disk-exhaustion incident here, on a target/ tree fed by onnxruntime/ort,
+      # ~a dozen tree-sitter grammars, aws-sdk-bedrock and usearch. It is also
+      # the job where the purge cost the most: 147s in run 31410011416, to take
+      # 87G available up to 115G against the ~27G peak #4402 measured. The
+      # script keeps the reclamation and fires it on measured headroom instead
+      # of unconditionally; the .rcgu.o sweep below, not this step, is what
+      # actually remedied #3668.
       - name: Free disk space
         if: needs.changes.outputs.docs_only != 'true'
-        run: |
-          echo "Before:"; df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /usr/local/share/boost /usr/local/share/powershell \
-            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
-            /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
-          sudo apt-get clean || true
-          sudo rm -rf /var/lib/apt/lists/* || true
-          # docker image prune reclaims only ~2GB (verified in job logs) but
-          # costs 78-181s (avg ~125s) of wall time on every run — it lists
-          # and deletes every pre-pulled runner image layer by layer. #4402:
-          # 10 sampled runs all showed 87-88GB free / 40% used at this point,
-          # already comfortably above the ~27GB peak the `test` job needs
-          # before the .rcgu.o sweep below runs (that sweep, not this prune,
-          # is the actual #3668 remedy). Gate the prune on measured headroom
-          # instead of removing it outright, so it still fires as a safety
-          # net if a future runner image or heavier test suite erodes the
-          # margin.
-          avail_kb=$(df -k --output=avail / | tail -1 | tr -d ' ')
-          avail_gb=$(( avail_kb / 1024 / 1024 ))
-          echo "Avail after SDK purge: ${avail_gb}G"
-          if [ "$avail_gb" -lt 25 ]; then
-            echo "::warning::only ${avail_gb}G free (< 25G threshold) — running docker image prune"
-            sudo docker image prune --all --force || true
-          else
-            echo "Skipping docker image prune: ${avail_gb}G free (>= 25G threshold, #4402)"
-          fi
-          echo "After:"; df -h /
+        run: bash scripts/ci-free-disk-space.sh
 
       # trusty-agents's git tests (list_branches_includes_current) assert that the
       # local branch list includes "main". GitHub Actions PR checkouts only create
@@ -806,6 +769,23 @@ jobs:
       # binaries so the intermediate .rcgu.o codegen objects below can be
       # swept once linking is done and before the (disk-heavier) test
       # execution phase runs. See #3668.
+      #
+      # This step is COMPILE-bound, not link-bound — measured, #5325. The cargo
+      # cache restores every dependency, so it compiles 25 workspace crates and
+      # links 194 test executables, and the linking is not where the time goes.
+      #
+      # mold 2.30 was tried here, invoked as `mold -run` so cargo's fingerprint
+      # and Swatinem/rust-cache's key (it hashes every RUST*-prefixed variable)
+      # stayed untouched and the comparison stayed clean. It changed nothing
+      # measurable: 8m01s with mold, against 7m42s / 7m49s / 8m00s / 8m16s
+      # across four runs of the identical unmodified command. Reverted rather
+      # than keep an apt package and an LD_PRELOAD interposer for an effect
+      # smaller than this step's run-to-run spread.
+      #
+      # The time is codegen for 25 large crates down a partly-serial dependency
+      # chain — everything waits on trusty-common — which no linker can touch.
+      # Don't re-try a linker swap without a `cargo build --timings` profile
+      # showing link time is actually the cost.
       - name: cargo test --workspace --no-run (build phase)
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
@@ -941,38 +921,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Free disk space (issue #2091): kept in sync with the more aggressive
-      # reclamation in the `test` job (see comment there for rationale).
+      # Free disk space (#2091; prune gated #4402, SDK purge gated #5325).
+      # Reclaims only when `df` says this runner needs it — thresholds, the
+      # three-tier decision, and why the reclamation is gated rather than
+      # deleted all live in the script.
       - name: Free disk space
         if: needs.changes.outputs.docs_only != 'true'
-        run: |
-          echo "Before:"; df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /usr/local/share/boost /usr/local/share/powershell \
-            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
-            /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
-          sudo apt-get clean || true
-          sudo rm -rf /var/lib/apt/lists/* || true
-          # docker image prune reclaims only ~2GB (verified in job logs) but
-          # costs 78-181s (avg ~125s) of wall time on every run — it lists
-          # and deletes every pre-pulled runner image layer by layer. #4402:
-          # 10 sampled runs all showed 87-88GB free / 40% used at this point,
-          # already comfortably above the ~27GB peak the `test` job needs
-          # before the .rcgu.o sweep below runs (that sweep, not this prune,
-          # is the actual #3668 remedy). Gate the prune on measured headroom
-          # instead of removing it outright, so it still fires as a safety
-          # net if a future runner image or heavier test suite erodes the
-          # margin.
-          avail_kb=$(df -k --output=avail / | tail -1 | tr -d ' ')
-          avail_gb=$(( avail_kb / 1024 / 1024 ))
-          echo "Avail after SDK purge: ${avail_gb}G"
-          if [ "$avail_gb" -lt 25 ]; then
-            echo "::warning::only ${avail_gb}G free (< 25G threshold) — running docker image prune"
-            sudo docker image prune --all --force || true
-          else
-            echo "Skipping docker image prune: ${avail_gb}G free (>= 25G threshold, #4402)"
-          fi
-          echo "After:"; df -h /
+        run: bash scripts/ci-free-disk-space.sh
 
       - name: Install Rust 1.94 toolchain
         if: needs.changes.outputs.docs_only != 'true'
@@ -1065,7 +1020,7 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           mkdir -p crates/trusty-agents/ui/dist
-          printf '<!doctype html><html><head><meta charset="utf-8"><title>open-mpm</title></head><body></body></html>\n' \
+          printf '<!doctype html><html><head><meta charset="utf-8"><title>trusty-agents</title></head><body></body></html>\n' \
             > crates/trusty-agents/ui/dist/index.html
 
       - name: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
@@ -1348,38 +1303,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Free disk space (issue #2091): kept in sync with the more aggressive
-      # reclamation in the `test` job (see comment there for rationale).
+      # Free disk space (#2091; prune gated #4402, SDK purge gated #5325).
+      # Reclaims only when `df` says this runner needs it — thresholds, the
+      # three-tier decision, and why the reclamation is gated rather than
+      # deleted all live in the script.
       - name: Free disk space
         if: needs.changes.outputs.docs_only != 'true'
-        run: |
-          echo "Before:"; df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
-            /usr/local/share/boost /usr/local/share/powershell \
-            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
-            /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
-          sudo apt-get clean || true
-          sudo rm -rf /var/lib/apt/lists/* || true
-          # docker image prune reclaims only ~2GB (verified in job logs) but
-          # costs 78-181s (avg ~125s) of wall time on every run — it lists
-          # and deletes every pre-pulled runner image layer by layer. #4402:
-          # 10 sampled runs all showed 87-88GB free / 40% used at this point,
-          # already comfortably above the ~27GB peak the `test` job needs
-          # before the .rcgu.o sweep below runs (that sweep, not this prune,
-          # is the actual #3668 remedy). Gate the prune on measured headroom
-          # instead of removing it outright, so it still fires as a safety
-          # net if a future runner image or heavier test suite erodes the
-          # margin.
-          avail_kb=$(df -k --output=avail / | tail -1 | tr -d ' ')
-          avail_gb=$(( avail_kb / 1024 / 1024 ))
-          echo "Avail after SDK purge: ${avail_gb}G"
-          if [ "$avail_gb" -lt 25 ]; then
-            echo "::warning::only ${avail_gb}G free (< 25G threshold) — running docker image prune"
-            sudo docker image prune --all --force || true
-          else
-            echo "Skipping docker image prune: ${avail_gb}G free (>= 25G threshold, #4402)"
-          fi
-          echo "After:"; df -h /
+        run: bash scripts/ci-free-disk-space.sh
 
       - name: Install stable toolchain
         if: needs.changes.outputs.docs_only != 'true'

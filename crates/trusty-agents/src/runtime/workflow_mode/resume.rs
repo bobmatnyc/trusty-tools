@@ -96,13 +96,19 @@ pub(crate) async fn run_resume_subcommand(args: &[String]) -> Result<()> {
     let tag_skill_registry = load_tag_skill_registry();
     let user_memory_suffix = load_user_memory_suffix().await;
 
-    let engine = WorkflowEngine::new(runner, PathBuf::from(".trusty-agents/workflows"))
-        .with_build(build_num)
-        .with_perf_dir(Some(perf_dir))
-        .with_skill_registry(Some(skill_registry))
-        .with_tag_skill_registry(Some(tag_skill_registry))
-        .with_user_memory(user_memory_suffix)
-        .with_progress(Some(Arc::new(crate::progress::ProgressReporter::new())));
+    // #5227: resume must resolve the workflows dir the same hierarchical way
+    // the original run did, or a resume from a different CWD reads no
+    // definition at all.
+    let engine = WorkflowEngine::new(
+        runner,
+        super::helpers::resolve_workflows_dir(&record.workflow),
+    )
+    .with_build(build_num)
+    .with_perf_dir(Some(perf_dir))
+    .with_skill_registry(Some(skill_registry))
+    .with_tag_skill_registry(Some(tag_skill_registry))
+    .with_user_memory(user_memory_suffix)
+    .with_progress(Some(Arc::new(crate::progress::ProgressReporter::new())));
 
     match engine.resume_with_perf_and_dirs(&run_id).await? {
         ResumeOutcome::AlreadyDone { run_id } => {

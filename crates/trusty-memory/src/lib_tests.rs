@@ -98,8 +98,9 @@ async fn tools_list_returns_all_tools() {
     // issue #1722 adds `task_add`, `task_list`, `task_complete`;
     // ADR-0027 T6 (#4805) adds `room_list`, `room_create`, `room_rename`;
     // ADR-0027 T9 (#4809) adds `wing_list`, `wing_create`, `wing_rename`;
-    // #4906 adds `palace_reembed`.
-    assert_eq!(tools.len(), 44);
+    // #4906 adds `palace_reembed`; #5005 adds `palace_unalias`;
+    // #4776 adds `kg_list_subjects`.
+    assert_eq!(tools.len(), 46);
 }
 
 #[tokio::test]
@@ -219,6 +220,14 @@ fn open_activity_log_with_fallback_returns_discard_when_unwritable() {
 /// `palace` argument and confirm it resolves to the default.
 #[tokio::test]
 async fn default_palace_used_when_arg_omitted() {
+    // This test builds its `AppState` inline rather than through a shared
+    // fixture, so it seeds the process-wide `retrieval::shared_embedder()`
+    // OnceCell itself. `memory_remember` below embeds; the cell is
+    // first-writer-wins, so under `cargo test` a sibling's seed satisfied this
+    // test, while under per-test process isolation (`cargo nextest run`) it got
+    // a virgin cell and reached for the real ONNX model (HTTP 429 in CI).
+    // Same defect class as #4413. Idempotent, so order does not matter.
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
 

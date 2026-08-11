@@ -23,10 +23,31 @@
 //! `set_corpus_store`). The quarantine is deliberately *asymmetric*: refusing
 //! a write costs an un-indexed file save that the next reindex picks up
 //! anyway, whereas accepting one destroys the corpus. So every corpus-open
-//! failure — transient I/O error, permission denial, stale redb file lock, an
-//! unresolvable storage path, or genuine corruption — quarantines, because at
-//! the point of failure they are indistinguishable and only one of the two
+//! failure that REACHES this module — transient I/O error, permission denial,
+//! stale redb file lock, or an unresolvable storage path — quarantines, because
+//! at the point of failure they are indistinguishable and only one of the two
 //! possible mistakes is recoverable.
+//!
+//! ## Genuine corruption does NOT reach here (#4227)
+//!
+//! This list used to name "genuine corruption" as a quarantine trigger. It is
+//! not one, and reading it as one misstates what the quarantine protects. A
+//! corrupt corpus is absorbed BEFORE `corpus_open_failed` can be set:
+//! `CorpusStore::open` (`core/corpus/store_impl.rs`) delegates to
+//! `open_corpus_db_or_recreate`, and `core/corpus_recovery.rs` classifies
+//! `UpgradeRequired`, `RepairAborted`, `Storage(Corrupted(_))` and
+//! `Storage(Io(InvalidData))` as RECOVERABLE — it moves the file aside with a
+//! `.v2-incompatible` suffix and returns `Ok` with a fresh EMPTY corpus. Only
+//! lock contention and genuine transient I/O errors propagate as `Err`, so the
+//! quarantine population is transient-dominated by construction.
+//!
+//! Two consequences worth keeping in view. First, an in-process reopen retry
+//! would clear most of this population (recovery currently needs a daemon
+//! restart — #4122 / PR #4220 HIGH-1). Second, the recreate path yields an index
+//! reporting HEALTHY on a fresh empty corpus, which watcher writes then populate
+//! with a partial rebuild — a symptom shape close to the #4122 incident's that
+//! this quarantine explicitly does NOT cover. That gap is #4087's, not this
+//! module's.
 //!
 //! Reads are NOT gated: a quarantined index still serves searches (returning
 //! whatever its empty in-memory corpus holds). Making failed indexes stop

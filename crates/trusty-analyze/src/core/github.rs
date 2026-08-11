@@ -6,19 +6,21 @@
 //! post the resulting report back as a PR comment — without the caller having
 //! to shell out to `git` or `gh`.
 //!
-//! What: three thin async helpers wrapping the GitHub REST API
+//! What: two thin async helpers wrapping the GitHub REST API
 //! ([`fetch_pr_diff`], [`post_pr_comment`]) plus a pure markdown renderer
 //! ([`format_review_as_markdown`]) that turns a [`ReviewReport`] into a
-//! human-readable PR comment. The webhook signature verifier
-//! ([`verify_webhook_signature`]) lives here too so all GitHub-facing code is
-//! in one place.
+//! human-readable PR comment.
 //!
-//! Test: see `mod tests` — covers request-shape errors, markdown rendering for
-//! empty/populated reports, and HMAC signature verification.
+//! #5181 removed `verify_webhook_signature` along with `POST /webhooks/github`.
+//! `trusty-console` is now the single process that verifies a GitHub delivery's
+//! HMAC (ADR-0034 §3), and this crate trusts the provenance record on the
+//! relayed frame instead of re-deriving it — the second implementation is gone
+//! rather than left unreachable.
+//!
+//! Test: see `mod tests` — covers request-shape errors and markdown rendering
+//! for empty/populated reports.
 
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 
 use crate::core::review::ReviewReport;
 
@@ -200,27 +202,6 @@ pub fn format_review_as_markdown(report: &ReviewReport) -> String {
     out
 }
 
-/// Verify a GitHub webhook's `X-Hub-Signature-256` HMAC.
-///
-/// Why: webhook payloads are unauthenticated by default; the shared-secret
-/// HMAC is the only thing proving a request actually came from GitHub.
-/// What: computes `HMAC-SHA256(secret, body)` and constant-time compares its
-/// hex digest against the `sha256=<hex>` signature header.
-/// Test: `webhook_signature_accepts_valid` / `webhook_signature_rejects_invalid`.
-pub fn verify_webhook_signature(secret: &str, body: &[u8], signature_header: &str) -> bool {
-    let Some(hex_sig) = signature_header.strip_prefix("sha256=") else {
-        return false;
-    };
-    let Ok(expected) = hex::decode(hex_sig) else {
-        return false;
-    };
-    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
-        return false;
-    };
-    mac.update(body);
-    mac.verify_slice(&expected).is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,33 +278,5 @@ mod tests {
         assert!(md.contains("Overall grade: A"));
         assert!(md.contains("0 smells"));
         assert!(md.contains("_No files changed._"));
-    }
-
-    #[test]
-    fn webhook_signature_accepts_valid() {
-        let secret = "test-hmac-key"; // pragma: allowlist secret
-        let body = br#"{"action":"opened"}"#;
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body);
-        let digest = hex::encode(mac.finalize().into_bytes());
-        let header = format!("sha256={digest}");
-        assert!(verify_webhook_signature(secret, body, &header));
-    }
-
-    #[test]
-    fn webhook_signature_rejects_invalid() {
-        let body = br#"{"action":"opened"}"#;
-        assert!(!verify_webhook_signature("secret", body, "sha256=deadbeef"));
-        // Missing prefix.
-        assert!(!verify_webhook_signature("secret", body, "deadbeef"));
-        // Wrong secret.
-        let mut mac = Hmac::<Sha256>::new_from_slice(b"other").unwrap();
-        mac.update(body);
-        let digest = hex::encode(mac.finalize().into_bytes());
-        assert!(!verify_webhook_signature(
-            "secret",
-            body,
-            &format!("sha256={digest}")
-        ));
     }
 }

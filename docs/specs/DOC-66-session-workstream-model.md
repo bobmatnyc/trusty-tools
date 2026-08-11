@@ -24,6 +24,7 @@ spec_refs:
 - [`docs/adr/0030-sessions-own-many-workstreams-from-the-tm-checkout.md`](../adr/0030-sessions-own-many-workstreams-from-the-tm-checkout.md) — the decision this spec encodes
 - [`docs/adr/0023-worktree-authority-existence-vs-ownership.md`](../adr/0023-worktree-authority-existence-vs-ownership.md) — git owns existence; a rebuildable record owns ownership
 - [`docs/adr/0020-session-owned-worktrees.md`](../adr/0020-session-owned-worktrees.md) — the `.trusty-mpm-worktree` sentinel this spec extends
+- [`docs/adr/0036-all-worktrees-are-siblings-under-claude-worktrees.md`](../adr/0036-all-worktrees-are-siblings-under-claude-worktrees.md) — every worktree is a flat sibling under `.claude/worktrees/`; §5's parent/child relation is a recorded id, never containment
 - [`docs/specs/DOC-52-shared-workstream-definition.md`](./DOC-52-shared-workstream-definition.md) — the cross-product glossary
 
 **Cross-ref (code):** `crates/trusty-mpm/src/session_manager/record.rs:190-270`; `crates/trusty-mpm/src/driver/correlation.rs:33-43`; `crates/trusty-mpm/src/core/worktree_naming.rs:33-35`; `crates/trusty-mpm/src/core/session_launch/workstream_label.rs:93-136`; `crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs:349-418`; `crates/trusty-mpm/src/daemon/managed_routes/launch_on_main.rs:64-69,93-229`; `crates/trusty-mpm/src/daemon/managed_routes/inproject.rs:56,134-136`; `crates/trusty-mpm/src/daemon/managed_routes/inproject_hygiene.rs:291-303,405-437`; `crates/trusty-mpm/src/daemon/mod.rs:149`; `crates/trusty-mpm/src/core/harness_root.rs:47-59`; `crates/trusty-mpm/src/provisioner/workspace.rs:13-22`; `crates/trusty-mpm/src/project/record.rs:165-177`; `crates/trusty-mpm/src/project/worktree_policy.rs:84-106`; `crates/trusty-mpm/src/session_manager/manager.rs:1125`; `crates/trusty-mpm/src/session_manager/worktree_reclaim.rs:91-125`
@@ -267,7 +268,7 @@ Covered in §5. They are children, not workstreams.
 
 ---
 
-## 5. Agent worktrees as children {#SPEC-SESSWS-05~draft}
+## 5. Agent worktrees are children by record, not by location {#SPEC-SESSWS-05~draft}
 
 **ID:** SPEC-SESSWS-05~draft
 **Status:** Draft
@@ -276,7 +277,8 @@ Parallel engineers inside one workstream legitimately need their own checkouts �
 
 **NORMATIVE:**
 
-- An agent worktree is a **child** of the workstream that dispatched the agent. Its sentinel carries `parent_workstream_id`.
+- An agent worktree is a **child** of the workstream that dispatched the agent. "Child" is a **recorded parent id and nothing more**: its sentinel carries `parent_workstream_id`, naming the dispatching workstream. It is a statement about lifetime and reclamation authority, never about where the directory sits.
+- **A child is not contained by its parent.** It is a flat sibling under `.claude/worktrees/`, alongside every other worktree, per [ADR-0036](../adr/0036-all-worktrees-are-siblings-under-claude-worktrees.md). A worktree nested inside another worktree's checkout is the defect ADR-0036 exists to prevent — the parent's dirty-tree report cannot see a gitignored worktree living inside it — so parentage must be resolved by reading `parent_workstream_id`, never by inspecting a path prefix.
 - It is **reaped when the agent exits**. Its lifetime is the agent's, not the workstream's and not the session's.
 - It **never consumes a slot** (§4.5) and never appears in the session's workstream set.
 - A child whose parent workstream reaches `Reclaimed` is reclaimed with it, whether or not its agent exited cleanly.

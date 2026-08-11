@@ -14,7 +14,7 @@ use super::deferred_embed;
 // #4886: ADR-0028 Tier C admission + retire-on-write. Kept in its own module so
 // the write path's design rationale does not push this file over the SLOC cap.
 use super::tier_c;
-use super::types::{L1_CAP, RememberOptions};
+use super::types::{ForgetOutcome, L1_CAP, RememberOptions};
 use crate::memory_core::analytics::{RecallEvent, RecallLog, query_hash};
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
@@ -778,16 +778,32 @@ impl PalaceHandle {
         *closets = new_index;
     }
 
-    /// Remove a drawer by id.
+    /// Remove a drawer by id, reporting whether one was actually there.
     ///
     /// Why: Surface forget as a first-class op so CLI/MCP can drop stale data
-    /// without leaking vectors in the HNSW index.
-    /// What: Removes the vector from the vector store and drops the matching
-    /// row from the in-memory drawer table. Persists the L1 snapshot afterward
-    /// so the drop survives a restart.
+    /// without leaking vectors in the HNSW index. #5231: the return value must
+    /// also distinguish a real delete from a no-op — `drawers.retain` silently
+    /// matches nothing for an id that was never stored, so an unconditional
+    /// `Ok(())` let a cleanup loop report N deletions having made zero.
+    /// What: Records whether the drawer table holds `id`, drops the persistent
+    /// metadata row, then the vector, then the KG triples, then the in-memory
+    /// row, and persists the L1 snapshot so the drop survives a restart.
+    /// Returns [`ForgetOutcome::NotFound`] when no such drawer existed.
     /// Test: `cli_forget_removes_drawer` asserts a recalled drawer disappears
-    /// after forget.
-    pub async fn forget(&self, id: Uuid) -> Result<()> {
+    /// after forget; `forget_reports_not_found_for_an_unknown_drawer` and
+    /// `forget_reports_deleted_and_the_drawer_stays_gone_after_reopen` cover
+    /// the reported outcome.
+    ///
+    /// # Errors
+    ///
+    /// Read-only handles, a write-lock timeout, a failed L1 snapshot write, or
+    /// — when the drawer did exist — a failed metadata delete. The last case is
+    /// an error rather than a warning because the redb drawer table is what
+    /// `open_with_intent` reloads from: a drawer whose row survives comes back
+    /// on the next open, so reporting it deleted would be the same lie #5231 is
+    /// about. Nothing else has been mutated at that point, so the drawer is
+    /// left wholly intact rather than half-deleted.
+    pub async fn forget(&self, id: Uuid) -> Result<ForgetOutcome> {
         // Idle-to-disk: a forget is a genuine user access. Suppressed during
         // dream cycles (which forget merged/pruned drawers) via `touch`.
         self.touch();
@@ -817,21 +833,38 @@ impl PalaceHandle {
         )
         .await?;
 
+        // #5231: settle the outcome from the drawer table before mutating
+        // anything. Held under the write mutex acquired above, so no concurrent
+        // remember/forget can change the answer underneath the removals below.
+        let existed = self.drawers.read().iter().any(|d| d.id == id);
+
+        // Drop persistent metadata first so cold restart doesn't resurrect this
+        // drawer (issue #32). #5231: this runs before the other removals so a
+        // failure here leaves the drawer wholly intact instead of half-deleted.
+        if let Err(e) = self.kg.delete_drawer(id).await {
+            if existed {
+                return Err(e).with_context(|| {
+                    format!("forget {id}: drawer metadata delete failed, drawer NOT deleted")
+                });
+            }
+            // No drawer to lose: the delete was speculative cleanup for an id
+            // that isn't in the table anyway.
+            tracing::warn!(?id, "drawer metadata delete failed: {e:#}");
+        }
+
         // Best-effort vector removal — usearch may legitimately not have the
-        // key (e.g. if remember failed mid-flight); we propagate other errors.
+        // key (e.g. if remember failed mid-flight). A survivor is an orphaned
+        // vector, which `palace_compact` reclaims and which recall cannot
+        // resolve back to a drawer, so it does not make the delete a lie.
         if let Err(e) = self.vector_store.remove(id).await {
             tracing::warn!(?id, "vector remove failed: {e:#}");
         }
 
-        // Drop persistent metadata alongside the vector so cold restart
-        // doesn't resurrect this drawer (issue #32).
-        if let Err(e) = self.kg.delete_drawer(id).await {
-            tracing::warn!(?id, "drawer metadata delete failed: {e:#}");
-        }
-
         // Issue #278 (cascade-delete): remove all KG triples whose subject is
         // `drawer:<id>` — these are auto-extracted facts whose source drawer no
-        // longer exists. Failure is best-effort (warn, don't abort the forget).
+        // longer exists. Best-effort for the same reason as the vector: the
+        // drawer itself is still gone, so survivors are leaked triples, not an
+        // undead drawer.
         if let Err(e) = self.kg.cascade_delete_by_drawer(id).await {
             tracing::warn!(?id, "kg cascade_delete_by_drawer failed: {e:#}");
         }
@@ -846,7 +879,11 @@ impl PalaceHandle {
             L1Cache::save_l1_cache(&snap, data_dir).context("save L1 snapshot after forget")?;
         }
 
-        Ok(())
+        Ok(if existed {
+            ForgetOutcome::Deleted
+        } else {
+            ForgetOutcome::NotFound
+        })
     }
 
     /// List drawers with optional room/tag filters, sorted by importance desc.
@@ -927,10 +964,14 @@ impl PalaceHandle {
             .filter(|d| d.is_expired_at(now) && !d.is_tier_c())
             .map(|d| d.id)
             .collect();
-        let count = expired_ids.len();
+        // #5231: count what was actually removed, not what was attempted — a
+        // forget that failed or raced another writer used to inflate this.
+        let mut count = 0usize;
         for id in expired_ids {
-            if let Err(e) = self.forget(id).await {
-                tracing::warn!(?id, "purge_expired: forget failed: {e:#}");
+            match self.forget(id).await {
+                Ok(outcome) if outcome.is_deleted() => count += 1,
+                Ok(_) => {}
+                Err(e) => tracing::warn!(?id, "purge_expired: forget failed: {e:#}"),
             }
         }
         if count > 0 {

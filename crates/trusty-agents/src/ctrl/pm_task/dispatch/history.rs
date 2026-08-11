@@ -85,7 +85,8 @@ pub async fn run_pm_task_with_history(
 
     if let Some(ref m) = overrides.model {
         tracing::debug!(model = %m, "applying /model session override");
-        pm_cfg.agent.model = m.clone();
+        // #3765: re-pins the override when the agent declares a provider.
+        pm_cfg.override_model(m)?;
     }
 
     let creds = resolve_overridden_credentials(&mut pm_cfg, overrides.provider.as_deref())?;

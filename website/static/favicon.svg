@@ -1,0 +1,14 @@
+<!--
+  Foundry mark: flat rectangular plates in the rust ramp, no gradients or
+  rounded pills (docs/design/UI/design-system/README.md, "Flat and honest").
+  Hex values are the canonical --trusty-accent light (#B7410E) and
+  --trusty-sidebar-accent (#E9B98A). A favicon cannot read CSS variables, so
+  these are the one place in this package a hex is written by hand.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="trusty-tools">
+  <rect width="32" height="32" fill="#2B1C12" />
+  <rect x="5" y="5" width="10" height="10" fill="#B7410E" />
+  <rect x="17" y="5" width="10" height="10" fill="#E9B98A" />
+  <rect x="5" y="17" width="10" height="10" fill="#E9B98A" />
+  <rect x="17" y="17" width="10" height="10" fill="#B7410E" />
+</svg>

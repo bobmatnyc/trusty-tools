@@ -56,8 +56,8 @@ pub fn build_router(state: AnalyzerAppState) -> Router {
 /// self-origins for the router-wide same-origin write guard (#3304).
 ///
 /// Why: the analyzer exposes destructive write routes (`POST /indexes/{id}/scip`,
-/// `POST /review`, `POST /analyze/deep`, `POST /facts`, `DELETE /facts/{id}`,
-/// GitHub webhook) behind the permissive-CORS shared stack; without a
+/// `POST /review`, `POST /analyze/deep`, `POST /facts`, `DELETE /facts/{id}`)
+/// behind the permissive-CORS shared stack; without a
 /// same-origin guard a page the operator visits could drive them cross-origin
 /// (CSRF). This is the guarded entry point; `build_router` delegates here with a
 /// loopback-only allowlist so existing callers/tests are unchanged. `serve`
@@ -78,6 +78,10 @@ pub fn build_router_with_self_origins(
         .route(
             "/indexes/{id}/complexity_hotspots",
             get(handlers::analysis::complexity_hotspots),
+        )
+        .route(
+            "/indexes/{id}/complexity_distribution",
+            get(handlers::analysis::complexity_distribution),
         )
         .route("/indexes/{id}/smells", get(handlers::analysis::smells))
         .route(
@@ -102,17 +106,24 @@ pub fn build_router_with_self_origins(
             get(handlers::graph::clusters_for_index),
         )
         .route("/indexes/{id}/ner", get(handlers::graph::ner_for_index))
-        .route("/indexes/{id}/scip", post(handlers::graph::ingest_scip))
+        // #5049: GET reports whether an overlay was ever ingested (404) versus
+        // ingested-and-empty (200, `nodes: 0`) — the distinction an empty
+        // `/graph` body cannot make on its own.
+        .route(
+            "/indexes/{id}/scip",
+            post(handlers::graph::ingest_scip).get(handlers::graph::scip_overlay_status),
+        )
         .route("/review", post(handlers::review::review_diff_handler))
         .route(
             "/review/github-pr",
             post(handlers::review::review_github_pr_handler),
         )
         .route("/analyze/deep", post(handlers::deep::deep_analyze_handler))
-        .route(
-            "/webhooks/github",
-            post(handlers::review::github_webhook_handler),
-        )
+        // #5181: `POST /webhooks/github` is NOT registered here. GitHub reaches
+        // this crate through `trusty-console`'s `/api/webhooks/{source}` and the
+        // UDS listener in `webhook_listener`; the path 404s, so a delivery aimed
+        // at the retired route fails visibly at GitHub instead of being accepted
+        // and dropped.
         .route(
             "/facts",
             get(handlers::facts::list_facts).post(handlers::facts::upsert_fact),

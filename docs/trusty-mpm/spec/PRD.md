@@ -1,7 +1,7 @@
 # trusty-mpm — Product Requirements Document
 
 > **Status:** Canonical · Living Document
-> **Last reviewed:** 2026-05-29
+> **Last reviewed:** 2026-08-08
 > **Derived from:** code/docs/tickets audit
 > **Crate:** `crates/trusty-mpm/` (version `0.5.0`, edition 2024, `publish = false`)
 > **Companion docs:** [ARCHITECTURE.md](./ARCHITECTURE.md) · [COMPONENTS.md](./COMPONENTS.md)
@@ -70,8 +70,9 @@ process whose PM behaviour comes from deployed agents, deployed skills, a projec
 4. **Agent + skill system** with `extends:` inheritance, idempotent
    checksum-guarded ownership-aware deployment, and (intended) remote registry
    distribution.
-5. **Customizable, layered instruction assembly** — framework floor + project
-   overrides.
+5. **Traceable, layered instruction assembly** — an authored package plus
+   declared project overrides and generated delegation authority, resolved to
+   a provenance-bearing per-session artifact.
 6. **Full host-wide observability** — session registry, hook relay, live SSE
    event stream, circuit-breaker views, TUI dashboard, remote Telegram management.
 7. **Offline-first** — framework ships embedded in the binary; no network to
@@ -179,11 +180,11 @@ inline. Detailed source citations live in [COMPONENTS.md](./COMPONENTS.md) and
 
 | Req | Intent | Status |
 |---|---|---|
-| FR-PM-1 | PM delegates all work to specialist agents; default = delegate, exception only on explicit "you do it". | ✅ — `PM_INSTRUCTIONS.md` asset. |
-| FR-PM-2 | Verification gates: "done" claims require evidence (file paths, commit hash, QA repro/verify, live health). | ✅ — `WORKFLOW.md` + `PM_INSTRUCTIONS.md`. |
+| FR-PM-1 | PM delegates all work to specialist agents; default = delegate, exception only on explicit "you do it". | ✅ — package section plus generated delegation roster. |
+| FR-PM-2 | Verification gates: "done" claims require evidence (file paths, commit hash, QA repro/verify, live health). | ✅ — package sections plus embedded workflow/verification skills. |
 | FR-PM-3 | 5-phase workflow (Research → Code Analysis → Implementation → QA → Documentation) with skip rules. | ✅ — instruction asset. |
 | FR-PM-4 | Autonomous execution — PM runs the full pipeline; asks the user only below ~90% success probability. | ✅ — instruction asset. |
-| FR-PM-5 | Model-selection protocol (haiku/sonnet/opus tiers, per-agent overrides via `~/.trusty-mpm/config.toml models.agents.*`). | 🟡 — specified in instructions; **no Rust code reads the key**. The `config.yaml` reference in `PM_INSTRUCTIONS.md` is a stale Python-era artifact — `config.toml` is canonical. Tracked by **#394**. |
+| FR-PM-5 | Model-selection protocol (haiku/sonnet/opus tiers, per-agent overrides via `~/.trusty-mpm/config.toml models.agents.*`). | 🟡 — specified in instructions; **no Rust code reads the key**. Any surviving `config.yaml` instruction reference is a stale Python-era artifact — `config.toml` is canonical. Tracked by **#394** and audited by **#5206**. |
 | FR-PM-6 | Optional LLM overseer evaluating hook events (allow/block/respond/flag) + interactive coordinator chat. | ✅ — `DeterministicOverseer` + optional `CompositeOverseer` from `overseer.toml`; `POST /llm/chat`. Disabled by default; opt-in. |
 
 ### 4.8 Circuit breakers
@@ -204,34 +205,24 @@ inline. Detailed source citations live in [COMPONENTS.md](./COMPONENTS.md) and
 | FR-DEP-4 | Robust agent frontmatter parsing (no `:`-truncation; single parser; Claude Code `model:`-injection workaround). | 🟡 — defect: parser splits on first `:` and truncates colon-bearing values; two divergent parser copies. Tracked by **#389** (truncation/dup) and **#390** (model-injection). |
 | FR-DEP-5 | Atomic deploy writes; graceful handling of a corrupt manifest. | 🟡 — tracked by **#392**. |
 | FR-DEP-6 | Prune stale deployed agent/skill files on rename or removal. | 🔵 — tracked by **#391**. |
-| FR-DEP-7 | 3-level agent precedence: project `.claude/agents/` > user `~/.claude-mpm/agents/` > cached remote. | 🔵 — documented in `PM_INSTRUCTIONS.md`; implementation has **one source, one target**. Tracked by **#387**. |
+| FR-DEP-7 | 3-level agent precedence: project `.claude/agents/` > user `~/.claude-mpm/agents/` > cached remote. | 🔵 — historically documented by the instruction corpus; implementation has **one source, one target**. Tracked by **#387**. |
 | FR-DEP-8 | Remote agent registry: fetch agents with TTL/offline-cache; record `Origin::Registry`. | 🔵 — `Origin::Registry` is a forward-compat enum variant; `registry/` path resolves but nothing fetches. Tracked by **#388**. |
 
 ### 4.10 Instruction assembly & customization
 
-> **Stale as of 2026-08-01.** This table (last reviewed 2026-05-29) predates
-> both the #381 fix (project overrides became real reads, not advertised
-> no-ops) and #4183 (the four monolithic files below were replaced by
-> per-section files composed from a JSON manifest). FR-IN-4's "no Rust code
-> reads these files" is no longer true: the five-file `.trusty-mpm/` surface
-> is read by
-> [`instruction_overrides.rs`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/instruction_overrides.rs#L52-L60).
-> Project customization is named sections in the root `CLAUDE.md`, added by
-> #4324 and read first
-> ([`claude_md_sections.rs:72`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/claude_md_sections.rs#L72),
-> `HOST_FILES[0]` wins). The `.trusty-mpm/` files remain in the current
-> binary's read paths;
-> [#4286](https://github.com/bobmatnyc/trusty-tools/issues/4286) tracks
-> their removal. The rest of this table is left as the historical
-> 2026-05-29 record rather than rewritten row-by-row.
+The normative design is DOC-59 §§11–12. `CLAUDE.md` is a project-owned override
+input and is not a framework policy source. The compiled prompt is an
+inspectable per-session output, never an authoring input.
 
 | Req | Intent | Status |
 |---|---|---|
-| FR-IN-1 | Every launched session receives identical, version-controlled PM instructions (`PM_INSTRUCTIONS → WORKFLOW → AGENT_DELEGATION → BASE_PM`, `BASE_PM` last as the non-overridable floor). | ✅ — compile-time `include_str!` concat (`instruction_pipeline.rs:31-72`), passed via `--append-system-prompt-file`. |
-| FR-IN-2 | Runtime merge composes framework + delegation authority (generated from deployed agents) + project `CLAUDE.md`. | ✅ — `build_instructions` (`instruction_pipeline.rs:163-204`); stash at `.trusty-mpm/last-instructions.md`. |
-| FR-IN-3 | First-launch instruction stash matches the actual system prompt; `tm install` does not overwrite the assembled prompt with a stub. | 🟡 — defects: stash diverges (**#382**), `tm install` overwrites the prompt with a 4-line stub (**#383**). |
-| FR-IN-4 | Project override system: `.trusty-mpm/{INSTRUCTIONS,AGENT_DELEGATION,WORKFLOW,MEMORY,PM_INSTRUCTIONS_DEPLOYED}.md` customize/replace PM behaviour. | 🔵 — advertised in `BASE_PM.md:17-33`; **no Rust code reads these files** (only `CLAUDE.md` is read). Trust gap. *(Superseded — see stale-banner above: these files ARE read as of the #381 fix and remain live.)* |
-| FR-IN-5 | `PM_INSTRUCTIONS_VERSION` marker gates instruction upgrades. | 🔵 — marker present (`= 0014`) but inert. Tracked by **#384**. |
+| FR-IN-1 | Compose the PM prompt from the versioned package manifest, registered section sources, generated roster, project-owned named-section overrides, and selected output style. | ✅ — package-based composition is implemented; semantic consistency coverage remains partial. |
+| FR-IN-2 | Write the exact resolved prompt before spawn to `<harness-root>/.trusty-mpm/sessions/<session-id>/INSTRUCTIONS-COMPILED.md`; refuse launch if composition or the required write fails. | ✅ — `compiled_prompt_path(project_dir, session_id)` and fatal instruction preparation. |
+| FR-IN-3 | Attach enough provenance to identify the binary/source revision, package/schema, ordered section hashes, overrides, generated inputs, style, and final digest. | 🔵 — required by #5206 / DOC-59 §11; not yet delivered. |
+| FR-IN-4 | Generate an inventory of every governed instruction artifact with authority, source, consumer, deployment, override, parity, and verification metadata. | 🔵 — required by #5206 / DOC-59 §11. |
+| FR-IN-5 | Detect semantic contradictions, retired references, broken skill links, duplicate policy owners, stale protocol markers, and undeclared product divergence. | 🟡 — byte/golden and selected drift checks exist; the semantic suite is incomplete. |
+| FR-IN-6 | Keep one delivery-workflow skill (`tm-workflow`), a separate issue-domain skill (`tm-ticketing`), and artifact-based execution boundaries for ticketing and version control. | 🟡 — target defined by #5202 / DOC-59 §12; `tm-pr-workflow` and conflicting PR-body ownership remain to migrate. |
+| FR-IN-7 | Keep all `CLAUDE.md` files outside the framework-instruction audit/edit set while checking them read-only for incompatible routing or authority claims. | 🔵 — required by #5206 / DOC-59 §11. |
 
 ### 4.11 Memory routing & protection
 
@@ -293,20 +284,22 @@ inline. Detailed source citations live in [COMPONENTS.md](./COMPONENTS.md) and
 Gap-remediation is tracked by epic
 [**#380**](https://github.com/bobmatnyc/trusty-tools/issues/380) and its children.
 
-### High-severity trust gaps (documented capability that does not exist)
+### High-severity trust gaps
 
-- **Project override system unread** (FR-IN-4) — users following `BASE_PM.md`
-  write `.trusty-mpm/*.md` files that have no effect. Either implement the reader
-  in `build_instructions` or remove the claim. (#382/#383 cover the related
-  stash/stub instruction defects.)
-- **3-level agent precedence** (FR-DEP-7, **#387**) — `PM_INSTRUCTIONS.md`
-  overstates capability; only single-source/single-target exists.
+- **Instruction provenance and semantic consistency** (FR-IN-3–5, FR-IN-7,
+  **#5206**) — the runtime composes and writes the prompt, but cannot yet prove
+  source/deployment provenance or detect all contradictory policy claims.
+- **Workflow ownership consolidation** (FR-IN-6, **#5202**) —
+  `tm-pr-workflow` still duplicates delivery policy and shipped routing still
+  disagrees on PR-metadata ownership.
+- **3-level agent precedence** (FR-DEP-7, **#387**) — the historical
+  instruction claim overstates capability; only single-source/single-target
+  exists.
 
 ### Functional gaps
 
 - **Daemon-enforced circuit breakers** (FR-CB-3, **#393**).
 - **Remote agent registry** (FR-DEP-8, **#388**); **3-level precedence** (#387).
-- **`PM_INSTRUCTIONS_VERSION` gating** (FR-IN-5, **#384**).
 - **Per-agent model overrides + canonical `config.toml` loading** (FR-PM-5, **#394**).
 - **Per-session file tracking** (FR-SES-6, **#94**).
 

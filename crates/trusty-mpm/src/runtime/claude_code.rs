@@ -740,6 +740,15 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
         );
     }
 
+    // #4181: git-exclude `.mcp.json` BEFORE the injectors below write to it.
+    // This is the second write site, not a duplicate of `prepare_session_inner`'s
+    // call: `spawn_resume` and `build_inplace_resume_command` both reach this
+    // function with no `prepare_session*` anywhere in their chain, so without
+    // this call every resume re-dirties a tracked, machine-specific `.mcp.json`.
+    // Cheap and idempotent — `info/exclude` lives in the shared common git dir,
+    // so one successful call covers every worktree in the project permanently.
+    crate::core::session_launch::exclude_mcp_json_from_git(cwd);
+
     // Force-write the two unconditional framework builtins into `cwd`'s
     // `.mcp.json` and track whether the write ACTUALLY succeeded this run
     // (issue #3950) — mirroring `session_launch::prepare_session_inner`'s

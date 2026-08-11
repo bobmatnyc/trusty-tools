@@ -1,0 +1,50 @@
+# public-stale-terms.tsv — retired names and anti-patterns that must not appear
+# in a PUBLISHED page (issue #5125, epic #5092).
+#
+# Why: docs/public-manifest.tsv proves a published page EXISTS and sits inside
+#   the boundary. Nothing proved its CONTENT was current, and four published
+#   pages were caught naming binaries and crates that no longer exist — each
+#   found by a human reading closely, which does not scale. A reader who copies
+#   `cargo install trusty-mpmd` off the public site gets an error, not a daemon.
+#
+# What: two record types, tab-separated, consumed by
+#   `scripts/check_public_docs.sh --stale`:
+#
+#     TERM   <ere>                              <remedy>
+#     WAIVE  <source>  <ere>  <count>  <reason>
+#
+#     ere      POSIX extended regular expression, matched line-by-line with
+#              `grep -nE` against every source the manifest publishes. Only the
+#              published set is searched: excluded trees may hold historical
+#              names, and often must.
+#     remedy   what to write instead. It is printed verbatim in the failure, so
+#              an author fixes the page without opening this file.
+#     source   a repo-relative path that some PAGE row publishes.
+#     count    how many matching LINES that source is allowed to keep.
+#     reason   why. Required — an unexplained waiver is indistinguishable from
+#              an oversight a year later.
+#
+#   Blank lines and `#` comments are ignored. No field may contain a tab.
+#
+# Waivers are a COUNT RATCHET, the same mechanic as .line-cap-allowlist.tsv:
+#   N+1 fails (new stale content sneaking in behind an existing waiver) and N-1
+#   fails too (drift — lower the count, or delete the row). A waiver naming a
+#   source no PAGE row publishes, or an ERE no TERM row declares, fails as dead.
+#
+# `@FORMER_REPO_CLONE_URLS@` is a placeholder the gate EXPANDS, not a literal.
+#   It is derived at run time from the `bobmatnyc/<repo>` names in
+#   docs/reference/former-repos.md, so the two can never drift apart, and the
+#   gate FAILS if the derivation finds nothing — a term that silently matches
+#   nothing is worse than no term at all.
+#
+# Author guidance for adding a term lives in docs/public-manifest.tsv's header,
+#   under "KEEPING A PUBLISHED PAGE CURRENT".
+
+TERM	open[-_]mpm	the project was renamed: it is `trusty-agents`, and its binary is `tagent`. `open-mpm` / `open_mpm` names nothing a reader can install.
+TERM	trusty-mpmd	there is no `trusty-mpmd` binary. The daemon folded into `tm` / `trusty-mpm` as the `daemon` subcommand.
+TERM	trusty-mpm-(tui|telegram)	there are no `trusty-mpm-tui` or `trusty-mpm-telegram` binaries. They are the `tm tui` and `tm telegram` subcommands.
+TERM	trusty-code-v0\.0\.0	`trusty-code-v0.0.0` is a placeholder tag that was never cut. The first real tag is `trusty-code-v0.2.0`.
+TERM	@FORMER_REPO_CLONE_URLS@	that repository was folded into `bobmatnyc/trusty-tools` and no longer exists. Clone the workspace instead; see docs/reference/former-repos.md.
+TERM	cp( +-[A-Za-z]+)* +[^ ]*target/(release|debug)/[^ ]+ +[^ ]*bin/	never `cp` a freshly built binary over an on-PATH one on macOS: the stale kernel cdhash cache makes the next exec SIGKILL, which looks exactly like an OOM kill. Use `cargo install --path crates/<name> --locked`.
+
+WAIVE	docs/trusty-search/README.md	open[-_]mpm	1	doc-map row naming the `open-mpm` baseline CORPUS FILE under regression-testing/, not an instruction to install anything. The file keeps its recorded name.

@@ -20,16 +20,29 @@
 //!     comments to post plus the findings that fell back to the summary — surfaced
 //!     verbatim in dry-run so the MCP response shows exactly what *would* be posted.
 //!   * [`build_inline_plan`] is the pure mapping from findings → plan.
-//!   * [`render_finding_comment`] renders one finding's inline-comment markdown.
+//!   * [`render_finding_comment`] renders one finding's inline-comment markdown,
+//!     led by a verification caveat when the finding's own `verified` outcome
+//!     owes the reader one (#5312) — a refuted claim must not read like a
+//!     surviving one.
 //!
 //! Test: `inline_tests.rs` (sibling) — covers diff-index construction, the
 //! finding→comment mapping, and off-diff fallback.
 
 use std::collections::HashSet;
 
-use crate::models::{Effort, Finding};
+use crate::models::{Effort, Finding, VerifyOutcome};
 
 // ─── Tuning constants ─────────────────────────────────────────────────────────
+
+/// Blockquote lead-in for the per-finding verification caveat (#5312).
+///
+/// Why: the summary banner already opens with `> **Verification notice:**`
+/// (`pipeline::verification_notice`); using the same blockquote shape inline
+/// means a reader meets one recognisable marker wherever the pipeline qualifies
+/// a claim, and a distinct suffix keeps the two greppable apart.
+/// What: prefixes the caveat returned by [`VerifyOutcome::reader_caveat`].
+/// Test: `render_marks_refuted_finding`.
+const VERIFICATION_CAVEAT_PREFIX: &str = "> **Verification:**";
 
 /// Confidence below which a finding is hedged rather than asserted (#1416).
 ///
@@ -338,12 +351,29 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
 /// line when the finding carries a consequence, then appends either a fenced
 /// ```suggestion block (when [`suggestion_replacement`] accepts the finding's
 /// `suggested_replacement`) or a `_Fix:_ <prose>` line.  A malformed or non-code
-/// replacement degrades to prose, never a broken suggestion block.
+/// replacement degrades to prose, never a broken suggestion block.  When the
+/// finding's own `verified` outcome owes the reader a caveat
+/// ([`VerifyOutcome::reader_caveat`]) that caveat is prepended as a blockquote
+/// ABOVE the claim, so a refuted or unverified finding can never read as a
+/// surviving one (#5312).
 /// Test: `render_finding_comment_includes_kind_and_fix`,
 /// `render_emits_suggestion_block`, `render_falls_back_to_prose_fix`,
-/// `render_includes_consequence`, `low_confidence_finding_is_hedged`.
+/// `render_includes_consequence`, `low_confidence_finding_is_hedged`,
+/// `render_marks_refuted_finding`, `render_marks_error_refuted_as_unverified`,
+/// `render_leaves_confirmed_and_unjudged_findings_unmarked`.
 pub fn render_finding_comment(finding: &Finding) -> String {
     let mut out = String::with_capacity(256);
+
+    // #5312: a finding the pipeline does not stand behind must say so before it
+    // says anything else — keyed on the finding's own recorded outcome, never on
+    // a per-surface list of outcomes someone remembered to enumerate here.
+    if let Some(caveat) = finding
+        .verified
+        .as_ref()
+        .and_then(VerifyOutcome::reader_caveat)
+    {
+        out.push_str(&format!("{VERIFICATION_CAVEAT_PREFIX} {caveat}\n\n"));
+    }
 
     // Lead line: kind + description, hedged for low confidence (#1416).
     let hedged = if finding.confidence < UNCERTAINTY_THRESHOLD {

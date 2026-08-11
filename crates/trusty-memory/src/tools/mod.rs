@@ -12,7 +12,7 @@
 //! - `memory_recall(palace, query, top_k?)`        -> Vec<Drawer> (L0+L1+L2)
 //! - `memory_recall_deep(palace, query, top_k?)`   -> Vec<Drawer> (L3 deep)
 //! - `memory_list(palace, room?, tag?, limit?)`    -> Vec<Drawer>
-//! - `memory_forget(palace, drawer_id)`            -> ()
+//! - `memory_forget(palace, drawer_id)`            -> status: deleted|not_found
 //! - `palace_create(name, description?)`           -> PalaceId
 //! - `palace_list()`                                -> Vec<PalaceId>
 //! - `palace_info(palace)`                          -> palace metadata + stats
@@ -21,6 +21,7 @@
 //! - `room_rename(palace, room, new_label)`         -> renamed room
 //! - `kg_assert(palace, subject, predicate, object, confidence?, provenance?)` -> ()
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
+//! - `kg_list_subjects(palace, limit?, with_counts?)` -> subjects (#4776)
 //! - `wing_list(palace)`                            -> Vec<WingSummary>
 //! - `wing_create(palace, label)`                   -> wing_id (idempotent)
 //! - `wing_rename(palace, wing, new_label)`         -> WingSummary
@@ -68,8 +69,8 @@ use chat_ops::{
 use dream_ops::{handle_dream_consolidate_room, handle_palace_dream};
 use kg_ops::{
     handle_add_alias, handle_discover_aliases, handle_get_prompt_context, handle_kg_assert,
-    handle_kg_bootstrap, handle_kg_gaps, handle_kg_query, handle_list_prompt_facts,
-    handle_remove_prompt_fact, handle_upgrade_tool,
+    handle_kg_bootstrap, handle_kg_gaps, handle_kg_list_subjects, handle_kg_query,
+    handle_list_prompt_facts, handle_remove_prompt_fact, handle_upgrade_tool,
 };
 use memory_ops::{
     handle_memory_forget, handle_memory_list, handle_memory_note, handle_memory_recall,
@@ -78,7 +79,7 @@ use memory_ops::{
 };
 use palace_ops::{
     handle_palace_compact, handle_palace_create, handle_palace_delete, handle_palace_info,
-    handle_palace_list, handle_palace_reembed, handle_palace_update,
+    handle_palace_list, handle_palace_reembed, handle_palace_unalias, handle_palace_update,
 };
 use room_ops::{handle_room_create, handle_room_list, handle_room_rename};
 use task_ops::{handle_task_add, handle_task_complete, handle_task_list};
@@ -110,12 +111,17 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "list_prompt_facts" => handle_list_prompt_facts(state, args).await,
         "remove_prompt_fact" => handle_remove_prompt_fact(state, args).await,
         "kg_query" => handle_kg_query(state, args).await,
+        // #4776: subject discovery — the read that makes `kg_query` usable
+        // without already knowing a subject.
+        "kg_list_subjects" => handle_kg_list_subjects(state, args).await,
         "memory_list" => handle_memory_list(state, args).await,
         "memory_forget" => handle_memory_forget(state, args).await,
         "palace_info" => handle_palace_info(state, args).await,
         "palace_compact" => handle_palace_compact(state, args).await,
         // #4906: report / repair drawers that have no vector.
         "palace_reembed" => handle_palace_reembed(state, args).await,
+        // #5005: free drawers destroyed by a vector-id collision.
+        "palace_unalias" => handle_palace_unalias(state, args).await,
         "kg_gaps" => handle_kg_gaps(state, args).await,
         "memory_recall_all" => handle_memory_recall_all(state, args).await,
         "get_prompt_context" => handle_get_prompt_context(state, args).await,

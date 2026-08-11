@@ -1,6 +1,6 @@
 [package]
 name        = "trusty-review"
-version     = "0.11.1"
+version     = "0.14.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
@@ -84,16 +84,19 @@ clap         = { workspace = true }
 # #1359) calls it to surface the resolved ticket/spec intent as a review context
 # source.  The ISR is feature-gated in trusty-common so the 11 non-consumer
 # dependents pay nothing; trusty-review opts in here.
-trusty-common = { workspace = true, features = ["intent-source", "config-cli"] }
+# `webhook-relay` (#5182): the console->target relay wire contract AND its
+# receive half — the durable inbox, the listener, and the hardened UDS bind
+# this crate mounts in `webhook_listener`. Implies `uds` and `webhook-hmac`.
+trusty-common = { workspace = true, features = ["intent-source", "config-cli", "webhook-relay"] }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console is
 # no longer bundled into trusty-review (single-owner-per-binary); the standalone
 # `trusty-console` crate is its sole producer.
 
-# ── JWT / HMAC / crypto (GitHub App auth) ─────────────────────────────────
+# ── JWT / crypto (GitHub App auth) ────────────────────────────────────────
+# Why (#5181): `hmac`/`sha2`/`hex` were REMOVED with `verify_webhook_signature`.
+#      `trusty-console` verifies a GitHub delivery's HMAC once, before relaying
+#      (ADR-0034 §3); this crate has no signature to check any more.
 jsonwebtoken = { workspace = true }
-hmac         = { workspace = true }
-sha2         = { workspace = true }
-hex          = { workspace = true }
 base64       = { workspace = true }
 chrono       = { workspace = true }
 

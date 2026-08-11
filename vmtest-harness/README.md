@@ -67,7 +67,7 @@ granularity), and the same assertion oracle.
 | Pattern | Source | What it is good for |
 |---|---|---|
 | `local` (c) | your **working tree**, streamed host→guest as a tar over `tart exec -i` — tracked **and** untracked-but-not-ignored files | testing a change you have not committed |
-| `branch` (b) | `git clone` of `bobmatnyc/trusty-tools` **inside the guest** | testing what is actually on a branch, with no host bytes involved |
+| `branch` (b) | `git clone` of `bobmatnyc/trusty-tools` **inside the guest** — authenticated when you have a `GITHUB_TOKEN`, see [below](#github-credential-propagation-pattern-branch-only) | testing what is actually on a branch, with no host source bytes involved |
 | `released` (a) | `cargo install <pkg> --locked` from **crates.io** | testing what a user gets |
 
 Flags:
@@ -78,6 +78,8 @@ Flags:
   failure. This is the only supported way to leave a VM behind, and
   `vmtest clean --include-kept` is the paired escape hatch. A kept VM is left
   `stopped`, not running; the driver prints the exact commands to boot and inspect it.
+  **Under `run branch` with a token, a kept VM retains your credential on disk** —
+  see [the caveat below](#--keep-retains-the-credential-on-disk).
 - `--dry-run` — preflight + effective-config banner + acquire/release the run
   registry entry, then **stop before the clone**. No VM is created and no guest is
   touched.
@@ -252,6 +254,62 @@ What it asserts, in one run of the **same** predicate the default path uses:
 The negative half is the one that matters. A predicate that accepts a 503 is only
 correct if it still rejects a daemon that is genuinely gone; without that assertion
 all the positive half proves is that the rule got more permissive.
+
+---
+
+## GitHub credential propagation (pattern `branch` only)
+
+`vmtest run branch` clones the repository **inside the guest**. The repository is
+public, so that clone has always *worked* anonymously — but anonymously it shares one
+github.com rate-limit quota with your host and with every concurrent guest on the same
+egress IP. So if the host has a **`GITHUB_TOKEN`** in its environment, the harness
+hands it to the guest and the clone is **authenticated**.
+
+| | |
+|---|---|
+| **Applies to** | `vmtest run branch` **only**. Patterns `local` and `released` never contact github.com and never receive the token — an expired token cannot fail them. |
+| **No token set** | **Not an error.** The run clones anonymously and exits 0 exactly as it did before this existed. The log says so once, as information. |
+| **Turn it off** | `propagate_github_token` (a `vmtest.defaults` key, default `true`) → `VMTEST_PROPAGATE_GITHUB_TOKEN=false vmtest run branch`. |
+| **Bad value** | Anything but exactly `true` or `false` — `0`, `1`, `yes`, `maybe` — is exit **10** at preflight, **before any VM is cloned**, and `--dry-run` catches it too. Values are refused, never guessed at. |
+| **Proof it worked** | An in-guest `git ls-remote` against `repo_url` runs as an actual network step. If github.com rejects the token the run fails **40** in a second or two, naming the cause. |
+
+How it gets there, because two things about it are counter-intuitive:
+
+- It is wired in as **`http.https://github.com/.extraheader`**, not as a credential
+  helper. A helper is consulted only **after a 401**, and github.com serves a public
+  repository with **200** — so `credential.helper store` is never called at all. It
+  looks like it works while delivering zero rate-limit relief; a deliberately invalid
+  token in the credential store still clones fine. An `extraheader` is sent
+  **preemptively** on every request.
+- The guest's inherited **interactive** credential-helper chain is **cleared first**
+  (`git config --global --replace-all credential.helper ''`). The base image ships a
+  `~/.gitconfig` wired to Git Credential Manager; without the reset, writing the header
+  fails with `cannot overwrite multiple values with a single value`, and — worse — a
+  credential GitHub rejects makes `git ls-remote` **hang** in the headless guest instead
+  of failing. The reset turns that hang into an error in a second or two — measured at
+  **1.977 s** end to end for the whole credential step on an invalid-token run.
+
+**The token never appears** in `vmtest.defaults`, in the effective-configuration banner,
+in `repo_url`, in `$VMTEST_GUEST_ENV`, in host `ps` output, or in `$VMTEST_RUNDIR`. It
+crosses to the guest **on stdin** — the same channel the toolchain hand-off uses — into
+a **0600** include file created under `umask 077`. Only its presence and the pass/fail
+outcome are ever logged.
+
+### `--keep` retains the credential on disk
+
+`--keep` leaves the VM on the host in state `stopped` **with the credential include file
+intact**. The header value is **base64, which is encoding and not encryption** — it is
+trivially reversible by anyone who can read the VM image or your home directory.
+
+**The harness tells you this at teardown, not only here.** A `--keep` run that actually
+propagated a token prints the warning and the include file's path immediately before the
+inspection hint, so the caveat arrives when it is actionable rather than only in this
+file. A run with no token, and every `local` / `released` run, prints nothing.
+
+- The remedy is **`vmtest clean --include-kept`**, which deletes the kept VM and the file
+  with it.
+- **If a kept VM was shared, copied, or has outlived its inspection purpose, revoke the
+  token.** Deleting the VM afterwards does not undo exposure that already happened.
 
 ---
 

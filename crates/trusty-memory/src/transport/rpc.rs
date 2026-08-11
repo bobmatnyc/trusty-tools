@@ -205,6 +205,7 @@ const TOOL_METHODS: &[&str] = &[
     "palace_info",
     "palace_list",
     "palace_reembed",
+    "palace_unalias",
     "remove_prompt_fact",
 ];
 

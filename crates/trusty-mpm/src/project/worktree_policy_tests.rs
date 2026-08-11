@@ -14,7 +14,8 @@ use std::path::Path;
 
 use super::{
     REGISTRY_DIR_NAME, registry_data_dir_under, worktree_enabled_for_origin,
-    worktree_enabled_for_origin_at, worktree_enabled_in,
+    worktree_enabled_for_origin_at, worktree_enabled_for_project, worktree_enabled_in,
+    worktree_override_in_project,
 };
 use crate::project::{Project, ProjectRegistry};
 
@@ -262,5 +263,270 @@ fn registry_dir_name_is_frozen() {
         "the registry dir must be a single component directly under the \
          framework root, got {}",
         resolved.display()
+    );
+}
+
+// ── Project-level config layer (#5207) ───────────────────────────────────────
+//
+// Why these five: they pin the full precedence chain the owner ruling
+// introduces — project config > registry > built-in `true` — plus the two
+// failure modes that decide whether the feature is safe to commit to a shared
+// repo (a rejected file, and a clone-based spawn that has no project dir).
+
+/// A project directory carrying `.trusty-mpm.toml` with the given body.
+///
+/// Why: every case below needs a real on-disk project root, since the whole
+/// point of this layer is that the setting travels with the checkout.
+/// What: a `TempDir` whose root holds the committed config file.
+fn project_dir_with_config(body: &str) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(
+        dir.path()
+            .join(crate::core::project_config::PROJECT_CONFIG_FILE),
+        body,
+    )
+    .expect("write project config");
+    dir
+}
+
+/// The project's committed config OUTRANKS the machine-global registry (#5207).
+///
+/// Why: this is the ruling itself — "configuration should be at the project
+/// level". The registry says isolation is ON for this repo; the repo says OFF,
+/// and the repo wins. Without the project layer this resolves to `true`.
+/// Test: itself.
+#[tokio::test]
+async fn worktree_project_config_overrides_registry() {
+    let proj = project_dir_with_config("worktree = false\n");
+    let dir = crate::test_support::hermetic_temp_dir();
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry
+        .register(project(
+            "widget",
+            "https://github.com/acme/widget",
+            Some(true),
+        ))
+        .await
+        .expect("register");
+
+    assert!(
+        !worktree_enabled_for_project(proj.path(), &registry, "https://github.com/acme/widget")
+            .await,
+        "the project's committed config must outrank the machine-global registry"
+    );
+}
+
+/// The project layer wins in BOTH directions, not just toward the opt-out.
+///
+/// Why: a precedence rule that only ever moves one way is indistinguishable
+/// from an `if disabled_anywhere` short-circuit. A project that requires
+/// isolation must be able to force it back ON over an operator's local opt-out.
+/// Test: itself.
+#[tokio::test]
+async fn worktree_project_config_can_force_isolation_on() {
+    let proj = project_dir_with_config("worktree = true\n");
+    let dir = crate::test_support::hermetic_temp_dir();
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry
+        .register(project(
+            "widget",
+            "https://github.com/acme/widget",
+            Some(false),
+        ))
+        .await
+        .expect("register");
+
+    assert!(
+        worktree_enabled_for_project(proj.path(), &registry, "https://github.com/acme/widget")
+            .await,
+        "a project that requires isolation must override a local registry opt-out"
+    );
+}
+
+/// With NO project config, the registry still decides — no regression (#5207).
+///
+/// Why: almost every project has no `.trusty-mpm.toml`. Adding the layer must
+/// leave all of them on exactly the pre-#5207 behaviour.
+/// Test: itself.
+#[tokio::test]
+async fn worktree_project_config_absent_falls_back_to_registry() {
+    let proj = tempfile::TempDir::new().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry
+        .register(project(
+            "writing",
+            "https://github.com/bobmatnyc/writing",
+            Some(false),
+        ))
+        .await
+        .expect("register");
+
+    assert!(
+        !worktree_enabled_for_project(
+            proj.path(),
+            &registry,
+            "https://github.com/bobmatnyc/writing"
+        )
+        .await,
+        "with no project config the registry opt-out must still apply"
+    );
+}
+
+/// With NEITHER layer deciding, the built-in `true` stands (#3455 default).
+///
+/// Why: the floor of the chain. An unregistered repo with no project config
+/// gets worktree isolation, exactly as before #3455.
+/// Test: itself.
+#[tokio::test]
+async fn worktree_defaults_true_with_neither_layer() {
+    let proj = tempfile::TempDir::new().expect("tempdir");
+    let dir = crate::test_support::hermetic_temp_dir();
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+
+    assert!(
+        worktree_enabled_for_project(
+            proj.path(),
+            &registry,
+            "https://github.com/acme/unregistered"
+        )
+        .await,
+        "neither layer deciding must leave the built-in `true` default intact"
+    );
+}
+
+/// A REJECTED project config contributes nothing and falls through (#5207).
+///
+/// Why: this is the runtime half of the `deny_unknown_fields` contract. The
+/// file is committed, so one bad push reaches every operator at once — it must
+/// not brick their spawns, and it must not half-apply either. `worktre` is a
+/// typo, so the whole file is discarded and the registry answers instead. Note
+/// what this proves: the typo did NOT silently read as `worktree = false`.
+/// Test: itself.
+#[tokio::test]
+async fn worktree_project_config_malformed_falls_back_to_registry() {
+    let proj = project_dir_with_config("worktre = false\n");
+    let dir = crate::test_support::hermetic_temp_dir();
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry
+        .register(project(
+            "widget",
+            "https://github.com/acme/widget",
+            Some(true),
+        ))
+        .await
+        .expect("register");
+
+    assert!(
+        worktree_enabled_for_project(proj.path(), &registry, "https://github.com/acme/widget")
+            .await,
+        "a rejected project config must contribute nothing, leaving the registry to decide"
+    );
+    assert_eq!(
+        worktree_override_in_project(proj.path()),
+        None,
+        "a file that fails deny_unknown_fields must yield no override at all"
+    );
+}
+
+/// The clone-based branch — no project dir on disk — still resolves (#5207).
+///
+/// Why: `spawn_managed_routed`'s clone branch asks the question BEFORE the
+/// project exists anywhere, so it keeps calling the registry-only entry point.
+/// This pins that the pre-existing path is untouched, and that pointing the
+/// project-aware resolver at a non-existent directory degrades to the registry
+/// rather than panicking.
+/// Test: itself.
+#[tokio::test]
+async fn worktree_clone_branch_resolves_without_a_project_dir() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry
+        .register(project(
+            "writing",
+            "https://github.com/bobmatnyc/writing",
+            Some(false),
+        ))
+        .await
+        .expect("register");
+
+    // The clone branch's own entry point is unchanged.
+    assert!(
+        !worktree_enabled_for_origin(&registry, "https://github.com/bobmatnyc/writing").await,
+        "the clone-based branch must keep resolving from the registry alone"
+    );
+
+    // And the project-aware resolver must not panic or invent an answer when
+    // handed a path that does not exist yet.
+    let missing = dir.path().join("not-cloned-yet");
+    assert!(
+        !worktree_enabled_for_project(&missing, &registry, "https://github.com/bobmatnyc/writing")
+            .await,
+        "a non-existent project dir must fall through to the registry"
+    );
+}
+
+/// Contract row 4 — AGENT isolation survives #5274 intact on a `worktree: true`
+/// project, whether that `true` is explicit or the built-in default.
+///
+/// Why: #5274 took PM SESSION PLACEMENT away from this resolver family, and the
+/// first attempt at that change took agent isolation with it — it flipped
+/// `Project::worktree_enabled` and `worktree_enabled_in` from `unwrap_or(true)`
+/// to `unwrap_or(false)`, which silently disabled agent worktrees on every one
+/// of the 31-of-33 registered projects carrying no explicit key. CI caught one
+/// consequence (`patch_round_trips_worktree_opt_out`); nothing asserted the
+/// rule itself. The owner ruling keeps the flag with a specific meaning —
+/// "`worktree: false` means that the entire project works on the main
+/// checkout" — so `true`, however it is reached, must still mean the agents
+/// this project dispatches are isolated.
+/// What: drives [`worktree_enabled_for_project`], the resolver an
+/// agent-isolation consumer reads, across both routes to `true` — an explicit
+/// `worktree: true` registration, and a project the registry has never heard of
+/// — and asserts both resolve isolation ON. The third assertion pins that
+/// `false` is still reachable, so a resolver hard-wired to `true` fails here
+/// too rather than passing the first two by accident.
+/// Test: itself. RED on the reverted `adf4faf76` default flip: assertions 1 and
+/// 2 both fail.
+#[tokio::test]
+async fn agent_isolation_stays_enabled_for_a_worktree_true_project() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    registry
+        .register(project(
+            "isolated",
+            "https://github.com/acme/isolated",
+            Some(true),
+        ))
+        .await
+        .expect("register");
+    registry
+        .register(project(
+            "on-main",
+            "https://github.com/acme/on-main",
+            Some(false),
+        ))
+        .await
+        .expect("register");
+
+    // No `.trusty-mpm.toml` anywhere here: this asserts the registry + built-in
+    // layers, which are the two the flip broke.
+    let proj = tempfile::TempDir::new().expect("tempdir");
+
+    assert!(
+        worktree_enabled_for_project(proj.path(), &registry, "https://github.com/acme/isolated")
+            .await,
+        "#5274 row 4: an explicit `worktree: true` must keep agent isolation ON"
+    );
+    assert!(
+        worktree_enabled_for_project(proj.path(), &registry, "https://github.com/acme/unheard-of")
+            .await,
+        "#5274 row 4: a project with no registry entry must default to agent \
+         isolation ON — flipping this default is the defect this test guards"
+    );
+    assert!(
+        !worktree_enabled_for_project(proj.path(), &registry, "https://github.com/acme/on-main")
+            .await,
+        "`worktree: false` must still reach the main-checkout answer, or the two \
+         assertions above would pass for a resolver hard-wired to `true`"
     );
 }

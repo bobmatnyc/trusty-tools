@@ -1,6 +1,6 @@
 //! Role-based access control for tool execution (#445).
 //!
-//! Why: Open-mpm exposes tools over multiple transports (CLI, REPL, Slack,
+//! Why: trusty-agents exposes tools over multiple transports (CLI, REPL, Slack,
 //! Telegram, HTTP API). Some tools (memory writes, shell exec, ticketing
 //! mutations) are unsafe for arbitrary end-users while still being essential
 //! for the trusted operator at the controller. RBAC gates tool execution on

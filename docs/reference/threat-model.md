@@ -1,5 +1,22 @@
 # HTTP Trust-Boundary Threat Model
 
+🔴 **This document's per-daemon inventory is superseded and needs revision.**
+[ADR-0032](../adr/0032-no-service-owns-http-console-is-the-only-http-surface.md)
+(2026-08-07 owner ruling) reverses the premise this table is built on: no
+sibling daemon runs its own HTTP server at all, loopback-only included —
+inter-service traffic moves to UDS, and only `trusty-console` keeps HTTP.
+[ADR-0018](../adr/0018-loopback-only-doctrine.md), the doctrine this document
+was written to audit compliance against, is now `Superseded by 0032`. The
+bind/guard/console-proxy-allowlist table below still describes the **live**
+topology as of this writing (nothing has migrated), so it is not yet wrong
+about current reality — but it is no longer a description of the target
+architecture, and most of its columns (per-daemon bind address, origin
+guard) stop applying once a daemon has no HTTP listener to guard.
+Re-deriving this table for the UDS topology is implementation work gated on
+an open question ADR-0032 does not resolve — see that ADR's Open Questions
+section (webhook ingress for on-demand processes) — and is out of scope for
+this update. Read ADR-0032 before treating any row below as prescriptive.
+
 This is the authoritative reference for **who can reach which trusty-\* HTTP
 surface, from where, and what stops them.** It exists because the
 2026-07-19 architecture review (`docs/research/architecture-review-2026-07-19.md`,
@@ -25,6 +42,34 @@ the full context, the rejected full-UDS alternative, and the consistency
 vetting against ADR-0011/ADR-0017. This document does not restate that
 reasoning — it is the compliance inventory the ADR promises.
 
+**[ADR-0031 — transport by purpose](../adr/0031-uds-for-inter-crate-transport-http-for-external.md)**
+(Proposed) sits on a different axis and does **not** amend this doctrine.
+ADR-0018 governs bind-address reachability; ADR-0031 governs which local
+transport inter-crate callers use to reach an already-loopback-bound daemon —
+UDS for inter-crate same-host traffic, one shared HTTP server for everything
+external. **Nothing has migrated**, so the inventory below still describes the
+live topology. Whatever HTTP remains under ADR-0031 stays governed by ADR-0018
+exactly as written, and ADR-0031 authorises no new off-loopback binding. If
+adopted it would *strengthen* this doctrine's goal: a loopback TCP port is
+reachable by any local process, a `0600` socket is not. See ADR-0031 for the
+classification test.
+
+**Two things this table does not show, worth stating so it is not misread:**
+
+1. **It is an inventory of HTTP surfaces, not of the whole transport topology.**
+   Two daemons have no HTTP surface and therefore no row:
+   **trusty-bm25-daemon** (per-palace Unix-socket JSON-RPC; the subprocess owns
+   the index and is itself the writer lock) and **trusty-embedderd** (Unix
+   socket + stdio). Their absence is correct here, not an omission.
+2. **Each daemon's stdio/MCP surface is a client of its own HTTP daemon, not a
+   separate surface.** `trusty-memory serve --stdio` is a pure proxy to
+   `POST /rpc` and never opens redb (#1078); trusty-search's and
+   trusty-analyze's MCP servers are HTTP clients of theirs. So the "native MCP
+   stdio bridge" listed among the direct clients below reaches the daemon
+   through the same loopback port as everything else, and inherits the same
+   guard. If ADR-0031's tool paths later move off HTTP, these rows will need to
+   distinguish a daemon's remaining management routes from its tool routes.
+
 ## Client inventory
 
 Ports and bind defaults below were verified against `origin/main` at the time
@@ -35,16 +80,27 @@ the daemons' listener setup code moves independently of this doc.
 |---|---|---|---|---|---|
 | **trusty-search** | `127.0.0.1:7878` (`service/constants.rs::DEFAULT_PORT`) | **Yes** — router-wide `SelfOrigins` guard (`service/server/mod.rs`) | Yes (`search` → `trusty-search`) | Yes, embedded (`ui/`) | CLI (`trusty-search status`/`port`), native MCP stdio bridge (HTTP→`/rpc`), embedded UI, console proxy |
 | **trusty-memory** | `127.0.0.1:7070`–`7079` (auto-selects next free); `--http` accepts any explicit addr | **Yes** — router-wide `SelfOrigins` guard (`web/mod.rs`) | Yes (`memory` → `trusty-memory`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge — a pure HTTP proxy forwarding JSON-RPC to the daemon's own `/rpc` (no local tool logic), embedded UI, console proxy |
-| **trusty-analyze** | `127.0.0.1:7879` (`commands/port.rs::DEFAULT_PORT`) | **Yes** — router-wide `SelfOrigins` guard (`service/routes.rs`) | Yes (`analyze` → `trusty-analyze`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge, embedded UI, console proxy, **direct GitHub webhook** (`POST /webhooks/github` — see Known Gaps) |
-| **trusty-review** | `127.0.0.1:7891` | **Yes** — `SelfOrigins` guard wraps all routes (`service/routes.rs`) | Yes (`review` → `trusty-review`) | No embedded UI | CLI, console proxy, HMAC-verified GitHub webhook (signature check is independent of the origin guard) |
-| **trusty-agents** | **`0.0.0.0:7654`** (LAN-reachable by default) — optional bearer auth, **off by default** | **No** | **No** — not yet in the allowlist | Yes, separate `agents-ui` crate | CLI, native MCP stdio bridge, `agents-ui` (Tauri, talks directly to the `0.0.0.0` API), any host on the LAN (this is the gap) |
+| **trusty-analyze** | `127.0.0.1:7879` (`commands/port.rs::DEFAULT_PORT`) | **Yes** — router-wide `SelfOrigins` guard (`service/routes.rs`) | Yes (`analyze` → `trusty-analyze`) | Yes, embedded (`ui/`) | CLI, native MCP stdio bridge, embedded UI, console proxy. **No webhook surface** — `POST /webhooks/github` was retired in #5181 and 404s |
+| **trusty-review** | `127.0.0.1:7891` | **Yes** — `SelfOrigins` guard wraps all routes (`service/routes.rs`) | Yes (`review` → `trusty-review`) | No embedded UI | CLI, console proxy. **No webhook surface** — `POST /pr/github/webhook` was retired in #5181 and 404s |
+| **trusty-agents** | `127.0.0.1:8080` (`--port`; 7654 is the conventional dev/UI port, passed explicitly). `--bind` is an explicit non-loopback opt-in that `serve_with_config` **refuses to start without `--api-token`** (`api/server/routes.rs`) | **Yes** — router-wide `SelfOrigins` guard via `with_guarded_middleware` (`api/server/routes.rs::build_router_with_origins`) | Yes (`agents` → `trusty-agents`, #3331) | Yes, separate `agents-ui` crate | CLI, native MCP stdio bridge, `agents-ui` (Tauri — writes go over Tauri IPC, not HTTP), console proxy |
 | **trusty-mpm** | `127.0.0.1:7880` | **Yes** — `guard_router` wraps the listener with the `SelfOrigins` guard (`daemon/api/origin_guard.rs`) | Yes (`mpm` → `trusty-mpm`, #1849 Phase 1) | No embedded UI (separate `trusty-mpm-gui` Tauri app) | CLI (`tm`), native MCP stdio bridge, `trusty-mpm-gui` (talks **directly** to the daemon, not gateway-first — migration tracked as [#3333](https://github.com/bobmatnyc/trusty-tools/issues/3333), #1849 Phase 2), console proxy |
 | **trusty-console** | `127.0.0.1:7788` by default; `--tailscale` widens to a dual listener (loopback + tailnet IP); Funnel mode (ADR-0017, Proposed) layers public HTTPS on top | Yes — the original router-wide guard this pattern was lifted from (`crates/trusty-common/src/server/origin_guard.rs` docs the provenance: #3268/#3269/#3280) | n/a — console is the proxy, not a proxied target (`full_id("console")` is explicitly `None`) | Yes, the dashboard SPA | Browsers (local or, in `--tailscale`/Funnel mode, remote), every CLI/UI above via the reverse proxy, and — the **sole off-loopback surface** per ADR-0018 |
 
-**One item above is still in progress:** trusty-agents'
-bind/guard/allowlist fix (#3329, epic #3328). The trusty-mpm `--tailscale`
-listener removal (#3330) and trusty-review origin guard (#3332) are resolved in
-this version.
+**Every row above is now resolved.** trusty-agents' bind/guard/allowlist fix
+(#3329, epic #3328) landed in [#3341](https://github.com/bobmatnyc/trusty-tools/pull/3341)
+together with the console `agents` proxy route (#3331); the trusty-mpm
+`--tailscale` listener removal (#3330) and trusty-review origin guard (#3332)
+were resolved earlier.
+
+**Remote access to trusty-agents goes through trusty-console**, not through a
+direct bind. Per [ADR-0018](../adr/0018-loopback-only-doctrine.md) console is
+the sole off-loopback surface and the only component that widens over
+Tailscale, and [ADR-0031](../adr/0031-uds-for-inter-crate-transport-http-for-external.md) routes all
+external comms through the one shared HTTP server. trusty-agents publishes its
+bound address to the standard `http_addr` discovery file so the console proxy
+resolves `/api/agents/*` to it. The `--bind` escape hatch remains for the case
+console cannot cover, which is why it is token-gated at startup rather than
+merely discouraged.
 
 ## Why the guard fails open on a missing `Origin` header
 
@@ -79,16 +135,14 @@ firing a cross-origin write.
 
 ## Known gaps
 
-- **ADR-0017's webhook-ingress gap.** [ADR-0017](../adr/0017-shared-ingress-via-console-tailscale-funnel.md)
-  (Proposed) plans a single `/api/webhooks/{source}` endpoint mounted in
-  trusty-mpm and reverse-proxied by console — but it does not mention
-  retiring trusty-analyze's existing **direct** `POST /webhooks/github`
-  endpoint (`crates/trusty-analyze/src/service/routes.rs`). Today that route
-  is reachable only on trusty-analyze's own loopback bind (consistent with
-  the loopback-only doctrine), but it is a second, unproxied webhook path
-  that predates ADR-0017 and isn't addressed by it. Flagged here for whoever
-  lands ADR-0017: decide whether analyze's webhook route is retired in favor
-  of the new shared endpoint, or documented as a deliberate second path.
+- ~~**ADR-0017's webhook-ingress gap.**~~ **CLOSED (#5181).**
+  [ADR-0034](../adr/0034-webhook-ingress-console-relays-over-uds-to-a-supervised-on-demand-process.md)
+  settled it: `trusty-console`'s `POST /api/webhooks/{source}` is the only HTTP
+  webhook surface in the workspace and the only holder of the shared secret. It
+  verifies the HMAC once, spools the payload durably, and relays over UDS.
+  Both direct routes — trusty-analyze's `POST /webhooks/github` and
+  trusty-review's `POST /pr/github/webhook` — are deleted and now 404, so
+  neither crate verifies a signature or exposes a second, unproxied path.
 - **Console strips the `Upgrade` header.** The reverse proxy's hop-by-hop
   header list (`crates/trusty-console/src/proxy/routes.rs:37`,
   `HOP_BY_HOP`) includes `"upgrade"` alongside the standard RFC 7230 §6.1 set.
@@ -101,9 +155,10 @@ firing a cross-origin write.
 - **trusty-agents' undeclared 7th HTTP surface.** `crates/trusty-agents/src/search/service/mod.rs`
   runs a per-project search-as-a-service daemon in the background (PID
   tracked at `.trusty-agents/state/search.pid`). It does not appear in any
-  daemon inventory, port table, or (until this document) threat model; it is
-  not currently subject to the loopback-only doctrine's enforcement and is
-  not wrapped by the shared write-origin guard. Tracked as
+  daemon inventory, port table, or (until this document) threat model. It does
+  bind loopback — `TcpListener::bind("127.0.0.1:0")`, hardcoded, so there is no
+  configuration that widens it — but that is incidental rather than enforced,
+  and it is not wrapped by the shared write-origin guard. Tracked as
   [#3335](https://github.com/bobmatnyc/trusty-tools/issues/3335) — needs
   either formal declaration (loopback bind + guard) or retirement.
 

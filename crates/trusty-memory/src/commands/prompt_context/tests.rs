@@ -47,6 +47,7 @@ fn filter_drawers_by_deny_tags_handles_edge_cases() {
         content: "irrelevant".into(),
         tags: tags.iter().map(|s| s.to_string()).collect(),
         layer: Some(2),
+        score: Some(0.9),
     };
 
     // Empty deny list → passthrough.
@@ -130,12 +131,16 @@ fn compose_injection_truncates_at_cap() {
     // 4 KB byte cap. Drawer previews are already capped at
     // DRAWER_PREVIEW_CHARS so the cap-trigger has to come from the
     // global section.
-    let big_global = "## Big block\n".to_string() + &"- fact line\n".repeat(500);
+    // #5037 raised INJECTION_BYTE_CAP from 4 KB to 8 KB; size the fixture off
+    // the constant so the next raise cannot silently stop exercising truncation.
+    let lines = INJECTION_BYTE_CAP / "- fact line\n".len() + 64;
+    let big_global = "## Big block\n".to_string() + &"- fact line\n".repeat(lines);
     let drawers: Vec<RecalledDrawer> = (0..5)
         .map(|i| RecalledDrawer {
             content: format!("drawer {i} content"),
             tags: vec!["tag1".into()],
             layer: Some(2),
+            score: Some(0.9),
         })
         .collect();
     let triples: Vec<RawTriple> = (0..5)
@@ -145,7 +150,7 @@ fn compose_injection_truncates_at_cap() {
             object: "object".into(),
         })
         .collect();
-    let out = compose_injection(Some(&big_global), &drawers, &triples, Some("alpha"));
+    let out = compose_injection(Some(&big_global), &drawers, 0, &triples, Some("alpha"));
     assert!(
         out.len() <= INJECTION_BYTE_CAP,
         "expected len <= cap; got {}",
@@ -169,8 +174,214 @@ fn compose_injection_truncates_at_cap() {
 #[test]
 fn compose_injection_empty_inputs_yields_empty() {
     use format::compose_injection;
-    let out = compose_injection(None, &[], &[], Some("alpha"));
+    let out = compose_injection(None, &[], 0, &[], Some("alpha"));
     assert!(out.is_empty(), "got: {out:?}");
+}
+
+/// Why (issue #5037): the truncation budget was raised from 4 KB to 8 KB
+/// alongside the relevance floor. Pin the new ceiling explicitly so a future
+/// edit cannot quietly shrink it back and blame the floor for lost content.
+/// What: asserts the constant and that `compose_injection` respects it.
+/// Test: itself.
+#[test]
+fn injection_byte_cap_is_eight_kib() {
+    assert_eq!(INJECTION_BYTE_CAP, 8 * 1024);
+    assert_eq!(DEFAULT_TOP_K, 12, "requirement 2: max size raised from 5");
+}
+
+/// Why (issue #5037, requirement 1 + the primary probe): "what is the capital
+/// of France" returned five drawers all scoring exactly `0.15` — the
+/// `L1_NO_SIMILARITY_PENALTY` floor — and the reader could not tell them from a
+/// genuine `0.56` hit. That set must now be empty.
+/// What: five 0.15-scored drawers through the relevance filter at the shipped
+/// default; asserts nothing survives and all five are counted as withheld.
+/// Test: itself.
+#[test]
+fn relevance_floor_drops_all_noise_drawers() {
+    use filter::{filter_drawers_by_relevance_floor, RecalledDrawer};
+    let noise: Vec<RecalledDrawer> = (0..5)
+        .map(|i| RecalledDrawer {
+            content: format!("off-topic session drawer {i}"),
+            tags: vec!["signal".into()],
+            layer: Some(1),
+            // The exact value `rescore_l1_by_similarity` assigns an essential
+            // drawer the HNSW search never returned.
+            score: Some(0.15),
+        })
+        .collect();
+    let out = filter_drawers_by_relevance_floor(noise, DEFAULT_RELEVANCE_FLOOR);
+    assert!(
+        out.kept.is_empty(),
+        "0.15 L1-penalty drawers must not reach the injection; got {:?}",
+        out.kept.len()
+    );
+    assert_eq!(out.withheld, 5, "all five must be counted for the notice");
+}
+
+/// Why (issue #5037): a floor that also cut real matches would trade one defect
+/// for a worse one. `0.56` is the measured median of the self-retrieval signal
+/// population against the live palace.
+/// What: one genuine hit among four noise drawers; asserts only the hit
+/// survives, in order, with the rest counted.
+/// Test: itself.
+#[test]
+fn relevance_floor_keeps_high_scoring_drawer() {
+    use filter::{filter_drawers_by_relevance_floor, RecalledDrawer};
+    let make = |content: &str, score: f32| RecalledDrawer {
+        content: content.into(),
+        tags: Vec::new(),
+        layer: Some(2),
+        score: Some(score),
+    };
+    let mixed = vec![
+        make("genuine on-topic hit about rust integration", 0.56),
+        make("noise a", 0.15),
+        make("noise b", 0.15),
+        make("noise c", 0.2446),
+        make("noise d", 0.3439),
+    ];
+    let out = filter_drawers_by_relevance_floor(mixed, DEFAULT_RELEVANCE_FLOOR);
+    assert_eq!(out.kept.len(), 1, "the genuine hit must survive");
+    assert!(out.kept[0].content.contains("genuine on-topic hit"));
+    assert_eq!(out.withheld, 4);
+}
+
+/// Why (issue #5037): a drawer whose `score` the daemon did not send is
+/// unjudgeable. Dropping it would let a wire-format change silently empty every
+/// injection — the fail-open inversion this fix exists to prevent.
+/// What: a drawer with `score: None` through the filter at the default floor.
+/// Test: itself.
+#[test]
+fn relevance_floor_keeps_drawer_without_score() {
+    use filter::{filter_drawers_by_relevance_floor, RecalledDrawer};
+    let drawers = vec![RecalledDrawer {
+        content: "daemon predates the score field".into(),
+        tags: Vec::new(),
+        layer: Some(2),
+        score: None,
+    }];
+    let out = filter_drawers_by_relevance_floor(drawers, DEFAULT_RELEVANCE_FLOOR);
+    assert_eq!(out.kept.len(), 1, "unknown score must not mean dropped");
+    assert_eq!(out.withheld, 0);
+}
+
+/// Why (issue #5037, requirement 4): a partial drop must tell the reader more
+/// exists, so "the model saw everything relevant" is never assumed wrongly.
+/// What: composes with two kept drawers and three withheld; asserts the count
+/// and the `memory_recall` pointer both render.
+/// Test: itself.
+#[test]
+fn compose_injection_announces_withheld_drawers() {
+    use filter::RecalledDrawer;
+    use format::compose_injection;
+    let drawers: Vec<RecalledDrawer> = (0..2)
+        .map(|i| RecalledDrawer {
+            content: format!("kept drawer {i}"),
+            tags: Vec::new(),
+            layer: Some(2),
+            score: Some(0.7),
+        })
+        .collect();
+    let out = compose_injection(None, &drawers, 3, &[], Some("alpha"));
+    assert!(out.contains("kept drawer 0"), "kept content must render");
+    assert!(
+        out.contains("3 further memories withheld"),
+        "the withheld count must be visible; got:\n{out}"
+    );
+    assert!(
+        out.contains("memory_recall"),
+        "the notice must point at how to see past the floor; got:\n{out}"
+    );
+}
+
+/// Why (issue #5037, requirement 4 — the case the ruling calls out): returning
+/// zero drawers where five noisy ones used to appear is correct, but only if it
+/// is visible. Silence must be distinguishable from nothing-existed.
+/// What: composes with zero kept and five withheld, then with zero of both.
+/// Asserts the first announces itself and the second stays silent — an empty
+/// palace has nothing to announce.
+/// Test: itself.
+#[test]
+fn compose_injection_announces_total_silence() {
+    use format::compose_injection;
+    let silenced = compose_injection(None, &[], 5, &[], Some("alpha"));
+    assert!(
+        !silenced.is_empty(),
+        "an all-withheld recall must not render as an empty injection"
+    );
+    assert!(
+        silenced.contains("cleared the relevance floor") && silenced.contains('5'),
+        "total silence must be announced with its count; got:\n{silenced}"
+    );
+    assert!(
+        silenced.contains("Nothing is missing from the palace"),
+        "the notice must distinguish withheld from absent; got:\n{silenced}"
+    );
+
+    let nothing_existed = compose_injection(None, &[], 0, &[], Some("alpha"));
+    assert!(
+        nothing_existed.is_empty(),
+        "zero candidates is not a withheld recall; got:\n{nothing_existed}"
+    );
+}
+
+/// Why (issue #5037): the floor is required to be *configurable*, including
+/// settable to zero to restore pre-fix behaviour. The clamp is the only thing
+/// standing between an operator typo and a disabled or total-blackout gate.
+/// What: exercises `clamp_floor` across unset, valid, zero, out-of-range,
+/// unparseable, and NaN inputs.
+/// Test: itself.
+#[test]
+fn configured_relevance_floor_clamps_to_bounds() {
+    assert_eq!(clamp_floor(None), DEFAULT_RELEVANCE_FLOOR);
+    assert_eq!(clamp_floor(Some("0.5")), 0.5);
+    assert_eq!(clamp_floor(Some(" 0.42 ")), 0.42);
+    assert_eq!(clamp_floor(Some("0")), 0.0, "zero must disable the gate");
+    assert_eq!(clamp_floor(Some("-3")), 0.0);
+    assert_eq!(clamp_floor(Some("9")), 1.0);
+    assert_eq!(clamp_floor(Some("banana")), DEFAULT_RELEVANCE_FLOOR);
+    assert_eq!(clamp_floor(Some("NaN")), DEFAULT_RELEVANCE_FLOOR);
+}
+
+/// Why (issue #5037, requirement 2): the K ceiling moved with the default, and
+/// a ceiling below the default would silently cap every operator override.
+/// What: exercises `clamp_top_k` across unset, valid, zero, over-ceiling, and
+/// unparseable inputs.
+/// Test: itself.
+#[test]
+fn configured_top_k_clamps_to_bounds() {
+    assert_eq!(clamp_top_k(None), DEFAULT_TOP_K);
+    assert_eq!(clamp_top_k(Some("7")), 7);
+    assert_eq!(clamp_top_k(Some("0")), DEFAULT_TOP_K);
+    assert_eq!(clamp_top_k(Some("999")), MAX_TOP_K);
+    assert_eq!(clamp_top_k(Some("nope")), DEFAULT_TOP_K);
+}
+
+/// Why (issue #5037, requirement 3): the recall query must be the whole user
+/// input. `hook_prompt_excerpt` exists a few lines away in the same module and
+/// truncates for telemetry — wiring it into the query by mistake would fragment
+/// every recall silently. Pin that `parse_user_prompt` hands back the prompt
+/// entire.
+/// What: a 12,000-character prompt through `parse_user_prompt`; asserts the
+/// result is byte-identical, and that the telemetry excerpt is not.
+/// Test: itself.
+#[test]
+fn recall_query_is_the_whole_prompt() {
+    let long: String = "explain the retrieval floor and why it matters. "
+        .repeat(400)
+        .trim_end()
+        .to_string();
+    assert!(long.len() > 12_000, "fixture must exceed any plausible cap");
+    let payload = serde_json::json!({ "prompt": long, "cwd": "/tmp" }).to_string();
+
+    let parsed = parse_user_prompt(&payload);
+    assert_eq!(parsed, long, "the recall query must not be truncated");
+
+    // The telemetry excerpt IS truncated — that asymmetry is the point.
+    assert!(
+        crate::hook_prompt_excerpt(&parsed).len() < parsed.len(),
+        "excerpt helper must stay distinct from the query path"
+    );
 }
 
 /// Why (issue #125): when Claude Code invokes the UserPromptSubmit hook,
@@ -351,6 +562,80 @@ async fn prompt_context_recalls_palace_drawers() {
     addr_handle.shutdown().await;
 }
 
+/// Why (issue #5037, end to end): the unit tests above pin the floor over
+/// synthetic scores. This one proves the whole chain — real embedder, real HTTP
+/// recall, real `score` on the wire, real filter — turns an off-topic prompt
+/// into zero injected drawers plus a visible withheld notice, which is the
+/// behaviour the probe found missing ("what is the capital of France" returned
+/// five drawers at 0.15, rendered as if they matched).
+/// What: populates a palace with three Rust/Python/KG drawers, then submits a
+/// prompt about none of them. Asserts no drawer content reaches the injection,
+/// and that the block says results were withheld rather than going silent.
+/// Test: itself.
+/// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+#[cfg(feature = "axum-server")]
+#[tokio::test]
+async fn prompt_context_off_topic_prompt_withholds_and_says_so() {
+    let _guard = crate::commands::env_test_lock().lock().await;
+    unsafe {
+        std::env::remove_var(ENV_MIN_SCORE);
+        std::env::remove_var(ENV_RECALL_DENY_TAGS);
+    }
+    let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+        spin_up_test_daemon_with_palace("prompt-ctx-floor-e2e").await;
+
+    for (text, tags) in [
+        (
+            "Rust integration uses tokio for async tasks and serde for JSON encoding",
+            vec!["rust", "tokio"],
+        ),
+        (
+            "Python bindings ship via PyO3 with custom ABI shims for the runtime",
+            vec!["python", "pyo3"],
+        ),
+        (
+            "Knowledge graph stores triples in redb with valid_from intervals per edge",
+            vec!["kg", "redb"],
+        ),
+    ] {
+        let tags_json: Vec<serde_json::Value> = tags.iter().map(|t| json!(t)).collect();
+        let _ = crate::tools::dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": slug,
+                "text": text,
+                "room": "General",
+                "tags": tags_json,
+            }),
+        )
+        .await
+        .expect("memory_remember");
+    }
+
+    // The probe query from #5037 — nothing in this palace answers it.
+    let payload = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": project_dir.to_string_lossy(),
+        "prompt": "what is the capital of France"
+    })
+    .to_string();
+    let body = build_injection_body(&payload).await;
+
+    for leaked in ["tokio", "PyO3", "valid_from"] {
+        assert!(
+            !body.contains(leaked),
+            "off-topic prompt must not inject `{leaked}`; got:\n{body}"
+        );
+    }
+    assert!(
+        body.contains("relevance floor"),
+        "a withheld recall must announce itself, not go silent; got:\n{body}"
+    );
+
+    addr_handle.shutdown().await;
+}
+
 /// Why (issue #134, negative case): when the resolved palace has no
 /// drawers AND no global hot facts have been asserted, the hook must
 /// still emit a safe placeholder so downstream consumers see byte-
@@ -411,6 +696,14 @@ async fn spin_up_test_daemon_with_palace(
     String,
     DaemonHandle,
 ) {
+    // Seed the process-wide `retrieval::shared_embedder()` OnceCell with
+    // `MockEmbedder`: every caller of this helper writes fixture drawers via
+    // `memory_remember`, which embeds. The cell is first-writer-wins for the
+    // whole process, so under `cargo test` a sibling test's seed satisfied
+    // these; under per-test process isolation (`cargo nextest run`) each gets a
+    // virgin cell and reaches for the real ONNX model (HTTP 429 in CI) — same
+    // defect class as #4413. The call is idempotent, so order does not matter.
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
     let data_tmp = tempfile::tempdir().expect("data tempdir");
     let project_tmp = tempfile::tempdir().expect("project tempdir");
     // Build a project directory whose basename equals the palace slug.
@@ -914,4 +1207,344 @@ async fn handle_prompt_context_fails_open_on_slow_daemon() {
         "handle_prompt_context took {elapsed:?}, expected under budget {budget:?} \
          (a stalled daemon must never make the hook wait out its own timeout)"
     );
+}
+
+/// Why (issue #5038, symptom 1): `memory_remember` stamps every drawer with the
+/// reserved `creator:*` namespace — `creator:cwd` alone is a ~90-character
+/// absolute path — and the injection rendered all of it. Over 17,176 real
+/// firings those tags are 33.4% of every tag byte injected. They tell a model
+/// nothing about what the drawer says.
+/// What: a drawer carrying provenance tags among topical ones through
+/// `render_tags`; asserts no `creator:` survives and the topical tags do.
+/// Test: itself.
+#[test]
+fn injection_drops_provenance_tags() {
+    use format::render_tags;
+    let tags: Vec<String> = [
+        "rust",
+        "creator:client=trusty-memory-mcp",
+        "tokio",
+        "creator:version=0.21.2",
+        "creator:source=mcp",
+        "creator:cwd=/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.base",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let rendered = render_tags(&tags).expect("topical tags must still render");
+    assert!(
+        !rendered.contains("creator:"),
+        "provenance must not reach the injection; got: {rendered}"
+    );
+    assert!(
+        rendered.contains("`rust`") && rendered.contains("`tokio`"),
+        "topical tags must survive; got: {rendered}"
+    );
+
+    // A drawer whose only tags are provenance renders no suffix at all — 2.8%
+    // of drawers in the corpus were exactly this shape.
+    let only_provenance: Vec<String> = tags
+        .iter()
+        .filter(|t| t.starts_with("creator:"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        render_tags(&only_provenance),
+        None,
+        "an all-provenance tag list must render nothing, not an empty suffix"
+    );
+}
+
+/// Why (issue #5038, symptom 2): tag lists rendered in full, uncapped — the
+/// median drawer carried 17 tags and the `_(tags: …)_` suffix was 53.0% of
+/// every byte the hook injected, outweighing the content preview it labels on
+/// 82.3% of drawers.
+/// What: a 12-tag drawer through `render_tags`; asserts exactly
+/// `MAX_RENDERED_TAGS` render, the surplus is announced rather than dropped
+/// silently, and the whole suffix stays under the content budget the cap was
+/// chosen against.
+/// Test: itself.
+#[test]
+fn injection_caps_rendered_tag_count() {
+    use format::{render_tags, MAX_RENDERED_TAGS};
+    // Realistic tag lengths, not `topic-N`. These are the shapes the live
+    // palace actually stores — the 7-character fixture this test used to carry
+    // could not have caught the byte-budget hole the #5038 review found.
+    let tags: Vec<String> = [
+        "slate-prioritization-in-flight",
+        "trusty-search-reinstall-in-flight",
+        "standing-instruction",
+        "session-2eb72dca",
+        "resume-target",
+        "issue-2833",
+        "bob-decision",
+        "trusty-mpm",
+        "status",
+        "kg",
+        "redb",
+        "python",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let rendered = render_tags(&tags).expect("tags must render");
+    let shown = rendered.matches('`').count() / 2;
+    assert!(
+        shown <= MAX_RENDERED_TAGS,
+        "at most MAX_RENDERED_TAGS tags may render; got {shown}: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("+{} more", tags.len() - shown)),
+        "held-back tags must be announced, not dropped silently; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("python"),
+        "the tail of the tag list must not render; got: {rendered}"
+    );
+}
+
+/// Why (#5038 review): `MAX_RENDERED_TAGS` is argued from "a label must never
+/// outweigh the payload it labels" but enforces a *count*, and a count cannot
+/// bound bytes — four 55-character tags blow a 220-character budget while
+/// satisfying the cap. The old test used 7-character `topic-N` fixtures, so its
+/// length assertion could never fail no matter how wrong the cap was.
+/// What: four tags of 55 characters each — well inside the count cap, well past
+/// the char budget. Asserts the rendered suffix stays within
+/// `MAX_RENDERED_TAG_CHARS`, that fewer than the count cap render as a result,
+/// and that the ones dropped for length are still announced.
+/// Test: itself.
+#[test]
+fn injection_caps_rendered_tag_bytes() {
+    use format::{render_tags, MAX_RENDERED_TAGS, MAX_RENDERED_TAG_CHARS};
+    const TAG_CHARS: usize = 55;
+    let long: Vec<String> = (0..4)
+        .map(|i| {
+            let stem = format!("workstream-{i}-");
+            format!("{stem}{}", "x".repeat(TAG_CHARS - stem.chars().count()))
+        })
+        .collect();
+    assert_eq!(
+        long[0].chars().count(),
+        TAG_CHARS,
+        "fixture must be 55 chars"
+    );
+    let rendered = render_tags(&long).expect("tags must render");
+    assert!(
+        rendered.chars().count() <= MAX_RENDERED_TAG_CHARS,
+        "the tag label must stay inside its {MAX_RENDERED_TAG_CHARS}-char budget; \
+         got {} chars: {rendered}",
+        rendered.chars().count()
+    );
+    let shown = rendered.matches('`').count() / 2;
+    assert!(
+        shown < MAX_RENDERED_TAGS,
+        "with 55-char tags the byte budget must bind before the count cap; \
+         got {shown} tags: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("+{} more", long.len() - shown)),
+        "tags held back for length must be announced too; got: {rendered}"
+    );
+
+    // The deliberate exception: one tag longer than the whole budget still
+    // renders, because `_(tags: +1 more)_` communicates strictly less.
+    let huge = vec![format!("w-{}", "y".repeat(400))];
+    let rendered = render_tags(&huge).expect("a single oversized tag still renders");
+    assert!(
+        rendered.contains(&huge[0]),
+        "the lone tag must survive whole"
+    );
+}
+
+/// Why (issue #5038, end to end): the unit tests above pin `render_tags` in
+/// isolation. This one proves the whole chain — real MCP write path stamping
+/// `creator:*`, real HTTP recall, real composition — never puts provenance or
+/// an uncapped tag list into what Claude Code actually receives.
+/// What: seeds a palace through `memory_remember` (which attaches the
+/// attribution namespace exactly as production does) with drawers carrying more
+/// topical tags than the cap, recalls with a matching prompt, and asserts the
+/// rendered injection carries no `creator:` and no bullet over the cap.
+/// Test: itself.
+/// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+#[cfg(feature = "axum-server")]
+#[tokio::test]
+async fn prompt_context_injection_has_no_provenance_tags() {
+    use format::MAX_RENDERED_TAGS;
+    let _guard = crate::commands::env_test_lock().lock().await;
+    unsafe {
+        std::env::remove_var(ENV_MIN_SCORE);
+        std::env::remove_var(ENV_RECALL_DENY_TAGS);
+    }
+    let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+        spin_up_test_daemon_with_palace("prompt-ctx-tag-render").await;
+
+    for (text, tags) in [
+        (
+            "Rust integration uses tokio for async tasks and serde for JSON encoding",
+            vec![
+                "rust", "tokio", "serde", "async", "json", "encoding", "runtime", "crate",
+            ],
+        ),
+        (
+            "Rust error handling prefers thiserror in libraries and anyhow in binaries",
+            vec![
+                "rust",
+                "thiserror",
+                "anyhow",
+                "errors",
+                "libraries",
+                "binaries",
+                "convention",
+            ],
+        ),
+    ] {
+        let tags_json: Vec<serde_json::Value> = tags.iter().map(|t| json!(t)).collect();
+        let _ = crate::tools::dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({
+                "palace": slug,
+                "text": text,
+                "room": "General",
+                "tags": tags_json,
+            }),
+        )
+        .await
+        .expect("memory_remember");
+    }
+
+    let payload = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": project_dir.to_string_lossy(),
+        "prompt": "how does rust integration work with tokio and serde?"
+    })
+    .to_string();
+    let body = build_injection_body(&payload).await;
+
+    assert_ne!(
+        body, EMPTY_PLACEHOLDER,
+        "fixture must actually recall something for this test to mean anything"
+    );
+    assert!(
+        body.contains("_(tags:"),
+        "fixture must render a tag suffix for this test to mean anything; got:\n{body}"
+    );
+    assert!(
+        !body.contains("creator:"),
+        "no provenance tag may reach the injection; got:\n{body}"
+    );
+    for bullet in body.lines().filter(|l| l.contains("_(tags:")) {
+        let shown = bullet
+            .split("_(tags:")
+            .nth(1)
+            .map(|suffix| suffix.matches('`').count() / 2)
+            .unwrap_or(0);
+        assert!(
+            shown <= MAX_RENDERED_TAGS,
+            "bullet renders {shown} tags, over the cap of {MAX_RENDERED_TAGS}: {bullet}"
+        );
+    }
+
+    addr_handle.shutdown().await;
+}
+
+/// Why (issue #4972, end to end): the unit tests in `query` pin the shaping in
+/// isolation. This one proves the metric survives the whole hook — an
+/// over-window `<task-notification>` prompt must reach `/recall` reshaped and
+/// leave a record of it on the enriched-prompt log line, which is the same
+/// corpus the 52%-over-window rate was measured from. Before this change the
+/// embedder cut the query at token 512 and nothing anywhere recorded it.
+/// What: fires the hook with a 22 KB envelope-wrapped prompt, then parses the
+/// JSONL log and asserts `recall_query` reports an over-budget original, a
+/// within-budget send, a stripped envelope, and a non-zero dropped-unit count.
+/// Test: itself.
+/// Note (issue #226): gated on `axum-server`; spins up the HTTP daemon.
+#[cfg(feature = "axum-server")]
+#[tokio::test]
+async fn prompt_context_logs_recall_query_shape() {
+    let _guard = crate::commands::env_test_lock().lock().await;
+    unsafe {
+        std::env::remove_var(ENV_MIN_SCORE);
+        std::env::remove_var(super::query::ENV_QUERY_TOKEN_BUDGET);
+    }
+    let (state, _data_dir_tmp, _project_dir_tmp, project_dir, slug, addr_handle) =
+        spin_up_test_daemon_with_palace("prompt-ctx-query-shape").await;
+    let _ = crate::tools::dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": slug,
+            "text": "Rust integration uses tokio for async tasks and serde for JSON encoding",
+            "room": "General",
+            "tags": [json!("rust")],
+        }),
+    )
+    .await
+    .expect("memory_remember");
+
+    // The exact shape 65.3% of logged hook prompts arrive in: a machine
+    // envelope whose head is task ids and absolute paths, wrapping a long
+    // agent report.
+    let long_result = "The retrieval relevance floor interacts with the top_k cap.\n".repeat(400);
+    let prompt = format!(
+        "<task-notification>\n\
+         <task-id>a23c46a0439fa7881</task-id>\n\
+         <tool-use-id>toolu_01PvoC76SpHX65DVbJi7sPes</tool-use-id>\n\
+         <output-file>/private/tmp/claude-502/-Users-masa-projects/tasks/a23.output</output-file>\n\
+         <status>completed</status>\n\
+         <summary>Agent \"rust integration\" finished</summary>\n\
+         <result>{long_result}</result>\n\
+         </task-notification>"
+    );
+    assert!(prompt.len() > 20_000, "fixture must be far past the window");
+
+    let payload = json!({
+        "hook_event_name": "UserPromptSubmit",
+        "cwd": project_dir.to_string_lossy(),
+        "prompt": prompt,
+    })
+    .to_string();
+    let _ = build_injection_body(&payload).await;
+
+    let logs_dir = trusty_common::resolve_data_dir("trusty-memory")
+        .expect("resolve data dir")
+        .join("logs");
+    let log_file = std::fs::read_dir(&logs_dir)
+        .expect("logs dir")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("enriched-prompts."))
+        })
+        .expect("an enriched-prompts log file");
+    let content = std::fs::read_to_string(&log_file).expect("read log");
+    let entry: crate::prompt_log::PromptLogEntry = content
+        .lines()
+        .filter_map(|l| serde_json::from_str::<crate::prompt_log::PromptLogEntry>(l).ok())
+        .next_back()
+        .expect("at least one parseable log line");
+
+    let shape = entry
+        .recall_query
+        .expect("an over-window query must leave a shape record, not truncate silently");
+    assert!(
+        shape.original_tokens > shape.budget_tokens,
+        "fixture must exceed the budget; got {shape:?}"
+    );
+    assert!(
+        shape.sent_tokens <= shape.budget_tokens,
+        "the query sent to the embedder must fit its window; got {shape:?}"
+    );
+    assert!(
+        shape.envelope_stripped,
+        "the task-notification envelope must be stripped; got {shape:?}"
+    );
+    assert!(
+        shape.units_dropped > 0 && shape.reshaped(),
+        "the reduction must be recorded, not silent; got {shape:?}"
+    );
+
+    addr_handle.shutdown().await;
 }

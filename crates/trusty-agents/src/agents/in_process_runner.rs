@@ -287,11 +287,14 @@ impl InProcessAgentRunner {
             .with_context(|| format!("failed to load agent config for '{agent_name}'"))?;
 
         // Apply per-call model override (carried via RunContext).
+        // #3765: routed through `override_model` so a PINNED agent re-pins the
+        // override onto its provider instead of silently escaping the pin —
+        // this path is reachable for a pinned agent via a workflow phase's
+        // `model` field and via retry escalation.
         if let Some(model) = &ctx.model
             && !model.is_empty()
         {
-            cfg.agent.model = model.clone();
-            cfg.adapter = Arc::from(crate::llm::adapter::adapter_for_model(&cfg.agent.model));
+            cfg.override_model(model)?;
         }
 
         // Resolve the effective max_turns: ctx > runner_config.max_tool_calls > llm.max_turns.

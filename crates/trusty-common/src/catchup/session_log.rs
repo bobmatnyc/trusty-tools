@@ -6,21 +6,28 @@
 //! snapshot. An append-only log records one line per pause/resume event, so
 //! concurrent sessions never overwrite each other's resume target and the
 //! latest snapshot for a *specific* session id is always recoverable.
+//!
+//! The log is also the store's ATTRIBUTION INDEX: a snapshot belongs to the
+//! session whose `pause` line names it, wherever the file physically sits. That
+//! is what lets [`resolve_session_snapshot`] serve pre-#5272 flat snapshots at
+//! the store root and post-#5272 ones under `<session-id>/` through one code
+//! path, and what makes an unattributable file resolve for nobody.
 //! What: [`SessionLogEntry`] models one JSONL line; [`read_log`] parses the
 //! file (fail-open, skipping malformed lines); [`latest_snapshot_for_session`]
 //! and [`latest_snapshot_overall`] resolve the newest pause snapshot;
-//! [`resolve_latest_snapshot`] implements the full fallback chain
-//! (log → legacy `LATEST-SESSION.txt` pointer → mtime scan); [`append_entry`]
+//! [`resolve_session_snapshot`] resolves a snapshot for ONE session id with no
+//! cross-session fallback; [`resolve_latest_snapshot`] keeps the session-blind
+//! fallback chain for the legacy claude-mpm JSON store only; [`append_entry`]
 //! writes a new line without truncating.
 //! Test: inline `#[cfg(test)]` module (`read_log_*`, `latest_*`, `resolve_*`,
-//! `append_*`).
+//! `append_*`, `snapshot_path_in_*`, `session_dir_name_*`).
 //!
 // CUTOVER BRIDGE note: the legacy-pointer fallback exists for back-compat with
 // snapshots written before the log was introduced; it can be dropped once no
 // project on disk still carries a `LATEST-SESSION.txt`.
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -84,8 +91,9 @@ pub fn read_log(sessions_dir: &Path) -> Vec<SessionLogEntry> {
 /// Why: on resume, a session should reload *its own* latest snapshot rather than
 /// whichever session happened to pause last — this is the concurrency fix.
 /// What: scans the log newest-first and returns the `snapshot` of the last
-/// `pause` entry whose `session_id` matches. Returns `None` when the session has
-/// no pause entry.
+/// `pause` entry whose `session_id` matches, as recorded — a bare
+/// `session-<ts>.md` for a pre-#5272 flat snapshot, `<session-id>/session-<ts>.md`
+/// for one written since. Returns `None` when the session has no pause entry.
 /// Test: `latest_snapshot_for_session_picks_own`.
 pub fn latest_snapshot_for_session(sessions_dir: &Path, session_id: &str) -> Option<String> {
     read_log(sessions_dir)
@@ -110,18 +118,164 @@ pub fn latest_snapshot_overall(sessions_dir: &Path) -> Option<String> {
         .map(|e| e.snapshot)
 }
 
-/// Resolve the latest snapshot file, applying the full back-compat fallback.
+/// Directory name a session's snapshots are written under, when its id is safe
+/// to use as one.
+///
+/// Why: `session_id` reaches this crate straight from an MCP argument, so it
+/// cannot be joined onto a path unchecked — `../../x` would place a snapshot
+/// outside the store. A session id also must never be MANGLED into a safe name,
+/// because two distinct ids collapsing onto one directory reintroduces exactly
+/// the crosstalk #5272 fixes; an unsafe id gets no directory at all instead.
+/// What: `Some(id)` when `session_id` is non-empty and made only of ASCII
+/// alphanumerics, `-`, `_`, or `.`, and is not `.` or `..`; `None` otherwise.
+/// UUID session ids — every id `tm` mints — always qualify.
+/// Test: `session_dir_name_accepts_uuid`, `session_dir_name_rejects_traversal`.
+pub fn session_dir_name(session_id: &str) -> Option<&str> {
+    if session_id.is_empty() || session_id == "." || session_id == ".." {
+        return None;
+    }
+    session_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .then_some(session_id)
+}
+
+/// Resolve a `snapshot` field from the log against `sessions_dir`, refusing to
+/// escape it.
+///
+/// Why: `sessions-log.jsonl` is a plain file any process can append to, so its
+/// `snapshot` value is untrusted input to a path join. Without containment,
+/// `"../../../../etc/passwd"` would be read and rendered into a resume digest.
+/// What: accepts only a relative path whose every component is an ordinary name
+/// and whose file name is `session-*.<ext>`; returns the joined path only when
+/// it is an existing file. `None` in every other case.
+/// Test: `snapshot_path_in_accepts_flat_and_nested`,
+/// `snapshot_path_in_rejects_escapes`.
+fn snapshot_path_in(sessions_dir: &Path, snapshot: &str, ext: &str) -> Option<PathBuf> {
+    let rel = Path::new(snapshot);
+    if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+        return None;
+    }
+    let name = rel.file_name()?.to_str()?;
+    if !(name.starts_with("session-") && name.ends_with(&format!(".{ext}"))) {
+        return None;
+    }
+    let path = sessions_dir.join(rel);
+    path.is_file().then_some(path)
+}
+
+/// Resolve the newest snapshot belonging to `session_id`, and only to it.
+///
+/// Why: #5272 — resume must never hand a session another session's snapshot.
+/// The session-blind chain in [`resolve_latest_snapshot`] was correct under
+/// #2731's one-session-per-checkout model, but once several PM sessions share
+/// one `.trusty-mpm/sessions/` store its "newest pause overall" step silently
+/// answers "someone else's snapshot" whenever the asking session has none of
+/// its own. This function has no such step: unattributable means empty.
+/// What: (1) the newest `pause` line in `sessions-log.jsonl` for `session_id`,
+/// resolved through [`snapshot_path_in`] — which covers a pre-#5272 flat
+/// `session-<ts>.<ext>` at the store root and a post-#5272
+/// `<session-id>/session-<ts>.<ext>` alike, since the log records the path
+/// relative to `sessions_dir`; (2) failing that, the newest `session-*.<ext>`
+/// inside `<sessions_dir>/<session_id>/`, which recovers a snapshot whose log
+/// append did not land. Returns `None` when neither yields an existing file —
+/// never another session's snapshot.
+/// Test: `resolve_session_snapshot_refuses_another_sessions_snapshot`,
+/// `resolve_session_snapshot_reads_legacy_flat_via_log`,
+/// `resolve_session_snapshot_reads_per_session_dir`,
+/// `resolve_session_snapshot_ignores_unattributed_flat_file`.
+pub fn resolve_session_snapshot(
+    sessions_dir: &Path,
+    session_id: &str,
+    ext: &str,
+) -> Option<PathBuf> {
+    if !sessions_dir.is_dir() {
+        return None;
+    }
+    if let Some(name) = latest_snapshot_for_session(sessions_dir, session_id)
+        && let Some(path) = snapshot_path_in(sessions_dir, &name, ext)
+    {
+        return Some(path);
+    }
+    let dir = sessions_dir.join(session_dir_name(session_id)?);
+    newest_session_file(&dir, ext)
+}
+
+/// Every existing snapshot attributable to `session_id` — not just the newest.
+///
+/// Why: #5386 — the catch-up digest has to decide, per listed session, whether
+/// the caller owns it. [`resolve_session_snapshot`] answers "which one snapshot
+/// do I resume from", which is the wrong question here: a session that paused
+/// five times owns all five files, and disclosing four of them because only the
+/// newest is attributable would leak exactly what this is meant to gate.
+/// What: the same two sources [`resolve_session_snapshot`] reads, unioned
+/// instead of short-circuited — every `pause` line in `sessions-log.jsonl` for
+/// `session_id` resolved through [`snapshot_path_in`] (covering the pre-#5272
+/// flat layout and the per-session-directory one alike), plus every
+/// `session-*.<ext>` sitting in `<sessions_dir>/<session_id>/` whose log append
+/// did not land. Paths are deduplicated; each is known to exist.
+/// Test: `snapshots_attributed_to_unions_log_and_directory`,
+/// `snapshots_attributed_to_excludes_other_sessions`.
+pub fn snapshots_attributed_to(sessions_dir: &Path, session_id: &str, ext: &str) -> Vec<PathBuf> {
+    if !sessions_dir.is_dir() {
+        return Vec::new();
+    }
+    let mut out: Vec<PathBuf> = read_log(sessions_dir)
+        .into_iter()
+        .filter(|e| e.event == EVENT_PAUSE && e.session_id == session_id)
+        .filter_map(|e| snapshot_path_in(sessions_dir, &e.snapshot, ext))
+        .collect();
+
+    if let Some(name) = session_dir_name(session_id) {
+        out.extend(session_files_in(&sessions_dir.join(name), ext));
+    }
+
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every `session-*.<ext>` directly inside `dir`.
+///
+/// Why: the all-snapshots counterpart of [`newest_session_file`], which picks
+/// one by mtime. [`snapshots_attributed_to`] needs the whole set.
+/// What: an empty vec when `dir` is absent or unreadable — a missing
+/// per-session directory means the log is the only attribution source, not an
+/// error.
+/// Test: covered by `snapshots_attributed_to_unions_log_and_directory`.
+fn session_files_in(dir: &Path, ext: &str) -> Vec<PathBuf> {
+    let suffix = format!(".{ext}");
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .filter(|e| {
+            let name = e.file_name().into_string().unwrap_or_default();
+            name.starts_with("session-") && name.ends_with(&suffix)
+        })
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// Resolve the latest snapshot file, applying the full session-blind fallback.
 ///
 /// Why: a project may carry snapshots from before the log existed; resume must
 /// still find them without a log. This centralises the ordered fallback chain so
 /// every reader behaves identically.
+///
+/// 🔴 Session-blind by construction: steps (1)–(3) below can all return a
+/// snapshot written by a different session. Since #5272 the native
+/// `.trusty-mpm` store never calls this — use [`resolve_session_snapshot`]
+/// there. It survives only for the legacy claude-mpm JSON store
+/// (`.claude-mpm/sessions/`, `ext = "json"`), which predates per-session
+/// attribution entirely and which one `tm` session never shares with another.
 /// What: tries, in order — (1) the newest `pause` snapshot in
 /// `sessions-log.jsonl`; (2) the legacy `LATEST-SESSION.txt` pointer (first line
 /// or token ending in `.<ext>`); (3) an mtime scan for the newest
 /// `session-*.<ext>` file. Returns the resolved path only when it exists on
 /// disk; `None` when nothing resolves. `ext` is the snapshot extension without
-/// the leading dot (e.g. `"md"` for the native store, `"json"` for the legacy
-/// claude-mpm store).
+/// the leading dot.
 /// Test: `resolve_prefers_log`, `resolve_falls_back_to_pointer`,
 /// `resolve_falls_back_to_mtime`, `resolve_none_when_empty`.
 pub fn resolve_latest_snapshot(sessions_dir: &Path, ext: &str) -> Option<PathBuf> {
@@ -360,6 +514,195 @@ mod tests {
         // Log points at a missing file → must not resolve to a phantom path.
         append_entry(tmp.path(), &entry("s1", "pause", "gone.md", "t1")).unwrap();
         assert!(resolve_latest_snapshot(tmp.path(), "md").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // #5272 — session-scoped resolution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_dir_name_accepts_uuid() {
+        let id = "7bd5c27a-475b-41df-9e9f-a6f630801717";
+        assert_eq!(session_dir_name(id), Some(id));
+        assert_eq!(session_dir_name("tm_sess.01"), Some("tm_sess.01"));
+    }
+
+    #[test]
+    fn session_dir_name_rejects_traversal() {
+        for bad in ["", ".", "..", "../evil", "a/b", "sess:1", "sess id"] {
+            assert_eq!(session_dir_name(bad), None, "{bad:?} must not name a dir");
+        }
+    }
+
+    #[test]
+    fn snapshot_path_in_accepts_flat_and_nested() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("sid")).unwrap();
+        fs::write(tmp.path().join("session-flat.md"), b"x").unwrap();
+        fs::write(tmp.path().join("sid").join("session-nested.md"), b"x").unwrap();
+
+        assert!(snapshot_path_in(tmp.path(), "session-flat.md", "md").is_some());
+        assert!(snapshot_path_in(tmp.path(), "sid/session-nested.md", "md").is_some());
+        // Names outside the `session-*.<ext>` shape, and files that don't exist.
+        assert!(snapshot_path_in(tmp.path(), "session-flat.json", "md").is_none());
+        assert!(snapshot_path_in(tmp.path(), "notes.md", "md").is_none());
+        assert!(snapshot_path_in(tmp.path(), "session-gone.md", "md").is_none());
+    }
+
+    /// Why: `sessions-log.jsonl` is a plain file, so its `snapshot` value is
+    /// untrusted input to a path join — an entry naming `../…` would otherwise
+    /// be read from outside the store and rendered into a resume digest.
+    /// What: absolute and parent-traversing values resolve to `None` even when
+    /// the file they name exists.
+    /// Test: itself.
+    #[test]
+    fn snapshot_path_in_rejects_escapes() {
+        let tmp = TempDir::new().unwrap();
+        let store = tmp.path().join("sessions");
+        fs::create_dir_all(&store).unwrap();
+        let outside = tmp.path().join("session-outside.md");
+        fs::write(&outside, b"secret").unwrap();
+
+        assert!(snapshot_path_in(&store, "../session-outside.md", "md").is_none());
+        assert!(snapshot_path_in(&store, "a/../../session-outside.md", "md").is_none());
+        assert!(snapshot_path_in(&store, outside.to_str().unwrap(), "md").is_none());
+    }
+
+    /// Why: issue #5272's exact shape at the resolver level — one store, a
+    /// snapshot logged to session A, session B asking. The old chain answered
+    /// with A's file; this one answers `None`.
+    /// What: B resolves to `None`, A to its own snapshot.
+    /// Test: itself.
+    #[test]
+    fn resolve_session_snapshot_refuses_another_sessions_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("session-20260809-010155.md"), b"A").unwrap();
+        append_entry(
+            tmp.path(),
+            &entry("session-a", "pause", "session-20260809-010155.md", "t1"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_session_snapshot(tmp.path(), "session-b", "md"),
+            None
+        );
+        assert!(resolve_session_snapshot(tmp.path(), "session-a", "md").is_some());
+    }
+
+    /// Why: #5386 — the digest gates every listed session on ownership, so the
+    /// attribution lookup must return ALL of a session's snapshots, not the one
+    /// it would resume from. Reusing `resolve_session_snapshot` here would
+    /// redact a caller's own older files.
+    /// What: a flat snapshot attributed only by the log and a per-session-
+    /// directory one with no log line both come back, deduplicated.
+    /// Test: itself.
+    #[test]
+    fn snapshots_attributed_to_unions_log_and_directory() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("session-20260809-010155.md"), b"flat").unwrap();
+        append_entry(
+            tmp.path(),
+            &entry("s1", "pause", "session-20260809-010155.md", "t1"),
+        )
+        .unwrap();
+        fs::create_dir_all(tmp.path().join("s1")).unwrap();
+        fs::write(
+            tmp.path().join("s1").join("session-20260810-120000.md"),
+            b"nested",
+        )
+        .unwrap();
+        // Also logged, to prove the two sources dedupe rather than double-count.
+        append_entry(
+            tmp.path(),
+            &entry("s1", "pause", "s1/session-20260810-120000.md", "t2"),
+        )
+        .unwrap();
+
+        let got = snapshots_attributed_to(tmp.path(), "s1", "md");
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(
+            got.iter()
+                .any(|p| p.ends_with("session-20260809-010155.md"))
+        );
+        assert!(
+            got.iter()
+                .any(|p| p.ends_with("session-20260810-120000.md"))
+        );
+    }
+
+    /// Why: the whole point is that one session's set never contains another's.
+    /// What: a snapshot attributed to `s1` is absent from `s2`'s set, and an
+    /// unattributed flat file belongs to neither.
+    /// Test: itself.
+    #[test]
+    fn snapshots_attributed_to_excludes_other_sessions() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("session-20260809-010155.md"), b"A").unwrap();
+        append_entry(
+            tmp.path(),
+            &entry("s1", "pause", "session-20260809-010155.md", "t1"),
+        )
+        .unwrap();
+        fs::write(tmp.path().join("session-20260809-020000.md"), b"orphan").unwrap();
+
+        assert_eq!(snapshots_attributed_to(tmp.path(), "s1", "md").len(), 1);
+        assert!(snapshots_attributed_to(tmp.path(), "s2", "md").is_empty());
+    }
+
+    #[test]
+    fn resolve_session_snapshot_reads_legacy_flat_via_log() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("session-20260723-215536.md"), b"legacy").unwrap();
+        append_entry(
+            tmp.path(),
+            &entry("s1", "pause", "session-20260723-215536.md", "t1"),
+        )
+        .unwrap();
+        let got = resolve_session_snapshot(tmp.path(), "s1", "md").unwrap();
+        assert_eq!(got.file_name().unwrap(), "session-20260723-215536.md");
+    }
+
+    /// Why: a snapshot whose log append did not land is still the session's
+    /// own; the per-session directory is a second, layout-based attribution
+    /// that cannot reach across sessions the way an mtime scan of the root can.
+    /// What: with no log at all, a file under `<id>/` resolves for that id and
+    /// for no other.
+    /// Test: itself.
+    #[test]
+    fn resolve_session_snapshot_reads_per_session_dir() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("s1")).unwrap();
+        fs::write(tmp.path().join("s1").join("session-old.md"), b"old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(tmp.path().join("s1").join("session-new.md"), b"new").unwrap();
+
+        let got = resolve_session_snapshot(tmp.path(), "s1", "md").unwrap();
+        assert_eq!(got.file_name().unwrap(), "session-new.md");
+        assert_eq!(resolve_session_snapshot(tmp.path(), "s2", "md"), None);
+    }
+
+    /// Why: #5272 requirement — a flat snapshot `sessions-log.jsonl` cannot
+    /// attribute must resolve to empty rather than to whichever session asks.
+    /// What: an unlogged root-level file is invisible to every session id.
+    /// Test: itself.
+    #[test]
+    fn resolve_session_snapshot_ignores_unattributed_flat_file() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("session-orphan.md"), b"whose?").unwrap();
+        assert_eq!(resolve_session_snapshot(tmp.path(), "s1", "md"), None);
+        assert_eq!(resolve_session_snapshot(tmp.path(), "s2", "md"), None);
+    }
+
+    #[test]
+    fn resolve_session_snapshot_skips_a_log_entry_whose_file_is_gone() {
+        let tmp = TempDir::new().unwrap();
+        append_entry(tmp.path(), &entry("s1", "pause", "session-gone.md", "t1")).unwrap();
+        assert_eq!(
+            resolve_session_snapshot(tmp.path(), "s1", "md"),
+            None,
+            "a dangling log entry must not resolve to a phantom path"
+        );
     }
 
     #[test]

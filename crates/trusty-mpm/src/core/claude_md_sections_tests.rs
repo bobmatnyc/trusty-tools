@@ -850,7 +850,8 @@ fn assert_authority_intact(prompt: &str, configuration: &str) {
             prompt.contains(marker),
             "{configuration}: the delivered prompt lost the authority row {marker:?} — \
              the Prohibitions and Circuit Breakers tables are the PM's entire \
-             delegation-enforcement model and no customization may remove them (#4573)"
+             delegation-enforcement model. Only an ENFORCEMENT marker may remove \
+             them (#4838); every other override path must leave them intact (#4573)"
         );
     }
 }
@@ -896,7 +897,7 @@ fn a_hostile_core_override_cannot_delete_the_authority_tables() {
 }
 
 #[test]
-fn the_authority_tables_survive_every_override_configuration() {
+fn the_authority_tables_survive_every_override_except_an_enforcement_block() {
     // SCOPE CHANGE (#4286). This no longer claims the tables survive EVERY
     // configuration, because they do not: `enforcement` is now an ordinary
     // overridable section, so a project that writes an ENFORCEMENT block does
@@ -1207,7 +1208,8 @@ fn the_pm_allowlist_does_not_contradict_the_action_budget() {
 fn the_budget_survives_every_override_configuration() {
     // SCOPE CHANGE (#4838, the deduplication PR). This no longer claims the
     // budget survives EVERY configuration, for the same reason
-    // `the_authority_tables_survive_every_override_configuration` stopped
+    // `the_authority_tables_survive_every_override_except_an_enforcement_block`
+    // stopped
     // claiming that of the tables at #4286: `enforcement` is an ordinary
     // overridable section. #4838 also made `enforcement.md` the single
     // canonical home of the budget rule (it used to be restated in
@@ -1249,7 +1251,7 @@ fn the_budget_survives_every_override_configuration() {
 
     // #4838: an ENFORCEMENT override now DOES delete the budget rule, because
     // deduplication left `enforcement.md` as the rule's only copy. Mirrors
-    // `the_authority_tables_survive_every_override_configuration`'s
+    // `the_authority_tables_survive_every_override_except_an_enforcement_block`'s
     // `hostile_floor` arm, which records the same fact for the Prohibitions
     // and Circuit Breakers tables.
     let hostile_enforcement = TempDir::new().unwrap();
@@ -1398,7 +1400,20 @@ fn locate_blocks_ignores_other_sections() {
 /// surviving table would silently drop a real routing rule with nothing else
 /// asserting it — which is the failure this test exists to catch, not the
 /// wording of any one row.
-const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
+///
+/// #5087 moved the per-agent trigger lists and the default-model column out of
+/// the always-loaded prompt and into the `tm-delegation-patterns` skill, which
+/// loads on trigger. The assertions FOLLOW the mappings to their new home
+/// rather than being deleted — the same pattern #4574 used when the prose rules
+/// moved to the output style. Every mapping is still asserted verbatim, byte
+/// for byte; what changed is which surface has to carry it. A mapping that
+/// appears on NEITHER surface is the regression these tests exist to catch.
+///
+/// The split: a mapping stays resident when it gates a dispatch decision the PM
+/// makes without first reaching for a skill (what is delegated at all, which of
+/// two confusable agents, which tool is banned). It moves to the skill when it
+/// is lookup detail — a trigger keyword list, or an agent's default model.
+const FOLDED_ROUTING_MAPPINGS_PROMPT: &[(&str, &str)] = &[
     // Make / Mise Command Routing — the whole table lived nowhere else. `mise`
     // in particular is absent from the Prohibitions table, so this section is
     // the ONLY statement that `mise run` targets are delegated at all.
@@ -1414,27 +1429,7 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
         "every `make` and `mise run` target",
         "make/mise → local-ops",
     ),
-    (
-        "build, dist, clean, install, setup",
-        "build/dist/clean/install/setup → local-ops",
-    ),
-    (
-        "version, bump, release, publish, deploy",
-        "version/release/publish → local-ops",
-    ),
-    (
-        "`pyproject.toml`, `package.json`",
-        "the manifest-file release triggers",
-    ),
-    (
-        "`test`, `lint`, `check` (or `engineer`)",
-        "make/mise test/lint/check → qa or engineer",
-    ),
     // Ops Agent Routing.
-    (
-        "localhost, PM2, npm, docker",
-        "the local-ops trigger keywords",
-    ),
     (
         "including anything unknown or ambiguous",
         "unknown/ambiguous → local-ops",
@@ -1460,11 +1455,7 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
         "`research` → `engineer` → `local-ops` → `qa` → `documentation`",
         "the \"just do it\" full pipeline",
     ),
-    // When to Delegate to Each Agent — the per-agent facts.
-    (
-        "Prefer the language-specific engineer",
-        "the language-specific engineer preference",
-    ),
+    // When to Delegate to Each Agent — the two confusable pairs.
     (
         "APPROVED / NEEDS_IMPROVEMENT / BLOCKED",
         "the code-analyzer verdict vocabulary",
@@ -1474,8 +1465,42 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
         "code-analyzer vs code-critic are distinct",
     ),
     (
-        "never goes to `version-control`",
-        "P6 — ticket bookkeeping stays with ticketing",
+        "the Issue is `ticketing`'s, whole (P6)",
+        "P6 — the whole Issue stays with ticketing (#5202)",
+    ),
+    // The verbatim-name rule, which gated both deleted tables.
+    (
+        "fails to dispatch (issue #4594)",
+        "the pass-the-name-verbatim rule",
+    ),
+];
+
+/// The lookup detail #5087 relocated to `tm-delegation-patterns`. Same
+/// needles, asserted against the skill instead of the prompt.
+const FOLDED_ROUTING_MAPPINGS_SKILL: &[(&str, &str)] = &[
+    (
+        "build, dist, clean, install, setup",
+        "build/dist/clean/install/setup → local-ops",
+    ),
+    (
+        "version, bump, release, publish, deploy",
+        "version/release/publish → local-ops",
+    ),
+    (
+        "`pyproject.toml`, `package.json`",
+        "the manifest-file release triggers",
+    ),
+    (
+        "`test`, `lint`, `check` (or `engineer`)",
+        "make/mise test/lint/check → qa or engineer",
+    ),
+    (
+        "localhost, PM2, npm, docker",
+        "the local-ops trigger keywords",
+    ),
+    (
+        "Prefer the language-specific engineer",
+        "the language-specific engineer preference",
     ),
     (
         "Check git user for main-branch access",
@@ -1489,28 +1514,49 @@ const FOLDED_ROUTING_MAPPINGS: &[(&str, &str)] = &[
         "Secret scanning, attack-vector detection",
         "the security capabilities",
     ),
-    // core.md's Agent Routing — the per-agent default model column.
+    // The per-agent default-model column.
     ("| sonnet |", "the per-agent default-model column"),
     ("| opus |", "the per-agent default-model column"),
     ("| haiku |", "the per-agent default-model column"),
-    // The verbatim-name rule, which gated both deleted tables.
-    (
-        "fails to dispatch (issue #4594)",
-        "the pass-the-name-verbatim rule",
-    ),
 ];
+
+/// The bundled `tm-delegation-patterns` skill body, as shipped.
+const DELEGATION_PATTERNS_SKILL: &str = include_str!("../assets/skills/tm-delegation-patterns.md");
 
 #[test]
 fn the_surviving_routing_table_covers_every_folded_mapping() {
     let package = bundled_fallback_package().expect("manifest parses");
     let delegation = package.authored_run(&[SectionId::AgentDelegation]);
 
-    for (needle, what) in FOLDED_ROUTING_MAPPINGS {
+    for (needle, what) in FOLDED_ROUTING_MAPPINGS_PROMPT {
         assert!(
             delegation.contains(needle),
             "the collapsed routing tables lost {what}; missing {needle:?}"
         );
     }
+}
+
+#[test]
+fn the_relocated_routing_detail_is_carried_by_the_delegation_skill() {
+    // #5087: the other half of the same guarantee. These mappings left the
+    // always-loaded prompt, so the prompt-side assertion above can no longer
+    // see them — without this test, trimming the prompt would have silently
+    // deleted them with nothing failing.
+    for (needle, what) in FOLDED_ROUTING_MAPPINGS_SKILL {
+        assert!(
+            DELEGATION_PATTERNS_SKILL.contains(needle),
+            "tm-delegation-patterns lost {what}; missing {needle:?}"
+        );
+    }
+
+    // The prompt must name the call, or the relocated detail is unreachable.
+    let package = bundled_fallback_package().expect("manifest parses");
+    assert!(
+        package
+            .authored_run(&[SectionId::AgentDelegation])
+            .contains(r#"Skill(skill="tm-delegation-patterns")"#),
+        "the routing section must name the skill that now carries the detail"
+    );
 }
 
 #[test]
@@ -1627,7 +1673,7 @@ fn every_skill_pointer_names_the_call_rather_than_decorating() {
     for skill in [
         "tm-verification-protocols",
         "tm-git-file-tracking",
-        "tm-pr-workflow",
+        "tm-workflow",
         "tm-session-management",
         "tm-circuit-breaker",
         "tm-delegation-patterns",

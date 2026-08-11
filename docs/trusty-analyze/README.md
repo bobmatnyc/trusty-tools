@@ -11,7 +11,8 @@ research documentation. The crate `README.md` and rustdoc stay in-crate
 ## Role in Technical DD Report Generation
 
 trusty-analyze is the **standalone analysis engine** for the trusty-review report-generation 
-feature (announced 2026-07-10). When `trusty-review report --repo <path>` is invoked, 
+feature (announced 2026-07-10). When `trusty-review report --manifest <file>` is invoked 
+with `--analyze` (the manifest TOML declares each target repository's local path or remote), 
 trusty-analyze performs all static code analysis (complexity, smells, quality metrics, size/LoC 
 breakdowns, violations, ISO-5055 compliance, etc.) and exposes results via HTTP API on port 7879. 
 trusty-review consumes those metrics and fills templated DD report skeletons (generic or 

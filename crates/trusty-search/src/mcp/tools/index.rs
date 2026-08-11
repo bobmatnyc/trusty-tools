@@ -25,12 +25,16 @@ use super::{
 /// project's index id, exactly as the search tools do. Centralising the
 /// precedence here keeps every index arm consistent with `search`.
 /// What: returns the caller's non-empty `index_id` argument, else the session's
-/// pinned index, else an `InvalidParams` error naming the missing field.
-/// Test: `pinned_index_status_defaults_to_pin` in `tests.rs`.
+/// pinned index, else an `InvalidParams` error naming the missing field AND the
+/// tool that lists valid values for it (#5213 — an error that says only "field
+/// missing" leaves the caller guessing an id, which is the failure #1373 pinned
+/// the session to avoid in the first place).
+/// Test: `resolve_index_id_prefers_explicit_then_pinned` pins the precedence
+/// and `missing_index_id_error_names_list_indexes` the error text.
 fn required_index_id(server: &McpServer, args: &Value) -> Result<String, DispatchError> {
-    server.resolve_index_id(args).ok_or_else(|| {
-        DispatchError::InvalidParams("missing required string field: index_id".into())
-    })
+    server
+        .resolve_index_id(args)
+        .ok_or_else(|| DispatchError::InvalidParams(super::types::MISSING_INDEX_ID.into()))
 }
 
 /// Route one of the eight index-management tool names to the correct daemon
@@ -148,7 +152,13 @@ pub(super) async fn dispatch_index_tool(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(server.get(&format!("/indexes/{index_id}/status")).await)
+            // #4715: `index_status` on a never-indexed pin 404'd the same way
+            // `search` did; it gets the same honest not-ready answer.
+            Some(
+                server
+                    .get_scoped(&format!("/indexes/{index_id}/status"), Some(&index_id))
+                    .await,
+            )
         }
         "list_chunks" => {
             // Issue #54 — paginated enumeration of an index's corpus.
@@ -170,9 +180,15 @@ pub(super) async fn dispatch_index_tool(
                 // the query string.
                 query.push(("after", after.to_string()));
             }
+            // #4715: index-scoped like its `index_status` neighbour — a
+            // never-indexed pin gets the same not-ready answer here.
             Some(
                 server
-                    .get_query(&format!("/indexes/{index_id}/chunks"), &query)
+                    .get_query_scoped(
+                        &format!("/indexes/{index_id}/chunks"),
+                        &query,
+                        Some(&index_id),
+                    )
                     .await,
             )
         }

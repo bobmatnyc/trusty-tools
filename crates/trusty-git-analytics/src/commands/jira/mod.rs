@@ -77,7 +77,8 @@ const DEFAULT_MAX_TICKETS: usize = 10_000;
 const MAX_CONSECUTIVE_TICKET_FAILURES: usize = 10;
 
 /// Arguments for `tga jira sync`.
-#[derive(Args, Debug)]
+// #5217: `Default` is what lets `audit::run_full_sweep` build this without clap.
+#[derive(Args, Debug, Default)]
 #[command(
     about = "Sync JIRA status transitions and comments into fact_ticket_transitions / fact_jira_comment_detail.",
     long_about = "Fetch JIRA changelog status transitions and full comment history for the\n\

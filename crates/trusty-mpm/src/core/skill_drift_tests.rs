@@ -359,10 +359,10 @@ fn hand_edited_deploy_is_frozen_not_merely_drifted() {
     // recorded, so `deploy_skills` will skip it forever. That is a distinct
     // state from ordinary drift and must be reported as such.
     let dest = TempDir::new().unwrap();
-    let _src = deploy_real(dest.path(), "tm-pr-workflow", "v1 as deployed", None);
-    hand_edit(dest.path(), "tm-pr-workflow", "hand-edited by the operator");
+    let _src = deploy_real(dest.path(), "tm-ticketing", "v1 as deployed", None);
+    hand_edit(dest.path(), "tm-ticketing", "hand-edited by the operator");
 
-    let reference = reference_of(&[("tm-pr-workflow", "v2 from the binary")]);
+    let reference = reference_of(&[("tm-ticketing", "v2 from the binary")]);
     let audit = audit_deployed_skills(&reference, dest.path());
     assert_eq!(audit.findings[0].state, SkillDrift::DriftedFrozen);
 }

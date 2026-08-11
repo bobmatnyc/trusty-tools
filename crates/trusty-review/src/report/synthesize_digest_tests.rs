@@ -22,6 +22,7 @@ fn mf(title: &str, severity: Severity, category: &str, component: &str) -> Metri
         severity,
         category: category.to_string(),
         component: component.to_string(),
+        ..Default::default()
     }
 }
 
@@ -56,6 +57,7 @@ fn model_with(repos: Vec<RepositoryReport>, investigation: Option<Investigation>
         generated_date: "2026-07-10".to_string(),
         manifest_path: "m.toml".to_string(),
         repositories: repos,
+        gaps: Vec::new(),
         synthesis: None,
         benchmark: None,
         investigation,

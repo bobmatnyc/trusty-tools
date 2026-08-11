@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-57 top-level commands.
+58 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -31,6 +31,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `daemon` — Run the trusty-mpm daemon
 - `doctor` — Run a full system diagnostic of the trusty-mpm stack
 - `events` — Show the recent hook-event feed
+- `f` — Find a session by NAME, filtering as you type — `tm f [pattern]`
 - `generate` — Regenerate derived, committed artifacts from live harness surfaces (issue #2913)
   - `capabilities` — Regenerate the `tm-capabilities` bundled skill's generated files
 - `gui` — Launch the Tauri desktop GUI (or open the web build in the browser when Tauri is unavailable)
@@ -100,6 +101,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `repair` — Recover from corrupt or inconsistent deploy state
   - `deploy` — Repair the agent/skill deploy state in `~/.claude/`
   - `push-guard` — Retrofit the #2867 cross-branch `pre-push` guard onto an existing clone
+  - `session-store` — Recover a corrupt managed-session store (`sessions.json`)
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
 - `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias

@@ -28,7 +28,11 @@ pub enum PausedSession {
     TrustyMpm {
         /// Path to the `.md` session file.
         path: PathBuf,
-        /// Timestamp parsed from the filename or `## Paused At:` header.
+        /// Timestamp parsed from the `session-YYYYMMDD-HHMMSS.md` filename,
+        /// falling back to the file's mtime when the filename carries no
+        /// parseable stamp. `None` only when the filesystem cannot supply a
+        /// modification time — and such a record is excluded from every
+        /// watermark-filtered digest (see [`filter_sessions_since`], #5072).
         paused_at: Option<DateTime<Utc>>,
         /// Content of the `## Summary` section.
         summary: String,
@@ -54,19 +58,31 @@ pub enum PausedSession {
 }
 
 impl PausedSession {
-    /// Return a sortable pause timestamp, or `None` if not parseable.
+    /// Return a sortable pause timestamp, or `None` when the session cannot be
+    /// dated at all.
     ///
-    /// Why: needed to sort sessions newest-first regardless of format.
-    /// What: for `TrustyMpm` returns `paused_at` directly; for `ClaudeMpm`
-    /// parses the ISO-8601 `paused_at` string.
-    /// Test: covered by `find_orders_newest_first`.
+    /// Why: needed to sort sessions newest-first regardless of format — and,
+    /// since #5072, to decide watermark membership, where `None` means
+    /// "excluded" rather than "always included". Both variants therefore get
+    /// the same file-mtime fallback, so neither arm can go undatable merely
+    /// because its recorded timestamp is missing or malformed.
+    /// What: for `TrustyMpm` returns `paused_at`, which the parser already
+    /// backfills from mtime. For `ClaudeMpm` parses the ISO-8601 `paused_at`
+    /// string, falling back to
+    /// [`ClaudeMpmSession::source_mtime`](crate::catchup::mpm_session::ClaudeMpmSession::source_mtime).
+    /// `None` survives only for a session with no file behind it.
+    /// Test: `find_orders_newest_first`,
+    /// `claude_mpm_session_with_no_paused_at_is_dated_by_mtime`.
     pub fn sort_key(&self) -> Option<DateTime<Utc>> {
         match self {
             PausedSession::TrustyMpm { paused_at, .. } => *paused_at,
             PausedSession::ClaudeMpm { session } => session
                 .paused_at
                 .as_deref()
-                .and_then(|s| s.parse::<DateTime<Utc>>().ok()),
+                .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+                // #5072: same mtime rescue the TrustyMpm arm gets, so
+                // fail-closed filtering applies symmetrically to both.
+                .or(session.source_mtime),
         }
     }
 }
@@ -86,19 +102,11 @@ pub fn find_paused_sessions(project_dir: &Path) -> anyhow::Result<Vec<PausedSess
     let mut sessions = Vec::new();
 
     // ── trusty-mpm native format (.md) ───────────────────────────────────────
+    // #5272: snapshots now live under `sessions/<session-id>/`, so scan the
+    // store root AND one level of per-session directories.
     let tm_sessions_dir = project_dir.join(".trusty-mpm").join("sessions");
-    if tm_sessions_dir.is_dir()
-        && let Ok(rd) = std::fs::read_dir(&tm_sessions_dir)
-    {
-        for entry in rd.flatten() {
-            let name = entry.file_name().into_string().unwrap_or_default();
-            if name.starts_with("session-")
-                && name.ends_with(".md")
-                && let Ok(s) = parse_trusty_mpm_session(&entry.path())
-            {
-                sessions.push(s);
-            }
-        }
+    for dir in session_scan_dirs(&tm_sessions_dir) {
+        collect_trusty_mpm_snapshots(&dir, &mut sessions);
     }
 
     // ── claude-mpm JSON format ────────────────────────────────────────────────
@@ -119,32 +127,172 @@ pub fn find_paused_sessions(project_dir: &Path) -> anyhow::Result<Vec<PausedSess
     Ok(sessions)
 }
 
-/// Resolve the latest native `.trusty-mpm` snapshot, preferring the per-session
-/// log entry when a session id is known.
+/// The directories a native-snapshot scan must visit: the store root plus each
+/// per-session subdirectory.
 ///
-/// Why: with concurrent `tm` sessions in one project, resume must reload the
-/// current session's own newest snapshot, not whichever session paused last.
-/// The append-only `sessions-log.jsonl` makes that recoverable; this is the
-/// read side of the global-pointer fix.
-/// What: when `session_id` is `Some`, returns the newest `pause` snapshot logged
-/// for that id (if its file still exists); otherwise, or when that session has
-/// no log entry, falls back to the shared resolver chain
-/// (log-overall → legacy `LATEST-SESSION.txt` → newest `session-*.md` by mtime)
-/// against `<project_dir>/.trusty-mpm/sessions/`. Returns `None` when nothing
-/// resolves.
-/// Test: `latest_snapshot_prefers_session_log`, `latest_snapshot_falls_back`.
-pub fn latest_trusty_mpm_snapshot(project_dir: &Path, session_id: Option<&str>) -> Option<PathBuf> {
-    let sessions_dir = project_dir.join(".trusty-mpm").join("sessions");
-    if let Some(id) = session_id
-        && let Some(name) =
-            crate::catchup::session_log::latest_snapshot_for_session(&sessions_dir, id)
-    {
-        let path = sessions_dir.join(name);
-        if path.exists() {
-            return Some(path);
+/// Why: #5272 moved pause snapshots into `sessions/<session-id>/`. A scan that
+/// only reads the store root would show pre-#5272 flat files and NOTHING
+/// written since — an empty catch-up digest on a project full of snapshots.
+/// Depth is capped at one level because that is the whole layout; recursing
+/// further would only invite unrelated `.md` files in.
+/// What: `[root]` when it exists, followed by its immediate subdirectories in
+/// directory order. Empty when `root` is absent.
+/// Test: `find_includes_per_session_directories`.
+fn session_scan_dirs(root: &Path) -> Vec<PathBuf> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut dirs = vec![root.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(root) {
+        dirs.extend(rd.flatten().filter(|e| e.path().is_dir()).map(|e| e.path()));
+    }
+    dirs
+}
+
+/// Parse every `session-*.md` directly inside `dir` into `out`.
+///
+/// Why: the per-directory half of [`session_scan_dirs`], factored out so the
+/// root and each per-session directory go through identical parsing.
+/// What: appends one [`PausedSession::TrustyMpm`] per readable, parseable
+/// `session-*.md`; unreadable files are skipped, matching the pre-#5272
+/// fail-open scan.
+/// Test: `find_includes_per_session_directories`, `find_merges_both_formats`.
+fn collect_trusty_mpm_snapshots(dir: &Path, out: &mut Vec<PausedSession>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().into_string().unwrap_or_default();
+        if name.starts_with("session-")
+            && name.ends_with(".md")
+            && let Ok(s) = parse_trusty_mpm_session(&entry.path())
+        {
+            out.push(s);
         }
     }
-    crate::catchup::session_log::resolve_latest_snapshot(&sessions_dir, "md")
+}
+
+/// The outcome of a watermark filter: what survived, and what was withheld.
+///
+/// Why: the count is not diagnostics, it is a receipt. The watermark advances
+/// after a catch-up whether or not a session was withheld, so a withheld
+/// session falls outside every future window permanently — the caller must be
+/// able to tell "nothing paused since your last catch-up" apart from "N
+/// sessions existed and could not be dated" and re-run with `full`. A stderr
+/// warning is not a receipt when the consumer is an MCP client reading a JSON
+/// body (#5072).
+/// What: `kept` is the filtered list; `dropped_undatable` counts sessions
+/// excluded solely because [`PausedSession::sort_key`] returned `None`. It is
+/// always 0 when there is no watermark.
+/// Test: `filter_sessions_since_reports_dropped_count`,
+/// `generate_catchup_json_reports_undatable_drop_count`.
+#[derive(Debug, Default)]
+pub struct FilteredSessions {
+    /// Sessions that provably postdate the watermark.
+    pub kept: Vec<PausedSession>,
+    /// How many sessions were withheld because they could not be dated.
+    pub dropped_undatable: usize,
+}
+
+/// Retain only the sessions that provably paused after `watermark`.
+///
+/// Why: this predicate previously lived, copy-pasted, in both
+/// [`crate::catchup::generate_catchup_context`] and
+/// [`crate::catchup::generate_catchup_json`] as
+/// `s.sort_key().is_none_or(|ts| ts > wm)`. `is_none_or` yields `true` for an
+/// unknown key, so a session whose pause instant could not be derived was
+/// admitted by EVERY watermark, forever, while every session that could be
+/// dated was correctly filtered out. On a real project that inverted the
+/// digest: the one undatable record survived and dozens of newer well-formed
+/// snapshots did not (#5072). "Sessions since T" is not a claim an undatable
+/// record can satisfy, so it is now excluded — but the exclusion is reported in
+/// the return value, not merely logged, because the watermark advances past a
+/// withheld session and never comes back for it.
+/// What: with no watermark (a `full` catch-up) returns every session and a zero
+/// count. With a watermark, keeps only sessions whose
+/// [`PausedSession::sort_key`] is `Some` and strictly greater, counting the
+/// undatable exclusions and warning on stderr for each.
+/// Test: `filter_sessions_since_drops_undatable_session`,
+/// `filter_sessions_since_keeps_everything_without_watermark`,
+/// `filter_sessions_since_reports_dropped_count`,
+/// `generate_catchup_json_excludes_undatable_session_behind_watermark`.
+pub fn filter_sessions_since(
+    sessions: Vec<PausedSession>,
+    watermark: Option<DateTime<Utc>>,
+) -> FilteredSessions {
+    let Some(wm) = watermark else {
+        return FilteredSessions {
+            kept: sessions,
+            dropped_undatable: 0,
+        };
+    };
+    let mut out = FilteredSessions::default();
+    for s in sessions {
+        // #5072: fail-closed — an undatable session cannot be shown to postdate
+        // the watermark, so it is withheld instead of admitted unconditionally.
+        match s.sort_key() {
+            Some(ts) if ts > wm => out.kept.push(s),
+            Some(_) => {}
+            None => {
+                out.dropped_undatable += 1;
+                eprintln!(
+                    "catchup: warning: withholding a paused session with no derivable \
+                     pause timestamp from the since-{wm} digest; re-run with \
+                     full=true to see it"
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Read a file's modification time as a UTC instant.
+///
+/// Why: the fallback pause instant for both [`PausedSession`] variants when the
+/// recorded one is missing or unparseable (#5072). It is a fallback, not an
+/// equal: mtime tracks the last WRITE, not the pause, so editing an old
+/// hand-written snapshot re-dates it to the edit and promotes it to the head of
+/// the digest. Acceptable because the alternative is an undatable record, which
+/// [`filter_sessions_since`] drops entirely — a stale-but-present ordering beats
+/// an absent session. It does not fire on a fresh clone: `.trusty-mpm/` and
+/// `.claude-mpm/` are gitignored, so no snapshot carries a checkout mtime.
+/// What: `metadata().modified()`, converted to `DateTime<Utc>`; `None` when the
+/// platform or filesystem cannot supply one.
+/// Test: `parse_falls_back_to_mtime_when_filename_lacks_timestamp`,
+/// `claude_mpm_session_with_no_paused_at_is_dated_by_mtime`.
+pub(crate) fn mtime_utc(path: &Path) -> Option<DateTime<Utc>> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()
+        .map(DateTime::<Utc>::from)
+}
+
+/// Resolve the native `.trusty-mpm` snapshot a given session may resume from.
+///
+/// Why: #5272 — several PM sessions now share one `.trusty-mpm/sessions/` store
+/// (the PM runs on the project's main checkout), and the old chain answered
+/// "newest pause overall" whenever the asking session had no snapshot of its
+/// own. Session `7bd5c27a…` asked and was handed `session-20260809-010155.md`,
+/// which the log attributes to `2eb72dca…`, with nothing in the response saying
+/// so. Under #2731's one-session-per-checkout model that fallback was right;
+/// with a shared store it turns "no snapshot for me" into "someone else's".
+/// What: `session_id` is now the ATTRIBUTION, not a hint. `Some(id)` resolves
+/// through [`session_log::resolve_session_snapshot`](crate::catchup::session_log::resolve_session_snapshot),
+/// which never crosses session boundaries — an id may name another session, and
+/// that explicit request still succeeds, which is the only way a cross-session
+/// read happens. `None` means the caller did not identify itself, so no
+/// snapshot is attributable to it and the answer is `None` rather than an
+/// arbitrary session's file.
+/// Test: `latest_snapshot_prefers_session_log`,
+/// `latest_snapshot_refuses_cross_session_fallback`,
+/// `latest_snapshot_requires_a_session_id`,
+/// `latest_snapshot_reads_legacy_flat_snapshot_via_log`.
+pub fn latest_trusty_mpm_snapshot(project_dir: &Path, session_id: Option<&str>) -> Option<PathBuf> {
+    // #5272: no session id → nothing is attributable to this caller → empty.
+    let id = session_id?;
+    let sessions_dir = project_dir.join(".trusty-mpm").join("sessions");
+    crate::catchup::session_log::resolve_session_snapshot(&sessions_dir, id, "md")
 }
 
 /// Render a markdown catch-up digest for a slice of paused sessions.
@@ -289,11 +437,15 @@ fn parse_trusty_mpm_session(path: &Path) -> anyhow::Result<PausedSession> {
     let tmux_window = extract_section(&content, "Tmux Window");
 
     // Try to parse a UTC timestamp from the filename: session-YYYYMMDD-HHMMSS.md
+    // #5072: hand-written snapshots (`session-20260730-bounce.md`) carry no
+    // parseable stamp; fall back to the file's mtime so the record is still
+    // datable — an undatable one is dropped by `filter_sessions_since`.
     let paused_at = path
         .file_stem()
         .and_then(|s| s.to_str())
         .and_then(|s| s.strip_prefix("session-"))
-        .and_then(parse_filename_timestamp);
+        .and_then(parse_filename_timestamp)
+        .or_else(|| mtime_utc(path));
 
     Ok(PausedSession::TrustyMpm {
         path: path.to_owned(),

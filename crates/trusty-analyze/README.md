@@ -56,62 +56,22 @@ Check the Releases page for the exact artifact names for your version.
 
 ### Install with cargo
 
-**Standard install — macOS arm64 or Linux glibc ≥ 2.38:**
+**Standard install — every supported host:**
 
 ```bash
 cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze --locked
 ```
 
-The default build bundles a prebuilt ONNX Runtime (via `fastembed/ort-download-binaries`)
-for the neural concept-clustering embedder. This is the correct choice for macOS and
-any Linux host with glibc 2.38 or later.
+The build links no ONNX Runtime and downloads no model. Concept clustering uses a
+deterministic hashed bag-of-words embedder.
 
-**Amazon Linux 2023 / glibc < 2.38 (system ORT):**
+> **#5067:** earlier releases defaulted to `bundled-ort`, which pulled in a
+> fastembed/ONNX neural clustering embedder. No caller ever selected it, yet the
+> daemon constructed it at every boot and the untimed Hugging Face request that
+> construction made blocked startup for as long as the request took — 31m46s in
+> one measured production boot. The embedder, the `bundled-ort` / `load-dynamic`
+> / `cuda` features, and the separate Amazon Linux 2023 install path are all gone.
 
-The bundled ONNX Runtime static library (included by the default `bundled-ort` feature)
-is built against glibc 2.38. Linking it on AL2023 (glibc 2.34) or any other host with
-an older glibc fails at link time with an unresolved `__isoc23_strtol` symbol (glibc
-2.38-only). The `load-dynamic` feature bypasses the static bundle entirely: `ort` loads
-`libonnxruntime.so` via `libloading` at runtime instead of linking it at build time.
-
-Step 1 — install a glibc-compatible ONNX Runtime. The official Microsoft CPU release
-is built against glibc 2.17 and runs on AL2023 without issues:
-
-```bash
-# ORT 1.24.2 CPU (matches the version used by ort-sys 2.0.0-rc.12 / fastembed 5.x)
-ORT_VERSION=1.24.2
-curl -fsSL \
-  "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
-  | sudo tar xz -C /opt
-sudo ln -sf "/opt/onnxruntime-linux-x64-${ORT_VERSION}" /opt/onnxruntime
-```
-
-Step 2 — build without the bundled ORT:
-
-```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze \
-    --locked --no-default-features --features http-server,load-dynamic
-```
-
-Step 3 — export `ORT_DYLIB_PATH` and start the daemon:
-
-```bash
-export ORT_DYLIB_PATH=/opt/onnxruntime/lib/libonnxruntime.so
-trusty-analyze serve --search-url http://127.0.0.1:7878
-```
-
-Add `ORT_DYLIB_PATH` to your shell profile or systemd/launchd service unit so it
-persists across restarts. The exact ORT version (`1.24.2`) must match what
-`ort-sys`/`fastembed` expects; see the `ort-sys` version in `Cargo.lock` to
-confirm the version before upgrading ORT.
-
-If no system ORT is available, install without any ORT backend. The daemon will still
-run with the deterministic BoW embedder (no semantic clustering):
-
-```bash
-cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-analyze \
-    --locked --no-default-features --features http-server
-```
 
 The installed binary is named `trusty-analyze`.
 
@@ -137,7 +97,7 @@ Homebrew provides:
 
 ```bash
 # trusty-search must be running first (hard runtime dependency)
-trusty-search daemon
+trusty-search start
 
 # Run the analyzer sidecar
 trusty-analyze serve --search-url http://127.0.0.1:7878
@@ -189,7 +149,7 @@ Falls back to `7879` when no daemon is running.
 - Code smell detection with configurable thresholds and named categories
 - Quality grade aggregation (A–F) per file and per index
 - Git blame temporal decay scoring (stale high-complexity code surfaces first)
-- Concept clustering (k-means over embeddings, BoW or neural)
+- Concept clustering (k-means over hashed bag-of-words embeddings)
 - Facts store: `(subject, predicate, object)` knowledge triples, persisted in redb
 - SCIP protobuf ingest for LSP-quality symbol data
 - Full HTTP API + MCP stdio server (every endpoint has a tool equivalent)
@@ -216,8 +176,44 @@ unreachable.
 
 ## MCP Tools
 
-The MCP server registers **17 tools** (authoritative source: `src/mcp/mod.rs`
-`tool_definitions`):
+<!-- BEGIN GENERATED: mcp-tools -->
+The MCP server registers **20 tools** with default features, **23 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
+this table is generated from it, not maintained by hand.
+
+| Tool | Available | Arguments | Summary |
+|---|---|---|---|
+| `analyze_quality` | always | `index?`, `index_id?` | Aggregate quality stats: avg cyclomatic, %A, smell count |
+| `analyzer_health` | always | — | Probe analyzer daemon liveness and version |
+| `cluster_concepts` | always | `index?`, `index_id?`, `k?`, `method?` | Group chunks into concept clusters using k-means over hashed bag-of-words embeddings |
+| `complexity_distribution` | always | `index?`, `index_id?` | Full A-F cyclomatic-complexity histogram over the whole index corpus, with the counted total. |
+| `complexity_hotspots` | always | `index?`, `index_id?`, `top_n?` | Top-N chunks ranked by cyclomatic complexity |
+| `console_metrics` | always | — | Return health and operational metrics for trusty-console polling. |
+| `deep_analysis` | always | `index_id`, `model?` | Run an LLM-augmented deep analysis pass over an index: synthesises a deterministic review report from the indexed corpus, looks up detected… |
+| `delete_fact` | always | `id` | Delete a fact by its u64 id |
+| `extract_graph` | always | `index?`, `index_id?`, `language?` | Build the multi-language knowledge graph (nodes + edges) for an index |
+| `extract_ner` | always | `index?`, `index_id?`, `top_k?` | Extract named entities from doc comments for a code index using NER |
+| `find_smells` | always | `index?`, `index_id?`, `limit?`, `offset?`, `omit_content?` | Chunks with at least one detected code smell. |
+| `ingest_scip` | always | `scip_base64`, `index?`, `index_id?` | Ingest a SCIP (Scalable and Precise Index for Code) protobuf index for a given index_id, enriching the knowledge graph with fully-resolved… |
+| `list_analyze_indexes` | always | — | List all indexes known to the trusty-analyze daemon. |
+| `list_entities` | always | `index?`, `index_id?`, `kind?`, `language?` | List symbol-level entities (functions, classes, ...) for an index |
+| `list_facts` | always | `object?`, `predicate?`, `subject?` | List canonical facts, optionally filtered by subject/predicate/object |
+| `review_diff` | always | `diff`, `index_id` | Review a unified git diff and return a structured quality report (per-file complexity, code smells, grade A-F, recommendations). |
+| `review_github_pr` | always | `owner`, `repo`, `pr`, `index_id`, `post_comment?` | Fetch a GitHub pull request's unified diff and run a structured quality review against a trusty-search index. |
+| `run_diagnostics` | always | `index?`, `index_id?`, `language?`, `limit?`, `offset?`, `tools?` | Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy,… |
+| `suggest_refactors` | always | `file?`, `index?`, `index_id?`, `min_severity?`, `top_k?` | Suggest concrete refactoring actions (extract method, reduce nesting, ...) ranked by severity, derived from complexity metrics and code… |
+| `tr_review_diff` | `--features review` | `diff`, `context?`, `reviewer_model?` | LLM-backed review of a raw unified diff string via the embedded trusty-review pipeline. |
+| `tr_review_health` | `--features review` | — | Probe the embedded trusty-review pipeline's liveness and configuration (dry_run mode, reviewer model, dependency URLs). |
+| `tr_review_pr` | `--features review` | `owner`, `repo`, `pr`, `reviewer_model?` | LLM-backed review of a GitHub pull request via the embedded trusty-review pipeline. |
+| `upsert_fact` | always | `subject`, `predicate`, `object`, `index_id`, `confidence?`, `provenance?` | Insert or update a canonical fact triple |
+<!-- END GENERATED: mcp-tools -->
+
+### HTTP equivalents
+
+Parity rule: every HTTP endpoint has an MCP tool. This mapping is hand-written
+— the route a tool forwards to lives in the dispatcher's match arms, not in the
+descriptors, so the generator above cannot derive it. The tool names here are
+cross-checked against the descriptors by `http_equivalents_name_only_real_tools`
+in `tests/generated_docs.rs`, so the list cannot name a tool that does not exist.
 
 | Tool | HTTP equivalent |
 |------|-----------------|
@@ -234,10 +230,12 @@ The MCP server registers **17 tools** (authoritative source: `src/mcp/mod.rs`
 | `extract_graph` | knowledge-graph extraction |
 | `extract_ner` | named-entity extraction (optional ONNX) |
 | `list_entities` | enumerate extracted entities |
+| `list_analyze_indexes` | `GET /indexes` (used by the trusty-console dashboard) |
 | `suggest_refactors` | refactor suggestions |
 | `review_diff` | review a unified diff |
 | `review_github_pr` | review a GitHub pull request |
 | `deep_analysis` | combined deep-analysis pass |
+| `console_metrics` | daemon health + index stats for the trusty-console dashboard |
 
 ## HTTP API
 
@@ -248,7 +246,7 @@ GET  /health
 GET  /indexes/:id/complexity_hotspots[?top_k=N]
 GET  /indexes/:id/smells[?category=<name>]
 GET  /indexes/:id/quality
-GET  /indexes/:id/clusters?k=N&method=bow|neural
+GET  /indexes/:id/clusters?k=N&method=bow
 GET  /facts[?subject=<s>&predicate=<p>]
 POST /facts
 DELETE /facts/:id
@@ -315,19 +313,10 @@ accumulation, recommendations extraction) is identical.
 | Flag | Description |
 |---|---|
 | `http-server` | Axum HTTP daemon (enabled by default). Required for the `trusty-analyze` binary. |
-| `bundled-ort` | **Default.** Bundle the static ONNX Runtime libs via fastembed. Requires glibc ≥ 2.38. |
-| `load-dynamic` | Load ONNX Runtime dynamically from `ORT_DYLIB_PATH`. Use on glibc < 2.38 (AL2023). Mutually exclusive with `bundled-ort`. |
-| `cuda` | GPU-accelerated embedding via ONNX Runtime CUDA EP. Always pair with `--no-default-features`. |
-| `ner` | Optional ONNX-backed named entity recognition (separate model file required). |
+| `ner` | Optional ONNX-backed named entity recognition (separate model file required). Off by default; not on the boot path. |
 
-### ORT backend selection summary
-
-| Host | Recommended install command |
-|---|---|
-| macOS, Linux glibc ≥ 2.38 | `cargo install trusty-analyze` (default, bundled ORT) |
-| Amazon Linux 2023 / glibc 2.34 | `cargo install trusty-analyze --no-default-features --features http-server,load-dynamic` + `ORT_DYLIB_PATH` |
-| No ONNX Runtime available | `cargo install trusty-analyze --no-default-features --features http-server` (BoW fallback) |
-| CUDA GPU | `cargo install trusty-analyze --no-default-features --features http-server,cuda` + `ORT_DYLIB_PATH` |
+`bundled-ort`, `load-dynamic`, and `cuda` were removed in #5067 along with the
+neural clustering embedder. One install command works on every host.
 
 ## Architecture
 

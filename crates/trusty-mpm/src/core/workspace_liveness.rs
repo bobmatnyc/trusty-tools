@@ -209,7 +209,7 @@ mod tests {
     fn worktree_shaped(base: &TempDir, leaf: &str) -> std::path::PathBuf {
         let p = base
             .path()
-            .join(crate::session_manager::decommission::WORKTREES_DIRNAME)
+            .join(crate::session_manager::decommission::worktrees_dirname())
             .join(leaf);
         fs::create_dir_all(&p).unwrap();
         p

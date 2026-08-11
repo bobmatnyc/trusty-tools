@@ -59,8 +59,29 @@ fn skip_palace_enforcement() {
     });
 }
 
+/// Pre-seed the process-wide shared embedder with `MockEmbedder`.
+///
+/// Why: `memory_remember` / `memory_recall` resolve
+/// `retrieval::shared_embedder()`, a process-wide `OnceCell`. Whichever caller
+/// seeds it first wins for the rest of the process, so under `cargo test` — one
+/// process for this whole binary — a single sibling's seed silently satisfied
+/// every other test. Under per-test process isolation (`cargo nextest run`)
+/// each test gets a virgin cell instead, reaches for the real ONNX model, and
+/// fails on the HuggingFace download (HTTP 429 in CI). Same defect class as
+/// [`skip_palace_enforcement`] / #4413: a test that passes only because a
+/// sibling ran first. Establishing the precondition in the fixtures every test
+/// already calls is what makes each test self-sufficient.
+/// What: delegates to `seed_shared_embedder_with_mock`, which is idempotent
+/// (`OnceCell::set`, first caller wins), so calling it from both fixtures is
+/// free and order-independent.
+/// Test: every test in this module that constructs state.
+fn seed_embedder() {
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+}
+
 fn test_state() -> (AppState, tempfile::TempDir) {
     skip_palace_enforcement();
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = AppState::new(root);
@@ -78,6 +99,7 @@ fn test_state() -> (AppState, tempfile::TempDir) {
 ///       `note_returns_warming_error_while_state_is_warming`.
 fn test_state_warming() -> (crate::AppState, tempfile::TempDir) {
     skip_palace_enforcement();
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = crate::AppState::new(root);
@@ -102,6 +124,7 @@ fn tool_definitions_drops_palace_required_when_default_set() {
         ("palace_info", true),
         ("palace_compact", true),
         ("palace_reembed", true),
+        ("palace_unalias", true),
         ("kg_assert", true),
         ("kg_query", true),
         // Issue #664: add_alias and discover_aliases now include `palace`
@@ -128,6 +151,16 @@ fn tool_definitions_drops_palace_required_when_default_set() {
     }
 }
 
+/// Why: this roster is the required-tool contract — every name here must be
+/// served, and nothing may be served that is not here. It used to also carry a
+/// bare `assert_eq!(tools.len(), 45)`; #5205 removed that number because the
+/// README's count is now generated from this same function, and a hand-typed
+/// 45 alongside a derived count is two sources for one fact again. The roster
+/// stays hardcoded on purpose — it is the human-authored contract, not a
+/// restatement of what the code happens to return.
+/// What: asserts the roster and the served set are exactly equal, in both
+/// directions, so an addition or removal still fails here.
+/// Test: this test.
 #[test]
 fn tool_definitions_lists_all_tools() {
     let defs = tool_definitions();
@@ -135,16 +168,16 @@ fn tool_definitions_lists_all_tools() {
         .get("tools")
         .and_then(|t| t.as_array())
         .expect("tools array");
-    // 34 original + 3 task tools (task_add, task_list, task_complete, issue
-    // #1722) + 3 room tools (room_list, room_create, room_rename, ADR-0027 T6)
-    // + 3 wing tools (wing_list, wing_create, wing_rename, ADR-0027 T9 / #4809)
-    // + 1 repair tool (palace_reembed, #4906)
-    assert_eq!(tools.len(), 44);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
         .collect();
-    for expected in [
+    // 34 original + 3 task tools (task_add, task_list, task_complete, issue
+    // #1722) + 3 room tools (room_list, room_create, room_rename, ADR-0027 T6)
+    // + 3 wing tools (wing_list, wing_create, wing_rename, ADR-0027 T9 / #4809)
+    // + 1 repair tool (palace_reembed, #4906)
+    // + 1 alias-repair tool (palace_unalias, #5005)
+    let roster = [
         "memory_remember",
         "memory_note",
         "memory_recall",
@@ -158,8 +191,11 @@ fn tool_definitions_lists_all_tools() {
         "palace_info",
         "palace_compact",
         "palace_reembed",
+        "palace_unalias",
         "kg_assert",
         "kg_query",
+        // #4776: subject enumeration over MCP.
+        "kg_list_subjects",
         "memory_recall_all",
         "kg_gaps",
         "add_alias",
@@ -192,9 +228,23 @@ fn tool_definitions_lists_all_tools() {
         "wing_list",
         "wing_create",
         "wing_rename",
-    ] {
+    ];
+    for expected in roster {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
+    // The other direction: a new tool must be added to the roster above, which
+    // is what keeps this an exact contract rather than a lower bound.
+    for served in &names {
+        assert!(
+            roster.contains(served),
+            "tool not in the roster above: {served}"
+        );
+    }
+    assert_eq!(
+        names.len(),
+        roster.len(),
+        "duplicate tool name in tool_definitions"
+    );
 }
 
 /// Why: Confirm `palace_create` actually persists a palace under the
@@ -236,6 +286,46 @@ async fn dispatch_palace_reembed_dry_run_reports_counts() {
     assert_eq!(out["repaired"], 0);
     assert!(out["drawer_count"].is_number());
     assert!(out["vector_count"].is_number());
+}
+
+/// Why (#5005): `unalias` had zero call sites — the repair existed as code an
+/// operator could not run. The claim this makes is that it is now reachable
+/// through `dispatch_tool`, defaults to a dry run like `palace_reembed`, and
+/// reports an id SET rather than a count (the count-based all-clear is the
+/// defect the ticket is about). It also runs inside the daemon for the same
+/// reason `palace_reembed` does: the daemon holds the writer lock.
+/// What: creates a palace and calls `palace_unalias` with no arguments,
+/// asserting the default is a dry run, the outcome word is `clean` on a palace
+/// with nothing aliased, and the payload carries `freed_ids` as an array.
+/// Test: itself. Removing the `palace_unalias` dispatch arm makes this an
+/// unknown-tool error; defaulting `dry_run` to false fails the first assertion.
+#[tokio::test]
+async fn dispatch_palace_unalias_dry_run_names_ids_and_writes_nothing() {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "unalias-test"}))
+        .await
+        .expect("palace_create");
+    let out = dispatch_tool(&state, "palace_unalias", json!({"palace": "unalias-test"}))
+        .await
+        .expect("palace_unalias must be dispatchable");
+    assert_eq!(out["dry_run"], true, "must default to a dry run: {out}");
+    assert_eq!(
+        out["outcome"], "clean",
+        "a palace with no collision is clean, not repaired: {out}"
+    );
+    assert_eq!(out["success"], true);
+    assert!(
+        out["freed_ids"]
+            .as_array()
+            .expect("freed_ids array")
+            .is_empty(),
+        "an id SET, empty here — never a bare count: {out}"
+    );
+    assert_eq!(
+        out["reembed_required"], false,
+        "nothing was freed, so nothing is owed"
+    );
+    assert!(out["error"].is_null(), "a clean run has no error: {out}");
 }
 
 /// Why (issue #1714): `force=true` bypasses slug validation with no
@@ -444,6 +534,200 @@ async fn dispatch_kg_assert_then_query() {
     assert_eq!(triples.len(), 1);
     assert_eq!(triples[0]["object"], "Acme");
     assert_eq!(triples[0]["predicate"], "works_at");
+}
+
+/// Why: #4776 — `kg_list_subjects` is the discovery read that makes `kg_query`
+/// usable without already knowing a subject, so the contract that matters is
+/// that every asserted subject comes back, once, in alphabetical order.
+/// What: asserts two triples under distinct subjects, dispatches
+/// `kg_list_subjects`, and checks the envelope plus the ordering.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_returns_distinct_subjects() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "subjects"}))
+        .await
+        .expect("palace_create");
+
+    for (subject, object) in [("zeta", "Acme"), ("alpha", "Globex")] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "subjects",
+                "subject": subject,
+                "predicate": "works_at",
+                "object": object,
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let listed = dispatch_tool(&state, "kg_list_subjects", json!({"palace": "subjects"}))
+        .await
+        .expect("kg_list_subjects");
+
+    assert_eq!(listed["palace"], "subjects");
+    assert_eq!(listed["with_counts"], false);
+    assert_eq!(listed["truncated"], false);
+    let subjects: Vec<&str> = listed["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        subjects.contains(&"alpha") && subjects.contains(&"zeta"),
+        "both asserted subjects should be listed: {subjects:?}"
+    );
+    let mut sorted = subjects.clone();
+    sorted.sort_unstable();
+    assert_eq!(subjects, sorted, "subjects should be alphabetical");
+}
+
+/// Why: #4776 — `with_counts` is what lets a caller pick the densest subject to
+/// query first, so the count has to be a real per-subject active-triple count,
+/// not a placeholder.
+/// What: asserts two triples on one subject and one on another, then checks the
+/// `{subject, count}` pairs the tool returns.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_with_counts_returns_pairs() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "counts"}))
+        .await
+        .expect("palace_create");
+
+    for (subject, predicate) in [
+        ("alpha", "works_at"),
+        ("alpha", "lives_in"),
+        ("beta", "owns"),
+    ] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "counts",
+                "subject": subject,
+                "predicate": predicate,
+                "object": "Acme",
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let listed = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "counts", "with_counts": true}),
+    )
+    .await
+    .expect("kg_list_subjects");
+
+    assert_eq!(listed["with_counts"], true);
+    let pairs: Vec<(&str, u64)> = listed["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .iter()
+        .filter_map(|v| Some((v["subject"].as_str()?, v["count"].as_u64()?)))
+        .collect();
+    assert!(
+        pairs.contains(&("alpha", 2)),
+        "alpha should carry both of its triples: {pairs:?}"
+    );
+    assert!(
+        pairs.contains(&("beta", 1)),
+        "beta should carry its single triple: {pairs:?}"
+    );
+}
+
+/// Why: #4810 — `truncated = subjects.len() == limit` cannot distinguish "the
+/// page filled and more subjects exist" from "the palace holds exactly
+/// `limit` subjects in total"; a caller that trusted the old flag would raise
+/// `limit` and get back an identical page for nothing.
+/// What: asserts three subjects, then discovers the palace's real total
+/// subject count with a wide-open `kg_list_subjects` call — `palace_create`
+/// auto-bootstraps its own `project_subject` triple (see
+/// `bootstrap::bootstrap_palace`), so the total is not simply the three
+/// asserted names. Requests `limit: <that total>` and confirms `truncated`
+/// is `false` — the case the length-equality check got wrong. Then requests
+/// `limit: 1` over the same palace and confirms `truncated` still comes back
+/// `true` there.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_kg_list_subjects_exact_limit_is_not_truncated() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "exactlimit"}))
+        .await
+        .expect("palace_create");
+
+    for subject in ["alpha", "beta", "gamma"] {
+        let _ = dispatch_tool(
+            &state,
+            "kg_assert",
+            json!({
+                "palace": "exactlimit",
+                "subject": subject,
+                "predicate": "works_at",
+                "object": "Acme",
+            }),
+        )
+        .await
+        .expect("kg_assert");
+    }
+
+    let wide_open = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": 200}),
+    )
+    .await
+    .expect("kg_list_subjects wide-open baseline");
+    let total = wide_open["subjects"]
+        .as_array()
+        .expect("subjects array")
+        .len();
+    assert!(
+        total >= 3,
+        "the three asserted subjects should all be present: total={total}"
+    );
+    assert_eq!(
+        wide_open["truncated"], false,
+        "a limit well above the real total is never truncated"
+    );
+
+    let listed = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": total}),
+    )
+    .await
+    .expect("kg_list_subjects");
+
+    let subjects = listed["subjects"].as_array().expect("subjects array");
+    assert_eq!(
+        subjects.len(),
+        total,
+        "every subject should come back: {subjects:?}"
+    );
+    assert_eq!(
+        listed["truncated"], false,
+        "exactly `limit` subjects total is not truncation"
+    );
+
+    let capped = dispatch_tool(
+        &state,
+        "kg_list_subjects",
+        json!({"palace": "exactlimit", "limit": 1}),
+    )
+    .await
+    .expect("kg_list_subjects");
+    assert_eq!(
+        capped["truncated"], true,
+        "limit below the subject count should still report truncated"
+    );
 }
 
 /// Why: Issue #53 — verify the MCP `kg_gaps` tool returns whatever was
@@ -844,18 +1128,44 @@ async fn palace_create_auto_seeds_temporal_metadata() {
         queried.get("hint").is_none(),
         "hint should be absent when triples exist"
     );
+    // #4775: `graph_state` is the miss discriminator, so its absence is what
+    // marks a hit; `kg_triple_count` is present either way.
+    assert!(
+        queried.get("graph_state").is_none(),
+        "graph_state should be absent when triples exist"
+    );
+    assert!(
+        queried["kg_triple_count"].as_u64().unwrap_or(0) >= 2,
+        "kg_triple_count must be present on a hit; got {}",
+        queried["kg_triple_count"],
+    );
 }
 
-/// Why (issue #60): `kg_query` against a subject with no triples must
-/// surface a `hint` field pointing the user at `kg_bootstrap` /
-/// `kg_assert`. Without the hint, brand-new palaces returned empty
-/// arrays with no breadcrumb back to the seeding tools.
+/// Why (#4775): this is the case the old single-hint behavior got wrong.
+/// `palace_create` auto-bootstraps at least `created_at` + `bootstrapped_at`,
+/// so the graph is provably non-empty; querying a subject it does not hold
+/// used to answer "Knowledge graph is empty" anyway. The replaced test
+/// asserted that falsehood and passed. The `kg_list_subjects` call here is
+/// what makes the non-emptiness a fact of the test rather than an assumption.
 #[tokio::test]
-async fn kg_query_emits_hint_when_palace_empty() {
+async fn kg_query_reports_subject_not_found_when_graph_has_other_subjects() {
     let (state, _tmp) = test_state();
     let _ = dispatch_tool(&state, "palace_create", json!({"name": "hinted"}))
         .await
         .expect("palace_create");
+
+    // Establish the precondition: the graph holds subjects.
+    let subjects = dispatch_tool(&state, "kg_list_subjects", json!({"palace": "hinted"}))
+        .await
+        .expect("kg_list_subjects");
+    assert!(
+        !subjects["subjects"]
+            .as_array()
+            .expect("subjects")
+            .is_empty(),
+        "auto-bootstrap should have seeded at least one subject",
+    );
+
     // Query a subject that auto-bootstrap did NOT seed.
     let queried = dispatch_tool(
         &state,
@@ -865,9 +1175,73 @@ async fn kg_query_emits_hint_when_palace_empty() {
     .await
     .expect("kg_query");
     assert_eq!(queried["triples"].as_array().unwrap().len(), 0);
+    assert_eq!(queried["graph_state"], "subject_not_found");
+    assert!(
+        queried["kg_triple_count"].as_u64().unwrap_or(0) >= 2,
+        "whole-graph count must reflect the bootstrapped triples; got {}",
+        queried["kg_triple_count"],
+    );
+    let hint = queried["hint"].as_str().expect("hint field present");
+    assert!(
+        hint.contains("kg_list_subjects"),
+        "miss hint must name kg_list_subjects; got {hint:?}",
+    );
+    assert!(
+        !hint.contains("Knowledge graph is empty"),
+        "must not claim emptiness for a non-empty graph; got {hint:?}",
+    );
+}
+
+/// Why (#4775): the `graph_empty` branch is the one the old hint was written
+/// for, and it must still fire — but only when the graph really holds nothing.
+/// The palace is created through the registry directly because
+/// `palace_create` auto-bootstraps, and there is no way to ask it not to.
+#[tokio::test]
+async fn kg_query_reports_graph_empty_when_graph_has_no_triples() {
+    use trusty_common::memory_core::palace::Palace;
+
+    let (state, _tmp) = test_state();
+    let palace = Palace {
+        id: PalaceId::new("barren"),
+        name: "barren".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join("barren"),
+    };
+    let _ = state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create_palace");
+
+    let queried = dispatch_tool(
+        &state,
+        "kg_query",
+        json!({"palace": "barren", "subject": "anything"}),
+    )
+    .await
+    .expect("kg_query");
+    assert_eq!(queried["triples"].as_array().unwrap().len(), 0);
+    assert_eq!(queried["kg_triple_count"], 0);
+    assert_eq!(queried["graph_state"], "graph_empty");
     let hint = queried["hint"].as_str().expect("hint field present");
     assert!(hint.contains("kg_bootstrap"));
     assert!(hint.contains("kg_assert"));
+}
+
+/// Why (#4775): the classification is pure, so pin all four combinations of
+/// (subject has triples, graph has triples) without a live palace.
+#[test]
+fn kg_miss_classify_distinguishes_empty_graph_from_missing_subject() {
+    use crate::bootstrap::KgMiss;
+
+    assert_eq!(KgMiss::classify(0, 0), Some(KgMiss::GraphEmpty));
+    assert_eq!(KgMiss::classify(0, 7), Some(KgMiss::SubjectNotFound));
+    assert_eq!(KgMiss::classify(3, 7), None);
+    // A subject with triples in a graph that reports zero is contradictory;
+    // a hit still wins, because the triples are in hand and the count is not.
+    assert_eq!(KgMiss::classify(3, 0), None);
+    assert_eq!(KgMiss::GraphEmpty.wire_value(), "graph_empty");
+    assert_eq!(KgMiss::SubjectNotFound.wire_value(), "subject_not_found");
 }
 
 /// Why (issue #60): `kg_bootstrap` against the live workspace root must
@@ -1778,6 +2152,15 @@ async fn bm25_index_queue_drops_when_full() {
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
         other => panic!("expected Full overflow, got {other:?}"),
     }
+
+    // #5048 review: dropping is only defensible if something repairs the drop.
+    // Removing the `mark_dirty` call from `bm25_index_enqueue`'s `Full` arm
+    // leaves this list empty and the coverage gap unrepaired until restart.
+    assert_eq!(
+        crate::bm25_repair::dirty_palaces(&state),
+        vec!["default".to_string()],
+        "a dropped index op must queue its palace for coverage repair"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -1800,10 +2183,15 @@ async fn bm25_index_queue_drops_when_full() {
 /// `handle.vector_store` returns a hit for the drawer id. This proves the
 /// deferred embed job is not just fired but actually completes.
 ///
-/// Deliberately does NOT seed a mock embedder: this unit-test binary also
-/// runs `dispatch_remember_then_recall` against the real, process-wide
-/// `shared_embedder()` singleton, and seeding a mock here would race with
-/// (and potentially poison) that test depending on execution order.
+/// Runs against the seeded `MockEmbedder` (via [`test_state_warming`] →
+/// [`seed_embedder`]). It used to deliberately skip the seed, on the reasoning
+/// that seeding would race `dispatch_remember_then_recall`'s use of the real
+/// embedder — but the cell is process-wide and first-writer-wins, so that
+/// reasoning made this test depend on whichever sibling happened to initialise
+/// it, and under `cargo nextest run` (a virgin cell per test) the
+/// `shared_embedder()` call below failed outright. The mock is a deterministic
+/// hash, so the backfilled vector and the query vector below match exactly;
+/// `dispatch_remember_then_recall` passes on the mock as well.
 /// Test: this test.
 #[tokio::test]
 async fn remember_succeeds_and_defers_embedding_while_state_is_warming() {
@@ -3304,4 +3692,255 @@ fn kuzu_migrate_refuses_hot_predicates_and_passes_cold_ones() {
             "{p} is an ordinary relation type and must still import",
         );
     }
+}
+
+/// Why (#5048 re-review): the enqueue drop was tested but the worker's own two
+/// loss paths were not, and they lose a write just as completely — a daemon
+/// that will not spawn and an index call that fails both leave the drawer out
+/// of the BM25 corpus with nothing queued to repair it.
+/// What: drives `spawn_bm25_index_worker` directly with a client pointed at a
+/// dead socket, so `client.index` fails, and asserts the palace is queued.
+/// Test: this test itself. Delete the `dirty.insert` from the index-failure arm
+/// and the queue stays empty.
+#[tokio::test]
+async fn a_failed_index_call_queues_the_palace_for_repair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dirty: crate::bm25_repair::DirtyPalaces = std::sync::Arc::new(dashmap::DashSet::new());
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+
+    // No listener at this path, so every `index` call fails at connect.
+    let client = std::sync::Arc::new(trusty_common::bm25_client::Bm25Client::new(
+        tmp.path().join("dead.sock"),
+    ));
+    // No supervisor: this isolates the index-failure arm from the spawn arm.
+    spawn_bm25_index_worker(rx, Some(client), None, std::sync::Arc::clone(&dirty));
+
+    tx.send(Bm25IndexRequest {
+        palace: "lossy".to_string(),
+        drawer_id: Uuid::new_v4().to_string(),
+        content: "content that will never reach the daemon".to_string(),
+        data_dir: tmp.path().join("bm25"),
+    })
+    .await
+    .expect("send to worker");
+
+    for _ in 0..200 {
+        if dirty.contains("lossy") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        dirty.contains("lossy"),
+        "an index call that failed lost the write and must queue the palace"
+    );
+}
+
+/// Why: the other worker loss path. A supervisor that cannot start a daemon
+/// makes the worker skip the request entirely, which is the same lost write.
+/// What: points the daemon locator at a path that does not exist so
+/// `ensure_running` fails, and asserts the palace is queued.
+/// Test: this test itself. Delete the `dirty.insert` from the spawn-failure arm
+/// and the queue stays empty.
+#[tokio::test]
+async fn a_daemon_that_will_not_spawn_queues_the_palace_for_repair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let prev = std::env::var("TRUSTY_BM25_DAEMON_BIN").ok();
+    let prev_ext = std::env::var("TRUSTY_BM25_EXTERNAL").ok();
+    // SAFETY: test-only env mutation, restored below.
+    unsafe {
+        std::env::set_var("TRUSTY_BM25_DAEMON_BIN", tmp.path().join("no-such-binary"));
+        std::env::remove_var("TRUSTY_BM25_EXTERNAL");
+    }
+
+    let dirty: crate::bm25_repair::DirtyPalaces = std::sync::Arc::new(dashmap::DashSet::new());
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+    let client = std::sync::Arc::new(trusty_common::bm25_client::Bm25Client::new(
+        tmp.path().join("unused.sock"),
+    ));
+    let supervisor = std::sync::Arc::new(crate::bm25_supervisor::Bm25Supervisor::new());
+    spawn_bm25_index_worker(
+        rx,
+        Some(client),
+        Some(supervisor),
+        std::sync::Arc::clone(&dirty),
+    );
+
+    // A palace name short enough that the socket path stays inside `sun_path`.
+    let palace = format!("nz{:x}", std::process::id() & 0xfff);
+    tx.send(Bm25IndexRequest {
+        palace: palace.clone(),
+        drawer_id: Uuid::new_v4().to_string(),
+        content: "content that will never reach a daemon".to_string(),
+        data_dir: tmp.path().join("bm25"),
+    })
+    .await
+    .expect("send to worker");
+
+    for _ in 0..400 {
+        if dirty.contains(&palace) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let queued = dirty.contains(&palace);
+
+    // SAFETY: restoring the captured prior values.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("TRUSTY_BM25_DAEMON_BIN", v),
+            None => std::env::remove_var("TRUSTY_BM25_DAEMON_BIN"),
+        }
+        if let Some(v) = prev_ext {
+            std::env::set_var("TRUSTY_BM25_EXTERNAL", v);
+        }
+    }
+
+    assert!(
+        queued,
+        "a daemon that will not spawn lost the write and must queue the palace"
+    );
+}
+
+/// Why (#5048 re-review): `Full` marked the palace dirty and `Closed`, three
+/// lines below it, logged at `debug!` and returned. Both lose the write
+/// identically — the drawer never reaches the index and nothing remembers that
+/// it did not. Fixing one arm and leaving its sibling is the shape #4683
+/// shipped with.
+/// What: drops the receiver so `try_send` returns `Closed`, then enqueues.
+/// Test: this test itself. Remove the `mark_dirty` from the `Closed` arm and
+/// the queue stays empty.
+#[tokio::test]
+async fn a_closed_index_queue_queues_the_palace_for_repair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut state = AppState::new(tmp.path().to_path_buf());
+
+    // Swap in a sender whose receiver is dropped. Waiting for the real worker
+    // to exit would race its spawn; this closes the channel deterministically.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bm25IndexRequest>(8);
+    drop(rx);
+    state.bm25_index_tx = tx;
+
+    assert!(
+        matches!(
+            state.bm25_index_tx.try_send(Bm25IndexRequest {
+                palace: "default".to_string(),
+                drawer_id: Uuid::new_v4().to_string(),
+                content: "probe".to_string(),
+                data_dir: state.data_root.join("default"),
+            }),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_))
+        ),
+        "precondition: the queue must actually be closed, not merely full"
+    );
+
+    bm25_index_enqueue(&state, "default", Uuid::new_v4(), "content that is lost");
+
+    assert_eq!(
+        crate::bm25_repair::dirty_palaces(&state),
+        vec!["default".to_string()],
+        "a closed queue loses the write as completely as a full one and must queue repair"
+    );
+}
+
+/// Why (#5005 review): every `palace_unalias` test that reached `dispatch_tool`
+/// ran against an empty palace, so the only daemon-level outcome ever observed
+/// was `clean` — the branch that does nothing. The success path was proven at
+/// the store layer and assumed through the tool: nothing had shown that a real
+/// collision survives arg parsing, the `is_read_only()` routing a dry run skips,
+/// and JSON serialization to arrive as a non-empty `freed_ids`. An unobserved
+/// happy path is not a proven one, and this is the path #4834's deletion gate
+/// will call.
+/// What: seeds two drawer uuids onto one `vector_id` in the palace's own
+/// `index.usearch.redb`, then drives `palace_unalias` with `dry_run: false`
+/// through `dispatch_tool`, asserting `outcome: "repaired"`, both uuids named
+/// in `freed_ids`, and `reembed_required: true`. A second call must then report
+/// `clean` and free nothing — idempotence observed at the tool surface, not
+/// just at the store.
+/// Test: itself. Routing the write path through the read-only lock, or letting
+/// `freed_ids` serialize as a count, fails it.
+#[tokio::test]
+async fn dispatch_palace_unalias_frees_a_real_collision_and_is_idempotent() {
+    use redb::{Database, TableDefinition};
+    const VECTORS: TableDefinition<u64, &[u8]> = TableDefinition::new("vectors");
+    const VECTOR_KEYS: TableDefinition<&str, u64> = TableDefinition::new("vector_keys");
+
+    let (state, tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "collide"}))
+        .await
+        .expect("palace_create");
+
+    // Two drawers, one shared vector id — the collision this PR repairs.
+    let a = uuid::Uuid::new_v4();
+    let b = uuid::Uuid::new_v4();
+    let shared_id: u64 = 7;
+    {
+        // Drop the cached handle so the palace releases its flock; the next
+        // dispatch reopens the file and sees the seeded collision.
+        state.registry.remove(&PalaceId::new("collide"));
+        let db = Database::create(tmp.path().join("collide/index.usearch.redb"))
+            .expect("open palace vector redb");
+        let wtx = db.begin_write().expect("begin");
+        {
+            let mut vectors = wtx.open_table(VECTORS).expect("vectors");
+            let mut keys = wtx.open_table(VECTOR_KEYS).expect("keys");
+            let encoded = postcard::to_allocvec(&vec![0.05_f32; 384]).expect("encode vector");
+            vectors.insert(shared_id, encoded.as_slice()).expect("vec");
+            keys.insert(a.to_string().as_str(), shared_id)
+                .expect("key a");
+            keys.insert(b.to_string().as_str(), shared_id)
+                .expect("key b");
+        }
+        wtx.commit().expect("commit");
+        drop(db); // release the flock before the palace reopens the file
+    }
+
+    let out = dispatch_tool(
+        &state,
+        "palace_unalias",
+        json!({"palace": "collide", "dry_run": false}),
+    )
+    .await
+    .expect("palace_unalias must dispatch on the write path");
+
+    assert_eq!(out["dry_run"], false, "explicit write run: {out}");
+    assert_eq!(
+        out["outcome"], "repaired",
+        "a real collision must repair, not report clean: {out}"
+    );
+    assert_eq!(out["success"], true, "{out}");
+    let freed: Vec<String> = out["freed_ids"]
+        .as_array()
+        .expect("freed_ids array")
+        .iter()
+        .map(|v| v.as_str().expect("uuid string").to_string())
+        .collect();
+    assert_eq!(freed.len(), 2, "both members of the group: {out}");
+    assert!(freed.contains(&a.to_string()), "{a} missing: {out}");
+    assert!(freed.contains(&b.to_string()), "{b} missing: {out}");
+    assert_eq!(
+        out["reembed_required"], true,
+        "freed drawers are owed a re-embed: {out}"
+    );
+    assert!(out["error"].is_null(), "{out}");
+
+    // Idempotence at the tool surface: the collision is gone, not just reported.
+    let again = dispatch_tool(
+        &state,
+        "palace_unalias",
+        json!({"palace": "collide", "dry_run": false}),
+    )
+    .await
+    .expect("second palace_unalias");
+    assert_eq!(
+        again["outcome"], "clean",
+        "the repair must be durable, not repeatable: {again}"
+    );
+    assert!(
+        again["freed_ids"]
+            .as_array()
+            .expect("freed_ids array")
+            .is_empty(),
+        "nothing left to free: {again}"
+    );
 }

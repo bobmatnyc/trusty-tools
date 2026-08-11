@@ -135,7 +135,9 @@ async fn run_test_daemon(listener: UnixListener) {
 async fn end_to_end_index_then_search_via_client() {
     let tmp = tempfile::tempdir().unwrap();
     let socket_path = tmp.path().join("bm25.sock");
-    let listener = UnixListener::bind(&socket_path).expect("bind UDS");
+    // #5099: bind the way the real daemon does. A bare bind leaves the socket
+    // and its directory at the process umask, which `Bm25Client` now refuses.
+    let listener = trusty_common::uds::bind_hardened(&socket_path).expect("bind UDS");
     let daemon_handle = tokio::spawn(run_test_daemon(listener));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -156,7 +158,9 @@ async fn end_to_end_index_then_search_via_client() {
 async fn end_to_end_delete_via_client() {
     let tmp = tempfile::tempdir().unwrap();
     let socket_path = tmp.path().join("bm25.sock");
-    let listener = UnixListener::bind(&socket_path).expect("bind UDS");
+    // #5099: bind the way the real daemon does. A bare bind leaves the socket
+    // and its directory at the process umask, which `Bm25Client` now refuses.
+    let listener = trusty_common::uds::bind_hardened(&socket_path).expect("bind UDS");
     let daemon_handle = tokio::spawn(run_test_daemon(listener));
 
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -175,7 +179,9 @@ async fn raw_protocol_smoke_test() {
     // Mirrors what a non-Rust consumer would send on the wire.
     let tmp = tempfile::tempdir().unwrap();
     let socket_path = tmp.path().join("bm25.sock");
-    let listener = UnixListener::bind(&socket_path).expect("bind UDS");
+    // #5099: bind the way the real daemon does. A bare bind leaves the socket
+    // and its directory at the process umask, which `Bm25Client` now refuses.
+    let listener = trusty_common::uds::bind_hardened(&socket_path).expect("bind UDS");
     let daemon_handle = tokio::spawn(run_test_daemon(listener));
 
     tokio::time::sleep(Duration::from_millis(20)).await;

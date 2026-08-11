@@ -24,7 +24,6 @@
 //! - `POST /review`                             diff review
 //! - `POST /review/github-pr`                   GitHub PR review
 //! - `POST /analyze/deep`                       LLM narrative pass
-//! - `POST /webhooks/github`                    GitHub event webhook
 //! - `GET  /facts`                              list / filter facts
 //! - `POST /facts`                              upsert a fact
 //! - `DELETE /facts/{id}`                       delete a fact

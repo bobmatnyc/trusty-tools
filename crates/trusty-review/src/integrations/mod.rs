@@ -5,8 +5,7 @@
 //! (spec REV-009, doc 05-integrations)
 //!
 //! What: sub-modules:
-//!   - `github` — GitHub App auth, PR diff/metadata fetch, push firewall,
-//!     webhook HMAC verification.
+//!   - `github` — GitHub App auth, PR diff/metadata fetch, push firewall.
 //!   - `health` — tolerant `HealthResponse` / `EmbedderState` types for the
 //!     trusty-search `/health` wire format (accepts both bool and string forms;
 //!     closes #628).
@@ -51,7 +50,7 @@ pub use context::{
 pub use github::{
     AuthStrategy, GH_ALLOW_PUSH, GithubClient, GithubError, PostedReview, PrMetadata, PrRef,
     PrUser, RunMode, assert_no_push_operation, fetch_pr_diff, fetch_pr_metadata, mint_app_jwt,
-    post_pr_review, resolve_token_for_mode, verify_webhook_signature,
+    post_pr_review, resolve_token_for_mode,
 };
 pub use null_analyze_client::NullAnalyzeClient;
 pub use null_search_client::NullSearchClient;

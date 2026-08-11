@@ -69,9 +69,10 @@ pub fn worktree_branch_for(name: &str) -> String {
 pub fn ensure_worktrees_gitignored(base_path: &std::path::Path) -> Result<(), String> {
     // The entry is the shared directory name plus a trailing slash, so the
     // pattern can never drift from the directory the provisioners create.
+    // #5204: gitignore the base new worktrees are actually created under.
     let entry_pattern = format!(
         "{}/",
-        crate::session_manager::decommission::WORKTREES_DIRNAME
+        crate::session_manager::decommission::worktrees_dirname()
     );
 
     let info_dir = base_path.join(".git").join("info");

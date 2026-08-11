@@ -52,18 +52,16 @@ const MAX_NAMED: usize = 5;
 /// trains operators to ignore it.
 /// What: the list, with each entry's rule:
 /// - `documentation-style` — the mandatory Why/What/Test doc-comment triple.
-/// - `tm-pr-workflow` — the attribution-footer text, the
-///   `--assignee @me --label trusty-mpm` defaults, and squash-merge-only.
+/// - `tm-workflow` — the attribution-footer text, the
+///   `--assignee @me --label trusty-mpm` defaults, and squash-merge-only. It
+///   inherited all three from the retired `tm-pr-workflow` (#5202).
 /// - `tm-git-file-tracking` — CB#4's blocking file-tracking gate, and the other
 ///   skill reproducing the attribution footer inline.
 ///
 /// Test: `staleness_escalates_when_conventions_skill_drifts`,
 /// `staleness_warns_when_ordinary_skill_drifts`.
-const CONVENTIONS_BEARING_SKILLS: &[&str] = &[
-    "documentation-style",
-    "tm-pr-workflow",
-    "tm-git-file-tracking",
-];
+const CONVENTIONS_BEARING_SKILLS: &[&str] =
+    &["documentation-style", "tm-workflow", "tm-git-file-tracking"];
 
 /// Audit every deploy tier's skills against the running binary's assets.
 ///

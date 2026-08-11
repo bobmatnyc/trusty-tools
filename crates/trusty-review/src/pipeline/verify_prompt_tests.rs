@@ -238,3 +238,28 @@ fn verify_request_handles_missing_line() {
         "missing line must render a stable placeholder"
     );
 }
+
+/// #5309: the verifier must be offered a third judgment for a claim the diff
+/// cannot settle, in BOTH the prose rules and the forced-output schema.
+///
+/// Why: with only CONFIRMED and REFUTED available the verifier had to pick one
+/// even when the evidence was outside the diff, and on PR #5303 it picked
+/// CONFIRMED — producing a false BLOCK on a finding whose own text said it
+/// could not be confirmed from the diff.
+#[test]
+fn verify_system_prompt_offers_unverifiable_judgment() {
+    let prompt = verifier_system_prompt();
+    assert!(
+        prompt.contains("UNVERIFIABLE"),
+        "the verifier must be told it may decline to confirm"
+    );
+
+    let schema = verify_response_schema();
+    let variants = schema.schema["properties"]["judgment"]["enum"]
+        .as_array()
+        .expect("judgment enum")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(variants, ["CONFIRMED", "REFUTED", "UNVERIFIABLE"]);
+}

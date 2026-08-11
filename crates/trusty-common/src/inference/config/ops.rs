@@ -16,7 +16,9 @@
 
 use std::io::{BufRead, Write};
 
-use crate::credentials::{KeyStore, env_local_value, redact_secret, resolve_key_with};
+use crate::credentials::{
+    KeyStore, env_local_value, redact_secret, resolve_key_with, scrub_secrets,
+};
 use crate::inference::configurator::Configurator;
 use crate::inference::error::InferenceError;
 use crate::inference::registry::{ProviderCapabilities, all, capabilities_for};
@@ -302,7 +304,7 @@ pub fn list(store: &dyn KeyStore, out: &mut dyn Write) -> anyhow::Result<()> {
 /// it), so the credential itself may be perfectly valid; a not-yet-wired
 /// provider is [`ProbeOutcome::Unsupported`]; any other error is
 /// [`ProbeOutcome::Failed`]. Every non-2xx-derived message is run through
-/// [`scrub_key`] first — a provider's non-2xx response BODY is
+/// [`scrub_secrets`] first — a provider's non-2xx response BODY is
 /// attacker/provider-controlled and could echo the credential back (some
 /// providers include the offending header value in a 401/400 body); the scrub
 /// guarantees the resolved key never reaches `Failed`'s or `ModelNotFound`'s
@@ -327,7 +329,7 @@ pub async fn probe(
     }
 
     // Clean degrade when nothing resolves. Keep the resolved value so any error
-    // text surfaced below can be scrubbed of it (see `scrub_key`).
+    // text surfaced below can be scrubbed of it (see `scrub_secrets`).
     let Some(resolved_key) = resolve_key_with(name, store) else {
         return Ok(ProbeOutcome::Unconfigured);
     };
@@ -344,9 +346,9 @@ pub async fn probe(
         }
         Err(InferenceError::MissingCredential { .. }) => return Ok(ProbeOutcome::Unconfigured),
         Err(err) => {
-            return Ok(ProbeOutcome::Failed(scrub_key(
+            return Ok(ProbeOutcome::Failed(scrub_secrets(
                 &err.to_string(),
-                &resolved_key,
+                std::slice::from_ref(&resolved_key),
             )));
         }
     };
@@ -361,35 +363,13 @@ pub async fn probe(
             status: 401 | 403, ..
         }) => Ok(ProbeOutcome::Unauthorized),
         Err(err @ InferenceError::Api { status: 404, .. }) => Ok(ProbeOutcome::ModelNotFound(
-            scrub_key(&err.to_string(), &resolved_key),
+            scrub_secrets(&err.to_string(), std::slice::from_ref(&resolved_key)),
         )),
-        Err(err) => Ok(ProbeOutcome::Failed(scrub_key(
+        Err(err) => Ok(ProbeOutcome::Failed(scrub_secrets(
             &err.to_string(),
-            &resolved_key,
+            std::slice::from_ref(&resolved_key),
         ))),
     }
-}
-
-/// Remove any occurrence of `key` from `message`, defensively.
-///
-/// Why: [`InferenceError::Api`]'s `Display` embeds the provider's raw,
-/// non-2xx response BODY verbatim — provider-controlled content that could
-/// (accidentally or via a misbehaving/malicious endpoint) echo the credential
-/// back, e.g. in a "your key `sk-…` is invalid" message. `Failed`'s message
-/// reaches stdout unredacted via [`report_probe`], so this is the one place in
-/// the credential-management CLI that must never let that happen. Generic
-/// substring removal (rather than a provider-specific parser) keeps the guard
-/// correct for every current and future adapter.
-/// What: returns `message` with every occurrence of `key` replaced by
-/// `[REDACTED]`; a no-op when `key` is empty (an empty needle would match
-/// everywhere) or does not occur in `message`.
-/// Test: `probe_error_body_never_leaks_the_resolved_key`,
-/// `scrub_key_is_noop_for_empty_key`.
-fn scrub_key(message: &str, key: &str) -> String {
-    if key.is_empty() {
-        return message.to_string();
-    }
-    message.replace(key, "[REDACTED]")
 }
 
 /// Write a probe outcome as a value-free status line.
@@ -514,13 +494,16 @@ mod tests {
 
     /// Why: a probe-error message that echoes the resolved key verbatim (e.g. a
     /// provider that includes the offending credential in its error body) must
-    /// have every occurrence of the key removed, never partially redacted.
+    /// have every occurrence of the key removed, never partially redacted. The
+    /// scrub itself moved to `credentials::scrub_secrets` (#4321); this pins
+    /// that the probe path still gets that behaviour through the shared entry
+    /// point.
     /// Test: itself.
     #[test]
-    fn scrub_key_removes_every_occurrence() {
+    fn probe_scrub_removes_every_occurrence_of_the_key() {
         let key = "sk-or-verysecret1234"; // pragma: allowlist secret
         let msg = format!("inference API error 400: bad key {key}, retry without {key}");
-        let scrubbed = scrub_key(&msg, key);
+        let scrubbed = scrub_secrets(&msg, &[key]);
         assert!(!scrubbed.contains(key), "leaked: {scrubbed}");
         assert_eq!(scrubbed.matches("[REDACTED]").count(), 2);
     }
@@ -529,7 +512,7 @@ mod tests {
     /// corrupt every message it touches.
     /// Test: itself.
     #[test]
-    fn scrub_key_is_noop_for_empty_key() {
-        assert_eq!(scrub_key("some message", ""), "some message");
+    fn probe_scrub_is_noop_for_empty_key() {
+        assert_eq!(scrub_secrets("some message", &[""]), "some message");
     }
 }

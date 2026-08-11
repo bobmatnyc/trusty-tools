@@ -126,6 +126,34 @@ pub async fn complexity_hotspots(
     })))
 }
 
+/// `GET /indexes/{id}/complexity_distribution` — the full A–F histogram over
+/// the whole corpus.
+///
+/// Why: `/complexity_hotspots` is a descending, truncated top-N; a consumer that
+/// buckets its response is describing the worst N functions, not the codebase.
+/// On a large repository that reads as "zero simple functions", which is what
+/// reached a due-diligence report (#5320). This endpoint answers the
+/// distribution question exhaustively and returns a payload bounded at five
+/// rows regardless of corpus size, so no caller has to trade honesty for
+/// bandwidth.
+/// What: delegates to `quality::complexity_distribution`, which counts only
+/// files with a mapped language and reports the counted total plus the number
+/// of non-code chunks it skipped.
+/// Test: `super::super::tests::complexity_distribution_endpoint_returns_all_bands`.
+pub async fn complexity_distribution(
+    State(state): State<Arc<AnalyzerAppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let chunks = fetch_chunks(&state, &id).await?;
+    let report = quality::complexity_distribution(&chunks);
+    Ok(Json(serde_json::json!({
+        "index_id": id,
+        "total": report.total,
+        "skipped_non_code": report.skipped_non_code,
+        "buckets": report.buckets,
+    })))
+}
+
 /// `GET /indexes/{id}/smells` — return chunks with at least one detected smell.
 ///
 /// Why: #917 — the unbounded result set (full `content` per chunk) caused MCP
@@ -204,6 +232,13 @@ pub async fn refactor_suggestions(
             if chunk.file != file {
                 continue;
             }
+        }
+        // #5317: "extract method" against a CHANGELOG.md is not a suggestion a
+        // caller can act on. Without a mapped language `compute_complexity_for`
+        // falls back to the keyword text heuristic, which grades prose F and
+        // emitted refactor suggestions for docs, FAQs, and CI workflow YAML.
+        if !crate::lang::ext_map::is_code_file(&chunk.file) {
+            continue;
         }
         let lang = super::lang_for_extension(&chunk.file);
         let metrics = compute_complexity_for(&chunk.content, lang);

@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to `bundle::ALL` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-52 bundled skills.
+51 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -43,16 +43,15 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-init` | pm-workflow | yes | Initialize or intelligently refresh a project for trusty-mpm — analyze the repo and scaffold or update CLAUDE.md (project instructions), register the project with the daemon, and offer update/context/catchup modes |
 | `tm-issues-prune` | pm-workflow | yes | Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred) |
 | `tm-postmortem` | pm-workflow | yes | Analyze session errors captured across trusty-* daemons and route them through the bug-reporting pipeline |
-| `tm-pr-workflow` | pm-workflow | no | Branch protection, per-PR changelog fragment requirement (changelog.d file format and category line), trusty-review merge gate, squash-merge, and worktree discipline for landing work on main |
 | `tm-session-management` | pm-workflow | yes | PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration |
 | `tm-session-pause` | pm-workflow | yes | Pause the current PM session — snapshot todos, git state, and context to a project-local session file, prune stale worktrees, and print the resume path |
 | `tm-session-resume` | pm-workflow | yes | Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context |
 | `tm-slack` | pm-workflow | no | Deliver messages, canvases, and files to the user via Slack — routes through the native slack-mcp connector, not claude.ai's hosted Slack connector; canvas creation alone is never delivery |
 | `tm-teaching-templates` | pm-workflow | no | Progressive-disclosure teaching templates for onboarding users to trusty-mpm concepts |
-| `tm-ticketing` | pm-workflow | yes | Ticket-driven development protocol and high-level ticketing orchestration for the trusty-mpm PM |
+| `tm-ticketing` | pm-workflow | yes | The single authority on issues — whether one should exist, deduplication disposition, title/body style, labels, milestones, lifecycle comments, and attribution |
 | `tm-tool-usage-guide` | pm-reference | no | Detailed tool usage patterns and examples for the trusty-mpm PM agent |
 | `tm-verification-protocols` | pm-workflow | no | QA verification gate and evidence requirements for the trusty-mpm PM |
-| `tm-workflow` | pm-workflow | yes | Manage and customize the trusty-mpm PM workflow via named-section overrides in the project's CLAUDE.md |
+| `tm-workflow` | pm-workflow | yes | The single trusty-mpm delivery workflow — phases and gates, the ticketing/workflow/version-control ownership boundary and handoff, worktree and branch discipline, changelog, PR body, review gate, squash-merge, cleanup, and how a project customizes the workflow via CLAUDE.md |
 | `verification-before-completion` | agent-reference | no | Run verification commands and confirm output before claiming success |
 | `web-performance-optimization` | agent-reference | no | Optimize web performance using Core Web Vitals, modern patterns (View Transitions, Speculation Rules), and framework-specific techniques |
 | `webapp-testing` | agent-reference | no | Comprehensive web application testing patterns with Playwright selectors, wait strategies, and best practices |

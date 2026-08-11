@@ -172,6 +172,17 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
         .inspect_err(|e| tracing::warn!(error = %e, "failed to deploy bundled agents to $HOME"))
         .unwrap_or_default();
 
+    // #5227: same treatment for the bundled WORKFLOW definitions. Agents were
+    // the only config kind that ever reached the `$HOME` tier, so
+    // `--workflow prescriptive` launched from a directory with no
+    // `.trusty-agents/` (the GUI sidecar runs with `cwd = /`) had no
+    // definition to read anywhere on its search hierarchy. Same best-effort
+    // posture as the roster deploy above: a read-only `$HOME` degrades to the
+    // pre-fix "workflow not found", it does not crash the harness.
+    let _bundled_workflows_report = agents::bundled::ensure_bundled_workflows_deployed()
+        .inspect_err(|e| tracing::warn!(error = %e, "failed to deploy bundled workflows to $HOME"))
+        .unwrap_or_default();
+
     // #4325: create each Assistant INSTANCE's home directory
     // (`~/trusty-agents/<instance>/`) so the layout exists before anything
     // reaches for it. Placed here, immediately after the bundled roster is on
@@ -345,20 +356,20 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             // #3329: `--bind <addr>` / `--bind=<addr>`; default loopback. A
             // non-loopback bind without a token is refused inside
             // serve_with_config (loopback-only doctrine).
-            let mut bind: std::net::IpAddr = std::net::Ipv4Addr::LOCALHOST.into();
+            let mut bind: Option<std::net::IpAddr> = None;
             let mut iter = raw_args.iter();
             while let Some(a) = iter.next() {
                 if a == "--bind"
                     && let Some(v) = iter.next()
                     && let Ok(ip) = v.parse::<std::net::IpAddr>()
                 {
-                    bind = ip;
+                    bind = Some(ip);
                     break;
                 }
                 if let Some(rest) = a.strip_prefix("--bind=")
                     && let Ok(ip) = rest.parse::<std::net::IpAddr>()
                 {
-                    bind = ip;
+                    bind = Some(ip);
                     break;
                 }
             }
@@ -390,7 +401,8 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
                 api::watchdog::arm_parent_death_watchdog(pp);
             }
 
-            api::server::serve_with_config(api::server::ApiConfig { bind, port, token }).await?;
+            api::server::serve_with_config(api::server::ApiConfig::with_bind(bind, port, token))
+                .await?;
             return Ok(false);
         }
     }

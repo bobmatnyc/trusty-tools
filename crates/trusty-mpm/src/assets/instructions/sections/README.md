@@ -91,6 +91,14 @@ Do not "fix" this by promoting content into `core.md`. That was considered and
 rejected: relocating content to preserve protection defeats the point of
 removing the mechanism, and would turn `core.md` into a dumping ground.
 
+**Narrow exception, 2026-08-07 (#4834):** the "Memory & Instruction Sources"
+rule in `core.md` (never write to or cite `MEMORY.md`; `CLAUDE.md` is the only
+non-dynamic instruction source) is owner-directed CORE content — the owner's
+own words were "this should be part of the core instruction set." That is a
+deliberate placement decision by the same authority who made the ruling above,
+not a routine protection-seeking promotion. It is not precedent for moving
+other content into `core.md`.
+
 ## How a project overrides a section
 
 In the project's root `CLAUDE.md`:

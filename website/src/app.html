@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en" class="h-full">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
+		<link
+			rel="preload"
+			href="%sveltekit.assets%/fonts/ibm-plex-sans-var.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin="anonymous"
+		/>
+		<!--
+			Why: without this, a reader whose stored preference is dark sees a
+			full-brightness cream flash before hydration swaps the class. The
+			snippet runs before first paint, reads the same localStorage key and
+			the same `.dark` class as src/lib/theme/index.ts, and is deliberately
+			inlined rather than imported so nothing blocks on the module graph.
+			Keep the STORAGE_KEY string in sync with theme.ts — `theme.test.ts`
+			pins the key so a rename fails there.
+		-->
+		<script>
+			(function () {
+				try {
+					var stored = localStorage.getItem('foundry-theme');
+					var dark =
+						stored === 'dark' ||
+						((stored === 'system' || stored === null) &&
+							window.matchMedia('(prefers-color-scheme: dark)').matches);
+					document.documentElement.classList.toggle('dark', dark);
+				} catch (e) {
+					/* Private-browsing localStorage throws; light is the safe default. */
+				}
+			})();
+		</script>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover" class="min-h-full">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

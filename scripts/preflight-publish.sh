@@ -17,7 +17,7 @@
 #   absolute stop.
 #
 # What: given a crate (by package name or crates/ directory name) and,
-#   optionally, an explicit version, runs FOUR independent checks and exits
+#   optionally, an explicit version, runs FIVE independent checks and exits
 #   nonzero if any of them fail:
 #
 #   CHECK 1 (merged-main): after `git fetch origin main`, current HEAD's
@@ -55,6 +55,38 @@
 #     Any other outcome (network error, unexpected status) fails CLOSED
 #     (cannot verify safety, so refuse) rather than silently passing.
 #
+#   CHECK 5 (public-API SemVer, #5149): runs `scripts/check_semver.sh --crate
+#     <pkg>`, which compares this crate's public API against its latest
+#     non-yanked crates.io release and fails when a breaking change is not
+#     carried by a breaking version bump (Cargo's 0.x rule: for 0.y.z the MINOR
+#     position is the breaking one).
+#
+#     WHY IT LIVES HERE, and not only in CI: this script is the LAST thing that
+#     runs before `cargo publish`, and its nonzero exit is the documented
+#     absolute stop — so a break caught here is caught while the upload can
+#     still be prevented. A crates.io publish is irreversible except by yank, so
+#     a gate that only reports AFTER the upload has no way to undo the damage:
+#     that is exactly #4088, where trusty-common 0.22.5 shipped a required new
+#     public field on a patch bump and cost trusty-analyze 0.7.3 a yank.
+#     `.github/workflows/semver-checks.yml` runs the same command on the tag
+#     push, but a CI job cannot stop a `cargo publish` a human runs locally —
+#     it reports, this blocks.
+#
+#     No override flag exists, and none is needed: the correct response to a
+#     firing gate is to bump the breaking position, which the gate then records
+#     as an already-breaking release and skips. A false positive and a real
+#     break have the same safe remedy.
+#
+#     A NON-VERDICT IS NOT A VERDICT (#5289). check_semver.sh exits 1 only when
+#     it computed a verdict that says break, and 3 when it could not compute one
+#     at all (rustdoc build failure, unreachable registry, missing tool). Both
+#     stop the publish; only the first is reported as "your API changed". The
+#     remedy above applies to exit 1 — for exit 3 the remedy is to fix the gate
+#     and re-run, never to bump a version on evidence that does not exist.
+#
+#     Requires `cargo-semver-checks` (`cargo install cargo-semver-checks@0.50.0
+#     --locked`). Its absence is a FAILURE with that remedy, never a skip.
+#
 # Crate + version resolution: accepts EITHER
 #     scripts/preflight-publish.sh <crate-name-or-dir> [version]
 #   or, when [version] is omitted, reads the version from that crate's
@@ -69,7 +101,7 @@
 #   check-publish-ready.sh does, to avoid a second, divergent lookup
 #   convention in this workspace.
 #
-#   --check-only     run all 4 checks unconditionally (never short-circuits)
+#   --check-only     run all 5 checks unconditionally (never short-circuits)
 #                     and print one [PASS]/[FAIL] line per check, then a
 #                     one-line summary. Useful to preview status without
 #                     assuming you are mid-publish. Exit code is still
@@ -97,6 +129,14 @@
 #         at true origin/main (or PREFLIGHT_ALLOW_DETACHED=1, explicitly
 #         labeled) for check 1, real `gh auth status` output for check 2, a
 #         clean tree for check 3, and a not-yet-published version for check 4.
+#     (e) BOTH modes for check 5 (#5149), against real source rather than a
+#         synthetic break: `fix/5064-redb-flock-collision`'s trusty-review
+#         source paired with version 0.11.1 (a MINOR bump over the published
+#         0.11.0, so the already-breaking skip does not apply) FAILS on 2 major
+#         lints — enum_marked_non_exhaustive on DedupError, and
+#         method_receiver_type_changed on DedupStore::{claim,complete,release}
+#         — and the script exits 1 with "do NOT run 'cargo publish'". The same
+#         crate unmodified at 0.11.1 PASSES: 196 checks, 196 pass.
 #   See the PR description for this script for the full raw terminal output.
 
 set -euo pipefail
@@ -348,16 +388,62 @@ check4_version_not_live() {
   esac
 }
 
+# ===========================================================================
+# CHECK 5 — public-API SemVer against the latest crates.io release (#5149)
+# ===========================================================================
+# Output goes to a file rather than the terminal because cargo-semver-checks
+# prints a per-lint progress stream; the file is echoed only when the check
+# fails, which is the only time any of it carries information.
+#
+# The two nonzero statuses are DIFFERENT FACTS and are reported as such (#5289).
+# This function used to render every nonzero exit as "public-API check failed …
+# publishing this would ship a breaking change", so a rustdoc build error at the
+# last barrier before `cargo publish` read as a SemVer verdict. Exit 3 means
+# check_semver.sh never computed one; saying "your API changed" there would be
+# inventing a result, and telling the operator to bump the breaking position
+# would be advising a version change on no evidence. Either way the publish
+# still stops — both branches return 1.
+check5_semver() {
+  local log="${TMP_SEMVER}" rc=0
+
+  SKIP_UI_BUILD=1 bash "${REPO_ROOT}/scripts/check_semver.sh" \
+    --crate "$PKG_NAME" > "$log" 2>&1 || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    echo "[PASS] semver: $(tail -1 "$log")" >&2
+    return 0
+  fi
+
+  if [ "$rc" -eq 3 ]; then
+    echo "[FAIL] semver: NO VERDICT for ${PKG_NAME} ${VERSION} — the gate could not run:" >&2
+    sed 's/^/       /' "$log" >&2
+    echo "       cargo-semver-checks never completed a comparison, so whether this" >&2
+    echo "       release breaks the public API is UNKNOWN. That is not a reason to" >&2
+    echo "       bump the version and not a reason to publish." >&2
+    echo "       Fix the gate (see the NO SEMVER VERDICT block above), then re-run." >&2
+    return 1
+  fi
+
+  echo "[FAIL] semver: public-API check failed for ${PKG_NAME} ${VERSION}:" >&2
+  sed 's/^/       /' "$log" >&2
+  echo "       Publishing this would ship a breaking change without a breaking" >&2
+  echo "       version bump — the #4088 shape that yanked trusty-analyze 0.7.3." >&2
+  echo "       Bump the breaking position in ${MANIFEST}, or make the change" >&2
+  echo "       non-breaking (#[non_exhaustive] on public structs and enums)." >&2
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Scratch temp file for check 4's curl response body. Created once up front
 # and cleaned up via a script-scoped EXIT trap (matches check_line_cap.sh's
 # convention: mktemp + trap 'rm -f ...' EXIT).
 # ---------------------------------------------------------------------------
 TMP_BODY="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.body.XXXXXX")"
-trap 'rm -f "$TMP_BODY"' EXIT
+TMP_SEMVER="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.semver.XXXXXX")"
+trap 'rm -f "$TMP_BODY" "$TMP_SEMVER"' EXIT
 
 # ---------------------------------------------------------------------------
-# Run all 4 checks. Always run every check (rather than short-circuiting) so
+# Run all 5 checks. Always run every check (rather than short-circuiting) so
 # --check-only and normal mode share one code path and a single run always
 # reports the full picture — a partial preflight is how gaps get missed.
 # ---------------------------------------------------------------------------
@@ -366,6 +452,7 @@ check1_merged_main;      [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check2_identity;         [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check3_clean_tree;       [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check4_version_not_live; [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check5_semver;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 set -e
 
 if [ "$FAILURES" -gt 0 ]; then
@@ -373,5 +460,5 @@ if [ "$FAILURES" -gt 0 ]; then
   exit 1
 fi
 
-echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 4 checks. Safe to publish." >&2
+echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 5 checks. Safe to publish." >&2
 exit 0

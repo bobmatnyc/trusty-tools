@@ -1,6 +1,7 @@
 //! Host-glibc probing and glibc-aware asset selection for ONNX-Runtime crates.
 //!
-//! Why: `trusty-search` and `trusty-analyze` bundle ONNX Runtime. Their native
+//! Why: `trusty-search` bundles ONNX Runtime (`trusty-analyze` did too until
+//! #5067 removed its unused neural embedder). Its native
 //! `x86_64-unknown-linux-gnu` release asset is built on the CI `ubuntu-latest`
 //! runner and carries a high glibc floor (`GLIBC_2.39`), so it fails to even
 //! execute on Debian 12, Ubuntu 22.04, RHEL 9, and Amazon Linux 2023 with
@@ -33,10 +34,18 @@ use super::platform::{TARGET_LINUX_ARM64, TARGET_LINUX_X86_64};
 /// every other crate's Linux asset is a glibc-2.17-baseline zigbuild (issue
 /// #2037) that runs everywhere, so it needs no glibc-aware routing.
 ///
+/// Why (#5067): `trusty-analyze` was removed from this set. It bundled ONNX
+/// Runtime only for a neural clustering embedder nobody selected; with that
+/// embedder gone its default build links no ONNX Runtime, so its native Linux
+/// asset is an ordinary zigbuild with no elevated glibc floor and the release
+/// workflow no longer publishes an AL2023 variant for it. Routing a low-glibc
+/// host to an asset that is not built would 404 the install.
+///
 /// What: The set of crate names that receive AL2023 asset selection.
 ///
-/// Test: `tests::select_*` exercise both members and a non-member.
-pub const ORT_CRATES: [&str; 2] = ["trusty-search", "trusty-analyze"];
+/// Test: `tests::select_*` exercise the member and non-members, including
+/// `select_analyze_is_no_longer_an_ort_crate`.
+pub const ORT_CRATES: [&str; 1] = ["trusty-search"];
 
 /// Minimum glibc `(major, minor)` the native Linux ORT assets require.
 ///
@@ -330,11 +339,11 @@ mod tests {
 
     /// Why: A host that meets the floor must keep the fast native static asset —
     /// no needless load-dynamic path.
-    /// What: trusty-analyze on x86_64 Linux with glibc exactly 2.39 → native.
+    /// What: trusty-search on x86_64 Linux with glibc exactly 2.39 → native.
     /// Test: This is the test.
     #[test]
     fn select_keeps_native_at_floor() {
-        let choice = select_asset_suffix("trusty-analyze", TARGET_LINUX_X86_64, Some((2, 39)));
+        let choice = select_asset_suffix("trusty-search", TARGET_LINUX_X86_64, Some((2, 39)));
         assert_eq!(choice.suffix, TARGET_LINUX_X86_64);
         assert!(!choice.load_dynamic);
     }
@@ -397,12 +406,28 @@ mod tests {
     }
 
     /// Why: macOS ORT assets are static; no glibc routing applies there.
-    /// What: trusty-analyze on macOS arm64 → native suffix, not load-dynamic.
+    /// What: trusty-search on macOS arm64 → native suffix, not load-dynamic.
     /// Test: This is the test.
     #[test]
     fn select_macos_ort_keeps_native() {
-        let choice = select_asset_suffix("trusty-analyze", "aarch64-apple-darwin", Some((2, 30)));
+        let choice = select_asset_suffix("trusty-search", "aarch64-apple-darwin", Some((2, 30)));
         assert_eq!(choice.suffix, "aarch64-apple-darwin");
+        assert!(!choice.load_dynamic);
+    }
+
+    /// Why (#5067): `trusty-analyze` stopped bundling ONNX Runtime when its
+    /// unused neural embedder was removed, so the release workflow no longer
+    /// publishes an AL2023 variant for it. A below-floor host that still got
+    /// routed to `x86_64-linux-al2023` would 404 on an asset that is never
+    /// built — worse than the native asset it was meant to replace.
+    /// What: trusty-analyze on a below-floor x86_64 host → native suffix, no
+    /// ORT_DYLIB_PATH note.
+    /// Test: This is the test.
+    #[test]
+    fn select_analyze_is_no_longer_an_ort_crate() {
+        assert!(!ORT_CRATES.contains(&"trusty-analyze"));
+        let choice = select_asset_suffix("trusty-analyze", TARGET_LINUX_X86_64, Some((2, 35)));
+        assert_eq!(choice.suffix, TARGET_LINUX_X86_64);
         assert!(!choice.load_dynamic);
     }
 

@@ -84,6 +84,28 @@ pub(crate) fn is_low_quality_content(content: &str, min_words: usize) -> bool {
     word_count < min_words
 }
 
+/// Byte cap applied to a merged drawer's content by [`merge_into`].
+pub(crate) const MERGED_CONTENT_CAP: usize = 500;
+
+/// Largest prefix of `s` that fits in `max_bytes` and ends on a UTF-8 char
+/// boundary.
+///
+/// Why (#5187): the dream passes cap drawer text at fixed byte counts — the
+/// merge cap in [`merge_into`] and the log preview in the semantic pass.
+/// Applied as a raw byte offset, either one panics the moment the cap lands
+/// inside a multi-byte `char` (`assertion failed: self.is_char_boundary`),
+/// which killed a `tokio-rt-worker` in the shipped `com.trusty.memory`
+/// daemon. Drawer content is arbitrary user text, so CJK, Cyrillic, emoji,
+/// and accented Latin all reach these caps.
+/// What: rounds `max_bytes` DOWN to the nearest char boundary via
+/// `str::floor_char_boundary`, so the result never exceeds `max_bytes` and
+/// never splits a `char`. Returns all of `s` when `s` already fits.
+/// Test: `char_safe_prefix_stops_below_a_multibyte_char`,
+/// `dream_merge_into_caps_multibyte_content_without_panicking`.
+pub(crate) fn char_safe_prefix(s: &str, max_bytes: usize) -> &str {
+    &s[..s.floor_char_boundary(max_bytes)]
+}
+
 /// Current unix timestamp in seconds. Saturates to 0 on clock errors.
 pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
@@ -105,9 +127,10 @@ pub(crate) fn merge_into(handle: &Arc<PalaceHandle>, survivor: &Drawer, loser: &
         let mut combined = target.content.clone();
         combined.push_str("\n\nAlso: ");
         combined.push_str(&loser.content);
-        if combined.len() > 500 {
-            combined.truncate(500);
-        }
+        // #5187: cut on a char boundary — `truncate` at a raw byte offset
+        // panics when the cap lands inside a multi-byte char.
+        let cut = char_safe_prefix(&combined, MERGED_CONTENT_CAP).len();
+        combined.truncate(cut);
         target.content = combined;
         target.importance = target.importance.max(loser.importance);
         for tag in &loser.tags {

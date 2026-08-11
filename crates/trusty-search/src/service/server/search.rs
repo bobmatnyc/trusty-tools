@@ -24,7 +24,7 @@ use crate::service::warm_boot::restore_one_index_bounded;
 
 use super::helpers::file_is_within_root;
 use super::state::{DaemonEvent, SearchAppState};
-use super::status::index_disk_and_mtime;
+use super::status::index_last_indexed;
 
 // Re-export global fan-out handler so the router in `mod.rs` can reach it
 // through the `search` path without knowing about `search_global`.
@@ -101,6 +101,14 @@ pub(super) async fn delete_index_handler(
 /// root from `roots.toml` so the colocated rescan cannot rediscover it (issue
 /// #1090), emits `IndexRemoved`, and re-syncs the index-count gauge (issue #41).
 /// Returns whether an index was actually removed.
+///
+/// #5075: also purges this id's cold-store records (`entries`,
+/// `failed_entries`). Without that the id stayed "registered but not resident"
+/// to the #5057 guards forever, so `GET /indexes/:id/status`, `/chunks`, and
+/// `grep` answered 503 for an index that no longer exists — and a
+/// cold-parked-only index was never removed from `indexes.toml` at all, so the
+/// next warm boot resurrected it. A cold record now counts as "an index was
+/// removed" for the durable-cleanup half below.
 /// Test: delete-path handler tests; reaper behaviour covered by `orphan_reaper`
 /// unit tests plus the `spawn_orphan_reaper_ticker` wiring.
 pub(super) async fn unregister_index(
@@ -111,6 +119,19 @@ pub(super) async fn unregister_index(
     let index_id = IndexId::new(id.to_string());
     let (removed, removed_handle) = state.registry.remove_and_get(&index_id);
     let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
+    // #5075: drop the cold-store records too, or the #5057 guards answer 503
+    // forever for an id that is now absent from every store. Sampled BEFORE the
+    // purge because a cold-parked or restore-failed index is not in the hot
+    // registry — `removed` is false for exactly the ids this is meant to reap,
+    // and the durable cleanup below must still run for them.
+    let was_cold = state.cold_store.contains(&index_id) || state.cold_store.is_failed(&index_id);
+    let cold_root = state
+        .cold_store
+        .get_persisted(&index_id)
+        .map(|e| e.root_path);
+    state.cold_store.purge(&index_id);
+    let root_path_for_cleanup = root_path_for_cleanup.or(cold_root);
+    let removed = removed || was_cold;
     state.reindex_progress.remove(&index_id);
     state.watcher_manager.stop_for_index(&index_id).await;
     // Issue #2984 Phase 1 delta-review MEDIUM finding: `INDEX_LOCKS` (the
@@ -175,27 +196,19 @@ pub(super) async fn search_handler(
         // Try hot path first — avoids the embedder check for warm indexes.
         if let Some(h) = state.registry.get(&index_id) {
             h
-        } else if state.cold_store.is_failed(&index_id) {
-            // Issue #1106: index was attempted but restore permanently failed
-            // (blocked volume, missing root_path). Return 503 so the caller
-            // knows the index exists but cannot be served — distinct from a
-            // genuine 404 for an unknown index. The operator must restart the
-            // daemon or re-register the index to clear the failed state.
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "index_restore_failed",
-                    "message": format!(
-                        "index '{}' previously failed to restore (blocked volume or \
-                         missing root_path) — restart the daemon or re-register to retry",
-                        index_id.0
-                    ),
-                })),
-            ));
-        } else if !state.cold_store.contains(&index_id) {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": format!("unknown index: {}", index_id.0) })),
+        } else if state.cold_store.is_failed(&index_id) || !state.cold_store.contains(&index_id) {
+            // Issue #1106 / #5061: permanently-failed and genuinely-unknown are
+            // the two residency verdicts this handler can reach without
+            // attempting a load. Both go through the shared builder — this
+            // endpoint is the one every other endpoint's `restore_via` hint
+            // points at, so a body here that omits `retryable`/`index_id` is
+            // the one place the contract most needs to hold. The remaining
+            // verdict (`index_not_resident`) is unreachable from here by
+            // construction: a cold-but-not-failed index falls through to the
+            // lazy load below rather than erroring.
+            return Err(super::degraded::residency_miss_response(
+                &state.cold_store,
+                &index_id,
             ));
         } else {
             // Cold index: need the embedder to restore.
@@ -204,6 +217,13 @@ pub(super) async fn search_handler(
                     StatusCode::SERVICE_UNAVAILABLE,
                     Json(serde_json::json!({
                         "error": "embedder_initializing",
+                        // #5061: every 5xx this handler emits carries
+                        // `retryable` and `index_id`. A client branching on
+                        // `retryable` must never meet a body that omits it —
+                        // absent reads as undefined, and both interpretations
+                        // are wrong for some state.
+                        "index_id": index_id.0,
+                        "retryable": true,
                         "message": "embedder not yet ready — retry after /health reports embedder:ready",
                     })),
                 ));
@@ -230,38 +250,30 @@ pub(super) async fn search_handler(
             .await;
             match load_result {
                 Ok(h) => h,
-                Err(LazyLoadError::NotFound) => {
-                    return Err((
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({
-                            "error": format!("unknown index: {}", index_id.0),
-                        })),
+                // #5061: both terminal load outcomes are residency verdicts and
+                // go through the shared builder. `RestoreFailed` lands on its
+                // `index_restore_failed` arm rather than a 404 because BOTH
+                // paths that produce this variant guarantee the entry is in the
+                // failed set — `loader.rs:116` returns it *because* `is_failed`
+                // is already true, and `loader.rs:148` calls `mark_failed`
+                // immediately before returning it.
+                Err(LazyLoadError::NotFound) | Err(LazyLoadError::RestoreFailed) => {
+                    return Err(super::degraded::residency_miss_response(
+                        &state.cold_store,
+                        &index_id,
                     ));
                 }
+                // A load in flight is not a residency miss — the index is
+                // neither absent nor failed, it is arriving. Its own body
+                // carries the same `retryable` / `index_id` contract.
                 Err(LazyLoadError::Loading { retry_after_secs }) => {
                     return Err((
                         StatusCode::SERVICE_UNAVAILABLE,
                         Json(serde_json::json!({
                             "error": "index_loading",
+                            "index_id": index_id.0,
+                            "retryable": true,
                             "retry_after_secs": retry_after_secs,
-                        })),
-                    ));
-                }
-                // Issue #1106: `restore_fn` returned false — permanently
-                // failed. The entry has been moved to `failed_entries` so
-                // subsequent queries hit the `is_failed` guard above (fast
-                // path) and never re-enter this branch.
-                Err(LazyLoadError::RestoreFailed) => {
-                    return Err((
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(serde_json::json!({
-                            "error": "index_restore_failed",
-                            "message": format!(
-                                "index '{}' failed to restore (blocked volume or \
-                                 missing root_path) — restart the daemon or \
-                                 re-register to retry",
-                                index_id.0
-                            ),
                         })),
                     ));
                 }
@@ -325,7 +337,12 @@ pub(super) async fn search_handler(
             state
                 .last_queried_write_cache
                 .insert(index_id.clone(), now_unix);
-            tokio::spawn(async move {
+            // Review MEDIUM: `spawn_blocking`, not `spawn`. This body takes the
+            // process-wide registry `std::sync::Mutex` (#4871) and then does
+            // synchronous file I/O — parking an async worker thread on a lock
+            // another blocking writer holds. On the blocking pool that is what
+            // the pool is for; on a worker it starves the runtime.
+            tokio::task::spawn_blocking(move || {
                 if let Err(e) =
                     crate::service::persistence::update_last_queried_unix(&id_str, now_unix)
                 {
@@ -345,8 +362,21 @@ pub(super) async fn search_handler(
     // when either (a) the caller explicitly asked for it, or (b) the
     // semantic stage is not yet ready. Doing this here keeps the indexer
     // unaware of the index-handle-level capability surface.
-    let caps = { handle.stages.read().await.search_capabilities() };
+    let stages_snapshot = { handle.stages.read().await.clone() };
+    let caps = stages_snapshot.search_capabilities();
     let semantic_ready = caps.contains(&"vector");
+    // #5068: a caller that PINNED the semantic lane asked a question this index
+    // cannot answer. Serving BM25 rows under a 200 answers a different question
+    // silently, so refuse with the same shape `search_kg` uses for `skip_kg`.
+    if query.stage == Some(crate::core::indexer::SearchStage::Semantic) {
+        if let Some(resp) = super::degraded::vector_lane_unavailable(
+            &index_id.0,
+            handle.skip_vector,
+            &stages_snapshot,
+        ) {
+            return Err(resp);
+        }
+    }
     if query.stage.is_none() && !semantic_ready {
         // Force lexical lane until the embedder catches up. The caller's
         // request is preserved if they explicitly asked for `mode = all`
@@ -434,7 +464,9 @@ pub(super) async fn search_handler(
     // is unavailable (non-git directory, missing git binary) or the SHAs
     // match — i.e. defaults to "not stale" rather than scaring callers
     // about indexes whose freshness we cannot verify.
-    let (_disk_bytes, last_indexed) = index_disk_and_mtime(&index_id.0);
+    // #4706: mtime only — the byte count was discarded here, and computing it
+    // cost a recursive walk of both storage directories on every query.
+    let last_indexed = index_last_indexed(&index_id.0, &handle.root_path);
     let indexed_sha = handle.indexed_head_sha.read().await.clone();
     let current_sha = crate::core::git::head_sha(&handle.root_path);
     let results_may_be_stale = match (indexed_sha.as_deref(), current_sha.as_deref()) {
@@ -466,6 +498,19 @@ pub(super) async fn search_handler(
             // provisional and may retry shortly; the background rehydrate
             // keeps running regardless and the next query is warm.
             "bm25_lane_degraded": bm25_lane_degraded,
+            // #5068: the counterpart flag to `bm25_lane_degraded` for the OTHER
+            // lane. `true` means this hybrid query ran with no vector
+            // contribution at all — the results are lexical, however
+            // conceptual the query was. A pinned `stage: semantic` gets a 503
+            // instead (see `degraded::vector_lane_unavailable`); this flag is
+            // for the unpinned caller, who legitimately gets whatever lanes are
+            // ready but must be able to tell which ones those were without
+            // diffing `search_capabilities` against a schema it does not have.
+            "vector_unavailable": !semantic_ready,
+            // #5068: separates "off for this index" from "not built yet" — the
+            // same split `vector_unavailable`'s 503 body carries, so a caller
+            // handles one contract, not two.
+            "vector_disabled_by_config": handle.skip_vector,
         },
     })))
 }

@@ -57,6 +57,7 @@ fn metrics(
                 severity,
                 category: "c".to_string(),
                 component: "x".to_string(),
+                ..Default::default()
             })
             .collect(),
     }

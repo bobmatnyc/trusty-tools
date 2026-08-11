@@ -134,6 +134,54 @@ pub(super) struct HealthResponse {
     /// `health_does_not_flag_a_walked_index_as_stuck` in
     /// `tests_health_degraded`.
     pub(super) indexes_stuck_empty: usize,
+    /// Issue #4839: registered indexes that actually hold chunks
+    /// (`chunk_count > 0`), as opposed to `indexes` /
+    /// `warmboot_summary.indexes_loaded`, which count registration SLOTS.
+    ///
+    /// Why: a production deployment reported `indexes_loaded: 222/222`,
+    /// `indexes_failed: 0`, `status: ok` while only 2 of those 222 held any
+    /// data. Every counter on this response was structurally incapable of
+    /// showing it, so a consuming application returned empty context on 913
+    /// consecutive operations across 44 days with no signal. Registration and
+    /// population are different facts and this response now reports both.
+    /// What: computed live in the same single registry scan as
+    /// `indexes_kg_disabled`, from the DURABLE corpus count (the in-memory map
+    /// reads 0 after idle eviction, so it cannot be the source).
+    ///
+    /// An index is excluded from BOTH this and `indexes_empty` when its count
+    /// is unknown rather than zero: the corpus failed to open (`#4333`, already
+    /// owned by `indexes_corpus_failed`), the durable count read errored, or
+    /// the handle's lock was contended for this poll. So
+    /// `indexes_populated + indexes_empty <= indexes` — the shortfall is
+    /// indexes whose population could not be determined, never indexes silently
+    /// assumed empty.
+    /// Test: `health_reports_populated_and_empty_index_counts`,
+    /// `health_counts_a_real_corpus_and_excludes_a_corpus_failed_index`.
+    pub(super) indexes_populated: usize,
+    /// Issue #4839: registered indexes holding zero chunks whose corpus opened
+    /// fine — see `indexes_populated`.
+    ///
+    /// Why: NOT automatically a fault. Some indexes are legitimately empty
+    /// (their walk completed and matched no indexable file). What made #4839 a
+    /// defect was that nothing distinguished those from indexes that never
+    /// walked at all; `indexes_stuck_empty` (#4680) names that subset, and this
+    /// counter is the denominator it sits inside. `indexes_empty >
+    /// indexes_stuck_empty` is the legitimately-empty cohort.
+    /// What: the same scan's zero-chunk count. Deliberately does NOT force
+    /// `status: "degraded"` — an empty-but-walked index is honest, and #4680's
+    /// stuck predicate already degrades the genuinely broken case.
+    /// Test: `health_reports_populated_and_empty_index_counts`.
+    pub(super) indexes_empty: usize,
+    /// Issue #4839: total chunks across every registered, corpus-healthy index.
+    ///
+    /// Why: the reporter's suggested at-a-glance signal — a near-zero corpus on
+    /// a fleet of hundreds of indexes is visible in one number without diffing
+    /// per-index `chunk_count` values by hand, which is how the 44-day outage
+    /// was eventually found.
+    /// What: summed in the same scan; excludes corpus-failed indexes for the
+    /// reason given on `indexes_populated`.
+    /// Test: `health_reports_populated_and_empty_index_counts`.
+    pub(super) total_chunks: u64,
     /// Boot-time reconcile summary (issue #1672).
     ///
     /// Why: boot-reconcile catches stale indexes (git-delta path since #1670,
@@ -262,7 +310,7 @@ fn bootstrap_state_str(state: BootstrapState) -> &'static str {
 pub(super) async fn health_handler(
     State(state): State<Arc<SearchAppState>>,
 ) -> Json<HealthResponse> {
-    // Why: open-mpm (and other external integrators) probe `/health` to detect
+    // Why: trusty-agents (and other external integrators) probe `/health` to detect
     // a running trusty-search daemon before spawning their own. Including
     // `indexes` count lets the caller verify the daemon is not only alive but
     // also has the expected registry populated (issue #34).
@@ -275,7 +323,7 @@ pub(super) async fn health_handler(
     // Issue #1006 — Option B: this handler MUST NOT block on any contended
     // lock. An embed stall (CoreML/CUDA) can hold `embedder_slot` in a write
     // lock for up to 30 s; `.await`-ing it here would block the health handler
-    // for the same duration, causing external probes (trusty-review, open-mpm)
+    // for the same duration, causing external probes (trusty-review, trusty-agents)
     // to see a false "daemon down". All lock accesses below use either the
     // watch-based `is_embedder_ready()` (no lock) or `try_read()` / `try_lock()`
     // (returns immediately rather than parking the handler).
@@ -548,6 +596,12 @@ pub(super) async fn health_handler(
     // #4680: count indexes whose lexical stage still owes work but that no walk
     // has ever touched — the state every other health signal was blind to.
     let mut indexes_stuck_empty = 0usize;
+    // #4839: registration is not population. Folded into the SAME scan, from
+    // the durable corpus rather than the in-memory map (which reads 0 after
+    // idle eviction and would report a healthy index as empty).
+    let mut indexes_populated = 0usize;
+    let mut indexes_empty = 0usize;
+    let mut total_chunks = 0u64;
     let indexes_corpus_failed = state
         .registry
         .list_handles()
@@ -562,6 +616,48 @@ pub(super) async fn health_handler(
             if let Ok(indexer) = handle.indexer.try_read() {
                 if !indexer.has_embed_pool() {
                     indexes_embed_pool_missing += 1;
+                }
+                // #4839: a corpus-failed index is counted as NEITHER populated
+                // nor empty — its real chunk count is unknown (#4333), and
+                // calling it empty would invent a fact.
+                if !indexer.corpus_open_failed {
+                    // #4839 review: a durable-count READ error gets the same
+                    // treatment as a failed open, for the same reason. Falling
+                    // back to `indexer.chunk_count()` here would have been a
+                    // fail-open inside the fix for fail-opens: the in-memory
+                    // map reads 0 after idle eviction (#681), so an unreadable
+                    // corpus on a populated index would have been counted as
+                    // empty — manufacturing the exact false signal this issue
+                    // exists to remove.
+                    let counted = match indexer.corpus_arc() {
+                        Some(corpus) => match corpus.chunk_count() {
+                            Ok(n) => Some(n),
+                            Err(e) => {
+                                tracing::warn!(
+                                    index_id = %handle.id,
+                                    error = %e,
+                                    "health: durable chunk count unreadable — excluding this \
+                                     index from indexes_populated/indexes_empty/total_chunks \
+                                     for this poll rather than reporting a count it did not \
+                                     produce (#4839)"
+                                );
+                                None
+                            }
+                        },
+                        // No durable corpus wired at all (BM25-only or test
+                        // indexer). The in-memory map is the AUTHORITY for that
+                        // shape, not a fallback from a failure — no eviction
+                        // can make it lie, because there is nothing else.
+                        None => Some(indexer.chunk_count()),
+                    };
+                    if let Some(chunks) = counted {
+                        total_chunks = total_chunks.saturating_add(chunks as u64);
+                        if chunks > 0 {
+                            indexes_populated += 1;
+                        } else {
+                            indexes_empty += 1;
+                        }
+                    }
                 }
             }
             match handle.stages.try_read() {
@@ -705,6 +801,10 @@ pub(super) async fn health_handler(
         indexes_component_catch_up_in_progress,
         indexes_embed_pool_missing,
         indexes_stuck_empty,
+        // #4839: registered vs. populated, plus the fleet-wide corpus size.
+        indexes_populated,
+        indexes_empty,
+        total_chunks,
         warmboot_summary,
         boot_reconcile,
         indexes_watcher_network_degraded,

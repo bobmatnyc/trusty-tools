@@ -178,27 +178,16 @@ pub async fn chat_with_tools_gated(
 
     let openai_tools = registry.openai_tools()?;
     let mut messages = initial_messages;
-    // #287: ollama models are routed via `ollama/<name>` — the prefix is only
-    // used by `adapter_for_model` for selection. Strip it before sending the
-    // request body so ollama's OpenAI-compat layer sees the bare model id
-    // (e.g. `llama3.2:latest`). Force the raw HTTP path for these calls so
-    // they hit the local ollama base URL instead of the async-openai client's
-    // hardwired OpenRouter endpoint.
-    //
-    // #2410 (epic #2400) Step 3: `fireworks/<name>` models follow the exact
-    // same pattern — the prefix selects `FireworksAdapter` in
-    // `adapter_for_model`, is stripped here so Fireworks sees its own
-    // provider-native model id (e.g. `accounts/fireworks/models/...`), and
-    // the raw path is forced so `turn::dispatch_turn` routes through
-    // `adapter.api_endpoint()` (api.fireworks.ai + `FIREWORKS_API_KEY`)
-    // instead of the async-openai client hardwired to OpenRouter.
-    let is_ollama = model.starts_with("ollama/");
-    let is_fireworks = model.starts_with("fireworks/");
-    let model_owned = model
-        .strip_prefix("ollama/")
-        .or_else(|| model.strip_prefix("fireworks/"))
-        .unwrap_or(model)
-        .to_string();
+    // A routing marker (`ollama/` #287, `fireworks/` #2410, `atlascloud/`
+    // #3765) exists only to select an adapter — the provider itself rejects
+    // it in the request body — and any adapter with its own base URL must
+    // take the raw HTTP path, because the shared `async-openai` client is
+    // hardwired to OpenRouter. Both rules used to live here as a per-prefix
+    // list that each new provider had to remember to extend; #3765 moved them
+    // onto the adapter (`wire_model_id` / `requires_raw_http`), so a provider
+    // added later inherits them instead of rediscovering the bug.
+    let provider_needs_raw = adapter.requires_raw_http();
+    let model_owned = adapter.wire_model_id(model).to_string();
     let model = model_owned.as_str();
     // qwen3 supports `/think` and `/no_think` as in-message special tokens.
     // The system prompt sets `/no_think` as the default for speed; we inject
@@ -226,11 +215,8 @@ pub async fn chat_with_tools_gated(
     // caching) or as a raw `serde_json::Value` when we need provider-specific
     // fields (cache_control and/or a non-trivial tool_choice shape) that
     // async-openai 0.28 cannot model.
-    let needs_raw = caching_active
-        || tool_choice.is_some()
-        || route_native_anthropic
-        || is_ollama
-        || is_fireworks;
+    let needs_raw =
+        caching_active || tool_choice.is_some() || route_native_anthropic || provider_needs_raw;
     let routing = TurnRouting {
         caching_active,
         route_native_anthropic,

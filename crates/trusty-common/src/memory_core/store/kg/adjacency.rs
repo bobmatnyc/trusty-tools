@@ -16,6 +16,7 @@ use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 
 use crate::memory_core::store::kg_redb::KgStoreRedb;
+use crate::memory_core::store::kg_store::is_functional_predicate;
 
 /// In-memory adjacency cache backing the public graph API.
 ///
@@ -61,21 +62,28 @@ impl Adjacency {
     }
 
     /// Why: `assert` must keep the graph in sync with the store; doing it
-    /// here keeps the lock-management in one place.
-    /// What: Removes any prior edge for `(subject, predicate)` between the
-    /// existing subject and object nodes, then inserts the new edge using
-    /// the provided triple's metadata. Nodes are created if absent.
-    /// Test: `assert_adds_edge`, `retract_removes_edge`.
+    /// here keeps the lock-management in one place. #4810: the removal used to
+    /// drop EVERY edge from the subject carrying this predicate, regardless of
+    /// target. Since `hydrate_adjacency` replays each active triple through
+    /// here, a room's parallel `contains` edges collapsed back to one on every
+    /// palace open even once storage kept them — which is what left
+    /// `/kg/graph`, `kg_gaps`, and `expand_neighbors` under-reporting.
+    /// What: mirrors the storage split. For a functional predicate the prior
+    /// edge to any target is removed (one active object per subject); for a
+    /// multi-valued one only the edge to THIS target is, so parallel edges to
+    /// other targets survive. Nodes are created if absent.
+    /// Test: `assert_adds_edge`, `retract_removes_edge`,
+    /// `parallel_edges_survive_hydration`.
     pub(super) fn upsert_edge(&mut self, triple: &Triple) {
         let s_idx = self.ensure_node(&triple.subject);
         let o_idx = self.ensure_node(&triple.object);
-        // Remove any existing edge with the same predicate between the
-        // existing subject and any object (matches the temporal invariant
-        // "at most one active edge per (subject, predicate)").
+        let functional = is_functional_predicate(&triple.predicate);
         let to_remove: Vec<_> = self
             .graph
             .edges(s_idx)
-            .filter(|e| e.weight().predicate == triple.predicate)
+            .filter(|e| {
+                e.weight().predicate == triple.predicate && (functional || e.target() == o_idx)
+            })
             .map(|e| e.id())
             .collect();
         for eid in to_remove {

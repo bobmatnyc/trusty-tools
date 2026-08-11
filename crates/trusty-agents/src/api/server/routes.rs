@@ -16,10 +16,10 @@
 
 use anyhow::Result;
 use axum::{
-    Json, Router, middleware,
+    Extension, Json, Router, middleware,
     routing::{get, post},
 };
-use trusty_common::server::{SelfOrigins, with_guarded_middleware};
+use trusty_common::server::{SelfOrigins, with_guarded_middleware_same_origin_cors};
 
 use super::agent_create::create_agent_route;
 // #4290: read-only KG proxy routes backing the Knowledge Graph browser.
@@ -39,7 +39,8 @@ use super::ctrl_sessions::{
     attach_ctrl_session_handler, create_ctrl_session_handler, get_ctrl_session_handler,
     list_ctrl_sessions_handler, terminate_ctrl_session_handler,
 };
-use super::events_sse::events_handler;
+use super::event_tickets::EventStreamAuth;
+use super::events_sse::{events_handler, mint_event_ticket};
 use super::handlers::{
     clear_context, clear_recent_tasks, docs_search, get_session_recap, get_task, health,
     list_tasks, submit_task,
@@ -276,7 +277,14 @@ pub fn build_router_with_origins(
         // (project, harness) pair.
         .route("/api/tm/tell", post(tm_tell))
         // #192 Phase B: SSE event stream — replaces 2s stderr polling.
+        // #5052: authenticated by ticket or bearer token; see `events_sse`.
         .route("/api/events", get(events_handler))
+        // #5052: mints the short-lived ticket a browser `EventSource` presents
+        // on `/api/events`. A POST on purpose — that puts it behind the
+        // router-wide same-origin write guard applied below, which is what
+        // stops a cross-origin page minting one in the default, token-less
+        // configuration.
+        .route("/api/events/ticket", post(mint_event_ticket))
         // #3820: durable, persisted eventstream-listener event list + the
         // per-event-type include/exclude toggle (Events pane, #3818). Named
         // `/api/listener-events` — NOT `/api/events` — because that path is
@@ -305,17 +313,30 @@ pub fn build_router_with_origins(
         .route("/{*path}", get(serve_asset))
         .with_state(state);
 
+    // #5052: the SSE stream's own credential state — the ticket store plus the
+    // configured bearer token — delivered to `/api/events` and
+    // `/api/events/ticket` as a request extension. Built unconditionally: the
+    // stream is gated whether or not an operator token is configured.
+    router = router.layer(Extension(EventStreamAuth::new(token.clone())));
+
     if let Some(tok) = token {
         let auth_state = AuthState { token: tok };
         router = router.layer(middleware::from_fn_with_state(auth_state, auth_middleware));
     }
 
     // #3329: router-wide same-origin write guard + the shared standard
-    // middleware stack (permissive CORS, tracing, gzip), applied AFTER all
-    // route registration so every destructive route is covered (#3268 lesson).
-    // Replaces the crate-local CORS/compression/trace layers so trusty-agents
-    // no longer drifts from the sibling trusty-* daemons' middleware.
-    with_guarded_middleware(router, self_origins)
+    // middleware stack (tracing, gzip), applied AFTER all route registration so
+    // every destructive route is covered (#3268 lesson). Replaces the
+    // crate-local CORS/compression/trace layers so trusty-agents no longer
+    // drifts from the sibling trusty-* daemons' middleware.
+    //
+    // #5052: this daemon takes the SAME-ORIGIN CORS variant rather than the
+    // permissive one its siblings use. Its GET surface is conversation content
+    // — `/api/events`, `/api/tasks`, `/api/task/{id}`,
+    // `/api/sessions/{id}/recap` — and `allow_origin(Any)` let any page in the
+    // operator's browser read all of it from `127.0.0.1`. The write guard did
+    // not help, because it is method-gated and reads are GET.
+    with_guarded_middleware_same_origin_cors(router, self_origins)
 }
 
 /// Serve the HTTP API and embedded web UI on `127.0.0.1:<port>` until killed.
