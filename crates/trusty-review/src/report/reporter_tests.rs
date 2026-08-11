@@ -185,7 +185,10 @@ fn build_model_from_manifest() {
 #[test]
 fn write_emits_both() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let model = fixture_model(tmp.path());
+    let mut model = fixture_model(tmp.path());
+    // #5454: `write` requires a completed synthesis pass; an empty one is the
+    // minimum this test needs, since what it asserts is the file pair.
+    model.synthesis = Some(crate::report::synthesize::Synthesis::default());
     let out_dir = tmp.path().join("out");
     let template = TemplateLoader::bundled_only()
         .load("report-technical-dd")
@@ -220,13 +223,12 @@ fn write_emits_both() {
 /// Test: this test itself.
 #[test]
 fn reporter_injects_synthesis_prose() {
-    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+    use crate::report::synthesize::{FindingProse, Synthesis};
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     let slug = model.repositories[0].slug.clone();
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: Some("A grounded acquirer-relevant summary.".to_string()),
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -269,31 +271,70 @@ fn reporter_injects_synthesis_prose() {
     assert!(!md.contains("{{"), "no raw placeholder survives");
 }
 
-/// Why: an unavailable synthesis must keep the deterministic output and surface
-/// the fail-closed reason verbatim.
-/// What: attaches `Synthesis::unavailable(..)`; asserts the note is present and
-/// the exec-summary placeholder still falls through to the honesty marker.
+/// Why: a synthesis whose narrative fields were ALL rejected by the numeric
+/// guardrail still renders — a rejection is per-field, not a failed pass — and
+/// the report must name each rejection so a reader can tell a
+/// deterministically-composed section from one the model wrote. #5454 replaced
+/// this test's former subject (`Synthesis::unavailable`), which no longer exists:
+/// a failed pass never reaches the reporter at all.
+/// What: attaches a `Synthesis` carrying only guardrail notes; asserts the notes
+/// render and the exec-summary placeholder falls through.
 /// Test: this test itself.
 #[test]
-fn reporter_appends_unavailable_note() {
+fn reporter_appends_guardrail_rejection_note() {
     use crate::report::synthesize::Synthesis;
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
-    model.synthesis = Some(Synthesis::unavailable("provider timeout"));
+    model.synthesis = Some(Synthesis {
+        notes: vec![
+            "synthesis: rejected (unverified figure) in executive summary: 9999".to_string(),
+        ],
+        ..Default::default()
+    });
 
     let template = TemplateLoader::bundled_only()
         .load("report-technical-dd")
         .expect("bundled template");
     let md = Reporter::new(tmp.path()).render(&model, &template);
 
-    assert!(md.contains("synthesis: unavailable (provider timeout)"));
-    // Deterministic fallback: the exec summary was never injected — under the
-    // omit-empty default the un-synthesised paragraph is dropped (not a marker
-    // wall) and recorded under Data gaps.
+    assert!(md.contains("synthesis: available"));
+    assert!(md.contains("rejected (unverified figure) in executive summary: 9999"));
+    // The rejected exec summary was never injected — under the omit-empty default
+    // the un-synthesised paragraph is dropped (not a marker wall) and recorded
+    // under Data gaps.
     assert!(!md.contains("A grounded"));
     assert!(md.contains("Data gaps:"));
     assert!(!md.contains("{{"));
+}
+
+/// Why: #5454 — inference is required, so nothing may reach DISK without a
+/// synthesis pass behind it. `render` stays infallible for unit tests of the
+/// deterministic composition; `write` is the boundary that enforces the rule.
+/// What: hands `write` a model whose `synthesis` is `None`; asserts it refuses
+/// and that neither output file was created.
+/// Test: this test itself.
+#[test]
+fn write_refuses_a_model_with_no_synthesis() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    assert!(model.synthesis.is_none(), "fixture must be synthesis-free");
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let out = tmp.path().join("reports");
+    let err = Reporter::new(&out)
+        .write(&model, &template)
+        .expect_err("a synthesis-free model must not be written");
+    assert!(
+        matches!(err, crate::report::ReportError::SynthesisRequired),
+        "expected SynthesisRequired, got {err:?}"
+    );
+    assert!(
+        !out.join("2026-07-10-acme-technical-dd.md").exists(),
+        "no markdown may be written for a refused model"
+    );
 }
 
 // ─── Live-QA defect #1: deterministic findings fill ───────────────────────────
@@ -386,13 +427,12 @@ fn finding_numbering_restarts_per_severity_section() {
 /// Test: this test itself.
 #[test]
 fn evidence_renders_as_fenced_block() {
-    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+    use crate::report::synthesize::{FindingProse, Synthesis};
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     let slug = model.repositories[0].slug.clone();
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -437,7 +477,7 @@ fn evidence_renders_as_fenced_block() {
 /// Test: this test itself.
 #[test]
 fn evidence_with_blank_line_fences_cleanly() {
-    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+    use crate::report::synthesize::{FindingProse, Synthesis};
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
@@ -445,7 +485,6 @@ fn evidence_with_blank_line_fences_cleanly() {
     let quote =
         "function serializeSession(user) {\n\n  return Buffer.from(JSON.stringify(user));\n}";
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -494,14 +533,13 @@ fn evidence_with_blank_line_fences_cleanly() {
 /// Test: this test itself.
 #[test]
 fn evidence_containing_triple_backticks_uses_longer_fence() {
-    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+    use crate::report::synthesize::{FindingProse, Synthesis};
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     let slug = model.repositories[0].slug.clone();
     let quote = "const doc = \"```js\\nconsole.log(1)\\n```\";";
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -569,14 +607,13 @@ fn count_marker_inside_fences(md: &str) -> usize {
 /// Test: this test itself.
 #[test]
 fn evidence_with_adjacent_hash_comment_lines_renders_byte_identical() {
-    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+    use crate::report::synthesize::{FindingProse, Synthesis};
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     let slug = model.repositories[0].slug.clone();
     let quote = "# ALLOWED_OAUTH_DOMAINS: comma-separated Google Workspace hosted-domains (`hd`\n# claim) allowed to enter the visualization area. The gate FAILS CLOSED if this\n# is empty.";
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -631,14 +668,13 @@ fn evidence_with_adjacent_hash_comment_lines_renders_byte_identical() {
 /// Test: this test itself.
 #[test]
 fn evidence_with_blank_line_full_render_has_no_fenced_splice() {
-    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+    use crate::report::synthesize::{FindingProse, Synthesis};
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     let slug = model.repositories[0].slug.clone();
     let quote = "AI_GATEWAY_API_KEY=\n\n# Optional overrides for the gateway model IDs (format: \"provider/model\").\n# Defaults: AI_GATEWAY_MODEL=anthropic/claude-sonnet-4-5-20250929,";
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -807,13 +843,12 @@ fn reporter_omits_empty_findings_sections_without_metrics() {
 /// Test: this test itself.
 #[test]
 fn reporter_merges_synthesis_prose_onto_deterministic_finding() {
-    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+    use crate::report::synthesize::{FindingProse, Synthesis};
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model_with_findings(tmp.path());
     let slug = model.repositories[0].slug.clone();
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: None,
         top_risks: vec![],
         findings: vec![FindingProse {
@@ -1178,7 +1213,7 @@ fn reporter_declared_metrics_win_over_scanned() {
 /// Test: this test itself.
 #[test]
 fn dedupe_strips_trailing_period() {
-    use super::dedupe_terminal_punctuation;
+    use super::super::reporter_findings::dedupe_terminal_punctuation;
     assert_eq!(
         dedupe_terminal_punctuation("Raw query concatenation."),
         "Raw query concatenation"
@@ -1191,7 +1226,7 @@ fn dedupe_strips_trailing_period() {
 /// Test: this test itself.
 #[test]
 fn dedupe_strips_trailing_question_mark() {
-    use super::dedupe_terminal_punctuation;
+    use super::super::reporter_findings::dedupe_terminal_punctuation;
     assert_eq!(
         dedupe_terminal_punctuation("Is this exploitable?"),
         "Is this exploitable"
@@ -1205,7 +1240,7 @@ fn dedupe_strips_trailing_question_mark() {
 /// Test: this test itself.
 #[test]
 fn dedupe_leaves_trailing_paren() {
-    use super::dedupe_terminal_punctuation;
+    use super::super::reporter_findings::dedupe_terminal_punctuation;
     assert_eq!(
         dedupe_terminal_punctuation("use parameterised queries (see OWASP)"),
         "use parameterised queries (see OWASP)"
@@ -1220,12 +1255,11 @@ fn dedupe_leaves_trailing_paren() {
 /// Test: this test itself.
 #[test]
 fn reporter_tags_top_risks_as_inferred() {
-    use crate::report::synthesize::{RiskRow, Synthesis, SynthesisStatus};
+    use crate::report::synthesize::{RiskRow, Synthesis};
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: Some("Summary.".to_string()),
         top_risks: vec![RiskRow {
             description: "Unpatched dependency chain".to_string(),
@@ -1259,7 +1293,7 @@ fn reporter_tags_top_risks_as_inferred() {
 /// Test: this test itself.
 #[test]
 fn reporter_renders_all_top_risk_rows() {
-    use crate::report::synthesize::{RiskRow, Synthesis, SynthesisStatus};
+    use crate::report::synthesize::{RiskRow, Synthesis};
 
     let risk = |n: usize| RiskRow {
         description: format!("Risk number {n} description"),
@@ -1271,7 +1305,6 @@ fn reporter_renders_all_top_risk_rows() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: Some("Summary.".to_string()),
         top_risks: (1..=5).map(risk).collect(),
         findings: vec![],
@@ -1317,12 +1350,11 @@ fn reporter_renders_all_top_risk_rows() {
 /// Test: this test itself.
 #[test]
 fn reporter_collapses_empty_top_risks() {
-    use crate::report::synthesize::{Synthesis, SynthesisStatus};
+    use crate::report::synthesize::Synthesis;
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model(tmp.path());
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: Some("Summary.".to_string()),
         top_risks: vec![],
         findings: vec![],
@@ -1760,12 +1792,11 @@ fn reporter_names_missing_inputs_when_nothing_measured() {
 /// Test: this test itself.
 #[test]
 fn reporter_prefers_synthesis_over_deterministic_summary() {
-    use crate::report::synthesize::{RiskRow, Synthesis, SynthesisStatus};
+    use crate::report::synthesize::{RiskRow, Synthesis};
 
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let mut model = fixture_model_with_findings(tmp.path());
     model.synthesis = Some(Synthesis {
-        status: SynthesisStatus::Available,
         executive_summary: Some("An acquirer-relevant judgement.".to_string()),
         top_risks: vec![RiskRow {
             description: "Credential exposure".to_string(),

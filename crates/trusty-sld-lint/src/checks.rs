@@ -109,53 +109,91 @@ pub fn check_reference(
     out
 }
 
+/// One file's reference-resolution pass: how many references were resolved, and
+/// what they found.
+///
+/// Why: #5440-followup — a scan floor that counts files DISCOVERED cannot tell a
+/// healthy run from one where the reference PARSER stopped matching. Renaming
+/// the `# Spec References` block marker in `trusty_common::sld::inline` leaves
+/// the walkdir counts byte-identical while every reference silently vanishes, so
+/// the gate reports `scanned 57 spec doc(s) + 3205 code file(s); 0 error(s)` over
+/// a tree it never actually checked. Returning the number of references put
+/// through [`check_reference`] is what lets [`crate::run`] floor the WORK instead
+/// of the discovery.
+/// What: `checked` counts references handed to [`check_reference`];
+/// `diagnostics` are the findings they produced. A file with no declared
+/// references contributes `checked == 0` — the floor is a whole-run total, never
+/// a per-file requirement.
+/// Test: `super::tests::checks_code_file`, `checks_markdown_refs`,
+/// `checks_markdown_bad_frontmatter`.
+#[derive(Debug, Default)]
+pub struct RefScan {
+    /// References actually resolved (not merely files walked).
+    pub checked: usize,
+    /// Findings produced while resolving them.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
 /// Extract and resolve every inline `# Spec References` reference in a code file.
 ///
 /// Why: DOC-38 scopes inline linkage to non-Markdown source in its native
 /// comment idiom (§3); resolving each declared reference is the always-on check
 /// that keeps linkage honest everywhere.
 /// What: looks up the file's [`syntax_for_extension`]; an unknown extension
-/// yields nothing (never guess an idiom). Otherwise parses inline references and
-/// resolves each via [`check_reference`].
+/// yields an empty [`RefScan`] (never guess an idiom). Otherwise parses inline
+/// references, resolves each via [`check_reference`], and reports how many were
+/// resolved so the caller can floor that count.
 /// Test: `super::tests::checks_code_file`.
 pub fn check_code_file(
     decl_path: &str,
     content: &str,
     ext: &str,
     lookup: &impl Fn(&str) -> Option<String>,
-) -> Vec<Diagnostic> {
+) -> RefScan {
     let Some(syntax) = syntax_for_extension(ext) else {
-        return Vec::new();
+        return RefScan::default();
     };
-    parse_inline_refs(content, &syntax)
-        .iter()
-        .flat_map(|r| check_reference(decl_path, &r.id, &r.path, &r.anchor, r.line, lookup))
-        .collect()
+    let refs = parse_inline_refs(content, &syntax);
+    RefScan {
+        checked: refs.len(),
+        diagnostics: refs
+            .iter()
+            .flat_map(|r| check_reference(decl_path, &r.id, &r.path, &r.anchor, r.line, lookup))
+            .collect(),
+    }
 }
 
 /// Validate and resolve a Markdown document's `spec_refs:` frontmatter.
 ///
 /// Why: frontmatter is the canonical Markdown declaration form (§2.5); a schema
 /// violation is itself a defect, and each valid entry must resolve.
-/// What: on a schema error emits `frontmatter-schema` (file-scoped); otherwise
-/// resolves each frontmatter reference via [`check_reference`].
+/// What: on a schema error emits `frontmatter-schema` (file-scoped) and reports
+/// zero references checked — an unparseable block resolved nothing; otherwise
+/// resolves each frontmatter reference via [`check_reference`] and reports how
+/// many were resolved.
 /// Test: `super::tests::checks_markdown_refs`, `checks_markdown_bad_frontmatter`.
 pub fn check_markdown_refs(
     decl_path: &str,
     content: &str,
     lookup: &impl Fn(&str) -> Option<String>,
-) -> Vec<Diagnostic> {
+) -> RefScan {
     match parse_frontmatter_refs(content) {
-        Ok(refs) => refs
-            .iter()
-            .flat_map(|r| check_reference(decl_path, &r.id, &r.path, &r.anchor, r.line, lookup))
-            .collect(),
-        Err(e) => vec![Diagnostic::error(
-            decl_path,
-            0,
-            "frontmatter-schema",
-            format!("invalid `spec_refs:` frontmatter: {e}"),
-        )],
+        Ok(refs) => RefScan {
+            checked: refs.len(),
+            diagnostics: refs
+                .iter()
+                .flat_map(|r| check_reference(decl_path, &r.id, &r.path, &r.anchor, r.line, lookup))
+                .collect(),
+        },
+        Err(e) => RefScan {
+            checked: 0,
+            diagnostics: vec![Diagnostic::error(
+                decl_path,
+                0,
+                "frontmatter-schema",
+                format!("invalid `spec_refs:` frontmatter: {e}"),
+            )],
+        },
     }
 }
 

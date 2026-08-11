@@ -290,36 +290,9 @@ mod tests {
         assert_eq!(VectorQuant::I8.label(), "i8");
     }
 
-    /// `hnsw_review_idle_enabled` honours unset (default on), explicit
-    /// on/off spellings, and falls back to enabled on garbage (issue #2164).
-    #[test]
-    fn hnsw_review_idle_enabled_default_and_env_override() {
-        let prior = std::env::var(HNSW_REVIEW_IDLE_ENV).ok();
-
-        // SAFETY: this test is the only reader/writer of this env var in the
-        // process while it runs; `cargo test` for this crate runs each test
-        // binary's tests on one thread group but env vars are process-global,
-        // matching the pattern used by the sibling `mmap_serve_mode_*` tests.
-        unsafe { std::env::remove_var(HNSW_REVIEW_IDLE_ENV) };
-        assert!(hnsw_review_idle_enabled());
-
-        unsafe { std::env::set_var(HNSW_REVIEW_IDLE_ENV, "0") };
-        assert!(!hnsw_review_idle_enabled());
-
-        unsafe { std::env::set_var(HNSW_REVIEW_IDLE_ENV, "false") };
-        assert!(!hnsw_review_idle_enabled());
-
-        unsafe { std::env::set_var(HNSW_REVIEW_IDLE_ENV, "1") };
-        assert!(hnsw_review_idle_enabled());
-
-        unsafe { std::env::set_var(HNSW_REVIEW_IDLE_ENV, "banana") };
-        assert!(hnsw_review_idle_enabled());
-
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var(HNSW_REVIEW_IDLE_ENV, v),
-                None => std::env::remove_var(HNSW_REVIEW_IDLE_ENV),
-            }
-        }
-    }
+    // #3769: `hnsw_review_idle_enabled_default_and_env_override` lived here and
+    // was the second writer of `TRUSTY_HNSW_REVIEW_IDLE` inside this lib test
+    // binary, racing `hnsw_idle_demotion_reviews_clean_promoted_store` through
+    // the same gate. It now lives in `tests/hnsw_review_idle_env.rs`, its own
+    // test BINARY, alongside the other mutator. See that file's module docs.
 }
