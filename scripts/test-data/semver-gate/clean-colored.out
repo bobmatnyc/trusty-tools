@@ -1,0 +1,12 @@
+[1m[32m    Building[0m tga v2.17.0 (current)
+[1m[32m       Built[0m [ 149.220s] (current)
+[1m[32m     Parsing[0m tga v2.17.0 (current)
+[1m[32m      Parsed[0m [   0.180s] (current)
+[1m[32m    Building[0m tga v2.16.0 (baseline)
+[1m[32m       Built[0m [ 148.121s] (baseline)
+[1m[32m     Parsing[0m tga v2.16.0 (baseline)
+[1m[32m      Parsed[0m [   0.179s] (baseline)
+[1m[32m    Checking[0m tga v2.16.0 -> v2.17.0 (minor change)
+[1m[32m     Checked[0m [   0.871s] 196 checks: 196 pass, 58 skip
+[1m[32m     Summary[0m no semver update required
+[1m[32m    Finished[0m [ 302.779s] tga
