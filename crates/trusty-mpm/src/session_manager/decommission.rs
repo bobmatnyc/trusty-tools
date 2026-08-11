@@ -123,7 +123,26 @@ pub(crate) const GIT_WORKTREE_REMOVE_TIMEOUT: std::time::Duration =
 pub(crate) fn is_session_worktree(path: &Path) -> bool {
     // #5204: detection matches the configured base OR the built-in `.worktrees`,
     // so retargeting never orphans worktrees already on disk.
-    let names = worktree_dir_names();
+    is_session_worktree_with(path, &worktree_dir_names())
+}
+
+/// [`is_session_worktree`] against ALREADY-RESOLVED base names.
+///
+/// Why: [`worktree_dir_names`] calls `TrustyToolsConfig::load()`, which re-reads
+/// and re-parses config files on every call and re-emits its unknown-key warning
+/// (#5207). That is fine once, but a caller asking the question per item in a
+/// loop pays it per item — and on a repeating timer it also multiplies that
+/// one-shot warning into a per-item, per-tick log flood. `WorktreeDirNames`'s own
+/// docs prescribe the remedy: resolve once at the top of a scan and pass the
+/// value down (#5204). #5327's retention sweep is the first such loop caller.
+/// What: the pure path-shape predicate — is the immediate parent a base name.
+/// [`is_session_worktree`] is this function plus a per-call resolve.
+/// Test: `is_session_worktree_detects_dot_worktrees_component` (through the
+/// delegating wrapper), `workspace_needs_protection_covers_a_session_worktree`.
+pub(crate) fn is_session_worktree_with(
+    path: &Path,
+    names: &trusty_common::workspace_layout::WorktreeDirNames,
+) -> bool {
     path.parent()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())

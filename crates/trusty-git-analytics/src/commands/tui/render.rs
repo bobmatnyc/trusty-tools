@@ -16,8 +16,6 @@ use ratatui::widgets::{Gauge, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use trusty_common::monitor::tui_common::{panel_block, render_help_overlay, truncate};
 
-use tga::core::progress::Stage;
-
 use super::state::{RepoSource, TuiState, View, WorkStatus};
 
 /// Key reference shown in the status bar and the help overlay.
@@ -117,9 +115,15 @@ pub fn repo_line(state: &TuiState, index: usize) -> String {
 /// One progress line for a stage's target row.
 ///
 /// Why/What/Test: see `super::tests::progress_lines_show_counts_and_outcome`.
+///
+/// #5361: driven by the stages that actually emitted, not by
+/// [`Stage::all`](tga::core::progress::Stage::all) — the audit sweep reports
+/// under `Stage::Audit`, which `all()` excludes, so a fixed skeleton would drop
+/// its rows on the floor. Unstarted stages were already skipped, so the three
+/// pipeline stages render exactly as before.
 pub fn progress_lines(state: &TuiState) -> Vec<String> {
     let mut out = Vec::new();
-    for stage in Stage::all() {
+    for stage in state.progress.stages() {
         let summary = state.progress.summary(stage);
         if !summary.is_started() {
             continue;

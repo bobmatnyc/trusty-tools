@@ -418,3 +418,91 @@ async fn test_global_search_surfaces_cold_indexes_skipped() {
         "global fan-out must report 1 cold index skipped; body={body:?}"
     );
 }
+
+// ── #4951: the two root_path copies must never diverge ───────────────────────
+
+/// #4951: a `reindex` `root_path` override must move the SHARED indexer's own
+/// `root_path` too, or the search post-filter discards every result.
+///
+/// Why: `IndexHandle::root_path` and `CodeIndexer::root_path` are two copies of
+/// one fact. The indexer's copy is the base every stored root-relative chunk
+/// path is joined against to build the absolute `CodeChunk::file`
+/// (`raw_to_code_chunk`); the handle's copy is what `search_handler` post-filters
+/// those absolute paths against (`file_is_within_root`, added for #64/#541). The
+/// override rebuilds the handle around the SAME indexer `Arc`, so leaving the
+/// indexer on the old root made every materialized `file` fall outside the new
+/// root: 100% of candidates were dropped and search returned `results: []` with
+/// `stale_index_root: true` — on an index whose `/status` read `ready` with
+/// 85,642 chunks and a populated `search_capabilities`. JIRA context was absent
+/// from every PR review for 40+ days behind this.
+/// What: reproduces the exact production shape — a root re-pointed one level
+/// down (`/knowledge` → `/knowledge/Jira`) with a chunk stored relative to it —
+/// and asserts the resolved absolute path passes the post-filter. Pre-fix,
+/// `set_root_path` does not exist and the stale join produces
+/// `/knowledge/ACP/ACP-1.md`, which fails `file_is_within_root` against
+/// `/knowledge/Jira`.
+/// Test: this test.
+#[test]
+fn stale_indexer_root_makes_every_chunk_fail_the_search_post_filter() {
+    use crate::core::indexer::helpers::resolve_chunk_file;
+
+    let old_root = std::path::Path::new("/knowledge");
+    let new_root = std::path::Path::new("/knowledge/Jira");
+    // What the walker stores: a path relative to the CURRENT root.
+    let stored_relative = "ACP/ACP-1.md";
+
+    // The defect, stated as an assertion: materializing against the stale root
+    // yields an absolute path the post-filter rejects.
+    let stale_file = resolve_chunk_file(stored_relative, old_root);
+    assert_eq!(stale_file, "/knowledge/ACP/ACP-1.md");
+    assert!(
+        !file_is_within_root(&stale_file, new_root),
+        "#4951: this is the drop — a chunk built against the old root cannot \
+         pass the new root's containment check, so search returns nothing"
+    );
+
+    // The fix: once the indexer's root moves with the handle's, the same stored
+    // chunk resolves inside the new root and survives the filter.
+    let fixed_file = resolve_chunk_file(stored_relative, new_root);
+    assert_eq!(fixed_file, "/knowledge/Jira/ACP/ACP-1.md");
+    assert!(
+        file_is_within_root(&fixed_file, new_root),
+        "#4951: with the roots in lockstep the chunk must survive the post-filter"
+    );
+
+    // `path` (the portable root-relative form) stays correct in BOTH cases —
+    // which is why the mismatch was invisible on `/status` and surfaced only as
+    // an empty result set. `raw_to_code_chunk_populates_path_for_relative_file`
+    // pins that half.
+}
+
+/// #4951: `CodeIndexer::set_root_path` is the single way the reindex root
+/// override keeps the indexer in lockstep with its rebuilt handle.
+///
+/// Why: without a mutator the override had no way to move the shared indexer at
+/// all — the divergence was unfixable at the call site, which is why it shipped.
+/// What: builds an indexer at one root, moves it, and asserts chunk resolution
+/// follows.
+/// Test: this test.
+#[test]
+fn reindex_root_override_syncs_indexer_root_path() {
+    use crate::core::indexer::CodeIndexer;
+
+    let mut indexer = CodeIndexer::new("atlassian", "/knowledge");
+    assert_eq!(indexer.root_path, std::path::PathBuf::from("/knowledge"));
+
+    indexer.set_root_path("/knowledge/Jira");
+
+    assert_eq!(
+        indexer.root_path,
+        std::path::PathBuf::from("/knowledge/Jira"),
+        "#4951: the override must re-point the indexer, not just the handle"
+    );
+    assert!(
+        file_is_within_root(
+            &crate::core::indexer::helpers::resolve_chunk_file("ACP/ACP-1.md", &indexer.root_path),
+            std::path::Path::new("/knowledge/Jira"),
+        ),
+        "#4951: chunks must resolve inside the new root after the sync"
+    );
+}

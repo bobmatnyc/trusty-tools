@@ -39,5 +39,5 @@ pub use review::{
     artifact_paths, resolve_review_binary, run_review_report, ReviewRun, ReviewRunError,
     DEFAULT_REVIEW_BIN, ENV_REVIEW_BIN,
 };
-pub use stage::{AuditSweepStats, StageOutcome, StageStatus, SweepStage};
+pub use stage::{AuditSweepStats, StageOutcome, StageStatus, StaleFetch, SweepStage};
 pub use sweep::{run_full_sweep, SweepOptions};

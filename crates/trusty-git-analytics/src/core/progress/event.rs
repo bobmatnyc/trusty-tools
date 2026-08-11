@@ -28,27 +28,41 @@ pub enum Stage {
     Correlate,
     /// Stage 2 — the classification cascade (`classify/`).
     Classify,
+    /// The AUDIT sweep (`crate::audit`), one target per sweep stage.
+    ///
+    /// #5361: the sweep drives eight subcommands, most of which have no
+    /// progress instrumentation of their own — so the sweep itself reports
+    /// their start and finish, with [`crate::audit::SweepStage::as_str`] as the
+    /// target. Its own collection stage still emits [`Stage::Collect`] rows on
+    /// the same bus, so the coarse and fine views coexist rather than merge.
+    Audit,
 }
 
 impl Stage {
     /// Short display label for this stage.
     ///
     /// Why: renderers and log lines both need one canonical spelling.
-    /// What: `"Collect"` / `"Correlate"` / `"Classify"`.
+    /// What: `"Collect"` / `"Correlate"` / `"Classify"` / `"Audit"`.
     /// Test: `super::tests::stage_label_is_stable`.
     pub fn label(self) -> &'static str {
         match self {
             Self::Collect => "Collect",
             Self::Correlate => "Correlate",
             Self::Classify => "Classify",
+            Self::Audit => "Audit",
         }
     }
 
-    /// Every stage, in pipeline order.
+    /// The three long-running data stages, in pipeline order.
     ///
-    /// Why: the aggregate view lists stages in a stable order even before any
-    /// event for a stage has arrived.
-    /// What: `[Collect, Correlate, Classify]`.
+    /// Why: a consumer that wants a fixed skeleton — every pipeline stage
+    /// listed even before its first event — reads this list.
+    /// What: `[Collect, Correlate, Classify]`. [`Stage::Audit`] is deliberately
+    /// absent: it is not a pipeline stage but a wrapper whose rows are the
+    /// sweep's own stages, so a skeleton built from it would show eight empty
+    /// rows on every `tga tui` run. A consumer that wants whatever actually
+    /// ran, including `Audit`, iterates
+    /// [`super::ProgressAggregate::stages`] instead.
     /// Test: `super::tests::stage_label_is_stable`.
     pub fn all() -> [Stage; 3] {
         [Self::Collect, Self::Correlate, Self::Classify]

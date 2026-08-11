@@ -256,6 +256,35 @@ the template needs but the metrics omit falls through to the honesty marker.
 Scoring, health-factor, and benchmark placeholders have no deterministic M1
 source and therefore render as `not stated in source data` until M2/M3 land.
 
+### §2 Executive Summary — deterministic floor (#5318)
+
+The executive summary used to be the one section with no deterministic source at
+all: `reporter.rs` filled it only from M2 synthesis prose, so a run without
+`--synthesize` — which is every `tga audit` run, since the sweep invokes
+`trusty-review report --manifest … --analyze --out …` — collapsed §2 to
+`_No data available — see Gaps & Caveats._` while listing real RED/AMBER findings
+in §5.
+
+`exec_summary.rs` gives §2 a floor built from data the report already carries:
+applications and their aggregate size and language mix, RED/AMBER counts with the
+dimensions they fall in, and — when more than one application carries findings —
+which one they concentrate in. The paragraph closes by saying what it is ("a
+deterministic roll-up … not an analyst judgement") and carries the provenance of
+the figures it used: `declared` when any came from a metrics document, `measured`
+when all came from the built-in scan. The Top Risks table fills from the same
+findings, RED first, capped at five rows; `Est. cost/effort` has no deterministic
+source and stays honesty-marked.
+
+Synthesis is unchanged and still wins: `inject_synthesis_summary` runs after the
+deterministic fill and overwrites the paragraph, and the deterministic risk rows
+are suppressed entirely when synthesis produced rows of its own, so the two never
+stack into one table.
+
+When nothing measurable was supplied — a remote-only manifest, or every repository
+unscannable with no metrics — §2 states which inputs were absent (no `metrics`
+file, no `--analyze` fetch, no scannable checkout) rather than collapsing to the
+generic Gaps & Caveats pointer.
+
 ## Synthesis (M2)
 
 M2 layers **opt-in** LLM prose on top of the M1 deterministic fill. It is OFF by
@@ -618,8 +647,12 @@ deterministic fill and before the appended status notes):
    collapses instead of rendering with nothing beneath it (live-QA wave-2 defect
    #4).
 4. **Gaps list** — every dropped field/section is collected into a compact
-   `Data gaps: client, native scale, …` line in the Gaps & Caveats section,
-   replacing the wall of `not stated` rows.
+   `Data gaps: 2 unpopulated fields/sections — client; native scale.` line in the
+   Gaps & Caveats section, replacing the wall of `not stated` rows. The count is
+   the length of the same slice the line goes on to join, so the two can never
+   disagree; items are `;`-separated because a label may itself contain a comma
+   or open with its template section number ("2. Executive Summary"), which
+   comma-joining rendered as a bogus leading count (#5319).
 
 This **deliberately changes default rendering** — the M2/M3 byte-identical-when-off
 guarantees apply to *their* flags (`--synthesize`, `--benchmark`), not to this

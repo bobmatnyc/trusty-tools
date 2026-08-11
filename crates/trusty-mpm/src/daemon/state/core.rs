@@ -377,6 +377,23 @@ pub struct DaemonState {
     /// Test: `daemon::idle_nudge` unit tests exercise the decide→record→prune
     /// path; the ledger's own semantics are covered by `core::idle_nudge` tests.
     pub(super) nudge_ledger: parking_lot::Mutex<crate::core::idle_nudge::NudgeLedger>,
+    /// Serializes the shared-working-tree dispatch claim (#5324).
+    ///
+    /// Why: `tm hook --pm-guard` used to ASK which agents were already writing
+    /// in a directory and record the answer's consequence later, so two
+    /// dispatches issued in one PM turn could both ask before either was
+    /// recorded, both see an empty set, and both be admitted — the collision the
+    /// guard exists to prevent. Closing that needs the question and the record
+    /// to be one indivisible step, and `delegations` is a `DashMap`: it makes
+    /// each entry atomic, never a scan-then-insert pair. This mutex is what
+    /// makes that pair atomic.
+    /// What: guards nothing itself — it is held across the scan-and-record in
+    /// [`DaemonState::claim_shared_tree_dispatch`], which is its only taker.
+    /// Held for an in-memory scan of one session's delegations and at most one
+    /// insert; no I/O, no await, no other lock nested inside it.
+    /// Test: `shared_tree_dispatch_route_denies_the_second_claim`,
+    /// `pm_guard_denies_the_second_of_two_simultaneous_dispatches`.
+    pub(super) shared_tree_claim: parking_lot::Mutex<()>,
 }
 
 impl Default for DaemonState {
@@ -473,6 +490,7 @@ impl DaemonState {
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
+            shared_tree_claim: parking_lot::Mutex::new(()),
         }
     }
 
@@ -546,6 +564,7 @@ impl DaemonState {
             manager,
             provisioning: crate::daemon::provisioning::ProvisioningRegistry::default(),
             nudge_ledger: parking_lot::Mutex::new(crate::core::idle_nudge::NudgeLedger::new()),
+            shared_tree_claim: parking_lot::Mutex::new(()),
         }
     }
 

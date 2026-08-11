@@ -159,12 +159,58 @@ derived rules live here because they apply only at a specific moment:
 Slow feature release *causes* too many things in flight. Shortening time-to-land
 is the fix; capping WIP treats the symptom.
 
+## Test Scope Widens by Stage
+
+Unit tests run on the new or changed code only while developing, on the full
+test files that changed when merging, and on the full corpus only when
+publishing.
+
+| Stage | Scope |
+|---|---|
+| Developing | tests covering the new or changed code only |
+| Merging | the full test files that changed |
+| Publishing | the full corpus |
+
+- **Developing** is the inner loop: the targeted test that proves the change,
+  re-run as you edit. Nothing wider is owed while the code is still moving.
+- **Merging** widens to whole files, never to the whole repository. Every test
+  file the diff touched runs in full — including the cases you did not edit, and
+  any normally-skipped test that lives in one of those files. A change to a
+  public interface or to shared test infrastructure alters what a dependent
+  package's test files mean, so those files count as changed even though the
+  diff never opened them.
+- **Publishing** is the only stage that owes the whole corpus, plus whatever
+  release gates the project defines.
+
+This is the two-phase doctrine at finer grain: developing is SPRINT; merging and
+publishing are two different widths inside HARDEN, and merging is the narrower.
+A green merge gate is therefore not a release gate.
+
+Stage and rigour are separate axes and both bind. The stage decides how *wide* a
+gate runs; the project's risk labels and test ladder decide how *hard* it is
+applied and which gates run at all. Pick the rung from the project's `CLAUDE.md`,
+then read the stage off where you are in the delivery chain.
+
+A consequence for branch protection: a full-corpus CI job is a publish gate, so a
+project may leave it off the required pre-merge contexts and merge while it is
+still pending. A **failing** check blocks the merge at every stage — only
+*pending* is tolerated.
+
+🔴 **Widening by stage is never licence to skip.** Choosing the narrower scope is
+a claim about blast radius that you must be able to prove. It is never licence to
+make a red gate green by deleting a test, marking it skipped or ignored, gating
+it out of the build, or excluding it from the run. That hard line ("Sprint, then
+Harden") is unchanged.
+
 ## Worktree Discipline (Mandatory Before Any Edit)
 
 The main checkout is **inspection-only** — read-only `git status`/`log`/`diff`/
-`show` and file reads. No edits, no builds or test runs (whatever the project's
-gate is: `cargo build`/`test`, `npm run build`/`test`, `pytest`, …), no
-destructive git ops. All write-side work happens in a dedicated worktree branched
+`show` and file reads. Forbidden against it: any edit; any build or test run
+(whatever the project's gate is: `cargo build`/`test`, `npm run build`/`test`,
+`pytest`, …); any destructive git operation (`git reset --hard`,
+`git checkout .`, `git stash`, `git restore .`); any file-mutating command
+(`sed`/`awk`/`patch`) — or anything else that mutates the working tree, index,
+or build output. All write-side work happens in a dedicated worktree branched
 off `origin/main`:
 
 ```bash
@@ -176,6 +222,18 @@ cd .claude/worktrees/<dirname>
 
 Always `git fetch origin main` first and branch off `origin/main`, never local
 `main` — local `main` can be stale and branching from it has caused lost commits.
+
+**A worktree is a writer; the branch is the workstream.** The durable unit is
+the branch — one branch per workstream, one session per workstream. A worktree
+is only the checkout that lets you write to that branch: ephemeral, disposable,
+recreatable at any time with `git worktree add`. Losing a worktree loses nothing
+the branch does not still hold.
+
+**One branch and worktree per independently reviewable PR outcome** — not per
+ticket, per refactor step, or per experiment. Several related tickets may share
+one worktree when a single coherent change satisfies them (`Closes #A`,
+`Closes #B`); see "One Outcome, One PR" above for everything that outcome owes
+and keeps bundled in that same worktree and PR.
 
 **Experiments stay session-local.** Promote an experiment to a branch and
 worktree only once its result is accepted for implementation.
@@ -201,7 +259,11 @@ git -C /path/to/main-checkout stash pop
 ```
 
 Surface the stash name in your report if popping fails, so a human can restore
-it manually.
+it manually. This is a narrow exception, not license for routine edits from the
+main checkout.
+
+Project-specific worktree hazards (binary-install caveats, code-signing caches,
+and the like) belong in the project's own reference docs, not here.
 
 ## Git Security Review (Mandatory Before Push)
 

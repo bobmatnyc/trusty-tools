@@ -355,3 +355,103 @@ async fn not_ready_message_says_retryable_and_names_the_fallback() {
         "must not leak the raw HTTP transport error: {msg}"
     );
 }
+
+/// The not-ready payload points at `list_indexes`, not only at a fallback.
+///
+/// Why (#5213): `suggested_fallback: ["grep", "find"]` was the only actionable
+/// field, an agent read "grep" as trusty-search's `grep` TOOL, and that tool is
+/// index-backed under the same pin — so it reported the same failure and the
+/// loss of search capability round-tripped into advice that could not work. The
+/// prose warned about it; the machine-readable field, which is what an agent
+/// branches on, did not. The owner's ruling is that an omitted `index_id` must
+/// error loudly AND point at discovery. Pre-fix the payload had no `next_steps`
+/// key at all, so both assertions below fail against the pre-fix commit.
+/// Test: this test.
+#[tokio::test]
+async fn not_ready_payload_points_at_list_indexes_not_only_a_fallback() {
+    let base =
+        spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
+    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let resp = server
+        .dispatch(req("search", serde_json::json!({ "query": "q" })))
+        .await;
+    let data = resp.error.expect("error").data.expect("payload");
+
+    let discover = data["next_steps"]["discover"]
+        .as_str()
+        .expect("next_steps.discover must be present");
+    assert!(
+        discover.contains("list_indexes"),
+        "the caller must be told how to reach an index that DOES exist, got: {discover}"
+    );
+    let scope = data["fallback_scope"]
+        .as_str()
+        .expect("fallback_scope must disambiguate whose grep is meant");
+    assert!(
+        scope.contains("grep"),
+        "the circular-advice trap must be named in data, not only in prose: {scope}"
+    );
+}
+
+/// An unresolvable `index_id` names `list_indexes` in the error itself.
+///
+/// Why (#5213): "missing required string field: index_id" is true and
+/// unactionable. A caller that does not know a valid id guesses one — which is
+/// the wrong-index failure #1373 pinned the session to avoid, arriving by a
+/// different route. Pre-fix the message was the bare field name, so the
+/// `contains("list_indexes")` assertion fails against the pre-fix commit.
+/// Test: this test.
+#[tokio::test]
+async fn missing_index_id_error_names_list_indexes() {
+    // No pin, no explicit id: there is genuinely nothing to resolve.
+    let server = McpServer::new("http://127.0.0.1:1");
+    for tool in ["search", "search_semantic", "index_status"] {
+        let resp = server
+            .dispatch(req(tool, serde_json::json!({ "query": "q" })))
+            .await;
+        let msg = resp.error.expect("error").message;
+        assert!(
+            msg.contains("list_indexes"),
+            "{tool}: an omitted index_id must point at discovery, got: {msg}"
+        );
+    }
+}
+
+/// `search_all`'s tool description and its `index_id` parameter agree.
+///
+/// Why (#5213): the tool description said omitting `index_id` "falls back to
+/// legacy cross-project fan-out behaviour (issue #10)" while the parameter
+/// description said it defaults to the session pin. Both cannot hold —
+/// empirically the pin wins, so the documented fan-out path is unreachable in a
+/// pinned session and the contract contradicted itself. `issue #10` was also a
+/// stale reference (an unrelated closed `tga` ticket). Pre-fix the description
+/// contained "issue #10" and did not mention the pin, so both assertions fail
+/// against the pre-fix commit.
+/// Test: this test.
+#[test]
+fn search_all_description_matches_actual_index_precedence() {
+    let defs = super::tool_descriptors();
+    let all = defs
+        .as_array()
+        .expect("descriptors are an array")
+        .iter()
+        .find(|t| t["name"] == "search_all")
+        .expect("search_all is registered");
+    let desc = all["description"].as_str().expect("description");
+
+    assert!(
+        !desc.contains("issue #10"),
+        "the stale #10 reference must be gone: {desc}"
+    );
+    assert!(
+        desc.contains("pinned"),
+        "the description must state that a session pin pre-empts fan-out: {desc}"
+    );
+    let param = all["inputSchema"]["properties"]["index_id"]["description"]
+        .as_str()
+        .expect("index_id description");
+    assert!(
+        param.contains("pinned"),
+        "the parameter description must agree with the tool description: {param}"
+    );
+}

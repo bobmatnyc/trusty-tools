@@ -11,6 +11,7 @@
 //! Test: `dispatch_kg_assert_then_query`, `dispatch_discover_aliases_*`,
 //! `dispatch_kg_gaps_returns_cached` in `tools::tests`.
 
+use crate::service::core_kg::{DEFAULT_KG_LIST_LIMIT, MAX_KG_LIST_LIMIT};
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -261,6 +262,72 @@ pub(crate) async fn handle_kg_gaps(state: &AppState, args: Value) -> Result<Valu
         })
         .collect();
     Ok(json!({ "palace": palace, "gaps": payload }))
+}
+
+/// MCP `kg_list_subjects` tool — enumerate the subjects a palace's KG holds.
+///
+/// Why (#4776): `kg_query` requires a subject the caller must already know, and
+/// a guessed subject that misses returns the same empty result as a genuinely
+/// empty graph. The enumeration existed at the HTTP layer
+/// (`GET /api/v1/palaces/{id}/kg/subjects`) but had no MCP equivalent, so a
+/// model could only discover subjects by guessing.
+/// What: resolves the palace, clamps `limit` into `[1, MAX_KG_LIST_LIMIT]`
+/// (default [`DEFAULT_KG_LIST_LIMIT`]), and reads the alphabetically-ordered
+/// subject list — bare strings, or `{subject, count}` objects when
+/// `with_counts` is true. `truncated` cannot be `subjects.len() == limit`: a
+/// palace that holds exactly `limit` subjects would report `true` with no
+/// more subjects to page to. Instead the store is asked for one row past
+/// `limit` (#4810); if that extra row comes back it is dropped and
+/// `truncated` is `true`, otherwise every row returned is real and
+/// `truncated` is `false`.
+/// Test: `dispatch_kg_list_subjects_returns_distinct_subjects`,
+/// `dispatch_kg_list_subjects_with_counts_returns_pairs`,
+/// `dispatch_kg_list_subjects_exact_limit_is_not_truncated`.
+pub(crate) async fn handle_kg_list_subjects(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "kg_list_subjects")?;
+    let handle = open_palace_handle(state, &palace)?;
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map_or(DEFAULT_KG_LIST_LIMIT, |n| n as usize)
+        .clamp(1, MAX_KG_LIST_LIMIT);
+    let with_counts = args
+        .get("with_counts")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // #4810: over-fetch by one so the extra row's presence — not a
+    // length-equals-limit coincidence — is the truncation signal.
+    let fetch_limit = limit + 1;
+
+    let (subjects, truncated): (Vec<Value>, bool) = if with_counts {
+        let mut rows = handle
+            .kg
+            .list_subjects_with_counts(fetch_limit)
+            .context("kg.list_subjects_with_counts")?;
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
+        let subjects = rows
+            .into_iter()
+            .map(|(subject, count)| json!({ "subject": subject, "count": count }))
+            .collect();
+        (subjects, truncated)
+    } else {
+        let mut rows = handle
+            .kg
+            .list_subjects(fetch_limit)
+            .context("kg.list_subjects")?;
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
+        let subjects = rows.into_iter().map(Value::String).collect();
+        (subjects, truncated)
+    };
+
+    Ok(json!({
+        "palace": palace,
+        "truncated": truncated,
+        "with_counts": with_counts,
+        "subjects": subjects,
+    }))
 }
 
 pub(crate) async fn handle_get_prompt_context(state: &AppState, args: Value) -> Result<Value> {

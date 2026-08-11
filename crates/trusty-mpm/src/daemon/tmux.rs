@@ -330,7 +330,8 @@ impl TmuxDriver {
     /// What: loads [`crate::core::trusty_tools_config::TrustyToolsConfig`],
     /// resolves the `tmux:` section via
     /// [`crate::core::trusty_tools_config::resolve_tmux_options`] (defaults:
-    /// 100,000-line history-limit, mouse on, alternate-screen on), and runs
+    /// 100,000-line history-limit, mouse on, alternate-screen off since
+    /// #5364), and runs
     /// each [`crate::core::tmux::scrollback_option_commands`] entry via
     /// [`Self::run`] — including the `-wg`-scoped `alternate-screen` entry
     /// (#5151). Best-effort: `set-option` is idempotent (safe to

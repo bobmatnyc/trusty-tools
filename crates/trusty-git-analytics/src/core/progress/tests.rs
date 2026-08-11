@@ -13,7 +13,11 @@ fn stage_label_is_stable() {
     assert_eq!(Stage::Collect.label(), "Collect");
     assert_eq!(Stage::Correlate.label(), "Correlate");
     assert_eq!(Stage::Classify.label(), "Classify");
+    assert_eq!(Stage::Audit.label(), "Audit");
+    // #5361: `all()` is the pipeline skeleton, so the audit wrapper stays out
+    // of it — a `tga tui` run would otherwise show eight rows that never fill.
     assert_eq!(Stage::all().len(), 3);
+    assert!(!Stage::all().contains(&Stage::Audit));
 }
 
 #[test]
@@ -197,6 +201,24 @@ fn aggregate_starts_empty() {
     assert!(agg.rows(Stage::Collect).is_empty());
     assert_eq!(agg.summary(Stage::Collect), StageSummary::default());
     assert!(!agg.summary(Stage::Collect).is_started());
+}
+
+/// #5361: a renderer driven by `Stage::all()` can never show audit-sweep rows,
+/// so the aggregate must be able to report what actually emitted.
+#[test]
+fn aggregate_lists_only_stages_that_produced_rows() {
+    let mut agg = ProgressAggregate::new();
+    assert_eq!(agg.stages().count(), 0);
+
+    agg.apply(ProgressEvent::started(Stage::Audit, "jira sync", Some(1)));
+    agg.apply(ProgressEvent::completed(Stage::Collect, "api", 1));
+
+    // Ascending `Stage` order, and nothing for the stage that never emitted.
+    assert_eq!(
+        agg.stages().collect::<Vec<_>>(),
+        vec![Stage::Collect, Stage::Audit]
+    );
+    assert!(!agg.stages().any(|s| s == Stage::Classify));
 }
 
 #[test]

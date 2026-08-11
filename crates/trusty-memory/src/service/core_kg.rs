@@ -23,6 +23,28 @@ use super::types::{
 };
 use super::MemoryService;
 
+// ---------------------------------------------------------------------------
+// KG list bounds
+// ---------------------------------------------------------------------------
+//
+// #4776: these live on the service layer, not on either consumer, because both
+// readers of the subject list must agree on them — the HTTP explorer routes in
+// `web::kg_routes` (compiled only under `axum-server`) and the MCP
+// `kg_list_subjects` tool in `tools::kg_ops` (always compiled). Defining them
+// in `web` would put them on the far side of that feature gate from the tool.
+
+/// Default page size for KG subject listings when the caller omits `limit`.
+///
+/// Why: 50 is large enough to feel responsive in the KG Explorer and to answer
+/// "what is in this graph?" in one call, without dumping a full graph.
+pub(crate) const DEFAULT_KG_LIST_LIMIT: usize = 50;
+
+/// Hard ceiling on `limit` for KG subject listings.
+///
+/// Why: prevent a misconfigured client from asking the daemon to materialize
+/// thousands of rows in one go; matches the spec's max=200.
+pub(crate) const MAX_KG_LIST_LIMIT: usize = 200;
+
 impl MemoryService {
     // -----------------------------------------------------------------
     // Knowledge graph

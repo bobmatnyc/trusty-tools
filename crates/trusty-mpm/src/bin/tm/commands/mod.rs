@@ -78,11 +78,15 @@ pub(crate) mod register_args;
 pub(crate) mod reinstall;
 pub(crate) mod rename;
 pub(crate) mod repair;
+// #5007: `tm repair session-store` — back up and truncate a corrupt
+// `sessions.json` so a wedged store no longer needs a human editing JSON.
+pub(crate) mod repair_session_store;
 pub(crate) mod run_target;
 pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod sessctl;
 pub(crate) mod session;
+pub(crate) mod session_ls_connector;
 pub(crate) mod session_picker;
 pub(crate) mod session_picker_filter;
 pub(crate) mod session_picker_prune;
