@@ -33,22 +33,27 @@
 //! liveness from real `SubagentStop` signals, so it is asked rather than
 //! guessed at.
 //!
-//! **Known gap — this is check-then-decide, with no reservation step.** The
-//! daemon is queried and the verdict computed from the answer; nothing claims
-//! the directory in between. Two dispatches that both query before either's
-//! `on_dispatch` recording lands both see an empty set and are both ALLOWED.
-//! `pm_guard_admits_both_dispatches_that_query_before_either_is_recorded`
-//! (`tests/tm_hook_pm_guard.rs`) pins that behaviour deterministically, by
-//! blocking the mock daemon's replies until both queries have arrived.
+//! **The question and the claim are one daemon operation (#5324).** This used
+//! to be check-then-decide: the daemon was queried and the verdict computed
+//! from the answer, with nothing claiming the directory in between, so two
+//! dispatches issued in one PM turn could both query before either's
+//! `on_dispatch` recording landed, both see an empty set, and both be ALLOWED —
+//! and a PM dispatching several agents in one message is the framework's own
+//! documented pattern for parallel work, so that was the common shape, not an
+//! edge case. [`claim_shared_tree`] now POSTs the dispatch instead of asking
+//! about it: the daemon answers and, when the answer is empty, records this
+//! dispatch inside the same critical section. The second of two simultaneous
+//! dispatches therefore sees the first and is denied.
 //!
-//! Whether the harness ever produces that interleaving is NOT established here.
-//! Claude Code's hooks reference states that multiple handlers matching ONE
-//! event run in parallel, and says nothing about `PreToolUse` across
-//! simultaneous `tool_use` blocks; nothing in this repo can observe it. So the
-//! guard is reliable for a dispatch issued after a sibling is already recorded,
-//! and indeterminate for two issued in the same turn. Closing that needs a
-//! reservation step — a record-and-answer that is atomic in the daemon — which
-//! is a design change, deliberately not made here (#4480).
+//! What the daemon records is not a new kind of state — it is the delegation
+//! record its own `matcher: "*"` PreToolUse hook would have written for the
+//! same dispatch a moment later, and that hook is idempotent on `tool_use_id`,
+//! so exactly one record exists either way and its lifecycle is unchanged.
+//!
+//! Residual, unchanged from #4480: if the daemon's tracker records BOTH
+//! dispatches before either guard's claim arrives, each guard sees the other and
+//! both are denied. That ordering predates this module and is not made more
+//! likely by it; the remedy the deny prints (declare isolation) resolves it.
 //!
 //! **This guard FAILS OPEN at every step.** A down, slow, or unreachable daemon
 //! answers "nobody else is here" and the dispatch proceeds; so does an
@@ -67,7 +72,7 @@
 //! `allows_a_read_only_agent`, `allows_when_the_agent_is_unknown`,
 //! `allows_every_non_dispatch_tool` below. The six declared fail-open branches
 //! each have an error-arm test: unreachable daemon
-//! (`live_shared_tree_writers_is_empty_when_the_daemon_is_unreachable`),
+//! (`claim_shared_tree_is_empty_when_the_daemon_is_unreachable`),
 //! malformed response (`pm_guard_allows_when_the_daemon_answer_is_malformed`),
 //! unresolvable cwd (`evaluate_allows_when_the_cwd_cannot_be_resolved`),
 //! unknown agent (`allows_when_the_agent_is_unknown`), untyped dispatch (same),
@@ -80,6 +85,8 @@ use trusty_mpm::core::agent::is_subagent_dispatch_tool;
 use trusty_mpm::core::dispatch_isolation::{
     dispatch_agent, dispatch_isolation, shares_the_callers_tree,
 };
+
+use crate::commands::hook_payload::build_hook_payload;
 
 /// Build the deny message for a blocked concurrent dispatch.
 ///
@@ -116,7 +123,7 @@ fn deny_reason(agent: &str, cwd: &Path, live: &[String]) -> String {
 ///
 /// Why: kept pure — it takes the daemon's answer as a slice rather than fetching
 /// it — so the whole policy is exhaustively unit-testable with no network, and
-/// the I/O lives in [`live_shared_tree_writers`] next door.
+/// the I/O lives in [`claim_shared_tree`] next door.
 /// What: `Some(reason)` (DENY) when `tool_name` is a dispatch tool, the dispatch
 /// [`shares_the_callers_tree`], and `live` is non-empty. `None` (ALLOW) in every
 /// other case, including every non-dispatch tool.
@@ -195,22 +202,69 @@ pub(crate) fn resolve_dispatch_cwd(
     })
 }
 
-/// Ask the daemon which agents are already writing unisolated in `cwd`.
+/// Narrow `payload["input"]` to the three fields the daemon actually reads.
+///
+/// Why: an `Agent` dispatch's `tool_input` carries the whole subagent prompt,
+/// which is unbounded — a long brief is ordinary, not pathological. Forwarding
+/// it verbatim would put this POST under axum's default 2 MB body limit and
+/// create a failure arm the old read-only GET could not have: a 413 returns an
+/// empty answer, so the dispatch is admitted having claimed nothing, and the
+/// guard is silently off for exactly the largest dispatches. Rather than test
+/// that arm, this removes it — the body is now bounded by an agent name, an
+/// isolation mode, and a description.
+///
+/// The record stays byte-identical: the route reads only `subagent_type`
+/// ([`dispatch_agent`]) and `isolation` ([`dispatch_isolation`]), and
+/// `delegation_tracker::on_dispatch` stores only those two plus `description`.
+/// Nothing downstream reads another key of `input`, so dropping the rest cannot
+/// change what is written.
+/// What: replaces `input` with an object of just those three keys, each copied
+/// only when present. A payload with no `input`, or a non-object one, is left
+/// exactly as it is — there is nothing to narrow and inventing a shape here
+/// could only make the daemon's classification disagree with the guard's.
+/// Test: `claim_payload_carries_only_the_fields_the_daemon_reads`,
+/// `claim_payload_projection_leaves_a_non_object_input_alone`.
+fn project_dispatch_input(forwarded: &mut Value) {
+    const FORWARDED_INPUT_FIELDS: [&str; 3] = ["subagent_type", "isolation", "description"];
+
+    let Some(input) = forwarded.get("input").filter(|i| i.is_object()) else {
+        return;
+    };
+    let mut projected = serde_json::Map::new();
+    for key in FORWARDED_INPUT_FIELDS {
+        if let Some(value) = input.get(key) {
+            projected.insert(key.to_string(), value.clone());
+        }
+    }
+    forwarded["input"] = Value::Object(projected);
+}
+
+/// Claim `cwd` for this dispatch, and learn who already holds it (#5324).
 ///
 /// Why: see the module doc — liveness is the daemon's to answer, and it is the
-/// only process that resolves it from real terminal signals.
-/// What: `GET <url>/api/v1/sessions/{session}/delegations/shared-tree-writers`
-/// with the caller's own `tool_use_id` excluded, under the same tight
-/// connect/total bounds `pm_guard`'s audit POSTs use (500 ms / 2 s) — this call
-/// sits inside a `PreToolUse` budget, so a slow daemon must cost a bounded wait
-/// and nothing more. EVERY failure — client build, transport, non-2xx, malformed
-/// body — returns an empty vec, which the pure policy above reads as ALLOW.
-/// Test: `live_shared_tree_writers_is_empty_when_the_daemon_is_unreachable`.
-pub(crate) async fn live_shared_tree_writers(
+/// only process that resolves it from real terminal signals. It is also the only
+/// place the answer and the claim can be made indivisible: a hook process that
+/// asked and then acted would leave the window two same-turn dispatches slip
+/// through.
+/// What: `POST <url>/api/v1/sessions/{session}/delegations/shared-tree-dispatch`
+/// carrying this dispatch in the daemon's own forwarded hook shape (built by the
+/// one [`build_hook_payload`], so the record the daemon writes is the record its
+/// own `matcher: "*"` hook would write) with `cwd` stamped to the directory the
+/// guard resolved and `input` narrowed by [`project_dispatch_input`] to the
+/// three fields the daemon reads — the dispatch prompt never travels, so the
+/// body stays small enough that a size limit is not a reachable failure arm.
+/// Sent under the same tight connect/total bounds `pm_guard`'s
+/// audit POSTs use (500 ms / 2 s) — this call sits inside a `PreToolUse` budget,
+/// so a slow daemon must cost a bounded wait and nothing more. EVERY failure —
+/// client build, transport, non-2xx, malformed body — returns an empty vec,
+/// which the pure policy above reads as ALLOW; nothing is claimed, and the
+/// verdict degrades to exactly the behaviour that shipped before #4480.
+/// Test: `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`.
+pub(crate) async fn claim_shared_tree(
     url: &str,
     session_id: &str,
     cwd: &Path,
-    exclude_tool_use_id: Option<&str>,
+    payload: &Value,
 ) -> Vec<String> {
     if session_id.is_empty() {
         return Vec::new();
@@ -222,12 +276,11 @@ pub(crate) async fn live_shared_tree_writers(
     else {
         return Vec::new();
     };
-    let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/shared-tree-writers");
-    let mut query: Vec<(&str, String)> = vec![("cwd", cwd.display().to_string())];
-    if let Some(id) = exclude_tool_use_id {
-        query.push(("exclude_tool_use_id", id.to_string()));
-    }
-    let Ok(response) = client.get(&endpoint).query(&query).send().await else {
+    let endpoint = format!("{url}/api/v1/sessions/{session_id}/delegations/shared-tree-dispatch");
+    let mut forwarded = build_hook_payload(&cwd.display().to_string(), Some(payload), None);
+    project_dispatch_input(&mut forwarded);
+    let body = serde_json::json!({ "payload": forwarded });
+    let Ok(response) = client.post(&endpoint).json(&body).send().await else {
         return Vec::new();
     };
     let Ok(response) = response.error_for_status() else {
@@ -236,7 +289,8 @@ pub(crate) async fn live_shared_tree_writers(
     let Ok(body) = response.json::<Value>().await else {
         return Vec::new();
     };
-    body.get("agents")
+    let live: Vec<String> = body
+        .get("agents")
         .and_then(Value::as_array)
         .map(|rows| {
             rows.iter()
@@ -244,7 +298,59 @@ pub(crate) async fn live_shared_tree_writers(
                 .map(str::to_owned)
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    warn_on_eligibility_divergence(&body, &live);
+    live
+}
+
+/// Warn when the daemon answered "nobody here" but claimed nothing (#5324).
+///
+/// Why: this combination is always a disagreement, never a normal outcome. The
+/// guard does not call this route at all unless it has already classified the
+/// dispatch as tree-sharing, so an empty answer means the daemon declined to
+/// claim a directory the guard believes needs claiming — and it re-derives
+/// eligibility from its own `core::bundle::ALL`. A running daemon built before
+/// an agent was added to that table sees an agent it does not know, classifies
+/// it ineligible, and claims nothing. Both dispatches are then admitted with the
+/// guard silently disabled, and `claimed` is the only evidence anything is
+/// wrong. Discarding it discards the one signal.
+/// What: one stderr line — `pm_guard` writes to stderr, which Claude Code
+/// surfaces without it reaching the hook's stdout JSON verdict. It does NOT
+/// deny: denying here would fail CLOSED on version skew, the exact opposite of
+/// the degradation this whole path is built for, and a stale daemon would then
+/// block every dispatch instead of merely failing to guard it.
+/// Test: `eligibility_divergence_is_an_empty_answer_that_claimed_nothing` and
+/// siblings.
+fn warn_on_eligibility_divergence(body: &Value, live: &[String]) {
+    if !eligibility_diverged(body, live) {
+        return;
+    }
+    eprintln!(
+        "tm hook --pm-guard: the daemon reported no live writers but claimed nothing (#5324). \
+         The guard classified this dispatch as sharing the working tree and the daemon did not, \
+         so concurrent shared-worktree dispatch is NOT being enforced for this agent. The usual \
+         cause is a running daemon older than the `tm` on PATH, built before this agent was \
+         added to its bundled table — restart the daemon (`tm restart`) to clear it. Allowing \
+         the dispatch: this path fails open by design."
+    );
+}
+
+/// Did the daemon answer "nobody here" while claiming nothing?
+///
+/// Why: split from the `eprintln!` so the condition is assertable without
+/// capturing stderr — the decision is the part worth pinning, not the plumbing.
+/// What: true only when the answer is EMPTY and `claimed` is not `true`. A
+/// missing `claimed` counts as not-claimed, which is the conservative read: an
+/// older daemon that never sends the field is exactly the skew this warns about.
+/// A non-empty answer is never divergence — the daemon deliberately claims
+/// nothing when it is about to deny.
+/// Test: `eligibility_divergence_is_an_empty_answer_that_claimed_nothing`.
+fn eligibility_diverged(body: &Value, live: &[String]) -> bool {
+    let claimed = body
+        .get("claimed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    live.is_empty() && !claimed
 }
 
 /// Resolve the full verdict for one `PreToolUse` call: `Some(reason)` denies.
@@ -253,10 +359,10 @@ pub(crate) async fn live_shared_tree_writers(
 /// daemon off the hot path — classify first, ask second — lives here rather
 /// than being re-derived at the call site.
 /// What: returns `None` immediately unless [`dispatch_shares_the_tree`] and a
-/// resolvable [`dispatch_cwd`]; only then queries the daemon and runs
-/// [`evaluate_shared_tree_dispatch`].
+/// resolvable [`dispatch_cwd`]; only then claims the tree through the daemon and
+/// runs [`evaluate_shared_tree_dispatch`] on the answer.
 /// Test: the pure half is covered exhaustively below; the network half's
-/// fail-open is `live_shared_tree_writers_is_empty_when_the_daemon_is_unreachable`,
+/// fail-open is `claim_shared_tree_is_empty_when_the_daemon_is_unreachable`,
 /// and the end-to-end path runs through the real binary in
 /// `tests/tm_hook_pm_guard.rs`.
 pub(crate) async fn evaluate(
@@ -297,11 +403,7 @@ pub(crate) async fn evaluate_with_cwd(
         return None;
     }
     let cwd = cwd?;
-    let tool_use_id = payload
-        .get("tool_use_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
-    let live = live_shared_tree_writers(url, session_id, &cwd, tool_use_id).await;
+    let live = claim_shared_tree(url, session_id, &cwd, payload).await;
     evaluate_shared_tree_dispatch(tool_name, tool_input, &cwd, &live)
 }
 
@@ -562,17 +664,120 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_shared_tree_writers_is_empty_when_the_daemon_is_unreachable() {
+    async fn claim_shared_tree_is_empty_when_the_daemon_is_unreachable() {
         // Fail-open on the network path: an unroutable daemon must resolve to
-        // "nobody else is here", never hang and never deny.
-        let live = live_shared_tree_writers(
+        // "nobody else is here", never hang and never deny. Nothing is claimed
+        // either, so the verdict degrades to the pre-#4480 behaviour rather
+        // than to a directory nobody can release.
+        let live = claim_shared_tree(
             "http://127.0.0.1:1",
             "11111111-1111-1111-1111-111111111111",
             Path::new("/repo"),
-            Some("toolu_X"),
+            &serde_json::json!({"tool_use_id": "toolu_X"}),
         )
         .await;
         assert!(live.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claim_shared_tree_is_empty_without_a_session_id() {
+        // A hook payload with no `session_id` cannot address a session's
+        // delegations at all. Fail open before dialling anything — an unroutable
+        // URL would cost a real (bounded) wait if this branch were removed.
+        let started = std::time::Instant::now();
+        let live = claim_shared_tree(
+            "http://127.0.0.1:1",
+            "",
+            Path::new("/repo"),
+            &serde_json::json!({}),
+        )
+        .await;
+        assert!(live.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_millis(400));
+    }
+
+    #[test]
+    fn claim_payload_carries_only_the_fields_the_daemon_reads() {
+        // #5324: the dispatch prompt must not travel to the daemon. Forwarding
+        // it verbatim puts an unbounded body under axum's 2 MB limit, and a 413
+        // is an empty answer — the dispatch admitted, unclaimed, guard silently
+        // off for exactly the biggest dispatches. Projecting removes that arm
+        // rather than testing it.
+        let mut forwarded = serde_json::json!({
+            "cwd": "/repo",
+            "tool": "Agent",
+            "input": {
+                "subagent_type": "rust-engineer",
+                "isolation": "worktree",
+                "description": "short label",
+                "prompt": "x".repeat(4096),
+                "extra": {"nested": true},
+            },
+        });
+        project_dispatch_input(&mut forwarded);
+
+        let input = forwarded.get("input").expect("input survives");
+        let keys: Vec<&String> = input
+            .as_object()
+            .expect("input stays an object")
+            .keys()
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["description", "isolation", "subagent_type"],
+            "only the three fields the route and the tracker read may be sent"
+        );
+        // The three that remain must be untouched — the record the daemon
+        // writes has to stay byte-identical to the tracker's own.
+        assert_eq!(input["subagent_type"], "rust-engineer");
+        assert_eq!(input["isolation"], "worktree");
+        assert_eq!(input["description"], "short label");
+        // Sibling keys outside `input` are not this function's business.
+        assert_eq!(forwarded["tool"], "Agent");
+        assert_eq!(forwarded["cwd"], "/repo");
+    }
+
+    #[test]
+    fn claim_payload_projection_leaves_a_non_object_input_alone() {
+        // Nothing to narrow, and inventing a shape here could only make the
+        // daemon's classification disagree with the guard's. Absent stays
+        // absent; a non-object stays whatever it was.
+        let mut absent = serde_json::json!({"cwd": "/repo", "tool": "Agent"});
+        project_dispatch_input(&mut absent);
+        assert!(absent.get("input").is_none(), "absent input stays absent");
+
+        let mut scalar = serde_json::json!({"cwd": "/repo", "input": "not-an-object"});
+        project_dispatch_input(&mut scalar);
+        assert_eq!(scalar["input"], "not-an-object");
+    }
+
+    #[test]
+    fn eligibility_divergence_is_an_empty_answer_that_claimed_nothing() {
+        // #5324: the guard never asks unless it already classified the dispatch
+        // as tree-sharing, so "nobody here" AND "claimed nothing" is always the
+        // daemon disagreeing about eligibility — the one observable symptom of
+        // a daemon older than the `tm` on PATH. It must warn, and must NOT deny:
+        // denying would fail closed on version skew.
+        let empty: Vec<String> = Vec::new();
+        assert!(
+            eligibility_diverged(&serde_json::json!({"agents": [], "claimed": false}), &empty),
+            "empty answer that claimed nothing is divergence"
+        );
+        assert!(
+            eligibility_diverged(&serde_json::json!({"agents": []}), &empty),
+            "a daemon too old to send `claimed` reads as not-claimed"
+        );
+        assert!(
+            !eligibility_diverged(&serde_json::json!({"agents": [], "claimed": true}), &empty),
+            "the ordinary first dispatch claims, and is silent"
+        );
+        assert!(
+            !eligibility_diverged(
+                &serde_json::json!({"claimed": false}),
+                &["rust-engineer".to_string()]
+            ),
+            "a non-empty answer is a deny, where claiming nothing is correct"
+        );
     }
 
     #[tokio::test]

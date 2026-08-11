@@ -537,7 +537,7 @@ impl DaemonState {
     /// share one: it is indeterminate, and this whole guard fails toward ALLOW.
     /// `Stale` is deliberately not live — a record tracking has given up on
     /// must not block a dispatch for the remaining hours of its retention.
-    /// Test: `shared_tree_writers_route_reports_live_unisolated_writers` and
+    /// Test: `shared_tree_dispatch_route_reports_live_unisolated_writers` and
     /// siblings in [`crate::daemon::delegation_routes`], which drive every
     /// filter here through the route that is this method's only caller.
     pub fn live_shared_tree_writers(
@@ -562,6 +562,53 @@ impl DaemonState {
             })
             .map(|e| e.value().agent.clone())
             .collect()
+    }
+
+    /// Answer [`Self::live_shared_tree_writers`] and claim the tree in one step
+    /// (#5324).
+    ///
+    /// Why: [`Self::live_shared_tree_writers`] alone is a question, and
+    /// `tm hook --pm-guard` used to act on the answer without anything having
+    /// claimed the directory in between. Two dispatches issued in one PM turn
+    /// could both ask before either was recorded, both see an empty set, and
+    /// both be admitted. Asking and claiming have to be indivisible, and a
+    /// `DashMap` makes each entry atomic but never a scan-then-insert pair — so
+    /// [`shared_tree_claim`](Self::shared_tree_claim) is held across both here.
+    ///
+    /// What: under that mutex, computes the live-writer answer and, when it is
+    /// EMPTY and `eligible` says this dispatch would itself share the tree, runs
+    /// `record` before releasing. Returns the answer the caller decides on plus
+    /// whether the claim was taken. A second caller arriving concurrently blocks
+    /// until the first has recorded, so it sees a non-empty answer and is denied
+    /// — exactly one of two simultaneous dispatches is admitted.
+    ///
+    /// `record` is a closure rather than an inlined write so this method keeps
+    /// no opinion about what a delegation record looks like: the only caller
+    /// passes the delegation tracker's own `PreToolUse` observer, so the claim
+    /// IS the record that tracker would have written milliseconds later, with
+    /// the same lifecycle, the same liveness, and the same staleness sweep. No
+    /// second kind of state and no new expiry are introduced.
+    ///
+    /// `record` must not take this lock again (it is not reentrant), must not
+    /// block, and must not await.
+    /// Test: `shared_tree_dispatch_route_denies_the_second_claim`,
+    /// `shared_tree_dispatch_route_reserves_the_tree_on_an_empty_answer`,
+    /// `shared_tree_dispatch_route_does_not_reserve_when_it_denies`.
+    pub fn claim_shared_tree_dispatch<F: FnOnce(&Self)>(
+        &self,
+        session: SessionId,
+        cwd: &std::path::Path,
+        exclude_tool_use_id: Option<&str>,
+        eligible: bool,
+        record: F,
+    ) -> (Vec<String>, bool) {
+        let _claim = self.shared_tree_claim.lock();
+        let live = self.live_shared_tree_writers(session, cwd, exclude_tool_use_id);
+        let claimed = eligible && live.is_empty();
+        if claimed {
+            record(self);
+        }
+        (live, claimed)
     }
 
     /// Find one session's delegation matching `pred`, returning its id (#2864).

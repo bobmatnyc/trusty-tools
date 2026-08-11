@@ -329,15 +329,33 @@ pub const DEFAULT_TMUX_HISTORY_LIMIT: u32 = 100_000;
 pub const DEFAULT_TMUX_MOUSE: bool = true;
 
 /// Built-in default for whether panes may use the terminal alternate screen
-/// buffer (tmux `alternate-screen`) (#5151).
+/// buffer (tmux `alternate-screen`) (#5151, flipped to `false` by #5364).
 ///
-/// Why: `true` is tmux's own factory default AND the behaviour every existing
-/// managed session already has, so this knob changes nothing until an operator
-/// opts out. Defaulting to `false` would silently rewrite how every full-screen
-/// program in every pane on the shared server behaves — see
-/// [`scrollback_option_commands`] for what turning it off actually costs.
-/// What: `true`.
-pub const DEFAULT_TMUX_ALTERNATE_SCREEN: bool = true;
+/// Why: when a full-screen TUI draws into tmux's alternate screen, tmux does
+/// not append that output to the pane's scrollback at all — `history-limit` is
+/// irrelevant in that state, which is why a managed session can hold a
+/// 100,000-line history and still have nothing to scroll back through. #5151
+/// added this knob to fix that, but shipped it defaulting to `true` — tmux's
+/// factory value and the pre-fix behaviour — so the original bug persisted for
+/// every operator who never found the knob. `false` makes the fix the default:
+/// a managed session has working scrollback out of the box.
+///
+/// **The accepted tradeoff.** `alternate-screen` is server-global and every
+/// trusty-* managed session shares one tmux server, so this governs every pane
+/// on it, not just the ones running an agent. `vim`, `less`, `htop` and `man`
+/// stop restoring the screen they covered: each leaves its final frame behind,
+/// smeared into the scrollback on exit, sometimes with redraw garbage from
+/// partial repaints. The repo owner accepted that cost in exchange for working
+/// scrollback (#5364). Setting `tmux.alternate_screen: true` in
+/// `~/.trusty-tools/trusty-mpm/config.yaml` restores the old behaviour.
+/// What: `false`. Both consumers of this constant — trusty-mpm's config
+/// resolution and trusty-agents' two session-creation call sites — inherit it,
+/// so they cannot fight each other over the shared server's global option.
+/// Test: `scrollback_option_commands_alternate_screen_defaults_off`;
+/// trusty-mpm's `tmux_options_alternate_screen_defaults_off` covers the
+/// config-resolution half.
+// #5364: default flipped true -> false so scrollback works without opt-in.
+pub const DEFAULT_TMUX_ALTERNATE_SCREEN: bool = false;
 
 /// Render a [`TmuxCommand`] into an argv vector suitable for `Command::args`.
 ///
@@ -508,15 +526,16 @@ pub fn tmux_argv(cmd: &TmuxCommand) -> Vec<String> {
 /// not from here, so this function stays free of any config/file-system
 /// dependency and is testable with plain arguments.
 ///
-/// **What `alternate_screen: false` costs.** tmux's alternate screen is what
-/// gives a full-screen program its own buffer: the pane's prior contents
-/// reappear untouched when the program exits, and nothing the program drew is
-/// added to the pane's scrollback. Turning it off is why a TUI's output
-/// becomes scrollable — and the price is paid by EVERY pane on the shared
-/// tmux server, not just the one running an agent TUI. `vim`, `less`, `htop`
-/// and `man` all leave their final frame behind, smeared into the scrollback
-/// on exit, sometimes with redraw garbage. It is also not retroactive: history
-/// already lost to the alt screen stays lost.
+/// **What `alternate_screen: false` costs** — the default since #5364, so this
+/// is what a caller passing [`DEFAULT_TMUX_ALTERNATE_SCREEN`] now gets. tmux's
+/// alternate screen is what gives a full-screen program its own buffer: the
+/// pane's prior contents reappear untouched when the program exits, and nothing
+/// the program drew is added to the pane's scrollback. Turning it off is why a
+/// TUI's output becomes scrollable — and the price is paid by EVERY pane on the
+/// shared tmux server, not just the one running an agent TUI. `vim`, `less`,
+/// `htop` and `man` all leave their final frame behind, smeared into the
+/// scrollback on exit, sometimes with redraw garbage. It is also not
+/// retroactive: history already lost to the alt screen stays lost.
 ///
 /// What: three entries in the order the caller must run them, all of which
 /// must land before the caller's subsequent `new-session` —
@@ -527,7 +546,7 @@ pub fn tmux_argv(cmd: &TmuxCommand) -> Vec<String> {
 /// measured reason the server/pane scopes silently do nothing here.
 /// Test: `scrollback_option_commands_uses_configured_values`,
 /// `scrollback_option_commands_mouse_off`,
-/// `scrollback_option_commands_alternate_screen_defaults_on`,
+/// `scrollback_option_commands_alternate_screen_defaults_off`,
 /// `scrollback_option_commands_alternate_screen_off_uses_window_scope`.
 pub fn scrollback_option_commands(
     history_limit: u32,

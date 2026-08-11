@@ -273,11 +273,12 @@ mod tests {
             ]
         );
         assert_eq!(tmux_argv(&cmds[1]), ["set-option", "-g", "mouse", "on"]);
-        // #5151: window scope (`-wg`), and `on` — the factory default this
-        // adapter passes through unchanged.
+        // #5364: window scope (`-wg`), and `off` — this adapter passes the
+        // shared default through unchanged, and that default flipped from
+        // tmux's factory `on` so managed sessions get working scrollback.
         assert_eq!(
             tmux_argv(&cmds[2]),
-            ["set-option", "-wg", "alternate-screen", "on"]
+            ["set-option", "-wg", "alternate-screen", "off"]
         );
         assert_eq!(
             tmux_argv(&cmds[3]),

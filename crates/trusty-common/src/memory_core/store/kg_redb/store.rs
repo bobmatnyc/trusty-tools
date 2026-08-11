@@ -10,7 +10,7 @@ use crate::memory_core::store::concurrent_open::{
     OpenIntent, OpenMode, backoff_sleep_ms, try_open_or_snapshot,
 };
 use crate::memory_core::store::kg_store::{
-    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, ROOM_KEYS, ROOMS, TRIPLES,
+    ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS, ROOMS, TRIPLES,
     TRIPLES_BY_OBJECT, TRIPLES_BY_PREDICATE, WING_KEYS, WINGS,
 };
 use anyhow::{Context, Result};
@@ -18,6 +18,7 @@ use redb::Database;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::migrate::migrate_triple_keys_fail_open;
 use super::types::{KgDbState, READ_ONLY_ERROR_MSG, canonical_key, db_cache};
 
 /// Why: All KG callers go through a single `KnowledgeGraph` handle that is
@@ -172,8 +173,20 @@ impl KgStoreRedb {
                             // without the tables that scope them.
                             let _ = wtx.open_table(WINGS).context("init wings table")?;
                             let _ = wtx.open_table(WING_KEYS).context("init wing_keys table")?;
+                            // #4810: same whole-schema rule — the migration
+                            // gate reads this table on every open, so it must
+                            // exist before anything asks.
+                            let _ = wtx.open_table(KG_SCHEMA).context("init kg_schema table")?;
                         }
                         wtx.commit().context("commit init txn")?;
+
+                        // #4810: rewrite pre-object triple keys once per
+                        // palace. Deliberately fail-open — a palace that cannot
+                        // be migrated still opens and behaves exactly as it did
+                        // before #4810. Snapshot mode never reaches here: a
+                        // migration written into a throw-away snapshot would be
+                        // discarded and re-attempted on every open.
+                        migrate_triple_keys_fail_open(&db, path);
                     }
 
                     let state = Arc::new(KgDbState {

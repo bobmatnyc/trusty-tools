@@ -77,9 +77,11 @@ Read that page's rung entry before running the gate, and paste the command you
 actually ran into the PR body.
 
 🔴 **`cargo test --workspace` is not the default inner-loop proof for a localized
-change.** It belongs at the hardening boundaries (rungs 4–6). Making every narrow
-PR depend on the whole workspace turns unrelated flakes into an issue factory
-without adding one line of coverage for your change.
+change.** It is keyed to the stage, not the rung: it belongs at the publish
+boundary, and rungs 4–6 are the ones that reach it — a rung-4 PR does not owe a
+workspace run to merge. Making every narrow PR depend on the whole workspace
+turns unrelated flakes into an issue factory without adding one line of coverage
+for your change.
 
 🔴 **Scope down, never scope away.** Choosing a lower rung is a statement about
 blast radius, and you must be able to prove it (see the baseline-failure rules
@@ -170,11 +172,19 @@ still counted, as is any test module whose brace balance is skewed by a brace
 inside a string literal. The matcher is line-based and fails closed: it can
 raise a false cap violation, never silently drop production code.
 
+🟡 **No standalone SLOC-cap fix.** Never open a PR whose only purpose is bringing
+a file back under cap — the split ships inside the PR that next adds to that
+file, which is the PR the gate blocks anyway, so it costs one CI cycle instead of
+two. That is not licence to leave a red gate red: if your PR trips the cap, split
+in that PR. Example — a rebase pushed `bin/tm/main.rs` to 505 SLOC while the
+branch was adding a third `RepairAction` arm, and that same PR moved the match
+into a submodule.
+
 🔴 Mechanically enforced by `scripts/check_line_cap.sh` in CI and the pre-commit
 hook (#610) — a new tracked file over its cap **cannot merge**. Never turn this
 gate green by deleting, `#[ignore]`-ing, or excluding a file from the count;
-split it instead. Counting definition, the split pattern, ratchet-allowlist
-mechanics, and refactor history:
+split it instead. Counting definition, the split pattern, when a violation gets
+fixed, ratchet-allowlist mechanics, and refactor history:
 [docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
@@ -287,7 +297,8 @@ Publish-time `[patch.crates-io]` semantics are in
 ## Parallel Worktree Discipline
 
 Generic worktree discipline — main checkout inspection-only, provisioning off
-`origin/main`, branch-is-the-workstream, subagent confinement, cleanup — lives in
+`origin/main`, branch-is-the-workstream, one worktree per independently
+reviewable PR outcome, subagent confinement, cleanup — lives in
 `Skill(skill="tm-workflow")`. It applies here in full. What follows is only what
 this repo adds.
 
@@ -310,7 +321,8 @@ release-workflow note above). A plain `cp` over an on-PATH binary leaves a stale
 cdhash cache and the next exec is SIGKILL'd. The main checkout never needs to be
 involved.
 
-> **Extended discipline rationale and cleanup details:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
+> **Extended discipline rationale, the install-from-worktree commands, and the
+> stash-first fallback:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
 
 ## Abbreviations & Aliases
 

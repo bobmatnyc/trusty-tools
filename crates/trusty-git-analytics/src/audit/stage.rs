@@ -102,6 +102,29 @@ pub struct StageOutcome {
     pub elapsed: Duration,
 }
 
+/// A repository the sweep walked on stale local refs because its remote could
+/// not be fetched (#5321).
+///
+/// Why: this is the degradation a [`StageStatus`] cannot express. The sweep
+/// hard-codes `--allow-stale` (DOC-67 §9), so an unreachable remote does not
+/// fail the `collect` stage — it silently narrows what the stage collected. A
+/// separate record is what lets the report distinguish "no stale repositories"
+/// from "this repository's figures describe a local clone of unknown age".
+/// What: the repository's display name, the remote that could not be reached,
+/// and the fetch error verbatim. The error is redacted and excerpted later, by
+/// [`super::sweep_gap_lines`], for the same reason a stage message is.
+/// Test: `super::tests::a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StaleFetch {
+    /// Display name of the repository, as the collection pipeline reported it.
+    pub repo: String,
+    /// The remote that could not be fetched (usually `origin`).
+    pub remote: String,
+    /// The fetch error, unredacted and untruncated.
+    pub error: String,
+}
+
 /// The ordered outcome of a full AUDIT sweep.
 ///
 /// Why: DOC-67 §9 requires that a repo or dimension missing because a stage
@@ -117,6 +140,10 @@ pub struct StageOutcome {
 pub struct AuditSweepStats {
     /// Every stage that was attempted, in execution order.
     pub outcomes: Vec<StageOutcome>,
+    /// Repositories collected from stale local refs because their remote could
+    /// not be fetched, in collection order (#5321). Empty when every configured
+    /// remote was reached — a clean run adds no entry.
+    pub stale_fetches: Vec<StaleFetch>,
 }
 
 impl AuditSweepStats {
@@ -143,6 +170,24 @@ impl AuditSweepStats {
             status,
             elapsed: started.elapsed(),
         });
+    }
+
+    /// Record that `fetch`'s repository was walked on stale local refs.
+    ///
+    /// Why: the stage this happened inside reports `Succeeded`, so without an
+    /// explicit record the fact has nowhere to go — #5321 is precisely that it
+    /// went nowhere. Logging it here as well as storing it keeps the terminal
+    /// and the report saying the same thing.
+    /// What: warns, then appends. Order of arrival is collection order.
+    /// Test: `super::tests::a_repo_that_fell_back_to_stale_local_refs_is_named_in_the_gap_lines`.
+    pub fn record_stale_fetch(&mut self, fetch: StaleFetch) {
+        tracing::warn!(
+            repo = %fetch.repo,
+            remote = %fetch.remote,
+            error = %fetch.error,
+            "collected from stale local refs; data may be behind the remote"
+        );
+        self.stale_fetches.push(fetch);
     }
 
     /// Every stage that failed, in execution order.

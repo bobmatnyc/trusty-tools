@@ -17,9 +17,10 @@ use anyhow::{Context, Result};
 use redb::ReadableTable;
 
 use super::super::kg::Triple;
+use super::drawer_ops::{batch_delete_drawer, batch_upsert_drawer};
 use super::store::KgStoreRedb;
 use super::types::{BatchOpResult, BatchWriteOp};
-use super::write_ops::{batch_assert, batch_delete_drawer, batch_retract, batch_upsert_drawer};
+use super::write_ops::{batch_assert, batch_retract};
 
 impl KgStoreRedb {
     /// Import a batch of historical triples and drawers without disturbing
@@ -31,12 +32,14 @@ impl KgStoreRedb {
     /// originated from a temporal store and already carry their final
     /// `valid_from` / `valid_to`; we must preserve that history.
     /// What: In a single write transaction, write each triple at either its
-    /// primary `(subject, predicate)` key (when active) or a `hist:`-prefixed
-    /// key (when closed). Secondary indexes and `ACTIVE_SUBJECT_COUNTS` are
-    /// updated only for active rows. Drawers are upserted as-is. If multiple
-    /// triples share `(subject, predicate)`, the last active one wins at the
-    /// primary key — earlier active rows of the same pair are stored under
-    /// `hist:` keys instead so no data is silently dropped.
+    /// primary `(subject, predicate, object)` key (when active) or a
+    /// `hist:`-prefixed key (when closed). Secondary indexes and
+    /// `ACTIVE_SUBJECT_COUNTS` are updated only for active rows. Drawers are
+    /// upserted as-is. Since #4810 put the object in the key, two active rows
+    /// that differ only in object no longer contend for one slot; the
+    /// demote-to-history path below now fires only on an exact
+    /// `(subject, predicate, object)` repeat, where the later row still wins
+    /// and the earlier one is preserved under a `hist:` key.
     /// Test: Covered by the kg_migration integration test in
     /// `crates/trusty-common/tests/kg_migration_tests.rs`.
     pub fn import_all(&self, triples: Vec<Triple>, drawers: Vec<Drawer>) -> Result<()> {
@@ -62,7 +65,7 @@ impl KgStoreRedb {
                     confidence: triple.confidence,
                     provenance: triple.provenance.clone(),
                 };
-                let key = encode_triple_key(&triple.subject, &triple.predicate);
+                let key = encode_triple_key(&triple.subject, &triple.predicate, &triple.object);
                 let bytes = encode_value(&value).context("encode triple value")?;
 
                 if value.valid_to_ms.is_some() {
@@ -120,8 +123,11 @@ impl KgStoreRedb {
                             by_object
                                 .remove(obj_key.as_slice())
                                 .context("remove demoted object index")?;
-                            let pred_key =
-                                encode_predicate_index_key(&triple.predicate, &triple.subject);
+                            let pred_key = encode_predicate_index_key(
+                                &triple.predicate,
+                                &triple.subject,
+                                &prior.object,
+                            );
                             by_predicate
                                 .remove(pred_key.as_slice())
                                 .context("remove demoted predicate index")?;
@@ -152,7 +158,11 @@ impl KgStoreRedb {
                     by_object
                         .insert(obj_key.as_slice(), [].as_slice())
                         .context("insert object index for imported row")?;
-                    let pred_key = encode_predicate_index_key(&triple.predicate, &triple.subject);
+                    let pred_key = encode_predicate_index_key(
+                        &triple.predicate,
+                        &triple.subject,
+                        &value.object,
+                    );
                     by_predicate
                         .insert(pred_key.as_slice(), [].as_slice())
                         .context("insert predicate index for imported row")?;

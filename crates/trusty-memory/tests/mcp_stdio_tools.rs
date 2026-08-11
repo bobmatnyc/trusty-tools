@@ -38,6 +38,24 @@ use trusty_memory::AppState;
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/// Pre-seed the process-wide shared embedder with `MockEmbedder`.
+///
+/// Why: `memory_remember` / `memory_recall` resolve `retrieval::shared_embedder()`,
+/// a process-wide `OnceCell`. Whichever test seeds it first wins for the whole
+/// process, so under `cargo test` — one process per binary — a single sibling's
+/// seed silently satisfied every other test here. Under per-test process
+/// isolation (`cargo nextest run`) each test gets a virgin cell instead, reaches
+/// for the real ONNX model, and fails on the HuggingFace download (HTTP 429 in
+/// CI). Same defect class as #4413: a test that passes only because a sibling
+/// ran first.
+/// What: delegates to `seed_shared_embedder_with_mock`, which is idempotent
+/// (`OnceCell::set`, first caller wins), so calling it from every fixture is
+/// free and safe regardless of order.
+/// Test: every test in this file, via `Fixture::new` or `seed_palace`.
+fn seed_embedder() {
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+}
+
 /// Hold an `AppState` together with the tempdir that backs it so cleanup
 /// happens at the end of the test instead of on `AppState` drop.
 ///
@@ -53,6 +71,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        seed_embedder();
         let tmp = tempfile::tempdir().expect("tempdir");
         // Issue #88: bypass palace-slug enforcement so integration tests that
         // use arbitrary palace names keep passing. The env var is idempotent
@@ -608,6 +627,7 @@ where
     F: FnOnce(AppState, String) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
+    seed_embedder();
     // Issue #88: bypass palace-slug enforcement so these tests can use
     // arbitrary palace names without a matching project root on disk.
     // SAFETY: constant idempotent write "1"; benign across threads.

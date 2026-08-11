@@ -200,6 +200,25 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Pre-seed the process-wide shared embedder with `MockEmbedder`.
+    ///
+    /// Why: both tests below seed fixture drawers via `memory_remember`, which
+    /// resolves `retrieval::shared_embedder()` — a process-wide `OnceCell`
+    /// where the first caller wins for the rest of the process. Under
+    /// `cargo test` a sibling test's seed silently satisfied these two; under
+    /// per-test process isolation (`cargo nextest run`) each gets a virgin
+    /// cell, reaches for the real ONNX model, and fails on the HuggingFace
+    /// download (HTTP 429 in CI). Same defect class as #4413: passing only
+    /// because a sibling ran first. Neither test builds state through a shared
+    /// fixture, so each establishes the precondition itself.
+    /// What: delegates to `seed_shared_embedder_with_mock`, which is idempotent
+    /// (`OnceCell::set`), so order does not matter.
+    /// Test: `kg_rebuild_processes_all_drawers`,
+    ///       `kg_rebuild_processes_named_palace_only`.
+    fn seed_embedder() {
+        trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    }
+
     /// Why: Validate the back-fill end-to-end against a freshly-created
     /// palace with a known drawer count.
     /// What: Build a tempdir-rooted `AppState`, create two palaces, drop a
@@ -209,6 +228,7 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn kg_rebuild_processes_all_drawers() -> Result<()> {
+        seed_embedder();
         let tmp = tempfile::tempdir()?;
         // Issue #88: bypass palace-slug enforcement for test palaces.
         // SAFETY: tests using TRUSTY_SKIP_PALACE_ENFORCEMENT set a constant
@@ -279,6 +299,7 @@ mod tests {
     /// Test: This test.
     #[tokio::test]
     async fn kg_rebuild_processes_named_palace_only() -> Result<()> {
+        seed_embedder();
         let tmp = tempfile::tempdir()?;
         // Issue #88: bypass palace-slug enforcement for test palaces.
         // SAFETY: idempotent constant write "1"; safe across test threads.

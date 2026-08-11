@@ -9,6 +9,24 @@ use serde_json::{json, Value};
 use tower::util::ServiceExt;
 use trusty_common::memory_core::palace::PalaceId;
 
+/// Pre-seed the process-wide shared embedder with `MockEmbedder`.
+///
+/// Why: the attribution tests below build `AppState` INLINE (each needs its own
+/// pre-created palace), so they never run [`test_state`]'s seed. Their writes
+/// resolve `retrieval::shared_embedder()`, a process-wide `OnceCell` where the
+/// first caller wins for the rest of the process — so under `cargo test` a
+/// sibling test's seed silently satisfied them, while under per-test process
+/// isolation (`cargo nextest run`) each gets a virgin cell, reaches for the real
+/// ONNX model, and fails on the HuggingFace download (HTTP 429 in CI). Same
+/// defect class as #4413.
+/// What: delegates to `seed_shared_embedder_with_mock`, which is idempotent
+/// (`OnceCell::set`), so order does not matter.
+/// Test: the five `drawer_creator_attribution_*` /
+///       `mcp_writes_carry_distinct_ws_tags_per_caller_over_rpc` tests below.
+fn seed_embedder() {
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+}
+
 /// Why (submission-logging Part A): every hook firing must produce an
 /// activity-feed entry tagged `source=hook` so a normal Claude Code
 /// session that only triggers hooks no longer leaves the TUI feed
@@ -88,6 +106,7 @@ async fn hook_fired_activity_emit_smoke() {
 /// Test: itself.
 #[tokio::test]
 async fn drawer_creator_attribution_http_default() {
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = AppState::new(root);
@@ -170,6 +189,7 @@ async fn drawer_creator_attribution_http_default() {
 /// Test: itself.
 #[tokio::test]
 async fn drawer_creator_attribution_http_header() {
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = AppState::new(root);
@@ -244,6 +264,7 @@ async fn drawer_creator_attribution_http_header() {
 /// Test: itself.
 #[tokio::test]
 async fn drawer_creator_attribution_http_workstream_header() {
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = AppState::new(root);
@@ -317,6 +338,7 @@ async fn drawer_creator_attribution_http_workstream_header() {
 /// Test: itself.
 #[tokio::test]
 async fn drawer_creator_attribution_mcp_default() {
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     std::mem::forget(tmp);
@@ -405,6 +427,7 @@ async fn drawer_creator_attribution_mcp_default() {
 /// Test: itself.
 #[tokio::test]
 async fn mcp_writes_carry_distinct_ws_tags_per_caller_over_rpc() {
+    seed_embedder();
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
     let state = AppState::new(root);

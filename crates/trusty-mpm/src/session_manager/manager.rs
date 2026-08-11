@@ -355,11 +355,11 @@ impl SessionManager {
         match guard.all().await {
             Ok(records) => records,
             Err(e) => {
+                // #5007: the fallback stays — a transient read failure must not
+                // report an empty fleet — but it is no longer silent. See
+                // `store_health::log_reload_fallback`.
                 let last_known = guard.cached_all();
-                warn!(
-                    count = last_known.len(),
-                    "session list: reload failed: {e}; returning last-known in-memory set"
-                );
+                super::store_health::log_reload_fallback(&e, last_known.len());
                 last_known
             }
         }

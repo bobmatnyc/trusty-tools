@@ -261,7 +261,33 @@ pub fn leaf_slug_from_dir(path: &Path) -> String {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    sanitize_slug(&basename, MAX_FOLDER_LEN)
+    leaf_slug_from_hint(&basename)
+}
+
+/// Sanitize an operator-typed name hint to the SAME leaf slug the daemon's
+/// `name_hint` path would produce — the shared CLI/daemon contract (#4965).
+///
+/// Why: `SessionManager::resolve_session_name` sanitizes a `name_hint` by
+/// routing it through [`leaf_slug_from_dir`], which first takes
+/// `Path::file_name()` — so a hint of `feature/auth` loses everything before
+/// the last `/` and lands as `tm-auth-NN`, indistinguishable from a
+/// `hotfix/auth` hint. The CLI must therefore slugify BEFORE sending, and it
+/// must do so with the exact same algorithm and the exact same cap, or the two
+/// sides drift. This is that entry point: the private [`sanitize_slug`] under
+/// its `name_hint`-path cap ([`MAX_FOLDER_LEN`]), with no `file_name()` step.
+/// Because its output is always a single component of `[a-z0-9]`-bounded
+/// kebab-case within the cap, feeding it back through [`leaf_slug_from_dir`]
+/// daemon-side is a provable no-op — the CLI's chosen leaf is the leaf the
+/// session gets.
+/// What: delegates to [`sanitize_slug`] with [`MAX_FOLDER_LEN`]. Returns an
+/// empty string when nothing alphanumeric survives — the caller decides
+/// whether that is a fallback (`build_managed_session_name`'s `"local"`) or a
+/// refusal (the picker's `n <name>`, which will not spawn an unusable name).
+/// Test: `leaf_slug_from_hint_keeps_path_like_segments`,
+/// `leaf_slug_from_hint_matches_leaf_slug_from_dir_for_plain_names`,
+/// `leaf_slug_from_hint_is_a_fixed_point_for_its_own_output`.
+pub fn leaf_slug_from_hint(hint: &str) -> String {
+    sanitize_slug(hint, MAX_FOLDER_LEN)
 }
 
 /// Derive a session name from a project directory's basename (no serial).
@@ -635,6 +661,75 @@ mod tests {
     #[test]
     fn leaf_slug_from_dir_empty_for_root() {
         assert_eq!(leaf_slug_from_dir(Path::new("/")), "");
+    }
+
+    // ── leaf_slug_from_hint (#4965) ───────────────────────────────────────
+
+    /// Why (#4965): this is the whole reason the hint cannot just go through
+    /// [`leaf_slug_from_dir`] — that function's `Path::file_name()` step
+    /// discards everything before the last `/`, so `feature/auth` and
+    /// `hotfix/auth` both collapse to `auth` and name the same session.
+    /// Test: itself.
+    #[test]
+    fn leaf_slug_from_hint_keeps_path_like_segments() {
+        assert_eq!(leaf_slug_from_hint("feature/auth"), "feature-auth");
+        assert_eq!(leaf_slug_from_hint("hotfix/auth"), "hotfix-auth");
+        // The contrast that motivates it: the dir-based function loses them.
+        assert_eq!(leaf_slug_from_dir(Path::new("feature/auth")), "auth");
+        assert_eq!(leaf_slug_from_dir(Path::new("hotfix/auth")), "auth");
+    }
+
+    /// Why: for a hint with no path separators the two functions must agree
+    /// exactly, including the cap — otherwise sanitizing CLI-side would still
+    /// leave the daemon free to produce a different name.
+    /// Test: itself.
+    #[test]
+    fn leaf_slug_from_hint_matches_leaf_slug_from_dir_for_plain_names() {
+        for hint in [
+            "auth-refactor",
+            "My Auth Fix!",
+            "TRUSTY_TOOLS",
+            "a-very-long-name-that-exceeds-the-folder-cap",
+        ] {
+            assert_eq!(
+                leaf_slug_from_hint(hint),
+                leaf_slug_from_dir(Path::new(hint)),
+                "hint {hint:?} must slugify identically on both sides"
+            );
+        }
+    }
+
+    /// Why (#4965): the CLI slugifies before sending so the daemon's own
+    /// `leaf_slug_from_dir(Path::new(hint))` is a provable NO-OP. That only
+    /// holds if this function's output is a fixed point of BOTH functions.
+    /// Test: itself.
+    #[test]
+    fn leaf_slug_from_hint_is_a_fixed_point_for_its_own_output() {
+        for raw in [
+            "feature/auth",
+            "My Auth Fix!",
+            "  ---weird---  ",
+            "a-very-long-name-that-exceeds-the-folder-cap",
+            "v1.2.3",
+        ] {
+            let once = leaf_slug_from_hint(raw);
+            assert_eq!(leaf_slug_from_hint(&once), once, "hint {raw:?}");
+            assert_eq!(
+                leaf_slug_from_dir(Path::new(&once)),
+                once,
+                "the daemon's own sanitization must be a no-op for {raw:?}"
+            );
+        }
+    }
+
+    /// Why: an all-punctuation hint has no usable name — callers must be able
+    /// to see that and refuse, rather than silently inheriting a fallback.
+    /// Test: itself.
+    #[test]
+    fn leaf_slug_from_hint_empty_when_nothing_survives() {
+        assert_eq!(leaf_slug_from_hint("!!!"), "");
+        assert_eq!(leaf_slug_from_hint("---"), "");
+        assert_eq!(leaf_slug_from_hint("   "), "");
     }
 
     // ── slug_project ──────────────────────────────────────────────────────

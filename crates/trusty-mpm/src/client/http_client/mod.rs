@@ -41,7 +41,8 @@ pub use types::{
     ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
     ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
     ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
-    OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
+    ManagedStoreHealth, OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow,
+    TmuxSessionRow,
 };
 
 use serde::Deserialize;

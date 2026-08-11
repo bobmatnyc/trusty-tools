@@ -696,6 +696,14 @@ async fn spin_up_test_daemon_with_palace(
     String,
     DaemonHandle,
 ) {
+    // Seed the process-wide `retrieval::shared_embedder()` OnceCell with
+    // `MockEmbedder`: every caller of this helper writes fixture drawers via
+    // `memory_remember`, which embeds. The cell is first-writer-wins for the
+    // whole process, so under `cargo test` a sibling test's seed satisfied
+    // these; under per-test process isolation (`cargo nextest run`) each gets a
+    // virgin cell and reaches for the real ONNX model (HTTP 429 in CI) — same
+    // defect class as #4413. The call is idempotent, so order does not matter.
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
     let data_tmp = tempfile::tempdir().expect("data tempdir");
     let project_tmp = tempfile::tempdir().expect("project tempdir");
     // Build a project directory whose basename equals the palace slug.
