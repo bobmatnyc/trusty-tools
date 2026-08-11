@@ -163,7 +163,13 @@ fn git_branch(cwd: &str) -> Option<String> {
 /// indirectly via the pure [`select_branch_label`] selection tests and
 /// `project_segment_basename_fallback_non_git`, which asserts against this
 /// probe's own live result rather than assuming an environment.
-fn tmux_session_name() -> Option<String> {
+///
+/// `pub(crate)` since #5533: the `tm ls` picker's bulk glob delete needs the
+/// SAME "what is my own tmux session called" answer to exclude the caller's
+/// session from a pattern. Promoted rather than copied — a second probe with
+/// its own timeout and its own `$TMUX` handling is exactly the drift the
+/// common-entry-point rule exists to prevent.
+pub(crate) fn tmux_session_name() -> Option<String> {
     use std::sync::mpsc;
     use std::time::Duration;
 

@@ -11696,6 +11696,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "futures-util",
+ "globset",
  "gray_matter",
  "http-body-util",
  "jsonwebtoken",
