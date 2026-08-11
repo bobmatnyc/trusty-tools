@@ -143,6 +143,24 @@ pub async fn guard_does_not_reach_the_spawn(idx: Indexer, id: IndexId) {
 EOF
 }
 
+mutate_deferred_spawn_escape() {
+  # The same escape as `spawn_escape`, reached through an idiomatic refactor:
+  # name the future first (for tracing, instrumentation, or a conditional
+  # spawn), then spawn the binding. The `spawn(` and the write no longer share
+  # a line or a brace, so a gate that only opens a scope when `spawn(` and a
+  # brace-open coincide attributes the write to the enclosing function's guard —
+  # which is dropped the moment that function returns. #3049 round 4 review
+  # demonstrated exactly this against the first version of the gate: it reported
+  # OK, exit 0.
+  cat > "$1/crates/trusty-search/src/service/writer.rs" <<'EOF'
+pub async fn guard_does_not_reach_the_deferred_spawn(idx: Indexer, id: IndexId) {
+    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&id).await;
+    let fut = async move { idx.commit_parsed_batch(parsed, false).await };
+    tokio::spawn(fut);
+}
+EOF
+}
+
 mutate_guarded_ok() {
   cat > "$1/crates/trusty-search/src/service/writer.rs" <<'EOF'
 pub async fn correctly_guarded(idx: &Indexer, id: &IndexId) {
@@ -174,6 +192,7 @@ run_case empty_scan     1 "SCAN FLOOR"           no_mutation
 run_case unguarded_call 1 "UNDECLARED"           mutate_unguarded
 run_case late_guard     1 "UNDECLARED"           mutate_late_guard
 run_case spawn_escape   1 "UNDECLARED"           mutate_spawn_escape
+run_case deferred_spawn_escape 1 "UNDECLARED"    mutate_deferred_spawn_escape
 run_case guarded_ok     0 "OK: teardown guard"   mutate_guarded_ok
 run_case stale_row      1 "STALE ROW"            mutate_stale_row
 run_case bogus_caller   1 "UNVERIFIABLE CALLER"  mutate_bogus_caller
