@@ -55,6 +55,10 @@ mod hnsw_swap;
 mod orchestrator;
 mod pollers;
 mod progress;
+// #5357: the #2178 root-move trust gate, shared by `runner` and the HTTP
+// handler so the two decisions can never drift — and so a failed read of
+// either input refuses instead of degrading to "trusted".
+pub(crate) mod root_gate;
 mod runner;
 mod semaphore;
 // #5024: coarse per-stage wall-clock accumulator threaded runner → finish.

@@ -31,6 +31,10 @@ pub mod open_failure;
 pub(crate) mod open_guard;
 mod store_impl;
 mod tables;
+// #5357: `_meta` fault injectors for the fail-closed regression tests. Kept out
+// of `impl CorpusStore` so the production type carries no test-only surface.
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 mod types;

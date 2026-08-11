@@ -89,7 +89,9 @@ fn ensure_managed_config_dir_deploys_full_roster() {
 
     // Scaffolding landed.
     assert!(config_dir.join("settings.json").exists());
-    assert!(config_dir.join(".mcp.json").exists());
+    // #4181: the MCP declaration is seeded into `.claude.json`'s user-scope
+    // `mcpServers` map now, not into a `.mcp.json` no session discovers.
+    assert!(config_dir.join(".claude.json").exists());
 
     // Every seeded specialist must be present AND spawnable (has a
     // `description` in its deployed frontmatter).

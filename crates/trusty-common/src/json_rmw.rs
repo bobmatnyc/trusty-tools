@@ -59,7 +59,7 @@
 //!   must run [`update`] on a blocking-safe thread (e.g.
 //!   `tokio::task::spawn_blocking`).
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -158,17 +158,10 @@ impl JsonRmwError {
 
 /// Sidecar lock-file path for `path`.
 ///
-/// Why: locking the document itself would mean opening it for write before we
-/// know whether the update will succeed, and would be lost across the `rename`
-/// that publishes a new version (the renamed-over inode, and any lock on it,
-/// is discarded). A stable sidecar survives every publish.
-/// What: appends `.lock` to the file name, keeping it in the same directory.
-/// Test: `lock_path_is_a_sidecar`.
-pub fn lock_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".lock");
-    path.with_file_name(name)
-}
+/// #5344: re-export of [`crate::file_lock::lock_path`], which now owns the
+/// lock primitive so `indexes.toml`'s TOML writers share one implementation
+/// with this module's JSON ones.
+pub use crate::file_lock::lock_path;
 
 /// Scratch path for one publish attempt — unique per writer and per attempt.
 ///
@@ -278,37 +271,22 @@ where
     E: From<JsonRmwError>,
     F: FnOnce(&mut T) -> Result<R, E>,
 {
-    let lock = lock_path(path);
-    if let Some(parent) = lock.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| JsonRmwError::Lock {
+    // #5344: the lock itself lives in `crate::file_lock` so `indexes.toml`'s
+    // TOML writers serialise against the same primitive.
+    crate::file_lock::with_exclusive_lock(path, || -> Result<R, E> {
+        let mut value: T = read_or_default(path)?;
+        let result = f(&mut value)?;
+        let bytes =
+            serde_json::to_vec_pretty(&value).map_err(|e| JsonRmwError::serialize(path, e))?;
+        publish_atomic(path, &bytes)?;
+        Ok(result)
+    })
+    .map_err(|source| {
+        E::from(JsonRmwError::Lock {
             path: path.to_path_buf(),
-            source: e,
-        })?;
-    }
-    let lock_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock)
-        .map_err(|e| JsonRmwError::Lock {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-    let mut rw = fd_lock::RwLock::new(lock_file);
-    // Blocking exclusive acquisition. Failure is an error, never a bypass:
-    // proceeding unlocked is exactly the lost-update bug this module exists to
-    // remove.
-    let _guard = rw.write().map_err(|e| JsonRmwError::Lock {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-
-    let mut value: T = read_or_default(path)?;
-    let result = f(&mut value)?;
-    let bytes = serde_json::to_vec_pretty(&value).map_err(|e| JsonRmwError::serialize(path, e))?;
-    publish_atomic(path, &bytes)?;
-    Ok(result)
+            source,
+        })
+    })?
 }
 
 #[cfg(test)]

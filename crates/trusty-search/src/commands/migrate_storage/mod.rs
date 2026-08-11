@@ -43,7 +43,9 @@ use colored::Colorize;
 use std::path::PathBuf;
 
 use crate::service::colocated_storage::COLOCATED_DIR_NAME;
-use crate::service::persistence::{load_index_registry, save_index_registry};
+use crate::service::persistence::{
+    indexes_toml_path, load_index_registry, patch_index_registry_entry_at,
+};
 
 use classify::{classify_index, IndexMigrationClass};
 use migrate::{do_migrate_with_pointer_removal, move_data_files, try_remove_empty_src_dir};
@@ -87,7 +89,7 @@ pub struct MigrateStorageResult {
 /// `handler_tests::handle_legacy_pointer_file_migrates_correctly` exercises
 /// the full flow with a LegacyPointerFile fixture.
 pub fn handle_migrate_storage(dry_run: bool) -> Result<()> {
-    let mut entries = match load_index_registry() {
+    let entries = match load_index_registry() {
         Ok(e) => e,
         Err(e) => anyhow::bail!("could not read indexes.toml: {e}"),
     };
@@ -113,7 +115,9 @@ pub fn handle_migrate_storage(dry_run: bool) -> Result<()> {
     let mut skipped_count = 0usize;
     let mut failed_count = 0usize;
 
-    for entry in &mut entries {
+    let mut migrated_ids: Vec<String> = Vec::new();
+
+    for entry in &entries {
         let id = entry.id.clone();
         let root = entry.root_path.clone();
 
@@ -150,7 +154,6 @@ pub fn handle_migrate_storage(dry_run: bool) -> Result<()> {
                     match move_data_files(&src_dir, &dst_dir, &root) {
                         Ok(_moved) => {
                             try_remove_empty_src_dir(&src_dir);
-                            entry.colocated = true;
                             MigrateStorageResult {
                                 id: id.clone(),
                                 root_path: root.clone(),
@@ -182,7 +185,6 @@ pub fn handle_migrate_storage(dry_run: bool) -> Result<()> {
                     {
                         Ok(_moved) => {
                             try_remove_empty_src_dir(&src_dir);
-                            entry.colocated = true;
                             MigrateStorageResult {
                                 id: id.clone(),
                                 root_path: root.clone(),
@@ -207,25 +209,50 @@ pub fn handle_migrate_storage(dry_run: bool) -> Result<()> {
         );
 
         match result.status {
-            MigrateStorageStatus::Migrated => migrated_count += 1,
+            MigrateStorageStatus::Migrated => {
+                migrated_count += 1;
+                if !dry_run {
+                    migrated_ids.push(id);
+                }
+            }
             MigrateStorageStatus::AlreadyColocated => already_count += 1,
             MigrateStorageStatus::RootMissing | MigrateStorageStatus::NoData => skipped_count += 1,
             MigrateStorageStatus::Failed(_) => failed_count += 1,
         }
     }
 
-    // Persist updated registry (only when not dry-run and at least one was migrated).
-    if !dry_run && migrated_count > 0 {
-        if let Err(e) = save_index_registry(&entries) {
-            eprintln!(
-                "{} could not save indexes.toml after migration: {e:#}",
+    // Persist the `colocated` flag for the entries this run actually moved.
+    //
+    // #5344: patch BY ID under the registry write lock, never republish the
+    // whole `entries` snapshot. A migration walks and copies data directories,
+    // so minutes can pass between the load above and this write while a daemon
+    // in another process is registering indexes and flushing timestamps into the
+    // same file — a whole-file overwrite deleted all of it and logged success.
+    if !dry_run && !migrated_ids.is_empty() {
+        match indexes_toml_path() {
+            Ok(path) => {
+                let mut failed = 0usize;
+                for id in &migrated_ids {
+                    if let Err(e) =
+                        patch_index_registry_entry_at(&path, id, |entry| entry.colocated = true)
+                    {
+                        eprintln!(
+                            "{} could not record colocated=true for '{id}': {e:#}",
+                            "✗".red()
+                        );
+                        failed += 1;
+                    }
+                }
+                tracing::info!(
+                    "migrate storage: updated indexes.toml — {} entries now colocated ({} failed)",
+                    migrated_ids.len() - failed,
+                    failed
+                );
+            }
+            Err(e) => eprintln!(
+                "{} could not resolve indexes.toml after migration: {e:#}",
                 "✗".red()
-            );
-        } else {
-            tracing::info!(
-                "migrate storage: updated indexes.toml — {} entries now colocated",
-                migrated_count
-            );
+            ),
         }
     }
 

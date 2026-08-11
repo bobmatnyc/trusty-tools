@@ -1279,7 +1279,7 @@ fn output_styles_mirror_the_pm_prose_rules() {
         "## Communication — Write Plainly",
         "issue #2647",
         "**No praise for the user.**",
-        "**Delete the framing opener; lead with the fact.**",
+        "**If you are saying it, its worth is implied.**",
         "**Do not embellish.**",
         "the banned word \"honest\"",
         "**Ticket and PR bodies**",
