@@ -379,3 +379,82 @@ fn verify_outcome_serde() {
         matches!(back, VerifyOutcome::ErrorRefuted { error_class } if error_class == "ModelNotFound")
     );
 }
+
+/// A clean `Refuted` outcome reads as a disproof, not as "unchecked" (#5312).
+///
+/// Why: the two states carry opposite weight for a reader — a refuted claim does
+/// not support the verdict, an unverified one may still be real — so the caveat
+/// must not blur them.
+/// What: asserts the `Refuted` caveat says REFUTED and calls out that it is not a
+/// merge blocker.
+/// Test: this test itself.
+#[test]
+fn caveat_refuted_is_a_disproof() {
+    let caveat = VerifyOutcome::Refuted
+        .reader_caveat()
+        .expect("owed a caveat");
+    assert!(
+        caveat.contains("REFUTED"),
+        "caveat must name the disproof: {caveat}"
+    );
+    assert!(
+        caveat.contains("not a merge blocker"),
+        "caveat must say it does not block: {caveat}"
+    );
+}
+
+/// The two verifier-failure outcomes read as "unable to verify" (#726, #1876).
+///
+/// Why: `ErrorRefuted` / `TruncationRefuted` mean the verifier was never reached;
+/// `rederive_verdict` path (c) deliberately preserves the escalation for them, so
+/// telling the reader the claim was disproved would contradict the verdict the
+/// same review reports.
+/// What: asserts both caveats say UNVERIFIED, and that the error class reaches
+/// the reader.
+/// Test: this test itself.
+#[test]
+fn caveat_error_refuted_is_unable_to_verify() {
+    let caveat = VerifyOutcome::ErrorRefuted {
+        error_class: "RateLimited".to_string(),
+    }
+    .reader_caveat()
+    .expect("owed a caveat");
+    assert!(
+        caveat.contains("UNVERIFIED"),
+        "must not claim disproof: {caveat}"
+    );
+    assert!(
+        caveat.contains("RateLimited"),
+        "must name the error class: {caveat}"
+    );
+
+    let truncated = VerifyOutcome::TruncationRefuted
+        .reader_caveat()
+        .expect("owed a caveat");
+    assert!(
+        truncated.contains("UNVERIFIED"),
+        "must not claim disproof: {truncated}"
+    );
+}
+
+/// `Confirmed` and `Skipped` are owed no caveat (#5312).
+///
+/// Why: a confirmed finding stands on its own, and `Skipped` means the finding
+/// never cleared the candidate-confidence floor — the same state as the
+/// `verified: None` majority, so marking it would mark nearly every finding.
+/// What: asserts both return `None`, and that `Unverifiable` carries its reason.
+/// Test: this test itself.
+#[test]
+fn caveat_confirmed_and_skipped_are_unqualified() {
+    assert!(VerifyOutcome::Confirmed.reader_caveat().is_none());
+    assert!(VerifyOutcome::Skipped.reader_caveat().is_none());
+    let unverifiable = VerifyOutcome::Unverifiable {
+        reason: "no registry lookup performed".to_string(),
+    }
+    .reader_caveat()
+    .expect("owed a caveat");
+    assert!(
+        unverifiable.contains("no registry lookup performed"),
+        "must carry the recorded reason: {unverifiable}"
+    );
+}

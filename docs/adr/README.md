@@ -12,7 +12,9 @@ including the consistency-vetting protocol and governance rules.
 An ADR captures *why* a single architecturally-significant decision was made:
 the context that forced the decision, the decision itself, and its consequences.
 ADRs are immutable once accepted — a decision is changed by writing a *new* ADR
-that supersedes the old one, never by editing history. We use the
+that amends or supersedes the old one, never by editing its normative history.
+The old record's Status and backlink metadata are updated to point at the new
+ADR; its Context, Decision, and Consequences remain historical. We use the
 [Nygard format](https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions)
 (Title, Status, Context, Decision, Consequences) plus a **"Related Decisions"**
 section documenting consistency vetting (see DOC-46 §3).
@@ -42,7 +44,7 @@ A crate-specific ADR may reference a workspace ADR, and vice versa.
 
 ## Numbering & filenames
 
-`NNNN-kebab-title.md`, zero-padded to four digits, monotonically increasing
+`NNNN-kebab-title.md`, zero-padded to four digits, unique and monotonically increasing
 within the directory. Workspace ADRs and each crate's `decisions/` directory
 maintain **independent** numbering sequences. Never renumber an existing ADR.
 
@@ -62,7 +64,8 @@ Proposed ──► Accepted ──► Superseded by NNNN
 - **Accepted** — agreed and in force. All Accepted ADRs form the current decision set.
 - **Rejected** — considered but not adopted (kept for the record).
 - **Superseded by NNNN** — replaced by a later ADR; links to the new ADR. Old decision no longer in force.
-- **Amended by NNNN** — refined (not replaced) by a later ADR. Prior decision still in force, but qualified by the amendment.
+- **Amended by NNNN[, NNNN…]** — refined (not replaced) by one or more later
+  ADRs. The prior decision remains in force together with every listed amendment.
 
 ## Writing a new ADR
 
@@ -70,6 +73,9 @@ Proposed ──► Accepted ──► Superseded by NNNN
 2. Fill in Title, Status, Context, Decision, Consequences.
 3. **Critical: Add a "Related Decisions" section** (see DOC-46 §3) — sweep `docs/adr/INDEX.md` and prior decisions; record verdict codes (Consistent, Extends, Supersedes, Conflict) for each relevant prior ADR. **Do not accept an ADR with an empty "Related Decisions" section.**
 4. Open it as **Proposed**; flip to **Accepted** when the decision is agreed and consistency vetting is complete.
+5. Run `bash scripts/check_adr.sh` before opening the PR. The check enforces
+   numbering, status grammar, index parity, successor links, and required
+   consistency-vetting sections.
 
 See [`INDEX.md`](./INDEX.md) for the current decision corpus and a quick reference for vetting.
 

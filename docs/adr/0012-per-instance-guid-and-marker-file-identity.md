@@ -8,9 +8,8 @@
   trusty-agents (worktree tracking), trusty-controller (registry/palace sync).
   Also referenced by issue #1680 (case-insensitive aliases) and epic #1681
   (canonical index/source identity model).
-- **Supersedes / Superseded by:** ADR-0008 (partial — specifically the worktree
-  clause: "Worktrees get their own id, keyed on their working-directory path"
-  is SUPERSEDED by decision §7 below).
+- **Supersedes / Superseded by:** Amends ADR-0008, specifically its worktree
+  clause. ADR-0008's remaining project-identity rules stay in force.
 
 ## Context
 
@@ -147,7 +146,7 @@ let canonical = aliases.get(&normalized).unwrap_or(&normalized);
 registry.get(canonical)
 ```
 
-### 7. GIT WORKTREES = EPHEMERAL SUB-INDEX linked to PARENT (SUPERSEDES ADR-0008 §4)
+### 7. GIT WORKTREES = EPHEMERAL SUB-INDEX linked to PARENT (AMENDS ADR-0008 §4)
 
 **Detect a worktree** by running `git rev-parse --git-common-dir`. If it resolves to a path **outside** the source root's `.git/` directory, the root is a git worktree (worktrees place a `.git` FILE pointing to a `.git/worktrees/…` dir; the common-dir points to the parent repo's `.git/`).
 

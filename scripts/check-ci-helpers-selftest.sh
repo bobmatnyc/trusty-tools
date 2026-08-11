@@ -110,6 +110,14 @@ assert_eq "Cargo.toml"            "false" "$(docs_only_of 'Cargo.toml')"
 assert_eq "Cargo.lock"            "false" "$(docs_only_of 'Cargo.lock')"
 assert_eq "workflow file"         "false" "$(docs_only_of '.github/workflows/ci.yml')"
 assert_eq "script"                "false" "$(docs_only_of 'scripts/check_line_cap.sh')"
+assert_eq "ADR checker"           "true"  "$(docs_only_of 'scripts/check_adr.sh')"
+assert_eq "doc-number checker"    "true"  "$(docs_only_of 'scripts/check_doc_numbers.sh')"
+assert_eq "doc-number allowlist"  "true"  "$(docs_only_of '.doc-number-allowlist.tsv')"
+assert_eq "doc-number workflow"   "true"  "$(docs_only_of '.github/workflows/doc-numbers.yml')"
+assert_eq "SLD workflow wiring"   "true"  "$(docs_only_of '.github/workflows/sld-lint.yml')"
+assert_eq "SLD checker"           "true"  "$(docs_only_of 'scripts/check_sld.sh')"
+assert_eq "optional token gate"   "true"  "$(docs_only_of '.github/workflows/token-drift.yml')"
+assert_eq "capabilities wrapper"  "true"  "$(docs_only_of 'scripts/check_capabilities.sh')"
 assert_eq "UI source"             "false" "$(docs_only_of 'crates/trusty-agents/ui/src/App.svelte')"
 # The trap this denylist exists to avoid: markdown UNDER a crate's src/ is a
 # bundled agent/skill/instruction asset compiled in via include_dir!.
@@ -285,25 +293,31 @@ assert_eq "main-side parity also runs on a schedule (#4688)" "1" \
 # isolation.
 ci_wf=".github/workflows/ci.yml"
 assert_eq "ci.yml passes a base BRANCH, not base.sha" "1" \
-  "$(grep -c 'DOCS_ONLY_BASE: origin/\${{ github.event.pull_request.base.ref }}' \
+  "$(grep -c 'DOCS_ONLY_BASE="origin/\${{ github.event.pull_request.base.ref }}"' \
     "${ci_wf}" || true)"
 assert_eq "ci.yml no longer passes the frozen base.sha" "0" \
   "$(grep -c 'DOCS_ONLY_BASE: \${{ github.event.pull_request.base.sha }}' \
     "${ci_wf}" || true)"
+assert_eq "ci.yml classifies the push range instead of forcing full Cargo" "1" \
+  "$(grep -c 'DOCS_ONLY_BASE="\$before" bash scripts/detect-docs-only.sh' \
+    "${ci_wf}" || true)"
+assert_eq "ci.yml no-ops Cargo for title/body-only edits" "1" \
+  "$(grep -c 'title/body-only PR edit' "${ci_wf}" || true)"
 
-# capabilities-drift.yml grew its own `changes` job (reusing detect-docs-only.sh,
-# not a second predicate) so the tm-capabilities cargo build stops running
-# unconditionally on every PR. Same wiring guard, same reason: the script being
-# correct proves nothing if the workflow never passes it a live base.
+# capabilities-drift is optional, so it can use exact trigger paths instead of
+# paying for a duplicate checkout/classifier job on every PR.
 capabilities_wf=".github/workflows/capabilities-drift.yml"
-# 3 = every cargo-touching step in the job (toolchain install, cache, the
-# actual `check_capabilities.sh` run) — update this count if a step is added
-# or removed, the same way the count itself would need a human to notice.
-assert_eq "capabilities-drift.yml gates its cargo run on docs_only" "3" \
-  "$(grep -c "if: needs.changes.outputs.docs_only != 'true'" "${capabilities_wf}" || true)"
-assert_eq "capabilities-drift.yml passes a base BRANCH, not base.sha" "1" \
-  "$(grep -c 'DOCS_ONLY_BASE: origin/\${{ github.event.pull_request.base.ref }}' \
-    "${capabilities_wf}" || true)"
+assert_eq "capabilities-drift.yml has no duplicate classifier" "0" \
+  "$(grep -c '^  changes:' "${capabilities_wf}" || true)"
+assert_eq "capabilities-drift.yml scopes both events to trusty-mpm" "2" \
+  "$(grep -c '      - "crates/trusty-mpm/\*\*"' "${capabilities_wf}" || true)"
+
+# ADR consistency is a pure-shell document gate. Keep it beside document
+# allocation rather than installing Rust in the SLD workflow for ADR-only PRs.
+assert_eq "doc-numbers owns the ADR consistency step" "1" \
+  "$(grep -c 'run: bash scripts/check_adr.sh' .github/workflows/doc-numbers.yml || true)"
+assert_eq "SLD no longer runs the ADR consistency step" "0" \
+  "$(grep -c 'run: bash scripts/check_adr.sh' .github/workflows/sld-lint.yml || true)"
 
 # ---------------------------------------------------------------------------
 # ci-free-disk-space.sh (#5325)

@@ -1,9 +1,9 @@
 # DOC-46 — Architecture Decision Records (ADR) as First-Class Documentation Artifact
 
-**Status:** DRAFT
+**Status:** ACCEPTED
 **Subsystem:** Documentation / Architecture governance
 **Owner:** Architecture / Technical Leadership
-**Last-updated:** 2026-07-19
+**Last-updated:** 2026-08-11
 **Spec ID:** `SPEC-ADR-01` (DOC-46)
 **Builds on:** `docs/adr/README.md` (existing ADR convention); DOC-38 (Spec-Linked Documentation / SLD); DOC-30 (Project Manager vision — decision vetting); the tm-adr bundled skill (`crates/trusty-mpm/src/assets/skills/tm-adr.md`)
 
@@ -13,19 +13,23 @@
 
 ### Current State
 
-The trusty-tools repository maintains a de-facto ADR practice:
-- **14 existing ADRs** (ADR-0001 through ADR-0013) document foundational architectural decisions
-- ADRs are **informally opt-in**, created ad-hoc when maintainers recognize a significant choice
-- Existing decisions live only in **memory or informal channels** (meetings, memory palace)
-- **No consistency check**: new ADRs are not systematically vetted against prior decisions; silent contradictions can arise
-- ADRs are treated as **ancillary documentation**, not peer to Specs (DOC-38 SLD) and Requirements (DOC-43 — future)
-- **No mechanical enforcement** — missing ADRs, contradictions, and linting gaps are not surfaced by CI
+The trusty-tools repository maintains a governed ADR practice:
+- **44 existing ADRs** (ADR-0001 through ADR-0044) document architectural decisions
+- ADRs are mandatory for architecturally significant, costly-to-reverse choices
+- Significant decisions that originate in meetings or memory are promoted into
+  ADRs before they become governing architecture.
+- New ADRs carry a **Related Decisions** consistency-vetting section.
+- ADRs are first-class documentation, peer to Specs (DOC-38 SLD) and
+  Requirements.
+- `scripts/check_adr.sh` mechanically enforces numbering, status, successor
+  links, required vetting sections, and index parity in CI.
 
 ### Problem
 
 **Bob's directive (2026-07-19):** "Formalize ADRs so that any decision can be vetted against previous ones for consistency. Should be a peer to Spec, and Req."
 
-The core issue: **architectural decisions are treated as optional narratives, not as a governed, first-class artifact class**. This allows:
+Before this standard, architectural decisions were treated as optional
+narratives rather than a governed, first-class artifact class. That allowed:
 - **Inconsistent future decisions** that contradict earlier accepted choices without acknowledgment
 - **Lost decision rationale** when team members leave or memories fade
 - **No audit trail** for why the system is shaped as it is — impossible to trace "did we already consider this alternative?"
@@ -75,7 +79,7 @@ Every ADR must carry:
 ```markdown
 # NNNN. <Short Title of Decision>
 
-- **Status:** Proposed | Accepted | Rejected | Superseded by MMMM | Amended by MMMM
+- **Status:** Proposed | Accepted | Rejected | Superseded by MMMM | Amended by MMMM[, NNNN…]
 - **Date:** YYYY-MM-DD
 - **Scope:** Workspace-wide (or: crate `<name>` or subsystem `<name>`)
 - **Reversibility Cost:** (Low | Medium | High) — cost to undo this later
@@ -156,7 +160,8 @@ No prior decisions contradict this choice. Summary: Consistent with existing dec
 - **Proposed** — draft, under review. Consistency vetting is optional while Proposed, but required before acceptance.
 - **Accepted** — approved, in force. All Accepted ADRs form the current decision set; they govern system architecture and future decisions.
 - **Superseded by NNNN** — replaced by a later ADR. Links to the new ADR. Old decision is no longer in force; the new one takes precedence.
-- **Amended by NNNN** — refined (not replaced) by a later ADR. The prior decision is still in force, but qualified by the amendment.
+- **Amended by NNNN[, NNNN…]** — refined (not replaced) by one or more later
+  ADRs. The prior decision is still in force together with every amendment.
 - **Rejected** — considered but not adopted. Kept for the record so the same choice is not re-litigated.
 
 ---
@@ -196,11 +201,12 @@ Crates may maintain their own `docs/<crate>/decisions/` directory with independe
 
 ## 6. Mechanical Enforcement & CI Gates
 
-### Phase 1: Linting Script (Scoped, Pragmatic)
+### Phase 1: Linting Script (Implemented)
 
-Propose a new script: `scripts/check_adr.sh` (or fold into an extended `scripts/check_sld.sh`).
+`scripts/check_adr.sh` implements the structural gate and runs in the
+documentation lint workflow.
 
-**Scope — verify only these checks; implementation is a follow-up issue:**
+**Scope:**
 
 1. **Unique numbering:** each file matches pattern `docs/adr/NNNN-*.md` with NNNN in 0000–9999 range; no duplicates.
 2. **Sequential continuity:** if files are numbered 0001–0013, there are no gaps (e.g., no 0002 missing).

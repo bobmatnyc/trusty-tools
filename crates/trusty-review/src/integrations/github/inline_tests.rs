@@ -8,7 +8,7 @@
 //! Test: this module.
 
 use super::*;
-use crate::models::{Effort, Finding};
+use crate::models::{Effort, Finding, VerifyOutcome};
 
 /// A small two-file unified diff with added, context, and removed lines.
 fn sample_diff() -> &'static str {
@@ -392,4 +392,86 @@ fn suppressed_nits_line_singular() {
 fn max_inline_nits_is_five() {
     // Lock the documented cap so a silent change is caught.
     assert_eq!(MAX_INLINE_NITS, 5);
+}
+
+// ─── Verification caveat on the rendered comment (#5312) ──────────────────────
+
+/// A verifier-refuted finding renders with a caveat above the claim (#5312).
+///
+/// Why: before this, a finding carrying `verified: "refuted"` rendered
+/// byte-identically to a surviving one, so a reader of the PR could not tell the
+/// pipeline had disproved it.
+/// What: renders a `Refuted` finding, asserts the body opens with the
+/// verification blockquote and names the refutation, and asserts the same
+/// finding reaching `build_inline_plan` carries the marker into the plan.
+/// Test: this test itself.
+#[test]
+fn render_marks_refuted_finding() {
+    let mut f = finding_at("src/db.rs", Some(11));
+    f.verified = Some(VerifyOutcome::Refuted);
+
+    let body = render_finding_comment(&f);
+    assert!(
+        body.starts_with("> **Verification:**"),
+        "the caveat must lead the comment, not trail it: {body}"
+    );
+    assert!(
+        body.contains("REFUTED"),
+        "a refuted claim must say so: {body}"
+    );
+
+    let c = CommentableLines::from_unified_diff(sample_diff());
+    let plan = build_inline_plan(std::slice::from_ref(&f), &c);
+    assert_eq!(plan.comments.len(), 1, "still posted, but marked");
+    assert!(
+        plan.comments[0].body.contains("REFUTED"),
+        "the plan must carry the marked body: {}",
+        plan.comments[0].body
+    );
+}
+
+/// A verifier-failure finding reads as unverified, never as disproved (#5312).
+///
+/// Why: `ErrorRefuted` means the verifier was never reached (#726, #1876) and
+/// the verdict deliberately keeps the escalation, so calling the claim refuted
+/// inline would contradict the verdict the same review reports.
+/// What: renders an `ErrorRefuted` finding and asserts the caveat says
+/// UNVERIFIED and names the error class rather than claiming a disproof.
+/// Test: this test itself.
+#[test]
+fn render_marks_error_refuted_as_unverified() {
+    let mut f = finding_at("src/db.rs", Some(11));
+    f.verified = Some(VerifyOutcome::ErrorRefuted {
+        error_class: "RateLimited".to_string(),
+    });
+    let body = render_finding_comment(&f);
+    assert!(body.contains("UNVERIFIED"), "{body}");
+    assert!(body.contains("RateLimited"), "{body}");
+    assert!(
+        !body.contains("REFUTED it"),
+        "an unreachable verifier disproved nothing: {body}"
+    );
+}
+
+/// Confirmed and unjudged findings render exactly as before (#5312).
+///
+/// Why: the caveat is owed only where the pipeline does not stand behind the
+/// claim; adding it anywhere else would put a hedge on every comment.
+/// What: renders a `Confirmed` finding and a finding with no outcome, asserting
+/// neither carries the verification blockquote.
+/// Test: this test itself.
+#[test]
+fn render_leaves_confirmed_and_unjudged_findings_unmarked() {
+    let unjudged = finding_at("src/db.rs", Some(11));
+    assert!(
+        !render_finding_comment(&unjudged).contains("**Verification:**"),
+        "no outcome recorded → no caveat"
+    );
+
+    let mut confirmed = finding_at("src/db.rs", Some(11));
+    confirmed.verified = Some(VerifyOutcome::Confirmed);
+    assert!(
+        !render_finding_comment(&confirmed).contains("**Verification:**"),
+        "a confirmed finding stands unqualified"
+    );
 }

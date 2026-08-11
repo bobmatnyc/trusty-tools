@@ -431,11 +431,18 @@ impl OrchestratorBackend for StateBackend {
         &self,
         project_dir: &str,
         session_id: Option<&str>,
+        tmux_window: Option<&str>,
         all_projects: bool,
         full: bool,
     ) -> Result<Value, String> {
-        super::mcp_context::session_context_catchup(project_dir, session_id, all_projects, full)
-            .await
+        super::mcp_context::session_context_catchup(
+            project_dir,
+            session_id,
+            tmux_window,
+            all_projects,
+            full,
+        )
+        .await
     }
 
     async fn session_context_pause(

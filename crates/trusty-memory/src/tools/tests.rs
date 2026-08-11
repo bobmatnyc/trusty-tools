@@ -1128,18 +1128,44 @@ async fn palace_create_auto_seeds_temporal_metadata() {
         queried.get("hint").is_none(),
         "hint should be absent when triples exist"
     );
+    // #4775: `graph_state` is the miss discriminator, so its absence is what
+    // marks a hit; `kg_triple_count` is present either way.
+    assert!(
+        queried.get("graph_state").is_none(),
+        "graph_state should be absent when triples exist"
+    );
+    assert!(
+        queried["kg_triple_count"].as_u64().unwrap_or(0) >= 2,
+        "kg_triple_count must be present on a hit; got {}",
+        queried["kg_triple_count"],
+    );
 }
 
-/// Why (issue #60): `kg_query` against a subject with no triples must
-/// surface a `hint` field pointing the user at `kg_bootstrap` /
-/// `kg_assert`. Without the hint, brand-new palaces returned empty
-/// arrays with no breadcrumb back to the seeding tools.
+/// Why (#4775): this is the case the old single-hint behavior got wrong.
+/// `palace_create` auto-bootstraps at least `created_at` + `bootstrapped_at`,
+/// so the graph is provably non-empty; querying a subject it does not hold
+/// used to answer "Knowledge graph is empty" anyway. The replaced test
+/// asserted that falsehood and passed. The `kg_list_subjects` call here is
+/// what makes the non-emptiness a fact of the test rather than an assumption.
 #[tokio::test]
-async fn kg_query_emits_hint_when_palace_empty() {
+async fn kg_query_reports_subject_not_found_when_graph_has_other_subjects() {
     let (state, _tmp) = test_state();
     let _ = dispatch_tool(&state, "palace_create", json!({"name": "hinted"}))
         .await
         .expect("palace_create");
+
+    // Establish the precondition: the graph holds subjects.
+    let subjects = dispatch_tool(&state, "kg_list_subjects", json!({"palace": "hinted"}))
+        .await
+        .expect("kg_list_subjects");
+    assert!(
+        !subjects["subjects"]
+            .as_array()
+            .expect("subjects")
+            .is_empty(),
+        "auto-bootstrap should have seeded at least one subject",
+    );
+
     // Query a subject that auto-bootstrap did NOT seed.
     let queried = dispatch_tool(
         &state,
@@ -1149,9 +1175,73 @@ async fn kg_query_emits_hint_when_palace_empty() {
     .await
     .expect("kg_query");
     assert_eq!(queried["triples"].as_array().unwrap().len(), 0);
+    assert_eq!(queried["graph_state"], "subject_not_found");
+    assert!(
+        queried["kg_triple_count"].as_u64().unwrap_or(0) >= 2,
+        "whole-graph count must reflect the bootstrapped triples; got {}",
+        queried["kg_triple_count"],
+    );
+    let hint = queried["hint"].as_str().expect("hint field present");
+    assert!(
+        hint.contains("kg_list_subjects"),
+        "miss hint must name kg_list_subjects; got {hint:?}",
+    );
+    assert!(
+        !hint.contains("Knowledge graph is empty"),
+        "must not claim emptiness for a non-empty graph; got {hint:?}",
+    );
+}
+
+/// Why (#4775): the `graph_empty` branch is the one the old hint was written
+/// for, and it must still fire — but only when the graph really holds nothing.
+/// The palace is created through the registry directly because
+/// `palace_create` auto-bootstraps, and there is no way to ask it not to.
+#[tokio::test]
+async fn kg_query_reports_graph_empty_when_graph_has_no_triples() {
+    use trusty_common::memory_core::palace::Palace;
+
+    let (state, _tmp) = test_state();
+    let palace = Palace {
+        id: PalaceId::new("barren"),
+        name: "barren".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join("barren"),
+    };
+    let _ = state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create_palace");
+
+    let queried = dispatch_tool(
+        &state,
+        "kg_query",
+        json!({"palace": "barren", "subject": "anything"}),
+    )
+    .await
+    .expect("kg_query");
+    assert_eq!(queried["triples"].as_array().unwrap().len(), 0);
+    assert_eq!(queried["kg_triple_count"], 0);
+    assert_eq!(queried["graph_state"], "graph_empty");
     let hint = queried["hint"].as_str().expect("hint field present");
     assert!(hint.contains("kg_bootstrap"));
     assert!(hint.contains("kg_assert"));
+}
+
+/// Why (#4775): the classification is pure, so pin all four combinations of
+/// (subject has triples, graph has triples) without a live palace.
+#[test]
+fn kg_miss_classify_distinguishes_empty_graph_from_missing_subject() {
+    use crate::bootstrap::KgMiss;
+
+    assert_eq!(KgMiss::classify(0, 0), Some(KgMiss::GraphEmpty));
+    assert_eq!(KgMiss::classify(0, 7), Some(KgMiss::SubjectNotFound));
+    assert_eq!(KgMiss::classify(3, 7), None);
+    // A subject with triples in a graph that reports zero is contradictory;
+    // a hit still wins, because the triples are in hand and the count is not.
+    assert_eq!(KgMiss::classify(3, 0), None);
+    assert_eq!(KgMiss::GraphEmpty.wire_value(), "graph_empty");
+    assert_eq!(KgMiss::SubjectNotFound.wire_value(), "subject_not_found");
 }
 
 /// Why (issue #60): `kg_bootstrap` against the live workspace root must

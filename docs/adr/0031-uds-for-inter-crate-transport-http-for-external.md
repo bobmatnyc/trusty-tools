@@ -1,6 +1,8 @@
 # 0031. Transport by purpose: inter-crate same-host traffic over UDS; all external traffic through one shared HTTP server
 
-- **Status:** Proposed — access-control premise corrected by #5099 (see the correction note in Decision Drivers)
+- **Status:** Amended by [0032](0032-no-service-owns-http-console-is-the-only-http-surface.md)
+- **Acceptance:** Ratified by ADR-0032 on 2026-08-07. The access-control premise
+  was later corrected by #5099; see the correction note in Decision Drivers.
 - **Date:** 2026-08-06
 - **Scope:** Workspace-wide (the tool path of every trusty-\* daemon:
   trusty-search, trusty-memory, trusty-analyze, trusty-review,
@@ -15,20 +17,15 @@
   recall routes; an HTTP error surfacing through a nominally-STDIO MCP tool;
   redb's cross-process exclusive `flock`, which makes single-process store
   ownership a correctness requirement.
-- **Supersedes / Superseded by:** None. **Consistent with / Extends ADR-0018** —
-  the same relationship ADR-0018 itself recorded with ADR-0017. ADR-0018 is not
-  amended and its status is unchanged: it governs *bind-address reachability*,
-  this ADR governs *which local transport one caller class uses* to reach an
-  already-loopback-bound daemon. Per the ADR immutability rule (DOC-46 §4) this
-  is a new record rather than an edit to ADR-0018.
+- **Supersedes / Superseded by:** Ratified and narrowed by ADR-0032, which also
+  supersedes ADR-0018's loopback-HTTP carve-out. This ADR supplies the transport
+  classification and UDS mechanism that ADR-0032 adopts.
 
-> **Why Proposed and not Accepted.** The owner stated the topology as a
-> direction and the UDS move as *"let's consider"* — an open evaluation, not a
-> decision. Measurements taken afterward (recorded below) also contradict the
-> performance rationale originally given for it, which moves the case onto
-> different ground. Recording this as Accepted would assert a settled mechanism
-> that is not settled. The **classification test** below is usable today
-> regardless; what awaits sign-off is the mechanism and the sequencing.
+> **Historical status note.** This ADR began as Proposed because the UDS move
+> was initially an open evaluation. ADR-0032 subsequently ratified the
+> mechanism and narrowed it to a strict no-sibling-HTTP topology. The
+> classification test and UDS decision are therefore Accepted; ADR-0032 controls
+> wherever this document's original loopback assumptions differ.
 
 ## Context
 
@@ -500,28 +497,24 @@ Named rather than guessed:
   socket satisfies this ADR, and is what trusty-bm25-daemon and trusty-embedderd
   already do.
 - **Not "STDIO is faster."** Measured, it is not. See the table above.
-- **Not a decision to adopt UDS.** That is an open owner-initiated evaluation.
-- **Not a reversal of ADR-0018.** Loopback-only governs all remaining HTTP.
+- **Originally not a decision to adopt UDS.** ADR-0032 subsequently ratified it.
+- **Historically not a reversal of ADR-0018.** ADR-0032 later superseded
+  ADR-0018's loopback-HTTP carve-out and now controls that reachability axis.
 
 ## Related Decisions
 
 Vetted against `docs/adr/INDEX.md` and prior ADRs on 2026-08-06:
 
-- **ADR-0018 (Loopback-only doctrine):** **Consistent / Extends** — the same
-  relationship ADR-0018 recorded with ADR-0017. **ADR-0018 is not amended and
-  its status is unchanged.** Verified against its decision text rather than
-  assumed: ADR-0018's normative content is entirely about *bind-address
-  reachability* — which daemon may bind off-loopback, the origin guard on
-  write-mutating routes, console-proxy-only external reach. This ADR governs
-  *which local transport one caller class uses* to reach an already-loopback-bound
-  daemon. Different axes; no clause of ADR-0018 is contradicted, and nothing here
-  authorises a new off-loopback bind.
+- **ADR-0018 (Loopback-only doctrine):** Historically Consistent / Extends.
+  ADR-0032 later superseded ADR-0018's loopback-HTTP carve-out while ratifying
+  this ADR's UDS mechanism, so ADR-0032 is now the controlling reachability
+  decision.
 
   ADR-0018 did **evaluate and reject** a full-UDS migration, on two costed
   grounds. Both dissolve under this ADR's scope rather than being overridden:
 
   - *"`reqwest` has no UDS transport."* Costed against tunnelling **HTTP over
-    UDS**. This ADR proposes **JSON-RPC directly over UDS**, the shape already
+    UDS**. This ADR adopts **JSON-RPC directly over UDS**, the shape already
     shipping in `crates/trusty-common/src/embedder_client/uds.rs`, where no HTTP
     client is involved at all.
   - *"GUI webviews cannot `fetch()` a Unix socket."* Exactly the case the owner's

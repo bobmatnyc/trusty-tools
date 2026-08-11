@@ -164,7 +164,7 @@ Prune managed sessions by state and compact tombstones. `state` selects which re
 
 ## `session_context_catchup`
 
-Return a STRUCTURED (JSON, not prose) resume digest for `project_dir`: paused sessions (native trusty-mpm + legacy claude-mpm formats), recent git commits, and recent memory-palace activity — the same three sources `tm session catchup` renders as markdown, restructured as typed fields. This is a manual PEEK: it NEVER advances the incremental-catchup watermark (only automatic session-start injection does that), so calling it repeatedly is always safe and `watermark_advanced` in the result is always `false`. An empty `sessions` array means "nothing paused since your last catch-up" ONLY when `undatable_sessions_dropped` is 0 — non-zero means that many paused sessions exist but could not be dated and were withheld; re-call with `full: true` to see them. `sessions` and `resolved_snapshot` answer different questions ("what paused since last catch-up" vs "what should I resume from") and legitimately disagree under a recent watermark. `resolved_snapshot` is null unless you pass `session_id`, and it only ever names a snapshot belonging to THAT id — several sessions share one store, so there is no "latest overall" fallback.
+Return a STRUCTURED (JSON, not prose) resume digest for `project_dir`: paused sessions (native trusty-mpm + legacy claude-mpm formats), recent git commits, and recent memory-palace activity — the same three sources `tm session catchup` renders as markdown, restructured as typed fields. This is a manual PEEK: it NEVER advances the incremental-catchup watermark (only automatic session-start injection does that), so calling it repeatedly is always safe and `watermark_advanced` in the result is always `false`. An empty `sessions` array means "nothing paused since your last catch-up" ONLY when `undatable_sessions_dropped` is 0 — non-zero means that many paused sessions exist but could not be dated and were withheld; re-call with `full: true` to see them. `sessions` and `resolved_snapshot` answer different questions ("what paused since last catch-up" vs "what should I resume from") and legitimately disagree under a recent watermark. `resolved_snapshot` names a snapshot belonging to the `session_id` you pass; several sessions share one store, so there is no "latest overall" fallback. When that id owns nothing — a relaunch mints a new session id inside the same window — passing `tmux_window` resolves the newest snapshot THIS WINDOW paused in this project instead. `resolved_via` says which answered (`session_id`, `tmux_window`, or null), so do not read a window match as an exact one. Each entry in `sessions` carries `owned`: true when the session is attributable to you (your `session_id` paused it, or you are in the window that did). A session you do not own is listed with `format`, `paused_at` and `summary` only — its `source_file`, `tmux_window`, `in_progress`, `next_steps` and `git_context` are withheld, so the digest cannot hand you the means to adopt another session's state (#5386).
 
 | Parameter | Type | Required |
 |---|---|---|
@@ -172,6 +172,7 @@ Return a STRUCTURED (JSON, not prose) resume digest for `project_dir`: paused se
 | `full` | `boolean` | no |
 | `project_dir` | `string` | yes |
 | `session_id` | `string` | no |
+| `tmux_window` | `string` | no |
 
 ## `session_context_pause`
 

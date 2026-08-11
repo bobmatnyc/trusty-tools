@@ -136,24 +136,26 @@ async fn session_new<B: OrchestratorBackend>(backend: &B, args: &Value) -> Resul
 /// Parse `session_context_catchup` arguments and call the backend.
 ///
 /// Why: `project_dir` is required (the stdio bridge forwards no cwd); the
-/// other three fields are all optional with documented defaults.
+/// other four fields are all optional with documented defaults.
 /// What: requires `project_dir`; reads the optional `session_id`,
-/// `all_projects` (default false), and `full` (default false).
+/// `tmux_window`, `all_projects` (default false), and `full` (default false).
 /// Test: `super::tests::dispatch_session_context_catchup_tool`,
-/// `super::tests::dispatch_session_context_catchup_requires_project_dir`.
+/// `super::tests::dispatch_session_context_catchup_requires_project_dir`,
+/// `super::tests::dispatch_session_context_catchup_forwards_tmux_window`.
 async fn session_context_catchup<B: OrchestratorBackend>(
     backend: &B,
     args: &Value,
 ) -> Result<Value, String> {
     let project_dir = required_str(args, "project_dir")?;
     let session_id = args.get("session_id").and_then(Value::as_str);
+    let tmux_window = args.get("tmux_window").and_then(Value::as_str);
     let all_projects = args
         .get("all_projects")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
     backend
-        .session_context_catchup(&project_dir, session_id, all_projects, full)
+        .session_context_catchup(&project_dir, session_id, tmux_window, all_projects, full)
         .await
 }
 
