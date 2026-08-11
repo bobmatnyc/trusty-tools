@@ -102,9 +102,7 @@ pub(super) async fn relocate_index_handler(
     // #3049: relocate rebuilds the indexer and swaps the registered handle, so
     // it holds the teardown lock's shared side for the whole operation — a
     // concurrent DELETE must not tear the index down half way through.
-    let _teardown_guard = crate::service::reindex::index_teardown_lock(&index_id)
-        .read_owned()
-        .await;
+    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
 
     // Retrieve the existing handle so we can clone its configuration.
     let existing = match state.registry.get(&index_id) {

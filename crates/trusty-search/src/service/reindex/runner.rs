@@ -34,7 +34,7 @@ use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
 use super::root_gate;
 use super::semaphore::{
-    index_cancel_flag, index_semaphore, index_teardown_lock, reindex_semaphore_for,
+    acquire_index_teardown_read, index_cancel_flag, index_semaphore, reindex_semaphore_for,
     BACKGROUND_QUEUE_DEPTH,
 };
 use super::stage_timings::StageTimings;
@@ -96,7 +96,7 @@ pub(super) async fn run_reindex(
     // #3049: the reindex is the longest-running writer — hold the teardown
     // lock's shared side for its whole duration. The cancel flag above is what
     // keeps a waiting DELETE bounded to one batch rather than one corpus.
-    let _teardown_guard = index_teardown_lock(&handle.id).read_owned().await;
+    let _teardown_guard = acquire_index_teardown_read(&handle.id).await;
 
     // Arm the termination guard. Any early exit — panic, early return, or
     // `.await` cancellation — fires `ReindexTerminationGuard::drop`, which logs

@@ -177,15 +177,24 @@ pub(super) async fn apply_component_transition(
 /// generalised #923 deferred-embed core), which marks the semantic stage
 /// `Ready`/`Failed` itself. Both may run in the same task since only one
 /// permit exists.
+///
+/// `teardown_guard` (#3049 round 3) travels the same way and for the same
+/// reason: this task writes the corpus (`catch_up_symbol_graph`,
+/// `run_embed_catch_up`), so a `DELETE` must not be able to `remove_dir_all`
+/// underneath it. Re-acquiring here instead would leave the gap between the
+/// handler returning and the task being polled unguarded.
 /// Test: `service::server::tests_components::patch_vector_on_spawns_catch_up_and_reaches_ready`,
-/// `patch_kg_on_spawns_catch_up_and_reaches_ready`.
+/// `patch_kg_on_spawns_catch_up_and_reaches_ready`,
+/// `service::server::tests_3049::delete_waits_for_a_component_catch_up`.
 pub(super) fn spawn_component_catch_up(
     handle: Arc<IndexHandle>,
     transition: ComponentTransition,
     permit: tokio::sync::OwnedSemaphorePermit,
+    teardown_guard: tokio::sync::OwnedRwLockReadGuard<()>,
 ) {
     tokio::spawn(async move {
         let _permit = permit;
+        let _teardown_guard = teardown_guard;
         let index_id = handle.id.0.clone();
 
         if transition.kg_turning_on {

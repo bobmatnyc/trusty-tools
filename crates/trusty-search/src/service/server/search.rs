@@ -83,10 +83,11 @@ pub(super) async fn delete_index_handler(
         // answered `data_deleted: true` and the caller recorded the corpus as
         // reclaimed while every byte of it was still on disk.
         "data_deleted": outcome.data_deleted,
-        // #3049: false when an in-flight writer never released the index permit
-        // within `DELETE_QUIESCE_TIMEOUT`. The registration is still removed;
-        // what a caller learns from this is that data removal was REFUSED
-        // (see `unregister_index`), so retrying the delete is worthwhile.
+        // #3049: false when an in-flight writer never released the teardown lock
+        // within `DELETE_QUIESCE_TIMEOUT`. Paired with `removed: false` it means
+        // the delete was ABANDONED and nothing changed — retry it. Paired with
+        // `removed: true` (only reachable without `?delete_data=true`) it means
+        // the deregistration went ahead while a writer was still running.
         "quiesced": outcome.quiesced,
     }))
 }
@@ -114,8 +115,10 @@ pub(super) struct UnregisterOutcome {
     /// Whether the on-disk data directory was actually destroyed. Always
     /// `false` when `delete_data` was not requested.
     pub(super) data_deleted: bool,
-    /// Whether every in-flight writer released this index's permit before
-    /// teardown ran. `false` means the wait timed out.
+    /// Whether every in-flight writer released this index's teardown lock before
+    /// teardown ran. `false` means the wait timed out — and when `delete_data`
+    /// was requested, that nothing at all was changed (`removed` is then `false`
+    /// too). See [`unregister_index`].
     pub(super) quiesced: bool,
 }
 
@@ -125,9 +128,10 @@ pub(super) struct UnregisterOutcome {
 /// Why: writers poll the cancel flag at batch boundaries, so the expected wait
 /// is one batch, not one corpus — 30s is generous for that and still bounded, so
 /// a stuck writer cannot wedge the HTTP handler indefinitely. The timeout is not
-/// a licence to delete: on expiry the data directory is REFUSED (see
-/// [`unregister_index`]), and only the in-memory/registry teardown proceeds.
-/// Test: `delete_with_delete_data_refuses_removal_when_a_writer_never_quiesces`.
+/// a licence to delete: on expiry a `delete_data` delete abandons itself and
+/// changes nothing (see [`unregister_index`]).
+/// Test: `delete_with_delete_data_refuses_removal_when_a_writer_never_quiesces`,
+/// `a_second_delete_after_an_abandoned_one_reclaims_the_data`.
 #[cfg(not(test))]
 const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Test build uses a short deadline so the refusal path is exercised in
@@ -167,8 +171,24 @@ const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// this, a delete landing mid-write removed the registration and
 /// `remove_dir_all`'d the data directory while a live writer was still writing
 /// into it; recreating the same id immediately then let a new-epoch task
-/// interleave with the old one on identical on-disk paths. On timeout the data
-/// directory is REFUSED rather than destroyed under an active writer.
+/// interleave with the old one on identical on-disk paths.
+///
+/// On timeout the behaviour splits on `delete_data` (round 3):
+/// - `delete_data=true` — the whole delete is ABANDONED and nothing is changed,
+///   so re-issuing it once the writer stops actually works. Round 2 refused only
+///   the `remove_dir_all` while still removing the registration, which stranded
+///   the data directory forever: the retry it told operators to make hits
+///   `removed=false` and never reaches the removal branch, and
+///   `spawn_orphan_reaper_ticker` reaps registrations whose root_path vanished,
+///   never data directories with no registration.
+/// - `delete_data=false` — deregistration proceeds. No data was going to be
+///   removed, so no orphan is possible, and the orphan reaper (which runs in
+///   exactly this mode) must stay able to drop a dead registration.
+///
+/// Residual: `embed_deferred_chunks` still has no interior cancel checkpoint, so
+/// a delete landing during a deferred-embed pass waits for the whole pass and
+/// abandons itself if that outlasts the timeout. That is now a clean retryable
+/// failure rather than a silent orphan; see the PR discussion on #3049.
 ///
 /// Every writer must hold the SHARED side for the span of its write. The
 /// complete set, and why each entry is or is not guarded, is the table in
@@ -197,16 +217,45 @@ pub(super) async fn unregister_index(
     // returned instantly and reported a false `quiesced: true`. Held across teardown.
     let quiesce_permit = tokio::time::timeout(
         DELETE_QUIESCE_TIMEOUT,
-        crate::service::reindex::index_teardown_lock(&index_id).write_owned(),
+        crate::service::reindex::acquire_index_teardown_write(&index_id),
     )
     .await
     .ok();
     let quiesced = quiesce_permit.is_some();
+    if !quiesced && delete_data {
+        // #3049 round 3: ABANDON the delete, changing nothing. Round 2 refused
+        // only the `remove_dir_all` and tore the registration down anyway, which
+        // orphaned the data directory permanently: a re-issued delete finds
+        // `remove_and_get` returning `removed=false` and never reaches the
+        // data-removal branch at all, and no reaper covers a data directory with
+        // no registration. Leaving the registration in place is what makes the
+        // "re-issue the delete" instruction below TRUE.
+        tracing::error!(
+            "delete[{id}]: ABANDONED — in-flight work did not drain within {:?}, so \
+             nothing was changed (registration, indexes.toml and on-disk data are all \
+             intact). Re-issue the delete once the writer has stopped (issue #3049).",
+            DELETE_QUIESCE_TIMEOUT,
+        );
+        // The cancel we signalled above must not outlive the delete we just gave
+        // up on, or the surviving index's next reindex aborts at its first
+        // checkpoint. Clears the VALUE on the flag in-flight writers already hold
+        // — evicting the map entry would leave those readers seeing `true`.
+        crate::service::reindex::clear_index_cancel(&index_id);
+        return UnregisterOutcome {
+            removed: false,
+            data_deleted: false,
+            quiesced: false,
+        };
+    }
     if !quiesced {
+        // `delete_data=false` cannot orphan anything — preserving the data IS the
+        // requested semantics (issue #4123), and this is the mode the orphan
+        // reaper runs in, which must still be able to deregister an index whose
+        // root_path has vanished. Deregistration proceeds as before.
         tracing::warn!(
-            "delete[{id}]: in-flight work did not drain within {:?} — proceeding with \
-             registry teardown, but on-disk data removal is REFUSED so it cannot be \
-             deleted out from under an active writer (issue #3049)",
+            "delete[{id}]: in-flight work did not drain within {:?} — deregistering \
+             anyway. No data was going to be removed (delete_data=false), so there is \
+             nothing to refuse (issue #3049).",
             DELETE_QUIESCE_TIMEOUT,
         );
     }
@@ -233,25 +282,19 @@ pub(super) async fn unregister_index(
             tracing::warn!("could not remove '{id}' from indexes.toml: {e}");
         }
         if delete_data {
-            if !quiesced {
-                // #3049: refuse rather than `remove_dir_all` a directory an
-                // active writer still holds an open corpus in.
-                tracing::error!(
-                    "delete[{id}]: REFUSING to remove on-disk data — in-flight work did \
-                     not drain (issue #3049). The registration is gone; re-issue the \
-                     delete to reclaim the disk once the writer has stopped."
-                );
-            } else {
-                match crate::service::persistence::remove_index_data_dir(id) {
-                    // #3049: this is the only assignment of `data_deleted` —
-                    // the response field can no longer disagree with the disk.
-                    Ok(()) => data_deleted = true,
-                    Err(e) => tracing::error!(
-                        "delete[{id}]: on-disk data removal FAILED ({e}) — reporting \
-                         data_deleted=false so the caller does not record this corpus \
-                         as reclaimed (issue #3049)"
-                    ),
-                }
+            // Reaching here means the quiesce wait SUCCEEDED — a `delete_data`
+            // delete that timed out returned above without touching anything, so
+            // no `remove_dir_all` can run under an active writer.
+            debug_assert!(quiesced, "delete_data teardown runs only when quiesced");
+            match crate::service::persistence::remove_index_data_dir(id) {
+                // #3049: this is the only assignment of `data_deleted` —
+                // the response field can no longer disagree with the disk.
+                Ok(()) => data_deleted = true,
+                Err(e) => tracing::error!(
+                    "delete[{id}]: on-disk data removal FAILED ({e}) — reporting \
+                     data_deleted=false so the caller does not record this corpus \
+                     as reclaimed (issue #3049)"
+                ),
             }
         }
         if let Some(ref root) = root_path_for_cleanup {
@@ -273,11 +316,13 @@ pub(super) async fn unregister_index(
         // Keep the index-count gauge in sync.
         crate::service::metrics::set_index_count(state.registry.list().len());
     }
-    // #3049: release the quiescence permit BEFORE evicting the registry entry.
-    // While the entry is still registered, a caller racing this teardown blocks
-    // on our permit instead of starting work against a half-dismantled index;
-    // evicting first would hand that caller a fresh, uncontended semaphore.
-    drop(quiesce_permit);
+    // #3049 round 3: evict WHILE STILL HOLDING the exclusive guard, and drop the
+    // guard last. Eviction is what lets a racing caller — a recreate, or a second
+    // delete — obtain a fresh, uncontended lock for this id, so every destructive
+    // step above must already have run when it happens. Round 2 dropped the guard
+    // first and evicted after, leaving a window in which a second-generation
+    // writer and this teardown were serialised by nothing at all.
+    //
     // Issue #2984 Phase 1 delta-review MEDIUM finding: `INDEX_LOCKS` (the
     // per-index reindex/catch-up mutual-exclusion semaphore registry) never
     // shrinks on its own. Evict this id's entry unconditionally — safe even
@@ -289,8 +334,11 @@ pub(super) async fn unregister_index(
     // #3049: evict the cancel flag too, or an index recreated under this id
     // would be born cancelled and abort its first reindex.
     crate::service::reindex::remove_index_cancel_flag(&index_id);
-    // #3049: and the teardown lock, for the same growth reason.
+    // #3049: and the teardown lock, for the same growth reason. A writer already
+    // parked on the evicted instance re-validates and retries against the fresh
+    // one — see `reindex::semaphore::acquire_index_teardown_read`.
     crate::service::reindex::remove_index_teardown_lock(&index_id);
+    drop(quiesce_permit);
     UnregisterOutcome {
         removed,
         data_deleted,

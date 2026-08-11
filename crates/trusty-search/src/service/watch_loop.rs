@@ -289,9 +289,7 @@ async fn handle_modified(
     // lock's shared side across the write. Without it a DELETE landing on a
     // watched index acquired an uncontended lock and removed the data
     // directory while this call was mid-write.
-    let _teardown_guard = crate::service::reindex::index_teardown_lock(index_id)
-        .read_owned()
-        .await;
+    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(index_id).await;
     let idx = indexer.read().await;
     if let Err(err) = idx.index_file(&path_str, &content).await {
         tracing::warn!(?err, ?path, "index_file failed");
@@ -341,9 +339,7 @@ async fn handle_removed(
         return;
     };
     // #3049: `remove_chunk` mutates the corpus — same guard as `handle_modified`.
-    let _teardown_guard = crate::service::reindex::index_teardown_lock(index_id)
-        .read_owned()
-        .await;
+    let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(index_id).await;
     let idx = indexer.read().await;
     for id in ids {
         if let Err(err) = idx.remove_chunk(&id).await {

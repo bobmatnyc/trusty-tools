@@ -9,11 +9,13 @@
 //! `data_deleted` from the REQUEST while the removal itself was best-effort and
 //! its failure was downgraded to a `warn!`, so a delete whose data removal
 //! failed answered `data_deleted: true`.
-//! What: three behaviours, each with its own test — the delete WAITS for the
-//! per-index permit every long-running writer holds; it REFUSES on-disk removal
-//! when that wait times out; and it reports `data_deleted` from the removal's
-//! actual result. A fourth pins the cancel-flag eviction that keeps a recreated
-//! index from starting cancelled.
+//! What: one test per behaviour. Round 1 — the delete WAITS for in-flight work,
+//! reports `data_deleted` from the removal's actual result, and evicts the cancel
+//! flag so a recreated index does not start cancelled. Round 2 — the wait covers
+//! writers that hold no reindex permit. Round 3 — a `delete_data` delete that
+//! times out ABANDONS itself so the retry it advertises works; a writer parked
+//! across a teardown stays visible to the next delete; and neither `POST
+//! /indexes` nor `PATCH /indexes/:id/config` can slip inside a teardown window.
 //!
 //! `multi_thread` is required, not incidental: `unregister_index` reaches
 //! `watcher_manager.stop_for_index`, whose teardown uses `block_in_place`, which
@@ -103,18 +105,19 @@ async fn unregister_index_waits_for_an_in_flight_writer_to_release_the_permit() 
     assert!(outcome.removed, "the registration must still be removed");
 }
 
-/// #3049: when in-flight work never drains, the delete must REFUSE to destroy
-/// the data directory rather than `remove_dir_all` it under a live writer.
+/// #3049: when in-flight work never drains, a `delete_data` delete must ABANDON
+/// itself rather than `remove_dir_all` under a live writer.
 ///
 /// Why: the timeout exists so a stuck writer cannot wedge the HTTP handler, but
 /// timing out is not permission to delete — that is the exact data-loss the
-/// issue describes, just deferred by the length of the timeout. This is the
-/// error arm of the wait added above. Pre-fix it fails for the right reason:
-/// there was no wait and no refusal, so the marker file was destroyed and
-/// `data_deleted` read `true`.
-/// What: holds the permit for the whole test so the wait provably expires
+/// issue describes, just deferred by the length of the timeout. Round 2 refused
+/// only the removal and tore the registration down anyway; round 3 leaves
+/// everything in place, which is what makes the retry the log advertises real
+/// (see `a_second_delete_after_an_abandoned_one_reclaims_the_data`).
+/// What: holds the shared side for the whole test so the wait provably expires
 /// (`DELETE_QUIESCE_TIMEOUT` is 1.5s under `cfg(test)`), then asserts the
-/// on-disk marker survived and both flags report the refusal.
+/// on-disk marker survived and every field of the outcome reports "nothing
+/// happened".
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
@@ -148,8 +151,141 @@ async fn delete_with_delete_data_refuses_removal_when_a_writer_never_quiesces() 
         "preserved data must be byte-identical, not merely present"
     );
     assert!(
-        outcome.removed,
-        "registry teardown still proceeds — only the disk removal is refused"
+        !outcome.removed,
+        "an abandoned delete must report removed=false — round 2 reported true \
+         here and stranded the data directory forever (issue #3049)"
+    );
+}
+
+/// #3049 round 3: after a delete abandons itself on a quiesce timeout, the
+/// re-issued delete its log tells the operator to make must actually reclaim the
+/// disk.
+///
+/// Why: this is the orphan-leak arm. Round 2's timeout path still ran
+/// `registry.remove_and_get`, `remove_index_registry_entry` and `remove_root`,
+/// and refused only the `remove_dir_all`. The retry then found `removed=false`
+/// and `was_cold=false`, so the whole `if removed { … }` block — including the
+/// data-removal branch — never ran, `remove_index_data_dir` was never attempted
+/// a second time, and `spawn_orphan_reaper_ticker` does not cover this shape (it
+/// reaps registrations whose root_path vanished, not data directories with no
+/// registration). The directory leaked permanently, invisibly after a restart.
+/// Against round 2 this fails for the right reason: the retry's assertions on
+/// `removed` / `data_deleted` / the marker all trip, because the first delete
+/// consumed the registration the retry needed.
+/// What: times out one delete, asserts the whole registration survived (registry
+/// entry present, cancel flag cleared so the surviving index is not born
+/// cancelled), then releases the writer and re-issues the delete.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_second_delete_after_an_abandoned_one_reclaims_the_data() {
+    let isolated = IsolatedDataDir::new();
+    const ID: &str = "retry-after-abandon-3049";
+    let (state, data_dir) = state_with_index(isolated.path(), ID);
+    let marker = data_dir.join("corpus.marker");
+    let index_id = IndexId::new(ID);
+
+    let stuck_writer = index_teardown_lock(&index_id).read_owned().await;
+    let abandoned = unregister_index(&state, ID, true).await;
+    assert!(!abandoned.quiesced, "the wait must have expired");
+
+    // The state a retry depends on: nothing was torn down.
+    assert!(
+        state.registry.get(&index_id).is_some(),
+        "an abandoned delete must leave the registration in place, or the retry it \
+         advertises can never reach the data-removal branch (issue #3049)"
+    );
+    assert!(
+        !index_cancel_flag(&index_id).load(Ordering::Acquire),
+        "an abandoned delete must un-signal the cancel it sent, or the surviving \
+         index aborts its next reindex at the first checkpoint (issue #3049)"
+    );
+
+    drop(stuck_writer);
+    let retry = unregister_index(&state, ID, true).await;
+
+    assert!(
+        retry.quiesced,
+        "no writer is left, so the retry must quiesce"
+    );
+    assert!(
+        retry.removed && retry.data_deleted,
+        "the re-issued delete must actually deregister AND reclaim the disk \
+         (removed={}, data_deleted={}) — issue #3049",
+        retry.removed,
+        retry.data_deleted,
+    );
+    assert!(
+        !marker.exists(),
+        "the retry reported the data deleted, so {} must be gone",
+        marker.display()
+    );
+}
+
+/// #3049 round 3: a writer parked on the teardown lock across a delete must
+/// still be visible to the NEXT delete.
+///
+/// Why: `remove_index_teardown_lock` evicts the map entry, so a writer that was
+/// parked on that entry wakes holding an `Arc` nothing else can reach. The next
+/// delete calls `index_teardown_lock`, gets a brand-new uncontended lock, reports
+/// `quiesced: true` instantly, and `remove_dir_all`s the directory the parked
+/// writer is writing into — the round-2 shape of the recreate window, moved off
+/// the semaphore and onto the teardown lock. `acquire_index_teardown_read`'s
+/// `Arc::ptr_eq` re-validation is the fix. Against round 2 this fails for the
+/// right reason: `!outcome.quiesced` trips because the second delete saw no
+/// contention at all, and the marker assertion trips right behind it.
+/// What: stages the exact interleaving — gen-1 holds the lock, a delete parks on
+/// the write side, gen-2 parks on the read side of the SAME entry, gen-1 releases
+/// so the delete completes and evicts — then asserts a `delete_data` delete is
+/// refused while gen-2 still holds its guard.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn a_writer_parked_across_teardown_is_visible_to_the_next_delete() {
+    let isolated = IsolatedDataDir::new();
+    const ID: &str = "parked-writer-3049";
+    let (state, data_dir) = state_with_index(isolated.path(), ID);
+    let marker = data_dir.join("corpus.marker");
+    let index_id = IndexId::new(ID);
+
+    // Generation 1: holds the lock the delete is about to wait on.
+    let gen1 = index_teardown_lock(&index_id).read_owned().await;
+
+    let delete_state = Arc::clone(&state);
+    let delete = tokio::spawn(async move { unregister_index(&delete_state, ID, false).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Generation 2 parks on the same entry, behind the delete's pending write.
+    // The oneshot hands the guard back so the main test can hold it across the
+    // second delete without a sleep-based handoff.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let gen2_id = index_id.clone();
+    tokio::spawn(async move {
+        let guard = crate::service::reindex::acquire_index_teardown_read(&gen2_id).await;
+        let _ = tx.send(guard);
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    drop(gen1);
+    let first = delete.await.expect("delete task");
+    assert!(
+        first.quiesced,
+        "gen-1 released, so the first delete quiesces"
+    );
+    let _gen2 = rx.await.expect("gen-2 acquires once the delete releases");
+
+    // Gen-2 is writing. A delete that would destroy the disk must be refused.
+    let second = unregister_index(&state, ID, true).await;
+    assert!(
+        !second.quiesced,
+        "the second delete reported quiesced=true while a writer parked across the \
+         first teardown still held the lock — it was handed a fresh, uncontended \
+         instance (issue #3049)"
+    );
+    assert!(
+        marker.exists(),
+        "data must survive a delete raced against a parked writer; {} is gone",
+        marker.display()
     );
 }
 
@@ -305,4 +441,170 @@ async fn delete_waits_for_an_ungated_index_file_write() {
         !marker.exists(),
         "data removal was reported, so the marker must be gone"
     );
+}
+
+/// #3049 round 3: `POST /indexes` must not register a second generation of an id
+/// whose delete is still tearing it down.
+///
+/// Why: `unregister_index` removes the hot registry entry partway through its
+/// teardown, and `create_index_handler`'s only guard was
+/// `state.registry.get(&id).is_some()`. A create landing after that removal but
+/// before teardown finished registered a fresh handle and could spawn a reindex
+/// into the directory the delete was about to `remove_dir_all` — and, once the
+/// delete evicted the id's lock entries, the two generations no longer shared a
+/// quiescence primitive at all. Against round 2 this fails for the right reason:
+/// the ordering assertion trips because the create took no lock and returned
+/// while the delete was still parked on the writer.
+/// What: an in-flight writer holds the delete off; the create is issued while the
+/// delete is parked; both record their completion order. The create must land
+/// AFTER the delete, and must then succeed on a registry that tells the truth.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn create_index_cannot_register_while_a_delete_is_tearing_the_id_down() {
+    let _isolated = IsolatedDataDir::new();
+    const ID: &str = "recreate-window-3049";
+    let (dir, root) = super::test_support::allowlisted_index_root("ts-3049-recreate-");
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let embedder: Arc<dyn crate::core::embed::Embedder> =
+        Arc::new(crate::core::embed::MockEmbedder::new(8));
+    state.install_embedder(embedder).await;
+
+    // Generation 1, registered through the real handler.
+    let created = super::indexes::create_index_handler(
+        axum::extract::State(Arc::clone(&state)),
+        axum::Json(create_req(ID, root.clone())),
+    )
+    .await;
+    assert_eq!(created.status(), axum::http::StatusCode::OK, "gen-1 create");
+
+    // An in-flight writer keeps the delete parked long enough for the create to
+    // be issued squarely inside the teardown window.
+    let writer_guard = index_teardown_lock(&IndexId::new(ID)).read_owned().await;
+    let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+
+    let delete_state = Arc::clone(&state);
+    let delete_order = Arc::clone(&order);
+    let delete = tokio::spawn(async move {
+        let outcome = unregister_index(&delete_state, ID, false).await;
+        delete_order.lock().expect("order lock").push("delete");
+        outcome
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let create_state = Arc::clone(&state);
+    let create_order = Arc::clone(&order);
+    let create_root = root.clone();
+    let create = tokio::spawn(async move {
+        let resp = super::indexes::create_index_handler(
+            axum::extract::State(create_state),
+            axum::Json(create_req(ID, create_root)),
+        )
+        .await;
+        create_order.lock().expect("order lock").push("create");
+        resp
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(writer_guard);
+
+    let deleted = delete.await.expect("delete task");
+    let recreated = create.await.expect("create task");
+    assert!(deleted.removed, "the delete must deregister generation 1");
+
+    assert_eq!(
+        *order.lock().expect("order lock"),
+        vec!["delete", "create"],
+        "the recreate must not land until teardown has finished — a create that \
+         returns first has registered a second generation over a half-deleted \
+         index (issue #3049)"
+    );
+    assert_eq!(
+        recreated.status(),
+        axum::http::StatusCode::OK,
+        "once teardown is done the recreate is an ordinary create and must succeed"
+    );
+    assert!(
+        state.registry.get(&IndexId::new(ID)).is_some(),
+        "generation 2 must be the surviving registration"
+    );
+    drop(dir);
+}
+
+/// #3049 round 3: `PATCH /indexes/:id/config` must wait for an in-flight
+/// teardown.
+///
+/// Why: round 2's writer table listed this path as taking the teardown lock's
+/// read side and it never did. Round 1 quiesced on `index_semaphore`, which this
+/// handler DOES hold, so moving quiescence onto the teardown lock silently
+/// un-guarded it — leaving a PATCH free to re-register the handle and re-upsert
+/// the `indexes.toml` entry a concurrent delete had just removed, resurrecting a
+/// deleted index at the next warm boot. Against round 2 this fails for the right
+/// reason: the PATCH returns while the teardown guard is still held.
+/// What: holds the exclusive side exactly as `unregister_index` does, then
+/// asserts the handler has not answered while it is held and does once released.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn patch_index_config_waits_for_an_in_flight_teardown() {
+    let isolated = IsolatedDataDir::new();
+    const ID: &str = "patch-during-teardown-3049";
+    let (state, _data_dir) = state_with_index(isolated.path(), ID);
+
+    // Exactly what `unregister_index` holds across its teardown.
+    let teardown_guard =
+        crate::service::reindex::acquire_index_teardown_write(&IndexId::new(ID)).await;
+
+    let patch_state = Arc::clone(&state);
+    let patch = tokio::spawn(async move {
+        super::index_config::patch_index_config_handler(
+            axum::extract::State(patch_state),
+            axum::extract::Path(ID.to_string()),
+            axum::Json(super::index_config::PatchIndexConfigRequest {
+                include_docs: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        !patch.is_finished(),
+        "PATCH answered while a teardown held the exclusive lock — it can re-upsert \
+         the indexes.toml entry the delete just removed (issue #3049)"
+    );
+
+    drop(teardown_guard);
+    let resp = patch.await.expect("patch task");
+    assert_eq!(
+        resp.status(),
+        axum::http::StatusCode::OK,
+        "once teardown releases, the PATCH proceeds normally"
+    );
+}
+
+/// Build a `CreateIndexRequest` with every optional field defaulted — the same
+/// shape `tests_2336::create_req` uses, kept local so neither module has to make
+/// its helper `pub(super)`.
+fn create_req(id: &str, root_path: std::path::PathBuf) -> super::router::CreateIndexRequest {
+    super::router::CreateIndexRequest {
+        id: id.to_string(),
+        root_path,
+        include_paths: None,
+        exclude_globs: None,
+        extensions: None,
+        domain_terms: None,
+        path_filter: None,
+        include_docs: None,
+        respect_gitignore: None,
+        follow_links: None,
+        lexical_only: None,
+        skip_kg: None,
+        skip_vector: None,
+        defer_embed: None,
+        extra_skip_dirs: None,
+        data_file_max_bytes: None,
+        allow_sensitive_path: false,
+    }
 }
