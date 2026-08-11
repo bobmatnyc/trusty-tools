@@ -721,8 +721,11 @@ static REGISTRY_WRITE_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
 /// `f`. The acquisition order is the same at every call site, so the pair
 /// cannot deadlock. A lock that cannot be acquired is an error — never a
 /// bypass, because proceeding unlocked is the defect itself.
-/// Test: `concurrent_upserts_lose_no_entries`,
-/// `registry_write_blocks_while_another_process_holds_the_lock`.
+/// Test: `concurrent_upserts_lose_no_entries`; cross-process blocking is
+/// exercised indirectly via
+/// `commands::prune::tests::prune_apply_blocks_on_the_cross_process_registry_lock`
+/// and
+/// `commands::prune_orphans::tests::prune_orphans_blocks_on_the_cross_process_registry_lock`.
 fn with_registry_write_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let _guard = REGISTRY_WRITE_LOCK
         .lock()
