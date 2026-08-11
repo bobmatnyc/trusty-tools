@@ -28,26 +28,36 @@
 //! at the point of failure they are indistinguishable and only one of the two
 //! possible mistakes is recoverable.
 //!
-//! ## Genuine corruption does NOT reach here (#4227)
+//! ## Genuine corruption reaches here too, since #4227
 //!
-//! This list used to name "genuine corruption" as a quarantine trigger. It is
-//! not one, and reading it as one misstates what the quarantine protects. A
-//! corrupt corpus is absorbed BEFORE `corpus_open_failed` can be set:
-//! `CorpusStore::open` (`core/corpus/store_impl.rs`) delegates to
-//! `open_corpus_db_or_recreate`, and `core/corpus_recovery.rs` classifies
-//! `UpgradeRequired`, `RepairAborted`, `Storage(Corrupted(_))` and
-//! `Storage(Io(InvalidData))` as RECOVERABLE — it moves the file aside with a
-//! `.v2-incompatible` suffix and returns `Ok` with a fresh EMPTY corpus. Only
-//! lock contention and genuine transient I/O errors propagate as `Err`, so the
-//! quarantine population is transient-dominated by construction.
+//! It did not always. `CorpusStore::open` (`core/corpus/store_impl.rs`)
+//! delegates to `open_corpus_db_or_recreate`, and `core/corpus_recovery.rs`
+//! used to classify `UpgradeRequired`, `RepairAborted`,
+//! `Storage(Corrupted(_))` and `Storage(Io(InvalidData))` all as RECOVERABLE:
+//! move the file aside with a `.v2-incompatible` suffix, return `Ok` with a
+//! fresh EMPTY corpus. Because that was an `Ok`, the loader wired the empty
+//! store and `corpus_open_failed` stayed FALSE — so a corrupt index came up
+//! reporting HEALTHY with a live watcher, and the watcher then populated the
+//! recreated corpus with a partial rebuild. The #4122 data-loss shape exactly,
+//! with this quarantine and the #4087 query-surface guards both disarmed,
+//! because every one of them keys on that flag.
 //!
-//! Two consequences worth keeping in view. First, an in-process reopen retry
-//! would clear most of this population (recovery currently needs a daemon
-//! restart — #4122 / PR #4220 HIGH-1). Second, the recreate path yields an index
-//! reporting HEALTHY on a fresh empty corpus, which watcher writes then populate
-//! with a partial rebuild — a symptom shape close to the #4122 incident's that
-//! this quarantine explicitly does NOT cover. That gap is #4087's, not this
-//! module's.
+//! #4227 split the two buckets. `UpgradeRequired` — a KNOWN old on-disk format
+//! with a data-preserving migration tool (`trusty-search migrate-redb`) — still
+//! recreates silently; quarantining it would turn every redb major upgrade into
+//! an outage. The three corruption variants now back the file aside and return
+//! a typed `CorpusCorrupted` error, which reaches
+//! `build_indexer_from_entry`'s failure arm, sets `corpus_open_failed` with
+//! `CorpusOpenFailure::FormatIncompatible`, and wires NO corpus — so the
+//! invariant below holds unchanged and the write quarantine engages.
+//!
+//! So the trigger list above is complete as written, and the quarantine
+//! population is no longer transient-dominated. One consequence still worth
+//! keeping in view: an in-process reopen retry would clear the transient part of
+//! this population, which today needs a daemon restart (#4122 / PR #4220
+//! HIGH-1). A corrupt index needs that restart too, but for a different reason —
+//! the damaged file is already off the canonical path, so the next boot opens a
+//! clean corpus and boot reconcile rebuilds it from source.
 //!
 //! Reads are NOT gated: a quarantined index still serves searches (returning
 //! whatever its empty in-memory corpus holds). Making failed indexes stop
@@ -101,8 +111,10 @@
 //! `commit_corpus_to_redb`) exist to make that failure loud instead of silent.
 //!
 //! Test: `crates/trusty-search/tests/corpus_open_quarantine_4122.rs` (ingest
-//! family) and `crates/trusty-search/tests/quarantine_durable_writes_4226.rs`
-//! (snapshot family).
+//! family), `crates/trusty-search/tests/quarantine_durable_writes_4226.rs`
+//! (snapshot family), and
+//! `crates/trusty-search/tests/corpus_corruption_quarantine_4227.rs`
+//! (corruption reaches the quarantine at all).
 
 use std::sync::atomic::Ordering;
 
@@ -133,8 +145,11 @@ impl CodeIndexer {
     /// What: mirrors [`CodeIndexer::corpus_open_failed`], which is set by
     /// `service::persistence_loader::build_indexer_from_entry` on exactly two
     /// conditions — `open_corpus_with_retry` returned `Err`, or the redb
-    /// corpus path could not be resolved at all (#2847).
-    /// Test: `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`.
+    /// corpus path could not be resolved at all (#2847). Since #4227 a
+    /// genuinely corrupt corpus reaches the first of those instead of being
+    /// recreated empty behind an `Ok`.
+    /// Test: `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`
+    /// and `corrupt_corpus_refuses_watcher_writes_and_chunk_count_stays_zero`.
     pub fn is_write_quarantined(&self) -> bool {
         self.corpus_open_failed
     }
