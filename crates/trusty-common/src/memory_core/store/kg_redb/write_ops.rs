@@ -3,12 +3,13 @@
 //!
 //! Why: Separating write operations from the struct definition and read
 //! operations keeps each file under the 500-SLOC cap.
-//! What: `impl KgStoreRedb` for `assert`, `retract`, `upsert_drawer`,
-//! `delete_drawer`, `delete_by_subject`, plus the free-function helpers
-//! `batch_assert` / `batch_retract` that both the single-op methods and
-//! `apply_batch` in `import.rs` route through. The drawer-side helpers live in
-//! the sibling `drawer_ops` module.
+//! What: `impl KgStoreRedb` for `assert`, `retract`, `retract_triple`,
+//! `upsert_drawer`, `delete_drawer`, `delete_by_subject`, plus the
+//! free-function helpers `batch_assert` / `batch_retract` that both the
+//! single-op methods and `apply_batch` in `import.rs` route through. The
+//! drawer-side helpers live in the sibling `drawer_ops` module.
 //! Test: `assert_then_query_returns_triple`, `retract_closes_active_interval`,
+//! `retract_triple_closes_one_object_and_leaves_siblings_active`,
 //! `assert_multiple_objects_for_multivalued_predicate_all_survive`,
 //! `assert_functional_predicate_still_supersedes`,
 //! `cascade_delete_removes_triples_for_subject`.
@@ -81,13 +82,60 @@ impl KgStoreRedb {
     /// #4810 kept the two-argument signature and widened its meaning from "the
     /// active row" to "every active row", which is behaviour-preserving for
     /// every existing caller: before the object joined the key there could
-    /// only ever be one. A three-argument `retract_triple` is a deliberate
-    /// non-goal — no caller wants to retract one object of a set today, and
-    /// adding the surface unused would fix a shape nothing has exercised.
+    /// only ever be one. To remove ONE object and leave its siblings live,
+    /// call [`KgStoreRedb::retract_triple`] instead (#5396) — this method takes
+    /// the whole pair down.
     /// What: Delegates to [`batch_retract`] inside one write transaction.
     /// Test: `retract_closes_active_interval`,
     /// `retract_closes_every_object_at_the_pair`.
     pub fn retract(&self, subject: &str, predicate: &str) -> Result<usize> {
+        self.retract_in_txn(subject, predicate, None)
+    }
+
+    /// Close the active triple at exactly `(subject, predicate, object)`,
+    /// leaving every other object at that pair untouched. Returns 1 when a row
+    /// was closed and 0 when there was none.
+    ///
+    /// Why: a multi-valued pair can hold one wrong object beside correct ones —
+    /// a real subject carrying `--is-a--> hard` next to its good `is-a` rows
+    /// (#5396). [`KgStoreRedb::retract`] closes the whole pair, so removing the
+    /// wrong object took the right ones with it, and re-asserting does not
+    /// displace it either: `is-a` and friends are absent from
+    /// `FUNCTIONAL_PREDICATES`, so an assert of a DIFFERENT object joins the
+    /// bad row rather than superseding it. #4810 put the object in the redb key,
+    /// which is what makes addressing one row possible rather than a redesign.
+    /// What: same close as `retract` — history row, active row removed, both
+    /// secondary index entries removed, active-subject counter decremented —
+    /// but filtered to the single row whose object matches. Naming an object
+    /// that is not active at the pair is a no-op, not an error, because a
+    /// cleanup pass re-run over the same candidate list must stay idempotent.
+    /// A functional predicate gets no special treatment here: this addresses
+    /// one row by its full key, so it never closes an object the caller did not
+    /// name.
+    /// Test: `retract_triple_closes_one_object_and_leaves_siblings_active`,
+    /// `retract_triple_on_an_absent_object_is_a_noop`,
+    /// `retract_triple_on_a_functional_predicate_closes_only_the_named_object`,
+    /// `retract_triple_on_the_only_object_clears_the_active_count`.
+    pub fn retract_triple(&self, subject: &str, predicate: &str, object: &str) -> Result<usize> {
+        // #5396: three-argument retract so object-side noise can be removed
+        // without collateral loss of the good siblings at the same pair.
+        self.retract_in_txn(subject, predicate, Some(object))
+    }
+
+    /// One write transaction behind both retract shapes.
+    ///
+    /// Why: `retract` and `retract_triple` differ only in whether the object is
+    /// pinned; sharing the transaction body keeps the table set, the commit
+    /// boundary, and the writability check from drifting between them.
+    /// What: opens TRIPLES plus both secondary indexes and the counter table,
+    /// calls [`retract_rows`] with `object`, commits.
+    /// Test: covered through both public methods (see their `Test:` lists).
+    fn retract_in_txn(
+        &self,
+        subject: &str,
+        predicate: &str,
+        object: Option<&str>,
+    ) -> Result<usize> {
         self.check_writable()?;
         let wtx = self.db().begin_write().context("begin retract txn")?;
         let closed;
@@ -102,13 +150,14 @@ impl KgStoreRedb {
             let mut counts = wtx
                 .open_table(ACTIVE_SUBJECT_COUNTS)
                 .context("open active_subject_counts table")?;
-            closed = batch_retract(
+            closed = retract_rows(
                 &mut triples,
                 &mut by_object,
                 &mut by_predicate,
                 &mut counts,
                 subject,
                 predicate,
+                object,
             )?;
         }
         wtx.commit().context("commit retract txn")?;
@@ -469,6 +518,40 @@ pub(super) fn batch_retract<'txn>(
     subject: &str,
     predicate: &str,
 ) -> Result<usize> {
+    retract_rows(
+        triples,
+        by_object,
+        by_predicate,
+        counts,
+        subject,
+        predicate,
+        None,
+    )
+}
+
+/// Close the active rows at `(subject, predicate)`, optionally narrowed to one
+/// object (#5396).
+///
+/// Why: whole-pair retract and single-object retract are the same three
+/// mutations over the same tables; the only difference is which rows the scan
+/// keeps. Writing them twice is how the two would drift on the next fix to
+/// index maintenance or the counter delta.
+/// What: scans the pair's active rows via [`active_rows_for_pair`], skips those
+/// whose object is not `object` when one is given, closes each survivor through
+/// [`close_active_row`], and applies one net decrement to the active-subject
+/// counter. Returns the number closed.
+/// Test: `retract_closes_every_object_at_the_pair` (the `None` arm),
+/// `retract_triple_closes_one_object_and_leaves_siblings_active` (the `Some`
+/// arm).
+fn retract_rows<'txn>(
+    triples: &mut Tbl<'txn>,
+    by_object: &mut Tbl<'txn>,
+    by_predicate: &mut Tbl<'txn>,
+    counts: &mut Tbl<'_>,
+    subject: &str,
+    predicate: &str,
+    object: Option<&str>,
+) -> Result<usize> {
     let close_ms = now_ms();
     let active = active_rows_for_pair(triples, subject, predicate)?;
     let mut tables = TripleTables {
@@ -476,10 +559,16 @@ pub(super) fn batch_retract<'txn>(
         by_object,
         by_predicate,
     };
+    let mut closed = 0usize;
     for (key, prior) in &active {
+        if let Some(target) = object
+            && prior.object != target
+        {
+            continue;
+        }
         close_active_row(&mut tables, key, prior, subject, predicate, close_ms)?;
+        closed += 1;
     }
-    let closed = active.len();
     adjust_active_count(counts, subject, -(closed as i64))?;
     Ok(closed)
 }

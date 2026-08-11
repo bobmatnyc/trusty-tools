@@ -939,6 +939,130 @@ mod tests {
         assert_eq!(kg.retract("room:General", "contains").unwrap(), 0);
     }
 
+    /// Why (#5396): this is the whole reason the three-argument shape exists.
+    /// A test that only checked the bad object was gone would pass against
+    /// two-argument `retract`, which takes the entire pair down with it — so
+    /// the surviving siblings are the assertion that distinguishes the two.
+    #[test]
+    fn retract_triple_closes_one_object_and_leaves_siblings_active() {
+        let (_d, kg) = open_kg();
+        for object in ["drawer:a", "drawer:b", "drawer:c"] {
+            kg.assert(&t("room:General", "contains", object)).unwrap();
+        }
+
+        assert_eq!(
+            kg.retract_triple("room:General", "contains", "drawer:b")
+                .unwrap(),
+            1
+        );
+
+        let mut objects: Vec<String> = kg
+            .query_active("room:General")
+            .unwrap()
+            .into_iter()
+            .map(|x| x.object)
+            .collect();
+        objects.sort();
+        assert_eq!(
+            objects,
+            vec!["drawer:a".to_string(), "drawer:c".to_string()],
+            "the good siblings must survive"
+        );
+        assert_eq!(kg.count_active_triples(), 2);
+
+        // The retracted object is closed, not erased.
+        let closed: Vec<_> = kg
+            .dump_all_triples()
+            .unwrap()
+            .into_iter()
+            .filter(|x| x.object == "drawer:b")
+            .collect();
+        assert_eq!(closed.len(), 1);
+        assert!(closed[0].valid_to.is_some(), "history row carries valid_to");
+    }
+
+    /// Why (#5396): a caller cleaning object-side noise scans for candidates
+    /// and retracts them one at a time. An object that is already gone (or was
+    /// never there) is the normal outcome of a re-run, not an error.
+    #[test]
+    fn retract_triple_on_an_absent_object_is_a_noop() {
+        let (_d, kg) = open_kg();
+        kg.assert(&t("room:General", "contains", "drawer:a"))
+            .unwrap();
+
+        assert_eq!(
+            kg.retract_triple("room:General", "contains", "drawer:zzz")
+                .unwrap(),
+            0,
+            "unknown object"
+        );
+        assert_eq!(
+            kg.retract_triple("room:Other", "contains", "drawer:a")
+                .unwrap(),
+            0,
+            "unknown subject"
+        );
+        assert_eq!(
+            kg.retract_triple("room:General", "mentions", "drawer:a")
+                .unwrap(),
+            0,
+            "unknown predicate"
+        );
+        assert_eq!(kg.query_active("room:General").unwrap().len(), 1);
+        assert_eq!(kg.count_active_triples(), 1);
+    }
+
+    /// Why (#5396): `retract_triple` addresses one row by its full key, so a
+    /// functional predicate gets no special "close every object" treatment —
+    /// naming the wrong object must leave the right one alone even there.
+    #[test]
+    fn retract_triple_on_a_functional_predicate_closes_only_the_named_object() {
+        let (_d, kg) = open_kg();
+        kg.assert(&t("tga", "is_alias_for", "trusty-git-analytics"))
+            .unwrap();
+
+        assert_eq!(
+            kg.retract_triple("tga", "is_alias_for", "something-else")
+                .unwrap(),
+            0
+        );
+        assert_eq!(kg.query_active("tga").unwrap().len(), 1);
+
+        assert_eq!(
+            kg.retract_triple("tga", "is_alias_for", "trusty-git-analytics")
+                .unwrap(),
+            1
+        );
+        assert!(kg.query_active("tga").unwrap().is_empty());
+        assert_eq!(kg.count_active_triples(), 0);
+    }
+
+    /// Why (#5396): the last object at a pair is the boundary case for the
+    /// active-subject counter — it must reach zero and stay there, so a second
+    /// call finds nothing rather than driving the count negative.
+    #[test]
+    fn retract_triple_on_the_only_object_clears_the_active_count() {
+        let (_d, kg) = open_kg();
+        kg.assert(&t("room:General", "contains", "drawer:a"))
+            .unwrap();
+
+        assert_eq!(
+            kg.retract_triple("room:General", "contains", "drawer:a")
+                .unwrap(),
+            1
+        );
+        assert!(kg.query_active("room:General").unwrap().is_empty());
+        assert_eq!(kg.count_active_triples(), 0);
+
+        assert_eq!(
+            kg.retract_triple("room:General", "contains", "drawer:a")
+                .unwrap(),
+            0,
+            "second call is a no-op"
+        );
+        assert_eq!(kg.count_active_triples(), 0);
+    }
+
     /// Why (#4810): `delete_by_subject` collects pairs, and one pair can now
     /// span several rows. Without the dedup it would call `retract` once per
     /// row and double-count what the first call already closed.

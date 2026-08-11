@@ -108,6 +108,75 @@ async fn second_assert_closes_prior_interval() {
     assert_eq!(active[0].object, "Beta Inc");
 }
 
+/// #5396: the graph-level counterpart of
+/// `retract_triple_closes_one_object_and_leaves_siblings_active`. Storage and
+/// the in-memory adjacency must agree afterwards — dropping every edge at the
+/// pair (what `retract` does) would leave `neighbors` reporting one target
+/// where redb still holds two.
+#[tokio::test]
+async fn retract_triple_drops_one_edge_and_keeps_the_siblings() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("kg.db");
+    let kg = KnowledgeGraph::open(&path).unwrap();
+    for object in ["drawer:a", "drawer:b", "drawer:c"] {
+        kg.assert(Triple {
+            subject: "room:General".into(),
+            predicate: "contains".into(),
+            object: object.into(),
+            valid_from: Utc::now(),
+            valid_to: None,
+            confidence: 1.0,
+            provenance: None,
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(kg.edge_count(), 3);
+
+    let closed = kg
+        .retract_triple("room:General", "contains", "drawer:b")
+        .await
+        .unwrap();
+    assert_eq!(closed, 1);
+
+    let mut neighbors: Vec<String> = kg
+        .neighbors("room:General")
+        .unwrap()
+        .into_iter()
+        .map(|(other, _)| other)
+        .collect();
+    neighbors.sort();
+    assert_eq!(
+        neighbors,
+        vec!["drawer:a".to_string(), "drawer:c".to_string()],
+        "only the named edge is dropped"
+    );
+    assert_eq!(kg.edge_count(), 2);
+
+    let mut objects: Vec<String> = kg
+        .query_active("room:General")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|x| x.object)
+        .collect();
+    objects.sort();
+    assert_eq!(
+        objects,
+        vec!["drawer:a".to_string(), "drawer:c".to_string()],
+        "storage agrees with the adjacency"
+    );
+
+    // Re-run is a no-op and leaves the survivors alone.
+    assert_eq!(
+        kg.retract_triple("room:General", "contains", "drawer:b")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(kg.edge_count(), 2);
+}
+
 /// #4810: the counterpart to `second_assert_closes_prior_interval` — an
 /// unlisted predicate is multi-valued, so both objects stay live and the
 /// in-memory adjacency keeps both edges after a re-open.
