@@ -737,7 +737,9 @@ pub async fn enrich_with_analyze(
 /// eligible repository was populated completely.
 /// Test: `analyze_adapter_tests.rs::{enrich_names_unreachable_repositories,
 /// enrich_reports_no_gaps_when_every_repo_is_populated,
-/// enrich_reports_caveats_for_partially_answered_repositories}`.
+/// enrich_reports_caveats_for_partially_answered_repositories}`, plus
+/// `redact_tests.rs::enrich_scrubs_configured_credentials_from_findings` for
+/// the #5323 redaction boundary.
 pub async fn enrich_with_analyze_gaps(
     model: &mut super::model::ReportModel,
     source: &dyn AnalyzeMetricsSource,
@@ -746,6 +748,11 @@ pub async fn enrich_with_analyze_gaps(
     // iteration order (DOC-67 §9's determinism requirement).
     let mut missing: std::collections::BTreeMap<AnalyzeGap, Vec<String>> = Default::default();
     let mut partial: std::collections::BTreeMap<AnalyzeCaveat, Vec<String>> = Default::default();
+
+    // #5323: daemon-authored text lands in an acquirer-facing artifact, so it
+    // crosses the redaction boundary before it reaches the model. Resolved once
+    // per enrichment, not once per repository — it touches the filesystem.
+    let secrets = super::redact::report_secrets();
 
     for repo in &mut model.repositories {
         // Precedence: a declared metrics file always wins.
@@ -760,11 +767,15 @@ pub async fn enrich_with_analyze_gaps(
             continue;
         };
         match source.fetch_named(&index_id).await {
-            AnalyzeFetch::Fetched { metrics, caveats } => {
+            AnalyzeFetch::Fetched {
+                mut metrics,
+                caveats,
+            } => {
                 eprintln!(
                     "[trusty-review report] --analyze: populated metrics for '{}' from index '{index_id}'",
                     repo.name
                 );
+                super::redact::scrub_metrics(&mut metrics, &secrets);
                 repo.metrics = Some(*metrics);
                 for caveat in caveats {
                     partial.entry(caveat).or_default().push(repo.name.clone());
