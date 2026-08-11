@@ -11,6 +11,7 @@
 //! Test: `interactive_reindex_not_starved_by_background` and
 //! `reindex_semaphore_selection_routes_by_priority` in `tests.rs`.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 
@@ -180,6 +181,71 @@ pub(crate) fn index_semaphore(id: &IndexId) -> Arc<Semaphore> {
 /// `remove_index_semaphore_is_a_no_op_for_unknown_id`.
 pub(crate) fn remove_index_semaphore(id: &IndexId) {
     if let Some(map) = INDEX_LOCKS.get() {
+        map.remove(id);
+    }
+}
+
+/// Process-global registry of per-index cancellation flags (issue #3049).
+///
+/// Why: [`INDEX_LOCKS`] tells a writer when it may START, and `unregister_index`
+/// can now wait on that same permit to learn when every writer has FINISHED.
+/// Waiting alone is not enough: a full reindex of a large corpus holds its
+/// permit for minutes, so a `DELETE` that only waits either blocks for minutes
+/// or times out and deletes the data directory out from under a live writer.
+/// This flag is the other half — the delete SIGNALS it before waiting, and the
+/// long-running writers poll it at their batch boundaries and stop, so the
+/// permit is released in the time it takes to finish one batch instead of the
+/// whole corpus.
+///
+/// What: a `DashMap<IndexId, Arc<AtomicBool>>` mirroring [`INDEX_LOCKS`] —
+/// lazily populated, one entry per index, `false` until a delete sets it.
+/// Eviction (via [`remove_index_cancel_flag`]) is what keeps a recreated index
+/// from being born cancelled: the next [`index_cancel_flag`] call after an
+/// eviction allocates a fresh `false` flag.
+/// Test: `unregister_index_waits_for_an_in_flight_writer_to_release_the_permit`,
+/// `index_cancel_flag_is_evicted_so_a_recreated_index_starts_uncancelled`.
+static INDEX_CANCEL_FLAGS: OnceLock<DashMap<IndexId, Arc<AtomicBool>>> = OnceLock::new();
+
+/// Returns (creating on first use) the cancellation flag for `id`.
+///
+/// Why: a single accessor keeps lazy creation in one place so a writer polling
+/// the flag and the delete setting it always reach the same `AtomicBool`.
+/// What: `DashMap::entry` + `or_insert_with`, same shape as [`index_semaphore`].
+/// Callers should fetch this AFTER acquiring the index permit — a flag set by a
+/// delete that has already completed is gone by then, so the fresh flag they
+/// get is correctly `false`.
+/// Test: see [`INDEX_CANCEL_FLAGS`].
+pub(crate) fn index_cancel_flag(id: &IndexId) -> Arc<AtomicBool> {
+    INDEX_CANCEL_FLAGS
+        .get_or_init(DashMap::new)
+        .entry(id.clone())
+        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+        .clone()
+}
+
+/// Ask every in-flight writer on `id` to stop at its next checkpoint (#3049).
+///
+/// Why: called by `unregister_index` before it waits on the index permit. Setting
+/// the flag first and waiting second is the ordering that matters: a writer that
+/// checks the flag after we set it stops promptly, and one that already passed
+/// its last checkpoint still holds the permit we are about to wait on, so
+/// neither ordering lets the delete race ahead of a live writer.
+/// What: sets the (lazily created) flag to `true` with `Release` ordering.
+/// Test: see [`INDEX_CANCEL_FLAGS`].
+pub(crate) fn signal_index_cancel(id: &IndexId) {
+    index_cancel_flag(id).store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Remove `id`'s cancellation flag, e.g. once its delete has finished (#3049).
+///
+/// Why: without eviction the flag stays `true` forever, so an index recreated
+/// under the same id would abort its very first reindex. Same growth argument as
+/// [`remove_index_semaphore`]: the map would otherwise only ever grow.
+/// What: removes the entry if present; no-op when the map was never initialised
+/// or `id` was never seen.
+/// Test: `index_cancel_flag_is_evicted_so_a_recreated_index_starts_uncancelled`.
+pub(crate) fn remove_index_cancel_flag(id: &IndexId) {
+    if let Some(map) = INDEX_CANCEL_FLAGS.get() {
         map.remove(id);
     }
 }

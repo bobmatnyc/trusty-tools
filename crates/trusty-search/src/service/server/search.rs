@@ -73,15 +73,67 @@ pub(super) async fn delete_index_handler(
     Path(id): Path<String>,
     Query(params): Query<DeleteIndexParams>,
 ) -> Json<serde_json::Value> {
-    let removed = unregister_index(&state, &id, params.delete_data).await;
+    let outcome = unregister_index(&state, &id, params.delete_data).await;
     Json(serde_json::json!({
         "id": id,
-        "removed": removed,
-        // Only meaningful when something was actually removed: an unknown id
-        // deletes nothing regardless of the flag.
-        "data_deleted": removed && params.delete_data,
+        "removed": outcome.removed,
+        // #3049: reported from what the delete actually DID, not from the flag
+        // the request sent. This used to read `removed && params.delete_data`,
+        // so a `remove_index_data_dir` failure — downgraded to a `warn!` — still
+        // answered `data_deleted: true` and the caller recorded the corpus as
+        // reclaimed while every byte of it was still on disk.
+        "data_deleted": outcome.data_deleted,
+        // #3049: false when an in-flight writer never released the index permit
+        // within `DELETE_QUIESCE_TIMEOUT`. The registration is still removed;
+        // what a caller learns from this is that data removal was REFUSED
+        // (see `unregister_index`), so retrying the delete is worthwhile.
+        "quiesced": outcome.quiesced,
     }))
 }
+
+/// What a call to [`unregister_index`] actually did, as opposed to what its
+/// caller asked for (issue #3049).
+///
+/// Why: the delete handler used to derive its `data_deleted` response field from
+/// the REQUEST (`removed && params.delete_data`) while the on-disk removal was a
+/// best-effort call whose failure was downgraded to a `warn!`. The two could
+/// disagree, and when they did the API reported a destroyed corpus that was
+/// still fully present — a failure that advances state and reports success. The
+/// three fields here are the three independent facts a caller needs, so no
+/// caller has to infer one from another again.
+/// What: a plain value type. `removed` is registration removal (hot registry or
+/// cold store), `data_deleted` is TRUE only when `remove_index_data_dir`
+/// actually returned `Ok`, and `quiesced` is whether in-flight writers drained
+/// before teardown.
+/// Test: `service::server::tests_3049`, plus the existing
+/// `delete_index_without_param_preserves_data` /
+/// `delete_index_with_delete_data_true_destroys_data`.
+pub(super) struct UnregisterOutcome {
+    /// Whether a registration (hot or cold) was actually removed.
+    pub(super) removed: bool,
+    /// Whether the on-disk data directory was actually destroyed. Always
+    /// `false` when `delete_data` was not requested.
+    pub(super) data_deleted: bool,
+    /// Whether every in-flight writer released this index's permit before
+    /// teardown ran. `false` means the wait timed out.
+    pub(super) quiesced: bool,
+}
+
+/// How long `unregister_index` waits for in-flight writers to drain before it
+/// gives up and tears down anyway (issue #3049).
+///
+/// Why: writers poll the cancel flag at batch boundaries, so the expected wait
+/// is one batch, not one corpus — 30s is generous for that and still bounded, so
+/// a stuck writer cannot wedge the HTTP handler indefinitely. The timeout is not
+/// a licence to delete: on expiry the data directory is REFUSED (see
+/// [`unregister_index`]), and only the in-memory/registry teardown proceeds.
+/// Test: `delete_with_delete_data_refuses_removal_when_a_writer_never_quiesces`.
+#[cfg(not(test))]
+const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Test build uses a short deadline so the refusal path is exercised in
+/// milliseconds. See the production value above for the real semantics.
+#[cfg(test)]
+const DELETE_QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Fully unregister an index from the running daemon.
 ///
@@ -109,14 +161,47 @@ pub(super) async fn delete_index_handler(
 /// cold-parked-only index was never removed from `indexes.toml` at all, so the
 /// next warm boot resurrected it. A cold record now counts as "an index was
 /// removed" for the durable-cleanup half below.
+/// #3049: the delete now QUIESCES the index before tearing it down. It signals
+/// this id's cancel flag, then waits up to [`DELETE_QUIESCE_TIMEOUT`] for the
+/// per-index semaphore — the permit every long-running writer already holds
+/// (`runner::run_reindex`, `defer_embed_queue`, and the PATCH config handler) —
+/// and holds that permit across teardown. Before this, a delete that landed
+/// mid-reindex removed the registration and `remove_dir_all`'d the data
+/// directory while a live writer was still writing into it; recreating the same
+/// id immediately then let a new-epoch task interleave with the old one on
+/// identical on-disk paths. On timeout the data directory is REFUSED rather
+/// than destroyed under an active writer, and the outcome says so.
 /// Test: delete-path handler tests; reaper behaviour covered by `orphan_reaper`
-/// unit tests plus the `spawn_orphan_reaper_ticker` wiring.
+/// unit tests plus the `spawn_orphan_reaper_ticker` wiring; the quiesce and
+/// refusal behaviour by `service::server::tests_3049`.
 pub(super) async fn unregister_index(
     state: &Arc<SearchAppState>,
     id: &str,
     delete_data: bool,
-) -> bool {
+) -> UnregisterOutcome {
     let index_id = IndexId::new(id.to_string());
+    // #3049: signal BEFORE waiting so a writer that is between batches stops at
+    // its next checkpoint instead of running the whole corpus to completion.
+    crate::service::reindex::signal_index_cancel(&index_id);
+    // #3049: the permit is the existing quiescence point — all three
+    // long-running writers already hold it for the full duration of their work,
+    // so acquiring it means none of them is mid-flight. Held across teardown.
+    let quiesce_permit = tokio::time::timeout(
+        DELETE_QUIESCE_TIMEOUT,
+        crate::service::reindex::index_semaphore(&index_id).acquire_owned(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+    let quiesced = quiesce_permit.is_some();
+    if !quiesced {
+        tracing::warn!(
+            "delete[{id}]: in-flight work did not drain within {:?} — proceeding with \
+             registry teardown, but on-disk data removal is REFUSED so it cannot be \
+             deleted out from under an active writer (issue #3049)",
+            DELETE_QUIESCE_TIMEOUT,
+        );
+    }
     let (removed, removed_handle) = state.registry.remove_and_get(&index_id);
     let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
     // #5075: drop the cold-store records too, or the #5057 guards answer 503
@@ -134,21 +219,31 @@ pub(super) async fn unregister_index(
     let removed = removed || was_cold;
     state.reindex_progress.remove(&index_id);
     state.watcher_manager.stop_for_index(&index_id).await;
-    // Issue #2984 Phase 1 delta-review MEDIUM finding: `INDEX_LOCKS` (the
-    // per-index reindex/catch-up mutual-exclusion semaphore registry) never
-    // shrinks on its own. Evict this id's entry unconditionally — safe even
-    // if it was never registered (no-op) or a task is still mid-flight on it
-    // (that task holds its own `Arc<Semaphore>` clone, unaffected by removing
-    // the registry entry) — see `remove_index_semaphore`'s doc comment for
-    // the full semantics.
-    crate::service::reindex::remove_index_semaphore(&index_id);
+    let mut data_deleted = false;
     if removed {
         if let Err(e) = crate::service::persistence::remove_index_registry_entry(id) {
             tracing::warn!("could not remove '{id}' from indexes.toml: {e}");
         }
         if delete_data {
-            if let Err(e) = crate::service::persistence::remove_index_data_dir(id) {
-                tracing::warn!("could not remove on-disk data for '{id}': {e}");
+            if !quiesced {
+                // #3049: refuse rather than `remove_dir_all` a directory an
+                // active writer still holds an open corpus in.
+                tracing::error!(
+                    "delete[{id}]: REFUSING to remove on-disk data — in-flight work did \
+                     not drain (issue #3049). The registration is gone; re-issue the \
+                     delete to reclaim the disk once the writer has stopped."
+                );
+            } else {
+                match crate::service::persistence::remove_index_data_dir(id) {
+                    // #3049: this is the only assignment of `data_deleted` —
+                    // the response field can no longer disagree with the disk.
+                    Ok(()) => data_deleted = true,
+                    Err(e) => tracing::error!(
+                        "delete[{id}]: on-disk data removal FAILED ({e}) — reporting \
+                         data_deleted=false so the caller does not record this corpus \
+                         as reclaimed (issue #3049)"
+                    ),
+                }
             }
         }
         if let Some(ref root) = root_path_for_cleanup {
@@ -170,7 +265,27 @@ pub(super) async fn unregister_index(
         // Keep the index-count gauge in sync.
         crate::service::metrics::set_index_count(state.registry.list().len());
     }
-    removed
+    // #3049: release the quiescence permit BEFORE evicting the registry entry.
+    // While the entry is still registered, a caller racing this teardown blocks
+    // on our permit instead of starting work against a half-dismantled index;
+    // evicting first would hand that caller a fresh, uncontended semaphore.
+    drop(quiesce_permit);
+    // Issue #2984 Phase 1 delta-review MEDIUM finding: `INDEX_LOCKS` (the
+    // per-index reindex/catch-up mutual-exclusion semaphore registry) never
+    // shrinks on its own. Evict this id's entry unconditionally — safe even
+    // if it was never registered (no-op) or a task is still mid-flight on it
+    // (that task holds its own `Arc<Semaphore>` clone, unaffected by removing
+    // the registry entry) — see `remove_index_semaphore`'s doc comment for
+    // the full semantics.
+    crate::service::reindex::remove_index_semaphore(&index_id);
+    // #3049: evict the cancel flag too, or an index recreated under this id
+    // would be born cancelled and abort its first reindex.
+    crate::service::reindex::remove_index_cancel_flag(&index_id);
+    UnregisterOutcome {
+        removed,
+        data_deleted,
+        quiesced,
+    }
 }
 
 pub(super) async fn search_handler(
