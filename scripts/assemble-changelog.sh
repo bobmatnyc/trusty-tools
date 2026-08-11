@@ -42,6 +42,8 @@
 #   (default)   assemble into CHANGELOG.md and delete the consumed fragments
 #   --check     validate only — no writes, no deletions (use in a release
 #               pre-flight BEFORE anything else is mutated)
+#   --merge     fold the pending fragments INTO an existing `## [<version>]`
+#               section instead of inserting a second one (issue #5298)
 #   --stdout    render the section to stdout as `## [Unreleased]` for preview —
 #               no writes, no deletions
 #
@@ -49,6 +51,26 @@
 # tracked README.md placeholder, so a second run inserts nothing rather than an
 # empty section. A run refuses outright when the target version heading is
 # already present.
+#
+# STRANDED FRAGMENTS (issue #5298). A `## [<version>]` section can already exist
+# for the version being cut, because assembling is not coupled to publishing: PR
+# #4824 wrote `## [1.3.5]` into trusty-mpm and `## [0.5.0]` into
+# trusty-agents-common for a cut that never published, consuming 40 fragments in
+# the act. Over the next six days 77 more fragments accumulated behind those
+# sections. The default refusal below is correct and loud, but on its own it is a
+# dead end: it names neither the fragments now stranded nor a way forward, and
+# hand-splicing CHANGELOG.md is banned by repo policy. Recovery took a manual
+# reverse-apply of #4824's changelog write.
+#
+# So the refusal now enumerates every pending fragment, and `--merge` makes the
+# recovery a supported operation: new bullets are appended to the matching
+# `### <Category>` subsections of the existing section, missing categories are
+# inserted in CATEGORY_ORDER position, and the consumed fragments are deleted in
+# the same operation. Merge stays OPT-IN rather than the default because it
+# rewrites a section that may already be published and tagged — this script
+# cannot tell a phantom cut from a shipped one, so that call stays with the
+# operator. What is NOT acceptable either way is fragments going nowhere without
+# a nonzero exit.
 #
 # An empty changelog.d/ is NOT an error — it is the steady state after a release,
 # and a crate with no user-visible change since its last release has nothing to
@@ -58,17 +80,22 @@
 # Test: `bash scripts/assemble_changelog_selftest.sh` — fixture-driven coverage of
 # every validation branch (multi-category fragment, unknown category, bodyless,
 # empty, nested, and the bullet-starting-with-a-category-word false-positive
-# guard) against a throwaway workspace copy. `bash -n` for syntax. Functionally,
+# guard) against a throwaway workspace copy, plus the #5298 stale-section cases
+# (refusal names the stranded fragments; `--merge` appends to an existing
+# category, inserts a missing one in order, never duplicates a heading, and
+# rejects a fragment body line that forges the plan-file marker).
+# `bash -n` for syntax. Functionally,
 # `scripts/assemble-changelog.sh <crate-dir> --stdout` renders the pending
 # fragments without touching any file, and `--check` also validates the target
 # CHANGELOG.md state (leftover `## [Unreleased]`, version already released).
 #
 # Usage:
-#   scripts/assemble-changelog.sh <crate-dir> <version> [--check]
+#   scripts/assemble-changelog.sh <crate-dir> <version> [--check|--merge]
 #   scripts/assemble-changelog.sh <crate-dir> --stdout
 #
 # Example:
 #   scripts/assemble-changelog.sh trusty-mpm 1.3.2
+#   scripts/assemble-changelog.sh trusty-mpm 1.3.5 --merge
 #   scripts/assemble-changelog.sh trusty-mpm --stdout
 
 set -euo pipefail
@@ -86,13 +113,21 @@ WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # content.
 CATEGORY_ORDER="Breaking Added Fixed Performance Changed Removed Security Documentation"
 
+# The --merge plan file's category-boundary marker: this token, a tab, then the
+# category name. Defined once so the writer (render_merge_plan), the reader (the
+# awk in merge_into_section) and the fragment guard (plan_marker_lines) cannot
+# drift apart — a guard that stopped matching the marker it protects would be
+# worse than no guard.
+PLAN_MARKER="@@CATEGORY"
+
 usage() {
-  echo "Usage: scripts/assemble-changelog.sh <crate-dir> <version> [--check]" >&2
+  echo "Usage: scripts/assemble-changelog.sh <crate-dir> <version> [--check|--merge]" >&2
   echo "       scripts/assemble-changelog.sh <crate-dir> --stdout" >&2
   echo "" >&2
   echo "  <crate-dir>   directory under crates/ (e.g. trusty-mpm)" >&2
   echo "  <version>     released version for the new heading (e.g. 1.3.2)" >&2
   echo "  --check       validate fragments only; write nothing, delete nothing" >&2
+  echo "  --merge       fold the fragments into an EXISTING [<version>] section" >&2
   echo "  --stdout      preview the pending section as [Unreleased]; no writes" >&2
   exit 2
 }
@@ -208,6 +243,53 @@ stray_category_lines() {
   ' "${path}"
 }
 
+# Why: --merge hands fragment bodies to awk in a plan file whose category
+# boundaries are lines beginning with PLAN_MARKER + a tab. A body line that
+# begins with that same 11-byte sequence is read as a boundary, so every bullet
+# below it is filed under the smuggled category instead of the fragment's own —
+# and --merge then DELETES the fragment, which is the only other copy.
+#
+# The placed-vs-expected set check in merge_fragments() does not catch this on
+# its own: when the smuggled name is a category that is ALSO independently
+# pending, the placed set and the expected set are the same either way. The
+# misfiled bullets are written and the fragments removed, exit 0.
+#
+# Rejected in EVERY mode, not only --merge, because whether a given release runs
+# --merge is unknowable when the fragment is authored; catching it at --stdout
+# and --check costs the author one edit, catching it at release time costs the
+# operator their inputs. Rejected inside code fences too — unlike
+# stray_category_lines(), which may exempt fences because a HUMAN reads the
+# rendered markdown, the plan reader is line-based awk that does not track fence
+# state, so a fenced marker collides exactly as hard as a bare one.
+#
+# What: prints "<file-line-number>\t<text>" for every line after the category
+# line that begins with PLAN_MARKER + a tab. A line where the token is followed
+# by a space, or one where it appears anywhere but column 0, is not the marker
+# and is not flagged.
+# Test: the `plan-marker-*` cases in scripts/assemble_changelog_selftest.sh.
+plan_marker_lines() {
+  local path="$1"
+  awk -v marker="${PLAN_MARKER}" '
+    BEGIN { mark = marker "\t"; n = length(mark) }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+    }
+    !seen && line ~ /[^[:space:]]/ { seen = 1; next }   # the category line
+    !seen { next }                                       # leading blank lines
+    substr(line, 1, n) == mark {
+      text = line
+      sub(/[[:space:]]+$/, "", text)
+      # Render the tab as <TAB>. It is the whole reason the line is the marker
+      # rather than ordinary prose, and a raw tab is indistinguishable from
+      # spaces in a terminal — it would also split the caller`s tab-delimited
+      # report field and swallow the smuggled category name.
+      gsub(/\t/, "<TAB>", text)
+      printf "%d\t%s\n", NR, text
+    }
+  ' "${path}"
+}
+
 # Why: fragments must emit in a deterministic order so two people assembling the
 # same set get byte-identical output.
 # What: prints the fragment's leading issue/PR number, or 0 when the name has no
@@ -253,6 +335,21 @@ parse_fragment() {
     return 1
   fi
 
+  local marked
+  marked="$(plan_marker_lines "${path}")"
+  if [[ -n "${marked}" ]]; then
+    echo "ERROR: ${base} has a line that collides with the --merge plan-file" >&2
+    echo "       marker '${PLAN_MARKER}' + tab:" >&2
+    printf '%s\n' "${marked}" \
+      | awk -F'\t' -v b="${base}" '{ printf "         %s:%s: %s\n", b, $1, $2 }' >&2
+    echo "       A --merge run would read that line as a category boundary and file" >&2
+    echo "       every bullet below it under the smuggled category, then DELETE this" >&2
+    echo "       fragment. Rejected in every mode, and inside code fences too — the" >&2
+    echo "       plan reader is line-based and does not track fences." >&2
+    echo "       Indent the line by two spaces, or break up the token." >&2
+    return 1
+  fi
+
   local stray
   stray="$(stray_category_lines "${path}")"
   if [[ -n "${stray}" ]]; then
@@ -293,28 +390,270 @@ fragment_body() {
     | awk '{ lines[NR] = $0 } END { last = NR; while (last > 0 && lines[last] ~ /^[[:space:]]*$/) last--; for (i = 1; i <= last; i++) print lines[i] }'
 }
 
+# Why: the fresh-section renderer and the --merge planner must group fragments
+# identically, or a merged section would drift in shape from an assembled one.
+# What: prints the concatenated verbatim bodies of every fragment whose category
+# is $1, in the order the caller already sorted them, or nothing.
+category_body() {
+  local cat="$1" parsed="$2" group path
+  group="$(printf '%s\n' "${parsed}" | awk -F'\t' -v c="${cat}" '$1 == c { print $2 }')"
+  [[ -z "${group}" ]] && return 0
+  while IFS= read -r path; do
+    [[ -z "${path}" ]] && continue
+    fragment_body "${path}"
+  done <<<"${group}"
+}
+
 # Why: keep rendering in one place so --stdout preview and the real write can
 # never diverge.
 # What: prints the assembled section (heading + grouped bullets) for the given
-# heading text, reading the tab-separated "<category>\t<path>" list on stdin.
+# heading text, reading the tab-separated "<category>\t<path>" list in $2.
 render_section() {
-  local heading="$1" parsed="$2" cat path first_group=1
+  local heading="$1" parsed="$2" cat body first_group=1
   printf '%s\n' "${heading}"
   for cat in ${CATEGORY_ORDER}; do
-    local group
-    group="$(printf '%s\n' "${parsed}" | awk -F'\t' -v c="${cat}" '$1 == c { print $2 }')"
-    [[ -z "${group}" ]] && continue
+    body="$(category_body "${cat}" "${parsed}")"
+    [[ -z "${body}" ]] && continue
     printf '\n### %s\n\n' "${cat}"
     first_group=0
-    while IFS= read -r path; do
-      [[ -z "${path}" ]] && continue
-      fragment_body "${path}"
-    done <<<"${group}"
+    printf '%s\n' "${body}"
   done
   if [[ "${first_group}" -eq 1 ]]; then
     echo "ERROR: no category groups rendered — refusing to write an empty section." >&2
     return 1
   fi
+}
+
+# Why: awk cannot take a multi-line value per category through -v, so --merge
+# hands it the new bullets as a file. A fragment body cannot forge a boundary
+# here — parse_fragment() has already rejected any body line carrying the marker.
+# What: prints the plan — a `<PLAN_MARKER><TAB><name>` line followed by that
+# category's verbatim bullet lines, for every category with pending fragments.
+render_merge_plan() {
+  local parsed="$1" cat body
+  for cat in ${CATEGORY_ORDER}; do
+    body="$(category_body "${cat}" "${parsed}")"
+    [[ -z "${body}" ]] && continue
+    printf '%s\t%s\n' "${PLAN_MARKER}" "${cat}"
+    printf '%s\n' "${body}"
+  done
+}
+
+# Why: --merge must place every pending bullet inside the EXISTING
+# `## [<version>]` section without duplicating a `### <Category>` heading and
+# without disturbing any other section. Insertion position matters: a new
+# category belongs where CATEGORY_ORDER puts it, and a category the section
+# already carries must be APPENDED to, not restated.
+#
+# What: rewrites $1 into $4, folding the plan file $3 into the section headed by
+# `## [$2]`. Three passes over two files — the plan builds the per-category
+# bullet map, changelog pass 1 records which `### <Category>` headings the
+# target section already has, changelog pass 2 emits the rewrite. Every category
+# it actually places is recorded in the report file $5 as `PLACED<TAB><name>`,
+# which is what lets the caller prove nothing was dropped before it deletes a
+# single fragment.
+#
+# Heading matching is `index($0, want) == 1`, not a regex: the version is
+# operator-supplied and would otherwise need escaping twice (once for the shell,
+# once through awk -v's own escape processing), and `## [1.3.5]` as a literal
+# prefix already matches `## [1.3.5] — 2026-08-04` exactly as intended.
+#
+# Test: the #5298 cases in scripts/assemble_changelog_selftest.sh.
+merge_into_section() {
+  local changelog="$1" version="$2" plan="$3" out="$4" report="$5"
+  : >"${report}"
+  awk -v planfile="${plan}" -v want="## [${version}]" -v cats="${CATEGORY_ORDER}" \
+    -v repfile="${report}" -v marker="${PLAN_MARKER}" '
+    function record(c) { done[c] = 1; printf "PLACED\t%s\n", c > repfile }
+    function emit_new(c) {
+      print ""
+      print "### " c
+      print ""
+      printf "%s", pend[c]
+      record(c)
+    }
+    # Emits the subsection just walked (heading, its authored body with the
+    # blank padding normalised, then any pending bullets for that category).
+    # cur == "" is the pre-heading remainder of the section, emitted verbatim.
+    function finalize(   i, first, last) {
+      first = 1
+      last = nb
+      while (first <= last && body[first] ~ /^[[:space:]]*$/) first++
+      while (last >= first && body[last] ~ /^[[:space:]]*$/) last--
+      if (cur == "") {
+        if (last >= first) {
+          print ""
+          for (i = first; i <= last; i++) print body[i]
+        }
+      } else {
+        print ""
+        print "### " cur
+        print ""
+        for (i = first; i <= last; i++) print body[i]
+        if ((cur in pend) && !(cur in done)) {
+          printf "%s", pend[cur]
+          record(cur)
+        }
+      }
+      nb = 0
+      cur = ""
+    }
+    # A pending category with no heading of its own goes in ahead of the first
+    # existing heading that outranks it. One the section already carries is
+    # skipped here and appended at its own heading by finalize().
+    function flush_before(h,   i, c) {
+      if (!(h in rank)) return
+      for (i = 1; i <= nc; i++) {
+        c = order[i]
+        if (rank[c] >= rank[h]) return
+        if ((c in pend) && !(c in done) && !(c in hashead)) emit_new(c)
+      }
+    }
+    function flush_rest(   i, c) {
+      for (i = 1; i <= nc; i++) {
+        c = order[i]
+        if ((c in pend) && !(c in done)) emit_new(c)
+      }
+    }
+    function heading_text(line,   h) {
+      h = line
+      sub(/^#+[[:space:]]*/, "", h)
+      sub(/[[:space:]]*#*[[:space:]]*$/, "", h)
+      return h
+    }
+    BEGIN {
+      nc = split(cats, order, " ")
+      for (i = 1; i <= nc; i++) rank[order[i]] = i
+      mark = marker "\t"
+      marklen = length(mark)
+      phase = 0
+      cur = ""
+      nb = 0
+      pass = 0
+    }
+    FILENAME == planfile {
+      if (substr($0, 1, marklen) == mark) { pc = substr($0, marklen + 1); next }
+      if (pc != "") pend[pc] = pend[pc] $0 "\n"
+      next
+    }
+    FNR == 1 { pass++ }
+    pass == 1 {
+      if (index($0, want) == 1) { scan = 1; next }
+      if (scan && index($0, "## ") == 1) scan = 0
+      if (scan && index($0, "### ") == 1) hashead[heading_text($0)] = 1
+      next
+    }
+    phase == 0 {
+      print
+      if (index($0, want) == 1) { phase = 1; cur = ""; nb = 0 }
+      next
+    }
+    phase == 2 { print; next }
+    index($0, "## ") == 1 {
+      finalize()
+      flush_rest()
+      print ""
+      print
+      phase = 2
+      next
+    }
+    index($0, "### ") == 1 {
+      h = heading_text($0)
+      finalize()
+      flush_before(h)
+      cur = h
+      nb = 0
+      next
+    }
+    { body[++nb] = $0; next }
+    END {
+      if (phase == 1) { finalize(); flush_rest() }
+    }
+  ' "${plan}" "${changelog}" "${changelog}" >"${out}"
+}
+
+# Why: --merge is the one path that rewrites text a human already reviewed, so
+# it owes a proof that the rewrite placed everything before it deletes the only
+# other copy of those bullets. Deleting fragments on the strength of "the awk
+# exited 0" is exactly the fail-open shape #5298 is about.
+# What: renders the plan, merges into a temp file, and requires the merger's
+# PLACED report to list every category that had pending fragments. Any shortfall
+# leaves CHANGELOG.md and changelog.d/ untouched and exits nonzero.
+# Test: the #5298 `--merge` cases in scripts/assemble_changelog_selftest.sh.
+# Why: both write paths end with `rm -f "${fragments[@]}"` AFTER CHANGELOG.md has
+# already been replaced, and a bare `rm` there is a silent-partial arm. If it
+# fails — a read-only changelog.d/, a permissions change, an immutable flag —
+# `set -e` aborts before the success message, so the operator sees NO output at
+# all: the section is written, the fragments are still pending, and nothing says
+# so. The next run then re-adds those bullets. --merge is the more damaging of
+# the two, because its re-run appends the survivor to a section that already
+# contains it; the default-write path's re-run at least hits the
+# already-has-a-section refusal.
+#
+# What: deletes the consumed fragments and verifies each one is gone. Any
+# survivor is reported by name, together with the fact that CHANGELOG.md is
+# ALREADY updated and that re-running would duplicate the bullets, and returns
+# nonzero so the caller's success message never prints. Existence is the ground
+# truth here, not `rm`'s exit status — one status covers N files.
+# Test: the `undeletable-fragment-*` cases in scripts/assemble_changelog_selftest.sh.
+delete_consumed_fragments() {
+  local crate_dir="$1" what="$2"
+  shift 2
+  local fragments=("$@") survivors=() f
+
+  rm -f "${fragments[@]}" || true
+  for f in "${fragments[@]}"; do
+    if [[ -e "${f}" ]]; then survivors+=("${f}"); fi
+  done
+  [[ "${#survivors[@]}" -eq 0 ]] && return 0
+
+  echo "ERROR: crates/${crate_dir}/CHANGELOG.md WAS ALREADY UPDATED (${what}), but" >&2
+  echo "       ${#survivors[@]} of ${#fragments[@]} fragment(s) could not be deleted:" >&2
+  printf '%s\n' "${survivors[@]}" | sed 's#^.*/changelog\.d/#         changelog.d/#' >&2
+  echo "       Do NOT re-run: those bullets are in CHANGELOG.md already, and a" >&2
+  echo "       second run would add them a second time. Delete these by hand," >&2
+  echo "       then review and commit the CHANGELOG.md change." >&2
+  return 1
+}
+
+merge_fragments() {
+  local crate_dir="$1" changelog="$2" version="$3" parsed="$4"
+  shift 4
+  local fragments=("$@")
+
+  local plan="${changelog}.merge-plan.$$"
+  local report="${changelog}.merge-report.$$"
+  local tmp="${changelog}.merge.$$"
+  # shellcheck disable=SC2064  # expand the paths now so the trap targets these files
+  trap "rm -f '${plan}' '${report}' '${tmp}'" EXIT
+
+  render_merge_plan "${parsed}" >"${plan}"
+  if [[ ! -s "${plan}" ]]; then
+    echo "ERROR: no category groups rendered — refusing to merge nothing." >&2
+    exit 1
+  fi
+
+  merge_into_section "${changelog}" "${version}" "${plan}" "${tmp}" "${report}"
+
+  local want_cats got_cats
+  want_cats="$(printf '%s\n' "${parsed}" | cut -f1 | LC_ALL=C sort -u)"
+  got_cats="$(cut -f2 "${report}" | LC_ALL=C sort -u)"
+  if [[ "${want_cats}" != "${got_cats}" ]]; then
+    echo "ERROR: merge into '## [${version}]' did not place every pending category." >&2
+    echo "       Expected: $(printf '%s' "${want_cats}" | tr '\n' ' ')" >&2
+    echo "       Placed:   $(printf '%s' "${got_cats}" | tr '\n' ' ')" >&2
+    echo "       crates/${crate_dir}/CHANGELOG.md and changelog.d/ are UNCHANGED." >&2
+    exit 1
+  fi
+
+  mv "${tmp}" "${changelog}"
+  rm -f "${plan}" "${report}"
+  trap - EXIT
+
+  delete_consumed_fragments "${crate_dir}" "merged into [${version}]" "${fragments[@]}" || exit 1
+
+  echo "Merged ${#fragments[@]} fragment(s) into the existing [${version}] section of" >&2
+  echo "crates/${crate_dir}/CHANGELOG.md and removed them from changelog.d/." >&2
 }
 
 main() {
@@ -328,7 +667,7 @@ main() {
     version=""
   else
     case "${mode}" in
-      write | --check) ;;
+      write | --check | --merge) ;;
       *) usage ;;
     esac
     if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
@@ -430,9 +769,37 @@ main() {
     return 0
   fi
 
+  local has_section=0
   if grep -qE "^## \[${version//./\\.}\]" "${changelog}"; then
-    echo "ERROR: ${changelog} already has a '## [${version}]' section." >&2
-    echo "       Refusing to insert a second one. Nothing has been modified." >&2
+    has_section=1
+  fi
+
+  # --merge folds into the existing section; every other mode refuses to touch
+  # one. See the STRANDED FRAGMENTS note at the top of this file (#5298).
+  if [[ "${mode}" == "--merge" ]]; then
+    if [[ "${has_section}" -eq 0 ]]; then
+      echo "ERROR: ${changelog} has no '## [${version}]' section to merge into." >&2
+      echo "       --merge exists to recover a section that was assembled for a cut" >&2
+      echo "       that never published; there is nothing here to recover. Drop" >&2
+      echo "       --merge to assemble a fresh section. Nothing has been modified." >&2
+      exit 1
+    fi
+    merge_fragments "${crate_dir}" "${changelog}" "${version}" "${parsed}" "${fragments[@]}"
+    return 0
+  fi
+
+  if [[ "${has_section}" -eq 1 ]]; then
+    echo "ERROR: ${changelog} already has a '## [${version}]' section, and these" >&2
+    echo "       ${#fragments[@]} fragment(s) are still pending behind it:" >&2
+    printf '%s\n' "${fragments[@]}" | sed "s#^${crate_path}/#         #" >&2
+    echo "       Refusing to insert a second section. Nothing has been modified." >&2
+    echo "" >&2
+    echo "       This is the #5298 state: an earlier run assembled [${version}] for a" >&2
+    echo "       cut that did not publish, and work accumulated behind it. Two ways" >&2
+    echo "       forward — never hand-edit CHANGELOG.md:" >&2
+    echo "         1. Fold the pending fragments into that section:" >&2
+    echo "              scripts/assemble-changelog.sh ${crate_dir} ${version} --merge" >&2
+    echo "         2. Cut the next version instead, leaving [${version}] as history." >&2
     exit 1
   fi
 
@@ -477,7 +844,7 @@ main() {
   # with no such directory sends the next PR straight back to editing
   # `## [Unreleased]` — which is both the conflict this change removes and, one
   # release later, a hard stop in the leftover-[Unreleased] check above.
-  rm -f "${fragments[@]}"
+  delete_consumed_fragments "${crate_dir}" "assembled as [${version}]" "${fragments[@]}" || exit 1
 
   echo "Assembled ${#fragments[@]} fragment(s) into crates/${crate_dir}/CHANGELOG.md as [${version}]" >&2
   echo "and removed them from crates/${crate_dir}/changelog.d/." >&2
