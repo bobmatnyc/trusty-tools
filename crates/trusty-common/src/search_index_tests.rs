@@ -29,16 +29,24 @@ fn scratch_dir(tag: &str) -> PathBuf {
     p
 }
 
+/// Derivation still walks to the git root, and nothing registered means nothing
+/// pinnable (#1373, #5091).
+///
+/// Why: this test used to be called
+/// `ensure_project_indexed_returns_derived_id_when_daemon_down` and asserted the
+/// id came back regardless. It was wrong twice over. The contract it pinned is
+/// the #5091 defect — an id handed to a caller that will pin it, for an index
+/// nothing created. And its name never matched what it ran: under `cargo test`
+/// the #4255 harness guard short-circuits before daemon discovery, so the
+/// daemon-down branch it claims to exercise is never reached (the branch that
+/// IS reached, `SkippedUnderTest`, sends nothing either — same conclusion).
+/// What: keeps the derivation assertion — the id is the git-root basename even
+/// from a nested directory, read off the reporting entry point which still
+/// carries it — and adds the #5091 one: the id-only entry point withholds it,
+/// because no registration was observed.
+/// Test: this test.
 #[test]
-fn ensure_project_indexed_returns_derived_id_when_daemon_down() {
-    // Why (#1373): the helper must derive the project's index id (git-root
-    // basename, via `derive_index_id`) AND stay graceful when the
-    // trusty-search daemon is unreachable — it still returns the id so the
-    // caller can pin it. We force the daemon-down path by pointing the data
-    // dir at an empty temp dir so `resolve_daemon_base_url` finds no address
-    // file (and thus issues no HTTP POST). `ENV_LOCK` serialises the
-    // process-global override against sibling env-mutating tests (the same
-    // guard `daemon_addr`/`data_dir` tests use).
+fn ensure_project_indexed_withholds_id_when_nothing_was_registered() {
     let _guard = crate::data_dir::ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -55,7 +63,11 @@ fn ensure_project_indexed_returns_derived_id_when_daemon_down() {
     let nested = project.join("crates/inner");
     fs::create_dir_all(&nested).unwrap();
 
-    let id = ensure_project_indexed(&nested, true);
+    let report = ensure_project_indexed_reporting(
+        &nested,
+        IndexOptions::default().with_allow_sensitive_path(true),
+    );
+    let pinnable = ensure_project_indexed(&nested, true);
     let expected = crate::derive_index_id(&project);
 
     unsafe {
@@ -64,7 +76,20 @@ fn ensure_project_indexed_returns_derived_id_when_daemon_down() {
     let _ = fs::remove_dir_all(&project);
     let _ = fs::remove_dir_all(&data_dir);
 
-    assert_eq!(id, Some(expected), "id is the git-root basename");
+    assert_eq!(
+        report.index_id,
+        Some(expected),
+        "id is the git-root basename"
+    );
+    assert_ne!(
+        report.registration,
+        IndexRegistration::Confirmed,
+        "no daemon was contacted, so nothing can be confirmed"
+    );
+    assert_eq!(
+        pinnable, None,
+        "an unregistered index must not come back as a pinnable id (#5091)"
+    );
 }
 
 /// A test process gets `SkippedUnderTest`, never a claim of registration
@@ -78,10 +103,17 @@ fn ensure_project_indexed_returns_derived_id_when_daemon_down() {
 /// What: calls the reporting entry point on a real git-rooted temp project
 /// under the default (test-harness-detected) environment and asserts the id
 /// still comes back while `registration` is `SkippedUnderTest` — not
-/// `Confirmed`.
+/// `Confirmed`. Holds `ENV_LOCK` for the same reason
+/// `running_under_test_harness_is_true_in_this_test_binary` does: the verdict
+/// reads `ALLOW_PRODUCTION_ENV`, which sibling tests set and clear, so without
+/// the lock this asserts on whatever another thread happened to leave in the
+/// process env.
 /// Test: this test.
 #[test]
 fn reporting_says_skipped_under_test_harness() {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let project = scratch_dir("report-skip");
     fs::create_dir_all(project.join(".git")).unwrap();
 
@@ -759,8 +791,9 @@ fn daemon_was_contacted_during(body: impl FnOnce()) -> bool {
 /// only prior guard) is switched off on that path, so nothing else stands
 /// between the fixture and the operator's registry.
 /// What: with a discoverable stand-in daemon, calls `ensure_project_indexed`
-/// on a temp fixture root; asserts no connection was made and the id still
-/// came back (the fail-open contract is unchanged).
+/// on a temp fixture root; asserts no connection was made, and — since a
+/// suppressed write registers nothing — that no pinnable id came back either
+/// (#5091; before that fix this arm asserted the opposite).
 /// Test: this test.
 #[test]
 fn ensure_project_indexed_never_writes_to_a_daemon_under_test() {
@@ -778,9 +811,9 @@ fn ensure_project_indexed_never_writes_to_a_daemon_under_test() {
          process — that is the issue #4255 registry leak"
     );
     assert!(
-        id.is_some(),
-        "the derived index id must still be returned; the guard suppresses the \
-         daemon write, not the caller's contract"
+        id.is_none(),
+        "the guard suppressed the write, so no index was registered — handing \
+         back a pinnable id anyway is the #5091 fail-open shape"
     );
     let _ = fs::remove_dir_all(&root);
 }
@@ -852,5 +885,155 @@ fn index_options_builders_match_field_construction() {
             allow_sensitive_path: true,
             skip_vector: true,
         }
+    );
+}
+
+/// Stand up a one-shot fake trusty-search daemon answering with `status_line`.
+///
+/// Why: the #5091 error arm is only reachable against a daemon that is
+/// REACHABLE and REFUSES — pointing discovery at a dead port lands in
+/// `DaemonUnreachable`, a different branch. Accepting exactly one connection and
+/// then dropping the listener also makes the follow-up reindex probes fail fast
+/// with connection-refused instead of idling in the accept backlog until their
+/// own multi-second timeouts elapse (the trick
+/// `ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body`
+/// already uses).
+/// What: binds `127.0.0.1:0`, spawns a thread that accepts ONE connection, reads
+/// the request, replies `status_line` with an empty body, and exits. Returns the
+/// bound address and the thread handle.
+/// Test: used by `create_rejected_by_the_daemon_withholds_the_pinnable_id`.
+fn one_shot_daemon(
+    status_line: &'static str,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake daemon");
+    let addr = listener.local_addr().expect("fake daemon local_addr");
+    let handle = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        drop(listener);
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        let _ = stream.write_all(
+            format!("{status_line}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").as_bytes(),
+        );
+        let _ = stream.flush();
+    });
+    (addr, handle)
+}
+
+/// Publish `addr` where `resolve_daemon_base_url("trusty-search")` will find it.
+///
+/// Why: mirrors `write_daemon_addr`'s on-disk discovery contract so a test's own
+/// loopback socket stands in for the daemon.
+/// What: creates `<data_dir>/trusty-search/` and writes `http_addr`.
+/// Test: used by `create_rejected_by_the_daemon_withholds_the_pinnable_id`.
+fn publish_daemon_addr(data_dir: &Path, addr: std::net::SocketAddr) {
+    let search_data_dir = data_dir.join("trusty-search");
+    fs::create_dir_all(&search_data_dir).unwrap();
+    fs::write(search_data_dir.join("http_addr"), addr.to_string()).unwrap();
+}
+
+/// Run `body` with discovery pointed at a fake daemon that answers `status_line`.
+///
+/// Why: the three arms of the #5091 regression need the identical arrangement —
+/// `ENV_LOCK`, an isolated data dir, the #4255 opt-out, a fake daemon, and a
+/// git-rooted project — and repeating it three times is where a missed env
+/// restore leaks into a sibling serial test.
+/// What: locks `ENV_LOCK`, points `DATA_DIR_OVERRIDE_ENV` at a scratch dir, sets
+/// `ALLOW_PRODUCTION_ENV=1` (safe: discovery points at this test's OWN loopback
+/// socket, never the operator's daemon), creates a git-rooted scratch project,
+/// runs `body(&project)`, then restores the env and removes both scratch dirs
+/// before returning `body`'s value.
+/// Test: used by `create_rejected_by_the_daemon_withholds_the_pinnable_id`.
+fn with_refusing_daemon<T>(
+    tag: &str,
+    status_line: &'static str,
+    body: impl FnOnce(&Path) -> T,
+) -> T {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let data_dir = scratch_dir(&format!("5091-data-{tag}"));
+    fs::create_dir_all(&data_dir).unwrap();
+    // SAFETY: guarded by ENV_LOCK; both vars are removed below before returning.
+    unsafe {
+        std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+        std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
+    }
+
+    let (addr, server) = one_shot_daemon(status_line);
+    publish_daemon_addr(&data_dir, addr);
+
+    let project = scratch_dir(&format!("5091-project-{tag}"));
+    fs::create_dir_all(project.join(".git")).unwrap();
+
+    let out = body(&project);
+
+    let _ = server.join();
+    unsafe {
+        std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+        std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
+    }
+    let _ = fs::remove_dir_all(&project);
+    let _ = fs::remove_dir_all(&data_dir);
+    out
+}
+
+/// Regression for #5091: a `POST /indexes` the daemon REFUSES must not yield a
+/// pinnable index id.
+///
+/// Why: this is the fail-open shape the ticket names. The create failed — the
+/// daemon answered 500, so no index exists under the derived id — yet
+/// `ensure_project_indexed` handed the id back anyway, session launch pinned it
+/// into `.mcp.json`, and every later `search` in that session answered
+/// `404 unknown index` while `search_health` stayed green. Withholding the id
+/// leaves the pin unadvanced, which is the fix; the derived id itself stays
+/// reachable through `ensure_project_indexed_reporting` for callers that need it
+/// to log or to GC, where the adjacent `registration` field makes ignoring the
+/// failure a visible choice rather than the default.
+/// What: three arms against a fake daemon that 500s the create — the two id-only
+/// entry points must return `None`, and the reporting entry point must still
+/// carry the derived id alongside `NotConfirmed`.
+/// Test: this test.
+#[test]
+fn create_rejected_by_the_daemon_withholds_the_pinnable_id() {
+    let refused = "HTTP/1.1 500 Internal Server Error";
+
+    let id = with_refusing_daemon("ensure", refused, |project| {
+        ensure_project_indexed(project, false)
+    });
+    assert_eq!(
+        id, None,
+        "ensure_project_indexed returned a pinnable id after the daemon REFUSED \
+         the create (HTTP 500) — pinning it makes every later search 404 (#5091)"
+    );
+
+    let id = with_refusing_daemon("ensure-with", refused, |project| {
+        ensure_project_indexed_with(project, IndexOptions::default().with_skip_vector(true))
+    });
+    assert_eq!(
+        id, None,
+        "ensure_project_indexed_with returned a pinnable id after the daemon \
+         REFUSED the create (HTTP 500) — #5091"
+    );
+
+    let (report, expected) = with_refusing_daemon("report", refused, |project| {
+        (
+            ensure_project_indexed_reporting(project, IndexOptions::default()),
+            crate::derive_index_id(project),
+        )
+    });
+    assert_eq!(
+        report.registration,
+        IndexRegistration::NotConfirmed,
+        "a 500 on the create is not a registration"
+    );
+    assert_eq!(
+        report.index_id,
+        Some(expected),
+        "the derived id stays available for logging and GC — it is the PIN that \
+         is withheld, not the id"
     );
 }

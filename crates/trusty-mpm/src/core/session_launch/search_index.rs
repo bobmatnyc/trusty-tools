@@ -90,11 +90,18 @@ pub(crate) fn inject_trusty_search_mcp(
 /// register-and-populate logic was PROMOTED into
 /// [`trusty_common::search_index::ensure_project_indexed`] so trusty-code can
 /// reuse the ONE implementation (common entry-point rule); this wrapper keeps
-/// the session-launch call site and name stable. Behaviour is unchanged: derive
-/// the canonical index id, best-effort `POST /indexes` + freshness-gated reindex
-/// when the daemon is reachable, always return the derived id so the stub is
-/// pinned even when the daemon is down, and never propagate an error (the
-/// session must still launch).
+/// the session-launch call site and name stable. Derive the canonical index id,
+/// best-effort `POST /indexes` + freshness-gated reindex when the daemon is
+/// reachable, and never propagate an error (the session must still launch).
+///
+/// `None` on an unconfirmed registration (#5091): the shared helper used to hand
+/// the derived id back even when the create failed or never happened, so this
+/// wrapper pinned `.mcp.json` to an index the daemon had never heard of and
+/// every `search` in that session answered `404 unknown index` — permanently,
+/// invisibly, with the `search` health check still green. It now returns the id
+/// only when the daemon confirmed it; otherwise the caller writes the unpinned
+/// stub, which `tm doctor`'s `search_index_pin` check reports as a warning
+/// instead of a silent dead end.
 /// What: delegates to [`trusty_common::search_index::ensure_project_indexed`]
 /// with `allow_sensitive_path: false` (issue #2914). A trusty-mpm session
 /// workspace is always either the user's checked-out repository or a
@@ -112,8 +119,8 @@ pub(crate) fn inject_trusty_search_mcp(
 /// cannot undo the BM25+KG-only decision worktree creation made. See that
 /// function for why the ordering made this a real drift and not a theoretical
 /// one.
-/// Test: `register_project_index_returns_derived_id` (derivation + daemon-down
-/// graceful path) and `register_project_index_never_bypasses_sensitive_path_denylist`
+/// Test: `register_project_index_withholds_id_when_registration_is_unconfirmed`
+/// (#5091) and `register_project_index_never_bypasses_sensitive_path_denylist`
 /// (issue #2914 regression) in `tests.rs`; the promoted logic is unit-tested in
 /// `trusty_common::search_index::tests`.
 pub(crate) fn register_project_index(project_root: &Path) -> Option<String> {
