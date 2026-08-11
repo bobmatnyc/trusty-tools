@@ -334,7 +334,9 @@ fn wing_registry_count(handle: &Arc<PalaceHandle>) -> Option<usize> {
 /// owns the degrade.
 /// Test: `status_does_not_open_uncached_palaces` (success path, through the
 /// status roll-up), `triple_count_or_zero_degrades_a_failed_read_to_zero` (the
-/// error arm).
+/// error arm, in the delegate that owns it). What stays uncovered is the
+/// one-line wiring of the read into that rule: inducing a real failure needs
+/// `KgStoreRedb::db()`, which trusty-common keeps `pub(super)`.
 pub(crate) fn kg_triple_count_or_zero(handle: &Arc<PalaceHandle>) -> usize {
     triple_count_or_zero(&handle.id, handle.kg.count_active_triples())
 }
