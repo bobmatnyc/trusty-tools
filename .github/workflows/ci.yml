@@ -319,6 +319,14 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy --workspace --all-targets --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
 
+      # `codex-config` is enabled by no crate in the workspace, so the
+      # `--workspace` run above never pulls `codex_config` in via feature
+      # unification — it ships with green CI that never even compiled the
+      # module. This is the only step that lints it (#5264).
+      - name: cargo clippy -p trusty-common --features codex-config -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo clippy -p trusty-common --all-targets --features codex-config -- -D warnings
+
   # --------------------------------------------------------------------------
   # test: run all unit + integration tests (stable, no --include-ignored).
   # ONNX-backed tests are #[ignore]-tagged; they are intentionally skipped here
@@ -893,6 +901,14 @@ jobs:
         run: |
           cargo test -p trusty-common --lib --features update-check \
             update::tests::cache_fresh_returns_some_when_newer -- --exact
+
+      # `codex-config` is enabled by no crate in the workspace, so neither
+      # `cargo test --workspace` nor `cargo clippy --workspace` ever compiles
+      # `codex_config` or runs its tests — the module could rot undetected
+      # (#5264). This is the only step that exercises it.
+      - name: cargo test -p trusty-common --features codex-config
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo test -p trusty-common --lib --features codex-config codex_config
 
   # --------------------------------------------------------------------------
   # msrv: verify the workspace compiles on the effective MSRV.
