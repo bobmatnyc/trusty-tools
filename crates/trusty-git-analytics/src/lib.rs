@@ -10,6 +10,7 @@
 //! - [`collect`] — Stage 1: git extraction and external-system fetches
 //! - [`classify`] — Stage 2: four-tier commit classification cascade
 //! - [`report`] — Stage 3: CSV / JSON / Markdown report generation
+//! - [`profile`] — longitudinal contributor profiling over the collected data
 //! - [`commands`] — the subcommand handlers `main.rs` dispatches into
 //! - [`audit`] — the one-shot AUDIT sweep that drives those handlers end to end
 
@@ -28,4 +29,7 @@ pub mod classify;
 pub mod collect;
 pub mod commands;
 pub mod core;
+// #5463: contributor profiling is tga's domain, so it lives beside the data it
+// reads rather than in a crate that then has to depend on tga (epic #5468).
+pub mod profile;
 pub mod report;
