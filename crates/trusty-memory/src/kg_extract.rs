@@ -20,6 +20,7 @@
 //! `extract_triples_extracts_is_a_pattern`,
 //! `extract_triples_never_panics_on_empty_input`.
 
+use crate::wordnet_pos;
 use chrono::Utc;
 use std::collections::HashSet;
 use trusty_common::memory_core::store::kg::Triple;
@@ -646,6 +647,7 @@ pub fn is_stop_token(tok: &str) -> bool {
 /// `extract_triples_rejects_stopword_object`.
 fn extract_patterns(content: &str) -> Vec<(String, String, String)> {
     let lower = content.to_lowercase();
+    let wn = wordnet_pos::wordnet();
     let mut out: Vec<(String, String, String)> = Vec::new();
     for (predicate, markers) in PATTERN_TABLE {
         for marker in *markers {
@@ -654,18 +656,123 @@ fn extract_patterns(content: &str) -> Vec<(String, String, String)> {
                 let right_start = idx + marker.len();
                 let right = lower[right_start..].trim();
                 let subject_tok = last_token(left);
-                let object_tok = first_token(right);
                 // #4678: a marker hit is not evidence of two entities — reject
                 // the whole triple when either side is a function word or too
                 // short, never half of it.
-                if !is_stop_token(&subject_tok) && !is_stop_token(&object_tok) {
-                    out.push((subject_tok, (*predicate).to_string(), object_tok));
+                // #5399: and reject when POS says the token names a property
+                // rather than a thing, on either side.
+                let subject_ok =
+                    !is_stop_token(&subject_tok) && !wn.is_adjective_only(&subject_tok);
+                if subject_ok {
+                    if let Some(object_tok) = select_object(right, wn) {
+                        out.push((subject_tok, (*predicate).to_string(), object_tok));
+                    }
                 }
                 break;
             }
         }
     }
     out
+}
+
+/// Prepositions that continue a noun phrase rather than closing it.
+///
+/// Why: #5399 rule 3 — `ancestor of origin/main` and `member of the process
+/// group` are single noun phrases, so grabbing `ancestor` or `member` alone
+/// truncates a relation into a bogus type. The stopping token is what reveals
+/// it. The set is deliberately just `of`: it is the genitive linker and is
+/// almost always NP-internal, whereas every other preposition attaches
+/// ambiguously — `trusty-memory uses redb for persistence` has `for` closing
+/// the object and opening a purpose adjunct on the verb, and that triple must
+/// survive.
+/// What: matched against the cleaned token immediately after the extracted
+/// noun-phrase run; a hit rejects the whole triple.
+/// Test: `rejects_ancestor_before_of`, `rejects_member_of_the_process_group`,
+/// `keeps_uses_object_before_a_non_genitive_preposition`.
+const NP_CONTINUING_PREPOSITIONS: &[&str] = &["of"];
+
+/// Characters that close a noun phrase when welded to a token's trailing edge.
+///
+/// Why: `is a parser, and ...` must not walk the run into the next clause.
+/// What: consulted on the RAW token before [`clean_token`] strips it.
+/// Test: `stops_the_noun_phrase_run_at_a_comma`.
+const NP_TERMINATING_PUNCT: &[char] = &['.', ',', ';', ':', '!', '?', ')'];
+
+/// Longest noun-phrase run the object walk will consider.
+///
+/// Why: a bound keeps a pathological line (a long unpunctuated list of unknown
+/// tokens) from letting the head drift far from the marker. Four covers
+/// `[adj] [noun] [noun]` plus one, which is past the length of any real
+/// technical compound in drawer prose.
+/// Test: `caps_the_noun_phrase_run`.
+const NP_RUN_MAX: usize = 4;
+
+/// Pick the object entity out of the text following a pattern marker.
+///
+/// Why: #5399 — `first_token` grabs one token, which is wrong three ways at
+/// once. It takes the modifier instead of the head (`a fast parser` -> `fast`),
+/// it accepts a bare property as a type (`a hard requirement` -> `hard`), and
+/// it silently truncates a relation into a type (`an ancestor of origin main`
+/// -> `ancestor`). All three need to see more than one token and need to know
+/// each token's part of speech.
+/// What: walks forward from the marker collecting a noun-phrase run, stopping
+/// at a function word, a verb-only or adverb-only token, trailing sentence
+/// punctuation, an unknown token (a name is a head, not a modifier), or
+/// [`NP_RUN_MAX`]. Then: rejects when the first token is adjective-only (rule
+/// 1); rejects when the token that stopped the run is in
+/// [`NP_CONTINUING_PREPOSITIONS`] (rule 3); otherwise returns the LAST
+/// non-adjective-only token in the run, which is the head of a right-headed
+/// English compound (rule 2). Every WordNet miss widens the accepted set rather
+/// than narrowing it, so an unknown crate name is never rejected for being
+/// unknown (rule 4).
+/// Test: `selects_the_head_noun_past_an_adjective`,
+/// `rejects_adjective_only_object`, `rejects_ancestor_before_of`,
+/// `unknown_object_token_is_accepted`.
+fn select_object(right: &str, wn: &wordnet_pos::WordNetPos) -> Option<String> {
+    let raw_toks: Vec<&str> = right.split_whitespace().collect();
+    let mut run: Vec<&str> = Vec::new();
+    let mut idx = 0usize;
+    let mut terminated = false;
+    while idx < raw_toks.len() && run.len() < NP_RUN_MAX {
+        let raw = raw_toks[idx];
+        let tok = clean_token(raw);
+        if tok.is_empty() || is_stop_token(tok) {
+            break;
+        }
+        let mask = wn.mask(tok);
+        // A word WordNet knows only as a verb or only as an adverb cannot sit
+        // inside a noun phrase, so the phrase ended before it.
+        if mask != 0 && mask & (wordnet_pos::NOUN | wordnet_pos::ADJ) == 0 {
+            break;
+        }
+        run.push(tok);
+        idx += 1;
+        if raw.ends_with(NP_TERMINATING_PUNCT) {
+            terminated = true;
+            break;
+        }
+        // An unknown token is almost always a proper name in this corpus, and a
+        // name heads its phrase rather than modifying the next word.
+        if mask == 0 {
+            break;
+        }
+    }
+    let first = *run.first()?;
+    if wn.is_adjective_only(first) {
+        return None;
+    }
+    if !terminated {
+        if let Some(next) = raw_toks.get(idx) {
+            let boundary = clean_token(next);
+            if NP_CONTINUING_PREPOSITIONS.contains(&boundary) {
+                return None;
+            }
+        }
+    }
+    run.iter()
+        .rev()
+        .find(|t| !wn.is_adjective_only(t))
+        .map(|t| (*t).to_string())
 }
 
 /// Pull the final whitespace-delimited token from a fragment.
@@ -684,19 +791,8 @@ fn last_token(s: &str) -> String {
         .to_string()
 }
 
-/// Pull the first whitespace-delimited token from a fragment.
-///
-/// Why: Mirror of `last_token` for the right side of a pattern hit.
-/// What: Returns the first whitespace-delimited token, cleaned identically.
-/// Test: `extract_triples_extracts_is_a_pattern`,
-/// `extract_triples_strips_punctuation_from_both_token_edges`.
-fn first_token(s: &str) -> String {
-    s.split_whitespace()
-        .next()
-        .map(clean_token)
-        .unwrap_or("")
-        .to_string()
-}
+// #5399: `first_token` is gone — the object side now walks a noun-phrase run
+// through `select_object` instead of grabbing one token.
 
 /// Strip surrounding punctuation from one raw token.
 ///
@@ -1216,12 +1312,14 @@ mod tests {
     /// Rejecting them needs sentence-level context or head-noun selection,
     /// which is a different change from this one.
     ///
-    /// The owner has ruled that lexical filtering alone therefore does NOT
-    /// satisfy ADR-0038 precondition 3. This test is the standing record of
-    /// that open gate, tracked as its own issue — not a temporary note. Do not
-    /// delete it because it looks like it asserts a bug: it does, deliberately,
-    /// and the gate closes with the issue, not with this file.
-    /// What: pins the residue as CURRENT behaviour — these two still extract.
+    /// #5399 closed that gate, so the assertion is inverted rather than
+    /// deleted: the lexical half still holds — `is_stop_token` alone provably
+    /// cannot reject any of these four words — but the residue it used to
+    /// permit is now gone, and it is the WordNet POS pass that removes it. Both
+    /// halves together are what says the fix landed where it was supposed to
+    /// and not by accidentally widening the stopword list.
+    /// What: asserts the four words survive the lexical filter AND that neither
+    /// sentence yields a triple.
     /// Test: This test.
     #[test]
     fn lexical_filter_does_not_reach_the_two_content_word_regressions() {
@@ -1234,13 +1332,13 @@ mod tests {
         );
         let exhaustiveness = patterns_for("match exhaustiveness is a hard requirement here");
         assert!(
-            exhaustiveness.contains(&("exhaustiveness".into(), "is-a".into(), "hard".into())),
-            "known #4678 residue; got {exhaustiveness:?}"
+            exhaustiveness.is_empty(),
+            "#5399 should have closed the #4678 residue; got {exhaustiveness:?}"
         );
         let squash = patterns_for("confirm the squash is an ancestor of origin main");
         assert!(
-            squash.contains(&("squash".into(), "is-a".into(), "ancestor".into())),
-            "known #4678 residue; got {squash:?}"
+            squash.is_empty(),
+            "#5399 should have closed the #4678 residue; got {squash:?}"
         );
     }
 
@@ -1267,6 +1365,321 @@ mod tests {
         assert!(
             !triples.is_empty(),
             "empty deny-list must not suppress extraction"
+        );
+    }
+}
+
+/// The #5399 lane-A bake-off evaluation set, plus the cases that probe where
+/// the WordNet approach behaves surprisingly.
+///
+/// Why: the owner is picking between two lanes on identical inputs, so these
+/// rows are fixed and must not be edited to suit an implementation. The
+/// `surprising_*` tests below are deliberately included even where they record
+/// a WRONG answer — a lane comparison built only from passing rows is useless.
+/// What: each test drives `extract_triples` end to end and asserts on the
+/// pattern-derived triples only (tag/room/hashtag triples are unrelated).
+#[cfg(test)]
+mod wordnet_eval {
+    use super::*;
+
+    /// Pattern triples only, as `(subject, predicate, object)`.
+    fn pattern_triples(content: &str) -> Vec<(String, String, String)> {
+        extract_triples(&ExtractInput {
+            drawer_id: Uuid::new_v4(),
+            content,
+            tags: &[],
+            room: None,
+        })
+        .into_iter()
+        .filter(|t| PATTERN_TABLE.iter().any(|(p, _)| *p == t.predicate))
+        .map(|t| (t.subject, t.predicate, t.object))
+        .collect()
+    }
+
+    fn assert_none(content: &str) {
+        let got = pattern_triples(content);
+        assert!(
+            got.is_empty(),
+            "expected no triple from {content:?}, got {got:?}"
+        );
+    }
+
+    fn assert_one(content: &str, s: &str, p: &str, o: &str) {
+        let got = pattern_triples(content);
+        assert_eq!(
+            got,
+            vec![(s.to_string(), p.to_string(), o.to_string())],
+            "wrong extraction from {content:?}"
+        );
+    }
+
+    // ---- Row 1: adjective-only object. `hard` is ADJ|ADV, never NOUN. ----
+    #[test]
+    fn row1_rejects_adjective_only_object() {
+        assert_none("match exhaustiveness is a hard requirement here");
+    }
+
+    // ---- Row 2: genitive boundary. The NP is `ancestor of origin main`. ----
+    #[test]
+    fn row2_rejects_ancestor_truncated_before_of() {
+        assert_none("confirm the squash is an ancestor of origin main");
+    }
+
+    // ---- Row 3: the baseline good triple must survive untouched. ----
+    #[test]
+    fn row3_keeps_rustc_is_a_compiler() {
+        assert_one("rustc is a compiler", "rustc", "is-a", "compiler");
+    }
+
+    // ---- Row 4: head-noun re-walk past a modifier. ----
+    #[test]
+    fn row4_rewalks_past_the_adjective_to_the_head_noun() {
+        assert_one("librs is a fast parser", "librs", "is-a", "parser");
+    }
+
+    // ---- Row 5: `for` closes the object; it is a verb adjunct, not a NP. ----
+    #[test]
+    fn row5_keeps_uses_object_before_a_non_genitive_preposition() {
+        assert_one(
+            "trusty-memory uses redb for persistence",
+            "trusty-memory",
+            "uses",
+            "redb",
+        );
+    }
+
+    // ---- Row 6: same genitive shape as row 2, different noun. ----
+    #[test]
+    fn row6_rejects_member_of_the_process_group() {
+        assert_none("the daemon is a member of the process group");
+    }
+
+    // ---- Row 7: right-headed compound; the head is the LAST noun. ----
+    #[test]
+    fn row7_takes_the_head_of_a_noun_noun_compound() {
+        assert_one("tantivy is a search library", "tantivy", "is-a", "library");
+    }
+
+    // ================= where this approach behaves surprisingly =============
+
+    /// The row-1 rule is decided by a lexicographic accident, not by grammar.
+    ///
+    /// `hard` has no noun sense in WordNet so `is a hard requirement` is
+    /// dropped whole; `fast` does have one (a period of fasting) so `is a fast
+    /// parser` re-walks and succeeds. The two inputs are grammatically
+    /// identical — DET ADJ NOUN — and the only thing separating them is
+    /// whether Princeton happened to record a noun sense for the modifier.
+    /// Every adjective-only modifier therefore destroys an otherwise good
+    /// triple.
+    #[test]
+    fn surprising_adjective_only_modifier_destroys_a_good_triple() {
+        // Grammatically identical to row 4, and the object is a real entity.
+        assert_none("librs is a robust parser");
+        assert_none("tantivy is an embedded library");
+        assert_none("sled is a concurrent database");
+        // Change one word to a modifier WordNet happens to give a noun sense
+        // and the same sentence works. Nothing grammatical separates them.
+        assert_one("librs is a fast parser", "librs", "is-a", "parser");
+        assert_one(
+            "tantivy is a portable library",
+            "tantivy",
+            "is-a",
+            "library",
+        );
+    }
+
+    /// How often the rule above fires, measured rather than asserted by feel.
+    ///
+    /// Over 78 adjectives drawn from ordinary technical prose, 43 have no noun
+    /// sense in WordNet 3.1 and therefore destroy the whole triple instead of
+    /// re-walking to the head noun. That is the dominant false-reject source in
+    /// this lane, and it is a property of Princeton's lexicography, not of
+    /// anything tunable here.
+    #[test]
+    fn measures_the_adjective_only_false_reject_rate() {
+        let wn = wordnet_pos::wordnet();
+        let sample: &[&str] = &[
+            "fast",
+            "small",
+            "simple",
+            "modern",
+            "lightweight",
+            "portable",
+            "generic",
+            "old",
+            "good",
+            "great",
+            "better",
+            "new",
+            "robust",
+            "minimal",
+            "tiny",
+            "huge",
+            "concurrent",
+            "embedded",
+            "reliable",
+            "lazy",
+            "secure",
+            "rusty",
+            "async",
+            "asynchronous",
+            "synchronous",
+            "distributed",
+            "persistent",
+            "immutable",
+            "mutable",
+            "functional",
+            "relational",
+            "hierarchical",
+            "incremental",
+            "deterministic",
+            "idempotent",
+            "scalable",
+            "extensible",
+            "pluggable",
+            "configurable",
+            "optional",
+            "required",
+            "deprecated",
+            "experimental",
+            "stable",
+            "unstable",
+            "legacy",
+            "native",
+            "remote",
+            "local",
+            "static",
+            "dynamic",
+            "public",
+            "private",
+            "internal",
+            "external",
+            "open",
+            "closed",
+            "free",
+            "paid",
+            "commercial",
+            "fancy",
+            "neat",
+            "clean",
+            "dirty",
+            "quick",
+            "slow",
+            "heavy",
+            "light",
+            "cheap",
+            "expensive",
+            "strict",
+            "lenient",
+            "safe",
+            "unsafe",
+            "correct",
+            "incorrect",
+            "complete",
+            "partial",
+        ];
+        let adj_only = sample.iter().filter(|w| wn.is_adjective_only(w)).count();
+        assert_eq!(
+            (sample.len(), adj_only),
+            (78, 43),
+            "adjective-only false-reject rate moved; re-measure before trusting the report"
+        );
+    }
+
+    /// Only `of` is treated as NP-continuing, so the same truncation slips
+    /// through with any other preposition.
+    #[test]
+    fn surprising_non_genitive_relational_phrase_still_truncates() {
+        assert_one(
+            "the daemon is a participant in the process group",
+            "daemon",
+            "is-a",
+            "participant",
+        );
+    }
+
+    /// WordNet knows ordinary English, and ordinary English words are also
+    /// language and tool names. Nothing here rejects a known word, so this
+    /// works — but it is worth pinning that the fail-open rule is what saves
+    /// it, and any future "reject known common nouns" tightening would break
+    /// exactly these.
+    #[test]
+    fn common_english_words_that_are_real_entity_names_survive() {
+        assert_one("rust is a language", "rust", "is-a", "language");
+        assert_one("go is a language", "go", "is-a", "language");
+        assert_one("python is a language", "python", "is-a", "language");
+    }
+
+    /// A plural head is unknown to WordNet (index files hold base forms only),
+    /// so the run stops at it and it becomes the head. Correct here, but it
+    /// means every inflected form takes the fail-open path rather than the
+    /// POS-checked one.
+    #[test]
+    fn surprising_plural_heads_are_unknown_to_wordnet() {
+        let wn = wordnet_pos::wordnet();
+        assert_eq!(wn.mask("parsers"), 0, "WordNet indexes base forms only");
+        assert_one("librs is a fast parsers", "librs", "is-a", "parsers");
+    }
+
+    /// Two unknown tokens in a row: the run stops at the first, so the head is
+    /// the first name rather than the last. Right for `uses redb for X`, wrong
+    /// for a genuine unknown-unknown compound.
+    #[test]
+    fn surprising_run_stops_at_the_first_unknown_token() {
+        assert_one(
+            "trusty-memory uses redb sled",
+            "trusty-memory",
+            "uses",
+            "redb",
+        );
+    }
+
+    #[test]
+    fn stops_the_noun_phrase_run_at_a_comma() {
+        assert_one(
+            "rustc is a compiler, and cargo is the build tool",
+            "rustc",
+            "is-a",
+            "compiler",
+        );
+    }
+
+    #[test]
+    fn caps_the_noun_phrase_run() {
+        // Five noun/adjective tokens; the head must come from the first four.
+        assert_one(
+            "librs is a fast small modular parser core",
+            "librs",
+            "is-a",
+            "parser",
+        );
+    }
+
+    #[test]
+    fn unknown_subject_and_object_both_fail_open() {
+        assert_one("tantivy uses fst", "tantivy", "uses", "fst");
+    }
+
+    #[test]
+    fn adjective_only_subject_is_rejected() {
+        assert_none("anything robust is a compiler");
+    }
+
+    /// An inflected form WordNet does not index takes the fail-open path, so
+    /// the adjective-only rule silently does not apply to it.
+    #[test]
+    fn surprising_comparative_adjectives_slip_past_the_pos_check() {
+        let wn = wordnet_pos::wordnet();
+        assert_eq!(
+            wn.mask("quicker"),
+            wordnet_pos::ADV,
+            "not indexed as an adjective"
+        );
+        assert_one(
+            "something quicker is a compiler",
+            "quicker",
+            "is-a",
+            "compiler",
         );
     }
 }

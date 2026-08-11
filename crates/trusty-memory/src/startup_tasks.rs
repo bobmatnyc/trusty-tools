@@ -42,6 +42,12 @@ use trusty_memory::AppState;
 ///       and populates the map; the log emission is confirmed by the throwaway
 ///       daemon run documented in the session notes.
 pub(crate) fn spawn_startup_tasks(state: &AppState) {
+    // #5399: build the WordNet POS table here so the first `memory_remember`
+    // does not pay for the parse. Synchronous on purpose — it is 6.6-9.8 ms
+    // measured (`examples/wordnet_measure.rs`) and every extraction path needs
+    // it, so deferring it to a task only moves the cost onto whichever request
+    // loses the race.
+    trusty_memory::wordnet_pos::preload();
     // Issue #1529: build watch channel for the autonomous dream scheduler.
     // The sender (`dtx`) is intentionally held here and moved into the
     // hydration task — the shutdown bridge is only wired AFTER
