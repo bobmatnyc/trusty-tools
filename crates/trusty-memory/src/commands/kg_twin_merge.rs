@@ -119,7 +119,7 @@ pub fn twin_repoints(active: &[Triple]) -> Vec<TwinRepoint> {
             new,
         });
     }
-    out.sort_by(|a, b| key(&a.old).cmp(&key(&b.old)));
+    out.sort_by_key(|a| key(&a.old));
     out
 }
 
