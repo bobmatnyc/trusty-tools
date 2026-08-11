@@ -198,6 +198,42 @@ impl CorpusStore {
         }
     }
 
+    /// Test-only fault injection: make every `_meta` read return a real redb
+    /// error (#5357).
+    ///
+    /// Why: the #2178 root-move gate's fail-open arms can only be proven by a
+    /// genuine `read_indexed_root` failure, and redb has no way to fail a read
+    /// from outside the database — the file lock means a test cannot reach the
+    /// open `Database` behind the store's back. Asserting the gate on a
+    /// hand-rolled `Err` value instead would prove the decision function and
+    /// leave the wiring from `IndexHandle::read_indexed_root` untested, which
+    /// is precisely where the `unwrap_or(None)` lived.
+    /// What: drops `_meta` and recreates a table of the same NAME with an
+    /// incompatible value type, so every later `open_table(META_TABLE)` returns
+    /// `TableError::TableTypeMismatch` — the same shape as an on-disk schema
+    /// fault. `#[cfg(test)]`, so it never exists in a shipped binary.
+    /// Test: `service::reindex::root_hijack_tests::\
+    /// reindex_refuses_when_the_corpus_indexed_root_read_fails`.
+    #[cfg(test)]
+    pub(crate) fn break_meta_table_for_tests(&self) -> Result<()> {
+        use crate::core::migration::META_TABLE;
+        const DECOY_META_TABLE: redb::TableDefinition<&str, u64> =
+            redb::TableDefinition::new("_meta");
+        let txn = self.db.begin_write().context("begin _meta break txn")?;
+        txn.delete_table(META_TABLE)
+            .map_err(|e| anyhow::anyhow!("drop _meta table: {e}"))?;
+        {
+            let mut decoy = txn
+                .open_table(DECOY_META_TABLE)
+                .map_err(|e| anyhow::anyhow!("create decoy _meta table: {e}"))?;
+            decoy
+                .insert(crate::core::migration::META_KEY_INDEXED_ROOT, 0u64)
+                .context("seed decoy _meta row")?;
+        }
+        txn.commit().context("commit _meta break txn")?;
+        Ok(())
+    }
+
     /// Persist the canonical root path the corpus's chunk `file` fields are
     /// stored relative to (#602).
     ///

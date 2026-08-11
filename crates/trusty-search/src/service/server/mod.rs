@@ -62,6 +62,10 @@ mod tests_4715;
 // #4951: a reindex root_path override must not empty every search result.
 #[cfg(test)]
 mod tests_4951;
+// #5357: a failed read of either trust-gate input must refuse the override
+// rather than degrade to "trusted".
+#[cfg(test)]
+mod tests_5357;
 // #4250: timeout-parked index recovery and the /health un-latch.
 #[cfg(test)]
 mod tests_4250;

@@ -21,9 +21,16 @@
 //! `POST /indexes/:id/relocate`, which persists before swapping the handle)
 //! — still completes normally.
 //!
+//! #5357 extends the module to the gate's two INPUTS: both were read
+//! fail-open, so a redb fault or an unparseable `indexes.toml` skipped the very
+//! check these tests pin. Those two tests inject a real read failure at each
+//! input and assert the same corpus-preserving refusal.
+//!
 //! Test: `reindex_refuses_untrusted_root_move_and_preserves_corpus` (the core
-//! #2178 regression) and `reindex_accepts_root_move_that_matches_persisted_config`
-//! (the surviving legitimate-move case).
+//! #2178 regression), `reindex_accepts_root_move_that_matches_persisted_config`
+//! (the surviving legitimate-move case),
+//! `reindex_refuses_when_the_persisted_registry_cannot_be_read` and
+//! `reindex_refuses_when_the_corpus_indexed_root_read_fails` (#5357).
 
 use super::*;
 use crate::core::chunker::{ChunkType, RawChunk};
@@ -214,6 +221,193 @@ async fn reindex_refuses_untrusted_root_move_and_preserves_corpus() {
          reindex against an untrusted root; found {} (a lower count means \
          the corpus was wrongly pruned)",
         surviving.len()
+    );
+
+    // #5357: the refusal must also repair the divergence it found. The handler
+    // applies the override's `set_root_path` at request time, so an index that
+    // reaches this abort has its indexer resolving root-relative chunk paths
+    // against the refused root while the corpus is relative to the old one —
+    // and `file_is_within_root` is a lexical prefix test, so those dangling
+    // paths pass it and `stale_index_root` reads `false`. Pointing the indexer
+    // back at the corpus's own root makes the same state fail closed.
+    assert_eq!(
+        handle.indexer.read().await.root_path,
+        root_a.path(),
+        "#5357: a refused root move must leave the indexer resolving against \
+         the root the corpus is actually relative to, not the refused one"
+    );
+}
+
+/// #5357: an `indexes.toml` that cannot be READ must refuse the move, not read
+/// back as "this index has no persisted entry".
+///
+/// Why: `load_index_registry().ok()` dropped the error, and
+/// `root_move_is_trusted(None, _)` returns `true` — so the one input that could
+/// contradict the hijacked in-memory root was silently discarded and the #2178
+/// gate waved the same incident straight through. #4317/#4871 already found
+/// unparseable registries in the wild, which is why that load is an `Err` at
+/// all rather than an empty vec.
+/// What: the hijack fixture, except `indexes.toml` holds garbage instead of the
+/// real entry. Asserts the reindex is refused before the walk and the corpus
+/// survives.
+/// Test: this test.
+#[tokio::test]
+async fn reindex_refuses_when_the_persisted_registry_cannot_be_read() {
+    if !isolate_in_child_process(
+        "service::reindex::root_hijack_tests::\
+         reindex_refuses_when_the_persisted_registry_cannot_be_read",
+    ) {
+        return;
+    }
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let root_a = tempfile::tempdir().expect("root a");
+    let root_b = tempfile::tempdir().expect("root b");
+    // A real file under the hijack target, so a gate that fails open walks
+    // something and the `total_files == 0` assertion below actually discriminates.
+    std::fs::write(root_b.path().join("bystander.rs"), "fn bystander() {}\n").unwrap();
+    std::fs::create_dir_all(root_b.path().join(".trusty-search")).unwrap();
+
+    let id = IndexId::new("cto-5357-registry-unreadable");
+    let corpus =
+        Arc::new(CorpusStore::open(&data_dir.path().join("cto_corpus.redb")).expect("open corpus"));
+    let seed_chunks: Vec<RawChunk> = (0..50)
+        .map(|i| chunk("real/file.rs", &format!("real:{i}")))
+        .collect();
+    corpus.upsert_chunks(&seed_chunks).expect("seed chunks");
+
+    let mut indexer = CodeIndexer::new(id.0.clone(), root_b.path().to_path_buf());
+    indexer.set_corpus_store(Arc::clone(&corpus));
+    let handle = Arc::new(IndexHandle::bare(
+        id.clone(),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root_b.path().to_path_buf(),
+    ));
+    handle
+        .write_indexed_root(root_a.path())
+        .await
+        .expect("stamp prior indexed_root");
+
+    // The durable source of truth is present but unreadable — the state
+    // `load_index_registry` reports as an error rather than an empty registry.
+    std::fs::write(
+        crate::service::persistence::indexes_toml_path().expect("registry path"),
+        "this file is not valid toml = = =\n",
+    )
+    .expect("write an unparseable registry");
+
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
+
+    assert_eq!(
+        progress.status.load(),
+        ReindexStatus::Failed,
+        "#5357: an unreadable indexes.toml must refuse the root move — \
+         discarding that read is how the #2178 gate was bypassed"
+    );
+    assert_eq!(
+        progress.total_files.load(Ordering::Acquire),
+        0,
+        "#5357: the refusal must fire before the walk starts"
+    );
+    assert_eq!(
+        corpus
+            .load_all_chunks()
+            .expect("read corpus after abort")
+            .len(),
+        50,
+        "#5357: the real corpus must survive a reindex refused for an \
+         unreadable registry"
+    );
+}
+
+/// #5357: a corpus whose last-indexed root cannot be READ must refuse the
+/// reindex, not proceed as though the index had never been indexed.
+///
+/// Why: `handle.read_indexed_root().await.unwrap_or(None)` collapsed two
+/// different states into one. `Ok(None)` — no durable corpus, or never
+/// stamped — legitimately means "nothing to relativize against" and skips the
+/// gate. `Err` means the answer is unknown, and skipping the gate there hands
+/// an unvalidated root to the walk and then to the prune pass, which is the
+/// #402 root-hijack incident's exact ending.
+/// What: seeds a corpus at root A, points the in-memory handle at an unrelated
+/// root B, then breaks the corpus's `_meta` table so every read of it errors.
+/// Asserts the reindex is refused before the walk and all 50 chunks survive —
+/// pre-fix, the gate never ran, root B was walked, and the prune pass deleted
+/// every chunk it did not see there.
+/// Test: this test.
+#[tokio::test]
+async fn reindex_refuses_when_the_corpus_indexed_root_read_fails() {
+    if !isolate_in_child_process(
+        "service::reindex::root_hijack_tests::\
+         reindex_refuses_when_the_corpus_indexed_root_read_fails",
+    ) {
+        return;
+    }
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let root_a = tempfile::tempdir().expect("root a");
+    let root_b = tempfile::tempdir().expect("root b");
+    std::fs::write(root_b.path().join("bystander.rs"), "fn bystander() {}\n").unwrap();
+    std::fs::create_dir_all(root_b.path().join(".trusty-search")).unwrap();
+
+    let id = IndexId::new("cto-5357-corpus-unreadable");
+    let corpus =
+        Arc::new(CorpusStore::open(&data_dir.path().join("cto_corpus.redb")).expect("open corpus"));
+    let seed_chunks: Vec<RawChunk> = (0..50)
+        .map(|i| chunk("real/file.rs", &format!("real:{i}")))
+        .collect();
+    corpus.upsert_chunks(&seed_chunks).expect("seed chunks");
+
+    let mut indexer = CodeIndexer::new(id.0.clone(), root_b.path().to_path_buf());
+    indexer.set_corpus_store(Arc::clone(&corpus));
+    let handle = Arc::new(IndexHandle::bare(
+        id.clone(),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root_b.path().to_path_buf(),
+    ));
+    handle
+        .write_indexed_root(root_a.path())
+        .await
+        .expect("stamp prior indexed_root");
+
+    // The registry agrees with the corpus — the corpus read is the input under
+    // test, and pre-fix its failure alone was enough to skip the gate.
+    crate::service::persistence::upsert_index_registry_entry(PersistedIndex {
+        id: id.0.clone(),
+        root_path: root_a.path().to_path_buf(),
+        ..Default::default()
+    })
+    .expect("persist indexes.toml entry");
+
+    corpus
+        .break_meta_table_for_tests()
+        .expect("inject the _meta read fault");
+
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), progress.clone(), false)
+        .await
+        .expect("reindex task must not panic");
+
+    assert_eq!(
+        progress.status.load(),
+        ReindexStatus::Failed,
+        "#5357: an unreadable corpus indexed_root must refuse the reindex — \
+         'the read failed' is not 'this index has no prior root'"
+    );
+    assert_eq!(
+        progress.total_files.load(Ordering::Acquire),
+        0,
+        "#5357: the refusal must fire before the walk starts"
+    );
+    assert_eq!(
+        corpus
+            .load_all_chunks()
+            .expect("read corpus after abort")
+            .len(),
+        50,
+        "#5357: the real corpus must survive — pre-fix this walked the \
+         unrelated root and pruned every chunk it did not find there"
     );
 }
 
