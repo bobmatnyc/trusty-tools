@@ -14,7 +14,24 @@ use std::path::{Path, PathBuf};
 
 /// On-disk record for one registered index. Kept tiny so the TOML file stays
 /// human-readable for ops debugging.
+///
+/// Why `#[non_exhaustive]`: this struct grows a field every time the daemon
+/// learns to remember one more thing across a restart, and each addition used
+/// to be a semver-major break for any outside caller building it with a struct
+/// literal — #4088 shipped exactly that break on a patch bump and cost a
+/// downstream crate a yank. `#[non_exhaustive]` makes future field additions
+/// non-breaking by construction, which is what this repo's release convention
+/// asks for. Adding the attribute is ITSELF breaking, so it lands here, in the
+/// release that was already taking a minor bump for the #4390 / #4391 fields.
+/// What: outside this crate, construct with [`PersistedIndex::new`] (or
+/// `Default::default()`) and assign the fields you need — every field stays
+/// `pub`, so only the literal SYNTAX is withdrawn, not write access. In-crate
+/// construction is unaffected.
+/// Test: `service::boot_markers_tests::legacy_entries_load_with_both_markers_absent`
+/// pins the deserialisation contract; the `tests/` integration suites exercise
+/// the constructor.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PersistedIndex {
     pub id: String,
     pub root_path: PathBuf,
@@ -404,6 +421,25 @@ impl Default for PersistedIndex {
             ambiguous_root_since_unix: None,
             indexed_head_sha: None,
             deferred_embed_pending: false,
+        }
+    }
+}
+
+impl PersistedIndex {
+    /// Build an entry for `id` rooted at `root_path`, everything else default.
+    ///
+    /// Why: `#[non_exhaustive]` withdraws struct-literal syntax outside this
+    /// crate, and `id` / `root_path` are the two fields with no meaningful
+    /// default — an entry without them addresses nothing. This is the
+    /// replacement for `PersistedIndex { id, root_path, ..Default::default() }`.
+    /// What: `Default::default()` with the two identity fields filled in. Every
+    /// other field stays `pub`, so a caller assigns what it needs afterwards.
+    /// Test: used throughout the `tests/` integration suites.
+    pub fn new(id: impl Into<String>, root_path: impl Into<PathBuf>) -> Self {
+        Self {
+            id: id.into(),
+            root_path: root_path.into(),
+            ..Default::default()
         }
     }
 }

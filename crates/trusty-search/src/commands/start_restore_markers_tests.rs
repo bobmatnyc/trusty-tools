@@ -91,11 +91,10 @@ fn read_entry(id: &str) -> PersistedIndex {
 }
 
 fn entry_for(id: &str, root: &std::path::Path) -> PersistedIndex {
-    PersistedIndex {
-        id: id.to_owned(),
-        root_path: root.to_path_buf(),
-        colocated: true,
-        ..Default::default()
+    {
+        let mut e = PersistedIndex::new(id.to_owned(), root.to_path_buf());
+        e.colocated = true;
+        e
     }
 }
 
@@ -119,8 +118,11 @@ async fn restore(entry: PersistedIndex) -> Arc<IndexHandle> {
 
 /// Serialised: `upsert_index_registry_entry` is load-all -> push -> save-all,
 /// so two concurrent upserts against the process-shared `indexes.toml` can
-/// drop each other's entry (#4871 tracks the general fix). `#[serial]` on the
-/// shared key is what keeps these tests deterministic in the meantime.
+/// drop each other's entry (#4871 tracks the general fix). These use the
+/// DEFAULT `#[serial]` key deliberately — it is the key the existing
+/// registry-mutating tests already use, and a named key would have excluded
+/// only each other while `save_index_registry` republished the whole file
+/// underneath them.
 ///
 /// #4391: a restored handle carries the persisted SHA, not live HEAD.
 ///
@@ -131,7 +133,7 @@ async fn restore(entry: PersistedIndex) -> Arc<IndexHandle> {
 /// Against the pre-fix restore the assertion fails carrying the SECOND sha.
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial(trusty_search_indexes_toml)]
+#[serial_test::serial]
 async fn restored_handle_keeps_the_persisted_head_sha_across_downtime() {
     let (dir, first_sha) = git_repo_with_commit("a.rs", "fn a() {}");
     let id = "start-restore-4391-downtime";
@@ -172,7 +174,7 @@ async fn restored_handle_keeps_the_persisted_head_sha_across_downtime() {
 /// `Pending` and this fails on the assertion after the poll window.
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial(trusty_search_indexes_toml)]
+#[serial_test::serial]
 async fn restore_rearms_an_interrupted_deferred_embed_pass() {
     let (dir, _sha) = git_repo_with_commit("c.rs", "fn c() {}");
     let id = "start-restore-4390-rearm";
@@ -211,7 +213,7 @@ async fn restore_rearms_an_interrupted_deferred_embed_pass() {
 /// cannot be mistaken for a marker that was never written.
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial(trusty_search_indexes_toml)]
+#[serial_test::serial]
 async fn restore_drops_the_marker_for_a_skip_vector_index() {
     let (dir, _sha) = git_repo_with_commit("d.rs", "fn d() {}");
     let id = "start-restore-4390-skip-vector";

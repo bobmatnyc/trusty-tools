@@ -18,12 +18,11 @@ use tempfile::tempdir;
 const DAY: u64 = 86_400;
 
 fn make_entry(id: &str, last_queried: Option<u64>, last_indexed: Option<u64>) -> PersistedIndex {
-    PersistedIndex {
-        id: id.to_string(),
-        root_path: PathBuf::from(format!("/tmp/{id}")),
-        last_queried_unix: last_queried,
-        last_indexed_unix: last_indexed,
-        ..Default::default()
+    {
+        let mut e = PersistedIndex::new(id.to_string(), PathBuf::from(format!("/tmp/{id}")));
+        e.last_queried_unix = last_queried;
+        e.last_indexed_unix = last_indexed;
+        e
     }
 }
 
@@ -304,12 +303,11 @@ fn prune_colocated_deletion_removes_colocated_dir() {
     assert!(colocated_dir.exists(), "setup: colocated dir must exist");
 
     let now = 1_000 * DAY;
-    let entry = PersistedIndex {
-        id: "myproject".to_string(),
-        root_path: root.clone(),
-        last_queried_unix: Some(now - 60 * DAY),
-        colocated: true,
-        ..Default::default()
+    let entry = {
+        let mut e = PersistedIndex::new("myproject".to_string(), root.clone());
+        e.last_queried_unix = Some(now - 60 * DAY);
+        e.colocated = true;
+        e
     };
     write_registry(&toml, &[entry]);
 
@@ -373,12 +371,11 @@ fn prune_colocated_absent_root_creates_no_dirs() {
     let colocated_dir = absent_root.join(COLOCATED_DIR_NAME);
 
     let now = 1_000 * DAY;
-    let entry = PersistedIndex {
-        id: "ghost".to_string(),
-        root_path: absent_root.clone(),
-        last_queried_unix: Some(now - 90 * DAY),
-        colocated: true,
-        ..Default::default()
+    let entry = {
+        let mut e = PersistedIndex::new("ghost".to_string(), absent_root.clone());
+        e.last_queried_unix = Some(now - 90 * DAY);
+        e.colocated = true;
+        e
     };
     write_registry(&toml, &[entry]);
 

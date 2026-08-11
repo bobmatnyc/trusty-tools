@@ -31,11 +31,10 @@ use trusty_search::service::persistence_loader::build_indexer_from_entry;
 
 /// Build a colocated `PersistedIndex` entry rooted at `root`.
 fn colocated_entry(id: &str, root: PathBuf) -> PersistedIndex {
-    PersistedIndex {
-        id: id.to_string(),
-        root_path: root,
-        colocated: true,
-        ..Default::default()
+    {
+        let mut e = PersistedIndex::new(id.to_string(), root);
+        e.colocated = true;
+        e
     }
 }
 

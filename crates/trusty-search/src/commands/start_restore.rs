@@ -166,10 +166,11 @@ pub(crate) fn try_locate_moved_root(
                 new_root.display(),
             );
             // Persist the new root_path so subsequent restarts skip the scan.
-            let updated = PersistedIndex {
-                root_path: new_root.clone(),
-                ..entry.clone()
-            };
+            // #4391: `PersistedIndex` is `#[non_exhaustive]`, so this crate (the
+            // binary, a separate crate from the library) assigns rather than
+            // using struct-update syntax. Same value, same one field overridden.
+            let mut updated = entry.clone();
+            updated.root_path = new_root.clone();
             if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
                 tracing::warn!(
                     "warm-boot: could not persist relocated root_path for '{}': {e}",
@@ -301,10 +302,9 @@ pub(crate) async fn restore_one_index(
         entry.root_path = canonical_root;
         // Persist so subsequent restarts see the canonical path immediately,
         // avoiding repeated canonicalization and keeping indexes.toml accurate.
-        let updated = PersistedIndex {
-            root_path: entry.root_path.clone(),
-            ..entry.clone()
-        };
+        // `entry.root_path` was set to `canonical_root` just above, so the old
+        // struct-update form was a verbose `entry.clone()`.
+        let updated = entry.clone();
         if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
             tracing::warn!(
                 "warm-boot: could not persist canonicalized root_path for '{}': {e}",
@@ -324,10 +324,8 @@ pub(crate) async fn restore_one_index(
             .map(|r| r.canonical())
         {
             entry.repo_identity = Some(identity.clone());
-            let updated = PersistedIndex {
-                repo_identity: Some(identity),
-                ..entry.clone()
-            };
+            // `entry.repo_identity` was set to `identity` just above.
+            let updated = entry.clone();
             if let Err(e) = crate::service::persistence::upsert_index_registry_entry(updated) {
                 tracing::warn!(
                     "warm-boot: could not persist backfilled repo_identity for '{}': {e}",

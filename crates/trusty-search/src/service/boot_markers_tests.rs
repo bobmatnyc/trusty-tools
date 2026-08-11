@@ -60,11 +60,10 @@ fn read_entry(id: &str) -> PersistedIndex {
 }
 
 fn entry_for(id: &str, root: &std::path::Path) -> PersistedIndex {
-    PersistedIndex {
-        id: id.to_owned(),
-        root_path: root.to_path_buf(),
-        colocated: true,
-        ..Default::default()
+    {
+        let mut e = PersistedIndex::new(id.to_owned(), root.to_path_buf());
+        e.colocated = true;
+        e
     }
 }
 
@@ -109,8 +108,11 @@ fn resolve_prefers_the_persisted_head_sha_over_live_git() {
 
 /// Serialised: `upsert_index_registry_entry` is load-all -> push -> save-all,
 /// so two concurrent upserts against the process-shared `indexes.toml` can
-/// drop each other's entry (#4871 tracks the general fix). `#[serial]` on the
-/// shared key is what keeps these tests deterministic in the meantime.
+/// drop each other's entry (#4871 tracks the general fix). These use the
+/// DEFAULT `#[serial]` key deliberately — it is the key the existing
+/// registry-mutating tests already use, and a named key would have excluded
+/// only each other while `save_index_registry` republished the whole file
+/// underneath them.
 ///
 /// #4391: a legacy entry with no stored SHA adopts live HEAD and BACKFILLS it.
 ///
@@ -123,7 +125,7 @@ fn resolve_prefers_the_persisted_head_sha_over_live_git() {
 /// disk. Pre-fix there is no write-through, so the on-disk assertion fails.
 /// Test: this IS the test.
 #[test]
-#[serial_test::serial(trusty_search_indexes_toml)]
+#[serial_test::serial]
 fn resolve_backfills_a_missing_head_sha_from_live_git() {
     let (dir, sha) = git_repo_with_commit("b.rs", "fn b() {}");
     let id = "boot-markers-4391-backfills";
@@ -156,7 +158,7 @@ fn resolve_backfills_a_missing_head_sha_from_live_git() {
 /// back off disk. Against the pre-fix `stamp_handle` this fails with `None`.
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
-#[serial_test::serial(trusty_search_indexes_toml)]
+#[serial_test::serial]
 async fn stamp_handle_persists_the_sha_it_writes() {
     let id = "boot-markers-4391-stamp";
     let dir = tempfile::tempdir().expect("tempdir");
@@ -191,7 +193,7 @@ async fn stamp_handle_persists_the_sha_it_writes() {
 /// writer at all, so the read-back is `false`.
 /// Test: this IS the test.
 #[test]
-#[serial_test::serial(trusty_search_indexes_toml)]
+#[serial_test::serial]
 fn interrupted_embed_pass_leaves_the_pending_marker_set() {
     let id = "boot-markers-4390-interrupted";
     let dir = tempfile::tempdir().expect("tempdir");
@@ -214,7 +216,7 @@ fn interrupted_embed_pass_leaves_the_pending_marker_set() {
 /// What: set then clear, and read back off disk.
 /// Test: this IS the test.
 #[test]
-#[serial_test::serial(trusty_search_indexes_toml)]
+#[serial_test::serial]
 fn a_completed_pass_clears_the_pending_marker_durably() {
     let id = "boot-markers-4390-cleared";
     let dir = tempfile::tempdir().expect("tempdir");

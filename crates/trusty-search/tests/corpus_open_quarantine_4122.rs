@@ -105,11 +105,10 @@ fn mock_embedder() -> Arc<dyn Embedder> {
 
 /// Build a colocated `PersistedIndex` entry rooted at `root`.
 fn entry_at(id: &str, root: &Path) -> PersistedIndex {
-    PersistedIndex {
-        id: id.to_string(),
-        root_path: root.to_path_buf(),
-        colocated: true,
-        ..Default::default()
+    {
+        let mut e = PersistedIndex::new(id.to_string(), root.to_path_buf());
+        e.colocated = true;
+        e
     }
 }
 
