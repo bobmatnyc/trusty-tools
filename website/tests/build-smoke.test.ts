@@ -54,6 +54,16 @@ function toolPages(): string[] {
 	return TOOLS.map((tool) => `tools/${tool.slug}.html`);
 }
 
+/**
+ * `tga audit`'s own page, nested under the tool that ships it.
+ *
+ * It is a route with no `TOOLS` record — `tga audit` is a subcommand, not a
+ * crate — so `toolPages()` cannot see it and every assertion driven by that
+ * list skips it silently.
+ */
+const AUDIT_PAGE = 'tools/trusty-git-analytics/audit.html';
+const AUDIT_ROUTE = '/tools/trusty-git-analytics/audit';
+
 /** Prerendered doc artifacts on disk, as paths relative to the static root. */
 function docPages(): Set<string> {
 	const found = new Set<string>();
@@ -265,8 +275,36 @@ describe('production build', () => {
 		}
 	});
 
+	// Why: the failure mode a nested route actually has is a dead link — the
+	// teaser on the tool page points at a route that never prerendered, and
+	// nothing else here reads either file, so the site ships a 404 the build
+	// reported as green. Both halves are asserted together for that reason: the
+	// artifact exists AND the page that advertises it names that exact href.
+	// What: the audit page's own artifact, its own `<title>` (it does not use
+	// `ToolPage.svelte`, so nothing else pins that), the install prerequisite
+	// that is the reason it exists, and the round trip back to the tool page.
+	it('prerenders the tga audit page and links it from the tool page', () => {
+		expect(existsSync(path.join(STATIC, AUDIT_PAGE)), AUDIT_PAGE).toBe(true);
+		const audit = readFileSync(path.join(STATIC, AUDIT_PAGE), 'utf8');
+
+		const title = audit.match(/<title>([\s\S]*?)<\/title>/);
+		expect(title?.[1], 'audit page title').toContain('tga audit');
+
+		const text = visibleText(audit);
+		// The whole point of the page: `tga audit` cannot produce a report with
+		// tga alone, and the two install lines are what a reader came for.
+		expect(text).toContain('tctl install tga');
+		expect(text).toContain('tctl install trusty-review');
+		expect(audit, 'audit page does not link back to the tool page').toContain(
+			'href="/tools/trusty-git-analytics"'
+		);
+
+		const toolPage = readFileSync(path.join(STATIC, 'tools/trusty-git-analytics.html'), 'utf8');
+		expect(toolPage, 'tool page does not link the audit page').toContain(`href="${AUDIT_ROUTE}"`);
+	});
+
 	it('loads no subresource from a third-party origin', () => {
-		for (const name of ['index.html', 'docs.html', ...docPages(), ...toolPages()]) {
+		for (const name of ['index.html', 'docs.html', AUDIT_PAGE, ...docPages(), ...toolPages()]) {
 			const html = readFileSync(path.join(STATIC, name), 'utf8');
 			const subresources = [
 				...html.matchAll(/<(?:script|img|source|iframe)\b[^>]*\bsrc="([^"]+)"/g),

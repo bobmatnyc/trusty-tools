@@ -86,15 +86,33 @@ fn managed_session_command_sequence_applies_options_before_new_session() {
 /// Write an executable shell script at `dir/name` with body `body`,
 /// returning its path as a `String` suitable for `create_managed_session`
 /// / `run_tmux_with_bin`'s `bin` parameter.
+///
+/// #5391: the script is created already executable and the write handle is
+/// dropped before it is returned, so no caller can exec it while this thread
+/// still holds a writable fd — the same shape `trusty-agents`'
+/// `test_env::write_executable_script` settled on for #1528. That closes the
+/// self-inflicted half of the ETXTBSY race; the other half — a sibling
+/// thread forking mid-write and handing its child an inherited copy of the
+/// fd — is covered by the bounded retry in `core::spawn_disclaim`.
 fn write_fake_tmux(dir: &std::path::Path, name: &str, body: &str) -> String {
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     let path = dir.join(name);
-    std::fs::write(&path, body).expect("write fake tmux script");
-    let mut perms = std::fs::metadata(&path)
-        .expect("stat fake tmux script")
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod fake tmux script");
+    {
+        // `create_new` so the 0o755 mode is guaranteed to apply: `mode` is
+        // honoured only when the open actually creates the file, and every
+        // caller writes its script name once into its own temp dir.
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o755)
+            .open(&path)
+            .expect("create fake tmux script");
+        f.write_all(body.as_bytes())
+            .expect("write fake tmux script");
+        // `f` drops here — the writable fd is closed before any exec.
+    }
     path.to_string_lossy().into_owned()
 }
 

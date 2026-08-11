@@ -17,9 +17,12 @@
 //! - [`collector`] — end-to-end pipeline orchestrator
 //! - `notify` — routes the pipeline's operator-facing lines to stdout/stderr,
 //!   or to the progress bus when a consumer owns the terminal (#5197)
+//! - [`ai_markers`] — the agentic-marker set behind `agentic_mode` detection
+//! - [`ai_marker_config`] — operator-supplied markers, read from a file (#5414)
 //! - [`errors`] — module-level error type ([`CollectError`])
 
 pub mod ai_attribution;
+pub mod ai_marker_config;
 pub mod ai_markers;
 pub mod azdo;
 pub mod bitbucket;
