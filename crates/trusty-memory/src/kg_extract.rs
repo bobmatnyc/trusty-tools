@@ -1034,8 +1034,8 @@ mod tests {
                 ("tokio", "is-a", "executor"),
             ),
             (
-                "masa works at duetto research today",
-                ("masa", "works-at", "duetto"),
+                "alice works at initech today",
+                ("alice", "works-at", "initech"),
             ),
             (
                 "trusty-memory uses redb for persistence",
@@ -1155,7 +1155,7 @@ mod tests {
             "redb",
             "no-op",
             "onnxruntime",
-            "duetto",
+            "initech",
         ] {
             assert!(!is_stop_token(tok), "{tok:?} must be accepted");
         }
