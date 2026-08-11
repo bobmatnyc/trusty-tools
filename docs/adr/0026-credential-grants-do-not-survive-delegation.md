@@ -1,6 +1,7 @@
 # 0026. A Credential Grant Does Not Survive Delegation
 
-- **Status:** Accepted — the authority model recorded here is an **owner decision
+- **Status:** Accepted
+- **Acceptance:** The authority model recorded here is an **owner decision
   given on 2026-08-01**, not a proposal. Its normative encoding is
   [DOC-45](../specs/DOC-45-credential-authority-model.md) §6
   (`SPEC-CREDAUTH-04~draft`); nothing in it is implemented yet.

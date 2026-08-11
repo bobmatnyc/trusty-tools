@@ -460,11 +460,9 @@ error named.
   in-repo.
 - The two WASM triggers are qualitative, not numeric thresholds.
 - Re-pointing #5083 at this ADR's scope — not this ADR's job to execute.
-- **Unrelated, found in passing:** `docs/adr/` has two files both numbered
-  `0021` (`0021-cargo-bin-policy.md`, Proposed, absent from `INDEX.md`; and
-  `0021-slack-inbound-hybrid-gateway-eventstream.md`, Accepted, the one
-  `INDEX.md` lists) — a pre-existing collision, orthogonal to this ADR,
-  flagged not fixed.
+- **Unrelated, found in passing:** `docs/adr/` formerly had two files numbered
+  `0021`. The consistency repair retained the Accepted Slack inbound ADR as
+  0021 and moved the Proposed Cargo policy to ADR-0043 before acceptance.
 - **Noted, not waited on:** a separate verification is in progress on
   whether the event-bus/push-semantics/performance case for
   `trusty-channels` going native survives contact with real message rates.

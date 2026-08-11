@@ -129,7 +129,7 @@ Two binaries from one `src/main.rs`: `trusty-installer` (`Cargo.toml:22-24`) and
   `doctor`, `ui`, `self-update`, `sign`. Global `--json`, `--scope`, `--timeout`, `-y`.
 
 > ⚠️ **Design trap surfaced by this finding.** `tctl install` only knows registry/prebuilt
-> sources. ADR-0021 (`docs/adr/0021-cargo-bin-policy.md:85`) *codifies* "install from registry
+> sources. ADR-0043 (`docs/adr/0043-cargo-bin-policy.md:85`) *codifies* "install from registry
 > only, not path". So in the **branch** and **local** patterns, running `tctl install` after a
 > source install would try to *overwrite* the source-built binaries with published ones,
 > silently invalidating the test. **Branch/local scenarios must drive `tctl ensure` / `tctl up`
@@ -211,7 +211,7 @@ This **is** an install test — of the *crates.io compile* path only.
 Canonical doc: `docs/adr/0002-single-install-convention.md:30-37` — *"one crate that bundles
 all of its required binaries via `[[bin]]` shims over a shared library, so a single
 `cargo install --path crates/<name> --locked` puts the whole tool family (CLI + daemon +
-sidecars) on PATH at one consistent version."* Refined by `docs/adr/0021-cargo-bin-policy.md:85`
+sidecars) on PATH at one consistent version."* Refined by `docs/adr/0043-cargo-bin-policy.md:85`
 (registry-only installs). Note there is **no tracked root `CLAUDE.md`** — it is guarded against
 by `.github/workflows/claude-md-guard.yml` + `scripts/check_claude_md_not_tracked.sh`; the
 workspace instruction file is `.trusty-mpm/INSTRUCTIONS.md`.
@@ -719,7 +719,7 @@ vm_exec "$VM" "$GUEST_ENV"'
 '
 ```
 
-> **Do NOT run `tctl install` in patterns (b) or (c).** Per `docs/adr/0021-cargo-bin-policy.md:85`
+> **Do NOT run `tctl install` in patterns (b) or (c).** Per `docs/adr/0043-cargo-bin-policy.md:85`
 > and `crates/trusty-installer/src/commands/install.rs:1-40`, `tctl install` sources from
 > prebuilt tarballs / crates.io only — it would *replace* the source-built binaries under test.
 > Use `tctl ensure --scope project --wait --yes`, `tctl up`, and `tctl stack health --json` for

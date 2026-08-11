@@ -25,7 +25,7 @@
 #
 #   1. DUP-DOC / DUP-ADR — no two FILES may claim the same number. A file
 #      "claims" a number via its filename (`DOC-46-adr-standard.md`,
-#      `0021-cargo-bin-policy.md`) and/or its own header self-label (`# DOC-42 —
+#      `0043-cargo-bin-policy.md`) and/or its own header self-label (`# DOC-42 —
 #      …`, a `**DOC-28**` status badge, `# 0021. …`). One file claiming the same
 #      number both ways is agreement, not a collision; two DIFFERENT files
 #      claiming one number is a collision, reported with every colliding path.
