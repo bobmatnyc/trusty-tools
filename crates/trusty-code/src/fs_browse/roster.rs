@@ -157,16 +157,20 @@ pub struct ProjectRoster {
 ///
 /// Why: the one function `protocol::list_projects` calls; resolves the real
 /// home directory so the RPC handler itself stays a one-liner.
-/// What: `dirs::home_dir()` unresolvable -> an empty [`ProjectRoster`]
-/// (never an error — see module docs on the best-effort philosophy).
+/// What: resolves the managed workspace root through
+/// [`trusty_common::workspace_layout::workspace_root`] — the SAME resolver
+/// trusty-mpm uses (#5203), so an operator who retargets the root via
+/// `TRUSTY_MPM_WORKSPACE_ROOT` or `workspace_root_template` gets a picker that
+/// scans where the checkouts actually are. `dirs::home_dir()` unresolvable ->
+/// an empty [`ProjectRoster`] (never an error — see module docs on the
+/// best-effort philosophy); it is still needed for the flat fallback scan.
 /// Otherwise delegates to [`list_projects_in`].
-/// Test: exercised indirectly via `protocol::tests::list_projects_returns_entries_array`
-/// (this function's own behaviour beyond delegation is untestable without
-/// touching the real home directory; [`list_projects_in`] carries the real
-/// coverage).
+/// Test: `tests::configured_workspace_root_is_scanned_not_the_default`
+/// (the #5203 regression), plus `protocol::tests::list_projects_returns_entries_array`.
 pub fn list_projects() -> ProjectRoster {
+    // #5203: scan the CONFIGURED workspace root, not a hardcoded literal.
     match dirs::home_dir() {
-        Some(home) => list_projects_in(&home),
+        Some(home) => list_projects_in(&home, &trusty_common::workspace_layout::workspace_root()),
         None => ProjectRoster::default(),
     }
 }
@@ -177,11 +181,16 @@ pub fn list_projects() -> ProjectRoster {
 /// Why: split out so tests can point this at a tempdir instead of the
 /// developer's (or CI runner's) actual home — the same seam
 /// `serve::mod::build_router_at` uses for the workstream store's data dir.
-/// What: if `<home>/trusty-mpm-projects` is a directory, scans it two levels
-/// deep (owner dirs -> their repo dirs, each filtered to
-/// [`super::is_git_repo`]) via [`scan_owner_layout`]; otherwise scans `home`
-/// itself one level deep via [`scan_flat_layout`]. Either way, results are
-/// sorted case-insensitively by `name` and truncated to [`MAX_ENTRIES`].
+/// What: if `workspace_root` is a directory, scans it two levels deep (owner
+/// dirs -> their repo dirs, each filtered to [`super::is_git_repo`]) via
+/// [`scan_owner_layout`]; otherwise scans `home` itself one level deep via
+/// [`scan_flat_layout`]. Either way, results are sorted case-insensitively by
+/// `name` and truncated to [`MAX_ENTRIES`].
+///
+/// #5203 split `workspace_root` out of `home` rather than deriving it here: the
+/// root is configurable and may sit anywhere, so only the caller (which owns the
+/// resolver) can say where it is. `home` remains a separate parameter because
+/// the FLAT fallback genuinely scans the home directory, not the workspace root.
 /// Test: `tests::trusty_mpm_projects_layout_is_scanned_two_levels_deep`,
 /// `tests::falls_back_to_flat_home_scan_when_no_trusty_mpm_projects_dir`,
 /// `tests::non_git_directories_are_excluded`,
@@ -192,10 +201,9 @@ pub fn list_projects() -> ProjectRoster {
 /// can build a hermetic filesystem-only `ProjectRoster` against a tempdir
 /// `home`, the same seam this module's own tests already use, rather than
 /// hand-rolling a second scan helper.
-pub(super) fn list_projects_in(home: &Path) -> ProjectRoster {
-    let mpm_root = home.join("trusty-mpm-projects");
-    let mut entries = if mpm_root.is_dir() {
-        scan_owner_layout(&mpm_root)
+pub(super) fn list_projects_in(home: &Path, workspace_root: &Path) -> ProjectRoster {
+    let mut entries = if workspace_root.is_dir() {
+        scan_owner_layout(workspace_root)
     } else {
         scan_flat_layout(home)
     };
@@ -312,7 +320,7 @@ mod tests {
         mkdir(&root.join("bobmatnyc").join("scratch")); // not a git repo
         mk_git_repo(&root.join("acme").join("widgets"));
 
-        let roster = list_projects_in(home.path());
+        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
 
         assert_eq!(roster.entries.len(), 2);
         let names: Vec<&str> = roster.entries.iter().map(|e| e.name.as_str()).collect();
@@ -334,7 +342,7 @@ mod tests {
         mk_git_repo(&home.path().join("acme-api"));
         mkdir(&home.path().join("Downloads")); // not a git repo
 
-        let roster = list_projects_in(home.path());
+        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
 
         assert_eq!(roster.entries.len(), 1);
         assert_eq!(roster.entries[0].name, "acme-api");
@@ -350,7 +358,7 @@ mod tests {
         let root = home.path().join("trusty-mpm-projects");
         mkdir(&root.join("bobmatnyc").join("not-a-repo"));
 
-        let roster = list_projects_in(home.path());
+        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
 
         assert!(roster.entries.is_empty());
     }
@@ -368,7 +376,7 @@ mod tests {
         std::fs::write(root.join("not-a-dir-owner"), "x").expect("write");
         mk_git_repo(&root.join("realowner").join("repo"));
 
-        let roster = list_projects_in(home.path());
+        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
 
         assert_eq!(roster.entries.len(), 1);
         assert_eq!(roster.entries[0].owner.as_deref(), Some("realowner"));
@@ -381,7 +389,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
         mkdir(&home.path().join("Documents"));
 
-        let roster = list_projects_in(home.path());
+        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
 
         assert!(roster.entries.is_empty());
     }
@@ -397,7 +405,7 @@ mod tests {
             mk_git_repo(&owner.join(format!("repo-{i:04}")));
         }
 
-        let roster = list_projects_in(home.path());
+        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
 
         assert_eq!(roster.entries.len(), MAX_ENTRIES);
     }
@@ -412,9 +420,103 @@ mod tests {
         mk_git_repo(&root.join("owner").join("apple"));
         mk_git_repo(&root.join("owner").join("Banana"));
 
-        let roster = list_projects_in(home.path());
+        let roster = list_projects_in(home.path(), &home.path().join("trusty-mpm-projects"));
 
         let names: Vec<&str> = roster.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["apple", "Banana", "Zebra"]);
+    }
+
+    /// #5203 REGRESSION: a CONFIGURED workspace root must be the directory the
+    /// picker scans — not the hardcoded `~/trusty-mpm-projects`.
+    ///
+    /// Why: this is the defect itself. Before the fix, [`list_projects`] built
+    /// its scan root as `home.join("trusty-mpm-projects")` and never read
+    /// `TRUSTY_MPM_WORKSPACE_ROOT`, so an operator who retargeted the managed
+    /// root got a picker that reported every real checkout as missing. This
+    /// test drives the PRODUCTION entry point (not the injectable core) so it
+    /// exercises the resolver wiring, which is exactly what was absent.
+    /// What: points the env var at a tempdir holding `<owner>/<repo>/.git`, then
+    /// asserts `list_projects()` finds that repo AND that the path it reports is
+    /// under the configured root. Against the pre-fix commit this fails at the
+    /// first assertion — the roster comes back from the default root instead.
+    /// Test: this test.
+    #[test]
+    fn configured_workspace_root_is_scanned_not_the_default() {
+        let _guard = env_lock();
+        let configured = tempfile::tempdir().expect("tempdir");
+        mk_git_repo(&configured.path().join("acme").join("widgets"));
+
+        // SAFETY: every env-mutating test in this module holds `env_lock()`.
+        unsafe {
+            std::env::set_var(
+                trusty_common::workspace_layout::WORKSPACE_ROOT_ENV,
+                configured.path(),
+            );
+        }
+        let roster = list_projects();
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var(trusty_common::workspace_layout::WORKSPACE_ROOT_ENV);
+        }
+
+        let found = roster
+            .entries
+            .iter()
+            .find(|e| e.name == "widgets")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the configured workspace root {} must be scanned; roster was {:?}",
+                    configured.path().display(),
+                    roster.entries
+                )
+            });
+        assert_eq!(found.owner.as_deref(), Some("acme"));
+        assert!(
+            Path::new(&found.path).starts_with(configured.path()),
+            "entry path {} must sit under the configured root {}",
+            found.path,
+            configured.path().display()
+        );
+    }
+
+    /// #5203: with nothing configured, the default must stay
+    /// `~/trusty-mpm-projects` — the fix must not move the root for the
+    /// overwhelming majority of operators who configure nothing.
+    ///
+    /// Why: the companion to the regression above. A resolver that honoured
+    /// config but changed the unconfigured default would break every existing
+    /// install silently.
+    /// What: with the env var cleared AND no config template supplied, the
+    /// shared resolver returns `<home>/trusty-mpm-projects`. Asserts against
+    /// `resolve_workspace_root(None)` rather than the zero-argument
+    /// `workspace_root()`, which reads the DEVELOPER'S OWN `config.yaml` — a
+    /// machine with `workspace_root_template` set would otherwise fail this
+    /// test for a correct build.
+    /// Test: this test.
+    #[test]
+    fn default_workspace_root_is_unchanged_when_nothing_is_configured() {
+        let _guard = env_lock();
+        // SAFETY: guarded by `env_lock()`.
+        unsafe {
+            std::env::remove_var(trusty_common::workspace_layout::WORKSPACE_ROOT_ENV);
+        }
+        let root = trusty_common::workspace_layout::resolve_workspace_root(None);
+        let home = dirs::home_dir().expect("home");
+        assert_eq!(root, home.join("trusty-mpm-projects"));
+    }
+
+    /// Serialise the env-mutating tests in this module.
+    ///
+    /// Why: `cargo test` shares one process environment across parallel test
+    /// threads, so an unguarded `set_var` leaks into a sibling's assertions.
+    /// What: a process-global mutex, poison-tolerant (a panicking test must not
+    /// wedge every later one).
+    /// Test: used by `configured_workspace_root_is_scanned_not_the_default`,
+    /// `default_workspace_root_is_unchanged_when_nothing_is_configured`.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 }

@@ -474,6 +474,26 @@ impl CodeIndexer {
     /// incrementally before attaching all components.
     /// What: initialises all fields to their zero/empty states.
     /// Test: every test that constructs a `CodeIndexer` exercises this.
+    /// Re-point this indexer at the root its stored chunk paths are relative to.
+    ///
+    /// Why (#4951): `root_path` here is the base every stored (root-relative)
+    /// chunk path is joined against to produce the absolute `CodeChunk::file`
+    /// callers see, and the search handler then post-filters those absolute
+    /// paths against `IndexHandle::root_path`. The two are separate copies of
+    /// the same fact, so any path that moves one must move the other or every
+    /// result is silently discarded — `POST /indexes/:id/reindex { root_path }`
+    /// rebuilt the handle around the SAME indexer `Arc` and left this field on
+    /// the old root, which dropped 100% of matches behind
+    /// `stale_index_root: true` while every status field still read `ready`.
+    /// What: overwrites the field. Callers must hold the indexer write lock (the
+    /// `&mut self` receiver enforces that) and must pass the same canonical root
+    /// the handle carries.
+    /// Test: `reindex_root_override_syncs_indexer_root_path`,
+    /// `stale_indexer_root_makes_every_chunk_fail_the_search_post_filter`.
+    pub fn set_root_path(&mut self, root_path: impl Into<std::path::PathBuf>) {
+        self.root_path = root_path.into();
+    }
+
     pub fn new(index_id: impl Into<String>, root_path: impl Into<std::path::PathBuf>) -> Self {
         let cap =
             NonZeroUsize::new(QUERY_CACHE_CAPACITY).expect("QUERY_CACHE_CAPACITY must be non-zero");

@@ -149,6 +149,10 @@ impl SessionControl for DaemonSessionControl {
             // programmatic driver; an idempotent reconnect for a project that
             // already has a live session is the safe default here too.
             force_new: false,
+            // #5274: `sm.sessions.launch` carries no worktree request in its
+            // `LaunchParams` wire shape, so the session runs in the project's
+            // main checkout — the same default every programmatic caller gets.
+            worktree: false,
         };
         let record = spawn_managed(
             &self.state,

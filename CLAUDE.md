@@ -57,7 +57,7 @@ change's blast radius — no less, and no more. The framework's Low / Normal / H
 risk labels map onto the rungs below (1–2 = Low, 3–4 = Normal, 5–6 = High); when
 the question is *which command to run*, this table decides.
 
-Required tests stay in the implementation PR (`tm-pr-workflow`, "One Outcome,
+Required tests stay in the implementation PR (`tm-workflow`, "One Outcome,
 One PR"). Name the rung and paste its command in the PR body so a reviewer can
 see which rung was actually run.
 
@@ -77,9 +77,11 @@ Read that page's rung entry before running the gate, and paste the command you
 actually ran into the PR body.
 
 🔴 **`cargo test --workspace` is not the default inner-loop proof for a localized
-change.** It belongs at the hardening boundaries (rungs 4–6). Making every narrow
-PR depend on the whole workspace turns unrelated flakes into an issue factory
-without adding one line of coverage for your change.
+change.** It is keyed to the stage, not the rung: it belongs at the publish
+boundary, and rungs 4–6 are the ones that reach it — a rung-4 PR does not owe a
+workspace run to merge. Making every narrow PR depend on the whole workspace
+turns unrelated flakes into an issue factory without adding one line of coverage
+for your change.
 
 🔴 **Scope down, never scope away.** Choosing a lower rung is a statement about
 blast radius, and you must be able to prove it (see the baseline-failure rules
@@ -110,8 +112,9 @@ exact report-string format: see
 issue at all is decided by the **Ticket-Promotion Gate** in the framework skill
 `tm-ticketing` — read it there. What this repo adds is *what to search by*: the
 **test name**, the **panic / error text**, the **affected symbol**, and the
-**crate**. Search open and recently closed issues on all four; append to the
-canonical issue rather than filing a second one. Rationale per key:
+**crate**. Search open and recently closed issues on all four. What to do with a
+hit — `COMMENT`, `REOPEN`, `NEW REGRESSION`, or `NO TICKET` — is `tm-ticketing`'s
+disposition to make, not automatically an append (#5202). Rationale per key:
 [docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md).
 
 🔴 **Why/What/Test doc pattern with proportional depth** — public items carry
@@ -146,6 +149,12 @@ TEST_CAP raised #4074):**
 | Production source files | **500 SLOC** |
 | Test / benchmark files | **3000 SLOC** |
 
+Comments, doc comments (`//`, `///`, `//!`, `/* … */`), and blank lines do
+**not** count toward the cap — only non-comment code lines in tracked `.rs`
+files do (e.g. `crates/trusty-common/src/lib.rs` is 809 raw lines but 113
+SLOC). Exact counting definition:
+[docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
+
 A file is classified as a **test/benchmark file** when ANY of these match:
 - basename is exactly `tests.rs`
 - basename ends with `_test.rs` or `_tests.rs`
@@ -155,11 +164,27 @@ A file is classified as a **test/benchmark file** when ANY of these match:
 
 All other tracked `.rs` files are **production files**, capped at 500 SLOC.
 
+🟡 **Inline `#[cfg(test)] mod <name> { … }` bodies do not count (#5153).** Add
+tests to a 460-SLOC module without splitting it. Only that exact shape is
+excluded — `#[cfg(test)] mod tests;` sibling declarations, `#[cfg(test)]` on an
+`fn`/`impl`/`use`, and predicates like `all(test, …)` or `any(test, …)` are all
+still counted, as is any test module whose brace balance is skewed by a brace
+inside a string literal. The matcher is line-based and fails closed: it can
+raise a false cap violation, never silently drop production code.
+
+🟡 **No standalone SLOC-cap fix.** Never open a PR whose only purpose is bringing
+a file back under cap — the split ships inside the PR that next adds to that
+file, which is the PR the gate blocks anyway, so it costs one CI cycle instead of
+two. That is not licence to leave a red gate red: if your PR trips the cap, split
+in that PR. Example — a rebase pushed `bin/tm/main.rs` to 505 SLOC while the
+branch was adding a third `RepairAction` arm, and that same PR moved the match
+into a submodule.
+
 🔴 Mechanically enforced by `scripts/check_line_cap.sh` in CI and the pre-commit
 hook (#610) — a new tracked file over its cap **cannot merge**. Never turn this
 gate green by deleting, `#[ignore]`-ing, or excluding a file from the count;
-split it instead. Counting definition, the split pattern, ratchet-allowlist
-mechanics, and refactor history:
+split it instead. Counting definition, the split pattern, when a violation gets
+fixed, ratchet-allowlist mechanics, and refactor history:
 [docs/reference/sloc-cap.md](docs/reference/sloc-cap.md).
 
 🔴 **`thiserror` for libraries, `anyhow` for binaries** — library crates
@@ -256,7 +281,7 @@ exception. Docs-only, CI-only, test-only and `testdata/` PRs may skip it.
 crates/<crate>/changelog.d/<issue-or-pr-number>-<short-slug>.md
 ```
 
-Fragment format and category line: `Skill(skill="tm-pr-workflow")`. Assembler
+Fragment format and category line: `Skill(skill="tm-workflow")`. Assembler
 and CI-gate specifics:
 [docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md).
 
@@ -271,72 +296,17 @@ Publish-time `[patch.crates-io]` semantics are in
 
 ## Parallel Worktree Discipline
 
-**CRITICAL RULES FOR CONCURRENT SESSIONS:**
-
-🔴 **SOURCE OF TRUTH = `origin/main:HEAD`.** Local `main` may be stale. **Always `git fetch origin main` and branch worktrees off `origin/main`** (not local main). Stale local main has caused lost commits and missed features. This is not optional.
-
-🔴 **The main checkout is inspection-only.** From the repo root
-(`/path/to/trusty-tools/`), the only allowed operations are read-only: `git status`,
-`git log`, `git diff`, `git show`, file reads. **FORBIDDEN**: edits, `git reset --hard`,
-`git checkout .`, `git stash`, `git restore .`, `cargo build`/`cargo test`,
-`sed`/`awk`/`patch`, or any command that mutates the working tree, index, or `target/`.
-
-🔴 **All write-side work happens in a dedicated git worktree branched off
-`origin/main`.** Provision one before starting any edit, build, or test:
-
-```bash
-git fetch origin main
-git worktree add -b <feature-or-fix-branch> \
-                  .claude/worktrees/<dirname> origin/main
-cd .claude/worktrees/<dirname>
-# … edit, build, test, commit, push from here …
-```
+Generic worktree discipline — main checkout inspection-only, provisioning off
+`origin/main`, branch-is-the-workstream, one worktree per independently
+reviewable PR outcome, subagent confinement, cleanup — lives in
+`Skill(skill="tm-workflow")`. It applies here in full. What follows is only what
+this repo adds.
 
 **End-to-end delivery chain:** accepted outcome → optional issue → worktree
 branch → one cohesive PR → applicable Rust gates → trusty-review gate →
-squash-merge → worktree cleanup. The framework skill `tm-pr-workflow` owns the
-full sequence and the optional-issue rule; this file adds only the Rust-specific
-gates (see the Rust Test Ladder above). *(This project-instruction host was
-`.trusty-mpm/INSTRUCTIONS.md` until #4286 retired it; the delivery chain itself
-now lives in `tm-pr-workflow`.)*
-
-🔴 **A worktree is a writer; the branch is the workstream.** The durable unit is
-the **branch** — one branch per workstream, and a session owns exactly one
-workstream. A worktree is only the checkout that lets you write to that branch:
-ephemeral, disposable, and recreatable at any time with `git worktree add`.
-Never treat a worktree as the thing being preserved; losing one loses nothing
-the branch does not still hold.
-
-What follows from that:
-
-- **One branch and worktree per independently reviewable PR outcome** — not per
-  ticket, per refactor step, or per experiment. Several related tickets may
-  share one worktree when a single coherent change satisfies them
-  (`Closes #A`, `Closes #B`).
-- **Everything that outcome owes stays in the same worktree and PR:** the
-  implementation, its regression tests, necessary local refactoring, docs, the
-  changelog fragment, and in-scope review fixes. Do not open a second worktree
-  for the tests you still owe the first one.
-- **Experiments stay session-local.** Promote an experiment to a branch and
-  worktree only once its result is accepted for implementation.
-- **Cleanup:** `git worktree remove --force <path>` once the PR has merged, then
-  `git branch -D <branch>` and `git push origin --delete <branch>` — the branch
-  goes last, because until the squash-merge has landed it is the only durable
-  copy of the workstream.
-
-🟡 **If you absolutely must run a command from the main checkout** — for
-example `cargo install --path crates/<name> --locked` after a merge —
-stash first, operate, then restore:
-
-```bash
-git -C /path/to/main-checkout stash push -u \
-    -m "claude: pre-op-safety $(date +%s)"
-# … do the op …
-git -C /path/to/main-checkout stash pop
-```
-
-Surface the stash name in your report if popping fails so the human can
-restore manually.
+squash-merge → worktree cleanup. `tm-workflow` owns the full sequence and
+`tm-ticketing` owns whether the optional issue exists; this file adds only the
+Rust-specific gates (see the Rust Test Ladder above).
 
 🟡 **`cargo install` from a worktree, not the main checkout.** The preferred
 pattern for installing a freshly-built binary onto your PATH is:
@@ -347,22 +317,12 @@ cargo install --path .claude/worktrees/<dirname>/crates/<name> --locked
 
 Cargo writes atomically to a temp file and renames into `~/.cargo/bin/`,
 which keeps the macOS kernel's cdhash cache consistent (see the
-release-workflow note above). The main checkout never needs to be involved.
+release-workflow note above). A plain `cp` over an on-PATH binary leaves a stale
+cdhash cache and the next exec is SIGKILL'd. The main checkout never needs to be
+involved.
 
-🟢 **Subagents inherit these rules.** Every `Agent`/`Task` dispatch prompt
-**must** name the exact worktree path the agent should operate from and forbid
-leaving that worktree into the main checkout, `git reset --hard`, `git checkout .`,
-and `git stash` against the main checkout, and touching files outside the assigned worktree.
-
-The pattern of instructing an agent to "operate from the main checkout" is banned.
-QA agents get their own worktree (`.claude/worktrees/qa-<ticket-or-pass>`) just
-like engineering agents.
-
-🟢 **Worktree cleanup is safe.** `git worktree remove --force <path>` deletes
-the worktree directory but never the main checkout. Use `git branch -D <branch>`
-and `git push origin --delete <branch>` to clean up refs after a squash-merge.
-
-> **Extended discipline rationale and cleanup details:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
+> **Extended discipline rationale, the install-from-worktree commands, and the
+> stash-first fallback:** see [docs/reference/worktree-discipline.md](docs/reference/worktree-discipline.md).
 
 ## Abbreviations & Aliases
 
@@ -415,6 +375,37 @@ Quick: VS Code needs `rust-analyzer` + `Even Better TOML` extensions; RustRover 
 
 Quick: `RUST_LOG=info cargo run -p trusty-search -- start` (daemon), `cargo run -p trusty-search -- serve` (MCP stdio mode).
 
+## Public Website (`website/`)
+
+SvelteKit + `adapter-vercel`, deployed to Vercel from `main`. Two page
+families with DIFFERENT update semantics:
+
+- **`/docs/**`** — generated at build time from files listed in
+  `docs/public-manifest.tsv`. Edit a listed `docs/` file, merge to main, and
+  the live site updates automatically. A `PAGE` row naming a missing file
+  FAILS the build; a `docs/` file absent from the manifest is simply never
+  public (an allowlist boundary, not a bug).
+- **`/tools/<crate>`** — six hand-authored flagship pages (search, memory,
+  mpm, analyze, review, tga). Their copy is static prose in
+  `website/src/lib/tools.ts` and `website/src/routes/tools/*/+page.svelte`,
+  verified against crate source when written. 🔴 **Editing a crate README does
+  NOT update its flagship page** — nothing in the build reads crate READMEs.
+  Update those files by hand.
+
+Vercel rebuilds only when a push touches `website/`, `docs/`, `Cargo.lock`, or
+`crates/*/Cargo.toml`. A `crates/*/README.md` or root `README.md` change
+triggers no rebuild — nor does a `CLAUDE.md` edit, which is expected.
+
+🔴 There is no `vercel.json`. Root Directory, "Include source files outside of
+the Root Directory", and the Ignored Build Step are configured in the Vercel
+dashboard only — dashboard drift leaves no trace in git. Setup and the full
+path table: [website/README.md](website/README.md).
+
+🔴 Website tests do not run in CI (#5200). Run them by hand: `pnpm test` from
+INSIDE `website/` — pnpm is pinned there (`packageManager` field); a shell at
+the repo root has no such pin and its resolved pnpm can require a Node version
+newer than what's installed.
+
 ## Common Pitfalls — Quick Checklist
 
 For extended explanations, see [docs/reference/common-pitfalls.md](docs/reference/common-pitfalls.md).
@@ -452,5 +443,6 @@ Full-length reference materials for less-frequent lookups:
 - **Per-PR changelog fragments:** [docs/reference/changelog-fragments.md](docs/reference/changelog-fragments.md) — assembler and CI-gate mechanics.
 - **Public-API / SemVer gate:** [docs/reference/semver-gate.md](docs/reference/semver-gate.md) — where it runs (release-time, not per-PR), what it checks, which crates it skips and why, and the feature-exclusion file.
 - **Rust test ladder gate commands:** [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md) — the exact command chain per rung, the baseline-failure protocol, and how much gate output a PR body owes.
+- **Generated doc regions:** [docs/reference/generated-doc-regions.md](docs/reference/generated-doc-regions.md) — the `<!-- BEGIN GENERATED: … -->` marker contract, the `UPDATE_DOCS=1 cargo test -p <crate> --test generated_docs` regeneration command, and the plainly-stated limit: a crate with no markers is not checked.
 - **Rust issue search keys:** [docs/reference/issue-search-keys.md](docs/reference/issue-search-keys.md) — why test name / panic text / symbol / crate find the canonical issue.
 - **Public documentation allowlist:** [docs/public-manifest.tsv](docs/public-manifest.tsv) — the curated list of `docs/` pages the public website may publish; format documented in the file header. It is an ALLOWLIST, so a page absent from it is never public. Enforced by `scripts/check_public_docs.sh` (self-test `scripts/check_public_docs_selftest.sh`). The internal mdBook (`docs/book.toml` + `docs/SUMMARY.md`) is unaffected and remains the complete offline book.

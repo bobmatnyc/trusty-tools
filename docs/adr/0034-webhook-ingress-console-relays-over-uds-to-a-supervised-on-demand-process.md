@@ -66,6 +66,30 @@ settled by precedent — newline-framed JSON-RPC 2.0 — but ADR-0032's
 does **not** exist. Two of the three clients above are near-duplicates of
 each other, which is the shape the common-entry-point rule exists to stop.
 
+> 🔴 **Correction (#5089 step 1a, 2026-08-07): the inventory above is
+> incomplete on both halves.** It omits `trusty-agents/src/bus/mod.rs`
+> (`MessageBus`) entirely — an NDJSON transport at
+> `~/.trusty-agents/sockets/<project>.sock` that is *both* a dialer
+> (`send_to`, which writes a payload, and `list_running`, which probes) and a
+> listener (`MessageBus::start`). The correct counts are **four** UDS clients,
+> not three, and **four** bind sites, not the two named in the sentence above:
+> `trusty-embedderd/src/uds_server.rs`, `trusty-bm25-daemon/src/socket.rs`,
+> `trusty-agents`' bus, and `trusty-agents`' `CtrlSocket::bind`. Note also that
+> the ctrl row above lists `<project>.sock`; the ctrl socket is actually
+> `<project>.ctrl.sock`, deliberately distinct from the bus's `<project>.sock`
+> in the same directory.
+>
+> The omission had consequences rather than being a bookkeeping slip: the bind
+> half of the bus was found and hardened only during implementation of
+> [#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099)
+> ([PR #5124](https://github.com/bobmatnyc/trusty-tools/pull/5124)), which is
+> where the "four bind sites" count comes from, and its three dial sites
+> survived that PR because this table never listed them. They are routed
+> through `trusty_common::uds::connect_hardened` in
+> [#5089](https://github.com/bobmatnyc/trusty-tools/issues/5089) step 1a. The
+> Context text above is left unedited per DOC-46 §4; this note records that its
+> site inventory was wrong, not that the decision changed.
+
 **🔴 Socket permissions are not what the prior ADRs claim.** ADR-0031 rests
 its case on "a loopback port is reachable by any local process, a 0600 socket
 is not," and ADR-0032 repeats it: "a `0600`-permissioned socket in a
@@ -228,6 +252,87 @@ clients. What is new is a single shared listener/dial module in
 and the workspace does not have. The three current implementations are
 migrated onto it rather than a fourth being added.
 
+> 🔴 **Correction (#5089 step 1a, 2026-08-07).** "Three current
+> implementations" inherits the incomplete inventory corrected in Context
+> above: there are **four**, the fourth being `trusty-agents`' `MessageBus`.
+> The Decision's substance is unaffected — every implementation migrates onto
+> the shared module — but the migration is one crate wider than this sentence
+> states. Decision text left unedited per DOC-46 §4.
+
+### 5. The drain: how a held delivery becomes work
+
+> **Amendment (#5192, 2026-08-09).** Decisions 1–4 carry a delivery as far as
+> the receiver's durable inbox and stop there. That is not an oversight the
+> implementation can paper over: an ack is what licenses `trusty-console` to
+> delete its only copy, so once §2's rule is satisfied the delivery exists in
+> exactly one place and nothing in the four decisions above ever reads it back.
+> #5182 shipped precisely that state — every delivery durably received, none
+> processed, and a spool that reported empty because the hand-off succeeded.
+
+The receiver drains its own inbox, in the same short-lived process that binds
+the socket, under four rules.
+
+1. **Ack on durability, act afterwards.** The ack still rests only on the
+   fsync (§2). A drain that ran before the ack would make a slow review look
+   like a refused delivery, and one that acked on the review's success would
+   hold console's socket open for 37 seconds.
+2. **Destroy only after the pipeline accepted.** Two calls unlink an entry and
+   the difference between them is the invariant, not the count: `remove_processed`
+   destroys the delivery and is reachable from one arm of the drain, behind a
+   processor that returned success; `quarantine` unlinks only after `hard_link`
+   has put the same inode under `<inbox>/quarantine/`, so it moves a delivery
+   and never destroys one. A pipeline failure keeps the entry.
+3. **Claim with a lock the kernel releases, not a marker on disk.** Exclusive
+   ownership of one entry is an `flock` on the entry file. A drainer that is
+   SIGKILLed mid-review is indistinguishable from one that finished, and that
+   state is *claimable* — a claim marker would instead strand the delivery
+   forever, which is §2's silent loss arriving one hop later. Redelivery of a
+   delivery already processed is therefore possible, which is the at-least-once
+   contract §4's frame already states.
+
+   > **Amendment (#5192 critic round 1).** "Receivers deduplicate on
+   > `delivery_id`" as a rule addressed to each receiver was the wrong place to
+   > put it. `trusty-review` satisfied it through its dedup store; `trusty-analyze`
+   > has no dedup infrastructure at all and would post a second identical PR
+   > comment every time a drainer died between the pipeline returning `Ok` and
+   > the unlink — a window this very design creates on purpose. **The drain owns
+   > the deduplication, not the receiver.** It records the delivery in a ledger
+   > under `<inbox>/processed/` *before* removing the entry, and consults that
+   > ledger before ever invoking a processor, so every receiver gets the
+   > guarantee from one implementation. Markers are pruned after 30 days, which
+   > exceeds the longest window in which the same `delivery_id` can legitimately
+   > arrive again. A per-receiver rule is how one target ends up with a safety
+   > property and its sibling silently does not — the third instance of that
+   > shape on this epic.
+4. **Bound the retries, quarantine the poison, and never delete either.** A
+   failure is counted in a sidecar beside the entry, so the bound survives the
+   process. An entry out of retries — or one that can never succeed, such as an
+   undecodable payload — moves to `<inbox>/quarantine/` and is reported. It is
+   never deleted, and it is metered separately from held work in
+   `/api/console/metrics/*`: quarantining takes a delivery out of the held
+   count, so without its own red state the signal would go **green** at the
+   moment a delivery was confirmed never to be processed.
+
+**`closed` + `merged`: the outcome poll is RETIRED, not moved (#5181,
+2026-08-09).** The paragraph this replaces said the drain ignored those
+deliveries and "the legacy HTTP route remains their only path". That route is
+gone. `trusty-review`'s outcome poll — the opt-in, default-off task that slept
+an hour after a merge and then read reactions and follow-up commits — was
+deleted along with it, by owner ruling, because a console-supervised process
+that exits on SIGTERM cannot honour an hour-long sleep and no restart-durable
+replacement was in scope.
+
+**Do not go looking for where it went. Nothing acts on a `closed` or `merged`
+webhook event any more.** Such a delivery is classified `Ignored`, recorded in
+the drain's processed ledger, and its inbox entry removed — accounted for, and
+finished. `Ignored` here means "deliberately not acted on", not "pending a
+handler elsewhere". The deletion took `poll_review_outcomes`, `OutcomeStore`,
+and the `[outcome]` / `TRUSTY_REVIEW_OUTCOME_*` configuration with it; leaving a
+knob an operator could set and get silence from was the same defect one level
+down. Issue #1421's outcome-feedback loop is therefore unimplemented again, and
+reinstating it means designing durable scheduling first — see
+`crates/trusty-review/src/webhook_drain.rs`.
+
 ## Consequences
 
 **Easier / positive:**
@@ -287,10 +392,11 @@ security-neutral.
 - **Idle-timeout tuning for the supervisor** is left to implementation.
   `Bm25Supervisor` uses an LRU cap plus an RSS ceiling rather than an idle
   timer; a webhook target probably wants the timer. Not decided here.
-- **Whether `trusty-analyze`'s webhook route survives at all.** Its
-  `POST /webhooks/github` overlaps substantially with `trusty-review`'s, and
-  #5028 measured zero deliveries to either. Retiring one is plausibly simpler
-  than relaying to both, but that is a product question, not a transport one.
+- ~~**Whether `trusty-analyze`'s webhook route survives at all.**~~
+  **CLOSED (owner ruling, #5181):** it does not. `trusty-analyze` is reached
+  over UDS like every other service, console owns the sole HTTP webhook route,
+  and both legacy routes retire with no survivor. Landed in #5181 — both paths
+  now 404.
 
 ## Prerequisites
 

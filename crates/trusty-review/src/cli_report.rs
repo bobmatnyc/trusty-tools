@@ -201,12 +201,29 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
         eprintln!("[trusty-review report] --analyze: fetching from {analyze_url}");
         match trusty_review::report::HttpAnalyzeMetricsSource::new(analyze_url) {
             Ok(source) => {
-                trusty_review::report::enrich_with_analyze(&mut model, &source).await;
+                // #5239: every repo the fetch could not populate is named in the
+                // report, not only warned about on stderr — a dimension missing
+                // because the daemon was down must not read as a clean pass.
+                let gaps =
+                    trusty_review::report::enrich_with_analyze_gaps(&mut model, &source).await;
+                for gap in &gaps {
+                    eprintln!("[trusty-review report] --analyze gap: {gap}");
+                }
+                model.gaps.extend(gaps);
             }
             Err(e) => {
                 eprintln!(
                     "[trusty-review report] --analyze: could not build HTTP client ({e}); \
                      falling back to scan"
+                );
+                // #5239: the client never existed, so no repo was assessed —
+                // that is a whole-report gap, not a per-repo one.
+                model.gaps.push(
+                    "trusty-analyze data unavailable — the analysis client could not be \
+                     built, so no application in this report was assessed against \
+                     trusty-analyze. Findings, complexity, and health factors are not \
+                     assessed, not clean."
+                        .to_string(),
                 );
             }
         }

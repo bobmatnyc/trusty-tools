@@ -3,17 +3,14 @@
 //! Why: trusty-review was missed by #3317's origin-guard rollout across
 //! search/memory/analyze/mpm. Issue #3332 adopts
 //! `trusty_common::server::with_guarded_middleware` so the destructive
-//! `POST /review` route is no longer reachable cross-origin (CSRF). The
-//! GitHub webhook route is a special case: GitHub signs requests with
-//! `X-Hub-Signature-256` and never sends an `Origin` header, so the guard's
-//! fail-open-on-missing-Origin behaviour must keep webhook delivery working
-//! unchanged — this file has a dedicated regression test for exactly that.
+//! `POST /review` route is no longer reachable cross-origin (CSRF).
 //!
 //! What: boots the real router via `build_router` (loopback-only allowlist,
 //! same as production's default bind) and drives it with
-//! `tower::ServiceExt::oneshot`, asserting the guard's three outcomes:
-//! cross-origin write → 403, loopback/missing-Origin write → allowed,
-//! cross-origin webhook (no Origin, as GitHub actually sends it) → allowed.
+//! `tower::ServiceExt::oneshot`, asserting the guard's outcomes: cross-origin
+//! write → 403, loopback/missing-Origin write → allowed, cross-origin GET →
+//! allowed. It also pins that the retired `POST /pr/github/webhook` path
+//! answers 404 (#5181).
 //!
 //! Test: this is the test module.
 
@@ -102,22 +99,8 @@ fn test_state() -> AppState {
     )
 }
 
-fn test_state_with_secret(secret: &str) -> AppState {
-    let mut config = crate::config::ReviewConfig::load(None);
-    config.github_webhook_secret = secret.to_string();
-    AppState::new(config, Arc::new(FakeLlm), Arc::new(FakeSearch), None)
-}
-
 fn router() -> Router {
     crate::service::build_router(test_state())
-}
-
-fn make_sig(secret: &str, body: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(body);
-    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
 
 fn review_requested_payload(action: &str) -> Vec<u8> {
@@ -234,45 +217,41 @@ async fn read_route_allows_cross_origin() {
     );
 }
 
-/// Why (#3332, CAUTION in the loopback-only doctrine tranche): GitHub's
-/// webhook deliveries are HMAC-signed (`X-Hub-Signature-256`) but carry NO
-/// `Origin` header at all — a browser-only header GitHub's server-to-server
-/// delivery never sends. If the router-wide guard did not fail open on a
-/// missing `Origin`, adopting it here would silently break webhook delivery.
-/// This test pins that the webhook path still accepts POSTs without Origin,
-/// using a correctly-signed payload so HMAC verification (a separate concern)
-/// is not what is under test.
-/// Test: this test.
+/// The retired webhook route answers 404, not 200-and-discard (#5181).
+///
+/// Why: the guard fails open on a missing `Origin` — exactly the shape of a
+/// real GitHub delivery — so a route left registered behind a gutted handler
+/// would sail through the middleware and answer 2xx while dropping the
+/// payload. GitHub never retries an acknowledged delivery, so that is silent
+/// loss with every health signal green. Asserting `handle_github_webhook` was
+/// deleted proves nothing about the router; this drives the real router and
+/// asserts the real response.
+///
+/// What: sends the request GitHub actually sends (POST, `X-GitHub-Event`, a
+/// signature header, no `Origin`) at the retired path and requires 404. Before
+/// #5181 the same request returned 202 — never 404 — so this test fails
+/// against the pre-fix state.
+/// Test: this is the test.
 #[tokio::test]
-async fn webhook_route_accepts_post_without_origin() {
-    let secret = "test-secret"; // pragma: allowlist secret
-    let state = test_state_with_secret(secret);
-    let router = crate::service::build_router(state);
-
-    let payload = review_requested_payload("review_requested");
-    let sig = make_sig(secret, &payload);
-
-    let response = router
+async fn retired_webhook_route_is_not_registered() {
+    let response = router()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri("/pr/github/webhook")
                 .header("x-github-event", "pull_request")
-                .header("x-hub-signature-256", sig)
+                .header("x-hub-signature-256", "sha256=deadbeef")
                 .header("content-type", "application/json")
                 // Deliberately NO `origin` header — matches real GitHub
-                // webhook deliveries exactly.
-                .body(Body::from(payload))
+                // webhook deliveries exactly, and the guard fails open on it.
+                .body(Body::from(review_requested_payload("review_requested")))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_ne!(
+    assert_eq!(
         response.status(),
-        StatusCode::FORBIDDEN,
-        "webhook POST with no Origin header must not be blocked by the write guard"
+        StatusCode::NOT_FOUND,
+        "the retired webhook route must be unreachable, not silently accepting"
     );
-    // The webhook handler itself accepts and dispatches (202) — confirms the
-    // request reached the handler rather than being swallowed by the guard.
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
 }

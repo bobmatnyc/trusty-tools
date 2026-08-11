@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Utc};
 use git2::{Repository, Sort};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rusqlite::params;
 use tracing::{debug, info, warn};
 
@@ -20,6 +20,7 @@ use crate::collect::git::fetch::{fetch_and_record, fetch_remote};
 use crate::collect::ticket::{extract_ticket_id, is_ticketed};
 use crate::core::config::{expand_path, RepositoryConfig};
 use crate::core::db::Database;
+use crate::core::progress::ProgressBus;
 
 /// Extracts commits from a single configured repository.
 ///
@@ -68,6 +69,11 @@ pub struct GitCollector {
     /// watchdog.  When `None` (the default), the system / git2 transport
     /// defaults apply.  See issue #334 and `RepositoryConfig::fetch_timeout_secs`.
     fetch_timeout_secs: Option<u64>,
+    /// #5197: the pipeline's live-progress sink, used here only as the signal
+    /// that somebody else owns the terminal. Defaults to
+    /// [`ProgressBus::disabled`], which keeps the CLI's spinner exactly as it
+    /// was.
+    progress: ProgressBus,
 }
 
 impl GitCollector {
@@ -115,7 +121,45 @@ impl GitCollector {
             head_only: config.head_only,
             explicit_branches: Vec::new(),
             fetch_timeout_secs: config.fetch_timeout_secs,
+            progress: ProgressBus::disabled(),
         })
+    }
+
+    /// Attach the pipeline's progress bus.
+    ///
+    /// Why: an attached bus means a consumer — today `tga tui` — is rendering
+    /// the run on the alternate screen. The revwalk spinner writes straight to
+    /// the terminal on a 100 ms steady tick, so leaving it enabled scribbles
+    /// over the drawn frame for the whole walk, and ratatui's diff renderer
+    /// never repaints cells it believes unchanged, making the damage permanent
+    /// for the session (#5197). This is the gate
+    /// [`ProgressBus::is_active`] was documented for.
+    /// What: builder setter. The walk emits nothing on this bus itself; it only
+    /// reads [`ProgressBus::is_active`] to pick the spinner's draw target.
+    /// Test: `tests::walk_spinner_is_hidden_when_a_progress_bus_is_attached`,
+    /// `tests::walk_spinner_keeps_the_cli_draw_target_with_no_bus`.
+    #[must_use]
+    pub fn with_progress(mut self, progress: ProgressBus) -> Self {
+        self.progress = progress;
+        self
+    }
+
+    /// Build the revwalk's spinner, suppressed when a consumer owns the screen.
+    ///
+    /// Why/What/Test: see [`GitCollector::with_progress`]. Kept as its own
+    /// function so the draw-target decision is assertable without a terminal.
+    fn walk_spinner(&self) -> ProgressBar {
+        let target = if self.progress.is_active() {
+            ProgressDrawTarget::hidden()
+        } else {
+            ProgressDrawTarget::stderr()
+        };
+        let pb = ProgressBar::with_draw_target(None, target);
+        pb.set_style(
+            ProgressStyle::with_template("{spinner} {pos} commits walked {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        pb
     }
 
     /// Set whether to skip merge commits during extraction.
@@ -409,11 +453,7 @@ impl GitCollector {
         // forces a full-history walk before the time filter can take
         // effect. With Sort::TIME the walk yields newest-first, so we can
         // safely break the moment we cross the `since` boundary.
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::with_template("{spinner} {pos} commits walked {msg}")
-                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
-        );
+        let pb = self.walk_spinner();
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         // Derive date-only bounds from the (UTC) timestamps. The collector
@@ -764,6 +804,42 @@ mod tests {
 
     fn make_collector(path: &Path, since: Option<&str>, until: Option<&str>) -> GitCollector {
         make_collector_opts(path, since, until, None, false)
+    }
+
+    /// #5197: with a consumer on the bus, the revwalk spinner must not draw.
+    ///
+    /// `ProgressDrawTarget::hidden()` reports hidden unconditionally, so this
+    /// holds on a TTY and in CI alike. What it proves is that no `indicatif`
+    /// write reaches the terminal for the whole walk; that the resulting screen
+    /// is clean also depends on the two other writers this issue fixed
+    /// (`collect::notify` and the tracing capture) and is confirmed visually.
+    #[test]
+    fn walk_spinner_is_hidden_when_a_progress_bus_is_attached() {
+        let (repo_dir, _repo) = init_repo("spinner-hidden");
+        let collector =
+            make_collector(&repo_dir.path, None, None).with_progress(ProgressBus::new());
+        assert!(
+            collector.walk_spinner().is_hidden(),
+            "an attached bus means a TUI owns the terminal; the spinner must not draw"
+        );
+    }
+
+    /// #5197: the plain CLI keeps the spinner it has always had.
+    ///
+    /// The bar tracks stderr, so it is visible on a terminal and hidden when
+    /// stderr is redirected — which is exactly indicatif's pre-existing
+    /// behavior, and the assertion is written against the actual stderr of the
+    /// test binary so it holds either way.
+    #[test]
+    fn walk_spinner_keeps_the_cli_draw_target_with_no_bus() {
+        use std::io::IsTerminal;
+        let (repo_dir, _repo) = init_repo("spinner-cli");
+        let collector = make_collector(&repo_dir.path, None, None);
+        assert_eq!(
+            collector.walk_spinner().is_hidden(),
+            !std::io::stderr().is_terminal(),
+            "with no bus the spinner must follow stderr, exactly as before"
+        );
     }
 
     /// Build a minimal [`RepositoryConfig`] for a test repo path.

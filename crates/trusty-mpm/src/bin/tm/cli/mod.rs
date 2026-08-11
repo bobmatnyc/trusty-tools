@@ -599,6 +599,17 @@ pub(crate) enum Command {
         /// to the default.
         #[arg(long)]
         style: Option<String>,
+        /// Run this session in its own git worktree instead of the project's
+        /// main checkout (#5274).
+        ///
+        /// By default a session launches in the project's own checkout: the PM
+        /// works where you work, and only the agents it dispatches are isolated
+        /// (governed separately by the project's `worktree` setting). Pass
+        /// `--worktree` when you want THIS session provisioned into a protected
+        /// managed clone plus a per-session worktree, leaving the live checkout
+        /// untouched.
+        #[arg(long)]
+        worktree: bool,
     },
     /// Start or attach to a session without running the deployment sequence.
     ///
@@ -1240,12 +1251,22 @@ pub(crate) enum Command {
 /// bare `tm doctor` is unchanged and READ-ONLY. The `repair` arg group holds
 /// the two flags that select a repair (`--fix`, `--fix-skills`) so
 /// `--include-frozen` can require either one without duplicating the check.
+/// The `writes` group holds the two that DEFAULT TO A PREVIEW (`--fix`,
+/// `--quarantine-mcp`) so `--yes` can promote either without naming both.
 /// Test: `cli_parses_doctor`, `cli_parses_doctor_prune_stale_skills`,
-/// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`.
+/// `cli_parses_doctor_fix_skills`, `cli_parses_doctor_fix`,
+/// `cli_parses_doctor_quarantine_mcp`,
+/// `cli_rejects_doctor_yes_without_a_write_action`.
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
 #[command(group(
     clap::ArgGroup::new("repair")
         .args(["fix", "fix_skills"])
+        .multiple(true)
+        .required(false)
+))]
+#[command(group(
+    clap::ArgGroup::new("writes")
+        .args(["fix", "quarantine_mcp"])
         .multiple(true)
         .required(false)
 ))]
@@ -1305,14 +1326,35 @@ pub struct DoctorFlags {
     #[arg(long)]
     pub fix: bool,
 
-    /// With `--fix`, actually perform the repairs instead of previewing.
+    /// With `--fix` or `--quarantine-mcp`, actually perform the change
+    /// instead of previewing.
     ///
     /// Why (#4948): these repairs rewrite files the operator can see and
     /// care about, so a preview is the default and writing is a second
-    /// deliberate act. Every overwrite is still backed up first.
-    /// What: promotes `--fix` from a dry run to an applied run.
-    #[arg(long, requires = "fix")]
+    /// deliberate act. Every overwrite is still backed up first, and a
+    /// quarantine renames aside rather than deleting.
+    /// What: promotes `--fix` and `--quarantine-mcp` from a dry run to an
+    /// applied run.
+    #[arg(long, requires = "writes")]
     pub yes: bool,
+
+    /// Quarantine one specific stray `.mcp.json` by path. DRY RUN unless
+    /// `--yes`.
+    ///
+    /// Why: `--fix`'s stray sweep acts only on files tm's provenance ledger
+    /// proves it wrote, and that ledger only covers writes made after it
+    /// shipped — so every stray already on disk is unattributable and the
+    /// sweep refuses it. Rather than weaken the evidence rule that keeps the
+    /// sweep off hand-written config, this takes the attribution from the
+    /// operator: naming an exact path is a deliberate act tm cannot perform
+    /// on its own.
+    /// What: renames the named file to `.mcp.json.quarantined-<epoch>` beside
+    /// itself, which is what stops Claude Code's upward walk finding it while
+    /// keeping every byte recoverable. Nothing is deleted. It refuses a path
+    /// that is not a `.mcp.json`, the current workspace's own `.mcp.json`, and
+    /// a symlink.
+    #[arg(long, value_name = "PATH")]
+    pub quarantine_mcp: Option<std::path::PathBuf>,
 
     /// With `--fix` or `--fix-skills`, also overwrite skills that were
     /// HAND-EDITED after deployment.

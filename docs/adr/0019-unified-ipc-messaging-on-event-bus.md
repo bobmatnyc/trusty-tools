@@ -5,7 +5,8 @@
 - **Scope:** Workspace-wide (trusty-mpm, trusty-code, trusty-agents)
 - **Reversibility Cost:** High — both deprecated channels have callers; migration requires per-harness adapter and coordination across PMs
 - **Decision Drivers:** Silent message loss, no application-level acknowledgment, modal-state swallowing, cross-pane identity defects, evidence of unverifiable delivery
-- **Supersedes / Superseded by:** Supersedes ADR-0005 (MessageBus stays separate)
+- **Supersedes / Superseded by:** Amends ADR-0005's "MessageBus stays separate"
+  rule; ADR-0005's telemetry envelope and event-bus foundation remain in force.
 
 ## Context
 
@@ -45,7 +46,13 @@ Together, this means **any message sent via either channel is unverifiable — e
 
 ADR-0005 §"Secondary design defaults" states: **"MessageBus stays separate... NOT a command/RPC bus."** The event bus was designed for telemetry (fan-out, lossy under lag, no delivery guarantee). 
 
-That was correct for telemetry. But the owner has now decided the opposite for **messaging**: there will be ONE IPC channel for cross-PM and cross-agent coordination, and it MUST be built on the event bus, with delivery semantics. Leaving ADR-0005 live while building precisely what it forbids would mislead the next reader — hence supersession rather than silent contradiction.
+That was correct for telemetry. But the owner has now decided the opposite for
+**messaging**: there will be ONE IPC channel for cross-PM and cross-agent
+coordination, and it MUST be built on the event bus, with delivery semantics.
+Leaving the prohibition unqualified while building precisely what it forbids
+would mislead the next reader — hence an explicit amendment rather than a
+silent contradiction. The rest of ADR-0005 remains the foundation this ADR
+uses.
 
 ## Decision
 
@@ -123,7 +130,10 @@ This approach keeps tmux as the last-mile transport for trusty-mpm but wraps it 
 Vetted against prior ADRs on 2026-07-21:
 
 - **ADR-0004 (Three harnesses on shared event-driven common):** Extends. This ADR adopts ADR-0004's foundation as the transport for messaging; consistent with the three-harness coordination model.
-- **ADR-0005 (Harness event bus):** Supersedes. ADR-0005 explicitly forbade a MessageBus on the event bus; this ADR reverses that decision, adopting a unified messaging channel on top of the event bus with explicit delivery semantics. **Action:** flip ADR-0005's status to "Superseded by 0019".
+- **ADR-0005 (Harness event bus):** Amends. ADR-0005 explicitly forbade a
+  MessageBus on the event bus; this ADR reverses that clause while retaining
+  ADR-0005's event envelope and telemetry bus. **Action:** mark ADR-0005
+  "Amended by 0019".
 - **ADR-0016 (Orchestration Hierarchy: Engineering Lead / PM / Assistant):** Consistent. This ADR uses ADR-0016's role hierarchy (Assistant, Engineering Lead, PM) as its addressing model; the two decisions are complementary.
 - **ADR-0018 (Loopback-only doctrine):** Consistent. Bus messaging is in-process (loopback); no new non-loopback binds.
 

@@ -1,6 +1,6 @@
 [package]
 name = "trusty-common"
-version = "0.30.0"
+version = "0.30.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -84,7 +84,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["net", "io-util", "io-std", "macros", "rt", "sync", "process", "time"] }
+tokio = { workspace = true, features = ["net", "io-util", "io-std", "macros", "rt", "sync", "process", "signal", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Process RSS / CPU sampling for the shared `sys_metrics` module; the
@@ -158,6 +158,9 @@ genco = { version = "0.19", optional = true }
 # Heavy deps gated behind the feature so downstream crates that only
 # want chat / mcp / symgraph pay zero cost.
 hex = { workspace = true, optional = true }
+# Optional: enabled by the `webhook-hmac` feature (#5089 step 3). The GitHub
+# `X-Hub-Signature-256` verifier is the crate's only HMAC consumer.
+hmac = { workspace = true, optional = true }
 hnsw_rs = { workspace = true, optional = true }
 git2 = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
@@ -176,6 +179,7 @@ base64 = { workspace = true, optional = true }
 # Optional: enabled by the `tickets` feature for config-file parsing. Also
 # reused by the `credentials` feature's `FileKeyStore` backend (issue #2401).
 toml = { version = "0.8", optional = true }
+toml_edit = { workspace = true, optional = true }
 
 # Optional: enabled by the `credentials` feature (issue #2401). Shared
 # `.env.local` loader for the `credentials` resolver's env tier.
@@ -214,8 +218,10 @@ aws-smithy-types = { workspace = true, optional = true }
 # reqwest, dirs, serde, serde_json, anyhow, tokio) are already unconditional.
 rusqlite = { workspace = true, optional = true }
 
-# launchd module is macOS-only and needs getuid(2) for the gui/<uid> domain.
-[target.'cfg(target_os = "macos")'.dependencies]
+# libc on every unix target: the macOS `launchd` module needs getuid(2) for the
+# gui/<uid> domain, and (#5099) the `uds` module needs getuid(2) plus
+# SO_PEERCRED / getpeereid on both macOS and Linux for peer-credential checks.
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
 # Cross-platform direct ort dep for the `embedder` feature. Pinned to the
@@ -264,6 +270,13 @@ postcard = { workspace = true }
 
 [features]
 default = []
+# Enables the `docgen` module: marker-delimited generated documentation
+# regions (`<!-- BEGIN GENERATED: <id> -->`) plus the MCP-tool-table renderer
+# and the check-or-rewrite gate the consumer crates' `tests/generated_docs.rs`
+# drive. Test-facing only — enable it in `[dev-dependencies]`, not in
+# `[dependencies]`. Adds no new dependency: `serde_json` is already
+# unconditional here, so the flag gates module compilation alone.
+docgen = []
 # Enables the `catchup` module: DOC-28 incremental catch-up engine for the
 # trusty-mpm ↔ trusty-code cutover bridge (#1762). Provides
 # `CatchupOptions`, `generate_catchup_context`, `run_catchup`,
@@ -320,7 +333,38 @@ migrations = []
 # Enables the `bm25_client` module: a UDS JSON-RPC client for the per-palace
 # `trusty-bm25-daemon` subprocess (issue #156). Pure user of existing
 # `tokio` / `serde_json` / `anyhow` workspace deps — adds no new deps.
-bm25-client = []
+# Implies `uds` for the shared socket-path resolver (#5099).
+bm25-client = ["uds"]
+# Enables the `uds` module: the shared 0700-directory / 0600-socket /
+# peer-uid enforcement every UDS bind site routes through (issue #5099).
+# Pulls in `thiserror` (error enum) and uses the `libc` and `tokio` workspace
+# deps already required — adds no new dependencies to the lockfile.
+uds = ["dep:thiserror"]
+# Enables the `uds::supervisor` module: the generic on-demand spawn supervisor
+# (`UdsServiceSupervisor`) promoted from trusty-memory's `Bm25Supervisor`
+# (issue #5089 step 2, ADR-0034 §1). Implies `uds` — it verifies an adopted
+# socket through `verify_socket_for_connect` and checks the `sun_path` budget
+# before spawning. Adds no new dependencies: `tokio/process`, `libc` on unix and
+# the unconditional `sys_metrics` module are already required by this crate.
+# Off by default so a consumer that only binds a socket does not compile the
+# child-process lifecycle.
+uds-supervisor = ["uds"]
+# Enables the `webhook_hmac` module: the single GitHub `X-Hub-Signature-256`
+# verifier (issue #5089 step 3, ADR-0034 §3), replacing the two divergent
+# copies in trusty-analyze and trusty-review. Pulls in `hmac`, and turns on the
+# `sha2` / `hex` deps this crate already declares optional.
+webhook-hmac = ["dep:hmac", "dep:sha2", "dep:hex"]
+# Enables the `webhook_relay` module: the console->target relay wire contract
+# (issue #5089 step 3, ADR-0034 §3). The sender is trusty-console and the
+# receivers are trusty-review / trusty-analyze, neither of which can depend on
+# the console — so the frame, its owned counterpart, and the ack-bearing
+# response live here where both halves read them. Implies `webhook-hmac`
+# because the frame's provenance record describes that verification, and `uds`
+# because #5182 added the receive half — the listener binds through
+# `bind_hardened` and checks the peer uid on accept, and both halves resolve the
+# socket paths from `scratch_socket_dir`. Adds no new dependencies beyond
+# `serde` / `serde_json` / `thiserror`, already present.
+webhook-relay = ["webhook-hmac", "uds"]
 # Bundle the ONNX Runtime static libs via fastembed's
 # `ort-download-binaries-native-tls`. Right choice for macOS and modern
 # Linux (glibc ≥ 2.38). Mutually exclusive with `embedder-load-dynamic`
@@ -453,7 +497,7 @@ monitor-tui = ["dep:ratatui", "dep:crossterm"]
 # both the in-process and remote paths.
 # Note: module name is `embedder_client` (with `er`) to distinguish from the
 # existing `embed_client` (UDS, PR #157). Issue #164 will reconcile them.
-embedder-client = ["dep:thiserror", "embedder"]
+embedder-client = ["dep:thiserror", "embedder", "uds"]
 # Enables the `tickets` module: unified ticketing MCP server with GitHub,
 # JIRA, and Linear backends (absorbed from the former standalone `trusty-tickets`
 # crate). Pulls in `chrono`, `uuid`, `base64`, `thiserror`, and `toml` as
@@ -558,6 +602,11 @@ console-metrics = ["stdio-mcp-client"]
 # loader) — all already optional workspace deps. Does NOT pull in the OS
 # keychain backend; see `keyring-store` for that.
 credentials = ["dep:thiserror", "dep:toml", "dep:dotenvy"]
+# Enables the `codex_config` module: the ONE writer for Codex CLI stdio MCP
+# registrations (`~/.codex/config.toml`), shared by trusty-search (#5264) and
+# trusty-memory (#5265). Pulls in `toml_edit` so a repair preserves the
+# operator's comments and unrelated tables.
+codex-config = ["dep:toml_edit"]
 # Enables `credentials::KeyringStore`, the OS-keychain backend
 # (macOS Keychain / Windows Credential Manager / Secret Service on Linux)
 # selected by `credentials::default_store` when available, with

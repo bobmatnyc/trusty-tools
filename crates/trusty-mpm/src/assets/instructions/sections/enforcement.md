@@ -10,8 +10,8 @@ deployed `subagent_type`.
 | P3 | `curl`,`wget`,`lsof`,`netstat`,`ps`,`pm2`,`docker ps` | `local-ops` / `qa` | 7 |
 | P4 | `make` (any target), `pytest`, `npm test`, `uv run pytest` | `local-ops` / `qa` / `engineer` | 7 |
 | P5 | `sed`,`awk`,`patch`,`git apply`, pipe to file | `engineer` | 14 |
-| P6 | `gh issue list/view/create/close/edit`, issue labels/comments/triage | `ticketing` | 6 |
-| P7 | `gh pr view/list/diff/review`, branch/push/rebase/merge/tag | `version-control` | 6 |
+| P6 | ANY Issue operation, any tracker: every `gh issue` verb, the ticketing MCP/CLI families, labels/assignee/milestone/comments/state | `ticketing` | 6 |
+| P7 | ANY Pull Request operation: every `gh pr` verb incl. `create`/`edit`/`checks`/`merge`, and the PR title and body; plus branch/push/rebase/tag | `version-control` | 6 |
 | P8 | `mcp__chrome-devtools__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*` | `web-qa` | 6 |
 | P9 | `rm`,`rmdir` on project files | `local-ops` | 7 |
 | P10 | Any non-git Bash command | Appropriate agent | 1/7 |
@@ -42,6 +42,9 @@ you stayed in budget.
 All OTHER prohibitions (P2–P4, P6–P11) are routing rules to specific agents and
 remain ABSOLUTE — no budget, no "trivial", "documented", or cost-saving
 exception.
+
+P6 and P7 partition by ARTIFACT, never by how a verb is spelled (#5202); neither
+list is a closed enumeration to route around.
 
 ## Circuit Breakers
 

@@ -19,98 +19,74 @@
  * truth.
  */
 
+import { TOOLS, type Tool } from './tools';
+
 export const GITHUB_URL = 'https://github.com/bobmatnyc/trusty-tools';
 
+/**
+ * Rendered by both `SiteHeader.svelte` and `SiteFooter.svelte`, which is why
+ * the list lives here rather than in `+layout.svelte`.
+ */
 export const NAV_LINKS: { href: string; label: string }[] = [
 	{ href: '/', label: 'Home' },
-	{ href: '/docs', label: 'Docs' }
+	{ href: '/docs', label: 'Docs' },
+	{ href: '/whats-new', label: "What's new" }
 ];
 
-export interface Flagship {
-	name: string;
-	unit: string;
-	tagline: string;
-	points: string[];
-}
-
-/** The three flagship MCP servers, per README.md's "Three Flagship MCP Servers". */
-export const FLAGSHIPS: Flagship[] = [
-	{
-		name: 'trusty-search',
-		unit: 'UNIT 01',
-		tagline: 'Hybrid code search',
-		points: [
-			'BM25, vector, and knowledge-graph retrieval fused with Reciprocal Rank Fusion',
-			'One machine-wide daemon, unlimited named project indexes',
-			'Query-intent routing across definition, usage, conceptual, and bug/debt lookups',
-			'Branch-aware ranking and caller/callee chain expansion'
-		]
-	},
-	{
-		name: 'trusty-memory',
-		unit: 'UNIT 02',
-		tagline: 'Memory palace storage',
-		points: [
-			'HNSW vector index over SQLite, embedded with fastembed',
-			'Semantic recall across everything you have stored',
-			'Collections for notes, snippets, code patterns, and decisions',
-			'Svelte UI for browsing and editing, plus an MCP server'
-		]
-	},
-	{
-		name: 'trusty-analyze',
-		unit: 'UNIT 03',
-		tagline: 'Code analysis sidecar',
-		points: [
-			'Cyclomatic and cognitive complexity per chunk, file, and index',
-			'Configurable code-smell categories and A–F quality grading',
-			'Git-blame temporal decay to surface stale, complex code',
-			'Tree-sitter adapters for 14 languages; HTTP and MCP parity'
-		]
-	}
-];
+/**
+ * The six flagship crates, each with a hand-authored page under `/tools/`.
+ * The records live in `./tools` because those pages need more per-crate detail
+ * than a landing-page card does, and a second copy here would drift.
+ */
+export type Flagship = Tool;
+export const FLAGSHIPS: Flagship[] = TOOLS;
 
 export interface CrateGroup {
 	group: string;
 	crates: { name: string; description: string }[];
 }
 
-/** Crate lineup, transcribed from README.md's "Full Crate Index" tables. */
+/**
+ * Why: what a visitor wants below the six flagship cards is "what else can I
+ * install, and what is coming" — not an inventory of every workspace member.
+ * Internal plumbing is deliberately absent: shared libraries (`trusty-common`,
+ * `trusty-progress`), private launchers, release tooling, and sidecars that
+ * are installed BY another crate rather than on their own (`trusty-embedderd`,
+ * whose own README says it is not installed standalone) have nothing to offer
+ * a reader here. The six flagships are carded above and are not repeated.
+ *
+ * What: two groups, split on release state rather than on subject matter.
+ * Placement was checked per crate against crates.io and this repository's
+ * release tags on 2026-08-08, not inferred from version numbers —
+ * `trusty-agents` reads 0.38.6 in its manifest while having no tag and no
+ * crates.io release at all.
+ *
+ * Deliberately omitted here, like the crate COUNT above: any per-crate version
+ * number. A number TYPED INTO THIS FILE is stale the next time that crate
+ * ships. The six flagship cards do now show one, and that is not a reversal of
+ * the same rule — `$lib/changelog` derives it from the crate's own
+ * `CHANGELOG.md` at build time, so it cannot disagree with the repository. The
+ * rule is "never hand-write a version", not "never show one".
+ */
 export const CRATE_GROUPS: CrateGroup[] = [
 	{
-		group: 'Daemons & MCP servers',
+		group: 'Also shipped',
 		crates: [
-			{ name: 'trusty-search', description: 'Hybrid code search (BM25 + vector + KG)' },
-			{ name: 'trusty-memory', description: 'Memory palace UI and MCP frontend' },
-			{ name: 'trusty-analyze', description: 'Complexity, smells, and a facts store' },
-			{ name: 'trusty-bm25-daemon', description: 'Standalone BM25 full-text search daemon' }
+			{ name: 'trusty-installer', description: 'The tctl install and upgrade control plane' },
+			{ name: 'trusty-console', description: 'Web dashboard over the trusty services you run' },
+			{ name: 'trusty-code', description: 'Per-project coding harness (tcode)' },
+			{ name: 'trusty-gworkspace', description: 'Google Workspace MCP server' }
 		]
 	},
 	{
-		group: 'Shared libraries',
+		group: 'In development',
 		crates: [
-			{ name: 'trusty-common', description: 'Tracing, daemon helpers, shared utilities' },
-			{ name: 'trusty-embedderd', description: 'fastembed wrapper, 384-dimension output' },
-			{ name: 'trusty-gworkspace', description: 'Google Workspace client' },
-			{ name: 'trusty-cto-db', description: 'SQLite schema and rusqlite bindings' }
-		]
-	},
-	{
-		group: 'Platform & agents',
-		crates: [
-			{ name: 'trusty-mpm', description: 'Multi-agent platform: CLI, daemon, MCP server' },
-			{ name: 'trusty-mpm-gui', description: 'Desktop GUI, built with Tauri' },
-			{ name: 'trusty-agents', description: 'Agent orchestration platform' },
-			{ name: 'trusty-installer', description: 'Install and upgrade orchestrator (tctl)' }
-		]
-	},
-	{
-		group: 'Tools & analytics',
-		crates: [
-			{ name: 'trusty-review', description: 'Code review automation and analysis' },
-			{ name: 'trusty-git-analytics', description: 'Developer analytics from git history' },
-			{ name: 'trusty-console', description: 'Terminal UI for system monitoring' },
-			{ name: 'trusty-code', description: 'Code generation and analysis utilities' }
+			{ name: 'trusty-agents', description: 'Agentic harness with multi-model routing (tagent)' },
+			{ name: 'trusty-channels', description: 'Chat-channel MCP servers, starting with Slack' },
+			{ name: 'trusty-kb', description: 'Personal knowledge base as an MCP server' },
+			{ name: 'trusty-sld-lint', description: 'Linter for spec-linked documentation' },
+			{ name: 'trusty-mpm-gui', description: 'Desktop dashboard for trusty-mpm' },
+			{ name: 'trusty-code-gui', description: 'Desktop shell for the tcode daemon' }
 		]
 	}
 ];

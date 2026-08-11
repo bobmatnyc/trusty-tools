@@ -1,13 +1,17 @@
-//! GitHub integration: App auth, PR diff/metadata fetch, push firewall, webhook
-//! HMAC verification.
+//! GitHub integration: App auth, PR diff/metadata fetch, push firewall.
 //!
 //! Why: all GitHub-facing code lives in this submodule so the error types,
 //! the HTTP client, and the firewall constant share a single namespace.
 //! (spec REV-400–REV-404, source-analysis §4)
 //!
 //! What: re-exports the public items from each submodule (`auth`, `pr`,
-//! `firewall`, `webhook`) and defines the shared `GithubError` enum and
-//! `GithubClient` wrapper used by all helpers.
+//! `firewall`) and defines the shared `GithubError` enum and `GithubClient`
+//! wrapper used by all helpers.
+//!
+//! #5181 removed the `webhook` submodule (`verify_webhook_signature`) and
+//! `outcomes` (the merged-PR outcome poll). `trusty-console` verifies a
+//! delivery's HMAC once before relaying (ADR-0034 §3), and the outcome poll is
+//! retired rather than relocated — see ADR-0034 §5.
 //!
 //! Test: each submodule carries its own tests; this module's
 //! `github_error_display` test verifies error message formatting.
@@ -15,10 +19,8 @@
 pub mod auth;
 pub mod firewall;
 pub mod inline;
-pub mod outcomes;
 pub mod posting;
 pub mod pr;
-pub mod webhook;
 
 pub use auth::{AuthStrategy, RunMode, mint_app_jwt, resolve_token_for_mode};
 pub use firewall::{GH_ALLOW_PUSH, assert_no_push_operation};
@@ -31,7 +33,6 @@ pub use pr::{
     CommitInfo, PrMetadata, PrRef, PrUser, Reaction, fetch_pr_diff, fetch_pr_metadata,
     get_pr_commits_after, get_review_comment_reactions,
 };
-pub use webhook::verify_webhook_signature;
 
 // ─── Shared error type ────────────────────────────────────────────────────────
 

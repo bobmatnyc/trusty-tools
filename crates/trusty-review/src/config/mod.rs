@@ -22,9 +22,6 @@ pub mod verification;
 // Why: voice configuration loading extracted to keep config/mod.rs under the
 // 500-line cap (#610) after adding voice support (#754/#756).
 pub mod voice;
-// Why: outcome-polling configuration extracted to keep config/mod.rs under the
-// 500-line cap — mirrors the verification module pattern.
-pub mod outcome;
 // Why: per-project `.trusty-review.toml` discovery (issue #2995) — separated
 // so the pure/impure git-root-walk split mirrors `index_resolver`.
 pub mod repo_config;
@@ -39,7 +36,6 @@ pub use index_resolver::{
 pub use mapreduce::{DiffStats, MapMode, MapReduceConfig, ReviewPath, select_review_mode};
 
 pub use context::{ContextConfig, ContextFileConfig, InvocationSurface};
-pub use outcome::{OutcomeConfig, OutcomeFileConfig};
 pub use repo_config::find_repo_config_path;
 pub use review_template::ReviewFileConfig;
 pub use role_models::{
@@ -138,8 +134,6 @@ struct TomlFile {
     voice: voice::VoiceFileConfig,
     #[serde(default)]
     coverage: crate::coverage::CoverageFileConfig,
-    #[serde(default)]
-    outcome: outcome::OutcomeFileConfig,
     // Why: `[review] template = "<name>"` (issue #2995) — resolved by
     // `review_template::load_review_template`.
     #[serde(default)]
@@ -210,8 +204,6 @@ pub struct ReviewConfig {
     pub github_app_private_key: Option<String>,
     /// PAT fallback token (`GITHUB_TOKEN`).
     pub github_token: String,
-    /// Webhook shared secret (`GITHUB_WEBHOOK_SECRET`).
-    pub github_webhook_secret: String,
     /// Installation IDs keyed by org name (case-insensitive).
     ///
     /// Populated from `GITHUB_INSTALLATION_ID_DUETTORESEARCH` and
@@ -313,12 +305,6 @@ pub struct ReviewConfig {
     /// default).  All fields configurable via env vars or `[coverage]` TOML table.
     /// When `enabled = false`, the coverage pipeline is a complete no-op.
     pub coverage: crate::coverage::CoveragePolicy,
-
-    // ── Outcome polling (issue #1421) ─────────────────────────────────────
-    /// Resolved outcome-polling settings (`enabled`, `poll_delay_minutes`,
-    /// `dismissal_threshold`).  Defaults to disabled — opt-in via
-    /// `TRUSTY_REVIEW_OUTCOME_ENABLED=true`.
-    pub outcome: OutcomeConfig,
 }
 
 impl ReviewConfig {
@@ -384,8 +370,6 @@ impl ReviewConfig {
             repo_toml_file.as_ref().map(|f| &f.review);
         let file_coverage: Option<&crate::coverage::CoverageFileConfig> =
             toml_file.as_ref().map(|f| &f.coverage);
-        let file_outcome: Option<&outcome::OutcomeFileConfig> =
-            toml_file.as_ref().map(|f| &f.outcome);
 
         let env = RoleEnv::from_env();
         let role_models = RoleModels::resolve(cli_overrides, &env, file_models.as_ref());
@@ -436,7 +420,6 @@ impl ReviewConfig {
                 .map(|s| s.replace("\\n", "\n")), // expand \n-escaped newlines.
             github_token: std::env::var(trusty_common::env_vars::ENV_GITHUB_TOKEN)
                 .unwrap_or_default(),
-            github_webhook_secret: std::env::var("GITHUB_WEBHOOK_SECRET").unwrap_or_default(),
             github_installations: load_github_installations(),
             bot_username: std::env::var("PR_REVIEW_BOT_USERNAME")
                 .ok()
@@ -456,7 +439,6 @@ impl ReviewConfig {
                 file_review,
             ),
             coverage: crate::coverage::CoveragePolicy::from_env_and_file(file_coverage),
-            outcome: OutcomeConfig::from_env_and_file(file_outcome),
         }
     }
 

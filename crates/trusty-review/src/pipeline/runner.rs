@@ -132,6 +132,7 @@ pub struct ReviewInput {
 /// so tests can inject fakes without a running daemon.
 /// What: all fields are `Arc<dyn Trait>` for cheap cloning in `compare` mode.
 /// Test: `run_review_with_fake_provider_approves`.
+#[derive(Clone)]
 pub struct ReviewDeps {
     /// LLM provider for the reviewer role.
     pub llm: Arc<dyn LlmProvider>,
@@ -661,8 +662,16 @@ pub async fn run_review(
     // Coverage-floor tightening (step 7b-post above) only drives REQUEST_CHANGES (not
     // BLOCK), and the original LLM grade for REQUEST_CHANGES is already at the D-band,
     // so the clamp is correct in the common case.
+    //
+    // #4044: `clamp_grade_to_verdict` only moves a grade that is too OPTIMISTIC
+    // for the verdict; a grade that is too SEVERE passes through untouched. So
+    // when verification refuted the blocking findings and the verdict relaxed,
+    // the model's own "F" survived verbatim next to an APPROVE — the grade was
+    // still resting on evidence the pipeline had already discarded.
+    // `reconcile_grade_with_verdict` moves it in both directions; `grade.rs`
+    // already switched to it for the #PR84 case and this call site was missed.
     result.grade = original_llm_grade.map(|g| {
-        crate::pipeline::letter_grade::clamp_grade_to_verdict(g, &result.verdict).to_string()
+        crate::pipeline::letter_grade::reconcile_grade_with_verdict(g, &result.verdict).to_string()
     });
 
     // 7d-post: flag a suspiciously "shallow" clean review (#1877) — a

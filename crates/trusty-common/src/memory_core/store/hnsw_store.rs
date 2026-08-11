@@ -30,6 +30,9 @@ use crate::memory_core::store::kg_store::{
     DELETED_VECTORS, NEXT_VECTOR_ID, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS,
 };
 
+mod exhaustive;
+use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowed};
+
 /// Default HNSW connectivity. Maps to `max_nb_connection` in `hnsw_rs`.
 ///
 /// Why: 16 is the recommended value from the original HNSW paper for
@@ -319,6 +322,21 @@ pub struct HnswStore {
     /// `delete`, and `compact_orphans`.
     /// Test: `vector_writes_rejected_on_snapshot` (in `vector.rs`).
     read_only: bool,
+    /// `vector_id`s that have more than one point in the in-memory graph.
+    ///
+    /// Why (#5171): `hnsw_rs` cannot remove a point, so re-upserting a mapped
+    /// uuid leaves its previous embedding in the graph under the same id. A
+    /// search that scores the drawer by that stale copy reports content the
+    /// drawer no longer holds. Knowing exactly which ids are ambiguous lets
+    /// `search` re-read only those from `VECTORS` instead of re-reading every
+    /// candidate — the steady state is empty, and this costs nothing there.
+    /// What: written by `upsert` when the uuid already had a mapping. Starts
+    /// empty at every `open`, which is correct: `open` rebuilds the graph with
+    /// one point per live vector. Marked before the shadow point enters the
+    /// graph, so no search can observe the point without the flag.
+    /// Test: `search_scores_a_re_upserted_drawer_by_its_current_vector`,
+    /// `upsert_marks_a_shadow_before_the_graph_can_serve_it`.
+    shadowed: RwLock<std::collections::HashSet<u64>>,
 }
 
 impl HnswStore {
@@ -457,6 +475,7 @@ impl HnswStore {
             index: Arc::new(RwLock::new(index)),
             dim,
             read_only,
+            shadowed: RwLock::new(std::collections::HashSet::new()),
         })
     }
 
@@ -512,6 +531,9 @@ impl HnswStore {
         let encoded: Vec<u8> = postcard::to_allocvec(&vector.to_vec())?;
         let wtx = self.db.begin_write()?;
         let vector_id;
+        // #5171: a re-upsert leaves the old embedding in the graph under this
+        // same id, so `search` must re-read the authoritative vector for it.
+        let shadows_previous;
         {
             let mut vectors = wtx.open_table(VECTORS)?;
             let mut keys = wtx.open_table(VECTOR_KEYS)?;
@@ -522,6 +544,7 @@ impl HnswStore {
             // (immutable borrow of `keys`) is dropped before we re-borrow
             // `keys` mutably for `insert`.
             let existing: Option<u64> = keys.get(uuid)?.map(|g| g.value());
+            shadows_previous = existing.is_some();
             vector_id = match existing {
                 Some(id) => id,
                 None => {
@@ -537,6 +560,19 @@ impl HnswStore {
         }
         wtx.commit()?;
 
+        // #5171: mark BEFORE the graph can serve the shadow point. The two
+        // steps cannot be atomic, and the asymmetry runs one way: a search
+        // that sees the shadow without the flag scores the drawer by whichever
+        // copy is nearer, which is the defect. A search that sees the flag
+        // without the shadow re-reads the already-committed `VECTORS` row and
+        // gets the right answer, so over-marking costs one point read.
+        //
+        // #5171: safe only because `exhaustive_nearest` (exhaustive.rs) never
+        // truncates before `resolve_shadowed` corrects every candidate — a
+        // pre-correction cap there would reopen this race.
+        if shadows_previous {
+            self.shadowed.write().insert(vector_id);
+        }
         self.index.read().insert((vector, vector_id as usize));
 
         Ok(vector_id)
@@ -550,11 +586,23 @@ impl HnswStore {
     /// path is a single in-memory graph traversal plus a hash lookup per
     /// hit. Tombstoned ids are filtered out before the lookup so callers
     /// never see deleted points.
-    /// What: Calls `Hnsw::search(query, k, ef_search)`, filters results
-    /// against `DELETED_VECTORS`, then maps each surviving `d_id` back to
-    /// its UUID via the `VECTOR_KEYS` reverse map. Returns hits sorted by
-    /// ascending distance (best first).
-    /// Test: `upsert_and_search_round_trips`, `delete_filters_results`.
+    /// What: Ranks candidates — exactly, by scanning every point, when the
+    /// palace holds at most [`EXHAUSTIVE_SCAN_MAX_POINTS`] live drawers;
+    /// otherwise via `Hnsw::search(query, k, ef_search)`. Re-scores any drawer
+    /// that has a shadow copy in the graph against its `VECTORS` row, filters
+    /// the result against `DELETED_VECTORS`, then maps each surviving
+    /// `vector_id` back to its UUID via the `VECTOR_KEYS` reverse map. Returns
+    /// hits sorted by ascending distance (best first), each UUID at most once.
+    ///
+    /// #5171: below the threshold the graph traversal returns only the points
+    /// reachable from its descent pivot along pruned layer-0 neighbour lists,
+    /// which on real embeddings dropped a true top-5 neighbour on 2–4% of
+    /// queries — and because `hnsw_rs` seeds its level RNG from OS entropy,
+    /// *which* drawer went missing changed on every palace open. See
+    /// [`exhaustive`] for the measurement and the threshold's rationale.
+    /// Test: `upsert_and_search_round_trips`, `delete_filters_results`,
+    /// `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
+    /// `search_scores_a_re_upserted_drawer_by_its_current_vector`.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
         if query.len() != self.dim {
             return Err(HnswStoreError::DimensionMismatch {
@@ -581,23 +629,50 @@ impl HnswStore {
             }
         }
 
-        // Over-fetch so tombstoning doesn't starve callers asking for k.
-        // 2x is sufficient in the common case; for pathological cases the
-        // caller can re-issue.
+        // Over-fetch so tombstoning doesn't starve callers asking for k. 2x is
+        // sufficient in the common case; for pathological cases the caller can
+        // re-issue. Bounds the graph arm only — the scan returns everything.
+        let want = k.saturating_mul(2).max(k);
         let ef = HNSW_DEFAULT_EF_SEARCH.max(k * 2);
-        let raw = self
-            .index
-            .read()
-            .search(query, k.saturating_mul(2).max(k), ef);
+        // #5171: `reverse.len()` is the LIVE drawer count — `get_nb_point()`
+        // also counts tombstones and shadows, so a small palace could churn
+        // past the threshold mid-session and silently revert to the approximate
+        // path. The scan returns every live candidate rather than a
+        // `want`-sized prefix: a shadowed drawer's provisional distance is
+        // `min(stale, current)`, so cutting before `resolve_shadowed` lets a
+        // superseded vector evict a true neighbour. The `out.len() >= k` break
+        // below does the bounding instead, on the corrected ranking.
+        let mut raw: Vec<(u64, f32)> = {
+            let index = self.index.read();
+            if reverse.len() <= EXHAUSTIVE_SCAN_MAX_POINTS {
+                exhaustive_nearest(&index, query, &tombstones)
+            } else {
+                index
+                    .search(query, want, ef)
+                    .into_iter()
+                    .map(|hit| (hit.d_id as u64, hit.distance))
+                    .collect()
+            }
+        };
+
+        // #5171: a drawer with two embeddings in the graph is scored against
+        // the one `VECTORS` holds, never against the copy it superseded.
+        let shadowed = self.shadowed.read();
+        if !shadowed.is_empty() {
+            let rtx = self.db.begin_read()?;
+            let vectors = rtx.open_table(VECTORS)?;
+            resolve_shadowed(&mut raw, &shadowed, query, &vectors)?;
+        }
+        drop(shadowed);
 
         let mut out: Vec<(String, f32)> = Vec::with_capacity(k);
-        for hit in raw {
-            let id = hit.d_id as u64;
-            if tombstones.contains(&id) {
+        let mut emitted: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for (id, distance) in raw {
+            if tombstones.contains(&id) || !emitted.insert(id) {
                 continue;
             }
             if let Some(uuid) = reverse.get(&id) {
-                out.push((uuid.clone(), hit.distance));
+                out.push((uuid.clone(), distance));
                 if out.len() >= k {
                     break;
                 }

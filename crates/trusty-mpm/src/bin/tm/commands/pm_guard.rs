@@ -74,10 +74,24 @@
 //! to an unconditional ALLOW) — so the PM, or any Guard-4-exempt subagent,
 //! can set either var there and self-exempt from this entire guard. That gap
 //! predates this PR by many issues and is NOT introduced or widened by it;
-//! tracked separately as issue #3981, not fixed here. This is the one place
-//! in the file that pierces an automatic-marker exemption; see that call
+//! tracked separately as issue #3981, not fixed here. It was the first place
+//! in the file to pierce an automatic-marker exemption; see that call
 //! site's comment for why it must never be routed through [`evaluate_tool`]
 //! instead.
+//! **Main-checkout destructive-git guard (ADR-0037):** immediately after the
+//! worktree-tmp guard, and ahead of the same two exemptions,
+//! [`crate::commands::pm_guard_bash::evaluate_main_checkout_destructive_command`]
+//! denies `git checkout -- <pathspec>` / `git restore` / `git reset --hard` /
+//! `git clean -f…` and their siblings when the directory they would act on is
+//! a project's MAIN CHECKOUT rather than a worktree. ADR-0037's
+//! write-restriction amendment states that rule and records its enforcement as
+//! "mechanical and NOT YET BUILT"; this is that mechanism for the destructive
+//! half. It pierces the subagent exemptions because the incident behind it was
+//! an AGENT dispatched by a different session — read-only git,
+//! `checkout -b`, a plain `git reset`, and everything under
+//! `.claude/worktrees/**` stay allowed. No daemon is consulted, so there is no
+//! unreachable-daemon arm to fail open through; see that module's doc for the
+//! registry it deliberately does not gate on and why.
 //! **Subagent fan-out denial (issue #4784):** [`pm_guard`] calls
 //! [`crate::commands::pm_guard_fanout::evaluate_subagent_fanout`] DIRECTLY,
 //! before Guards 1 and 4, denying `Task`/`Agent` when the calling session is
@@ -114,12 +128,13 @@ use std::path::PathBuf;
 
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
 use crate::commands::pm_guard_bash::{
-    SHELL_EDIT_REASON, evaluate_bash_command, evaluate_worktree_add_command,
-    extract_shell_edit_target,
+    SHELL_EDIT_REASON, evaluate_bash_command, evaluate_main_checkout_destructive_command,
+    evaluate_worktree_add_command, extract_shell_edit_target,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_cost;
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
+use crate::commands::pm_guard_dispatch;
 use crate::commands::pm_guard_fanout;
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
 use trusty_mpm::core::agent_cost::{self, AgentCostConfig, BudgetStatus};
@@ -296,6 +311,19 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             println!("{}", build_pretooluse_deny_response(reason));
             return Ok(());
         }
+        // ABSOLUTE guard (ADR-0037) — the same placement, and for the same
+        // structural reason, as the worktree-tmp guard directly above: the
+        // incident it exists for was an AGENT dispatched by another session,
+        // so a rule that ran after Guard 1 or Guard 4 would be a no-op for
+        // exactly the calling pattern it must catch. See
+        // `pm_guard_bash::main_checkout` for the scope this piercing is drawn
+        // to (irreversible destruction of another session's uncommitted work,
+        // nothing wider) and for why no daemon is consulted.
+        if let Some(reason) = evaluate_main_checkout_destructive_command(command, &hook_cwd) {
+            audit_denied_tool(url, session_id, tool_name, &reason).await;
+            println!("{}", build_pretooluse_deny_response(&reason));
+            return Ok(());
+        }
     }
 
     // #4784: a subagent must never dispatch further subagents. Placed here,
@@ -313,6 +341,25 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     if let Some(reason) = pm_guard_fanout::evaluate_subagent_fanout(tool_name, caller_is_subagent) {
         audit_denied_tool(url, session_id, tool_name, reason).await;
         println!("{}", build_pretooluse_deny_response(reason));
+        return Ok(());
+    }
+
+    // #4480: the PM must not put a SECOND file-mutating subagent into a working
+    // directory that already has one — they race over a single git HEAD and git
+    // does not refuse the collision. Placed here, after the fan-out guard,
+    // because it fires only on the PM's own dispatch: Guards 1 and 4 below
+    // early-return ALLOW precisely when the caller IS a subagent, and such a
+    // caller's dispatch has already been denied above. The `caller_is_subagent`
+    // gate keeps a subagent from paying for a check that can never apply to it.
+    // Fails OPEN throughout (see `pm_guard_dispatch`): a read-only or isolated
+    // dispatch never reaches the daemon at all, and a down daemon answers
+    // "nobody else is here".
+    if !caller_is_subagent
+        && let Some(reason) =
+            pm_guard_dispatch::evaluate(url, &payload, tool_name, tool_input, session_id).await
+    {
+        audit_denied_tool(url, session_id, tool_name, &reason).await;
+        println!("{}", build_pretooluse_deny_response(&reason));
         return Ok(());
     }
 

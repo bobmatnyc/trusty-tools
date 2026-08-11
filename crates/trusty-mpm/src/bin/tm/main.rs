@@ -33,7 +33,6 @@ use commands::{
     misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
     project::project,
     projects::projects,
-    repair::repair_deploy,
     services::services,
     session::session,
     slack::slack,
@@ -491,7 +490,11 @@ async fn main() -> anyhow::Result<()> {
             auto_resume,
             no_classify,
         }) => commands::supervisor::run_supervisor(addr, interval, auto_resume, no_classify).await,
-        Some(Command::Launch { dir, style }) => launch(&client, &url, dir, style).await,
+        Some(Command::Launch {
+            dir,
+            style,
+            worktree,
+        }) => launch(&client, &url, dir, style, worktree).await,
         Some(Command::Connect { dir }) => connect(&client, &url, dir).await,
         Some(Command::Attach { target, json }) => attach_cmd(&client, &url, &target, json).await,
         Some(Command::Optimizer { action }) => optimizer(&client, &url, action).await,
@@ -511,15 +514,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::Services { action }) => services(action),
-        Some(Command::Repair { action }) => {
-            use cli::RepairAction;
-            match action {
-                RepairAction::Deploy { force } => repair_deploy(force),
-                RepairAction::PushGuard { path, dry_run } => {
-                    commands::push_guard::repair_push_guard(path, dry_run)
-                }
-            }
-        }
+        Some(Command::Repair { action }) => commands::repair::dispatch(action),
         Some(Command::Auth { action }) => {
             use cli::AuthAction;
             match action {
@@ -578,7 +573,7 @@ async fn main() -> anyhow::Result<()> {
                 let (sort, term) = commands::session_picker::parse_ls_terms(&terms);
                 // #3483 scope: `tm ls <term>` matches every visible column.
                 let filter = term.map(commands::session_picker::SessionFilter::visible);
-                commands::session_picker::run_ls_connector(
+                commands::session_ls_connector::run_ls_connector(
                     &client, &url, json, source_id, current, all, sort, filter,
                 )
                 .await

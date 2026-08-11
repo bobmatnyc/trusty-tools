@@ -1,107 +1,87 @@
 ---
 name: tm-ticketing
-description: Ticket-driven development protocol and high-level ticketing orchestration for the trusty-mpm PM
+description: The single authority on issues — whether one should exist, deduplication disposition, title/body style, labels, milestones, lifecycle comments, and attribution
 user-invocable: true
-version: "1.0.0"
+version: "2.0.0"
 category: pm-workflow
-tags: [tickets, workflow, pm-required]
+tags: [tickets, issues, promotion-gate, deduplication, labels, pm-required]
 effort: medium
 ---
 
-# /tm-ticket — Ticketing Protocol
+# tm-ticketing — Issue Policy
 
-Consolidates ticket-driven-development (TkDD) enforcement and the
-high-level `/tm-ticket` orchestration commands. **The PM never calls
-ticketing tools directly — always delegate to the `ticketing` agent.**
+<!-- #5202: this skill owns the ISSUE. It owns no git operation and no PR
+     mutation, including PR title and body. The delivery chain that wraps it is
+     `tm-workflow`. -->
 
-## Verified Tool Reality
+The PM never calls ticketing tools directly — always delegate to the `ticketing`
+agent (P6 / CB#6). This skill is what the PM reads before deciding to file,
+comment on, or close anything.
 
-The bundled `ticketing` agent (`crates/trusty-mpm/src/assets/agents/ticketing.md`)
-has this real priority order — verified against the agent source, not
-assumed:
+## Scope
 
-1. **Primary**: `mcp__mcp-ticketer__*` MCP tools, when configured.
-2. **GitHub Issues**: `gh issue create/edit/view/list/close` (or
-   `mcp__github__*`) when the project's tracker is GitHub — as it is for this
-   repo (see root `CLAUDE.md`): spec → issue → worktree branch → PR →
-   trusty-review gate → squash-merge.
-3. **Fallback**: `aitrackdown` CLI (`aitrackdown create issue/task`,
-   `aitrackdown transition`, `aitrackdown status tasks`) when neither of the
-   above is available.
+Yours: whether an issue should exist, search and dedup, issue title and body,
+labels, assignee, milestone, comments, state, parent/child links.
 
-All three are the `ticketing` agent's paths — it is granted the full tool set,
-so `gh` is available to it whichever backend a project uses. Route **GitHub
-issue operations to `ticketing`**, not to Version Control. (Earlier revisions
-of this skill said the opposite, on the theory that `ticketing` only spoke
-`mcp-ticketer`/`aitrackdown` and so could not touch GitHub. That is no longer
-true and the split it created is retired.)
+Not yours: any git operation, and **any PR mutation — including the PR title and
+body**. Those are the `version-control` agent's, delegated by the PM. Ticketing
+supplies the canonical issue context that goes *into* the PR body; version
+control writes it. The full boundary and the handoff sequence are stated once, in
+`tm-workflow`.
 
-**Version Control keeps git and PR mechanics** — branch, push, rebase,
-conflict resolution, merge, release, tag. The dividing line is bookkeeping
-vs. mechanics, not GitHub vs. external tracker: opening or editing a PR
-*body* is bookkeeping; pushing or merging that PR is version control.
+For session-local task tracking that is not a formal ticket, use
+`mcp__trusty-memory__task_add` / `task_list` / `task_complete` directly. These
+are in-session TODOs, not a ticketing system, and are not a forbidden MCP family
+under CB#6.
 
-For lightweight, session-local task tracking that isn't a formal ticket at
-all, use `mcp__trusty-memory__task_add` / `task_list` / `task_complete`
-directly — these are cheap in-session TODOs, not a ticketing system
-replacement, and do not require delegation (they are not one of the
-forbidden MCP families in `tm-circuit-breaker` CB#6).
+## Backends
 
-## Delegation Pattern (CB#6 in `tm-circuit-breaker`)
+The `ticketing` agent is granted the full tool set, so `gh` is available to it
+whichever backend a project uses. Its priority order:
 
-**Wrong:**
-```
-PM: mcp__mcp-ticketer__ticket_list()   # PM using ticketing tools directly
-```
+1. `mcp__mcp-ticketer__*` MCP tools, when configured.
+2. GitHub Issues via `gh issue …` (or `mcp__github__*`) when the project's
+   tracker is GitHub — the common case.
+3. `aitrackdown` CLI when neither is available.
 
-**Correct:**
-```
-PM: "I'll have ticketing organize the board..."
-[PM constructs a delegation prompt for the ticketing agent]
-[ticketing agent uses mcp-ticketer or aitrackdown internally]
-PM: [presents results]
-```
+Route **every** Issue API operation to `ticketing`, whichever backend applies.
 
 ## Ask Before Creating
 
-If the user references a ticket/issue but no matching one is found:
-ticketing MUST NOT auto-create.
-Ask: "I didn't find an existing issue for [topic]. Create one, or did you
-mean a different one?" Auto-create only on explicit "create a
+If the user references a ticket or issue and no matching one is found, ticketing
+MUST NOT auto-create. Ask: "I didn't find an existing issue for [topic]. Create
+one, or did you mean a different one?" Auto-create only on an explicit "create a
 ticket/issue for X."
-
-When a GitHub issue *is* created, apply the shipped trusty-mpm defaults:
-`--assignee @me --label trusty-mpm --label ws/<session-name>` (this session's
-tmux session name; create the labels first if missing: `gh label create
-trusty-mpm --description "Created/managed by a trusty-mpm session" --color
-8250df` and `gh label create "ws/$WS_NAME" --description "trusty-mpm
-workstream $WS_NAME" --color 5319E7`). This is multi-harness support — the
-assignee + `trusty-mpm` label mark which issues a trusty-mpm session owns;
-`ws/<session-name>` tracks which workstream is driving it (a label, never a
-milestone — see `PM_INSTRUCTIONS.md`).
-
-These two are the harness defaults, not the whole label set. Type,
-component/crate, and conditional priority are required on top of them, and the
-milestone stays unset unless the issue is being scheduled into an open release.
-That is specified once, in the agent asset (`assets/agents/ticketing.md`,
-"Label at Creation" and "Milestones Are Release Slots") — the agent applies it,
-so do not restate it in a delegation brief.
 
 ## Ticket-Promotion Gate
 
 **A finding is not automatically a ticket.** Most findings belong to the work
-already in flight; only some are worth a durable artifact that someone else has
-to triage, prioritize, and eventually close. Run this gate before every
-`gh issue create`.
+already in flight; only some are worth a durable artifact someone else has to
+triage, prioritize, and eventually close. Run this gate before every issue
+creation.
 
-### 1. Search before filing — and reopen before creating
+### 1. Search first, then choose a disposition
 
-Searching open and closed issues, and **reopening** a closed ticket for a
-recurrence instead of filing a fresh one, is a required ordered procedure the
-`ticketing` agent runs on every dispatch. It is specified once, in the agent
-asset (`assets/agents/ticketing.md`, "Reopen Before You Create") — the agent
-executes it, so that is where it lives. Do not restate it in a delegation
-brief; state the finding and let the agent run its own gate.
+Searching open **and** closed issues is a required ordered procedure the
+`ticketing` agent runs on every dispatch, specified once in the agent asset
+(`assets/agents/ticketing.md`, "Search, Then Choose a Disposition"). Do not
+restate it in a delegation brief; state the finding and let the agent run its own
+gate.
+
+Every finding that could have become a ticket ends in exactly one of four
+dispositions, and the agent reports which:
+
+| Disposition | When |
+|---|---|
+| `COMMENT` | An open issue already covers it — add the new occurrence there |
+| `REOPEN` | A closed issue covers the same defect and the fix has not held — reopen it with the new occurrence |
+| `NEW REGRESSION` | A closed issue's fix landed and verified, and this is a *different* failure mode or a different root cause — file new and link the closed one |
+| `NO TICKET` | The promotion criteria below are not met — session task, PR comment, or a checklist item on the parent |
+
+Reopening is not unconditional. Reopen when the same defect recurs with the same
+root cause; file a new regression when the recurrence has a different cause, a
+different symptom class, or arrives after a verified fix that a reader would need
+to see as separate work.
 
 ### 2. Promote only an independently prioritizable outcome
 
@@ -115,20 +95,17 @@ File a standalone issue only when at least one of these holds:
 | d | It cannot fit the current PR without changing that PR's outcome or risk |
 | e | The user explicitly asked for it to be tracked |
 
-Otherwise it stays a session task (`mcp__trusty-memory__task_add`), a PR review
-comment, or a checklist item on the parent issue. **"Follow-up" is not a
-category that bypasses this gate.**
+Otherwise it stays a session task, a PR review comment, or a checklist item on
+the parent issue. **"Follow-up" is not a category that bypasses this gate.**
 
 An easy fix spotted while working on a file does not enter this gate at all: it
 is noted on the CURRENT issue and made in the same work — see **Opportunistic
-Fixes** in the instruction package, which this gate extends rather than
-restates.
+Fixes** in the instruction package, which this gate extends rather than restates.
 
-A code-review or QA finding reaches this gate by exactly one route: the
-`Promote` disposition in `code-review-standards`. A reviewer marking `Promote`
-has recommended, not filed — the finding still has to clear the criteria above,
-and an APPROVE verdict never files a ticket on its own. `Fix here` and `Parent`
-findings never reach this gate.
+A code-review or QA finding reaches this gate by exactly one route: the `Promote`
+disposition in `code-review-standards`. A reviewer marking `Promote` has
+recommended, not filed — the finding still has to clear the criteria above, and
+an APPROVE verdict never files a ticket on its own.
 
 ### 3. Label the confidence state
 
@@ -143,85 +120,125 @@ Every filed issue states which of these it is, in the body:
 
 If your own draft says "not confirmed", "possible", or "same risk class", the
 state is Inferred or Speculative — keep it on the parent unless severity
-justifies escalation. Nothing reads this label mechanically; it is a drafting
-rule, and the check is whether a reader of the filed issue can tell which state
-was claimed.
+justifies escalation.
 
 ### 4. Size issues by outcome, not by finding
 
-- One issue may hold several symptoms that share one root cause, owner, and
+- One issue may hold several symptoms sharing one root cause, owner, and
   acceptance test.
 - Never file separate issues for the implementation, tests, documentation,
   changelog, or review cleanup needed to finish the same outcome — those are one
-  PR (`tm-pr-workflow`, "One Outcome, One PR").
+  PR (`tm-workflow`, "One Outcome, One PR").
 - Split only when the parts can be prioritized, shipped, reverted, or accepted
   independently.
 - Experiments stay session-local until the project accepts the result.
 - A recurring flaky test or failure family gets **one canonical issue**. Append
-  each new occurrence (run URL, SHA, command, failure signature) to it; a new
-  issue per occurrence is a duplicate.
+  each new occurrence (run URL, SHA, command, failure signature) to it under
+  `COMMENT`.
 
-### 5. Minimal issue schema (six facts)
+## What a Ticket Says
 
-🔴 **These are six facts a reader must be able to tell from the body. They are
-NOT six headings to fill in.** A body carries defect, evidence, and resolution
-in prose, sparsely — the form is specified in the agent asset
-(`assets/agents/ticketing.md`, "Sparse Ticket Bodies"), which is binding here.
-Most tickets convey all six in under ten lines.
+🔴 **Title**: type-aware and specific — `<type>: <what is wrong or wanted>`, e.g.
+`fix(trusty-search): watcher misses renames on external volumes`. Under ~70
+characters. Not "Bug in system".
 
-1. Outcome/problem and impact.
-2. Confidence: Observed | Reproduced | Inferred | Speculative.
-3. Evidence/reproduction.
-4. Acceptance criteria.
-5. Relationship to parent work, and the search/reopen outcome.
-6. Test level expected for closure.
+🔴 **Body**: a concise problem/outcome statement, the decisive evidence, and
+**one to four observable closure conditions**. Nothing else. The form is binding
+and is specified once in the agent asset (`assets/agents/ticketing.md`, "Sparse
+Ticket Bodies") — no structured headings, point rather than restate, cite file
+and symbol rather than line numbers, and stop when the body fills a short screen.
+Most tickets do all of it in under ten lines.
 
-Field 3 governs issue bodies only. It does **not** relax the evidence rule for
-claiming a gate passed: raw test output stays mandatory there
-(`BASE-AGENT.md` — never summarise test results in your own words).
+Alongside the closure conditions a reader must be able to tell the confidence
+state (§3) and the relationship to parent work, including the search/dispatch
+outcome. Those are facts to convey, not headings to fill in.
 
-## Ticket-Driven Development Protocol (TkDD)
+**Bounded exceptions.** Three shapes may exceed the short-body form, and only
+these:
 
-When a ticket/issue reference is detected (an ID pattern, a URL, "work on
-issue #123"), the PM executes:
+| Shape | What it may add |
+|---|---|
+| `epic` | A child-work checklist and the scope boundary between children |
+| Security | Impact, affected versions, and disclosure state |
+| Research / audit | The evidence inventory the audit produced |
 
-1. **Work start** — delegate: transition to in-progress, comment with initial
-   findings (for bugs: root cause or hypothesis; for features: brief scope
-   summary) and any user workaround. Surfacing early findings to stakeholders
-   from the moment work begins is standard practice when tracking artifacts exist.
+An exception buys length for *evidence*, never for narrative. Everything else
+stays sparse.
 
-2. **Each phase** — delegate a progress comment at meaningful state transitions
-   (diagnosis confirmed, fix pushed, review verdict received, blocked/waiting).
-   Not per-poll spam — only when work state materially changes. Include
-   deliverables and links to commits/PRs.
+This governs issue bodies only. It does **not** relax the evidence rule for
+claiming a gate passed: raw test output stays mandatory there (`BASE-AGENT.md` —
+never summarise test results in your own words).
 
-3. **Work complete** — delegate: transition to done/closed, comprehensive
-   completion comment with fix version/SHA and verification evidence (test
-   output, deployment status, etc.), link the merged PR.
+## Labels
 
-4. **Blockers** — delegate: transition to blocked, comment with blocker
-   detail, impact, and unblock criteria.
+Four separable families. The `ticketing` agent applies them at creation and the
+exact command form lives in the agent asset ("Label at Creation"); this is the
+model, so a delegation brief never needs to spell it out.
 
-**In-flight updates are standard practice.** When tracking artifacts are in
-use, stakeholders follow issues from open through closure; visibility into
-in-progress work is as important as the final result. Projects without formal
-tracking workflows are not subject to this convention.
+| Family | Cardinality | Content |
+|---|---|---|
+| Type | exactly one | `bug`, `enhancement`, `refactor`, `chore`, `documentation`, `epic` |
+| Owning component | one or more | The crate or subsystem the defect actually lives in |
+| Priority | optional | `P0`–`P3`, **only** when the issue text itself asserts severity. A guessed priority is noise |
+| Provenance | optional | The harness defaults: `trusty-mpm` plus `ws/<session-name>`, with `--assignee @me` |
 
-**Attribution footer**: every issue/PR comment ends with:
-`🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools`
+🔴 **Never invent a label the repository does not carry.** Check `gh label list`
+before using one; create a genuinely missing label rather than dropping the
+family or substituting an approximation.
 
-**PR body freshness**: if scope or claims change mid-flight (e.g., a reviewer
-finding shifts what the diff covers), update the PR body immediately rather
-than leaving stale assertions.
+## Milestones
 
-Every delegation in this chain includes the ticket/issue context so
-downstream agents (Engineer, QA) know the work is ticket-driven and can
-reference it in their own output.
+🔴 **Leave the milestone UNSET by default.** A milestone is a delivery slot in a
+named release or epic — not a field every issue receives. Set one only when the
+issue is one of:
+
+- deliberately scheduled into a release you have confirmed is open;
+- child work that a release-gating parent already carries into that release;
+- identified as a blocker for a release already in flight.
+
+A milestone is not a label and not a project view. An issue holds many labels and
+exactly one milestone, so parking a workstream or a theme there evicts the real
+release slot. `ws/<session-name>` is always a label.
+
+## Lifecycle
+
+When a ticket or issue reference is detected (an ID pattern, a URL, "work on
+issue #123"), the PM delegates:
+
+1. **Work start** — mark in progress and comment with initial findings: for bugs
+   the root cause or hypothesis, for features a brief scope summary, plus any
+   user workaround.
+2. **Each phase** — a progress comment at meaningful state transitions
+   (diagnosis confirmed, fix pushed, review verdict received, blocked). Not
+   per-poll spam. Include deliverables and links to commits/PRs.
+3. **Work complete** — close with the fix SHA/version, verification evidence, and
+   the merged PR link. The PM hands `ticketing` the merged PR and squash SHA that
+   `version-control` reported.
+4. **Blockers** — mark blocked and comment with the blocker, its impact, and the
+   unblock criteria.
+
+In-flight visibility is standard practice where tracking artifacts exist.
+Projects without formal tracking workflows are not subject to it.
+
+Every delegation in this chain carries the ticket context, so downstream agents
+can reference it in their own output.
+
+### Attribution on Issues and Comments
+
+Every issue body and issue comment ends with one line:
+
+```
+🤖🤖🤖 Generated with trusty-mpm — https://github.com/bobmatnyc/trusty-tools
+```
+
+One line, machine-readable, no preamble around it. Commit and PR attribution is
+governed separately by the Framework-Guaranteed Conventions in the instruction
+package, and the PR body is `version-control`'s to write.
 
 ## `/tm-ticket` Subcommands
 
-High-level orchestration over the ticketing agent (for whichever tracker is
-configured):
+High-level orchestration over the ticketing agent, for whichever tracker is
+configured:
 
 | Subcommand | Purpose |
 |---|---|
@@ -230,25 +247,19 @@ configured):
 | `/tm-ticket status` | Health metrics, ticket counts, high-priority work, blockers |
 | `/tm-ticket project <url>` | Set the default project/tracker context |
 
-Every subcommand is a PM delegation to the ticketing agent with a specific
-task description — the PM constructs the prompt and presents the result, it
-never calls the underlying tools itself.
+Every subcommand is a PM delegation to the ticketing agent — the PM constructs
+the prompt and presents the result, never calling the underlying tools itself.
 
 ## Documentation Routing With Ticket Context
 
-When a ticket context is present, delegate to attach research findings and
-specs as ticket comments (or linked files); still create a local backup doc
-under `docs/research/` (or the configured `documentation.docs_path`). Without
-ticket context, everything goes to the local docs path only, named
-`{topic}-{date}.md`.
-
-## Violation Prevention
-
-Directly using ticketing tools is CB#6 (Forbidden Tool Usage) in
-`tm-circuit-breaker`: Violation #1 WARNING, #2 ESCALATION, #3 FAILURE.
+With a ticket context present, delegate research findings and specs as ticket
+comments (or linked files), and still write a local backup doc under
+`docs/research/` (or the configured `documentation.docs_path`). Without ticket
+context, everything goes to the local docs path only, named `{topic}-{date}.md`.
 
 ## Related Skills
 
+- `tm-workflow` — the delivery chain this issue lifecycle sits inside, and the ticketing/version-control boundary
 - `tm-circuit-breaker` — CB#6 enforcement detail
-- `tm-pr-workflow` — the PR side of the same delivery chain
 - `tm-delegation-patterns` — where ticketing fits in the broader agent matrix
+- `tm-bug-reporting` — the MCP-native path for daemon-captured errors

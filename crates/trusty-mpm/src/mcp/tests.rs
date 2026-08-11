@@ -116,6 +116,7 @@ impl OrchestratorBackend for MockBackend {
         &self,
         project_dir: &str,
         session_id: Option<&str>,
+        tmux_window: Option<&str>,
         all_projects: bool,
         full: bool,
     ) -> Result<Value, String> {
@@ -124,9 +125,11 @@ impl OrchestratorBackend for MockBackend {
             "recent_commits": [],
             "recent_memory": [],
             "resolved_snapshot": null,
+            "resolved_via": null,
             "watermark_advanced": false,
             "project_dir": project_dir,
             "session_id": session_id,
+            "tmux_window": tmux_window,
             "all_projects": all_projects,
             "full": full,
         }))
@@ -832,6 +835,30 @@ async fn dispatch_session_context_catchup_tool() {
             .as_str()
             .unwrap()
             .contains("watermark_advanced")
+    );
+}
+
+/// Why: the window-id fallback only works if the caller's window reaches the
+/// backend — a dropped argument would fail silently as "no snapshot found".
+/// What: `tmux_window` round-trips through dispatch to the backend call.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_context_catchup_forwards_tmux_window() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_context_catchup",
+            json!({ "project_dir": "/tmp/proj", "tmux_window": "tm-dogfood:0:@230" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("tm-dogfood:0:@230")
     );
 }
 

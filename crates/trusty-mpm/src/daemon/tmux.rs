@@ -330,9 +330,11 @@ impl TmuxDriver {
     /// What: loads [`crate::core::trusty_tools_config::TrustyToolsConfig`],
     /// resolves the `tmux:` section via
     /// [`crate::core::trusty_tools_config::resolve_tmux_options`] (defaults:
-    /// 100,000-line history-limit, mouse on), and runs each
-    /// [`crate::core::tmux::scrollback_option_commands`] entry via
-    /// [`Self::run`]. Best-effort: `set-option -g` is idempotent (safe to
+    /// 100,000-line history-limit, mouse on, alternate-screen off since
+    /// #5364), and runs
+    /// each [`crate::core::tmux::scrollback_option_commands`] entry via
+    /// [`Self::run`] — including the `-wg`-scoped `alternate-screen` entry
+    /// (#5151). Best-effort: `set-option` is idempotent (safe to
     /// call before every session creation) and virtually never fails on a
     /// tmux new enough to run trusty-mpm at all, but a failure here must
     /// never block session creation/restart — each failure is logged and the
@@ -345,7 +347,11 @@ impl TmuxDriver {
     pub fn apply_scrollback_options(&self) {
         let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
         let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
-        for cmd in crate::core::tmux::scrollback_option_commands(opts.history_limit, opts.mouse) {
+        for cmd in crate::core::tmux::scrollback_option_commands(
+            opts.history_limit,
+            opts.mouse,
+            opts.alternate_screen,
+        ) {
             if let Err(e) = self.run(&cmd) {
                 warn!("tmux scrollback/mouse option {cmd:?} failed (non-fatal): {e}");
             }

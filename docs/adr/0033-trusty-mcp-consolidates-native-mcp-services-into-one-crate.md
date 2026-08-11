@@ -1,6 +1,9 @@
 # 0033. `trusty-mcp` consolidates native MCP services into one adapter crate — amends ADR-0014
 
-- **Status:** Accepted
+- **Status:** Superseded by [0040](0040-trusty-mcp-services-absorbs-trusty-gworkspace.md)
+- **Supersession note:** ADR-0040 records this ADR as categorically mistaken
+  about `trusty-channels` and unfounded on `trusty-kb`; only the direction that
+  `trusty-gworkspace` should not remain standalone survives.
 - **Date:** 2026-08-07
 - **Scope:** Workspace-wide (`trusty-gworkspace`, `trusty-channels`, `trusty-kb`,
   plus every call site and trust-config table that names them)

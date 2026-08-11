@@ -5,10 +5,9 @@
 > [`CLAUDE.md`](../../CLAUDE.md)** (Rust Test Ladder). Choose the rung there,
 > then come here for the exact command to run and for triaging a red gate.
 
-The six-step baseline-failure protocol (establish whose red it is, fix if
-branch-caused, append to the canonical issue if tracked, one canonical issue if
-not, and the literal report string) lives in `tm-pr-workflow`. It is **not**
-restated here. What follows is only what that generic version cannot carry.
+The baseline-failure protocol (establish whose red it is, fix if branch-caused,
+hand a pre-existing red to `tm-ticketing` for its disposition, and the literal
+report string) lives in `tm-workflow`. It is **not** restated here. What follows is only what that generic version cannot carry.
 
 ## Per-Rung Gate Commands
 
@@ -28,6 +27,86 @@ was exercised.
 Why `cargo test --workspace` is absent from rungs 1–3, and the "scope down,
 never scope away" line that constrains picking a lower rung, are stated with the
 ladder itself in [`CLAUDE.md`](../../CLAUDE.md) — not repeated here.
+
+## The Three Stages in Cargo Terms
+
+`Skill(skill="tm-workflow")` ("Test Scope Widens by Stage") sets the framework
+rule for every project: developing runs the tests covering the new or changed
+code only, merging runs the full test files that changed, publishing runs the
+full corpus. This is what each stage is in this workspace.
+
+| Stage | Cargo scope | Command |
+|---|---|---|
+| Developing | the changed code's own tests | `cargo test -p <crate> <test-or-module> -- --exact --nocapture` |
+| Merging | every crate whose test files the diff changed | `cargo test -p <crate>` for each, alongside the `fmt`/`check`/`clippy` gates the rung calls for |
+| Publishing | the workspace | `cargo test --workspace` && `cargo clippy --workspace --all-targets -- -D warnings`, plus `cargo audit` and the publish preflight scripts |
+
+**Why merging is `-p <crate>` and not a per-file run.** Cargo has no "run this
+file" unit. A `#[cfg(test)] mod tests` compiles into its crate's test binary, and
+an integration test under `crates/<crate>/tests/` is its own binary but is still
+only addressable through its crate. `cargo test -p <crate>` is the smallest run
+that contains every test file the diff touched, so for this workspace it **is**
+the merge scope rather than an over-run of it.
+
+## How the Three Stages Compose With the Six Rungs
+
+Two axes, both binding. The rung says how much rigour the change earns — which
+gates run at all, whether ignored tests count, whether a `code-critic` round is
+owed. The stage says how wide each of those gates runs. Pick the rung from
+[`CLAUDE.md`](../../CLAUDE.md), then read the stage off where you are in the
+delivery chain.
+
+The per-rung table above already encodes the stages column by column:
+
+- **Development proof** is the developing stage.
+- **PR gate** is the merging stage.
+- **Hardening / release gate** is the publishing stage.
+
+**A rung-3 change: `cargo test -p <crate>` is the MERGE scope, not the develop
+scope.** While developing, run only the targeted regression test that provably
+fails before the change — `cargo test -p <crate> <test> -- --exact`. Before
+merging, run the crate in full: `cargo fmt --check` && `cargo check -p <crate>`
+&& `cargo clippy -p <crate> --all-targets -- -D warnings` && `cargo test -p
+<crate>`. A rung-3 change owes the workspace nothing at either stage.
+
+**Rung 4's `cargo check --workspace` stays at merge.** It is a compile gate, not
+a test run, so "full corpus only when publishing" does not reach it. Its
+companion `cargo test -p <consumer>` for each direct dependent is also merge
+scope, for the reason the framework rule gives: changing a shared library's
+public API changes what every dependent's test files mean, which makes those
+files changed even though the diff never opened them. Rung 4's `cargo test
+--workspace` sits in the hardening column precisely because it is the publish
+stage.
+
+**Rung 5's `--include-ignored` stays at merge too.** It is crate-scoped, and an
+`#[ignore]`d test living in a test file your diff changed is part of that file —
+the merge stage runs changed files *in full*, which is exactly what
+`--include-ignored` does for a crate. What rung 5 defers to publishing is the
+workspace run, `cargo audit`, and `scripts/check-publish-ready.sh` /
+`scripts/preflight-publish.sh`.
+
+**Rung 2's shared-test-infrastructure caveat is the one place merge scope can
+reach the workspace.** Same logic as rung 4's dependents: a change to a shared
+fixture or test harness changes what every test file using it means. When that
+happens the workspace run is a merge obligation, not a deferral to publish — the
+table's "only when shared test infrastructure changed" is the trigger.
+
+**`cargo test --workspace` is keyed to the stage, not the rung.** `CLAUDE.md`
+places it at the publish boundary; rungs 4–6 are named there only because they
+are the rungs that reach that boundary. A rung-4 PR does not owe a workspace test
+run to merge.
+
+**Branch protection follows from this.** The CI `Test` job is a pre-build /
+pre-publish gate, not a pre-merge one, and it is not among `main`'s required
+status contexts (`Format check`, `500-line file-size cap`, `Clippy`,
+`trusty-search daemon smoke test`, `MSRV check (1.94)`). Merges proceed with
+`Test` still pending; a **failing** check blocks at every stage.
+
+🔴 **Scoping down by stage is a claim you must be able to prove**, exactly as
+scoping down by rung is. It is never licence to make a red gate green by
+deleting, `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing
+coverage. A red gate blocks at every stage; only a *pending* full-corpus check is
+tolerated at merge, never a failing one.
 
 ## How Much Gate Output the PR Body Owes
 
@@ -93,6 +172,6 @@ git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
    the ladder says otherwise. This is the one case where scoping down is
    the wrong instinct.
 
-Report it in the shape `tm-pr-workflow` mandates, naming the crate-scoped gate:
+Report it in the shape `tm-workflow` mandates, naming the crate-scoped gate:
 `change-specific gates pass; cargo test -p trusty-search blocked by canonical
 issue #N`. Never "all tests pass" while a gate is red, whoever caused it.

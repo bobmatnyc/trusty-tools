@@ -59,6 +59,9 @@ pub enum AuthSource {
     /// `FireworksAdapter` (#2410 epic #2400, Step 3). Resolved through the
     /// same shared 3-tier resolver every other keyed provider uses.
     Fireworks,
+    /// `ATLASCLOUD_API_KEY` — direct `api.atlascloud.ai` access via
+    /// `AtlasCloudAdapter` (#3765). Same shared 3-tier resolver.
+    AtlasCloud,
 }
 
 impl std::fmt::Display for AuthSource {
@@ -69,6 +72,7 @@ impl std::fmt::Display for AuthSource {
             Self::OpenRouter => write!(f, "openrouter"),
             Self::Bedrock => write!(f, "aws-bedrock"),
             Self::Fireworks => write!(f, "fireworks-api-key"),
+            Self::AtlasCloud => write!(f, "atlascloud-api-key"),
         }
     }
 }
@@ -112,6 +116,10 @@ pub enum Provider {
     /// URL and credential. Activated when the model string starts with
     /// `fireworks/` (#2410, epic #2400, Step 3).
     Fireworks,
+    /// Direct `api.atlascloud.ai` — OpenAI-compatible wire format, own base
+    /// URL and credential. Activated when the model string starts with
+    /// `atlascloud/` (#3765).
+    AtlasCloud,
 }
 
 /// Centralizes all model-provider-specific behavior for the chat loop.
@@ -178,6 +186,41 @@ pub trait ModelAdapter: Send + Sync + std::fmt::Debug {
     fn uses_native_format(&self) -> bool {
         false
     }
+
+    /// The model id to put on THIS provider's wire, given the dispatch slug.
+    ///
+    /// Why: a routing marker (`ollama/`, `fireworks/`, `atlascloud/`) exists
+    /// only to select an adapter here — the provider itself has never heard of
+    /// it and answers 400 if it arrives in the request body. `tool_loop`
+    /// carried a hardcoded `strip_prefix("ollama/").or(strip_prefix("fireworks/"))`
+    /// chain that every new prefixed provider had to remember to extend; #3765
+    /// moves the rule onto the adapter that owns the prefix, so a provider
+    /// added later cannot forget it. Mirrors
+    /// [`trusty_common::inference::registry::ProviderId::wire_model_id`].
+    /// What: default is identity (the slug IS the wire id — true for
+    /// OpenRouter the aggregator, and for the bare-slug heuristic adapters);
+    /// prefixed adapters override to strip their own marker.
+    /// Test: `wire_model_id_strips_routing_prefixes`.
+    fn wire_model_id<'a>(&self, model: &'a str) -> &'a str {
+        model
+    }
+
+    /// Whether requests for this adapter MUST take the raw-HTTP path rather
+    /// than the shared `async-openai` client.
+    ///
+    /// Why: `llm::helpers::create_client` builds one `async-openai` client
+    /// hardwired to OpenRouter's base URL. Any adapter with its OWN base URL
+    /// is silently ignored by that client — the request goes to OpenRouter
+    /// with a provider-native model id and fails. `tool_loop` previously
+    /// tracked this as two ad-hoc `is_ollama`/`is_fireworks` booleans; making
+    /// it an adapter property means "own endpoint ⇒ own transport" holds by
+    /// construction for AtlasCloud (#3765) and anything added after it.
+    /// What: default `false`; `true` for every adapter whose `api_endpoint`
+    /// does not resolve to OpenRouter.
+    /// Test: `requires_raw_http_for_own_endpoint_adapters`.
+    fn requires_raw_http(&self) -> bool {
+        false
+    }
 }
 
 /// Base URL of the local ollama server.
@@ -226,11 +269,20 @@ pub fn openrouter_endpoint() -> ApiEndpoint {
 /// `vendor/model` or loose `claude-...`/`gpt-...`) keeps callers from
 /// knowing the concrete adapter types.
 /// What: Heuristic substring match — Anthropic first (most common), then
-/// OpenAI / o-series, else `GenericAdapter` as a safe default. `bedrock/`,
-/// `ollama/`, and `fireworks/` prefixes are checked first and always win
-/// regardless of what the remainder of the model id looks like.
+/// OpenAI / o-series, else `GenericAdapter` as a safe default. The explicit
+/// routing prefixes (`bedrock/`, `ollama/`, `fireworks/`, `atlascloud/`) are
+/// checked first and always win regardless of what the remainder of the model
+/// id looks like.
+///
+/// This prefix-beats-heuristic ordering is also the MECHANISM by which a
+/// per-agent provider pin takes precedence over slug inference (#3765): the
+/// loader rewrites `[agent].model` through
+/// [`crate::llm::provider_pin::pinned_model_slug`] so the pinned provider's
+/// marker leads the slug, and this factory then resolves it deterministically
+/// — no second argument, and no call site that re-derives an adapter from
+/// `cfg.agent.model` can disagree with the pin.
 /// Test: `adapter_for_model_routes_anthropic`, `adapter_for_model_routes_openai`,
-/// `adapter_for_model_routes_fireworks`.
+/// `adapter_for_model_routes_fireworks`, `adapter_for_model_routes_atlascloud`.
 pub fn adapter_for_model(model: &str) -> Box<dyn ModelAdapter> {
     // Bedrock prefix takes precedence — the model id after `bedrock/` may
     // contain `anthropic` (e.g. `bedrock/anthropic.claude-3-5-haiku-...`),
@@ -256,6 +308,16 @@ pub fn adapter_for_model(model: &str) -> Box<dyn ModelAdapter> {
             .unwrap_or(model)
             .to_string();
         return Box::new(FireworksAdapter { model_id: id });
+    }
+    // AtlasCloud prefix (#3765) — must be checked BEFORE the substring
+    // heuristics: AtlasCloud's own catalog ids are vendor-namespaced
+    // (`openai/gpt-5.6-sol`), so `atlascloud/openai/...` would otherwise match
+    // the `openai` heuristic and route to OpenRouter with an id AtlasCloud
+    // owns and OpenRouter does not.
+    if let Some(id) = model.strip_prefix("atlascloud/") {
+        return Box::new(AtlasCloudAdapter {
+            model_id: id.to_string(),
+        });
     }
     let m = model.to_ascii_lowercase();
     if m.contains("claude") || m.contains("anthropic") {
@@ -337,5 +399,33 @@ pub struct BedrockAdapter {
 pub struct FireworksAdapter {
     /// The provider-native Fireworks model id (everything after the
     /// `fireworks/` routing prefix).
+    pub model_id: String,
+}
+
+/// Direct AtlasCloud adapter (OpenAI-compatible endpoint, own credential).
+///
+/// Why: #3765 — AtlasCloud has been fully seeded in
+/// `trusty_common::inference::registry` since #2536 (base URL, credential
+/// name, default model, capabilities), but `adapter_for_model` had no branch
+/// for it, so an `atlascloud/*` slug fell through to `GenericAdapter` and its
+/// unconditional OpenRouter endpoint — carrying an AtlasCloud catalog id that
+/// OpenRouter does not serve. Exactly the `fireworks/` gap #2410 closed, one
+/// provider over. Modeled on [`FireworksAdapter`] because AtlasCloud is the
+/// same shape: OpenAI-compatible `/chat/completions`, own base URL, own key.
+/// What: activated by `adapter_for_model("atlascloud/<model>")`; the prefix is
+/// stripped for the wire (AtlasCloud's real ids are vendor-namespaced, e.g.
+/// `openai/gpt-5.6-sol`). Tool-choice/usage shapes match `OpenAiAdapter`; no
+/// prompt caching and no detailed-usage directive, matching this provider's
+/// registry seed (`prompt_caching = false`,
+/// `detailed_usage_accounting = false`).
+/// Test: `adapter_for_model_routes_atlascloud`, `atlascloud_adapter_strips_prefix`,
+/// `atlascloud_tool_choice_shapes`, `atlascloud_parse_usage_shape`,
+/// `atlascloud_inject_cache_control_is_noop`,
+/// `atlascloud_api_endpoint_resolves_key_from_store_when_env_absent`,
+/// `atlascloud_api_endpoint_base_url_override`.
+#[derive(Debug)]
+pub struct AtlasCloudAdapter {
+    /// The provider-native AtlasCloud model id (everything after the
+    /// `atlascloud/` routing prefix).
     pub model_id: String,
 }

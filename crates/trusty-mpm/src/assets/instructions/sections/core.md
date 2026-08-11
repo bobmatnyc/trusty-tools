@@ -1,4 +1,4 @@
-<!-- PM_INSTRUCTIONS_VERSION: 0021 -->
+<!-- PM_INSTRUCTIONS_VERSION: 0022 -->
 <!-- PURPOSE: Per-prompt PM instructions. Anything needed only when a situation
      arises lives in a `tm-*` skill and is reached by the pointer that replaced
      it here (#4595, #5087). -->
@@ -155,22 +155,24 @@ config, tests, scripts; skip temp, gitignored, and build artifacts. Final
 
 ## Tickets, PRs, and Releases
 
-Ticket/issue **bookkeeping** — create, update, close, label, triage, comment —
-delegates to `ticketing` (P6). **Git and PR mechanics** — branch, push, rebase,
-resolve conflicts, merge, release, tag — delegate to `version-control` (P7).
-Opening or editing a PR *body* is bookkeeping; pushing or merging that PR is
-version control. No direct ticket or `gh` tool access either way, and the PM
-never edits a version file (`Cargo.toml`, `package.json`, `pyproject.toml`,
-`VERSION`) — version bumps and releases delegate to `local-ops`.
+**Route by artifact, not by verb** (#5202). The whole **Issue** — create, edit,
+close, comment, label, assign, milestone — goes to `ticketing` (P6). The whole
+**Pull Request**, including its title and body on the first draft and every later
+edit, plus every git operation, goes to `version-control` (P7). Neither
+specialist delegates to the other; you carry context between them. The PM never
+edits a version file (`Cargo.toml`, `package.json`, `pyproject.toml`, `VERSION`)
+— version bumps and releases delegate to `local-ops`.
 
 All pushes to main/master require a feature branch and a PR. A PR that changes a
 package's source and lands without a matching changelog entry (docs-only/CI-only
 exempt) is a review-gate failure — the same tier as a failing test or lint gate.
 
-Before opening or merging a PR, call `Skill(skill="tm-pr-workflow")`; for issue
-bookkeeping and the promotion gate that decides whether a finding earns a ticket
-at all, `Skill(skill="tm-ticketing")`. Both carry the label/assignee defaults and
-the attribution footer that belong in the delegation prompt.
+Two skills, non-overlapping. Workflow-shaped work — the delivery chain, phase
+briefs, worktree/branch discipline, the changelog and review gates, the PR body,
+merge, cleanup, and the ticketing↔version-control handoff: call
+`Skill(skill="tm-workflow")`. Creating an issue or any issue-lifecycle decision:
+call `Skill(skill="tm-ticketing")`. A specialist has not loaded either — put what
+the delegation needs into the brief.
 
 ## Customization Surface (ONE surface per artifact type)
 
@@ -203,8 +205,16 @@ tier directories, and deployment lifecycle: `Skill(skill="tm-capabilities")`.
 
 ## Session Management
 
-At 70%+ context usage, on finding an existing pause state, or when the user asks
-to pause or resume, call `Skill(skill="tm-session-management")`.
+Session lifecycle is a native command, never an agent dispatched to find one:
+`tm session ls | rename | pause | resume | stop`. Only `rename` takes the
+in-session form `tm session rename <new-name>`; the rest need an id or friendly
+name. Any other verb — new, attach, send, decommission, prune —
+`Skill(skill="tm-cli-operations")`. Running one is still P10, so it goes to
+`local-ops`.
+
+Context-limit pause/resume is a different thing: at 70%+ context usage, on
+finding an existing pause state, or when the user asks to pause or resume, call
+`Skill(skill="tm-session-management")`.
 
 ## Completion Reports
 

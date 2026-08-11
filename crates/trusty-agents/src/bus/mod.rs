@@ -71,15 +71,14 @@ impl MessageBus {
     /// and assert the envelope arrives.
     pub async fn start(project_id: &str) -> Result<Arc<Self>> {
         let socket_path = Self::socket_path_for(project_id)?;
-        if let Some(parent) = socket_path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
         // Remove stale socket from a previous run.
         if socket_path.exists() {
             fs::remove_file(&socket_path).await.ok();
         }
 
-        let listener = UnixListener::bind(&socket_path)?;
+        // #5099: was `create_dir_all` + a bare bind, so both the sockets
+        // directory and the socket landed at the process umask.
+        let listener = trusty_common::uds::bind_hardened(&socket_path)?;
         let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
 
         let bus = Arc::new(Self {
@@ -112,23 +111,20 @@ impl MessageBus {
     ///
     /// Why: `send_to` abstracts the connect-write-close pattern so callers
     /// don't duplicate socket path resolution and NDJSON framing.
-    /// What: Resolves the target's socket path, opens a `UnixStream`, writes
-    /// one NDJSON-framed `BusEnvelope` line, and flushes.
-    /// Test: Start two buses, call `send_to` on one, assert subscriber on
-    /// the other receives the envelope.
+    /// What: Resolves the target's socket path, dials it through
+    /// [`trusty_common::uds::connect_hardened`], writes one NDJSON-framed
+    /// `BusEnvelope` line, and flushes. #5089: a target socket that is not
+    /// `0600`-and-self-owned in a `0700` directory is refused, not written to.
+    /// Test: `send_envelope_to_delivers_over_a_hardened_socket`,
+    /// `send_envelope_to_refuses_a_world_readable_socket`.
     pub async fn send_to(&self, target_project: &str, payload: serde_json::Value) -> Result<()> {
         let target_path = Self::socket_path_for(target_project)?;
-        let mut stream = UnixStream::connect(&target_path).await?;
         let envelope = BusEnvelope {
             source_project: self.project_id.clone(),
             target_project: Some(target_project.to_string()),
             message: payload,
         };
-        let mut line = serde_json::to_string(&envelope)?;
-        line.push('\n');
-        stream.write_all(line.as_bytes()).await?;
-        stream.flush().await?;
-        Ok(())
+        send_envelope_to(&target_path, &envelope).await
     }
 
     /// Subscribe to all incoming messages on this bus.
@@ -160,30 +156,15 @@ impl MessageBus {
     ///
     /// Why: Lets callers discover peers without a registry lookup; a live
     /// socket file is the most reliable signal of a running process.
-    /// What: Reads `~/.trusty-agents/sockets/`, returns the stem of every `*.sock`
-    /// file that is connectable. Non-connectable sockets (stale) are skipped.
-    /// Test: Start a bus, call `list_running`, assert the project_id appears.
+    /// What: Reads `~/.trusty-agents/sockets/`, returns the stem of every
+    /// `*.sock` file that is connectable. Stale sockets are skipped, and since
+    /// #5089 so are sockets that fail the permission check — `send_to` would
+    /// refuse them, so they are not reachable peers.
+    /// Test: `list_running_in_reports_a_hardened_socket`,
+    /// `list_running_in_skips_a_world_readable_socket`.
     pub async fn list_running() -> Result<Vec<String>> {
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-        let sockets_dir = home.join(".trusty-agents").join("sockets");
-        if !sockets_dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut result = Vec::new();
-        let mut entries = fs::read_dir(&sockets_dir).await?;
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
-                continue;
-            }
-            // Probe liveness with a quick connect attempt.
-            if UnixStream::connect(&path).await.is_ok()
-                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            {
-                result.push(stem.to_string());
-            }
-        }
-        Ok(result)
+        list_running_in(&home.join(".trusty-agents").join("sockets")).await
     }
 
     /// Return the socket path for this bus instance.
@@ -191,6 +172,59 @@ impl MessageBus {
     pub fn path(&self) -> &Path {
         &self.socket_path
     }
+}
+
+/// Dial `target_path` and write one NDJSON-framed envelope to it.
+///
+/// Why: split out of [`MessageBus::send_to`] so the dial half is reachable from
+/// a test without writing into the real `~/.trusty-agents/sockets/`, which
+/// `socket_path_for` hardcodes.
+/// What: connects, writes `envelope` plus a newline, flushes.
+/// Test: `send_envelope_to_delivers_over_a_hardened_socket`,
+/// `send_envelope_to_refuses_a_world_readable_socket`.
+async fn send_envelope_to(target_path: &Path, envelope: &BusEnvelope) -> Result<()> {
+    // #5089: this writes a payload, so the socket's permissions are the only
+    // thing standing between the envelope and a process that planted a socket
+    // at this path. Verify before writing.
+    let mut stream = trusty_common::uds::connect_hardened(target_path).await?;
+    let mut line = serde_json::to_string(envelope)?;
+    line.push('\n');
+    stream.write_all(line.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// Stems of every connectable `*.sock` in `sockets_dir`.
+///
+/// Why: split out of [`MessageBus::list_running`] for the same reason as
+/// [`send_envelope_to`] — the public entry point is pinned to the home
+/// directory, so a test that exercised it would see (and be perturbed by) the
+/// developer's live buses.
+/// What: returns an empty vec when the directory is absent; otherwise probes
+/// each `*.sock` entry and keeps the stems that answer.
+/// Test: `list_running_in_reports_a_hardened_socket`,
+/// `list_running_in_skips_a_world_readable_socket`.
+async fn list_running_in(sockets_dir: &Path) -> Result<Vec<String>> {
+    if !sockets_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut result = Vec::new();
+    let mut entries = fs::read_dir(sockets_dir).await?;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+            continue;
+        }
+        // Probe liveness with a quick connect attempt. #5089: a socket that
+        // fails verification is one `send_to` would refuse anyway, so it is
+        // not a running peer as far as this list is concerned.
+        if trusty_common::uds::connect_hardened(&path).await.is_ok()
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            result.push(stem.to_string());
+        }
+    }
+    Ok(result)
 }
 
 /// Test helper: bind a one-off listener at `socket_path`, accept the next
@@ -213,10 +247,10 @@ pub async fn subscribe_and_drain(
     if socket_path.exists() {
         let _ = fs::remove_file(socket_path).await;
     }
-    if let Some(parent) = socket_path.parent() {
-        let _ = fs::create_dir_all(parent).await;
-    }
-    let listener = match UnixListener::bind(socket_path) {
+    // #5089: bind the way the real bus does. A bare `create_dir_all` + bind
+    // leaves the stub at the process umask, which `send_to` now refuses to
+    // dial — the stub daemon would be unreachable from the code under test.
+    let listener = match trusty_common::uds::bind_hardened(socket_path) {
         Ok(l) => l,
         Err(_) => return Vec::new(),
     };
@@ -255,6 +289,11 @@ async fn accept_loop(listener: UnixListener, tx: broadcast::Sender<BusEnvelope>)
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                // #5099: a foreign-uid peer is dropped without being served.
+                if let Err(e) = trusty_common::uds::ensure_peer_is_self(&stream) {
+                    tracing::warn!(error = %e, "bus accept_loop: rejected connection");
+                    continue;
+                }
                 let tx_clone = tx.clone();
                 tokio::spawn(handle_connection(stream, tx_clone));
             }
@@ -290,5 +329,95 @@ async fn handle_connection(stream: UnixStream, tx: broadcast::Sender<BusEnvelope
                 tracing::warn!(error = %e, line = %line, "bus: malformed envelope; skipping");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn envelope() -> BusEnvelope {
+        BusEnvelope {
+            source_project: "sender".to_string(),
+            target_project: Some("receiver".to_string()),
+            message: serde_json::json!({"type": "ping"}),
+        }
+    }
+
+    /// Widen a bound socket to `0666`, the shape a pre-#5099 daemon left behind.
+    fn widen(path: &Path) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
+            .expect("widen socket");
+    }
+
+    /// The normal path still works: a socket bound through `bind_hardened`
+    /// accepts the envelope and the bytes arrive intact.
+    #[tokio::test]
+    async fn send_envelope_to_delivers_over_a_hardened_socket() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("receiver.sock");
+        let listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
+
+        let reader = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut lines = BufReader::new(stream).lines();
+            lines.next_line().await.expect("read").expect("one line")
+        });
+
+        send_envelope_to(&sock, &envelope()).await.expect("send");
+
+        let line = reader.await.expect("join");
+        let got: BusEnvelope = serde_json::from_str(&line).expect("parse");
+        assert_eq!(got.source_project, "sender");
+    }
+
+    /// #5089 step 1a: `send_to` writes a payload, so it must refuse a socket
+    /// that fails the permission check rather than trusting whatever answers.
+    /// Against the pre-migration bare `UnixStream::connect` this passes the
+    /// write straight through to a `0666` socket.
+    #[tokio::test]
+    async fn send_envelope_to_refuses_a_world_readable_socket() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sock = tmp.path().join("sockets").join("receiver.sock");
+        // Keep the listener alive, so a bare connect would succeed.
+        let _listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
+        widen(&sock);
+
+        let err = send_envelope_to(&sock, &envelope())
+            .await
+            .expect_err("must refuse a socket that is not 0600");
+        assert!(
+            err.to_string().contains("refusing to connect"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_running_in_reports_a_hardened_socket() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sockets");
+        let sock = dir.join("alive.sock");
+        let _listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
+
+        let running = list_running_in(&dir).await.expect("list");
+        assert_eq!(running, vec!["alive".to_string()]);
+    }
+
+    /// #5089 step 1a: a socket that fails verification is not a peer we would
+    /// ever send to, so it must not be reported as running either.
+    #[tokio::test]
+    async fn list_running_in_skips_a_world_readable_socket() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("sockets");
+        let sock = dir.join("wide.sock");
+        let _listener = trusty_common::uds::bind_hardened(&sock).expect("bind");
+        widen(&sock);
+
+        let running = list_running_in(&dir).await.expect("list");
+        assert!(
+            running.is_empty(),
+            "a 0666 socket must not be reported running: {running:?}"
+        );
     }
 }

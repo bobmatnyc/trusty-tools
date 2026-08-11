@@ -11,9 +11,17 @@
 # its own lightweight job (matches ci.yml / line-cap.yml's checkout style).
 name: Test pointers
 
+# This optional gate scans tracked Rust files only, so use an allowlist of its
+# actual inputs rather than making every new repository path opt in by default.
 on:
   push:
     branches: [main]
+    paths:
+      - "**/*.rs"
+      - ".test-pointer-allowlist.tsv"
+      - "scripts/check_test_pointers.sh"
+      - "scripts/check_scan_floor_selftest.sh"
+      - ".github/workflows/test-pointers.yml"
   pull_request:
     # Explicit activity types (#4179). `edited` is NOT in GitHub's default set
     # (opened/synchronize/reopened) and is the event a base-branch RETARGET
@@ -22,6 +30,12 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+    paths:
+      - "**/*.rs"
+      - ".test-pointer-allowlist.tsv"
+      - "scripts/check_test_pointers.sh"
+      - "scripts/check_scan_floor_selftest.sh"
+      - ".github/workflows/test-pointers.yml"
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push
@@ -33,6 +47,7 @@ concurrency:
 jobs:
   test-pointers:
     name: "Test: doc-comment pointer lint"
+    if: github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null
     runs-on: ubuntu-latest
     # #4882: was 5. Measured 2026-08-05: the lint itself legitimately took
     # 352s locally (close to CI's observed 303s the run that got cancelled),

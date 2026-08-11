@@ -30,19 +30,21 @@ fn indexes_body() -> String {
     format!(r#"[{{"id":"{INDEX_ID}","root_path":null}}]"#)
 }
 
-/// Body for `/complexity_hotspots` — hotspots carrying the #2446 numbers.
-fn hotspots_body() -> String {
-    r#"{"index_id":"acme-core","top_n":1000,"hotspots":[
-        {"id":"a:1:9","file":"src/a.rs","start_line":1,"end_line":9,"content":"fn a(){}","cyclomatic":25,"cognitive":30},
-        {"id":"b:1:9","file":"src/b.rs","start_line":1,"end_line":9,"content":"fn b(){}","cyclomatic":12,"cognitive":8},
-        {"id":"c:1:9","file":"src/c.rs","start_line":1,"end_line":9,"content":"fn c(){}","cyclomatic":3,"cognitive":1}
+/// Body for `/complexity_distribution` — the whole-corpus A-F histogram (#5320).
+fn distribution_body() -> String {
+    r#"{"index_id":"acme-core","total":3,"skipped_non_code":1,"buckets":[
+        {"grade":"A","label":"A: simple (0-5)","count":1},
+        {"grade":"B","label":"B: moderate (6-10)","count":0},
+        {"grade":"C","label":"C: elevated (11-15)","count":1},
+        {"grade":"D","label":"D: high (16-20)","count":0},
+        {"grade":"F","label":"F: very high (>20)","count":1}
     ]}"#
     .to_string()
 }
 
 /// Body for `/diagnostics` — one error (RED) + one hint (dropped GREEN).
 fn diagnostics_body() -> String {
-    r#"{"index_id":"acme-core","total":2,"diagnostics":[
+    r#"{"index_id":"acme-core","total":2,"tools_run":["clippy"],"diagnostics":[
         {"tool":"clippy","file":"src/a.rs","line":1,"col":1,"severity":"error","code":"E0001","message":"boom"},
         {"tool":"clippy","file":"src/b.rs","line":2,"col":1,"severity":"hint","code":"H1","message":"meh"}
     ]}"#
@@ -59,8 +61,8 @@ fn refactor_body() -> String {
 
 /// Route the request path to the right fixture body.
 fn body_for(path: &str) -> String {
-    if path.starts_with("/indexes/") && path.contains("/complexity_hotspots") {
-        hotspots_body()
+    if path.starts_with("/indexes/") && path.contains("/complexity_distribution") {
+        distribution_body()
     } else if path.contains("/diagnostics") {
         diagnostics_body()
     } else if path.contains("/refactor-suggestions") {
@@ -162,15 +164,27 @@ async fn analyze_populates_complexity_and_findings() {
         .expect("analyze filled metrics");
     // loc/counts stay empty (scanner owns them).
     assert_eq!(metrics.loc.total, 0);
-    // Buckets computed client-side: F (25), C (12), A (3).
+    // Every band from the daemon's full histogram (#5320) — not a bucketed
+    // top-N sample.
     let labels: Vec<&str> = metrics
         .complexity
         .buckets
         .iter()
         .map(|b| b.label.as_str())
         .collect();
+    assert_eq!(labels.len(), 5, "every band renders: {labels:?}");
     assert!(labels.contains(&"F: very high (>20)"), "{labels:?}");
     assert!(labels.contains(&"C: elevated (11-15)"), "{labels:?}");
+    assert_eq!(
+        metrics
+            .complexity
+            .buckets
+            .iter()
+            .map(|b| b.count)
+            .sum::<u64>(),
+        3,
+        "the percentage denominator is the counted population"
+    );
 
     let reporter = Reporter::new(tmp.path().join("reports"));
     let md = reporter.render(&model, &template);

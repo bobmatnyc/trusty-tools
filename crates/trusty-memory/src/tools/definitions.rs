@@ -79,6 +79,9 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     } else {
         vec!["palace", "subject"]
     };
+    // #4776: subject enumeration takes no argument of its own, so `palace` is
+    // the whole `required` list when no server default is configured.
+    let kg_list_subjects_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
     let memory_list_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
     let memory_forget_required: Vec<&str> = if has_default {
         vec!["drawer_id"]
@@ -246,6 +249,19 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                 }
             },
             {
+                "name": "kg_list_subjects",
+                "description": "List the subjects this palace's knowledge graph actually holds, alphabetically. Call this BEFORE kg_query instead of guessing a subject: kg_query needs a subject you already know, and a subject that does not exist returns the same empty result as an empty graph, so a guess tells you nothing. Subjects are namespaced by kind — `tag:<name>`, `topic:<name>`, `drawer:<uuid>`, `room:<name>` — alongside bare entity names asserted by kg_assert. Returns {palace, subjects, with_counts, truncated}. `truncated: true` means the page filled to `limit` and more subjects may exist; raise `limit` to see them.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":      {"type": "string", "description": "Palace ID (optional if server started with --palace)"},
+                        "limit":       {"type": "integer", "description": "Max subjects to return. Default 50, clamped to 1..=200.", "default": 50},
+                        "with_counts": {"type": "boolean", "description": "Return {subject, count} objects carrying each subject's active-triple count instead of bare subject strings. Use it to find the densest subjects to query first.", "default": false}
+                    },
+                    "required": kg_list_subjects_required,
+                }
+            },
+            {
                 "name": "memory_list",
                 "description": "List drawers in a palace, optionally filtered by wing, room type, or tag.",
                 "inputSchema": {
@@ -262,7 +278,10 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_forget",
-                "description": "Delete a drawer from a palace by its UUID.",
+                // #5231: the caller can only trust a delete if the tool says
+                // which of the two things happened, so the contract is in the
+                // description an LLM caller actually reads.
+                "description": "Delete a drawer from a palace by its UUID. Returns status='deleted' when a drawer was removed, or status='not_found' when no drawer with that id existed (nothing was deleted).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

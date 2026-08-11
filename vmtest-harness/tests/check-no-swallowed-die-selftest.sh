@@ -110,6 +110,16 @@ awk '
 ' "$HARNESS_DIR/lib/verify.sh" > "$H/lib/verify.sh"
 expect_red 'heredoc substitution' 'heredoc-substitution'
 
+# --- the assignment form that LOOKS exempt but is not --------------------
+# `x=$(f)` propagates the child status and is exempt; `local x=$(f)` does not,
+# because `local` is a command whose own 0 status wins (`vmtest:28-29`).  The
+# guard exempted both until #5014, so this case is the one that keeps the
+# narrowed exemption narrow.
+reset_copy
+insert_before_anchor "$H/scenarios/install-local.sh" "$SCENARIO_ANCHOR" \
+    '    local _z=$(tsv_scope_packages)'
+expect_red 'local-form assignment' 'argument-position'
+
 # --- the two constructs a name-grep alone would miss ----------------------
 reset_copy
 insert_before_anchor "$H/scenarios/install-local.sh" "$SCENARIO_ANCHOR" \

@@ -6,6 +6,7 @@
 pub mod aliases;
 pub mod analyze;
 pub mod args;
+pub mod audit;
 pub mod author;
 pub mod backfill;
 pub mod classify;
@@ -20,3 +21,4 @@ pub mod override_cmd;
 pub mod pr_metrics;
 pub mod report;
 pub mod rules;
+pub mod tui;

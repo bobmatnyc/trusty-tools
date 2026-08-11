@@ -731,6 +731,35 @@ pub struct AgentInfo {
     /// `agent_tier_explicit_declaration_overrides_the_derived_kind`.
     #[serde(default)]
     pub tier: Option<String>,
+
+    /// Pin this agent's inference provider (#3765).
+    ///
+    /// Why: before this field existed, `[agent].provider_id` was written by
+    /// `PATCH /api/agents/:name` (#3243) and read by NOTHING — `AgentInfo` had
+    /// no provider slot, so the loader dropped the key and every turn instead
+    /// re-probed the ambient environment through
+    /// `llm::credentials::pick_credentials` in fixed priority order. Choosing
+    /// a provider in the GUI looked like it worked and changed nothing. This
+    /// field is that same TOML key promoted to a real, enforced one — the name
+    /// is deliberately unchanged so every already-written agent TOML starts
+    /// taking effect rather than needing a migration.
+    /// What: a provider name from `trusty_common::inference::registry`
+    /// (`openrouter`, `anthropic`, `bedrock`, `fireworks`, `atlascloud`,
+    /// `local`). Absent or blank means UNPINNED and preserves today's ambient
+    /// behaviour exactly. When set, [`crate::llm::provider_pin::resolve`]
+    /// validates it at load and FAILS CLOSED — unknown name, provider the chat
+    /// loop cannot dispatch to, or a missing credential each abort the load
+    /// with an actionable message instead of quietly falling back. The pin
+    /// then rewrites `model` via
+    /// [`crate::llm::provider_pin::pinned_model_slug`] so it beats whatever
+    /// provider the model slug would otherwise imply, and forces
+    /// `[llm].use_anthropic_direct` to agree with the pin.
+    /// Test: `agent_config_honours_a_provider_pin`,
+    /// `agent_config_pin_beats_the_model_slug_prefix`,
+    /// `agent_config_without_a_pin_is_unchanged`,
+    /// `agent_config_rejects_a_pin_with_no_credential`.
+    #[serde(default)]
+    pub provider_id: Option<String>,
 }
 
 /// Persona privilege tier (#4168, epic #4167 — L0/L1 orchestration model).

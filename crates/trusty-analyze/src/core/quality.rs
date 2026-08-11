@@ -79,6 +79,103 @@ pub fn complexity_hotspots(chunks: &[CodeChunk], top_n: usize) -> Vec<HotspotIte
     scored
 }
 
+/// One grade band of a full-corpus complexity histogram.
+///
+/// Why: the report renderer needs a stable label per band so its chart axis and
+/// the analyzer's own A–F grading say the same thing.
+/// What: the letter grade, the human label carrying the band's cyclomatic
+/// range, and how many code chunks fall in it (zero included — an empty band is
+/// a measurement, not an absence).
+/// Test: `distribution_covers_every_band`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct DistributionBucket {
+    pub grade: String,
+    pub label: String,
+    pub count: usize,
+}
+
+/// The complete cyclomatic-complexity histogram over a chunk corpus.
+///
+/// Why: `/complexity_hotspots` answers "which are the worst N?" and can never
+/// answer "how is the codebase distributed?" — it is sorted descending and
+/// truncated, so on a large repository its top 1000 are all grade D and F. A
+/// report that renders that truncation as a distribution states, of a 1.37M-line
+/// codebase, that it contains zero simple functions (#5320). This type is the
+/// separate, exhaustive answer: every band, counted over the whole corpus.
+/// What: `total` is the number of code chunks counted (the honest percentage
+/// denominator), `skipped_non_code` the number excluded for having no mapped
+/// language, and `buckets` always carries all five bands in ascending order.
+/// Test: `distribution_covers_every_band`, `distribution_excludes_non_code`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ComplexityDistributionReport {
+    pub total: usize,
+    pub skipped_non_code: usize,
+    pub buckets: Vec<DistributionBucket>,
+}
+
+/// Human label per grade, carrying the band's cyclomatic range.
+fn grade_label(grade: ComplexityGrade) -> &'static str {
+    match grade {
+        ComplexityGrade::A => "A: simple (0-5)",
+        ComplexityGrade::B => "B: moderate (6-10)",
+        ComplexityGrade::C => "C: elevated (11-15)",
+        ComplexityGrade::D => "D: high (16-20)",
+        ComplexityGrade::F => "F: very high (>20)",
+    }
+}
+
+/// Compute the full A–F cyclomatic-complexity histogram over `chunks`.
+///
+/// Why: see [`ComplexityDistributionReport`] — this is the exhaustive
+/// counterpart to [`complexity_hotspots`], and the only source from which an
+/// honest percentage can be computed (#5320).
+/// What: scores every chunk whose file maps to a known language via
+/// [`metrics_of`], buckets it by [`ComplexityGrade::from_cyclomatic`], and
+/// returns all five bands in ascending order plus the counted and skipped
+/// totals. Non-code files (docs, workflows, lockfiles) are excluded rather than
+/// scored by the text heuristic (#5317).
+/// Test: `distribution_covers_every_band`, `distribution_excludes_non_code`.
+pub fn complexity_distribution(chunks: &[CodeChunk]) -> ComplexityDistributionReport {
+    let grades = [
+        ComplexityGrade::A,
+        ComplexityGrade::B,
+        ComplexityGrade::C,
+        ComplexityGrade::D,
+        ComplexityGrade::F,
+    ];
+    let mut counts = [0usize; 5];
+    let mut total = 0usize;
+    let mut skipped_non_code = 0usize;
+
+    for c in chunks {
+        if !crate::lang::ext_map::is_code_file(&c.file) {
+            skipped_non_code += 1;
+            continue;
+        }
+        let grade = ComplexityGrade::from_cyclomatic(metrics_of(c).cyclomatic);
+        let idx = grades
+            .iter()
+            .position(|g| *g == grade)
+            .unwrap_or(grades.len() - 1);
+        counts[idx] += 1;
+        total += 1;
+    }
+
+    ComplexityDistributionReport {
+        total,
+        skipped_non_code,
+        buckets: grades
+            .iter()
+            .zip(counts)
+            .map(|(grade, count)| DistributionBucket {
+                grade: grade.to_string(),
+                label: grade_label(*grade).to_string(),
+                count,
+            })
+            .collect(),
+    }
+}
+
 /// Return chunks that have at least one detected smell.
 pub fn smelly_chunks(chunks: &[CodeChunk]) -> Vec<CodeChunk> {
     chunks
@@ -180,6 +277,50 @@ mod tests {
         assert_eq!(v["id"], "f:1:5"); // flattened chunk field at top level
         assert!(v.get("cyclomatic").is_some());
         assert!(v.get("cognitive").is_some());
+    }
+
+    fn chunk_in(id: &str, file: &str, content: &str) -> CodeChunk {
+        let mut c = chunk(id, content);
+        c.file = file.into();
+        c
+    }
+
+    /// #5320: every band is present even when empty, and `total` is the counted
+    /// population — the two properties a percentage column needs to be honest.
+    #[test]
+    fn distribution_covers_every_band() {
+        let simple = chunk("s", "/// doc\nfn s() {}\n");
+        let mut messy_src = String::from("/// doc\nfn m(a: u32) {\n");
+        for _ in 0..30 {
+            messy_src.push_str("    if a == 1 { return; }\n");
+        }
+        messy_src.push_str("}\n");
+        let messy = chunk("m", &messy_src);
+
+        let d = complexity_distribution(&[simple, messy]);
+        assert_eq!(d.buckets.len(), 5, "all five bands render, empty included");
+        let grades: Vec<&str> = d.buckets.iter().map(|b| b.grade.as_str()).collect();
+        assert_eq!(grades, vec!["A", "B", "C", "D", "F"]);
+        assert_eq!(d.total, 2);
+        assert_eq!(d.skipped_non_code, 0);
+        assert_eq!(
+            d.buckets.iter().map(|b| b.count).sum::<usize>(),
+            d.total,
+            "band counts must sum to the stated denominator"
+        );
+        assert_eq!(d.buckets[0].count, 1, "the trivial fn grades A");
+        assert_eq!(d.buckets[4].count, 1, "the 30-branch fn grades F");
+    }
+
+    /// #5317: a CHANGELOG has no cyclomatic complexity — scoring it with the
+    /// text heuristic is what put `CHANGELOG.md` in a report's RED band.
+    #[test]
+    fn distribution_excludes_non_code() {
+        let doc = chunk_in("d", "/repo/CHANGELOG.md", "# 1.0\n- if this then that\n");
+        let code = chunk_in("c", "/repo/src/lib.rs", "/// doc\nfn f() {}\n");
+        let d = complexity_distribution(&[doc, code]);
+        assert_eq!(d.total, 1, "only the .rs chunk is counted");
+        assert_eq!(d.skipped_non_code, 1);
     }
 
     #[test]

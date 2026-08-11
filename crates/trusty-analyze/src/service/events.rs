@@ -113,17 +113,6 @@ pub struct AnalyzerAppState {
     /// `core::complexity` proves that a non-default threshold fires on a chunk
     /// the defaults would ignore.
     pub smell_thresholds: SmellThresholds,
-    /// Optional GitHub webhook HMAC secret override.
-    ///
-    /// Why: `POST /webhooks/github` verifies the `X-Hub-Signature-256` HMAC.
-    /// In production the secret comes from `GITHUB_WEBHOOK_SECRET`, but env
-    /// vars are process-global and unsafe to mutate from concurrent tests.
-    /// Threading the secret through state lets tests inject it deterministically
-    /// while production still falls back to the env var.
-    /// What: `Some(secret)` forces verification; `None` falls back to the env
-    /// var (and skips verification when that is also unset).
-    /// Test: `webhook_rejects_bad_signature` injects `Some(...)` here.
-    pub webhook_secret: Option<String>,
     /// OpenRouter API key used by the `POST /analyze/deep` endpoint.
     ///
     /// Why: the deep-analysis endpoint needs an LLM provider to generate the
@@ -169,7 +158,6 @@ impl AnalyzerAppState {
             scip_overlays,
             events: events_tx,
             smell_thresholds: SmellThresholds::default(),
-            webhook_secret: None,
             api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
@@ -193,7 +181,6 @@ impl AnalyzerAppState {
             scip_overlays,
             events: events_tx,
             smell_thresholds: SmellThresholds::default(),
-            webhook_secret: None,
             api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).ok(),
             llm_model: std::env::var("TRUSTY_LLM_MODEL")
                 .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
@@ -235,18 +222,6 @@ impl AnalyzerAppState {
     /// Test: covered transitively by the binary wiring tests.
     pub fn with_llm_model(mut self, model: impl Into<String>) -> Self {
         self.llm_model = model.into();
-        self
-    }
-
-    /// Override the GitHub webhook HMAC secret.
-    ///
-    /// Why: lets tests inject a deterministic secret and lets the binary pass
-    /// `GITHUB_WEBHOOK_SECRET` in once at startup instead of re-reading the
-    /// environment on every webhook request.
-    /// What: sets `webhook_secret` and returns `self` for chaining.
-    /// Test: `webhook_rejects_bad_signature` uses this to force verification.
-    pub fn with_webhook_secret(mut self, secret: Option<String>) -> Self {
-        self.webhook_secret = secret;
         self
     }
 

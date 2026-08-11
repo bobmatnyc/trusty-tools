@@ -136,6 +136,19 @@ source_deliver_local() {
 # the run log is 0), which is why nothing on this path may borrow
 # `source_deliver_local`'s vocabulary.
 #
+# #4924 QUALIFIES §6.2'S PARENTHESIS — "the repo is public, so no credential
+# plumbing is needed" — WITHOUT CHANGING ANYTHING BELOW. That clause is still
+# true of CORRECTNESS and was never true of RATE LIMITS: an anonymous clone
+# shares one github.com quota with the host and every concurrent guest on the
+# same egress IP. `provision_github_token` (lib/provision.sh) therefore wires a
+# preemptive Authorization header into the guest's git configuration BEFORE this
+# function runs, when the host has a $GITHUB_TOKEN and pattern (b) is the pattern
+# under test. This function is unchanged by that and must stay so: the credential
+# lives in the guest's own `~/.gitconfig` include, so `repo_url` carries NO
+# credential and neither does any command string here. Never embed one — this
+# file logs `repo_url` verbatim and `tail`s the clone log on failure. An absent
+# token still clones anonymously, exactly as before.
+#
 # NO NEW MECHANISM (plan §A). Pattern (b) reuses pattern (c)'s scaffolding
 # entirely: the same `lib/vm.sh` exec boundary, the same `run_watchdog`, the same
 # `install_from_path` install step, the same oracle. Only the acquisition of the
@@ -209,7 +222,13 @@ source_deliver_branch() {
         if [ "$rc" -eq 124 ]; then
             die 50 "the guest \`git clone\` of ${repo_url} exceeded its 300 s budget (DOC-2 §10.2 guest-git-clone row; NO vmtest.defaults key exists for this budget). No retry, ever (§10.3)."
         fi
-        die 50 "the guest \`git clone ${repo_url}\` / \`git checkout ${branch}\` exited ${rc} (last 40 lines above). The repository is public (DOC-1 §6.2), so this is not a credentials failure."
+        # #4924: the old text ended "so this is not a credentials failure" flat.
+        # That was unconditionally true until the guest started carrying a
+        # preemptive Authorization header: a token revoked in the up-to-300 s
+        # between the ls-remote proof and this clone, or a header github.com
+        # rejects, produces exactly a credentials failure — and the harness would
+        # have been telling the operator to rule that out.
+        die 50 "the guest \`git clone ${repo_url}\` / \`git checkout ${branch}\` exited ${rc} (last 40 lines above). The repository is public (DOC-1 §6.2), so an ANONYMOUS clone should have succeeded. If GITHUB_TOKEN propagation was active for this run (#4924), this CAN still be a credentials failure — the guest clones with a preemptive Authorization header, and a token revoked since the earlier ls-remote proof would land here. Re-run with VMTEST_PROPAGATE_GITHUB_TOKEN=false to isolate that."
     fi
     log "MEASURE git_clone_s ${elapsed} (measured baseline GIT_CLONE_MS=50131, i.e. 50.131 s)"
 

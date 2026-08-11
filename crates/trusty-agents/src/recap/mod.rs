@@ -183,17 +183,27 @@ fn capitalise(s: &str) -> String {
 /// Persist a recap to `state_dir/recaps/{session_id}.json`.
 ///
 /// Why: Recaps must survive process restart so the GUI can backfill the
-/// RecapPanel after reload. Writing a per-session JSON file keeps the
-/// storage trivial and inspectable.
-/// What: Creates the `recaps/` subdir if missing, then writes pretty JSON.
-/// Test: covered by integration; unit test would require a temp dir.
+/// RecapPanel after reload. A recap is a summary built from task narratives,
+/// so it is exactly as sensitive as the `tasks.json` it is derived from — and
+/// it used to be written with a bare `std::fs::write` at the process umask,
+/// landing world-readable, which is the same gap `persist_tasks` had (#4355).
+/// Routing through `state_writer` puts it under the one owner-only,
+/// lock + tmp + rename contract every other state file already uses.
+/// What: Serializes pretty JSON and hands it to
+/// [`crate::state_writer::atomic_write`], which creates the `recaps/` subdir
+/// itself — hence no separate `create_dir_all` here. Still returns `Result`
+/// and still blocks: the caller (`api::server::task_runner::maybe_emit_recap`)
+/// already invoked this synchronously and already logs-and-continues on error,
+/// so neither its error handling nor its blocking behavior changes. The
+/// advisory lock is per-session (`recaps/{session_id}.json.lock`), not a
+/// shared path, so it is effectively uncontended.
+/// Test: `save_and_load_recap_roundtrip`, `save_recap_writes_an_owner_only_file`.
 pub fn save_recap(state_dir: &Path, recap: &Recap) -> Result<()> {
-    let dir = state_dir.join("recaps");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.json", recap.session_id));
+    let path = state_dir
+        .join("recaps")
+        .join(format!("{}.json", recap.session_id));
     let json = serde_json::to_string_pretty(recap)?;
-    std::fs::write(path, json)?;
-    Ok(())
+    crate::state_writer::atomic_write(&path, json.as_bytes())
 }
 
 /// Load the most recent recap for a session, if any.
@@ -333,5 +343,33 @@ mod tests {
         assert_eq!(loaded.session_id, "sess1");
         assert_eq!(loaded.rows.len(), 1);
         assert_eq!(loaded.rows[0].result, "abc1234");
+    }
+
+    /// #4355: a recap summarises task narratives, so it is as sensitive as the
+    /// `tasks.json` it is derived from. Written with a bare `std::fs::write` it
+    /// landed at the process umask (0644 — world-readable on a shared host);
+    /// routed through `state_writer::atomic_write` it inherits the owner-only
+    /// contract every other state file now has.
+    #[cfg(unix)]
+    #[test]
+    fn save_recap_writes_an_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let recap = Recap {
+            session_id: "sess-perm".into(),
+            summary: "sensitive narrative summary".into(),
+            rows: Vec::new(),
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            task_count: 1,
+        };
+        save_recap(dir.path(), &recap).unwrap();
+
+        let path = dir.path().join("recaps").join("sess-perm.json");
+        let mode = std::fs::metadata(&path)
+            .expect("recap file must exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "recap must not be world-readable");
     }
 }

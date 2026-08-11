@@ -1,14 +1,22 @@
 # 0032. No trusty-\* service owns an HTTP daemon; UDS is the inter-service transport; `trusty-console` is the only HTTP surface
 
-- **Status:** Accepted — **Amended by
-  [0034](0034-webhook-ingress-console-relays-over-uds-to-a-supervised-on-demand-process.md)**
+- **Status:** Amended by [0034](0034-webhook-ingress-console-relays-over-uds-to-a-supervised-on-demand-process.md), [0035](0035-console-health-probe-aggregates-over-uds.md)
+- **Amendments:** ADR-0034
   (2026-08-07 owner ruling "Console relays over UDS." closes the Open
   Question below: console terminates the webhook's HTTP request, verifies
   HMAC once, spools the payload durably before acknowledging, and relays
-  over UDS to a console-supervised on-demand process). This ADR's Decision
+  over UDS to a console-supervised on-demand process); ADR-0035 (2026-08-08
+  owner ruling "Console should have a health probe that probes all the UDS
+  services." replaces the per-CLI UDS-dial mechanism named below in
+  Consequences with a console-side aggregator: console fans out over UDS to
+  every trusty-\* service, and CLIs consume console's aggregated health
+  instead of dialing each daemon directly). This ADR's Decision
   remains in force in full; its Context/Decision/Consequences are left as
   originally accepted per the ADR immutability rule (DOC-46 §4), and
-  ADR-0034 is the record of the amendment.
+  ADR-0034 and ADR-0035 are the records of the amendments.
+  Its `0600` access-control premise is separately corrected by
+  [#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099) — see the
+  correction note in Consequences.
 - **Date:** 2026-08-07
 - **Accepted:** 2026-08-07 (owner ruling, verbatim below)
 - **Scope:** Workspace-wide (every trusty-\* daemon that currently binds HTTP:
@@ -133,6 +141,15 @@ Concretely:
   `docs/reference/threat-model.md` exists to audit — a `0600`-permissioned
   socket in a user-owned directory replaces a loopback TCP port reachable by
   any local process, which is a stronger guarantee, not a weaker one.
+
+> 🔴 **Correction (#5099, 2026-08-07).** The `0600`-permissioned socket cited
+> here was not implemented anywhere in the workspace when this ADR was written;
+> see ADR-0031's matching correction note. It became true in
+> [#5099](https://github.com/bobmatnyc/trusty-tools/issues/5099). Note also that
+> the "UDS listener/dial module in `trusty-common`, mounted by every daemon"
+> assumed above still does not exist as a *transport*; #5099 supplied only its
+> security layer, and [#5089](https://github.com/bobmatnyc/trusty-tools/issues/5089)
+> step 1 builds the framing and dialing on top.
 - Unblocks [#5028](https://github.com/bobmatnyc/trusty-tools/issues/5028):
   trusty-analyze and trusty-review can now be built as on-demand processes
   rather than always-listening daemons, because their inter-service surface
@@ -154,6 +171,16 @@ Concretely:
 - **CLI status/health commands** (`trusty-search status`, `tm status`, etc.)
   that currently do a quick loopback HTTP `GET` must move to a UDS dial —
   mechanical, but touches every CLI entry point across six crates.
+
+  > 🔴 **Amended by [0035](0035-console-health-probe-aggregates-over-uds.md),
+  > 2026-08-08.** Owner ruling: "Console should have a health probe that
+  > probes all the UDS services." This replaces the per-CLI UDS-dial
+  > mechanism above with a console-side aggregator — console fans out over
+  > UDS to every trusty-\* service, and CLIs consume console's aggregated
+  > health rather than dialing each daemon themselves. The bullet above is
+  > left as originally accepted per DOC-46 §4; see ADR-0035 for the full
+  > mechanism, rationale, and its two open questions (how a CLI reaches
+  > console, and what happens when console itself is down).
 - **`docs/reference/threat-model.md`'s per-daemon inventory goes stale.**
   Its bind/guard/console-proxy-allowlist table is built entirely on ADR-0018
   premises (which daemons may bind loopback HTTP and how they're guarded).

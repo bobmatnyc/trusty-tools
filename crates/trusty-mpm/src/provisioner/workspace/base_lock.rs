@@ -144,7 +144,8 @@ fn protected_dir_error(project_dir: &Path) -> Option<ProvisionError> {
          rev-parse --show-toplevel` succeeds before retrying.",
         project = project_dir.display(),
         legacy = LEGACY_BASE_DIRNAME,
-        worktrees = crate::session_manager::decommission::WORKTREES_DIRNAME,
+        // #5204: name the configured base in the operator-facing message.
+        worktrees = crate::session_manager::decommission::worktrees_dirname(),
     )))
 }
 

@@ -32,6 +32,8 @@ async fn tools_list_contains_full_surface() {
         .collect();
     for required in [
         "complexity_hotspots",
+        // #5320 — the parity partner of the new HTTP distribution endpoint.
+        "complexity_distribution",
         "find_smells",
         "analyze_quality",
         "run_diagnostics",

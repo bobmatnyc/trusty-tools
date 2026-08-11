@@ -44,13 +44,14 @@ mod filter;
 // injection does, or its log join silently under-counts. Sharing the one
 // implementation is what makes that guarantee hold.
 pub(crate) mod format;
+mod query;
 
 use anyhow::Result;
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
 use crate::hook_emit::{post_hook_event, HookEventPayload};
-use crate::prompt_log::{PromptLogEntry, PromptLogger};
+use crate::prompt_log::{PromptLogEntry, PromptLogger, RecallQueryShape};
 use crate::{hook_prompt_excerpt, HookType, InjectionKind};
 
 use fetch::{fetch_global_prompt_context, fetch_palace_kg_triples, fetch_palace_recall};
@@ -58,7 +59,10 @@ use filter::{
     filter_drawers_by_deny_tags, filter_drawers_by_relevance_floor, select_relevant_triples,
 };
 use format::{compose_injection, count_facts};
+use query::{configured_query_budget, shape_recall_query, warn_if_reshaped};
 use trusty_common::memory_core::retrieval::DEFAULT_RELEVANCE_FLOOR;
+
+pub use query::ENV_QUERY_TOKEN_BUDGET;
 
 /// HTTP path for the global hot-facts block.
 pub(super) const PROMPT_CONTEXT_PATH: &str = "/api/v1/kg/prompt-context";
@@ -423,7 +427,7 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     let addr = match trusty_common::read_daemon_addr("trusty-memory") {
         Ok(Some(addr)) => addr,
         Ok(None) | Err(_) => {
-            log_entry(trigger_payload, "", 0, start);
+            log_entry(trigger_payload, "", 0, start, None);
             return String::new();
         }
     };
@@ -445,7 +449,7 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     {
         Ok(c) => c,
         Err(_) => {
-            log_entry(trigger_payload, "", 0, start);
+            log_entry(trigger_payload, "", 0, start, None);
             return String::new();
         }
     };
@@ -464,13 +468,20 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     // slower of drawers/kg); joining all three caps the fetch phase at
     // ~1× HTTP_TIMEOUT regardless of palace_slug.
     let global_fut = fetch_global_prompt_context(&client, &base);
+    let mut query_shape: Option<RecallQueryShape> = None;
     let (global_facts, drawers, withheld, kg_triples) = match &palace_slug {
         Some(slug) => {
             let top_k = configured_top_k();
-            // #5037 (requirement 3): the recall query is `user_prompt` whole —
-            // never a first line, a prefix, or an excerpt. `hook_prompt_excerpt`
-            // exists for telemetry only and must not be used here.
-            let drawers_fut = fetch_palace_recall(&client, &base, slug, &user_prompt, top_k);
+            // #4972: `user_prompt` is still parsed whole (#5037 requirement 3 —
+            // `hook_prompt_excerpt` is telemetry and must never be the query),
+            // but it is no longer handed to the embedder raw. Past the 512-token
+            // window the embedder cut it mid-word and said nothing; shaping
+            // strips the notification envelope and, if still over, keeps whole
+            // units and reports the reduction.
+            let shaped = shape_recall_query(&user_prompt, configured_query_budget());
+            warn_if_reshaped(&shaped.shape);
+            query_shape = Some(shaped.shape);
+            let drawers_fut = fetch_palace_recall(&client, &base, slug, &shaped.text, top_k);
             let kg_fut = fetch_palace_kg_triples(&client, &base, slug);
             let (global_facts, drawers, kg_all) = tokio::join!(global_fut, drawers_fut, kg_fut);
             // Issue #139: drop low-signal drawers (e.g. `claude-session` /
@@ -485,6 +496,9 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
             // would then promise `memory_recall` results the deny list also
             // suppresses.
             let floor = filter_drawers_by_relevance_floor(drawers, configured_relevance_floor());
+            // #4972: the KG selector matches literal words, not vectors — it has
+            // no token window, so it keeps the whole prompt. Shaping is a fix
+            // for the embedder, not a general narrowing of what we look at.
             let kg_filtered = select_relevant_triples(&kg_all, &user_prompt, top_k);
             (global_facts, floor.kept, floor.withheld, kg_filtered)
         }
@@ -511,7 +525,7 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     // bulleted facts in the rendered Markdown block. Errors are swallowed
     // inside the logger.
     let facts_count = count_facts(&body);
-    log_entry(trigger_payload, &body, facts_count, start);
+    log_entry(trigger_payload, &body, facts_count, start, query_shape);
 
     body
 }
@@ -753,8 +767,17 @@ fn palace_slug_from_stdin_cwd(stdin_payload: &str) -> Option<String> {
 /// Why: prompt logging is best-effort — a write failure must never block
 /// the hook from completing.
 /// What: constructs a `PromptLogEntry` and writes it via `PromptLogger`.
-/// Test: `prompt_context_logs_attempt_without_daemon`.
-fn log_entry(trigger_prompt: &str, injection: &str, facts_count: usize, start: Instant) {
+/// `query_shape` (#4972) is `None` on the paths that never reached a recall —
+/// no daemon, no HTTP client, no resolved palace.
+/// Test: `prompt_context_logs_attempt_without_daemon`,
+/// `prompt_context_logs_recall_query_shape`.
+fn log_entry(
+    trigger_prompt: &str,
+    injection: &str,
+    facts_count: usize,
+    start: Instant,
+    query_shape: Option<RecallQueryShape>,
+) {
     let logger = PromptLogger::from_env();
     let palace = resolve_palace_for_log(trigger_prompt);
     let entry = PromptLogEntry::new(
@@ -765,6 +788,7 @@ fn log_entry(trigger_prompt: &str, injection: &str, facts_count: usize, start: I
         injection,
     )
     .with_palace_facts_count(facts_count)
+    .with_recall_query(query_shape)
     .with_duration_ms(start.elapsed().as_millis() as u64);
     logger.log(entry);
 }

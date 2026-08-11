@@ -38,6 +38,17 @@ pub fn base_tool_descriptors() -> Value {
             }
         },
         {
+            "name": "complexity_distribution",
+            "description": "Full A-F cyclomatic-complexity histogram over the whole index corpus, with the counted total. Unlike complexity_hotspots (a descending top-N), this is exhaustive, so its counts are the only honest denominator for a percentage.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "string" },
+                    "index_id": { "type": "string" }
+                }
+            }
+        },
+        {
             "name": "find_smells",
             "description": "Chunks with at least one detected code smell. Results are paginated (default limit 500) and content is omitted by default to keep responses bounded. Use limit/offset to page through large result sets; set omit_content=false to include raw source text.",
             "inputSchema": {
@@ -242,4 +253,76 @@ pub fn base_tool_descriptors() -> Value {
             }
         }
     ])
+}
+
+/// Return the descriptors for the three `tr_review_*` tools (#630).
+///
+/// Why: these ship only under `feature = "review"`, but their *metadata* must
+/// be readable in every build. The generated MCP-tool section in `README.md` /
+/// `CLAUDE.md` has to be true under both configurations, and CI never builds
+/// this crate with `--features review` — so a descriptor list compiled only
+/// under that feature would leave the documented review rows unverified. The
+/// dispatch handler stays gated in `mcp::review`; only the data moved here.
+/// What: returns a `Vec<Value>`, one descriptor object per tool, mirroring the
+/// trusty-review tool schemas but with the `tr_` name prefix.
+/// Test: `review_descriptors_are_tr_prefixed_and_complete` below (always runs);
+/// `mod.rs::tools_list_includes_tr_review_tools` asserts they reach
+/// `tools/list` under the feature.
+pub fn review_tool_descriptors() -> Vec<Value> {
+    vec![
+        serde_json::json!({
+            "name": "tr_review_pr",
+            "description": "LLM-backed review of a GitHub pull request via the embedded trusty-review pipeline. Fetches the PR diff, retrieves code context from trusty-search, augments with this analyzer daemon's static-analysis context (loopback), and returns a structured verdict (APPROVE / APPROVE* / REQUEST_CHANGES / BLOCK / UNKNOWN) with actionable findings. Requires GITHUB_TOKEN and AWS Bedrock credentials (or OPENROUTER_API_KEY). Always dry-run — never posts a GitHub comment.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["owner", "repo", "pr"],
+                "properties": {
+                    "owner": { "type": "string", "description": "GitHub organisation or user that owns the repository" },
+                    "repo":  { "type": "string", "description": "GitHub repository name" },
+                    "pr":    { "type": "integer", "description": "Pull request number" },
+                    "reviewer_model": { "type": "string", "description": "Override the reviewer model slug (e.g. 'bedrock/us.anthropic.claude-sonnet-4-6')" }
+                }
+            }
+        }),
+        serde_json::json!({
+            "name": "tr_review_diff",
+            "description": "LLM-backed review of a raw unified diff string via the embedded trusty-review pipeline. No GitHub credentials required. Useful for reviewing local changes, staged diffs, or patches. Requires AWS Bedrock credentials (or OPENROUTER_API_KEY). trusty-search + this analyzer daemon supply code and static-analysis context.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["diff"],
+                "properties": {
+                    "diff":    { "type": "string", "description": "Unified diff string (output of `git diff` or similar)" },
+                    "context": { "type": "string", "description": "Optional human-readable context (PR title/description, ticket, intent)" },
+                    "reviewer_model": { "type": "string", "description": "Override the reviewer model slug (same format as tr_review_pr)" }
+                }
+            }
+        }),
+        serde_json::json!({
+            "name": "tr_review_health",
+            "description": "Probe the embedded trusty-review pipeline's liveness and configuration (dry_run mode, reviewer model, dependency URLs). Safe to call without any credentials.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_descriptors_are_tr_prefixed_and_complete() {
+        let descs = review_tool_descriptors();
+        let names: Vec<&str> = descs
+            .iter()
+            .filter_map(|d| d.get("name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(names.len(), 3, "expected 3 tr_ tools, got {names:?}");
+        for required in ["tr_review_pr", "tr_review_diff", "tr_review_health"] {
+            assert!(names.contains(&required), "missing {required} in {names:?}");
+        }
+        // Every tr_ tool carries an inputSchema.
+        for d in &descs {
+            assert!(d.get("inputSchema").is_some(), "missing inputSchema: {d}");
+        }
+    }
 }

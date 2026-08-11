@@ -317,9 +317,31 @@ fn render_tmux_window_present_and_omitted() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #5272 — session-snapshot crosstalk
+// ---------------------------------------------------------------------------
+
+/// Append a `pause` line attributing `snap` (a path relative to the store root)
+/// to `id`.
+fn log_pause(sdir: &Path, id: &str, snap: &str, ts: &str) {
+    crate::catchup::session_log::append_entry(
+        sdir,
+        &crate::catchup::session_log::SessionLogEntry {
+            session_id: id.to_string(),
+            event: "pause".to_string(),
+            snapshot: snap.to_string(),
+            timestamp: ts.to_string(),
+        },
+    )
+    .unwrap();
+}
+
+/// The two ids from the #5272 report: A paused, B never did.
+const SESSION_A: &str = "2eb72dca-de08-481b-8dfa-22ab7f81b1f9";
+const SESSION_B: &str = "7bd5c27a-475b-41df-9e9f-a6f630801717";
+
 #[test]
 fn latest_snapshot_prefers_session_log() {
-    use crate::catchup::session_log::{SessionLogEntry, append_entry};
     let tmp = TempDir::new().unwrap();
     let sdir = tmp.path().join(".trusty-mpm").join("sessions");
     fs::create_dir_all(&sdir).unwrap();
@@ -327,36 +349,141 @@ fn latest_snapshot_prefers_session_log() {
     // Two sessions interleave; each snapshot file exists on disk.
     write_file(&sdir, "session-A.md", "## Summary\nS1 work");
     write_file(&sdir, "session-B.md", "## Summary\nS2 work");
-    let mk = |id: &str, snap: &str, ts: &str| SessionLogEntry {
-        session_id: id.to_string(),
-        event: "pause".to_string(),
-        snapshot: snap.to_string(),
-        timestamp: ts.to_string(),
-    };
-    append_entry(&sdir, &mk("s1", "session-A.md", "t1")).unwrap();
-    append_entry(&sdir, &mk("s2", "session-B.md", "t2")).unwrap();
+    log_pause(&sdir, "s1", "session-A.md", "t1");
+    log_pause(&sdir, "s2", "session-B.md", "t2");
 
     // s1 resumes its own snapshot even though s2 paused last.
     let got = latest_trusty_mpm_snapshot(tmp.path(), Some("s1")).unwrap();
     assert_eq!(got.file_name().unwrap(), "session-A.md");
-    // No id → latest overall (s2's).
-    let got = latest_trusty_mpm_snapshot(tmp.path(), None).unwrap();
+    // An explicit request for another session's state is the opt-in, and still
+    // succeeds — that is what makes the default refusal a boundary and not a
+    // blanket ban.
+    let got = latest_trusty_mpm_snapshot(tmp.path(), Some("s2")).unwrap();
     assert_eq!(got.file_name().unwrap(), "session-B.md");
 }
 
+/// Why: issue #5272, reproduced exactly. Session `7bd5c27a…` called
+/// `session_context_catchup` on a store whose only snapshot,
+/// `session-20260809-010155.md`, `sessions-log.jsonl` attributes to
+/// `2eb72dca…`. The old chain's "newest pause overall" step handed it over with
+/// nothing in the response saying whose it was. Two sessions, one store, a
+/// snapshot belonging to A, B resuming: B must get nothing.
+/// What: asserts B resolves to `None` while A still resolves to its own file,
+/// so the refusal is provably B-specific and not the resolver going dark.
+/// Test: itself.
 #[test]
-fn latest_snapshot_falls_back() {
+fn latest_snapshot_refuses_cross_session_fallback() {
     let tmp = TempDir::new().unwrap();
     let sdir = tmp.path().join(".trusty-mpm").join("sessions");
     fs::create_dir_all(&sdir).unwrap();
-    // No log at all → mtime scan of session-*.md.
-    write_file(&sdir, "session-20260101-000000.md", "## Summary\nold");
+
+    let snap = "session-20260809-010155.md";
+    write_file(&sdir, snap, "## Summary\nSession A's work.\n");
+    log_pause(&sdir, SESSION_A, snap, "2026-08-09T01:01:55.796934+00:00");
+
+    assert_eq!(
+        latest_trusty_mpm_snapshot(tmp.path(), Some(SESSION_B)),
+        None,
+        "session B has no snapshot of its own and must NOT be handed A's"
+    );
+    assert_eq!(
+        latest_trusty_mpm_snapshot(tmp.path(), Some(SESSION_A))
+            .unwrap()
+            .file_name()
+            .unwrap(),
+        snap,
+        "A still resolves its own snapshot"
+    );
+}
+
+/// Why: #5272 — an unidentified caller cannot own anything in a shared store,
+/// so "latest overall" is a guess dressed as an answer. Every session-blind
+/// route into the native store is closed, not just the one the report hit.
+/// What: with a snapshot present and logged, `None` resolves to `None`.
+/// Test: itself.
+#[test]
+fn latest_snapshot_requires_a_session_id() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+    fs::create_dir_all(&sdir).unwrap();
+    write_file(&sdir, "session-20260809-010155.md", "## Summary\nA's work");
+    log_pause(&sdir, SESSION_A, "session-20260809-010155.md", "t1");
+
+    assert_eq!(latest_trusty_mpm_snapshot(tmp.path(), None), None);
+    assert!(latest_trusty_mpm_snapshot(&tmp.path().join("nope"), Some(SESSION_A)).is_none());
+}
+
+/// Why: #5272 back-compat. Flat `session-YYYYMMDD-HHMMSS.md` files at the store
+/// root are not migrated — they resolve through `sessions-log.jsonl`, which
+/// already attributes them. A flat file with no log line is attributable to
+/// nobody and must resolve for nobody, rather than to whichever session asks.
+/// What: two flat files, one logged to A and one unlogged; A gets its own, and
+/// the orphan is invisible to A and to an unrelated session alike.
+/// Test: itself.
+#[test]
+fn latest_snapshot_reads_legacy_flat_snapshot_via_log() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+    fs::create_dir_all(&sdir).unwrap();
+
+    write_file(
+        &sdir,
+        "session-20260807-040441.md",
+        "## Summary\nA's legacy",
+    );
+    // Newer by mtime, and deliberately never logged.
     std::thread::sleep(std::time::Duration::from_millis(10));
-    write_file(&sdir, "session-20260202-000000.md", "## Summary\nnew");
-    let got = latest_trusty_mpm_snapshot(tmp.path(), Some("unknown-id")).unwrap();
-    assert_eq!(got.file_name().unwrap(), "session-20260202-000000.md");
-    // Missing project dir → None.
-    assert!(latest_trusty_mpm_snapshot(&tmp.path().join("nope"), None).is_none());
+    write_file(&sdir, "session-20260807-043031.md", "## Summary\norphan");
+    log_pause(&sdir, SESSION_A, "session-20260807-040441.md", "t1");
+
+    assert_eq!(
+        latest_trusty_mpm_snapshot(tmp.path(), Some(SESSION_A))
+            .unwrap()
+            .file_name()
+            .unwrap(),
+        "session-20260807-040441.md",
+        "the logged flat file resolves without migrating it"
+    );
+    assert_eq!(
+        latest_trusty_mpm_snapshot(tmp.path(), Some(SESSION_B)),
+        None,
+        "the unattributable orphan must not resolve to an arbitrary session"
+    );
+}
+
+/// Why: #5272 moved pause snapshots into `sessions/<session-id>/`. A digest
+/// scan that only read the store root would report an empty catch-up on a
+/// project full of them — a regression this change would otherwise introduce.
+/// What: one flat snapshot and one nested under a session directory; both reach
+/// `find_paused_sessions`.
+/// Test: itself.
+#[test]
+fn find_includes_per_session_directories() {
+    let tmp = TempDir::new().unwrap();
+    let sdir = tmp.path().join(".trusty-mpm").join("sessions");
+    fs::create_dir_all(sdir.join(SESSION_A)).unwrap();
+    write_file(&sdir, "session-20260807-040441.md", "## Summary\nflat");
+    write_file(
+        &sdir.join(SESSION_A),
+        "session-20260809-010155.md",
+        "## Summary\nnested",
+    );
+
+    let found = find_paused_sessions(tmp.path()).unwrap();
+    let summaries: Vec<&str> = found
+        .iter()
+        .filter_map(|s| match s {
+            PausedSession::TrustyMpm { summary, .. } => Some(summary.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        summaries.len(),
+        2,
+        "both layouts are discovered: {summaries:?}"
+    );
+    assert!(summaries.contains(&"flat"));
+    assert!(summaries.contains(&"nested"));
 }
 
 #[test]

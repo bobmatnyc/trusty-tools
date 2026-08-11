@@ -9,8 +9,12 @@
 //! What: `Triple` record + `KnowledgeGraph` handle. Every method delegates to
 //! `KgStoreRedb`; async methods run blocking redb work on `tokio::task::
 //! spawn_blocking` so the async reactor isn't stalled.
-//! Test: Asserting (s,p,o) twice closes the first interval and opens a new
-//! one; `query_active` returns only the latest. Tests in kg/tests.rs exercise
+//! Test: Asserting the SAME (s,p,o) twice closes the first interval and opens
+//! a new one; `query_active` returns only the latest. Asserting a DIFFERENT
+//! object under the same (s,p) depends on the predicate (#4810): a functional
+//! predicate — one listed in `kg_store::FUNCTIONAL_PREDICATES`, such as
+//! `is_alias_for` — still supersedes, while every other predicate is
+//! multi-valued and both objects stay active. Tests in kg/tests.rs exercise
 //! the public API; storage-engine tests live in `kg_redb.rs`.
 
 mod adjacency;

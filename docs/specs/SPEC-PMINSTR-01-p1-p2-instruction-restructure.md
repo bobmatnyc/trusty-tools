@@ -13,11 +13,11 @@ spec_refs:
 
 # DOC-59 — P1/P2 Instruction Restructure: Tiered, Cache-Stable, Customizable PM System Prompt Composition
 
-**Status:** Draft (design proposal only — see §8)
+**Status:** Draft (current normative baseline in §§11–12; §§1–10 retain design history)
 **Subsystem:** trusty-mpm — PM instruction pipeline (`crates/trusty-mpm/src/core/instruction_pipeline.rs`, `instruction_overrides.rs`, `stack_profile.rs`); session-manager (workstream/session persistence)
 **Owner:** Engineering (trusty-mpm) / Bob Matsuoka
-**Last-updated:** 2026-08-03
-**Spec ID:** `SPEC-PMINSTR-01~draft` … `SPEC-PMINSTR-09~draft` (DOC-59)
+**Last-updated:** 2026-08-08
+**Spec ID:** `SPEC-PMINSTR-01~draft` … `SPEC-PMINSTR-12~draft` (DOC-59)
 **Motivating incident:** issue #4071 (contradiction between `PM_INSTRUCTIONS.md:70` and `stack_profile.rs`'s generated rule, ~400 resolved lines apart)
 **Builds on:** DOC-38 [Spec-Linked Documentation](./spec-linked-documentation.md) (numbering/anchor convention); DOC-31 [SYSTEM vs PROJECT Agents & Skills](./system-project-agents-skills.md) (the project-custom > user-custom > bundled precedence this design's tier ordering mirrors); DOC-52 [Shared Workstream Definition](./DOC-52-shared-workstream-definition.md) (the workstream/session binding §7 makes the resolved corpus immutable against); issue #2299 / PR #2300 (root-`CLAUDE.md` removal — directly informs §6)
 
@@ -66,6 +66,21 @@ spec_refs:
 > and the migration path. §5's argument that a tracked `CLAUDE.md` risks
 > reintroducing the #2299 double-load is superseded by §9.6, not by this
 > note — read §9 for the current position.
+
+---
+
+> **Current normative baseline (2026-08-08).** Sections 1–10 preserve the
+> design history and the owner rulings that produced the current pipeline.
+> Where they conflict with §§11–12, §§11–12 govern. In particular: the
+> compiled artifact is per **session**, not per project; instruction authority
+> is declared and traceable rather than inferred from file names or repeated
+> prose; `tm-workflow` is the single delivery-workflow skill;
+> `tm-ticketing` remains a separate issue-domain skill; and the `ticketing` and
+> `version-control` agents execute their respective tracker and repository/PR
+> mechanics. Issues
+> [#5202](https://github.com/bobmatnyc/trusty-tools/issues/5202) and
+> [#5206](https://github.com/bobmatnyc/trusty-tools/issues/5206) track delivery
+> of this baseline in milestone `tm 1.3.5`.
 
 ---
 
@@ -1370,3 +1385,149 @@ Two consequences worth recording:
   collision this issue closes. This eliminates the second writer rather than
   relocating it. `tm install` still deletes a stale pre-#4752
   `instructions/INSTRUCTIONS.md`.
+
+## 11. Current Instruction Authority, Compilation, and Consistency Contract {#SPEC-PMINSTR-11~draft}
+
+**ID:** SPEC-PMINSTR-11~draft
+**Status:** Draft
+**Tracked by:** [#5206](https://github.com/bobmatnyc/trusty-tools/issues/5206)
+
+This section supersedes §10 only where later implementation changed the
+artifact from project-scoped to session-scoped. It also defines the audit and
+traceability contract that the earlier design did not carry.
+
+### 11.1 Authority and deployment model
+
+The authored instruction package and its registered source components are the
+normative source for the PM core. The generated artifact at
+`<harness-root>/.trusty-mpm/sessions/<session-id>/INSTRUCTIONS-COMPILED.md` is
+the exact resolved prompt for one session. It is an output, never an input or
+an authoring surface. A launch MUST fail if the session's resolved instructions
+cannot be built or written before spawn.
+
+Core instructions state invariants and route work to domain policy. They MUST
+NOT duplicate detailed workflow, ticketing, version-control, or review
+procedures owned by embedded skills. Agents own tool execution, not policy.
+Output styles and review prompts may add presentation or review-role deltas but
+MUST NOT silently redefine core authority, safety, workflow, or ownership.
+
+### 11.2 Governed instruction inventory
+
+The consistency audit covers every instruction-bearing artifact shipped or
+consumed by the Trusty products, including:
+
+- trusty-mpm package components, compiled output, embedded agents, embedded
+  skills and references, output styles, and session-manager instructions;
+- corresponding trusty-code and trusty-agents instructions, personas, skills,
+  workflows, and harness documentation;
+- trusty-review prompts, legacy instruction directories, and instruction-like
+  literals embedded in source code.
+
+Every governed artifact MUST appear in a generated catalog with: purpose,
+audience, authority class, authored source, runtime consumer, deployment path
+and tier, override behavior, parity class, and verification method. Legacy
+artifacts MUST be classified as active, compatibility-only, generated,
+deprecated, or removable; an unclassified duplicate is a defect.
+
+All `CLAUDE.md` files are excluded from the governed inventory and from edits
+performed by this audit. They are project-owned inputs, not framework policy
+sources. A read-only compatibility check MUST nevertheless confirm that no
+`CLAUDE.md` contradicts the authority and routing model defined here. A
+conflict is reported for separate correction; it does not justify copying
+framework policy into `CLAUDE.md`.
+
+### 11.3 Compiled provenance and semantic verification
+
+Each compiled prompt MUST carry a machine-readable provenance header or
+sidecar containing at least:
+
+- binary/package version and source revision;
+- instruction package identifier and schema version;
+- ordered section identifiers and content hashes;
+- applied override decisions and hashes of generated inputs;
+- selected output style; and
+- a digest of the final resolved prompt.
+
+An operator command MUST compare the running binary's expected composition
+with the on-disk session artifact and report source, deployment, override, and
+digest drift separately. Byte-registration and golden tests remain necessary
+but are insufficient: CI MUST also detect contradictory authority claims,
+unknown or retired skill/agent references, broken embedded-skill links,
+duplicate policy owners, stale event-marker names, missing metadata, and
+undeclared cross-product divergence.
+
+Parity between trusty-mpm and trusty-code MUST be declared per shared artifact
+as exact, generated-equivalent, product-delta, or intentionally independent.
+Repeated output styles and review prompts SHOULD use a shared base plus a small,
+auditable delta so policy cannot drift inside presentation variants.
+
+### 11.4 Acceptance criteria
+
+- The generated catalog accounts for every governed artifact and has no
+  unknown authority or deployment path.
+- A freshly launched session's provenance validates against its running binary
+  and its compiled digest.
+- Semantic checks fail on the known contradiction classes above, not merely on
+  byte drift.
+- The deployed instruction package, embedded skills, and generated references
+  contain no unresolved links or undeclared duplicates.
+- `CLAUDE.md` remains outside the audit/edit set and passes the compatibility
+  check.
+
+## 12. Workflow, Ticketing, and Version-Control Ownership {#SPEC-PMINSTR-12~draft}
+
+**ID:** SPEC-PMINSTR-12~draft
+**Status:** Draft
+**Tracked by:** [#5202](https://github.com/bobmatnyc/trusty-tools/issues/5202)
+
+The system has one delivery workflow policy owner: `tm-workflow`. The existing
+`tm-pr-workflow` content MUST be consolidated into `tm-workflow`, all consumers
+and generated references migrated, and `tm-pr-workflow` retired. This does not
+eliminate `tm-ticketing`: ticketing is a separate domain policy, not a second
+workflow skill.
+
+The ownership boundary is artifact-based:
+
+| Artifact or decision | Policy owner | Execution owner |
+|---|---|---|
+| Phase order, gates, handoffs, change lifecycle, delivery completion | `tm-workflow` | PM routes; relevant agents execute |
+| Issue promotion, search/deduplication, issue language and structure, labels, milestones, links, comments, state transitions | `tm-ticketing` | `ticketing` agent |
+| Branches, commits, rebases, pushes, tags, PR creation/update/merge, PR title and body | `tm-workflow` for lifecycle policy | `version-control` agent |
+
+Core instructions MUST contain only the routing rule and the mandatory handoff
+sequence; they MUST NOT restate either skill's procedure. The normal delivery
+handoff is:
+
+1. `ticketing` establishes or updates the issue using `tm-ticketing`.
+2. The PM applies `tm-workflow` to plan and govern the change.
+3. `version-control` performs all git and PR operations, including PR metadata.
+4. `ticketing` updates or closes the issue after delivery evidence is known.
+
+When dispatched for issue work, the embedded `ticketing` agent MUST apply the
+embedded `tm-ticketing` skill. When the PM governs delivery, core instructions
+MUST route to the embedded `tm-workflow` skill; a repository `CLAUDE.md` is not
+a substitute policy source for either skill.
+
+Ticket language MUST be outcome-led, concise, testable, and durable: describe
+the problem and user/maintainer impact before implementation detail; separate
+current evidence from the proposed change; state scope and non-goals; use
+acceptance criteria that can be independently verified; link related issues,
+specs, and delivery artifacts; and avoid chat transcripts, speculative task
+dumps, duplicated findings, or prescriptive implementation steps unless they
+are true constraints.
+
+The current `tm-ticketing` statement that editing a PR body is ticket
+bookkeeping conflicts with this target boundary and MUST be changed during
+#5202. Until migration completes, this section is the normative target and the
+shipped skill is an explicitly recorded implementation gap.
+
+The repository root `CLAUDE.md` currently points to `tm-pr-workflow` in its
+test and delivery guidance. Those are compatibility conflicts, not a reason to
+make `CLAUDE.md` a framework-policy owner. #5202 MUST correct or remove those
+pointers when the skill is consolidated, without copying the consolidated
+workflow procedure into `CLAUDE.md`.
+
+Acceptance requires one discoverable workflow skill, no live
+`tm-pr-workflow` references, artifact-based routing in core and agent assets,
+tests for each boundary, and generated capability/reference output that names
+the same owners.

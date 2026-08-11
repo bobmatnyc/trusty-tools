@@ -6,7 +6,7 @@
 //! What: exercises `strip_template_comments` and `polish` on crafted markdown.
 //! Test: included as `#[cfg(test)] mod tests` from `polish.rs`.
 
-use super::{polish, strip_template_comments};
+use super::{polish, polish_with_gaps, strip_template_comments};
 use crate::report::fill::HONESTY_MARKER;
 
 /// Why: inline instructional comments must never reach the output.
@@ -160,7 +160,7 @@ fn drops_marker_rows() {
     let out = polish(&input);
     assert!(out.contains("| Vendor | trusty-review |"));
     assert!(!out.contains(&format!("Client | {HONESTY_MARKER}")));
-    assert!(out.contains("Data gaps: Client."));
+    assert!(out.contains("Data gaps: 1 unpopulated field/section — Client."));
 }
 
 /// Why: a section left with no data after row/block dropping must collapse to a
@@ -173,7 +173,8 @@ fn collapses_empty_section() {
     let input = "## 6. Risk Registers\n\n## 7. Appendix\n\ncontent\n\n## 8. Gaps & Caveats\n\nplaceholder\n";
     let out = polish(input);
     assert!(out.contains("_No data available"));
-    assert!(out.contains("Data gaps: 6. Risk Registers"));
+    // One gap, so the line counts it in the singular (#5319).
+    assert!(out.contains("Data gaps: 1 unpopulated field/section — 6. Risk Registers."));
     // Section 7 has content and is preserved.
     assert!(out.contains("content"));
 }
@@ -198,6 +199,60 @@ fn gaps_section_lists_dropped_fields() {
     assert!(gaps_line.contains("Client"));
     assert!(gaps_line.contains("Analyst"));
     assert!(!out.contains(HONESTY_MARKER));
+}
+
+/// Parse the `Data gaps:` line into its declared count and its listed items.
+///
+/// Why: #5319's whole point is that those two must agree, so the regression test
+/// reads them back out of the rendered line exactly as a reader would.
+/// What: returns `(declared_count, items)` from the single `Data gaps:` line.
+fn parse_gaps_line(out: &str) -> (usize, Vec<&str>) {
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("Data gaps:"))
+        .expect("gaps line");
+    let (count_part, list_part) = line
+        .trim_start_matches("Data gaps:")
+        .split_once('—')
+        .expect("count and list are separated by an em dash");
+    let count = count_part
+        .split_whitespace()
+        .next()
+        .expect("count token")
+        .parse::<usize>()
+        .expect("count token parses as a number");
+    let items: Vec<&str> = list_part
+        .trim()
+        .trim_end_matches('.')
+        .split(';')
+        .map(str::trim)
+        .collect();
+    (count, items)
+}
+
+/// Why: #5319 — the line rendered as `Data gaps: 2. Executive Summary, …`, whose
+/// leading section number a diligence reader parses as a count of two ahead of a
+/// sixteen-name list. Nothing counted anything; the "2" was the first label's own
+/// template numbering, and comma-joining it behind a colon manufactured a number
+/// that contradicted the list.
+/// What: collapses three numbered template sections, then asserts the declared
+/// count equals the number of items the same line goes on to list.
+/// Test: this test itself.
+#[test]
+fn gaps_line_count_matches_its_own_list() {
+    let input = "## 2. Executive Summary\n\n## 6.2 Open-Source / CVE Exposure\n\n\
+                 ## 6.3 License / IP Risk\n\n## 7. Graph-Ready Data Appendix\n\ncontent\n\n\
+                 ## 8. Gaps & Caveats\n\nplaceholder\n";
+    let out = polish(input);
+    let (count, items) = parse_gaps_line(&out);
+    assert_eq!(
+        count,
+        items.len(),
+        "declared count must equal the listed items: {out}"
+    );
+    assert_eq!(count, 3, "three sections collapsed: {out}");
+    // The section that supplied the misread "2." is still named in full.
+    assert!(items.contains(&"2. Executive Summary"), "{out}");
 }
 
 /// Why: with no gaps at all, the section states so rather than an empty list.
@@ -285,4 +340,60 @@ fn heading_with_only_pseudo_heading_content_not_collapsed() {
         .expect("region under the ### heading");
     assert!(!between.contains("No data available"));
     assert!(between.contains("Rust"));
+}
+
+// ─── Declared (named) gaps — #5239 ──────────────────────────────────────────
+
+/// A minimal document carrying the Gaps & Caveats heading the polish pass
+/// rewrites.
+fn doc_with_gaps_section() -> &'static str {
+    "# R\n\n## 1. Metadata\n\n| Field | Value |\n|---|---|\n| Client | Acme |\n\n\
+     ## 8. Gaps & Caveats\n\n- {{gap_1}}\n\n---\n*footer*\n"
+}
+
+/// Why: a stage that did not run must appear in the report as its own
+/// statement, not be folded into the field-level `Data gaps:` list where it
+/// would read as a missing table cell.
+/// Test: itself.
+#[test]
+fn declared_gaps_render_as_bullets() {
+    let declared = vec![
+        "Stage `jira sync` did not complete — ticket correlation is not assessed.".to_string(),
+        "trusty-analyze unreachable — no analysis pass ran for: Northwind Web.".to_string(),
+    ];
+    let out = polish_with_gaps(doc_with_gaps_section(), &declared);
+
+    for line in &declared {
+        assert!(out.contains(&format!("- {line}")), "missing {line}: {out}");
+    }
+    // The auto-collected list still renders, after the named bullets.
+    let bullet_at = out.find("- Stage `jira sync`").expect("bullet present");
+    if let Some(list_at) = out.find("Data gaps:") {
+        assert!(bullet_at < list_at, "named gaps lead the section: {out}");
+    }
+}
+
+/// Why: every existing caller passes no declared gaps; their output must not
+/// move by a single byte.
+/// Test: itself.
+#[test]
+fn empty_declared_gaps_are_byte_identical() {
+    let doc = doc_with_gaps_section();
+    assert_eq!(polish(doc), polish_with_gaps(doc, &[]));
+}
+
+/// Why: a custom template with no Gaps & Caveats heading must not silently
+/// swallow a named gap — that is the exact failure mode #5239 exists to close.
+/// Test: itself.
+#[test]
+fn declared_gaps_appended_when_template_has_no_section() {
+    let doc = "# R\n\n## 1. Metadata\n\nnothing here\n";
+    let declared = vec!["Stage `collect` did not complete.".to_string()];
+
+    let out = polish_with_gaps(doc, &declared);
+
+    assert!(out.contains("## Gaps & Caveats"), "{out}");
+    assert!(out.contains("- Stage `collect` did not complete."), "{out}");
+    // Unchanged when nothing was declared.
+    assert_eq!(polish_with_gaps(doc, &[]), polish(doc));
 }

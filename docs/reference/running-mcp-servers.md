@@ -7,7 +7,7 @@ All daemons log to **stderr** — never stdout.
 # trusty-search daemon (HTTP + MCP stdio)
 RUST_LOG=info cargo run -p trusty-search -- start
 # Query via CLI
-cargo run -p trusty-search -- query "fn authenticate" --index <id>
+cargo run -p trusty-search -- query "fn authenticate" --indexes <name>
 # MCP stdio mode (used by Claude Code via .mcp.json)
 cargo run -p trusty-search -- serve
 
@@ -23,9 +23,9 @@ cargo run -p trusty-mpm --bin trusty-mpm -- --help
 RUST_LOG=info cargo run -p trusty-memory
 
 # Report the daemon's listening port (stdout is clean — safe for shell substitution):
-trusty-search port                                   # bare port: 7879
-trusty-search port --addr                            # host:port: 127.0.0.1:7879
-trusty-search port --json                            # {"addr":"127.0.0.1","port":7879}
+trusty-search port                                   # bare port: 7878
+trusty-search port --addr                            # host:port: 127.0.0.1:7878
+trusty-search port --json                            # {"addr":"127.0.0.1","port":7878}
 # Shell substitution idiom — queries the daemon without guessing the port:
 curl http://127.0.0.1:$(trusty-search port)/health
 

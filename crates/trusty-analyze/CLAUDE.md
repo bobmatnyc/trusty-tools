@@ -405,14 +405,38 @@ GET  /indexes/:id/clusters?k=N&method=bow
 
 ## MCP Tools
 
-Parity rule: every HTTP endpoint has an MCP tool equivalent. The MCP server
-registers **17 tools** (authoritative source: `src/mcp/mod.rs`
-`tool_definitions`):
+Parity rule: every HTTP endpoint has an MCP tool equivalent.
 
-`complexity_hotspots`, `find_smells`, `analyze_quality`, `run_diagnostics`,
-`list_facts`, `upsert_fact`, `delete_fact`, `analyzer_health`, `extract_graph`,
-`cluster_concepts`, `ingest_scip`, `extract_ner`, `suggest_refactors`,
-`review_diff`, `deep_analysis`, `review_github_pr`, `list_entities`.
+<!-- BEGIN GENERATED: mcp-tools -->
+The MCP server registers **20 tools** with default features, **23 tools** with `--features review`. Authoritative source: `trusty_analyze::mcp::tool_descriptors + trusty_analyze::mcp::descriptors::review_tool_descriptors` —
+this table is generated from it, not maintained by hand.
+
+| Tool | Available | Arguments | Summary |
+|---|---|---|---|
+| `analyze_quality` | always | `index?`, `index_id?` | Aggregate quality stats: avg cyclomatic, %A, smell count |
+| `analyzer_health` | always | — | Probe analyzer daemon liveness and version |
+| `cluster_concepts` | always | `index?`, `index_id?`, `k?`, `method?` | Group chunks into concept clusters using k-means over hashed bag-of-words embeddings |
+| `complexity_distribution` | always | `index?`, `index_id?` | Full A-F cyclomatic-complexity histogram over the whole index corpus, with the counted total. |
+| `complexity_hotspots` | always | `index?`, `index_id?`, `top_n?` | Top-N chunks ranked by cyclomatic complexity |
+| `console_metrics` | always | — | Return health and operational metrics for trusty-console polling. |
+| `deep_analysis` | always | `index_id`, `model?` | Run an LLM-augmented deep analysis pass over an index: synthesises a deterministic review report from the indexed corpus, looks up detected… |
+| `delete_fact` | always | `id` | Delete a fact by its u64 id |
+| `extract_graph` | always | `index?`, `index_id?`, `language?` | Build the multi-language knowledge graph (nodes + edges) for an index |
+| `extract_ner` | always | `index?`, `index_id?`, `top_k?` | Extract named entities from doc comments for a code index using NER |
+| `find_smells` | always | `index?`, `index_id?`, `limit?`, `offset?`, `omit_content?` | Chunks with at least one detected code smell. |
+| `ingest_scip` | always | `scip_base64`, `index?`, `index_id?` | Ingest a SCIP (Scalable and Precise Index for Code) protobuf index for a given index_id, enriching the knowledge graph with fully-resolved… |
+| `list_analyze_indexes` | always | — | List all indexes known to the trusty-analyze daemon. |
+| `list_entities` | always | `index?`, `index_id?`, `kind?`, `language?` | List symbol-level entities (functions, classes, ...) for an index |
+| `list_facts` | always | `object?`, `predicate?`, `subject?` | List canonical facts, optionally filtered by subject/predicate/object |
+| `review_diff` | always | `diff`, `index_id` | Review a unified git diff and return a structured quality report (per-file complexity, code smells, grade A-F, recommendations). |
+| `review_github_pr` | always | `owner`, `repo`, `pr`, `index_id`, `post_comment?` | Fetch a GitHub pull request's unified diff and run a structured quality review against a trusty-search index. |
+| `run_diagnostics` | always | `index?`, `index_id?`, `language?`, `limit?`, `offset?`, `tools?` | Run available external static-analysis tools (clippy, ruff, biome, staticcheck, pmd, rubocop, phpstan, swiftlint, detekt, clang-tidy,… |
+| `suggest_refactors` | always | `file?`, `index?`, `index_id?`, `min_severity?`, `top_k?` | Suggest concrete refactoring actions (extract method, reduce nesting, ...) ranked by severity, derived from complexity metrics and code… |
+| `tr_review_diff` | `--features review` | `diff`, `context?`, `reviewer_model?` | LLM-backed review of a raw unified diff string via the embedded trusty-review pipeline. |
+| `tr_review_health` | `--features review` | — | Probe the embedded trusty-review pipeline's liveness and configuration (dry_run mode, reviewer model, dependency URLs). |
+| `tr_review_pr` | `--features review` | `owner`, `repo`, `pr`, `reviewer_model?` | LLM-backed review of a GitHub pull request via the embedded trusty-review pipeline. |
+| `upsert_fact` | always | `subject`, `predicate`, `object`, `index_id`, `confidence?`, `provenance?` | Insert or update a canonical fact triple |
+<!-- END GENERATED: mcp-tools -->
 
 ### Transports
 
@@ -502,7 +526,7 @@ trusty-common must never depend on trusty-search or trusty-analyze.
 
 ```bash
 # Step 1 — start trusty-search first (REQUIRED; analyzer will not start without it)
-trusty-search daemon   # port 7878
+trusty-search start   # port 7878
 
 # Step 2 — build everything
 cargo build
@@ -575,8 +599,7 @@ tree-sitter adapters are all functional.
   `blame.rs`, `quality.rs`, `facts.rs`, `concept_cluster.rs`, `linker.rs`,
   `explain.rs`, `github.rs`
 - axum HTTP sidecar (`src/service/`) on port 7879
-- MCP stdio + HTTP/SSE server (`src/mcp/`) — 17 tools (authoritative source:
-  `src/mcp/mod.rs` `tool_definitions`)
+- MCP stdio + HTTP/SSE server (`src/mcp/`) — see [MCP Tools](#mcp-tools)
 - CLI subcommands: `serve`, `analyze`, `facts list/upsert`, `health`
 - Daemon PID lockfile (fs4), graceful shutdown, `--search-url` flag
 - `LanguageAnalyzer` trait + 15 tree-sitter adapters, all implemented:

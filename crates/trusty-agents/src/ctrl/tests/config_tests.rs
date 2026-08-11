@@ -451,3 +451,50 @@ fn build_user_context_prefix_appends_base_content_after_block() {
         );
     });
 }
+
+/// Why (#3765): the fifth pin bypass. `resolve_overridden_credentials`'s
+/// `bedrock`/`local` arms PREPEND a routing marker to `cfg.agent.model`, so a
+/// session `/provider bedrock` on an agent pinned to `atlascloud` both defeated
+/// the pin and produced a nonsense `bedrock/atlascloud/...` slug. Unlike a
+/// model override — which names a model ON the pinned provider and is re-pinned
+/// by `AgentConfig::override_model` — a provider override directly contradicts
+/// the pin, so it is refused rather than silently applied.
+/// Test: itself.
+#[test]
+fn provider_override_is_refused_on_a_pinned_agent() {
+    // Built from the in-crate default rather than a TOML fixture: the guard
+    // reads `agent.provider_id` and `agent.model`, and `from_toml_str` is not
+    // visible outside `agents::`.
+    let mut cfg = AgentConfig::ctrl_default();
+    cfg.agent.provider_id = Some("atlascloud".to_string());
+    cfg.agent.model = "atlascloud/openai/gpt-5.6-sol".to_string();
+
+    let err = super::super::config::resolve_overridden_credentials(&mut cfg, Some("bedrock"))
+        .expect_err("a contradicting provider override must be refused");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("atlascloud") && msg.contains("bedrock"),
+        "{msg}"
+    );
+    assert!(
+        !cfg.agent.model.starts_with("bedrock/"),
+        "the model must not be mutated by a refused override: {}",
+        cfg.agent.model
+    );
+}
+
+/// Why: the same override on an UNPINNED agent must keep working exactly as
+/// before — the guard narrows nothing for agents that never opted in.
+/// Test: itself.
+#[test]
+fn provider_override_still_works_on_an_unpinned_agent() {
+    let mut cfg = AgentConfig::ctrl_default();
+    cfg.agent.provider_id = None;
+    super::super::config::resolve_overridden_credentials(&mut cfg, Some("bedrock"))
+        .expect("unpinned agents keep the pre-#3765 behaviour");
+    assert!(
+        cfg.agent.model.starts_with("bedrock/"),
+        "{}",
+        cfg.agent.model
+    );
+}

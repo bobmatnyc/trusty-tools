@@ -20,9 +20,11 @@ use super::fill::{Scope, render, strip_leading_comment};
 use super::manifest::slugify;
 use super::metrics::Severity;
 use super::model::{ReportModel, RepositoryReport};
-use super::polish::polish;
+use super::polish::polish_with_gaps;
 use super::provenance::{self, Provenance, tag};
-use super::reporter_fill::{crate_version, fill_profile, instructions_block, set_scoring_model};
+use super::reporter_fill::{
+    crate_version, fill_profile, instructions_block, set_executive_summary, set_scoring_model,
+};
 use super::reporter_graph_datasets::{
     inject_complexity_distribution_dataset, inject_loc_by_technology_dataset,
 };
@@ -88,7 +90,10 @@ impl Reporter {
         // pre-fill step so the header's literal `{{…}}`/BEGIN-END examples are
         // never mistaken for real placeholders by the fill engine.
         let filled = render(strip_leading_comment(template), &scope);
-        let mut out = polish(&filled);
+        // #5239: the model's named gaps (an upstream orchestrator's unassessed
+        // areas, plus any repo the live analyze fetch could not populate) lead
+        // the Gaps & Caveats section.
+        let mut out = polish_with_gaps(&filled, &model.gaps);
         // #2366 wave-4: render a ```mermaid chart under every populated dataset
         // table.  Runs AFTER polish (so it sees the omit-empty'd tables and never
         // charts a dropped/empty dataset) and BEFORE the appended status notes.
@@ -289,9 +294,14 @@ fn build_scope(model: &ReportModel) -> Scope {
     // never synthesized — filled independent of synthesis availability.
     push_green_topics(&mut root, model);
 
-    // M2: the executive summary and top-risk rationale have no deterministic M1
-    // source; fill them only from verified synthesis.  Absent/unavailable
-    // synthesis leaves both to the M1 honesty marker (unchanged behaviour).
+    // #5318: §2 has a deterministic source now.  It used to be filled ONLY from
+    // verified synthesis, so a run without `--synthesize` — which is every
+    // `tga audit` run — collapsed the first section a diligence reader opens
+    // while the report listed real RED/AMBER findings two sections below.  The
+    // roll-up counts what the report already contains; synthesis prose still
+    // overwrites it below when it runs and passes the guardrail.
+    let synthesized_risks = available_synthesis.is_some_and(|s| !s.top_risks.is_empty());
+    set_executive_summary(&mut root, model, !synthesized_risks);
     if let Some(syn) = available_synthesis {
         inject_synthesis_summary(&mut root, syn);
     }
@@ -374,16 +384,23 @@ impl FindingRow {
     /// A bare deterministic row from one `metrics.findings` entry.
     ///
     /// Why: title/category/component are verbatim, always-available facts from
-    /// trusty-analyze; the prose-only fields (description/evidence/business
-    /// impact/remediation/cost) are synthesis's job and start unset so they
-    /// render as the honesty marker until (and unless) synthesis fills them.
-    /// What: copies `title`/`category`/`component`, mapping an empty source
-    /// string to `None`.
+    /// trusty-analyze, and so — since #5317 — are the tool's own observation and
+    /// suggested action. Those two were previously left unset and rendered as
+    /// the honesty marker even though the daemon had returned them, which made
+    /// every analyze-derived entry read as contentless. They are deterministic
+    /// tool output, not synthesis, and [`FindingRow::merge_prose`] still
+    /// overwrites them when synthesis runs. Business impact and cost/effort stay
+    /// unset: nothing in the metrics states either.
+    /// What: copies `title`/`category`/`component`/`description`/`remediation`,
+    /// mapping an empty source string to `None`.
+    /// Test: `reporter_tests.rs::reporter_renders_metric_description_and_remediation`.
     fn from_metric(f: &super::metrics::MetricFinding) -> Self {
         FindingRow {
             title: f.title.clone(),
             category: non_empty(&f.category),
             component: dedupe_field(&f.component),
+            description: dedupe_field(&f.description),
+            remediation: dedupe_field(&f.remediation),
             ..Default::default()
         }
     }

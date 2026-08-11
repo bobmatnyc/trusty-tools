@@ -27,9 +27,7 @@ it is ephemeral.
 
 ## Risk — the second input to every skip condition
 
-The CORE section's phase table is canonical for WHETHER a phase runs and carries
-each skip condition; where a phase runs, its gate is blocking — "conditional"
-governs entry, never rigour (issue #4594).
+Skip conditions live in the CORE phase table. Risk is their second input.
 
 Label the change **Low** (docs, comments, mechanical metadata), **Normal** (a
 localized behaviour change inside one package), or **High** (security,
@@ -42,9 +40,9 @@ The labels say nothing about how much testing a change needs. The project's test
 ladder in its `CLAUDE.md` answers that, and is authoritative where the project
 defines one.
 
-Each phase's executing agent is the one named in the CORE phase table, and
 `code-analyzer` is a separate agent from `code-critic`. Per-phase dispatch-brief
-templates: `Skill(skill="tm-workflow")`.
+templates, and the rest of the delivery chain the phases sit inside:
+`Skill(skill="tm-workflow")`.
 
 ### Fail-Open Check (BLOCKING wherever a failure branch exists)
 
@@ -54,6 +52,11 @@ advances anyway — that branch is not reviewed until an error-arm regression te
 exists that FAILS against the pre-fix commit. **Name the Fail-Open Check in the
 dispatch brief** for `code-analyzer` or `code-critic`; the five checks that find
 it are in the `code-review-standards` skill both agents already load.
+
+## Live Issue Status
+
+Dispatching work against an issue: have `ticketing` mark it in progress, and
+update it when the work lands or blocks. Detail: `Skill(skill="tm-ticketing")`.
 
 ## Source Citations
 
@@ -66,4 +69,4 @@ and the line number is verified before linking.
 A credential scan by `security` over `git diff origin/main HEAD` is mandatory
 before any `git push`, and blocks the push on a hit. The branch protection it
 sits inside, and the review and changelog gates:
-`Skill(skill="tm-pr-workflow")`.
+`Skill(skill="tm-workflow")`.

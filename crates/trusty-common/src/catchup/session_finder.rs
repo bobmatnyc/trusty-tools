@@ -102,19 +102,11 @@ pub fn find_paused_sessions(project_dir: &Path) -> anyhow::Result<Vec<PausedSess
     let mut sessions = Vec::new();
 
     // ── trusty-mpm native format (.md) ───────────────────────────────────────
+    // #5272: snapshots now live under `sessions/<session-id>/`, so scan the
+    // store root AND one level of per-session directories.
     let tm_sessions_dir = project_dir.join(".trusty-mpm").join("sessions");
-    if tm_sessions_dir.is_dir()
-        && let Ok(rd) = std::fs::read_dir(&tm_sessions_dir)
-    {
-        for entry in rd.flatten() {
-            let name = entry.file_name().into_string().unwrap_or_default();
-            if name.starts_with("session-")
-                && name.ends_with(".md")
-                && let Ok(s) = parse_trusty_mpm_session(&entry.path())
-            {
-                sessions.push(s);
-            }
-        }
+    for dir in session_scan_dirs(&tm_sessions_dir) {
+        collect_trusty_mpm_snapshots(&dir, &mut sessions);
     }
 
     // ── claude-mpm JSON format ────────────────────────────────────────────────
@@ -133,6 +125,51 @@ pub fn find_paused_sessions(project_dir: &Path) -> anyhow::Result<Vec<PausedSess
     });
 
     Ok(sessions)
+}
+
+/// The directories a native-snapshot scan must visit: the store root plus each
+/// per-session subdirectory.
+///
+/// Why: #5272 moved pause snapshots into `sessions/<session-id>/`. A scan that
+/// only reads the store root would show pre-#5272 flat files and NOTHING
+/// written since — an empty catch-up digest on a project full of snapshots.
+/// Depth is capped at one level because that is the whole layout; recursing
+/// further would only invite unrelated `.md` files in.
+/// What: `[root]` when it exists, followed by its immediate subdirectories in
+/// directory order. Empty when `root` is absent.
+/// Test: `find_includes_per_session_directories`.
+fn session_scan_dirs(root: &Path) -> Vec<PathBuf> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut dirs = vec![root.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(root) {
+        dirs.extend(rd.flatten().filter(|e| e.path().is_dir()).map(|e| e.path()));
+    }
+    dirs
+}
+
+/// Parse every `session-*.md` directly inside `dir` into `out`.
+///
+/// Why: the per-directory half of [`session_scan_dirs`], factored out so the
+/// root and each per-session directory go through identical parsing.
+/// What: appends one [`PausedSession::TrustyMpm`] per readable, parseable
+/// `session-*.md`; unreadable files are skipped, matching the pre-#5272
+/// fail-open scan.
+/// Test: `find_includes_per_session_directories`, `find_merges_both_formats`.
+fn collect_trusty_mpm_snapshots(dir: &Path, out: &mut Vec<PausedSession>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().into_string().unwrap_or_default();
+        if name.starts_with("session-")
+            && name.ends_with(".md")
+            && let Ok(s) = parse_trusty_mpm_session(&entry.path())
+        {
+            out.push(s);
+        }
+    }
 }
 
 /// The outcome of a watermark filter: what survived, and what was withheld.
@@ -231,32 +268,31 @@ pub(crate) fn mtime_utc(path: &Path) -> Option<DateTime<Utc>> {
         .map(DateTime::<Utc>::from)
 }
 
-/// Resolve the latest native `.trusty-mpm` snapshot, preferring the per-session
-/// log entry when a session id is known.
+/// Resolve the native `.trusty-mpm` snapshot a given session may resume from.
 ///
-/// Why: with concurrent `tm` sessions in one project, resume must reload the
-/// current session's own newest snapshot, not whichever session paused last.
-/// The append-only `sessions-log.jsonl` makes that recoverable; this is the
-/// read side of the global-pointer fix.
-/// What: when `session_id` is `Some`, returns the newest `pause` snapshot logged
-/// for that id (if its file still exists); otherwise, or when that session has
-/// no log entry, falls back to the shared resolver chain
-/// (log-overall → legacy `LATEST-SESSION.txt` → newest `session-*.md` by mtime)
-/// against `<project_dir>/.trusty-mpm/sessions/`. Returns `None` when nothing
-/// resolves.
-/// Test: `latest_snapshot_prefers_session_log`, `latest_snapshot_falls_back`.
+/// Why: #5272 — several PM sessions now share one `.trusty-mpm/sessions/` store
+/// (the PM runs on the project's main checkout), and the old chain answered
+/// "newest pause overall" whenever the asking session had no snapshot of its
+/// own. Session `7bd5c27a…` asked and was handed `session-20260809-010155.md`,
+/// which the log attributes to `2eb72dca…`, with nothing in the response saying
+/// so. Under #2731's one-session-per-checkout model that fallback was right;
+/// with a shared store it turns "no snapshot for me" into "someone else's".
+/// What: `session_id` is now the ATTRIBUTION, not a hint. `Some(id)` resolves
+/// through [`session_log::resolve_session_snapshot`](crate::catchup::session_log::resolve_session_snapshot),
+/// which never crosses session boundaries — an id may name another session, and
+/// that explicit request still succeeds, which is the only way a cross-session
+/// read happens. `None` means the caller did not identify itself, so no
+/// snapshot is attributable to it and the answer is `None` rather than an
+/// arbitrary session's file.
+/// Test: `latest_snapshot_prefers_session_log`,
+/// `latest_snapshot_refuses_cross_session_fallback`,
+/// `latest_snapshot_requires_a_session_id`,
+/// `latest_snapshot_reads_legacy_flat_snapshot_via_log`.
 pub fn latest_trusty_mpm_snapshot(project_dir: &Path, session_id: Option<&str>) -> Option<PathBuf> {
+    // #5272: no session id → nothing is attributable to this caller → empty.
+    let id = session_id?;
     let sessions_dir = project_dir.join(".trusty-mpm").join("sessions");
-    if let Some(id) = session_id
-        && let Some(name) =
-            crate::catchup::session_log::latest_snapshot_for_session(&sessions_dir, id)
-    {
-        let path = sessions_dir.join(name);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    crate::catchup::session_log::resolve_latest_snapshot(&sessions_dir, "md")
+    crate::catchup::session_log::resolve_session_snapshot(&sessions_dir, id, "md")
 }
 
 /// Render a markdown catch-up digest for a slice of paused sessions.

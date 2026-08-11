@@ -268,6 +268,19 @@ enum Cmd {
         #[command(subcommand)]
         action: ServiceSubcommand,
     },
+    /// Serve the console webhook relay over a Unix socket, then exit (#5182).
+    ///
+    /// Why: `trusty-console` has been relaying verified GitHub deliveries to
+    /// `trusty-analyze-webhook.sock` since #5089 step 3 and nothing bound it,
+    /// so every delivery stayed pending forever.
+    /// What: binds that socket in the hardened scratch directory, writes each
+    /// delivery to a durable inbox, and acknowledges only after that write is
+    /// fsync'd — the ack is what lets console delete its own copy. Not a
+    /// resident daemon: console spawns it on demand and SIGTERMs it.
+    /// Test: `trusty_analyze::webhook_listener` unit tests, plus the shared
+    /// listener suite in trusty-common.
+    WebhookListen,
+
     /// Configure integrations with Claude Code, Cursor, claude-mpm, and daemon.
     ///
     /// Why: wiring trusty-analyze into MCP hosts means writing config files in
@@ -638,6 +651,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Setup { target } => run_setup(target).await,
+        Cmd::WebhookListen => trusty_analyze::webhook_listener::run(search).await,
         Cmd::ReviewPr {
             repo,
             pr,

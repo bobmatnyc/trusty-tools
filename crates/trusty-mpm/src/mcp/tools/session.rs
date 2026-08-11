@@ -279,7 +279,21 @@ pub(super) fn session_tools() -> Vec<Value> {
              withheld; re-call with `full: true` to see them. `sessions` and \
              `resolved_snapshot` answer different questions (\"what paused \
              since last catch-up\" vs \"what should I resume from\") and \
-             legitimately disagree under a recent watermark.",
+             legitimately disagree under a recent watermark. \
+             `resolved_snapshot` names a snapshot belonging to the `session_id` \
+             you pass; several sessions share one store, so there is no \"latest \
+             overall\" fallback. When that id owns nothing — a relaunch mints a \
+             new session id inside the same window — passing `tmux_window` \
+             resolves the newest snapshot THIS WINDOW paused in this project \
+             instead. `resolved_via` says which answered (`session_id`, \
+             `tmux_window`, or null), so do not read a window match as an exact \
+             one. Each entry in `sessions` carries `owned`: true when the \
+             session is attributable to you (your `session_id` paused it, or \
+             you are in the window that did). A session you do not own is \
+             listed with `format`, `paused_at` and `summary` only — its \
+             `source_file`, `tmux_window`, `in_progress`, `next_steps` and \
+             `git_context` are withheld, so the digest cannot hand you the \
+             means to adopt another session's state (#5386).",
             json!({
                 "type": "object",
                 "properties": {
@@ -289,7 +303,11 @@ pub(super) fn session_tools() -> Vec<Value> {
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Optional session id used only to resolve `resolved_snapshot` (the snapshot this specific session would resume from)."
+                        "description": "Session id that `resolved_snapshot` is resolved FOR. Omit it and only the `tmux_window` route can resolve anything: an unidentified caller owns nothing in a shared store. Naming another session's id is the explicit opt-in that reads that session's state (#5272)."
+                    },
+                    "tmux_window": {
+                        "type": "string",
+                        "description": "The CALLER's own `session_name:window_index:window_id` from `tmux display-message`, e.g. `tm-dogfood:0:@230`. Used only when `session_id` resolved nothing: matches the `window_id` (`@230`) component against snapshots this project paused, newest first. Session names and window indexes are not matched — they get renamed and renumbered."
                     },
                     "all_projects": {
                         "type": "boolean",
@@ -307,11 +325,13 @@ pub(super) fn session_tools() -> Vec<Value> {
         tool(
             "session_context_pause",
             "Write a session-pause snapshot for `project_dir`: a \
-             `session-YYYYMMDD-HHMMSS.md` file in the SAME section format the \
+             `<session-id>/session-YYYYMMDD-HHMMSS.md` file in the SAME section \
+             format the \
              catch-up reader already parses (`## Summary` / `## Completed` / \
              `## In Progress` / `## Next Steps` / `## Git Context` / \
              `## Tmux Window`), plus an appended `pause` line in the \
-             append-only `sessions-log.jsonl`. Also prunes orphaned managed-session \
+             append-only `sessions-log.jsonl` naming it. Only that session can \
+             resume from it (#5272). Also prunes orphaned managed-session \
              git worktrees in-process (same engine as `tm session prune-worktrees`) \
              unless `prune_worktrees` is set to `false`. That prune NEVER removes a \
              worktree holding uncommitted or unpushed work (#4091) — any such \

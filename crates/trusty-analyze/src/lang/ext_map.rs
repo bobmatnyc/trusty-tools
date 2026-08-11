@@ -162,6 +162,22 @@ pub fn lang_for_linter(path: &str) -> Option<&'static str> {
         .map(|e| e.linter)
 }
 
+/// Whether `path` is a source file in one of the languages this analyzer parses.
+///
+/// Why: complexity, smells, and refactor suggestions are only meaningful for
+/// code. `compute_complexity_for` falls back to a whitespace/keyword text
+/// heuristic for an unrecognized extension, which scores a `CHANGELOG.md` or a
+/// `release.yml` as grade F and emits "Extract method" against a document that
+/// has no method to extract (#5317). Callers gate on this so a non-code file
+/// never enters a code-quality result set in the first place.
+/// What: true when [`lang_for_extension`] resolves to a real language tag —
+/// i.e. the path matched an [`EXT_MAP`] row — and false for `"unknown"`.
+/// Test: `is_code_file_rejects_docs_and_configs`,
+/// `is_code_file_accepts_mapped_source_extensions`.
+pub fn is_code_file(path: &str) -> bool {
+    lang_for_extension(path) != "unknown"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +290,27 @@ mod tests {
     fn lang_for_linter_unknown_is_none() {
         assert_eq!(lang_for_linter("Makefile"), None);
         assert_eq!(lang_for_linter("data.json"), None);
+    }
+
+    // ── is_code_file (#5317) ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_code_file_rejects_docs_and_configs() {
+        // #5317: these three appeared as the Component of an "Extract method"
+        // finding in the RED band of two generated due-diligence reports.
+        assert!(!is_code_file("/repo/CHANGELOG.md"));
+        assert!(!is_code_file("/repo/FAQ.md"));
+        assert!(!is_code_file("/repo/.github/workflows/release.yml"));
+        assert!(!is_code_file("Makefile"));
+        assert!(!is_code_file("Cargo.toml"));
+    }
+
+    #[test]
+    fn is_code_file_accepts_mapped_source_extensions() {
+        assert!(is_code_file("src/main.rs"));
+        assert!(is_code_file("App.tsx"));
+        assert!(is_code_file("mod.py"));
+        assert!(is_code_file("HEADER.H"));
     }
 
     // ── table integrity ──────────────────────────────────────────────────────

@@ -348,6 +348,21 @@ pub(super) async fn patch_agent_at(
         // it's the caller's own input.
         let requested_provider_cap = match req.provider_id.as_deref() {
             Some(pid) => match registry::capabilities_for(pid) {
+                // #3765: `provider_id` is no longer inert — the loader now
+                // PINS the agent to it and fails closed. So the write gate
+                // must refuse a provider the loader would refuse, or the GUI
+                // would happily persist a pin that bricks the agent on its
+                // next load. Credential presence is deliberately NOT checked
+                // here: a key can legitimately be added after the agent is
+                // configured, and the load-time check is the enforcement
+                // point. Dispatchability cannot change without a rebuild.
+                Some(cap) if !crate::llm::provider_pin::is_pinnable(cap.id) => {
+                    return bad_request(format!(
+                        "provider_id '{pid}' is a known provider but trusty-agents \
+                         cannot dispatch to it yet, so pinning an agent to it would \
+                         fail at the first turn"
+                    ));
+                }
                 Some(cap) => Some(cap),
                 None => return bad_request(format!("unknown provider_id '{pid}'")),
             },

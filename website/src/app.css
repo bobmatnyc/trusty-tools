@@ -153,6 +153,45 @@
 		@apply bg-foundry-bg font-sans text-foundry-text antialiased;
 	}
 
+	/* Why: every wide-content case below is capped to its own scroll
+	   container (`.doc-table`, `.doc-prose pre`, `.doc-prose :not(pre) >
+	   code`), but a changelog section this size (225 inline `<code>` spans on
+	   trusty-review alone) can still land the PAGE a sub-pixel past its
+	   viewport on some routes — not any one element's doing (none of them
+	   measures past the viewport edge in DevTools; it takes removing whole
+	   sections of content to clear it, which is the signature of accumulated
+	   layout rounding across that many boxes, not a visible overflow). `main`
+	   (`+layout.svelte`) is the backstop for exactly that residue (whats-new
+	   mobile overflow) — never a substitute for containing wide content
+	   locally, which is what actually keeps this page's content legible
+	   instead of clipped.
+	   `overflow: clip`, not `hidden` (code-critic review on #5254): `hidden`
+	   on ONE axis forces the CSS Overflow spec's other-axis promotion —
+	   `overflow-y`, left at its default `visible`, becomes `auto` — which
+	   makes `main` a scroll container. `position: sticky` computes relative
+	   to the nearest scroll-container ancestor, so every sticky element
+	   INSIDE `main` (the `/docs` sidebar rail and the "On this page" aside,
+	   both `position: sticky`) silently stopped sticking — confirmed: their
+	   `top` went from a stable 80px to -667px after scrolling 800px. `clip`
+	   does not provide a scrolling mechanism, so a UA must not turn the box
+	   into a scroll container for it — sticky descendants keep using the
+	   viewport. Both axes are set explicitly to `clip` (not just `overflow-
+	   x`) so neither computes to `visible`; leaving `overflow-y` implicit
+	   would trigger the same forced-`auto` promotion this exists to avoid.
+	   `main`'s height is auto (no `overflow-y` clipping condition exists
+	   here — see `tests/mobile-overflow.test.ts`'s desktop sidebar-sticky
+	   case), and `main.scrollWidth` still reports true (unclipped) content
+	   width under `clip` exactly as it did under `hidden`, so the `main`
+	   vs `document` overflow measurement in that file is unaffected. Scoped
+	   to `main` rather than `html`/`body`: those sit in `<SiteHeader>`'s OWN
+	   sticky-positioning ancestor chain (not just descendants' — the header
+	   itself), and giving either a non-`visible` overflow risks the same
+	   class of breakage one level up. `main` is `SiteHeader`'s sibling, not
+	   its ancestor, so it carries none of that risk either way. */
+	main {
+		overflow: clip;
+	}
+
 	/* Foundry: "machines talk mono" — ids, paths, counts, versions. */
 	code,
 	pre,
@@ -202,5 +241,144 @@
 	   AA (see tokens.test.ts / README). */
 	.eyebrow {
 		@apply font-mono text-xs uppercase tracking-[0.18em] text-foundry-secondary;
+	}
+
+	/* Documentation prose (#5098). Every foreground/background pair used here
+	   is pinned by `src/lib/docs/prose-contrast.test.ts`, which recomputes the
+	   ratios from `app.css` itself in BOTH themes. Three canonical tokens are
+	   routed around and appear nowhere below:
+	     --color-text-muted on the page ground   3.87:1 light
+	     --color-primary on --color-surface-raised 4.50:1 (so no link may sit
+	       on a raised surface — hence the table head uses the CARD ground,
+	       where the same link is 5.47:1)
+	     --color-warning on the page ground      3.18:1 light
+	   Body copy is text-primary (14.39:1 / 14.45:1); anything quieter is
+	   text-secondary (5.86:1 / 9.04:1), never muted. */
+	.doc-prose {
+		@apply text-foundry-text;
+	}
+
+	.doc-prose > * + * {
+		@apply mt-4;
+	}
+
+	.doc-prose h1 {
+		@apply mt-0 font-display text-3xl font-bold tracking-tight sm:text-4xl;
+	}
+
+	.doc-prose h2 {
+		@apply mt-12 border-b border-foundry-border pb-2 font-display text-2xl font-semibold tracking-tight;
+	}
+
+	.doc-prose h3 {
+		@apply mt-8 font-display text-xl font-semibold;
+	}
+
+	.doc-prose h4,
+	.doc-prose h5,
+	.doc-prose h6 {
+		@apply mt-6 font-semibold;
+	}
+
+	.doc-prose a {
+		@apply text-foundry-primary underline decoration-1 underline-offset-2 hover:decoration-2;
+	}
+
+	/* A link that leaves the site says so. The 147 links into unpublished
+	   parts of the repository all carry this. */
+	.doc-prose a.doc-link-external::after {
+		content: '\2197';
+		font-size: 0.75em;
+		vertical-align: super;
+		margin-left: 0.15em;
+	}
+
+	.doc-prose ul {
+		@apply list-disc pl-6;
+	}
+
+	.doc-prose ol {
+		@apply list-decimal pl-6;
+	}
+
+	.doc-prose li + li,
+	.doc-prose li > ul,
+	.doc-prose li > ol {
+		@apply mt-1;
+	}
+
+	.doc-prose li::marker {
+		@apply text-foundry-secondary;
+	}
+
+	.doc-prose blockquote {
+		@apply border-l-[3px] border-foundry-border-strong pl-4 text-foundry-secondary;
+	}
+
+	.doc-prose hr {
+		@apply my-8 border-foundry-border;
+	}
+
+	/* Inline code sets NO colour, deliberately: inside a link it must stay
+	   link-coloured (5.47:1 on this ground), and in body copy it inherits
+	   text-primary (16.18:1). Setting a colour here would break the first.
+	   Why: an identifier like `pipeline::citation_check::downgrade_uncitable_findings`
+	   has no space or hyphen for the browser to wrap at, so on a narrow
+	   viewport it pushed the PAGE itself into horizontal scroll (whats-new
+	   mobile overflow). `display: inline-block` + `max-width: 100%` lets a
+	   code span that DOES contain spaces still wrap normally onto several
+	   lines inside its own box — no scrollbar, no overflow, same as before.
+	   A span with no break opportunity at all (the identifiers above) instead
+	   overflows that now-constrained box, so `overflow-x: auto` scrolls the
+	   SPAN, never the page — one more wide-content-scrolls-in-its-own-container
+	   contract, alongside `.doc-table` and `.doc-prose pre` below. Breaking the
+	   token mid-character to avoid that scrollbar would be worse: it stops
+	   reading as one identifier. */
+	.doc-prose :not(pre) > code {
+		@apply inline-block max-w-full overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card px-1 py-px align-bottom text-[0.9em];
+	}
+
+	.doc-prose pre {
+		@apply relative overflow-x-auto rounded border-[1.5px] border-foundry-border bg-foundry-raised p-4 pt-7 text-sm leading-relaxed;
+	}
+
+	.doc-prose pre > code {
+		@apply border-0 bg-transparent p-0 text-inherit;
+	}
+
+	/* The fenced block's language hint, lifted onto the <pre> by render.ts. */
+	.doc-prose pre[data-lang]::before {
+		content: attr(data-lang);
+		@apply absolute right-3 top-2 font-mono text-[10px] uppercase tracking-wider text-foundry-secondary;
+	}
+
+	/* Wide tables scroll inside this wrapper so the PAGE never scrolls
+	   sideways. render.ts inserts it around every table. */
+	.doc-table {
+		@apply my-6 overflow-x-auto rounded border-[1.5px] border-foundry-border;
+	}
+
+	.doc-prose table {
+		@apply w-full border-collapse text-left text-sm;
+	}
+
+	.doc-prose thead {
+		@apply bg-foundry-card;
+	}
+
+	.doc-prose th {
+		@apply border-b-[1.5px] border-foundry-border px-3 py-2 font-semibold;
+	}
+
+	.doc-prose td {
+		@apply border-b border-foundry-border px-3 py-2 align-top;
+	}
+
+	.doc-prose tbody tr:last-child td {
+		@apply border-b-0;
+	}
+
+	.doc-prose input[type='checkbox'] {
+		@apply mr-2 align-middle accent-foundry-primary;
 	}
 }
