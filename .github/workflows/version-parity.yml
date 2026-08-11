@@ -52,16 +52,18 @@ name: Version parity
 # `pull_request` carries NO path filter (issue #4421 follow-up). It used to —
 # first a `paths-ignore: [website/**, docs/**]`, later narrowed to a
 # `paths:` allowlist of crate/manifest/checker globs — but `pr-version-bump`
-# is about to become a REQUIRED branch-protection context, and a required
-# context that a path filter can skip goes permanently pending on any PR
-# that doesn't touch the allowlisted globs (proven on #5415/#5416: zero
-# `Version parity` runs against either head SHA). A required check must run
-# on every PR unconditionally, so the filter is gone rather than widened
-# again. This is cheap on unrelated PRs: `scripts/check-pr-version-bump.sh`
-# exits 0 with "[ OK ] ... none under crates/<crate>/src/**" the moment its
-# scan floor sees changed paths but zero of them under `crates/*/src/`, so a
-# docs-only or website-only PR still costs one shell scan-floor check, not a
-# skipped-forever gate.
+# is now a REQUIRED branch-protection context, and a required context that a
+# path filter can skip goes permanently pending on any PR that doesn't touch
+# the allowlisted globs (proven on #5415/#5416: zero `Version parity` runs
+# against either head SHA). A required check must run on every PR
+# unconditionally, so the filter is gone rather than widened again. This is
+# cheap on unrelated PRs: `scripts/check-pr-version-bump.sh` exits 0 with
+# "[ OK ] ... none under crates/<crate>/src/**" the moment its scan floor
+# sees changed paths but zero of them under `crates/*/src/`, so a docs-only
+# or website-only PR still costs one shell scan-floor check, not a
+# skipped-forever gate. The SAME "required context must never go pending/
+# skipped" reasoning is why the job's `edited`-action guard below lives in a
+# step, not a job-level `if:` — see the job's own header comment.
 on:
   push:
     branches: [main]
@@ -104,16 +106,52 @@ jobs:
   # Pre-merge guard (#4421). Pure shell + one HTTP GET per touched crate: no
   # Rust toolchain, no cargo build, so it adds seconds to a PR rather than the
   # minutes the post-merge job costs.
+  #
+  # REQUIRED branch-protection context. That is why this job carries NO
+  # job-level `if:` — a job whose `if:` evaluates false is reported to
+  # branch protection as `skipped`, not `success`, and GitHub creates a
+  # SEPARATE check run for it at the SAME head SHA as any earlier real run.
+  # A title/body-only edit fires `pull_request: edited` with no base change,
+  # which is exactly the case the old job-level `if:` excluded — and on a
+  # required context, that `skipped` run can sit alongside an earlier
+  # `success` run at the identical SHA, which is at minimum confusing and,
+  # depending on how branch protection reconciles two runs at one SHA, can
+  # mask the real result. Confirmed live on PR #5434, head `8619d595`: a
+  # `synchronize` run concluded `success` at 15:37:24Z, then an `edited` run
+  # at 15:43:44Z concluded `skipped` at that same SHA. Mirrors `ci.yml`'s
+  # `changes` job, which carries the identical no-job-level-`if:` reasoning
+  # in its own header comment.
+  #
+  # So the job always runs and always concludes `success` or `failure` —
+  # never `skipped` — and the `edited`-without-base-change case (and any
+  # non-`pull_request` trigger, e.g. `workflow_dispatch`) is handled by the
+  # first step below, which exits 0 and sets an output that gates every
+  # subsequent step. `edited` WITH a base change (a retarget, #3838) still
+  # runs the real check — the gate step only short-circuits the no-op case.
   pr-version-bump:
     name: "PR version bump vs crates.io (issue #4421)"
-    if: github.event_name == 'pull_request' && (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Skip the real check on a title/body-only edit (never `skipped` — always `success`)
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          BASE_CHANGED: ${{ toJSON(github.event.changes.base) }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" && ( "$EVENT_ACTION" != "edited" || "$BASE_CHANGED" != "null" ) ]]; then
+            echo "run_check=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_check=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Nothing to check here (event=$EVENT_NAME action=$EVENT_ACTION, base unchanged) — reporting success without running the real check."
+          fi
+
       # fetch-depth: 0 — the guard needs `git merge-base` against the base
       # branch and `git show <merge-base>:crates/<X>/Cargo.toml`, neither of
       # which a shallow checkout can resolve.
       - uses: actions/checkout@v5
+        if: steps.gate.outputs.run_check == 'true'
         with:
           fetch-depth: 0
 
@@ -123,6 +161,7 @@ jobs:
       # Runs before the real gate — a gate that cannot fail makes the real run's
       # green meaningless. Mirrors line-cap.yml's selftest-then-gate ordering.
       - name: Scan-floor selftest (must refuse an empty scan)
+        if: steps.gate.outputs.run_check == 'true'
         run: bash scripts/check_scan_floor_selftest.sh pr_version_bump
 
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
@@ -132,6 +171,7 @@ jobs:
       # ATTRIBUTION note in scripts/check-pr-version-bump.sh for the failure
       # this removes (PR #4666 / run 30839255128).
       - name: Refresh the base branch ref
+        if: steps.gate.outputs.run_check == 'true'
         run: |
           git fetch --no-tags --quiet origin \
             "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
@@ -140,6 +180,7 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
 
       - name: Check PR version bumps against crates.io
+        if: steps.gate.outputs.run_check == 'true'
         env:
           PR_VERSION_BUMP_BASE: origin/${{ github.event.pull_request.base.ref }}
         run: bash scripts/check-pr-version-bump.sh
