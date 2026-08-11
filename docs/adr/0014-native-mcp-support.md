@@ -3,6 +3,12 @@
 - **Status:** Amended by [0040](0040-trusty-mcp-services-absorbs-trusty-gworkspace.md), [0041](0041-trusty-okg-native-crate-search-absorbs-okf-indexing.md)
 - **Date:** 2026-07-14
 - **Scope:** Workspace-wide
+- **Reversibility Cost:** High — MCP service packaging, shared protocol
+  primitives, and the single-language distribution model affect multiple
+  crates and installed integrations.
+- **Decision Drivers:** Single Rust toolchain, one installation and signing
+  path, shared MCP contracts and observability, avoidance of third-party
+  runtime dependencies
 - **Supersedes / Superseded by:** ADR-0040 changes the MCP framework and service
   packaging; ADR-0041 applies that consumer-boundary rule to trusty-okg. The
   native, in-workspace Rust decision remains in force.
