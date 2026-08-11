@@ -21,8 +21,12 @@
 	 * Sourcing rule, inherited from `$lib/tools`: every claim here was checked
 	 * against crate source. The prerequisites in particular —
 	 * `crates/trusty-git-analytics/src/audit/review.rs` spawns
-	 * `trusty-review report --manifest … --analyze --out …` and hard-errors on
-	 * `BinaryNotFound`, while `crates/trusty-review/src/report/analyze_adapter.rs`
+	 * `trusty-review report --manifest … --analyze --synthesize --out …` and
+	 * hard-errors on `BinaryNotFound`; `commands/audit.rs` calls
+	 * `require_inference_credential()` and
+	 * `require_review_supports_required_inference()` before stage 1 (#5454), so
+	 * both the key card and the renderer card describe real preconditions; and
+	 * `crates/trusty-review/src/report/analyze_adapter.rs`
 	 * is fail-open against the analyze daemon — not against a README.
 	 *
 	 * No version number appears in the copy, for the reason
@@ -179,7 +183,21 @@ tctl install trusty-review</pre>
 				<p class="mt-2 text-sm text-foundry-secondary">
 					Without it the sweep still runs and still writes
 					<code class="text-xs">manifest.toml</code>, then stops with an error naming that file.
-					Nothing collected is lost — see the recovery command below.
+					Nothing collected is lost — see the recovery command below. A copy too old to
+					require inference is rejected before stage 1, with the upgrade command, rather
+					than delivering a report with no written analysis.
+				</p>
+			</div>
+			<div class="card bg-foundry-card">
+				<span class="badge">Required</span>
+				<h3 class="mt-3 font-display text-lg font-semibold text-foundry-text">
+					<code class="text-base">OPENROUTER_API_KEY</code>
+				</h3>
+				<p class="mt-2 text-sm text-foundry-secondary">
+					The renderer writes the report's analysis with a model, so an audit cannot finish
+					without a key. It is checked before stage 1, not at the end, so an unset one costs
+					you the error and not the sweep:
+					<code class="text-xs">export OPENROUTER_API_KEY=…</code>
 				</p>
 			</div>
 			<div class="card bg-foundry-card">
@@ -315,9 +333,10 @@ tctl install trusty-review</pre>
 				on your terminal are the deliverable. The Markdown file is the report; open it first.
 			</p>
 			<p class="mt-4 max-w-3xl text-foundry-secondary">
-				If the sweep stopped because <code class="text-sm">trusty-review</code> was not installed, the
-				manifest survived it. Install the renderer and run the last stage by hand — this is exactly what
-				the sweep would have run:
+				If the sweep stopped at the render — the renderer was not installed, or the model call
+				failed — the manifest survived it, because it is written before the renderer is called.
+				Fix the cause and run the last stage by hand; this is exactly what the sweep would have
+				run:
 			</p>
 
 			<div class="mt-6 max-w-xl min-w-0">
@@ -325,7 +344,7 @@ tctl install trusty-review</pre>
 				<pre
 					class="mt-2 overflow-x-auto rounded-sm border border-foundry-border bg-foundry-card p-3 text-xs leading-relaxed text-foundry-text">trusty-review report \
   --manifest ./audit-output/manifest.toml \
-  --analyze --out ./audit-output</pre>
+  --analyze --synthesize --out ./audit-output</pre>
 			</div>
 		</div>
 
@@ -481,9 +500,11 @@ tctl install trusty-review</pre>
 		<div class="min-w-0">
 			<h2 class="font-display text-2xl font-bold sm:text-3xl">The report, section by section</h2>
 			<p class="mt-4 max-w-3xl text-foundry-secondary">
-				Eight sections, in this order. Section 2 renders deterministically —
-				<code class="text-sm">tga audit</code> never passes
-				<code class="text-sm">--synthesize</code>, so no model writes the executive summary.
+				Eight sections, in this order. A model writes the executive summary, the top-risk
+				rationale, and the RED/AMBER finding prose, working only from what the sweep collected —
+				every figure it cites is checked against that data and the sentence is dropped if the
+				figure is not there. Section 2 falls back to a roll-up composed from the report's own
+				counts whenever that check rejects the written one.
 			</p>
 
 			<div class="doc-prose doc-table max-w-3xl">

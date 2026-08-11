@@ -10288,7 +10288,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "2.16.0"
+version = "2.17.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11764,7 +11764,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
