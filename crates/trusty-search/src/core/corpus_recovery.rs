@@ -28,7 +28,8 @@
 //! The split, and why it is not symmetric:
 //!
 //! - `UpgradeRequired(_)` names a KNOWN old on-disk format. It is expected on a
-//!   redb major upgrade, it says nothing is wrong with the bytes, and there is a
+//!   redb major upgrade, it almost always means the bytes are intact (see the
+//!   residual risk below for the one case where it does not), and there is a
 //!   data-preserving recovery tool for it (`trusty-search migrate-redb`, which
 //!   links redb 2.6 under the `redb2` alias precisely to read these files).
 //!   Recreating empty and letting reconcile reindex is correct; quarantining it
@@ -39,6 +40,31 @@
 //!   presents a broken index as healthy, so these now back the file aside and
 //!   return [`CorpusCorrupted`] — a typed `Err` that reaches the loader's
 //!   failure arm, sets `corpus_open_failed`, and quarantines the index.
+//!
+//! ## Residual risk: corruption that redb reports as `UpgradeRequired`
+//!
+//! The split above is only as good as redb's own classification, and there is
+//! one byte pattern where redb cannot tell the two apart — so neither can we.
+//!
+//! `TransactionHeader::from_bytes` (redb 4.1.0, `page_store/header.rs:323-335`)
+//! reads the version byte and returns `UpgradeRequired(version)` for values 1
+//! and 2 BEFORE it computes that slot's `xxh3` checksum a few lines further
+//! down. The version byte sits at offset 0 of each transaction slot, and the two
+//! slots are at fixed absolute offsets 64 and 192 (`TRANSACTION_0_OFFSET = 64`,
+//! `TRANSACTION_SIZE = 128`). So a single-byte corruption that lands on offset
+//! 64 or 192 and happens to leave the value 1 or 2 produces `UpgradeRequired`,
+//! not `Corrupted` — the checksum that would have caught it is never reached.
+//!
+//! Consequence: that one case is silently recreated empty rather than
+//! quarantined, which is a sliver of the exact fail-open this module closes.
+//! [`is_genuine_corpus_corruption`] returns `false` for `UpgradeRequired(_)`
+//! because that is what redb reports, and nothing at the `DatabaseError` level
+//! distinguishes the two. Closing it would mean re-parsing the header and
+//! re-verifying redb's internal checksums independently of what `DatabaseError`
+//! says — a much larger commitment than this module, and not worth it for a
+//! corruption that has to land on one of two exact offsets and yield one of two
+//! exact values. Any other byte in the header, and any other value at those two
+//! offsets, still reaches `Corrupted` and quarantines.
 //!
 //! What: [`is_incompatible_corpus_format`] reports whether an error means the
 //! file cannot be opened as-is (either bucket); [`is_genuine_corpus_corruption`]
@@ -219,8 +245,9 @@ pub(crate) fn is_incompatible_corpus_format(err: &DatabaseError) -> bool {
 /// What: returns `true` for `RepairAborted` (redb gave up repairing the file),
 /// `Storage(Corrupted(_))` (redb says so outright), and `Storage(Io(e))` with
 /// `e.kind() == InvalidData` (the bytes do not parse as a redb database at all).
-/// Returns `false` for `UpgradeRequired(_)` — a clean, well-understood old
-/// format — and for everything outside
+/// Returns `false` for `UpgradeRequired(_)` — a well-understood old format,
+/// with one narrow exception redb itself cannot distinguish (see the module
+/// docs, "Residual risk") — and for everything outside
 /// [`is_incompatible_corpus_format`]'s set. Callers must gate on that predicate
 /// first; this one answers a narrower question and says nothing about errors it
 /// does not recognise.
