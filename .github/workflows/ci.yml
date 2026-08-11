@@ -145,14 +145,15 @@ jobs:
   # changes: classify the diff as Cargo-inert or not (issue #4468), once, for
   # every job below to consult.
   #
-  # WHY THIS IS A JOB AND NOT A `paths:` FILTER. Five of this workflow's checks
-  # are REQUIRED by branch protection: Format check, 500-line file-size cap,
-  # Clippy, trusty-search daemon smoke test, MSRV check. "Rust tests
-  # (pre-publish gate)" (the `test` aggregate below) is NOT currently
-  # required — see #5407. This list is a convenience snapshot, not the source
-  # of truth; the authoritative list is always
-  # `gh api repos/bobmatnyc/trusty-tools/branches/main/protection`, since a
-  # hardcoded list in a comment is exactly what went stale here. GitHub does
+  # WHY THIS IS A JOB AND NOT A `paths:` FILTER. This workflow's jobs include
+  # the branch-protection REQUIRED checks. Do not enumerate them here — a
+  # hand-copied list in this comment has gone stale repeatedly, including
+  # within hours of last being corrected (PR #5416). The authoritative list
+  # is always:
+  #   gh api repos/bobmatnyc/trusty-tools/branches/main/protection \
+  #     --jq '.required_status_checks.contexts'
+  # "Rust tests (pre-publish gate)" (the `test` aggregate below) is NOT
+  # currently required — see #5407. GitHub does
   # not create check runs for a workflow its path/branch filters skipped, so a
   # required context would sit pending forever and a docs-only PR would become
   # unmergeable instead of fast — the trap #4468 calls out and the one
