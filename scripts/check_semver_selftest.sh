@@ -45,6 +45,23 @@
 #   silent-noop.out is the one synthetic fixture, because no real invocation
 #   produces that shape today — it is the shape a future regression would take.
 #
+#   Cases 9-12 (issues #5296, #5297b) cover WHICH release the gate compares
+#   against, and what it does when the bump is already breaking:
+#     9.  post-publish        — the declared version is itself on crates.io, as
+#                               it is by the time the tag workflow runs. The
+#                               baseline must be the release BEFORE it; taking
+#                               "latest" compares the crate against itself and
+#                               reports no change forever.
+#     10. first release       — nothing published below the declared version.
+#                               A recorded skip, and no comparison attempted.
+#     11. already-breaking    — must INVENTORY what the release breaks rather
+#                               than skip, and must stay green doing it: the
+#                               bump already permits the break.
+#     12. inventory blind     — the advisory run failed. Still green, but it has
+#                               to say so in the line AND the summary.
+#   9, 11 and 12 fail against the pre-#5296 gate, which is what makes them
+#   regression tests rather than descriptions of current behaviour.
+#
 # Usage:  bash scripts/check_semver_selftest.sh
 # Exit:   0 when every case behaves; 1 (naming the case) when one does not.
 #
@@ -99,15 +116,19 @@ import http.server, json, socketserver, sys, threading
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        # /v/<version>/... serves a one-line sparse-index body naming <version>
-        # as the only non-yanked release, so cases 5-8 get a real baseline
-        # without touching the network. Everything else keeps the original
-        # behaviour: /503 -> 503, anything else -> 404.
+        # /v/<v1>[,<v2>...]/... serves a sparse-index body naming each version
+        # as a non-yanked release, so cases 5-8 get a real baseline without
+        # touching the network and cases 9-11 (#5296) can serve a release
+        # HISTORY — which is the only way to tell "compare against the latest"
+        # apart from "compare against the previous". Everything else keeps the
+        # original behaviour: /503 -> 503, anything else -> 404.
         parts = self.path.split("/")
         if len(parts) > 2 and parts[1] == "v":
-            body = json.dumps(
-                {"name": "stub", "vers": parts[2], "yanked": False}
-            ).encode() + b"\n"
+            body = b"".join(
+                json.dumps({"name": "stub", "vers": v, "yanked": False}).encode()
+                + b"\n"
+                for v in parts[2].split(",")
+            )
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -207,25 +228,82 @@ if [[ "${1:-}" == "semver-checks" ]]; then
   case " $* " in
     *" --version "*) echo "cargo-semver-checks 0.50.0"; exit 0 ;;
   esac
-  cat "$SEMVER_SELFTEST_FIXTURE"
-  exit "$SEMVER_SELFTEST_RC"
+  fixture="${SEMVER_SELFTEST_FIXTURE:-}"
+  rc="${SEMVER_SELFTEST_RC:-0}"
+
+  # Baseline-keyed replay (#5296), "<version>=<file>:<rc>;..." — the fixture is
+  # chosen by the --baseline-version the gate ASKED FOR. That is what makes the
+  # post-publish case a real regression test: the old gate asks for the crate's
+  # own version and gets a clean run, the new one asks for the release before it
+  # and gets the break.
+  if [[ -n "${SEMVER_SELFTEST_BY_BASELINE:-}" ]]; then
+    want="" prev="" entry=""
+    for a in "$@"; do
+      [[ "$prev" == "--baseline-version" ]] && want="$a"
+      prev="$a"
+    done
+    for e in ${SEMVER_SELFTEST_BY_BASELINE//;/ }; do
+      case "$e" in
+        "${want}="*) entry="${e#*=}" ;;
+      esac
+    done
+    if [[ -z "$entry" ]]; then
+      echo "stub cargo: no fixture registered for --baseline-version '${want}'" >&2
+      exit 111
+    fi
+    fixture="${SEMVER_SELFTEST_FIXTURES}/${entry%%:*}"
+    rc="${entry##*:}"
+  fi
+
+  cat "$fixture"
+  exit "$rc"
 fi
 exec "$SEMVER_SELFTEST_REAL_CARGO" "$@"
 STUB
 chmod +x "${STUB_DIR}/cargo"
 
-# The stub crate must be publishable, have a lib target, and carry a version the
-# stub index can echo back — echoing the crate's OWN version makes release_type
-# "none", which never trips the already-breaking skip no matter how the crate is
-# versioned later. A crate that starts skipping would silently stop testing
-# anything, so the CHECK line is asserted below.
-STUB_CRATE="trusty-common"
-STUB_VERSION="$("$REAL_CARGO" metadata --no-deps --format-version 1 2>/dev/null \
-  | python3 -c 'import json,sys;m=json.load(sys.stdin);print(next(p["version"] for p in m["packages"] if p["name"]=="trusty-common"))')"
-if [[ -z "$STUB_VERSION" ]]; then
-  echo "SELF-TEST FAIL: could not read ${STUB_CRATE}'s version from cargo metadata." >&2
+# The stub crate must be publishable, have a lib target, and — since #5296 — sit
+# at a version that admits BOTH a same-minor predecessor (so cases 5-8 land in
+# the normal PASS/FAIL arm) and a lower-minor one (so case 11 lands in the
+# already-breaking INVENTORY arm). That means patch > 0 and minor > 0.
+# trusty-common is preferred for continuity with the captured fixtures; any
+# qualifying crate works, and none qualifying is a loud failure rather than a
+# quietly degraded run.
+PICK="$("$REAL_CARGO" metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
+import json, sys
+
+cands = []
+for p in json.load(sys.stdin)["packages"]:
+    if p.get("publish") == []:
+        continue
+    kinds = {k for t in p["targets"] for k in t["kind"]}
+    if not kinds & {"lib", "rlib", "cdylib", "proc-macro"}:
+        continue
+    core = p["version"].split("+")[0].split("-")[0].split(".")
+    try:
+        x, y, z = (int(c) for c in (core + ["0", "0", "0"])[:3])
+    except ValueError:
+        continue
+    if y == 0 or z == 0:
+        continue
+    cands.append((p["name"], p["version"], "%d.%d.%d" % (x, y, z - 1), "%d.%d.0" % (x, y - 1)))
+cands.sort()
+preferred = [c for c in cands if c[0] == "trusty-common"] or cands
+if preferred:
+    print(" ".join(preferred[0]))
+')"
+# shellcheck disable=SC2086
+set -- $PICK
+STUB_CRATE="${1:-}"
+STUB_VERSION="${2:-}"
+STUB_PREV="${3:-}"      # same minor, patch below  -> a PATCH release
+STUB_OLD_MINOR="${4:-}" # lower minor             -> a MAJOR release under 0.x
+if [[ -z "$STUB_CRATE" || -z "$STUB_VERSION" || -z "$STUB_PREV" ]]; then
+  echo "SELF-TEST FAIL: no publishable lib crate with minor>0 and patch>0 in this workspace;" >&2
+  echo "                cases 5-11 cannot construct a baseline. Pick a crate by hand." >&2
   exit 1
 fi
+echo "stub crate: ${STUB_CRATE} v${STUB_VERSION} (prev ${STUB_PREV}, older minor ${STUB_OLD_MINOR})"
 
 # name  fixture  stub-rc  expected-exit  must-contain  must-NOT-contain ("-" = none)
 TAB="$(printf '\t')"
@@ -243,7 +321,7 @@ while IFS="$TAB" read -r name fixture stub_rc want_exit must_have must_not; do
     SEMVER_SELFTEST_REAL_CARGO="$REAL_CARGO" \
     SEMVER_SELFTEST_FIXTURE="${FIXTURES}/${fixture}" \
     SEMVER_SELFTEST_RC="$stub_rc" \
-    SEMVER_GATE_INDEX_BASE="http://127.0.0.1:${PORT}/v/${STUB_VERSION}" \
+    SEMVER_GATE_INDEX_BASE="http://127.0.0.1:${PORT}/v/${STUB_PREV}" \
     bash "$GATE" --crate "$STUB_CRATE" 2>&1)" || rc=$?
 
   if [[ "$out" != *"CHECK ${STUB_CRATE}:"* ]]; then
@@ -258,6 +336,93 @@ while IFS="$TAB" read -r name fixture stub_rc want_exit must_have must_not; do
     pass_case "${name} -> exit ${rc}, says '${must_have}'"
   fi
 done <<<"$VERDICT_CASES"
+
+# ===========================================================================
+# 9-12. Which release is the baseline, and what happens when the bump is already
+# breaking (#5296, #5297b).
+#
+# Case 9 is the regression test for #5296 and is written so it FAILS against the
+# pre-fix gate: the stub index serves the crate's OWN version alongside the one
+# before it — the state of the registry after `cargo publish`, which is when the
+# tag-push workflow actually runs — and the stub replays a CLEAN run for the
+# self-comparison and a BREAK for the real previous release. A gate that picks
+# "latest" gets the clean fixture and exits 0 while a break is sitting there.
+#
+# Cases 11 and 12 pin the inventory arm: an already-breaking bump used to skip
+# outright, so any assertion that the inventory ran fails against the old gate.
+# ===========================================================================
+gate_with_index() { # <comma-separated versions> <baseline=fixture:rc;...>
+  (cd "$REPO_ROOT" &&
+    PATH="${STUB_DIR}:${PATH}" \
+      SEMVER_GATE_TOOLCHAIN_BIN='' \
+      SEMVER_SELFTEST_REAL_CARGO="$REAL_CARGO" \
+      SEMVER_SELFTEST_FIXTURES="$FIXTURES" \
+      SEMVER_SELFTEST_BY_BASELINE="$2" \
+      SEMVER_GATE_INDEX_BASE="http://127.0.0.1:${PORT}/v/${1}" \
+      bash "$GATE" --crate "$STUB_CRATE" 2>&1)
+}
+
+# --- 9. The version under test is already published: compare against the one
+#        before it, not against itself.
+rc=0
+out="$(gate_with_index "${STUB_PREV},${STUB_VERSION}" \
+  "${STUB_VERSION}=clean.out:0;${STUB_PREV}=break.out:100")" || rc=$?
+if [[ "$out" != *"CHECK ${STUB_CRATE}: ${STUB_PREV} -> ${STUB_VERSION}"* ]]; then
+  fail_case "baseline/post-publish: the gate did not compare against v${STUB_PREV}. A baseline equal to the version under test is the #5296 self-comparison." "$out"
+elif [[ "$rc" -ne 1 ]]; then
+  fail_case "baseline/post-publish: expected exit 1 (the break against v${STUB_PREV}), got ${rc}" "$out"
+elif [[ "$out" != *"VERDICT: BREAK"* ]]; then
+  fail_case "baseline/post-publish: exit 1 but no BREAK verdict" "$out"
+else
+  pass_case "an already-published version is compared against the release BEFORE it (#5296)"
+fi
+
+# --- 10. Nothing published below the declared version: a recorded skip, and the
+#         tool must not be invoked at all (any invocation hits the stub's
+#         no-fixture path and says so).
+rc=0
+out="$(gate_with_index "${STUB_VERSION}" "unreachable=clean.out:0")" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "baseline/first-release: a crate with no earlier release must be a recorded skip, not a failure (exit ${rc})" "$out"
+elif [[ "$out" != *"no previous release to compare against"* ]]; then
+  fail_case "baseline/first-release: exited 0 without recording WHY nothing was compared" "$out"
+elif [[ "$out" == *"CHECK ${STUB_CRATE}:"* ]]; then
+  fail_case "baseline/first-release: the gate ran a comparison with no baseline to compare to" "$out"
+else
+  pass_case "no release below the declared version is a recorded skip (exit 0)"
+fi
+
+# --- 11. Already-breaking bump: an INVENTORY, not a skip, and advisory — the
+#         listed breaks are permitted by the bump, so the gate stays green.
+rc=0
+out="$(gate_with_index "${STUB_OLD_MINOR}" "${STUB_OLD_MINOR}=break.out:100")" || rc=$?
+if [[ "$out" != *"INVENTORY ${STUB_CRATE}: ${STUB_OLD_MINOR} -> ${STUB_VERSION}"* ]]; then
+  fail_case "inventory/already-breaking: the gate skipped instead of listing what the release breaks (#5297)" "$out"
+elif [[ "$rc" -ne 0 ]]; then
+  fail_case "inventory/already-breaking: the inventory is advisory and must not fail the gate (exit ${rc})" "$out"
+elif [[ "$out" != *"breaking change(s) listed above"* ]]; then
+  fail_case "inventory/already-breaking: exit 0 but the breaks were never reported" "$out"
+elif [[ "$out" == *"VERDICT: BREAK"* ]]; then
+  fail_case "inventory/already-breaking: a permitted break was rendered as a SemVer verdict" "$out"
+else
+  pass_case "an already-breaking bump is inventoried, advisory (#5297b)"
+fi
+
+# --- 12. The inventory itself could not run. Still advisory — but it must say
+#         so, or "no inventory" would read as "inventory clean".
+rc=0
+out="$(gate_with_index "${STUB_OLD_MINOR}" "${STUB_OLD_MINOR}=build-error.out:101")" || rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  fail_case "inventory/blind: a failed advisory run must not block an already-permitted release (exit ${rc})" "$out"
+elif [[ "$out" != *"NO INVENTORY ${STUB_CRATE}"* ]]; then
+  fail_case "inventory/blind: an inventory that never ran was not reported as such" "$out"
+elif [[ "$out" != *"inventory NOT computed"* ]]; then
+  fail_case "inventory/blind: the summary line hid the missing inventory" "$out"
+elif [[ "$out" == *"no breaking changes found"* ]]; then
+  fail_case "inventory/blind: a run that produced nothing was reported as clean" "$out"
+else
+  pass_case "an inventory that could not run says so, in the line and in the summary"
+fi
 
 rm -rf "$STUB_DIR"
 

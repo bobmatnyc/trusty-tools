@@ -13,12 +13,24 @@
 #   Cargo.toml always pairs local source with local dependency. The break is
 #   only visible against the REGISTRY, which is what this gate compares to.
 #
-# What: for one or more crates, resolves the latest non-yanked version on
-#   crates.io and runs `cargo semver-checks` against it. A crate needs a check
-#   only when its declared version does not already carry a breaking bump; see
-#   "Already-breaking" below. Crate selection is either explicit (`--crate`) or,
-#   with no arguments, every crate whose `crates/<crate>/src/**` changed against
-#   a base ref.
+# What: for one or more crates, resolves the PREVIOUS release on crates.io — the
+#   greatest non-yanked version STRICTLY BELOW the crate's declared version — and
+#   runs `cargo semver-checks` against it. Crate selection is either explicit
+#   (`--crate`) or, with no arguments, every crate whose `crates/<crate>/src/**`
+#   changed against a base ref.
+#
+# THE BASELINE IS THE PREVIOUS RELEASE, NOT THE LATEST (issue #5296). Until this
+#   fix the baseline was crates.io's LATEST release, which is only the previous
+#   one while the crate is unpublished. `.github/workflows/semver-checks.yml`
+#   fires on the `<crate>-v<version>` tag push, and by the time that job queries
+#   the registry the `cargo publish` has already landed — so latest == the
+#   version under test, the crate was compared against itself, and every run
+#   reported no change. Observed on trusty-agents-common 0.5.0, trusty-progress
+#   0.3.0 and tga 2.12.0 during the 1.3.5 cut; still reproducible on main against
+#   trusty-search 0.45.0. Selecting "greatest published below the declared
+#   version" is the same version at preflight time and the right one after the
+#   publish, so the gate no longer depends on where in the release sequence it
+#   happens to run.
 #
 # Where this runs (#5149, moved from per-PR): the BLOCKING caller is
 #   `scripts/preflight-publish.sh` CHECK 5, which runs immediately before
@@ -37,6 +49,9 @@
 #                                       cargo-semver-checks can compare)
 #     - registry says 404            -> skip (never published; no baseline exists)
 #     - registry has only yanked vers-> skip (no installable baseline)
+#     - no non-yanked release BELOW
+#       the declared version         -> skip (this is the crate's first release;
+#                                       there is no earlier API to compare to)
 #     - registry probe fails any
 #       other way (network, 5xx,
 #       malformed index, curl error) -> HARD FAIL, exit non-zero
@@ -46,14 +61,25 @@
 #   than no gate at all. Every skip above is a fact about the crate; a probe
 #   error is a fact about the GATE, and the gate does not get to excuse itself.
 #
-# Already-breaking: when the declared version is already a major bump over the
-#   baseline (0.28.1 -> 0.29.0 is major under Cargo's 0.x rules, as is
-#   1.3.4 -> 2.0.0), cargo-semver-checks itself runs ZERO lints and exits 0 —
-#   there is no rule left to break. Observed directly on trusty-common 0.28.1 ->
-#   0.29.0: "0 checks: 0 pass, 254 skip". So the gate reaches the same verdict by
-#   comparing the versions, and does not spend ~4 minutes of CI building two
-#   rustdoc trees to be told nothing applies. This is a cost cut, not a coverage
-#   cut: the skipped run had no coverage to give.
+# Already-breaking -> INVENTORY, not a skip (issue #5297(b)). When the declared
+#   version already carries a breaking bump (0.28.1 -> 0.29.0 is major under
+#   Cargo's 0.x rules, as is 1.3.4 -> 2.0.0), no bump requirement can be
+#   violated, so there is no PASS/FAIL question left to ask. The gate used to
+#   stop there. Under the 0.x rule that fires on every MINOR bump of a 0.y.z
+#   crate — trusty-search 0.44.0 is where the owner hit it — which erased all
+#   coverage on exactly the releases most likely to break something by accident.
+#
+#   So the run happens anyway, with `--release-type minor` forcing the full
+#   breaking-change lint set to apply, and its result is reported as an
+#   INVENTORY: the complete list of what this release breaks, for a human to
+#   check against what they meant to break. It is ADVISORY and cannot fail this
+#   gate — a major release is entitled to break things, and turning a permitted
+#   break into a red gate would just teach people to ignore it. What it costs is
+#   ~4 minutes of rustdoc on already-breaking releases only; what it buys is the
+#   one question the skip could not answer: did an UNINTENDED break ride along?
+#
+#   An inventory that cannot be computed says so on its own line and in the
+#   summary. It is never rendered as "checked", and never silently absent.
 #
 # A BUILD FAILURE IS NOT A VERDICT (issue #5289). cargo-semver-checks has to
 #   build rustdoc for both sides before it can compare anything, and that build
@@ -117,8 +143,12 @@
 # Test: `scripts/check_semver_selftest.sh` proves every way this gate could lie
 #   — a vacuous scan, an unreachable registry, and (since #5289) a rustdoc build
 #   failure or a silent no-op rendered as a SemVer verdict — all exit non-zero,
-#   and that a real break is still reported as a break. The catch itself is
-#   demonstrated in PR #5051 against #4088's real shape.
+#   and that a real break is still reported as a break. Cases 9-11 (#5296,
+#   #5297b) add the post-publish shape: a crate whose declared version is already
+#   on crates.io must still be compared against the release BEFORE it, a first
+#   release is a recorded skip, and an already-breaking bump produces an
+#   inventory instead of a skip. The catch itself is demonstrated in PR #5051
+#   against #4088's real shape.
 #
 # Portability: bash 3.2 (macOS system bash) and bash 5 (Linux CI). POSIX tools
 #   plus `git`, `curl`, `cargo`, `python3` (JSON parsing only).
@@ -181,20 +211,33 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
-# registry_latest <crate> — print the latest NON-YANKED version on crates.io,
-# or the literal `NONE` when the crate has no installable release.
+# registry_probe <crate> <declared-version-or-empty> — print two lines:
+#     1. the latest non-yanked version on crates.io, or `NONE`
+#     2. the BASELINE: the greatest non-yanked version strictly BELOW
+#        <declared-version>, or `NONE`
+# With an empty declared version there is no upper bound, so line 2 repeats
+# line 1 (that is the `--probe` form, which may be handed a crate this workspace
+# does not build).
 #
-# Why: this is the one place the gate talks to the network, so it is the one
-#   place a fail-open can hide. `curl -f` alone is not enough — it conflates a
-#   404 (a real fact: never published) with a 503 (the gate is blind). The two
-#   are separated here by reading the HTTP status explicitly, and everything that
-#   is neither 200 nor 404 exits the whole script.
+# Why two lines and not one: the two facts answer different questions and the
+# gate needs both. The baseline is what `cargo semver-checks` compares against
+# (#5296 — using the latest made a published crate compare against itself). The
+# latest is what distinguishes "never published" from "published, but this is
+# the earliest release", and those two skips read very differently to whoever
+# has to trust the run.
+#
+# Why the network handling is spelled out: this is the one place the gate talks
+#   to the network, so it is the one place a fail-open can hide. `curl -f` alone
+#   is not enough — it conflates a 404 (a real fact: never published) with a 503
+#   (the gate is blind). The two are separated here by reading the HTTP status
+#   explicitly, and everything that is neither 200 nor 404 exits the whole
+#   script.
 # What: reads the crates.io sparse index (newline-delimited JSON, one object per
-#   version) and returns the greatest non-yanked `vers`. The sparse index is used
-#   rather than the crates.io API because it is CDN-cached and unrate-limited.
+#   version). The sparse index is used rather than the crates.io API because it
+#   is CDN-cached and unrate-limited.
 # ---------------------------------------------------------------------------
-registry_latest() {
-  local crate="$1" path body code
+registry_probe() {
+  local crate="$1" current="${2:-}" path body code
   case "${#crate}" in
     1) path="1/${crate}" ;;
     2) path="2/${crate}" ;;
@@ -215,7 +258,7 @@ registry_latest() {
 
   if [[ "$code" == "404" ]]; then
     rm -f "$body"
-    echo "NONE"
+    printf 'NONE\nNONE\n'
     return 0
   fi
 
@@ -229,8 +272,8 @@ registry_latest() {
     exit "$EXIT_NO_VERDICT"
   fi
 
-  local latest rc=0
-  latest="$(python3 - "$body" <<'PY'
+  local answer rc=0
+  answer="$(python3 - "$body" "$current" <<'PY'
 import json, sys
 
 def key(v):
@@ -241,7 +284,11 @@ def key(v):
     except ValueError:
         raise SystemExit(2)
 
-best = None
+# An empty declared version means "no upper bound" — the --probe form, which may
+# name a crate this workspace does not build and therefore has no version for.
+ceiling = key(sys.argv[2]) if sys.argv[2] else None
+
+latest = prev = None
 with open(sys.argv[1]) as fh:
     for line in fh:
         line = line.strip()
@@ -251,9 +298,17 @@ with open(sys.argv[1]) as fh:
         if rec.get("yanked"):
             continue
         v = rec["vers"]
-        if best is None or key(v) > key(best):
-            best = v
-print(best if best else "NONE")
+        if latest is None or key(v) > key(latest):
+            latest = v
+        # STRICTLY below: a version equal to the declared one is the release
+        # under test, never its own baseline (#5296).
+        if ceiling is not None and key(v) < ceiling:
+            if prev is None or key(v) > key(prev):
+                prev = v
+if ceiling is None:
+    prev = latest
+print(latest if latest else "NONE")
+print(prev if prev else "NONE")
 PY
   )" || rc=$?
 
@@ -264,7 +319,7 @@ PY
     echo "      This is NOT a pass (issue #5050)." >&2
     exit "$EXIT_NO_VERDICT"
   fi
-  echo "$latest"
+  printf '%s\n' "$answer"
 }
 
 # ---------------------------------------------------------------------------
@@ -272,8 +327,9 @@ PY
 #
 # Cargo's compatibility rules, not plain SemVer: for 0.x the MINOR position is
 # the breaking one, so 0.28.1 -> 0.29.0 is a major release. `none` means the two
-# versions are equal, or current is older than baseline (which is a version
-# mistake, not a SemVer question — it is reported and checked, never skipped).
+# versions are equal, or current is older than baseline; since #5296 the caller
+# selects a baseline STRICTLY BELOW the declared version, so `none` is now
+# unreachable from the gate and survives only as a total function's zero case.
 # ---------------------------------------------------------------------------
 release_type() {
   python3 - "$1" "$2" <<'PY'
@@ -573,14 +629,21 @@ verdict_computed() {
 # without a Cargo build, and so a human can ask "what would you compare against?"
 # ---------------------------------------------------------------------------
 if [[ -n "$PROBE_ONLY" ]]; then
-  # `registry_latest` runs in a command substitution, i.e. a SUBSHELL, so its
+  # The declared version is looked up BEST-EFFORT: --probe accepts a crate this
+  # workspace does not build (that is how the self-test probes an unpublished
+  # name), and an empty version simply means "no upper bound".
+  PROBE_VERSION="$(python3 "$PY_HELPER" field "$META_FILE" "$PROBE_ONLY" version 2>/dev/null || true)"
+
+  # `registry_probe` runs in a command substitution, i.e. a SUBSHELL, so its
   # `exit 1` cannot terminate this script on its own — it only ends the subshell.
   # Every caller must re-raise it explicitly. Leaving that to `set -e` is exactly
   # the fail-open shape this gate exists to avoid.
-  if ! latest="$(registry_latest "$PROBE_ONLY")"; then
+  if ! probe="$(registry_probe "$PROBE_ONLY" "$PROBE_VERSION")"; then
     exit "$EXIT_NO_VERDICT"
   fi
-  echo "probe ${PROBE_ONLY}: baseline=${latest}"
+  latest="$(printf '%s\n' "$probe" | sed -n 1p)"
+  baseline="$(printf '%s\n' "$probe" | sed -n 2p)"
+  echo "probe ${PROBE_ONLY}: baseline=${baseline} (declared=${PROBE_VERSION:-unknown}, latest on crates.io=${latest})"
   exit 0
 fi
 
@@ -660,6 +723,11 @@ checked=0
 skipped=0
 fail=0
 noverdict=0
+# Advisory tallies (#5297b) — reported, never added to `fail`. `inventory_blind`
+# exists so an inventory that could not run is visible in the summary line
+# instead of vanishing into the same number as one that ran clean.
+inventoried=0
+inventory_blind=0
 
 # Selected once, not per crate: the PATH edit is process-wide and re-running the
 # scan for every candidate would just re-answer the same question.
@@ -684,12 +752,27 @@ while IFS= read -r crate; do
 
   # Subshell re-raise, as at --probe above: a helper's `exit 1` dies with the
   # command substitution unless the caller checks for it.
-  if ! baseline="$(registry_latest "$crate")"; then
+  if ! probe="$(registry_probe "$crate" "$current")"; then
     exit "$EXIT_NO_VERDICT"
   fi
+  latest="$(printf '%s\n' "$probe" | sed -n 1p)"
+  baseline="$(printf '%s\n' "$probe" | sed -n 2p)"
 
-  if [[ "$baseline" == "NONE" ]]; then
+  if [[ "$latest" == "NONE" ]]; then
     echo "SKIP ${crate} v${current}: no installable release on crates.io — no baseline exists"
+    skipped=$((skipped + 1))
+    continue
+  fi
+
+  # #5296: the baseline is the greatest release BELOW the declared version, so
+  # this branch means every published release is >= the one under test — i.e.
+  # this is the crate's first release. That is a fact about the crate, and the
+  # only honest comparison (there is no earlier API) is none at all. The `latest`
+  # value is printed because it is what separates this from a version regression:
+  # if it is ABOVE the declared version, the crate is behind the registry and
+  # preflight-publish.sh CHECK 4 is the check that says so.
+  if [[ "$baseline" == "NONE" ]]; then
+    echo "SKIP ${crate} v${current}: no non-yanked release below v${current} (latest on crates.io is v${latest}) — no previous release to compare against"
     skipped=$((skipped + 1))
     continue
   fi
@@ -697,11 +780,6 @@ while IFS= read -r crate; do
   if ! rtype="$(release_type "$baseline" "$current")"; then
     echo "FAIL: TOOL ERROR — could not compare '${baseline}' and '${current}' for ${crate}." >&2
     exit "$EXIT_NO_VERDICT"
-  fi
-  if [[ "$rtype" == "major" ]]; then
-    echo "SKIP ${crate}: ${baseline} -> ${current} is already a major release — every lint is inapplicable"
-    skipped=$((skipped + 1))
-    continue
   fi
 
   # Checked lazily — a run whose every candidate skipped never needed the tool,
@@ -717,6 +795,44 @@ while IFS= read -r crate; do
 
   # shellcheck disable=SC2046
   set -- $(cat "${SCRATCH}/features.txt")
+
+  # -------------------------------------------------------------------------
+  # INVENTORY arm (#5297b). The bump is already breaking, so no verdict is owed
+  # and none is produced — but the run happens anyway, with --release-type minor
+  # forcing the breaking-change lints to apply, so a human gets the list of what
+  # this release actually breaks. ADVISORY BY CONSTRUCTION: nothing in this
+  # branch touches `fail` or `noverdict`, because a major release is entitled to
+  # break its API and a gate that reddened over a permitted break would be noise.
+  # -------------------------------------------------------------------------
+  if [[ "$rtype" == "major" ]]; then
+    echo "INVENTORY ${crate}: ${baseline} -> ${current} is already a breaking release — no bump can be owed, so this run is advisory: what does it break?"
+    rc=0
+    RUN_LOG="${SCRATCH}/inventory-${crate}.txt"
+    SKIP_UI_BUILD=1 cargo semver-checks \
+      --package "$crate" \
+      --baseline-version "$baseline" \
+      --release-type minor \
+      --only-explicit-features "$@" > "$RUN_LOG" 2>&1 || rc=$?
+    cat "$RUN_LOG"
+
+    if ! verdict_computed "$RUN_LOG"; then
+      # Loud, and counted. The release still proceeds — the permitted-break fact
+      # is decided by the version numbers, not by this run — but "no inventory"
+      # must never read as "inventory clean".
+      echo "NO INVENTORY ${crate}: cargo semver-checks exited ${rc} without completing a run." >&2
+      echo "             The release is still permitted (${baseline} -> ${current} already carries the break)," >&2
+      echo "             but WHAT it breaks is unknown. Fix the run above to get the list." >&2
+      inventory_blind=$((inventory_blind + 1))
+    elif [[ "$rc" -ne 0 ]]; then
+      echo "INVENTORY ${crate}: breaking change(s) listed above — permitted by the ${rtype} bump. Confirm every one was intended (#5297)."
+      inventoried=$((inventoried + 1))
+    else
+      echo "INVENTORY ${crate}: no breaking changes found against v${baseline}."
+      inventoried=$((inventoried + 1))
+    fi
+    continue
+  fi
+
   echo "CHECK ${crate}: ${baseline} -> ${current} (${rtype} release), $(($# / 2)) feature(s)"
 
   # Captured rather than streamed so the run can be CLASSIFIED afterwards
@@ -795,4 +911,11 @@ EOF
   exit "$EXIT_NO_VERDICT"
 fi
 
-echo "semver gate: scanned ${SCANNED}; ${checked} crate(s) checked, ${skipped} skipped — OK."
+SUMMARY="semver gate: scanned ${SCANNED}; ${checked} crate(s) checked, ${skipped} skipped"
+if [[ "$inventoried" -ne 0 ]]; then
+  SUMMARY="${SUMMARY}, ${inventoried} inventoried (advisory)"
+fi
+if [[ "$inventory_blind" -ne 0 ]]; then
+  SUMMARY="${SUMMARY}, ${inventory_blind} inventory NOT computed"
+fi
+echo "${SUMMARY} — OK."
