@@ -140,11 +140,16 @@ jobs:
   # every job below to consult.
   #
   # WHY THIS IS A JOB AND NOT A `paths:` FILTER. Five of this workflow's checks
-  # are REQUIRED by branch protection (Format check, Clippy, Test, MSRV check
-  # (1.94), trusty-search daemon smoke test). GitHub does not create check runs
-  # for a workflow its path/branch filters skipped, so a required context would
-  # sit pending forever and a docs-only PR would become unmergeable instead of
-  # fast — the trap #4468 calls out and the one
+  # are REQUIRED by branch protection: Format check, 500-line file-size cap,
+  # Clippy, trusty-search daemon smoke test, MSRV check. "Rust tests
+  # (pre-publish gate)" (the `test` aggregate below) is NOT currently
+  # required — see #5407. This list is a convenience snapshot, not the source
+  # of truth; the authoritative list is always
+  # `gh api repos/bobmatnyc/trusty-tools/branches/main/protection`, since a
+  # hardcoded list in a comment is exactly what went stale here. GitHub does
+  # not create check runs for a workflow its path/branch filters skipped, so a
+  # required context would sit pending forever and a docs-only PR would become
+  # unmergeable instead of fast — the trap #4468 calls out and the one
   # .github/workflows/changelog-fragment.yml already documents. So every job
   # still RUNS and still REPORTS; the exemption lives inside the jobs, on the
   # steps that cost money. A docs-only PR therefore gets a green required check
@@ -360,7 +365,9 @@ jobs:
   # --------------------------------------------------------------------------
   # test-shard: run all unit + integration tests (stable, no --include-ignored),
   # split four ways by nextest partition. The `test` job below aggregates these
-  # into the single required check named "Test".
+  # into a single roll-up row, "Rust tests (pre-publish gate)" — see that
+  # job's own comment for why, and that it is not currently a required
+  # branch-protection context.
   #
   # Why sharded: the unsharded job ran 16–24 minutes and was the critical path
   # of every CI run — ~45% of it executing tests one binary at a time.
@@ -416,7 +423,7 @@ jobs:
   # config files pulled by fastembed are also captured.
   # --------------------------------------------------------------------------
   test-shard:
-    name: Test shard ${{ matrix.shard }}
+    name: Rust tests (pre-publish gate) — shard ${{ matrix.shard }} of 4
     needs: [changes]
     # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
     # GitHub reports a skipped required check as PASSING — reintroducing the
@@ -982,12 +989,14 @@ jobs:
   # --------------------------------------------------------------------------
   # test: the aggregate gate over the sharded suite above.
   #
-  # This job exists to keep ONE stable required-check name. Branch protection
-  # requires the literal context "Test"; sharding alone would rename the check
-  # to "Test (shard-N)" and silently drop the requirement, leaving main
-  # unprotected. Repointing branch protection at N shard names would work but
-  # would have to be re-edited every time the shard count changes — this job
-  # makes the shard count an implementation detail instead.
+  # This job exists to give the shard matrix ONE roll-up row instead of N,
+  # so the shard count stays an implementation detail — resharding never
+  # requires touching anything downstream of this job. It runs no cargo
+  # command itself; it only checks that every `test-shard` leg succeeded.
+  #
+  # It is NOT currently a required branch-protection context (see the
+  # `changes` job comment above for the live list) — it exists so a roll-up
+  # context is available to become required later without a workflow change.
   #
   # `needs.test-shard.result` is the AGGREGATE of the matrix: it is 'success'
   # only when every leg succeeded, and 'failure' / 'cancelled' / 'skipped'
@@ -997,7 +1006,7 @@ jobs:
   # closed for this job's `if:` condition.
   # --------------------------------------------------------------------------
   test:
-    name: Test
+    name: Rust tests (pre-publish gate)
     needs: [changes, test-shard]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
@@ -1010,7 +1019,7 @@ jobs:
           set -euo pipefail
           echo "test-shard matrix aggregate result: ${SHARDS_RESULT}"
           if [ "${SHARDS_RESULT}" != "success" ]; then
-            echo "::error::Test is red: the test-shard matrix reported '${SHARDS_RESULT}'. Open the individual 'Test shard N' jobs — nextest names the owning crate for every failing test."
+            echo "::error::Rust tests (pre-publish gate) is red: the test-shard matrix reported '${SHARDS_RESULT}'. Open the individual 'Rust tests (pre-publish gate) — shard N of 4' jobs — nextest names the owning crate for every failing test."
             exit 1
           fi
           echo "every test shard succeeded"
@@ -1028,7 +1037,7 @@ jobs:
   # guaranteed to compile on the declared minimum.
   # --------------------------------------------------------------------------
   msrv:
-    name: MSRV check (1.94)
+    name: MSRV check
     needs: [changes]
     # #4179: `needs:` alone would make this job SKIP when `changes` fails, and
     # GitHub reports a skipped required check as PASSING — reintroducing the
