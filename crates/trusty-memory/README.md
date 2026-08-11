@@ -644,8 +644,11 @@ Auto-KG extraction skips drawers tagged `cross-project-qa`, `test`, or
 `memory_forget` cascade-delete their derived triples automatically.
 
 The REST endpoint `DELETE /api/v1/palaces/{id}/kg/triples/{triple_id}` lets
-you surgically remove a single active triple; `triple_id` is the base64url
-encoding of `subject + "\0" + predicate`.
+you remove a single active triple; `triple_id` is the base64url encoding of
+`subject + "\0" + predicate + "\0" + object`. Every object at a pair is a
+separate row, so the object is what makes the id name one of them — an id
+carrying only `subject + "\0" + predicate` is rejected with `400`, because
+that form used to close every object at the pair.
 
 ### From kuzu-memory data (issue #277)
 
