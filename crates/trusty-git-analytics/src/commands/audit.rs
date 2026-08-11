@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 
 use tga::audit::{
-    resolve_review_binary, run_full_sweep, run_review_report, sweep_gap_lines, AuditSweepStats,
-    SweepOptions, SweepStage, DATA_HANDLING_NOTE,
+    require_inference_credential, resolve_review_binary, run_full_sweep, run_review_report,
+    sweep_gap_lines, AuditSweepStats, SweepOptions, SweepStage, DATA_HANDLING_NOTE,
 };
 use tga::core::config::Config;
 use tga::core::db::Database;
@@ -120,9 +120,16 @@ const DEFAULT_OUTPUT_DIR: &str = "audit-output";
 ///
 /// # Errors
 ///
-/// Propagates a failure to create the output directory. A stage failure is
-/// reported, not propagated.
+/// Propagates a missing inference credential and a failure to create the output
+/// directory — both whole-run preconditions. A stage failure is reported, not
+/// propagated.
 pub async fn run(config: Config, db: &mut Database, args: AuditArgs) -> anyhow::Result<()> {
+    // #5454: the report's narrative now requires inference, so a missing
+    // credential is checked before ANY work — ahead of the output directory and
+    // stage 1. It is the one failure knowable up front, and DOC-67 §2 gives this
+    // command a single shot with nobody watching to re-run it with a flag.
+    require_inference_credential()?;
+
     let output = args
         .output
         .clone()
@@ -200,13 +207,20 @@ async fn render_report(manifest_path: &Path, output: &Path) -> anyhow::Result<()
         eprintln!("{}", run.stderr.trim_end());
     }
     if !run.success {
+        // #5454: a failed inference pass lands here too, and the manifest that
+        // makes the run resumable was written before `render_report` was called —
+        // so the remedy is always the same one command, named in full.
         anyhow::bail!(
-            "`{} report` exited with {}; no due-diligence report was produced. The manifest at \
-             {} is intact and can be rendered again once the cause is fixed.",
-            resolve_review_binary(),
-            run.code
+            "`{bin} report` exited with {code}; no due-diligence report was produced. Everything \
+             collected is intact — the manifest at {manifest} survives this, so once the cause is \
+             addressed re-run just the render:\n\n    {bin} report --manifest {manifest} \
+             --analyze --synthesize --out {out}",
+            bin = resolve_review_binary(),
+            code = run
+                .code
                 .map_or_else(|| "a signal".to_string(), |c| format!("code {c}")),
-            manifest_path.display()
+            manifest = manifest_path.display(),
+            out = output.display(),
         );
     }
 

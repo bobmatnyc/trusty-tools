@@ -683,3 +683,77 @@ fn binary_resolution_prefers_the_env_override() {
     let resolved = crate::audit::resolve_review_binary();
     assert!(!resolved.is_empty(), "{resolved}");
 }
+
+// ─── #5454: inference is required ────────────────────────────────────────────
+
+/// #5454 regression. Before this change `invoke` built `report --manifest <m>
+/// --analyze --out <dir>` and never passed `--synthesize`, so `model.synthesis`
+/// was `None` on every audit that had ever run and the whole report was
+/// deterministic. Pins the flag into the argument vector, and pins the rest of
+/// the vector alongside it so a future edit cannot drop `--analyze` while
+/// "fixing" this one.
+#[test]
+fn invocation_requests_inference() {
+    use std::path::Path;
+
+    let args = super::review::report_args(Path::new("/o/manifest.toml"), Path::new("/o"));
+    let rendered: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        rendered,
+        vec![
+            "report",
+            "--manifest",
+            "/o/manifest.toml",
+            "--analyze",
+            "--synthesize",
+            "--out",
+            "/o",
+        ],
+        "the audit's renderer invocation must request inference"
+    );
+}
+
+/// #5454. The credential is the one prerequisite knowable before the sweep
+/// starts, and DOC-67 §2 gives the run a single non-interactive shot — so a
+/// missing key must be named up front, with the variable and the way to set it,
+/// rather than surfacing minutes later at the render step.
+#[test]
+fn absent_credential_is_a_named_actionable_error() {
+    use super::review::credential_is_present;
+
+    assert!(!credential_is_present(None), "unset is absent");
+    assert!(!credential_is_present(Some("")), "empty is absent");
+    assert!(
+        !credential_is_present(Some("   \n")),
+        "whitespace-only is absent"
+    );
+
+    let msg = crate::audit::MissingInferenceCredential.to_string();
+    assert!(
+        msg.contains(crate::audit::ENV_INFERENCE_CREDENTIAL),
+        "names the variable: {msg}"
+    );
+    assert!(
+        msg.contains("export OPENROUTER_API_KEY="),
+        "says how to set it: {msg}"
+    );
+}
+
+/// #5454. The preflight must not stand between an operator who HAS a key and
+/// their run, and it must never copy the key anywhere — the message it can
+/// produce is a constant with no interpolation site for one.
+#[test]
+fn present_credential_passes_the_precheck() {
+    use super::review::credential_is_present;
+
+    let secret = "sk-or-v1-DEADBEEFdeadbeef";
+    assert!(credential_is_present(Some(secret)));
+
+    let msg = crate::audit::MissingInferenceCredential.to_string();
+    assert!(!msg.contains(secret), "no key material may appear: {msg}");
+    assert!(!msg.contains("sk-or"), "no key-shaped text: {msg}");
+}
