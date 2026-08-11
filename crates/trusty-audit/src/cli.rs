@@ -31,7 +31,7 @@ use crate::session::{Command, NextStep, Outcome};
 /// Test: `super::cli_tests::a_bare_invocation_enters_the_guided_flow`.
 #[derive(Debug, Parser)]
 #[command(
-    name = "taudit",
+    name = "trusty-audit",
     version,
     about = "Auditor client — installs its pinned audit tooling and runs an audit engagement",
     long_about = None,
@@ -178,7 +178,7 @@ fn count_of(n: usize, singular: &str, plural: &str) -> String {
 fn describe_next(next: &NextStep) -> String {
     match next {
         NextStep::SelectRepositories => {
-            "pick the repositories to audit (`taudit repos`)".to_string()
+            "pick the repositories to audit (`trusty-audit repos`)".to_string()
         }
         NextStep::InstallTools(missing) => {
             let names: Vec<&str> = missing.iter().map(|t| t.binary_name()).collect();

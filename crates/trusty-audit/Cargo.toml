@@ -20,12 +20,17 @@ publish = false
 name = "trusty_audit"
 path = "src/lib.rs"
 
-# #5502: PLACEHOLDER binary name — the final name is an open question the owner
-# has not settled (this repo's binaries are short: `tm`, `tga`, `tctl`,
-# `tcode`; `trusty-audit` is long to type, but the recipient is an outsider who
-# types it once from a README). Whichever name wins, CLAUDE.md's
-# "Abbreviations & Aliases" table gains a row, because `-p <crate>` takes the
-# Cargo `name` field (`trusty-audit`), not the binary name.
+# #5502: the binary ships under BOTH names, the `trusty-installer` / `tctl`
+# precedent. `trusty-audit` is what the docs and the handoff README say — the
+# recipient is an outsider who types it once from a page in front of them.
+# `taudit` is the short form for repeat use. Two targets, ONE `src/main.rs`:
+# there is a single implementation and no second code path to drift. Cargo
+# compiles that file once per target, so the binary is built twice.
+# `-p <crate>` still takes the Cargo `name` field (`trusty-audit`).
+[[bin]]
+name = "trusty-audit"
+path = "src/main.rs"
+
 [[bin]]
 name = "taudit"
 path = "src/main.rs"

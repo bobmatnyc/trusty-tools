@@ -28,14 +28,16 @@ pre-run steps in order (repository selection first, then tooling); it does not
 launch an unattended sweep.
 
 ```
-taudit                    # guided flow
-taudit workdir            # create the working directory, print what lands where
-taudit repos              # repositories this engagement is configured to audit
-taudit tools              # which pinned tools are installed
-taudit manifest           # engagement metadata from the companion manifest.toml
+trusty-audit                    # guided flow
+trusty-audit workdir            # create the working directory, print what lands where
+trusty-audit repos              # repositories this engagement is configured to audit
+trusty-audit tools              # which pinned tools are installed
+trusty-audit manifest           # engagement metadata from the companion manifest.toml
 ```
 
-`taudit` is a **placeholder binary name** — the final name is an open question.
+The same program is also installed as `taudit`, a shorter name for repeat use —
+`taudit workdir` and `trusty-audit workdir` are one binary built from one
+`src/main.rs` (the `trusty-installer` / `tctl` precedent).
 
 Global options: `--work-dir <DIR>` and `--manifest <FILE>`.
 
@@ -97,4 +99,5 @@ cargo clippy  -p trusty-audit --all-targets -- -D warnings
 cargo test    -p trusty-audit
 ```
 
-Note `-p trusty-audit` (the Cargo package name), not `taudit` (the binary).
+Note `-p trusty-audit` is the Cargo package name; `trusty-audit` and `taudit`
+are its two binary targets.

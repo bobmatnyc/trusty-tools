@@ -28,7 +28,7 @@ trusty-tools/               # workspace root
 │   ├── trusty-code/         # per-project Claude-Code-compatible MPM orchestration harness (bin: tcode); Phase 0 scaffold; extraction tracked in #587
 │   ├── trusty-audit/        # auditor client handed to a client company — installs its pinned
 │   │                        # tools via trusty-installer and drives the audit workflow
-│   │                        # (bin: taudit, PLACEHOLDER name); headless library + thin CLI,
+│   │                        # (bins: trusty-audit, taudit alias); headless library + thin CLI,
 │   │                        # publish = false; scaffold tracked in #5502, epic #5477
 │   └── trusty-installer/    # install/upgrade orchestrator (bins: trusty-installer, tctl alias); ADR-0013 / SPEC-INSTALLER-01; RFC tracked in #920
 └── .gitignore

@@ -153,6 +153,7 @@ impl WorkDir {
 
     /// Path of one layout area.
     pub fn path(&self, area: Area) -> PathBuf {
+        // #5495: a pre-planted symlink here is inert until #5491 installs and repo cloning write through it.
         self.root.join(area.dir_name())
     }
 
