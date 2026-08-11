@@ -22,9 +22,10 @@ use super::{McpServer, INDEX_NOT_READY, INDEX_NOT_READY_CODE};
 /// test needs to fix that status precisely — `spawn_mock_daemon` in `tests.rs`
 /// always answers 200 and cannot express it.
 /// What: returns the base URL of a loopback listener serving `status`/`body`
-/// on the search, status, and grep routes.
-/// Test: used by every test in this file.
-async fn spawn_status_daemon(status: u16, body: Value) -> String {
+/// on the search, grep, status, chunks, index-file, remove-file, and call_chain
+/// routes — one per HTTP verb the transport helpers use.
+/// Test: used by every test in this file and in `tests_unavailable.rs`.
+pub(super) async fn spawn_status_daemon(status: u16, body: Value) -> String {
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::routing::{get, post};
@@ -49,6 +50,11 @@ async fn spawn_status_daemon(status: u16, body: Value) -> String {
         .route("/indexes/{id}/grep", post(handler))
         .route("/indexes/{id}/status", get(handler))
         .route("/indexes/{id}/chunks", get(handler))
+        // #5350: the same fixed-status daemon serves the write and call-chain
+        // routes, so the 503 contract can be asserted on every verb.
+        .route("/indexes/{id}/index-file", post(handler))
+        .route("/indexes/{id}/remove-file", post(handler))
+        .route("/indexes/{id}/call_chain", get(handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
