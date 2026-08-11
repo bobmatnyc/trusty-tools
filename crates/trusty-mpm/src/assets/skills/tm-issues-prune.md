@@ -1,28 +1,27 @@
 ---
 name: tm-issues-prune
-description: Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred)
+description: Audit, prune, align, organize, prioritize, and build delivery views from a project's GitHub issues, labels, milestones, and Projects — natural-language PM delegation pattern (gh-first, JIRA deferred)
 user-invocable: true
-version: "1.1.0"
+version: "2.0.0"
 category: pm-workflow
 tags: [tickets, github, backlog, pm-required, triage, prioritization]
 effort: medium
 ---
 
-# /tm-issues-prune — Backlog Prune, Organize, Prioritize & Suggest Next
+# /tm-issues-prune — Portfolio Audit, Align, Prune & Prioritize
 
 A natural-language PM-delegation pattern for keeping a project's GitHub
-issue backlog healthy and actionable: closing stale/duplicate/obsolete
-issues, correcting priority labels on the ones that remain open, grouping
-the survivors into a navigable map, producing a deterministic priority
-ranking, and surfacing a short list of next tasks for the user to choose
-from. This skill describes a workflow, not a new tool or command — every
-mechanical `gh` operation is delegated, never run by the PM directly.
+issue portfolio healthy and actionable: validating tickets against current
+code/specs, consolidating stale/duplicate/obsolete issues and labels, aligning
+milestones to active/backlog/paused delivery lanes, grouping survivors into a
+navigable map or GitHub Project, producing a deterministic priority ranking,
+and surfacing a short list of next tasks. This skill describes a workflow, not
+a new tool or command — every mechanical `gh` operation is delegated, never run
+by the PM directly.
 
-The full sweep runs in four phases, in this order: **Prune → Organize →
-Prioritize → Suggest Next**. Each phase depends on the one before it —
-Organize/Prioritize/Suggest Next operate on the *surviving* open issues
-after any prune-close pass, so stale/duplicate/obsolete noise doesn't
-pollute the ranking or the suggestions.
+The full sweep runs in six phases: **Audit → Prune → Align → Organize →
+Prioritize → Suggest Next**. Later phases operate on the verified surviving
+set, so stale metadata does not pollute delivery views or ranking.
 
 ## Scope: gh-first, JIRA deferred
 
@@ -37,13 +36,11 @@ GitHub-repo projects can use `/tm-issues-prune`.
 ## Delegation Pattern
 
 **The PM never runs `gh issue` commands directly.** Delegate the mechanical
-work to the `ticketing` agent, which shells `gh issue list/close/edit`
-against the active project's GitHub repo. This is a deliberate, scoped
-extension of the ticketing agent's remit for bulk backlog-hygiene passes —
-distinct from `tm-ticketing.md`'s routing note that single-issue,
-PR-linked TkDD transitions go through the Version Control agent. A prune/
-prioritize sweep is workflow-state intelligence across the whole backlog
-(the ticketing agent's actual specialty), just backed by `gh` instead of
+work to the `ticketing` agent, which shells `gh issue`, `gh project`, and the
+relevant API calls against the active project's GitHub repo. Both single-issue
+and bulk portfolio operations belong to ticketing; Version Control owns the PR
+artifact and git operations. A prune/prioritize sweep is workflow-state
+intelligence across the whole backlog, backed by `gh` instead of
 `mcp-ticketer`/`aitrackdown` for this repo's own issues.
 
 **Wrong:**
@@ -65,19 +62,26 @@ PM: [presents the prune/prioritize summary, asks for confirmation before closing
 | Subcommand | Purpose |
 |---|---|
 | `/tm-issues-prune scan` | Survey the backlog, report prune candidates AND priority gaps without changing anything |
-| `/tm-issues-prune close` | Prune pass — present candidates with reasons, close only after user confirmation |
+| `/tm-issues-prune close` | Prune pass — close evidence-backed candidates when explicitly authorized; otherwise present for confirmation |
+| `/tm-issues-prune align` | Align labels and milestones into explicit active/backlog/paused delivery lanes |
 | `/tm-issues-prune organize` | Organize pass — group surviving open issues by epic/component/theme, flag orphans |
 | `/tm-issues-prune prioritize` | Prioritize pass — assess open issues, propose label changes, surface a ranked list |
 | `/tm-issues-prune suggest-next` | Suggest-next pass — recommend the top 3-7 next tasks as a selectable table |
-| `/tm-issues-prune` (no args) | Run scan, then offer to proceed with close, organize, prioritize, and/or suggest-next, in that order |
+| `/tm-issues-prune project-build` | Create or repair a minimal GitHub Project view over the aligned issue set |
+| `/tm-issues-prune` (no args) | Run Audit → Prune → Align → Organize → Prioritize → Suggest Next; Project build remains explicit |
 
 ## Prune Workflow
 
-1. **Delegate the survey.** Ask the `ticketing` agent to pull the open-issue
-   list for the active repo:
+1. **Delegate the survey.** Ask the `ticketing` agent to resolve the default
+   branch and pull the paginated issue/PR, label, milestone, and Project
+   inventory for the active repo. Do not assume one `--limit` result is the
+   whole corpus:
    ```bash
-   gh issue list --state open --limit 500 \
+   gh issue list --state open --limit 1000 \
      --json number,title,updatedAt,labels,body,comments
+   gh api --method GET --paginate \
+     'repos/{owner}/{repo}/milestones?state=all&per_page=100'
+   gh project list --owner '{owner}'
    ```
 2. **Classify candidates** against these criteria (the ticketing agent
    applies them, the PM does not re-derive them):
@@ -86,15 +90,17 @@ PM: [presents the prune/prioritize summary, asks for confirmation before closing
      before delegating).
    - **Duplicate** — title/body substantially overlaps an existing open
      issue; link the surviving issue number.
-   - **Obsolete/superseded** — references code, a design, or a milestone
-     that no longer exists (e.g. a removed crate, a merged/abandoned spec).
+   - **Obsolete/superseded** — current default-branch code, tests, specs/ADRs,
+     and history show the requested outcome already landed or no longer exists.
+     A commit that merely mentions the issue is a lead, not sufficient proof.
    - **Won't-fix** — valid report but explicitly out of scope or rejected
      in a prior comment thread.
-3. **Present the candidate list to the user WITH reasons**, one line per
-   issue: `#1234 "Old title" — stale, last activity 214 days ago`. Group by
-   category. **Never close anything silently or in bulk without explicit
-   user confirmation** — this is the conservative default and it is not
-   optional.
+3. **Present the candidate list WITH reasons**, one line per issue. Staleness
+   alone is never enough to close. If the user explicitly asked to close,
+   consolidate, prune, or clean the tracker, that request authorizes the
+   evidence-backed candidates after the exact target/rules are restated. A
+   read-only scan or vague "take a look" does not; request confirmation before
+   closing in that case.
 4. **On confirmation**, delegate the close pass. Each close carries a
    reason comment, not a bare state change:
    ```bash
@@ -106,6 +112,51 @@ PM: [presents the prune/prioritize summary, asks for confirmation before closing
 5. **Report** the final close list back to the user with issue numbers and
    reasons, so the action is auditable after the fact.
 
+## Align Workflow — Labels and Milestones
+
+Run after pruning and before grouping/ranking.
+
+1. **Define deterministic lanes.** Derive track precedence from established
+   component labels/titles/spec ownership. For each track, distinguish active
+   release cleanup, unscheduled backlog, and explicitly paused work. Record
+   feature exclusions for any no-new-features milestone.
+2. **Consolidate labels safely.** Identify semantic aliases and obsolete
+   execution labels. Add the canonical label to every affected item, verify
+   coverage, then delete/deprecate the source. Never delete after a partial
+   migration or transient API error.
+3. **Build destinations first.** Reuse matching open milestones. Create or
+   rename milestones only under an explicit roadmap-organization request.
+   Give every milestone a goal, exclusions, and observable exit criteria.
+4. **Classify conservatively.** Bugs/regressions/security/CI/tests/docs/
+   packaging/bounded maintenance may enter release cleanup. Enhancements,
+   epics, feature-titled work, experiments, and ambiguous items go to backlog.
+   Paused components override all other classifications.
+5. **Reconcile PRs.** Milestone `open_issues` includes PRs while
+   `gh issue list` excludes them. Inspect and move open PRs before closing an
+   apparently empty legacy milestone.
+6. **Verify invariants.** Report unmilestoned count, active-scope violations,
+   label coverage, open milestone list, and failed/retried mutations.
+
+## GitHub Project-Build Workflow
+
+Use only when the user explicitly asks for a board/Project or needs multiple
+planning axes/cross-repository visibility. Issues remain canonical.
+
+1. Inventory `gh project list` and `gh project field-list`; reuse a matching
+   Project rather than creating a parallel board.
+2. Keep fields minimal: built-in `Status`, then stable `Track`, `Delivery lane`,
+   `Priority`, and `Target release` only where they drive decisions.
+3. Add existing issue/PR URLs with `gh project item-add`. Draft items are only
+   for intentionally pre-ticket work.
+4. Resolve Project/item/field/option IDs before `gh project item-edit`; never
+   guess display names into ID parameters.
+5. Prefer three decision views: active release by track, backlog by track, and
+   paused. Do not create views per label or session. Saved-view configuration
+   may not be writable through the available CLI/API; use an authorized UI tool
+   or report the exact remaining manual step instead of claiming success.
+6. Verify item count and field coverage; report orphans rather than silently
+   dropping them.
+
 ## Prioritize Workflow
 
 1. **Delegate the assessment.** Ask the `ticketing` agent to pull open
@@ -113,10 +164,10 @@ PM: [presents the prune/prioritize summary, asks for confirmation before closing
    ```bash
    gh issue list --state open --limit 500 --json number,title,labels,createdAt
    ```
-2. **Classify against priority signal** (age, linked PR activity, explicit
-   user/maintainer escalation, blocking relationship to other open issues,
-   security/data-loss impact) and produce a proposed P0/P1/P2/… label per
-   issue, distinguishing:
+2. **Classify against priority evidence.** Propose a P0/P1/P2/… label only when
+   the issue text, a maintainer decision, or objective security/data-loss signal
+   asserts severity. Age, linked PR activity, and blocking relationships affect
+   the ranked list but do not manufacture a priority label. Distinguish:
    - **Unlabeled** — no priority label at all.
    - **Mislabeled** — current label looks inconsistent with the issue's
      actual signal (e.g. a security bug labeled P3).
@@ -231,13 +282,17 @@ next tasks:
 When running the full `/tm-issues-prune` sweep (no args, all phases), report
 back to the user in this sequence, each section clearly labeled:
 
-1. **Prune summary** — candidates presented, confirmations received, final
+1. **Audit summary** — repository/default branch, inventory counts, and current
+   taxonomy/project findings.
+2. **Prune summary** — candidates presented, authorization/confirmations, final
    close list with reasons (empty if nothing was closed).
-2. **Organized map** — epic → component → theme → orphans, one line per
+3. **Alignment summary** — label merges, milestone moves, active-scope checks,
+   and any intentionally unassigned items.
+4. **Organized map** — epic → component → theme → orphans, one line per
    surviving open issue.
-3. **Ranked list** — the ordered list from the Prioritize (Ranked List)
+5. **Ranked list** — the ordered list from the Prioritize (Ranked List)
    Workflow, each line with its rationale.
-4. **Next-task table** — the Suggest Next markdown table, ending with an
+6. **Next-task table** — the Suggest Next markdown table, ending with an
    explicit prompt for the user to pick a task (or none).
 
 Any phase can also be run standalone via its subcommand (`organize`,
@@ -246,14 +301,17 @@ only that section is reported.
 
 ## Safety Rules
 
-- **Closing is destructive and requires explicit user confirmation** —
-  present candidates first, close second, never combine the two steps into
-  one delegation.
+- **Closing needs authority and evidence.** An explicit user request to close,
+  consolidate, prune, or clean supplies authority for the stated scope after
+  exact candidates/rules are restated. Otherwise present candidates and wait.
+- **Bulk mutations are staged.** Create destination metadata, migrate, verify,
+  then remove source metadata. On partial failure, retain the source and retry
+  only the missing items.
 - **Priority label changes are additive/correctable**, not destructive, but
   still summarize proposed changes before applying them at scale (more than
   a handful of issues).
-- If the user has not specified a staleness window, ask before assuming a
-  default N.
+- If the user has not specified a staleness window, use 90 days for reporting;
+  never close on age alone.
 - Never delegate a prune/prioritize sweep against a repo other than the
   one the active project is registered against — confirm the target repo
   first if it is ambiguous.
@@ -273,8 +331,7 @@ by project configuration instead of always shelling `gh`.
 ## Related Skills
 
 - `tm-ticketing` — the general ticket-driven-development protocol and the
-  GitHub-issues-vs-ticketing-agent routing note this skill deliberately
-  extends for bulk backlog hygiene
+  issue/milestone/Project policy this skill extends for bulk portfolio hygiene
 - `tm-delegation-patterns` — where this fits in the broader agent matrix
 - `tm-circuit-breaker` — CB#6 (forbidden direct tool usage) applies here too:
   the PM delegates, it never runs `gh issue` itself

@@ -1,8 +1,8 @@
 ---
 name: tm-ticketing
-description: The single authority on issues — whether one should exist, deduplication disposition, title/body style, labels, milestones, lifecycle comments, and attribution
+description: The single authority on work-planning artifacts — issue promotion and deduplication, titles/bodies, labels, milestones, GitHub Projects, lifecycle comments, and code-backed portfolio triage
 user-invocable: true
-version: "2.0.0"
+version: "2.1.0"
 category: pm-workflow
 tags: [tickets, issues, promotion-gate, deduplication, labels, pm-required]
 effort: medium
@@ -21,7 +21,8 @@ comment on, or close anything.
 ## Scope
 
 Yours: whether an issue should exist, search and dedup, issue title and body,
-labels, assignee, milestone, comments, state, parent/child links.
+labels, assignee, milestone, comments, state, parent/child links, and GitHub
+Project structure/items/fields.
 
 Not yours: any git operation, and **any PR mutation — including the PR title and
 body**. Those are the `version-control` agent's, delegated by the PM. Ticketing
@@ -138,9 +139,10 @@ justifies escalation.
 
 ## What a Ticket Says
 
-🔴 **Title**: type-aware and specific — `<type>: <what is wrong or wanted>`, e.g.
-`fix(trusty-search): watcher misses renames on external volumes`. Under ~70
-characters. Not "Bug in system".
+🔴 **Title**: outcome-first and specific. Labels already carry type, so do not
+repeat `bug:`, `fix(…)`, `feat(…)`, or `epic:`. Keep a component prefix only
+when it disambiguates the issue, e.g. `trusty-search: Watcher misses
+external-volume renames`. Aim for under ~90 characters. Not "Bug in system".
 
 🔴 **Body**: a concise problem/outcome statement, the decisive evidence, and
 **one to four observable closure conditions**. Nothing else. The form is binding
@@ -180,25 +182,70 @@ model, so a delegation brief never needs to spell it out.
 | Type | exactly one | `bug`, `enhancement`, `refactor`, `chore`, `documentation`, `epic` |
 | Owning component | one or more | The crate or subsystem the defect actually lives in |
 | Priority | optional | `P0`–`P3`, **only** when the issue text itself asserts severity. A guessed priority is noise |
-| Provenance | optional | The harness defaults: `trusty-mpm` plus `ws/<session-name>`, with `--assignee @me` |
+| Workflow state | optional | Stable states such as `release-cleanup`, `backlog`, `paused`, or `blocked` when the repository uses them |
 
 🔴 **Never invent a label the repository does not carry.** Check `gh label list`
 before using one; create a genuinely missing label rather than dropping the
 family or substituting an approximation.
 
+Do not create or apply `ws/<session-name>` labels by default. A session is
+execution provenance, not a durable planning axis. Preserve one only when the
+repository explicitly declares it as an active automation contract.
+
 ## Milestones
 
-🔴 **Leave the milestone UNSET by default.** A milestone is a delivery slot in a
-named release or epic — not a field every issue receives. Set one only when the
-issue is one of:
+For a single new issue, leave the milestone unset unless the user, parent work,
+or repository policy supplies a delivery lane. A milestone may be a named
+release or an intentional portfolio lane such as active release cleanup,
+backlog, or paused work. During an explicit roadmap/portfolio organization
+request, classify every in-scope open issue into one confirmed lane so the
+tracker has no accidental orphans. Set or change a milestone when the item is:
 
 - deliberately scheduled into a release you have confirmed is open;
 - child work that a release-gating parent already carries into that release;
-- identified as a blocker for a release already in flight.
+- identified as a blocker for a release already in flight;
+- deliberately assigned to an established active/backlog/paused lane as part
+  of a user-requested portfolio cleanup.
 
-A milestone is not a label and not a project view. An issue holds many labels and
-exactly one milestone, so parking a workstream or a theme there evicts the real
-release slot. `ws/<session-name>` is always a label.
+A milestone is not a label and not a project view. An issue holds many labels
+and exactly one milestone, so a workstream or theme there evicts the delivery
+lane. No-new-features milestones may contain bugs, regressions, security work,
+CI/tests, documentation corrections, packaging, and bounded maintenance. They
+must not contain `enhancement`/`epic` work or feature-titled requests; route
+those to backlog or paused instead.
+
+## Portfolio Triage and GitHub Projects
+
+When the user asks to organize issues, milestones, groupings, or a Project,
+ticketing runs the full portfolio protocol in the agent asset ("Portfolio Audit
+and Safe Bulk Mutation"). The non-negotiable parts are:
+
+- inventory and paginate before designing;
+- validate stale/implemented claims against the current default branch, specs,
+  tests, and commit history;
+- state deterministic classification rules and counts;
+- create destinations before migrating sources;
+- verify coverage before deleting labels or closing milestones;
+- reconcile GitHub milestone counts with open PRs as well as issues;
+- retry only missing mutations after transient API failures.
+
+GitHub Projects are portfolio views over canonical issues, not a second issue
+store. Use one when the user needs a board, roadmap, cross-repository view, or
+multiple planning axes. Prefer a minimal field model: built-in `Status`, then
+only stable fields such as `Track`, `Delivery lane`, `Priority`, and `Target
+release`. Reuse an existing Project where possible; create one only when the
+user explicitly asks to build/create it.
+
+### Consolidation decisions
+
+- A duplicate shares the same outcome, root cause/decision, owner, and closure
+  test. Similar provider/platform/component siblings are not duplicates.
+- A commit mentioning an issue is not proof it is complete. Close only when
+  current code/tests satisfy the issue's requested outcome, and comment with
+  the implementing commit plus the verification seam.
+- For label aliases, migrate associations and verify counts before deleting the
+  source label. If pagination, rate limits, or a transient API error make the
+  migration incomplete, retain the source label and report the remainder.
 
 ## Lifecycle
 
@@ -246,6 +293,8 @@ configured:
 | `/tm-ticket proceed` | Analyze the board, recommend the top 3 next actions |
 | `/tm-ticket status` | Health metrics, ticket counts, high-priority work, blockers |
 | `/tm-ticket project <url>` | Set the default project/tracker context |
+| `/tm-ticket portfolio` | Align issues, labels, milestones, and Projects against current code/specs |
+| `/tm-ticket project-build` | Create or repair a minimal GitHub Project view over canonical issues |
 
 Every subcommand is a PM delegation to the ticketing agent — the PM constructs
 the prompt and presents the result, never calling the underlying tools itself.

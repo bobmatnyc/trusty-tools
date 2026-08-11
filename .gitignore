@@ -138,3 +138,12 @@ docs/certificates/*.cert
 docs/certificates/*.pem
 docs/certificates/*.key
 docs/certificates/*.mobileprovision
+
+# >>> trusty-mpm harness scaffolding (auto-managed by tm, issue #3427) >>>
+.claude/agents/
+.claude/skills/
+.claude/output-styles/
+.trusty-mpm/sessions/
+.trusty-mpm/logs/
+.trusty-mpm/last-instructions.md
+# <<< trusty-mpm harness scaffolding <<<

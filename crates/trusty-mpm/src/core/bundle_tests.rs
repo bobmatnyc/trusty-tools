@@ -136,6 +136,52 @@ fn tm_skills_are_in_bundle() {
     }
 }
 
+#[test]
+fn ticketing_assets_cover_portfolio_planning_without_session_label_drift() {
+    // Why: ticketing used to force ws/<session> labels and leave milestones
+    // unset, which made bulk roadmap organization impossible and accumulated
+    // execution-only labels as permanent taxonomy.
+    // What: pin the issue/milestone/Project ownership and staged bulk-mutation
+    // protocol in both the agent and its two policy skills.
+    // Test: this test; tcode byte parity is enforced separately by
+    // scripts/check_agent_assets.sh.
+    for required in [
+        "Portfolio Audit and Safe Bulk Mutation",
+        "GitHub Projects — Portfolio Views, Not a Second Tracker",
+        "Never delete a source label",
+    ] {
+        assert!(
+            TICKETING_AGENT.contains(required),
+            "ticketing agent must retain portfolio policy: {required}"
+        );
+    }
+
+    for required in [
+        "Portfolio Triage and GitHub Projects",
+        "A commit mentioning an issue is not proof it is complete",
+        "`/tm-ticket project-build`",
+    ] {
+        assert!(
+            TM_TICKETING.contains(required),
+            "tm-ticketing must retain portfolio policy: {required}"
+        );
+    }
+
+    for required in [
+        "Align Workflow — Labels and Milestones",
+        "GitHub Project-Build Workflow",
+        "Milestone `open_issues` includes PRs",
+    ] {
+        assert!(
+            TM_ISSUES_PRUNE.contains(required),
+            "tm-issues-prune must retain portfolio policy: {required}"
+        );
+    }
+
+    assert!(!TICKETING_AGENT.contains("--label \"ws/$WS_NAME\""));
+    assert!(!TICKETING_AGENT.contains("Every issue carries three label families"));
+}
+
 /// #5202: `tm-pr-workflow` is RETIRED, not aliased.
 ///
 /// Why: the consolidation only holds if there is exactly ONE workflow skill. A
