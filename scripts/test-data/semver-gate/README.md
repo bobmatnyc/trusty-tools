@@ -23,7 +23,8 @@ untouched, because those escapes are the whole point of the fixture.
 | File | Stub exit | Captured from |
 |---|---|---|
 | `break.out` | 100 | `cargo semver-checks -p trusty-mpm --baseline-version 1.3.4 --only-explicit-features` + the 11 default-set features, under rustc 1.97.1. The real 1.3.4 -> 1.3.5 break: 9 major failures. |
-| `clean.out` | 0 | `cargo semver-checks -p trusty-progress --baseline-version 0.2.0 --only-explicit-features`. Already a major bump, so 0 lints apply — the tool's "nothing to compare, and that is fine" shape. |
+| `clean.out` | 0 | `cargo semver-checks -p trusty-progress --baseline-version 0.2.0 --only-explicit-features --release-type minor`. A real all-pass verdict: `196 checks: 196 pass, 58 skip`. |
+| `all-skipped.out` | 0 | The same command WITHOUT `--release-type`, so the tool infers "major change" from 0.2.0 -> 0.3.0 and skips its entire lint set: `0 checks: 0 pass, 254 skip` + `Summary no semver update required`, at exit 0. This file used to be named `clean.out` and drove the gate's "clean" case — which is the #5440 defect exactly: zero work done was the fixture for a pass. |
 | `build-error.out` | 101 | The same `trusty-mpm` command under the repo MSRV 1.94.1, where the scratch resolution takes `takecell` 0.1.2 (`rust-version` 1.96) and rustdoc refuses to build. This is the defect #5289 was filed for. |
 | `silent-noop.out` | 0 | **Synthetic.** No real invocation produces exit 0 with no `checks:` summary today. It pins the fail-closed rule: "the tool said nothing" must never be read as "the tool said pass". |
 | `clean-colored.out` | 0 | The `tga` 2.16.0 -> 2.17.0 run of PR #5458, [job 93874563097](https://github.com/bobmatnyc/trusty-tools/actions/runs/31520044458/job/93874563097). 196 pass, no break — and the gate announced it as "exited 0 without completing a check run". |
