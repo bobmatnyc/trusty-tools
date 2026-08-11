@@ -175,6 +175,14 @@ pub mod tools;
 pub mod transport;
 #[cfg(feature = "axum-server")]
 pub mod web;
+/// Issue #5399: WordNet-backed part-of-speech membership for KG extraction.
+///
+/// Why: the #4678 lexical stopword filter cannot separate two ordinary content
+/// words, which is what `exhaustiveness --is-a--> hard` needs.
+/// What: exports [`wordnet_pos::WordNetPos`] and the `NOUN`/`VERB`/`ADJ`/`ADV`
+/// bitmask constants. There is no global and no load step — see the module docs.
+/// Test: see unit tests inside this module.
+pub mod wordnet_pos;
 
 pub use activity::{ActivityEntry, ActivityFilter, ActivityLog, ActivitySource};
 pub use attribution::{CreatorInfo, CreatorSource};
