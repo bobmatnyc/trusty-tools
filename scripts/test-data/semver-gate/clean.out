@@ -1,12 +1,12 @@
     Building trusty-progress v0.3.0 (current)
-       Built [   2.766s] (current)
+       Built [   4.552s] (current)
      Parsing trusty-progress v0.3.0 (current)
-      Parsed [   0.001s] (current)
+      Parsed [   0.006s] (current)
     Building trusty-progress v0.2.0 (baseline)
-       Built [   2.108s] (baseline)
+       Built [   5.832s] (baseline)
      Parsing trusty-progress v0.2.0 (baseline)
-      Parsed [   0.001s] (baseline)
-    Checking trusty-progress v0.2.0 -> v0.3.0 (major change)
-     Checked [   0.000s] 0 checks: 0 pass, 254 skip
+      Parsed [   0.002s] (baseline)
+    Checking trusty-progress v0.2.0 -> v0.3.0 (assume minor change)
+     Checked [   0.011s] 196 checks: 196 pass, 58 skip
      Summary no semver update required
-    Finished [   5.613s] trusty-progress
+    Finished [  11.773s] trusty-progress
