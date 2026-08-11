@@ -160,6 +160,18 @@ pub mod launchd_labels;
 /// Test: `cargo test -p trusty-common supervision`.
 pub mod supervision;
 
+/// Bounded `ETXTBSY` retry for process spawns (issue #5446).
+///
+/// Why: four independent copies of the same retry had grown across
+/// `trusty-agents`, `trusty-common`, and `trusty-mpm` (#1528, #1634, #3570,
+/// #5391; class epic #3451), so a policy fix had to land four times.
+/// What: [`spawn_retry::retry_on_etxtbsy`] (sync) and
+/// [`spawn_retry::retry_on_etxtbsy_async`] share one policy function. Ungated —
+/// `tokio` with `process` + `time` is already an unconditional dependency of
+/// this crate, so the async driver adds nothing to the dependency graph.
+/// Test: `cargo test -p trusty-common spawn_retry`.
+pub mod spawn_retry;
+
 #[cfg(feature = "axum-server")]
 pub mod server;
 

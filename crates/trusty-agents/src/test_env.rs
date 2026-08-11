@@ -335,42 +335,28 @@ pub fn write_executable_script(dir: &Path, name: &str, contents: &str) -> PathBu
 /// flush timing under heavy CI load can delay the execute permission becoming
 /// visible to `execve`. A small bounded retry (≤3 attempts, 5 ms back-off)
 /// acts as belt-and-suspenders without hiding real failures.
-/// What: Constructs a `tokio::process::Command` fresh on each attempt
-/// (required because `Command` is not `Clone`) and calls `.spawn()`.
-/// On ETXTBSY it backs off and retries; on any other error or after
-/// `MAX_ATTEMPTS` ETXTBSY hits it returns the error immediately.
-/// The stdio setup (stdin null / stdout piped / stderr inherited) matches
-/// the pattern used by all subprocess and claude-code-runner tests.
-/// Test: Covered indirectly by every async test that calls `spawn_script`;
-/// a direct unit test would require artificially injecting ETXTBSY which is
-/// impractical in pure Rust tests. The helper's correctness is validated by
-/// the absence of CI failures after the refactor.
+/// What: constructs a `tokio::process::Command` fresh on each attempt
+/// (required because `Command` is not `Clone`) and calls `.spawn()` through
+/// [`trusty_common::spawn_retry::retry_on_etxtbsy_async`], the workspace's one
+/// ETXTBSY policy (#5446). The stdio setup (stdin null / stdout piped / stderr
+/// inherited) matches the pattern used by all subprocess and
+/// claude-code-runner tests.
+/// Test: the retry contract is pinned by `trusty_common::spawn_retry::tests`;
+/// this helper's stdio wiring is covered indirectly by every async test that
+/// calls `spawn_script`.
 #[cfg(unix)]
 pub async fn spawn_script(path: &std::path::Path) -> std::io::Result<tokio::process::Child> {
     use std::process::Stdio;
 
-    const MAX_ATTEMPTS: u32 = 3;
-    const BACKOFF_MS: u64 = 5;
-
-    let mut last_err: Option<std::io::Error> = None;
-    for attempt in 0..MAX_ATTEMPTS {
-        let mut cmd = tokio::process::Command::new(path);
-        cmd.stdin(Stdio::null())
+    // #5446: the retry policy is trusty-common's, and wraps `.spawn()` alone.
+    trusty_common::spawn_retry::retry_on_etxtbsy_async(|| {
+        tokio::process::Command::new(path)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        match cmd.spawn() {
-            Ok(child) => return Ok(child),
-            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                last_err = Some(e);
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    BACKOFF_MS * (1 << attempt),
-                ))
-                .await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last_err.unwrap())
+            .stderr(Stdio::inherit())
+            .spawn()
+    })
+    .await
 }
 
 /// Tests for this module's own #3957 durability guards.
