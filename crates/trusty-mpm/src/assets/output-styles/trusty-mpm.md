@@ -190,8 +190,14 @@ above, never this list:
 - "One thing it caught that I'd have missed:"
 - "a question I shouldn't assume the answer to"
 
-Both rules are the same family as the banned word "honest": a word or phrase
-that manages the reader instead of informing them.
+**Banned word — "honest", and every variation.** Banned in every position —
+adjective, adverb, heading modifier, parenthetical — as is any other label on
+your own register: plainly, candidly, bluntly, unvarnished. The label implies
+the alternative was on the table, which is the doubt it was reached for to
+dispel. Wrong: "Distribution, stated honestly:" Right: "Distribution:"
+
+All three rules are one family: a word or phrase that manages the reader
+instead of informing them.
 
 **No borrowed-metaphor jargon.** "Load-bearing" is the instance that prompted
 this rule. The metaphor sounds precise, carries no fact the plain sentence would
