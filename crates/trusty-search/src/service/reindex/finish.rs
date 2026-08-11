@@ -390,6 +390,9 @@ pub(super) async fn finish_reindex(
         progress.status.store(ReindexStatus::Complete);
         // Issue #75: refresh the captured HEAD SHA.
         let new_sha = crate::core::git::head_sha(&handle.root_path);
+        // #4391: the in-memory stamp dies with the handle — persist it so the
+        // next boot compares against what was actually indexed, not live HEAD.
+        crate::service::boot_markers::persist_indexed_head_sha(&handle.id.0, new_sha.as_deref());
         *handle.indexed_head_sha.write().await = new_sha;
         // Issue #878: stamp the authoritative last-indexed timestamp.
         *handle.last_indexed_at.write().await = Some(now_rfc3339());
@@ -531,6 +534,11 @@ pub(super) async fn finish_reindex(
         // hold time on `handle.indexer`'s read lock is small and bounded by
         // corpus size, not worth the added public-API surface.
         let pending_chunks = handle.indexer.read().await.pending_embed_count().await;
+        // #4390: record the pass as outstanding BEFORE it is queued. C2 commits
+        // its vectors once at the very end, so a stop anywhere inside it
+        // persists none of them; this marker is the only thing that survives to
+        // tell the next boot the pass is still owed.
+        crate::service::boot_markers::persist_deferred_embed_pending(&handle.id.0, true);
         spawn_deferred_embed_pass(handle, progress.clone(), pending_chunks);
     }
 

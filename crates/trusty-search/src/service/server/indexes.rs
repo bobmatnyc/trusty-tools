@@ -520,6 +520,13 @@ pub(super) async fn create_index_handler(
             // #4095: a freshly-created index has an existing root by
             // construction, so no ambiguity clock is running.
             ambiguous_root_since_unix: None,
+            // #4391: registration is not indexing — the corpus is empty until a
+            // reindex runs, so claiming a HEAD SHA here would tell the next boot
+            // this index is current when nothing has been walked. `finish_reindex`
+            // writes the first genuine stamp.
+            indexed_head_sha: None,
+            // #4390: no deferred-embed pass has been queued for a new index.
+            deferred_embed_pending: false,
         },
     ) {
         tracing::warn!("could not persist index registry for {}: {e}", req.id);

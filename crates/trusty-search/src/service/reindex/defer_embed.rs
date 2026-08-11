@@ -47,7 +47,7 @@ use std::sync::Arc;
 /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent` and
 /// `failing_deferred_embed_pass_marks_semantic_failed` in this module's
 /// tests; queue ordering is covered in `defer_embed_queue`'s tests.
-pub(super) fn spawn_deferred_embed_pass(
+pub(crate) fn spawn_deferred_embed_pass(
     handle: Arc<IndexHandle>,
     progress: Arc<ReindexProgress>,
     total_chunks: usize,
@@ -170,9 +170,19 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
             // `Failed`, not `Ready`. Gathered before the stages write lock so
             // the indexer lock is never nested inside it.
             let broken = super::stages::semantic_health_reason(&handle).await;
+            // #4390: clear the durable pending marker only when this pass
+            // reached a state that owes no further work — `Ready` (the vectors
+            // are committed and snapshotted) or `Skipped` (the vector lane was
+            // disabled mid-pass, so the work is owed to nobody). A `Failed`
+            // outcome deliberately KEEPS the marker: the chunks really are
+            // still un-embedded, warm boot re-derives `semantic` from the
+            // on-disk snapshot and would report `Ready` again on the next boot,
+            // so the marker is the only thing that survives to re-arm the pass.
+            let mut settled = false;
             {
                 let mut stages = handle.stages.write().await;
                 if stages.semantic.status == StageStatus::Skipped {
+                    settled = true;
                     tracing::info!(
                         "deferred_embed[{}]: vector disabled mid-pass — leaving semantic \
                          Skipped ({embedded}/{total} chunks embedded but not published as \
@@ -187,7 +197,11 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
                     stages.semantic.completed_at = Some(now_rfc3339());
                     stages.semantic.embedded = Some(embedded);
                     stages.semantic.total = Some(total);
+                    settled = true;
                 }
+            }
+            if settled {
+                crate::service::boot_markers::persist_deferred_embed_pending(&index_id.0, false);
             }
             progress
                 .push(serde_json::json!({
@@ -222,6 +236,11 @@ pub(crate) async fn run_embed_catch_up(handle: Arc<IndexHandle>, progress: Arc<R
                 .await;
             // Issue #929: semantic.total was pre-seeded before embedding;
             // the Failed state replaces it (StageState::failed clears it).
+            // #4390: the pending marker is deliberately left SET here — the
+            // chunks are still un-embedded, and `Failed` does not survive a
+            // restart (warm boot re-derives the stage from the on-disk HNSW
+            // snapshot), so the marker is what re-arms the pass on the next
+            // boot instead of leaving the index silently short its vectors.
         }
     }
 }

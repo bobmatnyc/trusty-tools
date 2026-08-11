@@ -108,11 +108,10 @@ async fn corpus_open_failure_propagates_to_failed_stage() {
     let redb_path = colocated_dir.join("index.redb");
     std::fs::create_dir_all(&redb_path).unwrap(); // directory, not file
 
-    let entry = PersistedIndex {
-        id: "test-1158".to_string(),
-        root_path: root.clone(),
-        colocated: true,
-        ..Default::default()
+    let entry = {
+        let mut e = PersistedIndex::new("test-1158".to_string(), root.clone());
+        e.colocated = true;
+        e
     };
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(8));
 

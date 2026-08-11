@@ -1,3 +1,5 @@
+/// #4390 / #4391: durable boot-integrity markers on `indexes.toml`.
+pub mod boot_markers;
 pub mod call_chain;
 #[cfg(feature = "candle")]
 pub mod candle_embedder;

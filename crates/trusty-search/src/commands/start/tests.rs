@@ -427,11 +427,10 @@ fn restore_moved_colocated_index_relinks_unique_candidate() {
 
     // Entry whose root_path no longer exists.
     let dead_root = std::path::PathBuf::from("/tmp/trusty-484-dead-root-xyz9999");
-    let entry = PersistedIndex {
-        id: "moved-project".to_string(),
-        root_path: dead_root.clone(),
-        colocated: true,
-        ..Default::default()
+    let entry = {
+        let mut e = PersistedIndex::new("moved-project".to_string(), dead_root.clone());
+        e.colocated = true;
+        e
     };
 
     // #4846: the tracked-root walk moved out of `try_locate_moved_root` into
@@ -467,11 +466,10 @@ fn restore_missing_root_with_no_candidate_returns_none() {
     crate::service::roots_registry::upsert_root(empty_root.path().to_path_buf()).unwrap();
 
     let dead_root = std::path::PathBuf::from("/tmp/trusty-484-no-candidate-xyz9999");
-    let entry = PersistedIndex {
-        id: "no-candidate".to_string(),
-        root_path: dead_root.clone(),
-        colocated: true,
-        ..Default::default()
+    let entry = {
+        let mut e = PersistedIndex::new("no-candidate".to_string(), dead_root.clone());
+        e.colocated = true;
+        e
     };
 
     // #4846: the tracked-root walk moved out of `try_locate_moved_root` into
@@ -514,11 +512,10 @@ fn restore_missing_root_with_ambiguous_candidates_returns_none() {
     crate::service::roots_registry::upsert_root(root_b.path().to_path_buf()).unwrap();
 
     let dead_root = std::path::PathBuf::from("/tmp/trusty-484-ambiguous-xyz9999");
-    let entry = PersistedIndex {
-        id: "ambiguous".to_string(),
-        root_path: dead_root,
-        colocated: true,
-        ..Default::default()
+    let entry = {
+        let mut e = PersistedIndex::new("ambiguous".to_string(), dead_root);
+        e.colocated = true;
+        e
     };
 
     // #4846: the tracked-root walk moved out of `try_locate_moved_root` into

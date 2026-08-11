@@ -56,11 +56,10 @@ fn make_walkable_root(base: &Path) -> PathBuf {
 
 /// A colocated entry pointing at `root`.
 fn colocated_entry(id: &str, root: PathBuf) -> PersistedIndex {
-    PersistedIndex {
-        id: id.to_string(),
-        root_path: root,
-        colocated: true,
-        ..Default::default()
+    {
+        let mut e = PersistedIndex::new(id.to_string(), root);
+        e.colocated = true;
+        e
     }
 }
 

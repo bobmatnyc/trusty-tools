@@ -213,11 +213,16 @@ pub(crate) async fn restore_index_on_demand(
         .collect();
     indexer.set_domain_terms(entry.domain_terms.clone());
 
-    let indexed_head_sha = crate::core::git::head_sha(&entry.root_path);
+    // #4391: same fix as `start_restore` — a lazy reload that re-derived the SHA
+    // from live git made the query-wake reconcile inert for cold-parked and
+    // selectively-warm-booted indexes, the two cases `tickers.rs` cites as safe.
+    let indexed_head_sha = crate::service::boot_markers::resolve_indexed_head_sha(&entry);
     let lexical_only = entry.lexical_only;
     let skip_kg = entry.skip_kg;
     let skip_vector = entry.skip_vector;
     let defer_embed = entry.defer_embed;
+    // #4390: read the marker before `entry` is consumed by the handle below.
+    let deferred_embed_pending = entry.deferred_embed_pending;
 
     // Issue #1158: read corpus_open_failed before chunk_count so a redb
     // incompatible-format failure surfaces as Failed instead of InProgress.
@@ -289,5 +294,14 @@ pub(crate) async fn restore_index_on_demand(
             crate::core::registry::WalkDiagnostics::default(),
         )),
     };
-    state.registry.register(handle);
+    let registered = state.registry.register(handle);
+    // #4390: a cold-parked index reloaded on demand gets the same re-arm the
+    // eager warm-boot path does — otherwise an interrupted pass on a parked
+    // index would wait for an unrelated reindex, indefinitely on a quiet repo.
+    crate::service::boot_markers::rearm_deferred_embed_if_pending(
+        &registered,
+        deferred_embed_pending,
+        chunk_count,
+    )
+    .await;
 }
