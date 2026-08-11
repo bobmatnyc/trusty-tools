@@ -207,7 +207,9 @@ pub(crate) async fn handle_remove_prompt_fact(state: &AppState, args: Value) -> 
 /// hits and misses alike. On a miss it adds `graph_state` —
 /// `"subject_not_found"` or `"graph_empty"` — and the matching `hint`; a hit
 /// carries neither, so their absence means the subject was found. See
-/// [`crate::bootstrap::KgMiss`] for the classification.
+/// [`crate::bootstrap::KgMiss`] for the classification. A failed count read is
+/// an error (#5384), never a `graph_empty` verdict — the classifier only ever
+/// sees a total it actually read.
 /// Test: `kg_query_reports_subject_not_found_when_graph_has_other_subjects`,
 /// `kg_query_reports_graph_empty_when_graph_has_no_triples`,
 /// `dispatch_kg_assert_then_query`.
@@ -239,7 +241,12 @@ pub(crate) async fn handle_kg_query(state: &AppState, args: Value) -> Result<Val
         .collect();
     // #4775: read the whole-graph total so a miss can name which miss it is
     // instead of asserting emptiness the handler can disprove.
-    let total_active = handle.kg.count_active_triples();
+    // #5384: propagate a failed count read — classifying on a fail-open 0
+    // would report `graph_empty`, the claim #4775 exists to prevent.
+    let total_active = handle
+        .kg
+        .count_active_triples()
+        .context("kg.count_active_triples")?;
     let mut response = json!({
         "subject": subject,
         "triples": payload,
