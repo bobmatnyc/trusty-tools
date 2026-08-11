@@ -182,6 +182,17 @@ impl CorpusStore {
     /// deserialization, so a row that will not parse is carried forward rather
     /// than silently dropped — whether it can be merged is the load path's
     /// verdict to report, not this one's to pre-empt.
+    ///
+    /// That is a deliberate behavior change worth knowing when debugging a
+    /// graph that stays degraded across reindexes. `load_contrib_graphs` fails
+    /// all-or-nothing on the first row that will not deserialize. Before this
+    /// copy existed, a reindex destroyed such a row along with every valid one,
+    /// which incidentally left the table empty and readable again — the graph
+    /// "healed" by losing data. It now persists, so the load keeps failing on
+    /// every boot and `save_then_merge_contrib` keeps degrading to the
+    /// derived-only graph until the producer re-ingests or the row is deleted.
+    /// Preserving data inertly beats destroying it silently, and #5505's
+    /// `blocking_producer` names the row to fix.
     /// Test: `copy_contrib_from_carries_every_producer`,
     /// `copy_contrib_from_missing_source_table_is_a_no_op`,
     /// `copy_contrib_from_preserves_an_unreadable_row` below; end-to-end in

@@ -162,6 +162,15 @@ pub(super) async fn begin_staged_corpus_swap(
             // `kg_contrib` the way the chunk rebuild regenerates `kg_nodes` /
             // `kg_edges`. Unconditional, because force is the path that
             // otherwise carries nothing at all.
+            //
+            // Its own read transaction, opened after `copy_all_from` commits.
+            // An ingest landing between this snapshot and `swap_corpus_store`
+            // below writes to the LIVE corpus and is missed by the promotion —
+            // a window bounded by this copy's own duration, so narrower than
+            // the #839 chunk window it sits inside. It also extends that
+            // pre-existing chunk window by however long this copy takes, which
+            // is small: `kg_contrib` holds one blob per producer against a
+            // whole-corpus copy.
             let carried = store.copy_contrib_from(&live).with_context(|| {
                 format!(
                     "reindex[{index_id_str}]: failed to carry the contributed graph overlay into \
