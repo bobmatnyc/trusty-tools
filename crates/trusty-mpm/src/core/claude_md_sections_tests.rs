@@ -1744,15 +1744,15 @@ fn the_prose_rules_ban_categories_not_phrase_lists() {
         );
 
         assert!(
-            body.contains("**Delete the framing opener; lead with the fact.**"),
-            "{id}: must carry the framing-opener rule"
+            body.contains("**If you are saying it, its worth is implied.**"),
+            "{id}: must carry the significance-framing rule"
         );
         assert!(
             body.contains("`One <noun> that <its significance, or your relation to it>:`"),
-            "{id}: the framing-opener rule must state the TEMPLATE"
+            "{id}: the significance-framing rule must keep the TEMPLATE as one shape"
         );
         assert!(
-            body.contains("the rule is the template\nabove, never this list"),
+            body.contains("the rule is the sentence\nabove, never this list"),
             "{id}: the observed instances must be marked as illustration only"
         );
 
@@ -1791,7 +1791,7 @@ fn the_prose_rules_live_in_the_output_style_not_core() {
 
     for restated in [
         "**No praise for the user.**",
-        "**Delete the framing opener; lead with the fact.**",
+        "**If you are saying it, its worth is implied.**",
         "bans the CATEGORY",
         "**Do not embellish.**",
     ] {
