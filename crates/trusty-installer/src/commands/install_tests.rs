@@ -273,30 +273,38 @@ fn exit_code_reflects_all_ok() {
     assert_eq!(bad.exit_code(), 2);
 }
 
-/// Why: Re-review fix — `binary_size` must resolve under a non-default
-/// `CARGO_HOME` (CI installs there). The rule lives in the pure
-/// `cargo_bin_dir_from_env`, exercised here WITHOUT mutating the process
-/// environment so the test is safe to run in parallel with any other test.
-/// What: A non-empty value yields `<that>/bin`.
+// #4964: `cargo_bin_dir_from_env`'s two tests moved to `trusty-common` as
+// `bin_resolve::tests::canonical_bin_dir_from_*` — the local copy of the rule
+// they covered was one of five, and is now the shared
+// `trusty_common::bin_resolve::canonical_bin_dir`. The coverage is unchanged
+// (same three cases, plus a fourth for the no-home case); it just lives beside
+// the one implementation.
+
+/// Why (#4964): `binary_size` used to join a bare binary NAME onto the cargo
+/// bin dir while `install_one` writes to `install_dir` — so on the prebuilt
+/// branch it stat'ed a stale copy, or nothing at all, and the component
+/// table's size column described a file this run never touched. Taking the
+/// concrete path removes the second directory entirely.
+/// What: the reported size is the byte length of the file AT THE GIVEN PATH,
+/// in a directory that is provably not any cargo bin dir.
 /// Test: This is the test.
 #[test]
-fn cargo_bin_dir_from_env_honours_value() {
-    assert_eq!(
-        cargo_bin_dir_from_env(Some("/tmp/fake-cargo-home")),
-        Some(std::path::PathBuf::from("/tmp/fake-cargo-home").join("bin"))
-    );
+fn binary_size_reads_the_concrete_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("trusty-search");
+    std::fs::write(&path, b"0123456789").expect("write");
+    assert_eq!(binary_size(&path), 10);
 }
 
-/// Why: An empty or absent `CARGO_HOME` must fall back to `~/.cargo/bin`.
-/// What: Both `Some("")` and `None` resolve to a path ending in `.cargo/bin`.
+/// Why: the size column must still render for a binary that cannot be stat'ed
+/// (a permissions failure, a race with an external mover) rather than aborting
+/// the install report.
+/// What: a missing path reports 0.
 /// Test: This is the test.
 #[test]
-fn cargo_bin_dir_from_env_falls_back() {
-    for value in [Some(""), None] {
-        if let Some(p) = cargo_bin_dir_from_env(value) {
-            assert!(p.ends_with(std::path::Path::new(".cargo").join("bin")));
-        }
-    }
+fn binary_size_is_zero_for_a_missing_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert_eq!(binary_size(&dir.path().join("absent-4964")), 0);
 }
 
 // ── select_prebuilt_bin_path / cargo_fallback_bin_path (#3554 review — MEDIUM) ──

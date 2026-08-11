@@ -397,11 +397,14 @@ async fn install_all(
     let checklist = LiveChecklist::new(&narr.output(), &names);
 
     // Resolve the install directory once for post-install hooks (Phase 7 & 8).
-    let install_dir = crate::download::default_install_dir().unwrap_or_else(|| {
-        dirs::home_dir()
-            .map(|h| h.join(".cargo").join("bin"))
-            .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"))
-    });
+    // #4964: the fallback is the SHARED `canonical_bin_dir()`. It used to be an
+    // inline `~/.cargo/bin` join that never read `CARGO_HOME`, so it named a
+    // directory `cargo install` does not write to whenever `CARGO_HOME` was set
+    // — while the sibling fallback in `install_one` (same job, six hundred
+    // lines away) did read it.
+    let install_dir = crate::download::default_install_dir()
+        .or_else(trusty_common::bin_resolve::canonical_bin_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
 
     // #3554: the real $PATH, resolved once, used by every member's
     // shadow-detection check below.
@@ -426,7 +429,13 @@ async fn install_all(
         match install_one(m).await {
             Ok(installed) => {
                 checklist.set(&m.crate_name, ComponentState::Verifying);
-                tracker.add(Component::new(m.binary.clone(), binary_size(&m.binary)));
+                // #4964: size of the binary THIS run just placed, at its
+                // concrete path — never a name re-joined onto a directory the
+                // install may not have written to.
+                tracker.add(Component::new(
+                    m.binary.clone(),
+                    binary_size(&installed.path),
+                ));
                 // Phase 7: bootstrap trusty-mpm supervisor plist (fail-soft).
                 // #3527: gated behind the SAME `--no-service` /
                 // `TCTL_NO_SERVICE_BOOTSTRAP` decision as every other daemon —
@@ -524,7 +533,13 @@ async fn install_all(
                 // (#2566 review — `--json` previously reported `all_ok: true`
                 // even when every daemon's service bootstrap had failed).
                 let (service_ok, service_detail) = if plans_service_bootstrap(m, service_enabled) {
-                    let action = bootstrap_member_service(&m.binary);
+                    // #4964 Phase 0.2: pass the CONCRETE path this install just
+                    // wrote. Passing a bare name let `which::which` pick a
+                    // stale earlier-on-PATH copy, whose `service install` bakes
+                    // its OWN `current_exe()` into `ProgramArguments[0]` — so
+                    // launchd's KeepAlive then respawned the stale binary at
+                    // every boot, forever, with nothing to rewrite the plist.
+                    let action = bootstrap_member_service(&m.binary, Some(&installed.path));
                     let note = action.note(&m.binary);
                     // #4470: classified by the enum itself, never re-derived
                     // here. An inline `matches!` at this call site is exactly
@@ -728,9 +743,17 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 /// Why: Prebuilt binaries install in seconds without requiring a Rust toolchain;
 /// the cargo path is the universal fallback for unsupported platforms and failures.
 ///
-/// What: Resolves the install directory (prefers `~/.local/bin` to avoid cdhash
-/// issues on macOS; falls back to cargo path via `perform_upgrade_captured` when
-/// prebuilt fails). Calls `crate::download::try_install_prebuilt`; on
+/// #4964: this doc used to claim `~/.local/bin` was preferred "to avoid cdhash
+/// issues on macOS". It is not. What keeps the macOS cdhash cache consistent is
+/// the atomic `rename` in `crate::download::fetch` — writing a temp file beside
+/// the destination and renaming over it, so the kernel never sees a
+/// partially-overwritten inode. That property holds in ANY directory; the
+/// destination has nothing to do with it. `~/.local/bin` is the default because
+/// `install.sh` uses it, nothing more.
+///
+/// What: Resolves the install directory (`crate::download::default_install_dir`,
+/// today `~/.local/bin`; falls back to cargo path via `perform_upgrade_captured`
+/// when prebuilt fails). Calls `crate::download::try_install_prebuilt`; on
 /// `Outcome::Fallback` — which fires on ANY prebuilt-download failure (network
 /// blip, 404, rate-limit, SHA mismatch), not just an unsupported platform, so
 /// this path is reachable even on a Tier-1 machine — emits a narration line
@@ -760,20 +783,13 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
     use crate::download::{self, Outcome};
 
-    // Resolve the install directory — prefer ~/.local/bin (the default used by
-    // install.sh) so the prebuilt binary lands where the user expects; fall back
-    // to the cargo-install path when it cannot be determined.
-    let install_dir = download::default_install_dir().unwrap_or_else(|| {
-        // Fallback: CARGO_HOME/bin or ~/.cargo/bin.
-        let cargo_home = std::env::var("CARGO_HOME").unwrap_or_default();
-        if cargo_home.is_empty() {
-            dirs::home_dir()
-                .map(|h| h.join(".cargo").join("bin"))
-                .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"))
-        } else {
-            std::path::PathBuf::from(&cargo_home).join("bin")
-        }
-    });
+    // Resolve the install directory — currently `~/.local/bin` (the default
+    // `install.sh` uses), falling back to the cargo bin dir when the home
+    // directory cannot be determined (#4964: the shared `canonical_bin_dir()`,
+    // so this fallback and `install_all`'s read `CARGO_HOME` the same way).
+    let install_dir = download::default_install_dir()
+        .or_else(trusty_common::bin_resolve::canonical_bin_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
 
     // #3846 code-critic MEDIUM fix: capture "did a binary already exist" at
     // BOTH candidate destinations before EITHER write path below can run —
@@ -864,48 +880,31 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
     }
 }
 
-/// Best-effort on-disk size of an installed binary (for the component row).
+/// Best-effort on-disk size of a just-installed binary (for the component row).
 ///
-/// Why: The rustup-style table shows a size column; we look up the installed
-/// file's size, defaulting to 0 when it cannot be resolved (the row still renders).
-/// What: Resolves the cargo bin directory (`$CARGO_HOME/bin`, falling back to
-/// `~/.cargo/bin`) so the size resolves under a non-default `CARGO_HOME` (CI),
-/// then returns `<bin>/<binary>`'s byte length or 0.
-/// Test: Side-effect-only (filesystem); `cargo_bin_dir` is unit-tested in
-/// `tests::cargo_bin_dir_honours_cargo_home`.
-fn binary_size(binary: &str) -> u64 {
-    cargo_bin_dir()
-        .map(|d| d.join(binary))
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map(|md| md.len())
-        .unwrap_or(0)
+/// Why (#4964): this took a bare binary NAME and joined it onto the cargo bin
+/// dir, while `install_one` writes to `install_dir` (`~/.local/bin` on the
+/// prebuilt branch). The two disagreed, so the size column reported a stale
+/// copy's bytes — or 0 when no cargo copy existed at all — for the binary that
+/// had just been placed somewhere else. Taking the CONCRETE path
+/// `install_one` reports makes the divergence structurally impossible rather
+/// than merely fixed, on either branch and under any future destination.
+/// What: returns `path`'s byte length, or 0 when it cannot be stat'ed (the row
+/// still renders).
+/// Test: `tests::binary_size_reads_the_concrete_path`,
+/// `tests::binary_size_is_zero_for_a_missing_path`.
+fn binary_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|md| md.len()).unwrap_or(0)
 }
 
 /// Resolve the cargo binary install directory.
 ///
-/// Why: `cargo install` honours `CARGO_HOME`; hardcoding `~/.cargo/bin` would
-/// mis-resolve installed-binary sizes under a custom `CARGO_HOME` (e.g. CI).
-/// What: Reads `CARGO_HOME` from the process environment and delegates to the
-/// pure [`cargo_bin_dir_from_env`] (which holds the testable resolution rule).
-/// Test: `cargo_bin_dir_from_env` is unit-tested directly in
-/// `tests::cargo_bin_dir_from_env_*`; this wrapper is the side-effecting shell.
+/// Why (#4964): a thin alias for the shared
+/// [`trusty_common::bin_resolve::canonical_bin_dir`] — this file used to carry
+/// its own `CARGO_HOME` read, one of five copies of the same rule.
+/// What: `$CARGO_HOME/bin`, falling back to `~/.cargo/bin`.
 fn cargo_bin_dir() -> Option<std::path::PathBuf> {
-    cargo_bin_dir_from_env(std::env::var("CARGO_HOME").ok().as_deref())
-}
-
-/// Pure resolution of the cargo bin directory from a `CARGO_HOME` value.
-///
-/// Why: Extracting the rule from the env read makes it testable WITHOUT mutating
-/// the process-global environment, so the test is safe under parallel execution.
-/// What: Returns `<cargo_home>/bin` when `cargo_home` is `Some` and non-empty,
-/// otherwise `~/.cargo/bin` (or `None` when the home dir cannot be resolved).
-/// Test: `tests::cargo_bin_dir_from_env_honours_value`,
-/// `tests::cargo_bin_dir_from_env_falls_back`.
-fn cargo_bin_dir_from_env(cargo_home: Option<&str>) -> Option<std::path::PathBuf> {
-    match cargo_home {
-        Some(home) if !home.is_empty() => Some(std::path::PathBuf::from(home).join("bin")),
-        _ => dirs::home_dir().map(|h| h.join(".cargo").join("bin")),
-    }
+    trusty_common::bin_resolve::canonical_bin_dir()
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────
