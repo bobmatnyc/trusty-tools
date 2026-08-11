@@ -59,8 +59,8 @@ compares to.
 ## What runs
 
 For the named crate, the gate resolves the **previous release** — the greatest
-non-yanked crates.io version strictly below the crate's declared version — and
-runs `cargo semver-checks` against it. `--crate` accepts either the package name
+non-yanked **stable** crates.io version strictly below the crate's declared
+version — and runs `cargo semver-checks` against it. `--crate` accepts either the package name
 (`tga`) or the `crates/` directory name (`trusty-git-analytics`), because a
 release tag's prefix can be either
 ([#1128](https://github.com/bobmatnyc/trusty-tools/issues/1128)).
@@ -85,6 +85,35 @@ probe trusty-search: baseline=0.45.0                   # declared version: 0.45.
 time and the right one after the publish, so the verdict no longer depends on
 where in the release sequence the gate happens to run.
 
+### Pre-releases are never a baseline
+
+A pre-release is excluded from baseline selection outright — not merely ordered
+correctly below the version it shadows. Nothing resolves `^1.0` to `1.0.0-rc1`
+unless someone names it exactly, so a break measured against a pre-release is one
+no ordinary dependent can experience, while the real break against the stable
+release it shadows goes unreported. `release_type` also strips the suffix, so
+`1.0.1-beta → 1.0.1` computes as `none` and the gate would demand a bump over a
+version nobody uses.
+
+This was live: `key()` stripped the pre-release suffix before parsing, `1.0.0-rc1`
+and `1.0.0` both keyed to `(1, 0, 0)`, and the tie went to whichever the index
+listed first.
+
+```
+history ["0.9.9", "1.0.0-rc1", "1.0.0", "1.0.1-beta"], declared 1.0.1
+  before:  baseline=1.0.0-rc1
+  after:   baseline=1.0.0   (pre-release below=1.0.1-beta, recorded, not used)
+```
+
+When the **only** release below the declared version is a pre-release, the gate
+skips and names the version it refused — it does not share the generic "nothing
+below" message, which would hide a rejection behind a fact. A crate with no
+stable predecessor has no dependent to break.
+
+`--probe <crate> --probe-version <X>` answers "what would you compare against if
+this crate declared X?" without editing a `Cargo.toml`. It is read only by
+`--probe`, which prints and exits, so it cannot reach a verdict.
+
 With no arguments the gate still selects crates by diffing `crates/*/src/**`
 against a base ref. Nothing calls it that way now; it is kept because it is the
 right shape for a local "what would this branch break" check.
@@ -104,7 +133,7 @@ installs the same pinned version as a prebuilt binary.
 | no library target | skip — a bin-only crate has no API surface to compare |
 | crates.io returns 404 | skip — never published, so no baseline exists |
 | only yanked versions | skip — no installable baseline |
-| no non-yanked release below the declared version | skip — this is the crate's first release; there is no earlier API |
+| no non-yanked **stable** release below the declared version | skip — no stable predecessor; a pre-release below it is named in the skip line |
 | declared version is already a major bump over the baseline | **inventory** — advisory, see below |
 | **registry probe fails any other way** | **hard failure** |
 
@@ -272,6 +301,11 @@ an inventory rather than a skip and must stay green doing it; and an inventory
 that could not run must say so in both its own line and the summary. Cases 9, 11
 and 12 fail against the pre-#5296 gate, which is what makes them regression tests
 rather than descriptions of current behaviour.
+
+Cases 13-15 pin pre-release handling, case 13 running the reproduction on record
+verbatim (`["0.9.9", "1.0.0-rc1", "1.0.0", "1.0.1-beta"]`, declared 1.0.1). Case
+14 pins that a *nearer* pre-release still loses to the last stable release, and
+case 15 that a skip caused by the exclusion names what it refused.
 
 Cases 5-8 (#5289) pin the verdict/non-verdict split: a real break must report
 `BREAK` and exit 1; a rustdoc build error must report `NO VERDICT`, exit 3, and
