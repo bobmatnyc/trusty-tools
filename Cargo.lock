@@ -10288,7 +10288,7 @@ dependencies = [
 
 [[package]]
 name = "tga"
-version = "2.17.0"
+version = "2.19.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -10300,6 +10300,7 @@ dependencies = [
  "criterion",
  "crossterm 0.28.1",
  "csv",
+ "dirs 5.0.1",
  "futures",
  "git2",
  "indicatif 0.17.11",
@@ -10311,6 +10312,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "serial_test",
  "strsim",
  "tempfile",
  "tera",
@@ -11326,7 +11328,9 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror 1.0.69",
+ "tokio",
  "toml 0.8.23",
+ "trusty-installer",
 ]
 
 [[package]]
@@ -11593,7 +11597,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",

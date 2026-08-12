@@ -13,22 +13,27 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use trusty_audit::cli::{self, Cli};
+use trusty_audit::config::EngagementConfig;
 use trusty_audit::session::Session;
 use trusty_audit::workdir::{WORKDIR_ENV, WorkDir};
 
-fn main() -> Result<()> {
+// #5495: installing the pinned tools downloads, so `execute` is async and this
+// shim owns the runtime. Nothing else moved here.
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let cwd = std::env::current_dir().context("cannot determine the current directory")?;
     let env_value = std::env::var(WORKDIR_ENV).ok();
     let work = WorkDir::resolve(cli.work_dir.clone(), env_value.as_deref(), &cwd);
 
-    let mut session = Session::new(work);
+    let mut session = Session::new(work)
+        .with_config_path(EngagementConfig::resolve_path(cli.config.clone(), &cwd));
     if let Some(path) = &cli.manifest {
         session = session.with_manifest_path(path);
     }
 
-    let outcome = session.execute(cli.to_command())?;
+    let outcome = session.execute(cli.to_command()).await?;
     print!("{}", cli::render(&outcome));
     Ok(())
 }

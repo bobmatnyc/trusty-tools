@@ -309,6 +309,15 @@ pub(super) async fn index_status_handler(
     // zero-chunk indexes without reading daemon logs.  Use `clone()` so the
     // read lock is released before we build the JSON response.
     let walk_diag = handle.walk_diagnostics.read().await.clone();
+    // #5336: `status: "indexing"` and `stages.lexical: in_progress` say a walk
+    // is underway; neither says whether anything is still driving it. A reindex
+    // task that panicked or was cancelled leaves both exactly as a live one
+    // does, so this is the field that separates the two.
+    let stuck_mid_walk = crate::service::warm_boot::index_is_stuck_mid_walk(
+        stages_snapshot.lexical.status,
+        walk_diag.last_walk_started_at.is_some(),
+        crate::service::reindex::index_task_in_flight(&index_id),
+    );
     // Issue #681: prefer durable corpus count; in-memory map returns 0 after
     // idle eviction (TRUSTY_CHUNKS_IDLE_EVICT_SECS default 60s). Falls back to
     // in-memory for BM25-only / test indexers that have no corpus wired.
@@ -412,6 +421,9 @@ pub(super) async fn index_status_handler(
         "last_walk_files_seen": walk_diag.last_walk_files_seen,
         "last_walk_files_skipped": walk_diag.last_walk_files_skipped,
         "last_walk_error": walk_diag.last_walk_error,
+        // #5336: true when the walk started and was then abandoned. Surfaced,
+        // not recovered — clear it with `POST /indexes/:id/reindex`.
+        "stuck_mid_walk": stuck_mid_walk,
         // Issue #3408: per-index watcher liveness + network-mount degradation.
         "watcher": {
             "active": watcher_active,

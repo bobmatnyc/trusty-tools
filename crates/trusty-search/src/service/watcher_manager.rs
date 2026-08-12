@@ -463,32 +463,39 @@ mod tests {
     /// save must be incrementally indexed (chunk count grows) within the
     /// debounce window. This is the core acceptance criterion of issue #1621.
     /// Test: this test.
+    ///
+    /// #4731: the save is re-applied until the index reacts, so a dropped
+    /// FSEvents batch no longer strands a fixed 3 s deadline.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn save_triggers_incremental_index_via_manager() {
-        use std::time::Duration;
-
         let dir = tempfile::tempdir().expect("tempdir");
         let handle = handle_for("live", dir.path());
         let mgr = WatcherManager::new();
         mgr.spawn_for_index(&handle).await;
 
-        // Allow the OS watcher to install.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        tokio::fs::write(dir.path().join("lib.rs"), "fn alpha() {}\nfn beta() {}\n")
+        let file = dir.path().join("lib.rs");
+        let indexed = {
+            let handle = Arc::clone(&handle);
+            crate::service::watch_test_support::await_watch_condition(
+                |generation| {
+                    std::fs::write(
+                        &file,
+                        format!("fn alpha() {{}}\nfn beta{generation}() {{}}\n"),
+                    )
+                    .expect("write file");
+                },
+                move || {
+                    let handle = Arc::clone(&handle);
+                    async move { handle.indexer.read().await.chunk_count() > 0 }
+                },
+            )
             .await
-            .expect("write file");
+        };
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if handle.indexer.read().await.chunk_count() > 0 {
-                break;
-            }
-            if tokio::time::Instant::now() > deadline {
-                panic!("chunk_count never grew — watcher did not index the save");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        assert!(
+            indexed,
+            "chunk_count never grew — watcher did not index the save"
+        );
         mgr.stop_all().await;
     }
 

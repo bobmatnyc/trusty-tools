@@ -6,14 +6,16 @@
 //! directly against `tcode serve` or via the small test-only `StdioSession`
 //! helper. This ticket's own deliverable — the `tcode` BINARY's subcommands
 //! — needs its OWN black-box proof: spawn the compiled `tcode` binary
-//! (`env!("CARGO_BIN_EXE_tcode")`) exactly as a user's shell would, let it
+//! (via `support::tcode_command`) exactly as a user's shell would, let it
 //! do whatever it does internally (which, per #2060, is spawn its OWN
 //! nested `tcode serve --stdio` child and speak JSON-RPC to it — this test
 //! never touches that nested layer directly), and assert only on the
 //! OUTER process's stdout/stderr/exit code. `TCODE_MOCK_LLM=echo` keeps
 //! `run-task` deterministic and offline (env propagates from this outer
 //! process to the CLI's own spawned nested daemon child, since it inherits
-//! the environment by default).
+//! the environment by default). #3036, #3195: every spawn here goes through
+//! `support::tcode_command`, so the child cannot reach the developer's live
+//! trusty-search daemon and have it write index files into the fixture dir.
 //! What: [`run_task_streams_live_events_and_reports_final_status`] is the
 //! REQUIRED case — `tcode run-task python-engineer "<task>" --project <tmp>`
 //! must print live tool events and a final `status=finished` line, exit 0.
@@ -55,8 +57,6 @@
 
 mod support;
 
-use std::process::Command;
-
 use support::project_with_agents;
 
 /// `tcode run-task <agent> "<task>" --project <tmp>` (`TCODE_MOCK_LLM=echo`)
@@ -65,7 +65,7 @@ use support::project_with_agents;
 #[test]
 fn run_task_streams_live_events_and_reports_final_status() {
     let project = project_with_agents();
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "run-task",
             "pm",
@@ -107,7 +107,7 @@ fn run_task_streams_live_events_and_reports_final_status() {
 #[test]
 fn run_task_json_mode_prints_only_the_final_session() {
     let project = project_with_agents();
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "run-task",
             "pm",
@@ -156,7 +156,7 @@ fn run_task_resolved_mode(
         args.push(m.to_string());
     }
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tcode"));
+    let mut cmd = support::tcode_command();
     cmd.args(&args).env("TCODE_MOCK_LLM", "echo");
     if let Some(m) = env_mode {
         cmd.env("TRUSTY_CODE_MODE", m);
@@ -222,7 +222,7 @@ fn run_task_mode_precedence_over_the_wire() {
 #[test]
 fn session_list_on_fresh_project_reports_no_sessions() {
     let project = tempfile::tempdir().expect("project tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "session",
             "list",
@@ -246,7 +246,7 @@ fn session_list_on_fresh_project_reports_no_sessions() {
 #[test]
 fn transcript_unknown_session_errors_cleanly() {
     let project = tempfile::tempdir().expect("project tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "transcript",
             "nonexistent-id",
@@ -272,7 +272,7 @@ fn transcript_unknown_session_errors_cleanly() {
 #[test]
 fn attach_unknown_session_errors_cleanly() {
     let project = tempfile::tempdir().expect("project tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "attach",
             "nonexistent-id",
@@ -295,7 +295,7 @@ fn attach_unknown_session_errors_cleanly() {
 #[test]
 fn cancel_unknown_session_errors_cleanly() {
     let project = tempfile::tempdir().expect("project tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "cancel",
             "nonexistent-id",
@@ -326,7 +326,7 @@ fn cancel_unknown_session_errors_cleanly() {
 /// matching the compiled-in constants.
 #[test]
 fn version_flag_reports_build_provenance() {
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .arg("--version")
         .output()
         .expect("spawn tcode --version");
@@ -361,7 +361,7 @@ fn version_flag_reports_build_provenance() {
 /// workstream to act on; factored out so each test's setup is one line
 /// instead of a repeated Command/parse block.
 fn create_workstream(home: &std::path::Path, project_arg: &str, name: &str) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "workstream",
             "create",
@@ -390,7 +390,7 @@ fn create_workstream(home: &std::path::Path, project_arg: &str, name: &str) -> S
 fn workstream_list_on_fresh_project_reports_no_workstreams() {
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "workstream",
             "list",
@@ -421,7 +421,7 @@ fn workstream_create_persists_and_ws_alias_lists_it() {
 
     create_workstream(home.path(), &project_arg, "Token rotation hardening");
 
-    let list_output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let list_output = support::tcode_command()
         .args(["ws", "list", "--project", &project_arg])
         .env("HOME", home.path())
         .output()
@@ -447,7 +447,7 @@ fn workstream_create_persists_and_ws_alias_lists_it() {
 fn workstream_get_unknown_id_errors_cleanly() {
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "workstream",
             "get",
@@ -481,7 +481,7 @@ fn workstream_activate_conflict_names_active_and_suggests_force() {
     let id_a = create_workstream(home.path(), &project_arg, "A");
     let id_b = create_workstream(home.path(), &project_arg, "B");
 
-    let activate_a = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let activate_a = support::tcode_command()
         .args(["workstream", "activate", &id_a, "--project", &project_arg])
         .env("HOME", home.path())
         .output()
@@ -491,7 +491,7 @@ fn workstream_activate_conflict_names_active_and_suggests_force() {
         "activating a with no prior active must succeed: {activate_a:?}"
     );
 
-    let activate_b = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let activate_b = support::tcode_command()
         .args(["workstream", "activate", &id_b, "--project", &project_arg])
         .env("HOME", home.path())
         .output()
@@ -515,7 +515,7 @@ fn workstream_activate_conflict_names_active_and_suggests_force() {
 fn workstream_deactivate_with_none_active_is_a_clean_noop() {
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .args([
             "workstream",
             "deactivate",
@@ -545,7 +545,7 @@ fn workstream_close_hides_from_default_list_but_include_closed_shows_it() {
 
     let id = create_workstream(home.path(), &project_arg, "Old spike");
 
-    let close_output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let close_output = support::tcode_command()
         .args(["workstream", "close", &id, "--project", &project_arg])
         .env("HOME", home.path())
         .output()
@@ -555,7 +555,7 @@ fn workstream_close_hides_from_default_list_but_include_closed_shows_it() {
         "close must exit 0: {close_output:?}"
     );
 
-    let default_list = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let default_list = support::tcode_command()
         .args(["workstream", "list", "--project", &project_arg])
         .env("HOME", home.path())
         .output()
@@ -566,7 +566,7 @@ fn workstream_close_hides_from_default_list_but_include_closed_shows_it() {
         "closed workstream must be hidden from the default list: {default_stdout}"
     );
 
-    let include_closed_list = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let include_closed_list = support::tcode_command()
         .args([
             "workstream",
             "list",
@@ -590,7 +590,7 @@ fn workstream_close_hides_from_default_list_but_include_closed_shows_it() {
 /// and only this CLI surface was missing.
 #[test]
 fn tui_subcommand_is_listed_in_help() {
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .arg("--help")
         .output()
         .expect("spawn tcode --help");
@@ -627,7 +627,7 @@ fn tui_subcommand_is_listed_in_help() {
 #[tokio::test]
 async fn tui_auto_spawns_a_daemon_that_outlives_it() {
     let data_dir = tempfile::tempdir().expect("data dir tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .arg("tui")
         .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
         .env_remove("TCODE_DAEMON_URL")
@@ -694,7 +694,7 @@ async fn tui_refuses_a_daemon_bound_to_a_different_project() {
     let daemon_data = tempfile::tempdir().expect("daemon data dir");
     let tui_data = tempfile::tempdir().expect("tui data dir");
 
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let mut daemon = support::tcode_command()
         .args(["serve", "--http", "--port", "0", "--project"])
         .arg(their_project.path())
         .env("TRUSTY_DATA_DIR_OVERRIDE", daemon_data.path())
@@ -716,7 +716,7 @@ async fn tui_refuses_a_daemon_bound_to_a_different_project() {
         }
     };
 
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .arg("tui")
         .arg("--project")
         .arg(our_project.path())
@@ -762,7 +762,7 @@ async fn tui_refuses_a_daemon_bound_to_a_different_project() {
 #[test]
 fn tui_refuses_to_spawn_for_an_unreachable_explicit_daemon_url() {
     let data_dir = tempfile::tempdir().expect("data dir tempdir");
-    let output = Command::new(env!("CARGO_BIN_EXE_tcode"))
+    let output = support::tcode_command()
         .arg("tui")
         .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir.path())
         .env("TCODE_DAEMON_URL", "http://127.0.0.1:1")

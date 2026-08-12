@@ -19,6 +19,7 @@ use trusty_common::memory_core::retrieval::{
     recall_across_palaces_with_default_embedder, recall_deep_with_default_embedder,
     recall_with_default_embedder, RememberOptions,
 };
+use trusty_common::memory_core::store::PalaceStoreError;
 use trusty_common::memory_core::PalaceRegistry;
 use uuid::Uuid;
 
@@ -332,7 +333,9 @@ impl MemoryService {
     /// `palace.json` changes — so cached `PalaceHandle`s stay valid and no
     /// registry invalidation is required.
     /// What: 1) loads the palace via `PalaceStore::load_palace` (404 when the
-    /// directory or `palace.json` is missing), 2) trims the new name and
+    /// directory or `palace.json` is genuinely missing; a probe that cannot
+    /// determine whether it is there is a 500, not a 404 — #5549), 2) trims the
+    /// new name and
     /// returns `BadRequest` when empty, 3) mutates `palace.name` and writes
     /// the metadata back through the atomic `PalaceStore::save_palace`
     /// (tmp file + rename), 4) emits an aggregate `StatusChanged` so
@@ -349,7 +352,14 @@ impl MemoryService {
         }
         let palace_dir = self.state.data_root.join(palace_id);
         let mut palace = trusty_common::memory_core::store::PalaceStore::load_palace(&palace_dir)
-            .map_err(|e| anyhow!("palace not found: {palace_id} ({e})"))?;
+            .map_err(|e| {
+            // #5549: only a genuine absence may be reported as "not found".
+            if matches!(&e, PalaceStoreError::NotFound(_)) {
+                anyhow!("palace not found: {palace_id} ({e})")
+            } else {
+                anyhow!("cannot load palace {palace_id}: {e}")
+            }
+        })?;
         palace.name = trimmed.to_string();
         trusty_common::memory_core::store::PalaceStore::save_palace(&palace)
             .with_context(|| format!("save palace metadata for {palace_id}"))?;
@@ -377,11 +387,15 @@ impl MemoryService {
     /// untyped one keeps the wire shape correct on both surfaces without
     /// asking either caller to parse error strings.
     /// What: same as [`Self::update_palace_name`] but returns
-    /// `ServiceError::BadRequest` for empty names and
-    /// `ServiceError::NotFound` for missing palace metadata.
+    /// `ServiceError::BadRequest` for empty names and `ServiceError::NotFound`
+    /// for palace metadata that is genuinely absent. Metadata whose presence
+    /// cannot be determined — a denied or transient stat — is
+    /// `ServiceError::Internal`: a 404 would tell the client the palace does
+    /// not exist when nobody established that (#5549, ADR-0045).
     /// Test: `update_palace_name_renames_palace`,
     /// `update_palace_name_rejects_empty_name`,
-    /// `update_palace_name_returns_not_found_for_missing_id`.
+    /// `update_palace_name_returns_not_found_for_missing_id`,
+    /// `update_palace_name_reports_an_unstattable_palace_as_internal`.
     pub async fn update_palace_name_typed(
         &self,
         palace_id: &str,
@@ -396,7 +410,13 @@ impl MemoryService {
         let palace_dir = self.state.data_root.join(palace_id);
         let mut palace = trusty_common::memory_core::store::PalaceStore::load_palace(&palace_dir)
             .map_err(|e| {
-            ServiceError::not_found(format!("palace not found: {palace_id} ({e})"))
+            // #5549: `not_found` on every variant told the client the palace
+            // does not exist for a stat we were merely denied.
+            if matches!(&e, PalaceStoreError::NotFound(_)) {
+                ServiceError::not_found(format!("palace not found: {palace_id} ({e})"))
+            } else {
+                ServiceError::internal(format!("cannot load palace {palace_id}: {e}"))
+            }
         })?;
         palace.name = trimmed.to_string();
         trusty_common::memory_core::store::PalaceStore::save_palace(&palace).map_err(|e| {

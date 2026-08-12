@@ -1,6 +1,6 @@
 [package]
 name = "tga"
-version = "2.17.0"
+version = "2.19.0"
 publish = true
 edition = "2021"
 # Aligned with the workspace MSRV (1.94) per #254. Required for
@@ -39,7 +39,13 @@ path = "src/main.rs"
 # so tga does not grow a second copy of the raw-mode dance. It turns on
 # ratatui + crossterm in trusty-common at the SAME workspace versions tga pins
 # below — one ratatui major in the build graph.
-trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli", "monitor-tui"] }
+# `inference-client` (#5464) is what `profile::batch_reviewer::PeriodReviewer`
+# sends its period-review call through — the workspace's one inference entry
+# point, so contributor profiling reaches a model without tga taking a Cargo
+# edge to trusty-review. `config-cli` already implied it transitively; naming it
+# here makes the dependency the profile transport relies on explicit rather than
+# a side effect of the `config` subcommand staying mounted.
+trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli", "inference-client", "monitor-tui"] }
 # Async runtime
 tokio = { workspace = true }
 # IANA timezone database: JQL date literals are evaluated in the JIRA
@@ -87,6 +93,11 @@ reqwest = { workspace = true }
 rayon = "1"
 # Date/time
 chrono = { workspace = true }
+# Per-user data directory. #5463: `profile::selector::resolve_db_path` falls
+# back to `<data-dir>/tga/tga.db`, which is `~/Library/Application Support` on
+# macOS and `~/.local/share` on Linux — a distinction a bare `$HOME` join would
+# get wrong on one of the two.
+dirs = { workspace = true }
 # Error handling
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -143,6 +154,10 @@ criterion = { workspace = true }
 tracing-test = "0.2"
 # Temporary files for rule-loader tests
 tempfile = { workspace = true }
+# #5463: the `TGA_DB` resolution tests in `profile::selector` mutate the
+# environment, which is process-global — `#[serial]` keeps them off the other
+# test threads for the duration.
+serial_test = { workspace = true }
 
 [[bench]]
 name = "tga_bench"
