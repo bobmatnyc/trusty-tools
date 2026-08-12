@@ -102,15 +102,24 @@ result set.
 `SearchQuery` carries `stage` (`Lexical` / `Semantic` / `Graph`, `types.rs:156`)
 — the closest existing precedent for a declared mode — plus `mode`
 (`types.rs:148`), `expand_graph` (`types.rs:134`, which can opt out of KG but not
-in), and `refine_query` (`types.rs:160`), the one place a raw cosine sort is
-already caller-triggered, scoped to post-KG neighbours
+in), and `refine_query` (`types.rs:160`), the one place a caller already triggers
+a cosine sort, scoped to post-KG neighbours
 (`crates/trusty-search/src/core/indexer/search/kg.rs:115-135`).
 `GlobalSearchRequest` already carries explicit fan-out: `indexes`, `routing`,
 `routing_n`, `routing_threshold` (`search_global.rs:47-67`).
 
-KG results are already additive rather than fused: `kg.rs:138` does
-`all.extend(expanded)` after RRF has run. Returning KG as a distinct labelled set
-is closer to today's behavior than to a rewrite.
+That existing sort also thresholds. `KG_REFINE_THRESHOLD`
+(`crates/trusty-search/src/core/indexer/search/mod.rs:55`, value `0.4`) is
+applied at `kg.rs:124`: a neighbour whose cosine falls below it is dropped from
+the result, not reordered within it. A chunk with no stored embedding scores
+`0.0` and is dropped by the same check (`kg.rs:118-123`), so on a BM25-only index
+every refined neighbour disappears. This is a published quality bar of exactly
+the kind this decision forbids, already shipped inside the code cited as the
+sort's precedent. Its fate is DOC-69 §5.5 and open question Q8.
+
+KG results are appended rather than rank-fused — `kg.rs:138` does
+`all.extend(expanded)` after RRF has run — but appending is not where the
+behavior ends; see the Consequences section.
 
 ## Decision
 
@@ -191,8 +200,7 @@ declaration while withholding the information needed to make one.
 consumer at once, including the UI and `trusty-review`, on the first deploy.
 
 **Keep inference for undeclared callers only.** Rejected: it keeps the guessing
-layer as a permanent second code path, which means RRF survives on that path. A
-default that resurrects the fused score is the old design wearing a flag.
+layer as a permanent second code path, which means RRF survives on that path.
 
 **Accepted: BM25 + KG, both sets, page 1.** This costs a KG traversal on every
 bare query. That cost is accepted. It costs no intent inference.
@@ -205,8 +213,6 @@ bare query. That cost is accepted. It costs no intent inference.
   results in that lane's own order.
 - A consumer that wants more results asks for the next page instead of
   interpreting a number.
-- The KG-as-distinct-set change is small: `kg.rs:138` already extends rather than
-  fuses.
 - Deleting `rrf_fuse` from the search path removes the code that discards the
   vector lane's real cosine values.
 
@@ -214,6 +220,26 @@ bare query. That cost is accepted. It costs no intent inference.
 
 - **Paging is net-new and is the largest single cost.** Nothing on the search
   path pages today.
+- **Splitting KG into its own set retires deliberate behavior, not just an
+  append.** `kg.rs:138` appends KG neighbours to the fused list, but two steps
+  follow. `apply_score_adjustments` re-sorts the merged list by adjusted score
+  (`mod.rs:514-518`), and `materialize_search_results` then takes a single shared
+  `query.top_k` from it (`materialize.rs:43`). KG neighbours compete with lexical
+  hits for the same slots, so a strong neighbour can displace a weaker lexical
+  hit. Issue #94 built that on purpose: the doc comment at `mod.rs:394-398`
+  records that KG neighbours used to be appended after truncation had already
+  run, so on busy indexes they never surfaced, and
+  `test_kg_results_survive_top_k_truncation`
+  (`crates/trusty-search/src/core/indexer/tests/ranking_and_modes.rs:706`) is the
+  regression test. Two independently paged sets retire that competition: the
+  neighbour no longer has to outrank anything to be seen, and the lexical hit it
+  used to displace stays. Whether #94's outcome is preserved by other means or
+  accepted as superseded is not settled here.
+- **A cosine threshold already ships inside the sort this design cites as
+  precedent.** `KG_REFINE_THRESHOLD` (see Context) drops neighbours rather than
+  reordering them. Decision point 4 forbids exactly that, so the constant is
+  either retired with `refine_query`'s reshaping or explicitly carved out. DOC-69
+  §5.5 and Q8.
 - **Five consumers read the `score` field** and must be migrated. The migration
   table is in DOC-69 §8; the only live human exposure is
   `crates/trusty-search/ui/src/lib/views/Search.svelte:266-268`, which renders
@@ -245,6 +271,10 @@ bare query. That cost is accepted. It costs no intent inference.
   vector is unavailable is undecided.
 - **Whether the per-lane MCP tools become the dedicated endpoints**, or whether
   the dedicated endpoints are new and the MCP tools become thin wrappers.
+- **Whether issue #94's outcome is preserved** once KG and lexical stop competing
+  for one shared `top_k`, or accepted as superseded by independent paging.
+- **What happens to `KG_REFINE_THRESHOLD`** — retired with `refine_query`'s
+  reshaping, or carved out as a deliberate exception to decision point 4.
 
 ## Related Decisions
 

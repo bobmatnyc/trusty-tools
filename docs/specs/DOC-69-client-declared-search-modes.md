@@ -90,7 +90,7 @@ The surface is not being invented from nothing. `SearchQuery`
 | `stage` | `types.rs:156` | `Lexical` / `Semantic` / `Graph` — the closest existing precedent for a declared mode |
 | `mode` | `types.rs:148` | `Code` / `Text` / `Data` content-kind filter |
 | `expand_graph` | `types.rs:134` | opts OUT of KG expansion; there is no way to opt IN |
-| `refine_query` | `types.rs:160` | the one place a raw cosine sort is already caller-triggered, scoped to post-KG neighbours (`core/indexer/search/kg.rs:115-135`) |
+| `refine_query` | `types.rs:160` | the one place a caller already triggers a cosine sort, scoped to post-KG neighbours (`core/indexer/search/kg.rs:115-135`). It also **thresholds** — see §5.5 |
 | `top_k` | `types.rs:132` | result count — the only sizing control anywhere |
 
 `GlobalSearchRequest`
@@ -193,8 +193,9 @@ permanent second code path).
 ### 4.1 Nothing on the search path pages today
 
 `SearchQuery` and `GlobalSearchRequest` are `top_k`-only, and every search tool
-schema in `descriptors.rs` declares `top_k` and nothing else
-(`descriptors.rs:39,64,85,106,134,231,375`).
+schema in `descriptors.rs` declares `top_k` and nothing else:
+`search_lexical` (`:39`), `search_semantic` (`:64`), `search_kg` (`:85`),
+`search_all` (`:106`), `search` (`:134`), and `search_similar` (`:231`).
 
 The one paginated surface is `list_chunks` / `GET /indexes/:id/chunks`
 (`descriptors.rs:287-302`), which offers both `offset`/`limit` and an `after`
@@ -208,8 +209,11 @@ mechanism, not a parameter.
 
 - **R4.1** Every labelled result set is independently pageable. Advancing the
   `lexical` set does not advance the `graph` set.
-- **R4.2** A page request MUST be answerable without re-running the whole query
-  from scratch, or the design has traded one cost for a worse one.
+- **R4.2** A page request SHOULD be answerable without re-running the whole query
+  from scratch. This is deliberately SHOULD, not MUST: as a MUST it would decide
+  Q1 and Q2 by implication, since offset "re-ranks and discards `offset` results
+  per request" (§4.3) and §4.4 option 1 recomputes the ranking on every page
+  request. Both remain live options until those questions are answered.
 - **R4.3** Page boundaries MUST NOT drop or duplicate a result that was present
   and unchanged in the index across the two requests.
 - **R4.4** A caller MUST be able to distinguish "no more results" from "more
@@ -253,14 +257,13 @@ corpus admits several definitions, each with a different cost:
    under concurrent writes, which BM25 scores are not — a corpus change moves
    IDF and therefore every score.
 
-Option 3's problem is specific and worth naming: BM25 scores depend on
-corpus-wide term statistics, so an ingest between page 1 and page 2 changes the
-scores of documents that did not themselves change. A cursor keyed on score is
-resuming from a value that no longer means what it meant.
+Option 3 has a specific problem. BM25 scores depend on corpus-wide term
+statistics, so an ingest between page 1 and page 2 changes the scores of
+documents that did not themselves change. A cursor keyed on score resumes from a
+value that no longer means what it meant.
 
 - **R4.5** The chosen definition MUST be stated in the response contract, so a
-  consumer knows whether it may rely on page stability. An unstated guarantee is
-  the failure mode here, not a weak one.
+  consumer knows whether it may rely on page stability.
 
 Which of the three this design adopts is **undecided** (§9).
 
@@ -303,9 +306,13 @@ query — `let want = query.top_k.saturating_mul(HNSW_OVERSAMPLE).max(query.top_
 (`mod.rs:198`).
 
 There is no way to reconstruct a chunk's vector from the store. `VectorStore`
-(`crates/trusty-search/src/core/store/types.rs:54-95`) exposes `upsert`,
-`search`, `remove`, `len`, and `search_filtered`. There is no `get` and no
-reconstruction path.
+(`crates/trusty-search/src/core/store/types.rs:54-210`) has eleven methods:
+`upsert`, `search`, `remove`, `len`, `search_filtered`, `upsert_batch`,
+`save_to`, `rewrite_keys_to_relative`, `demote_to_view`, `contains`, and
+`contains_many`. Vectors go in and rankings come out. The two that come closest
+to a read — `contains` (`:190`) and `contains_many` (`:203`) — return `bool` and
+`Vec<bool>`, so even membership is answerable while the vector itself is not.
+There is no `get` and no reconstruction path.
 
 The only other source is a bounded LRU. `ChunkIndexer::get_embedding`
 (`core/indexer/search/lanes.rs:138-144`) peeks `chunk_embeddings`, an
@@ -333,8 +340,10 @@ also requires embedding the query itself.
 - **R5.3** No similarity value is published as a cross-set-comparable score, and
   none is compared to a threshold.
 - **R5.4** The re-embedding cost MUST be visible to the caller before it is paid —
-  by an explicit opt-in, a documented cost, or both. A sort that silently embeds a
-  page of chunks is a latency trap.
+  by an explicit opt-in, a documented cost, or both.
+- **R5.5** The existing `KG_REFINE_THRESHOLD` (§5.5) is either retired or
+  explicitly carved out. It cannot survive unexamined: R5.3 forbids a threshold,
+  and this constant is one.
 
 ### 5.4 Undecided: what happens to a chunk with no vector
 
@@ -348,6 +357,29 @@ must understand). See §9.
 addresses poor results. Auto-triggering a vector lane on a thin result count
 would collapse a client choice back into daemon guessing, which is exactly what
 this design removes.
+
+### 5.5 The threshold that already ships inside the precedent
+
+`refine_query` is cited in §2.1 as the caller-triggered cosine sort this design
+builds on. That sort also drops results.
+
+`KG_REFINE_THRESHOLD` is defined at
+`crates/trusty-search/src/core/indexer/search/mod.rs:55` with the value `0.4` and
+applied at `core/indexer/search/kg.rs:124` as `if cos >= KG_REFINE_THRESHOLD`.
+A neighbour below the bar is never pushed onto the scored list, so it is removed
+from the response rather than ranked lower within it. Two further properties
+matter:
+
+- A chunk with no stored embedding scores `0.0` and is dropped by the same check
+  (`kg.rs:118-123`). On a BM25-only index every refined neighbour disappears, and
+  the caller sees an empty graph set rather than an unsorted one.
+- The seed set is deliberately left unfiltered (`kg.rs:113-114`), so the
+  threshold applies asymmetrically — to expanded neighbours only.
+
+This is a published quality bar inside the exact code path §2.1 offers as
+precedent, and R5.3 forbids it. Naming it is not a proposal to keep it. Its fate
+is Q8: retired when `refine_query` is reshaped into a declared sort, or carved
+out as a deliberate exception with a stated reason.
 
 ---
 
@@ -428,13 +460,14 @@ the full migration surface.
 | Consumer | Site | What it does with the score | Migration |
 |---|---|---|---|
 | trusty-search UI | `crates/trusty-search/ui/src/lib/views/Search.svelte:266-268` | renders `{(r.score ?? 0).toFixed(3)}` under a literal `score` label to a human — **the only live human exposure** | Remove the score display. The lane label replaces it as the thing the reader needs. Highest-visibility change in this table. |
-| trusty-review | `crates/trusty-review/src/integrations/search_client.rs:107-115` | deserializes it into `SearchResult.score`, doc-commented "Combined relevance score" | Drop the field, or repoint it at the lane label. The doc comment is a factual claim that stops being true. |
+| trusty-review | `crates/trusty-review/src/integrations/search_client.rs:105-119` | deserializes it into `SearchResult.score` (field at `:119`), described as "the combined BM25+vector relevance score" at `:108` and "Combined relevance score" at `:117` | Drop the field, or repoint it at the lane label. Both doc lines are factual claims that stop being true. |
 | trusty-review | `crates/trusty-review/src/integrations/apex_context.rs:127` | copies it into `ApexContextResult.score` | Follows `search_client.rs`. Mechanical. |
 | trusty-review | `crates/trusty-review/src/pipeline/prompt_user_msg.rs` | **never reads it** — takes the top 10 on faith (`grep score` over the file returns nothing) | No change. Already dead as prompt content, which is evidence the score was not doing the job attributed to it. |
-| trusty-code | `crates/trusty-code/src/tools/trusty_search.rs:408-451` | parses it for telemetry only — no sort, no threshold (`SearchHit { path, score }`, `:447`) | Drop the field from `SearchHit`, or record the lane instead. No behavior depends on the value. |
+| trusty-code | parsed at `crates/trusty-code/src/tools/trusty_search.rs:408-451`; the type is `SearchHit` at `crates/trusty-code/src/events.rs:161-168` | no sort, no threshold — but `SearchHit` is not internal telemetry. It is a field on the SSE event enum streamed to UI clients (`events.rs:340`, `hits: Vec<SearchHit>`), documented there as DOC-39 Slice B's search-audit surface | Dropping `score` is a **wire-contract change to a documented spec**, not a field deletion. The field carries `#[serde(default)]` for old-transcript compatibility (`events.rs:339`), so removal has to be reconciled with DOC-39 rather than done unilaterally. |
 
 **R8.1** No consumer sorts by, thresholds on, or branches on the fused score
-today. The only behavior that changes for a human is the UI's rendered number.
+today. The only behavior that changes for a human is the UI's rendered number —
+but see the trusty-code row: no branching is not the same as no contract.
 
 **R8.2** The response envelope changes shape from a flat list to labelled sets;
 each row above changes its deserializer regardless of whether it kept reading the
@@ -468,9 +501,14 @@ Genuinely undecided. Each needs a ruling before implementation.
   Each was added for a specific issue and each needs its own call.
 - **Q7 — Default page size**, and whether it differs per lane. `top_k` defaults to
   10 across the MCP schemas; whether a page inherits that is unstated.
-- **Q8 — Does the undeclared response page the two sets in lockstep** or expose
-  two independent cursors (§3, §4.2)? R4.1 says independent; the undeclared
-  envelope has not been checked against that.
+- **Q8 — What happens to `KG_REFINE_THRESHOLD`** (§5.5): retired when
+  `refine_query` is reshaped into a declared sort, or carved out as a deliberate
+  exception to R5.3 with a stated reason. Retiring it changes what a
+  `refine_query` caller gets back today, so it is not a pure deletion.
+- **Q9 — Is issue #94's outcome preserved** once KG and lexical stop competing
+  for one shared `top_k` (ADR-0046 Consequences)? Two independently paged sets
+  remove the competition `apply_score_adjustments` + `materialize` were built to
+  create.
 
 ---
 
