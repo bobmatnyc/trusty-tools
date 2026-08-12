@@ -31,31 +31,28 @@ use super::{
 /// the session to avoid in the first place).
 /// Test: `resolve_index_id_prefers_explicit_then_pinned` pins the precedence
 /// and `missing_index_id_error_names_list_indexes` the error text.
-/// Read `key` as a non-empty array of strings, dropping non-string entries.
-///
-/// Why: `create_index` forwards `exclude_globs` verbatim into the HTTP body,
-/// and the daemon deserialises it as `Option<Vec<String>>` — a caller that
-/// passed `[1, 2]` would get a 422 from the daemon instead of an MCP-level
-/// answer. Filtering here keeps the wire body well-typed.
-/// What: returns `None` when the key is absent, not an array, or yields no
-/// strings, so the caller can leave the field off the body entirely.
-/// Test: `create_index_forwards_exclude_globs`,
-/// `create_index_omits_malformed_exclude_globs` in `tests.rs`.
-fn string_array(args: &Value, key: &str) -> Option<Vec<Value>> {
-    let items: Vec<Value> = args
-        .get(key)?
-        .as_array()?
-        .iter()
-        .filter(|v| v.is_string())
-        .cloned()
-        .collect();
-    (!items.is_empty()).then_some(items)
-}
-
 fn required_index_id(server: &McpServer, args: &Value) -> Result<String, DispatchError> {
     server
         .resolve_index_id(args)
         .ok_or_else(|| DispatchError::InvalidParams(super::types::MISSING_INDEX_ID.into()))
+}
+
+/// Read `key` as a non-empty array whose every entry is a string.
+///
+/// Why: `create_index` forwards `exclude_globs` verbatim into the HTTP body,
+/// and the daemon deserialises it as `Option<Vec<String>>` — a caller that
+/// passed `[1, 2]` would get a 422 from the daemon instead of an MCP-level
+/// answer. Validating here keeps the wire body well-typed.
+/// What: all-or-nothing. Returns `None` when the key is absent, is not an
+/// array, is empty, or holds ANY non-string entry. The last case used to drop
+/// just the offending entries, so `["a", 1, "b"]` registered an index filtered
+/// by two globs when the caller wrote three — a quieter outcome for the same
+/// typo that `[1, 2]` already rejected whole.
+/// Test: `create_index_forwards_exclude_globs`,
+/// `create_index_omits_malformed_exclude_globs` in `tests.rs`.
+fn string_array(args: &Value, key: &str) -> Option<Vec<Value>> {
+    let items = args.get(key)?.as_array()?;
+    (!items.is_empty() && items.iter().all(Value::is_string)).then(|| items.clone())
 }
 
 /// Route one of the eight index-management tool names to the correct daemon

@@ -106,7 +106,9 @@ pub(super) async fn run_reindex(
     // Stamping the index id makes the stderr line greppable per-index; the
     // failure-reason slot lets us hand a specific cause (e.g. a captured
     // producer-task panic) to `Drop`.
-    let term_guard =
+    // `mut` so the #4356 budget-refusal path can `disarm()` after emitting its
+    // own terminal frame; every other early return still relies on `Drop`.
+    let mut term_guard =
         ReindexTerminationGuard::new(Arc::clone(&progress)).with_index_id(handle.id.0.clone());
     let failure_slot = term_guard.failure_reason_slot();
 
@@ -182,7 +184,49 @@ pub(super) async fn run_reindex(
         diag.last_walk_error = None;
     }
     // Issue #744: stamp the walk end time.
-    let walk = super::orchestrator::collect_files_to_index(&handle);
+    //
+    // #4356 (review): the walk and the budget check both run `std::fs::metadata`
+    // over the same paths — `walker::should_skip_path`'s size guard stats every
+    // candidate, then `IndexBudget::check` sums the survivors. On a network
+    // mount a stalled `stat()` blocks for as long as the kernel takes, so
+    // neither belongs on a tokio worker thread; `spawn_blocking` puts both on
+    // the blocking pool, where a stall costs a pool thread and the runtime keeps
+    // scheduling. One hop covers both because they are adjacent and both purely
+    // synchronous.
+    //
+    // No wall-clock deadline, unlike `warm_boot::probe`: that one only needs a
+    // yes/no about a volume, so it can abandon a frozen thread and answer
+    // "inaccessible". This path needs the file list itself — there is nothing to
+    // return on a timeout, and refusing on one would turn a slow mount into a
+    // failed reindex.
+    let walk_task = {
+        let handle = Arc::clone(&handle);
+        tokio::task::spawn_blocking(move || {
+            let walk = super::orchestrator::collect_files_to_index(&handle);
+            // #4356: refuse a tree too large to index completely, rather than
+            // letting `TRUSTY_MAX_CHUNKS` truncate it into a corpus that
+            // reports success. Checked on the POST-FILTER list, so narrowing
+            // the index (`exclude_globs`, `extra_skip_dirs`, `include_paths`,
+            // `extensions`) is what clears it; the env ceilings are the blunt
+            // override.
+            let budget = crate::service::index_budget::IndexBudget::from_env().check(&walk.files);
+            (walk, budget)
+        })
+    };
+    let (walk, budget) = match walk_task.await {
+        Ok(pair) => pair,
+        Err(join_err) => {
+            // Before the walk moved onto the blocking pool a panic in it unwound
+            // `run_reindex` directly and fired `ReindexTerminationGuard::drop`.
+            // Re-raise so that stays exactly true.
+            if join_err.is_panic() {
+                std::panic::resume_unwind(join_err.into_panic());
+            }
+            // Runtime shutdown. Returning drops `term_guard`, which emits the
+            // terminal frame — the same path a cancelled `.await` took before.
+            return;
+        }
+    };
     let walk_ms = started.elapsed().as_millis() as u64;
     let total = walk.files.len();
     {
@@ -203,15 +247,11 @@ pub(super) async fn run_reindex(
         }
     }
 
-    // #4356: refuse a tree too large to index completely, rather than letting
-    // `TRUSTY_MAX_CHUNKS` truncate it into a corpus that reports success.
-    //
-    // This is the last point where nothing has been committed — no staging
-    // corpus is open, no chunk is written — so a refusal leaves the existing
-    // index byte-identical. The check runs on the POST-FILTER list, so
-    // narrowing the index (`exclude_globs`, `extra_skip_dirs`, `include_paths`,
-    // `extensions`) is what clears it; the env ceilings are the blunt override.
-    if let Err(over) = crate::service::index_budget::IndexBudget::from_env().check(&walk.files) {
+    // #4356: act on the budget verdict computed alongside the walk above. This
+    // is the last point where nothing has been committed — no staging corpus is
+    // open, no chunk is written — so a refusal leaves the existing index
+    // byte-identical.
+    if let Err(over) = budget {
         let reason = over.to_string();
         tracing::warn!("reindex[{}]: {}", index_id.0, reason);
         handle.walk_diagnostics.write().await.last_walk_error = Some(reason.clone());
@@ -229,6 +269,14 @@ pub(super) async fn run_reindex(
                 "fatal": true,
             }))
             .await;
+        // #4356 (review): the frame above is this run's ONE terminal event, and
+        // `push` also wrote it to the replay buffer, which `Drop` cannot reach.
+        // Leaving the guard armed broadcasts a SECOND `fatal` frame reading
+        // "exited unexpectedly (panic or cancellation)" — the CLI prints every
+        // error frame it receives (`commands::reindex_engine::events`), so an
+        // operator who narrowed their index correctly would be sent hunting a
+        // panic backtrace for a refusal working as designed.
+        term_guard.disarm();
         drop(term_guard);
         schedule_progress_cleanup(cleanup_map, cleanup_id);
         if let Some(ref q) = quarantine {

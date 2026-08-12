@@ -629,8 +629,11 @@ async fn create_index_forwards_exclude_globs() {
 /// Why: the daemon deserialises the field as `Option<Vec<String>>`, so sending
 /// `[1, 2]` would 422 the whole registration — an unrelated failure for a
 /// caller who merely mistyped an optional filter.
-/// What: a non-array value and an array with no strings both leave the field
-/// off the body entirely.
+/// What: a non-array value, an array with no strings, and a MIXED array all
+/// leave the field off the body entirely. The mixed case used to forward just
+/// the string entries, so `["**/a/**", 1]` registered an index filtered by one
+/// glob where the caller wrote two — the same typo `[1, 2]` already rejected
+/// whole, but silent. All-or-nothing means the two spellings agree.
 /// Test: this test.
 #[tokio::test]
 async fn create_index_omits_malformed_exclude_globs() {
@@ -654,5 +657,17 @@ async fn create_index_omits_malformed_exclude_globs() {
     assert!(
         no_strings.get("exclude_globs").is_none(),
         "an array with no strings must not be forwarded: {no_strings:?}"
+    );
+
+    let mixed = captured_create_index_body(serde_json::json!({
+        "id": "idx",
+        "root_path": "/projects/idx",
+        "exclude_globs": ["**/fixtures/**", 1, "**/*.generated.ts"],
+    }))
+    .await;
+    assert!(
+        mixed.get("exclude_globs").is_none(),
+        "one non-string entry must reject the whole array, not silently drop \
+         that entry and narrow the index by less than the caller asked: {mixed:?}"
     );
 }

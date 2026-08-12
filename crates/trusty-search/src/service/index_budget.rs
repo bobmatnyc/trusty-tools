@@ -16,7 +16,9 @@
 //!
 //! Test: the `tests` module at the bottom of this file, plus
 //! `reindex_refuses_walk_over_file_budget` and
-//! `reindex_budget_is_inclusive_at_the_boundary` in `service::reindex::tests`.
+//! `reindex_budget_is_inclusive_at_the_boundary` in the integration test binary
+//! `crates/trusty-search/tests/index_budget_env.rs` — they set
+//! `TRUSTY_MAX_INDEX_FILES`, so they need their own process (#3769).
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -180,13 +182,28 @@ fn zero_is_none<T: PartialEq + Default>(v: T) -> Option<T> {
 
 /// Read `name` as `T`, falling back to `default` when unset or unparseable.
 ///
-/// A malformed value warns and uses the default: silently treating garbage as
-/// `0` would UNCAP the walk, which is the failure this module exists to
-/// prevent.
+/// The env read is all this does; the parse lives in [`parse_limit`] so a test
+/// can reach the malformed-value branch without writing to process env.
 fn env_limit<T: FromStr + std::fmt::Display>(name: &str, default: T) -> T {
-    let Ok(raw) = std::env::var(name) else {
-        return default;
-    };
+    match std::env::var(name) {
+        Ok(raw) => parse_limit(name, &raw, default),
+        Err(_) => default,
+    }
+}
+
+/// Parse one already-read ceiling, falling back to `default` on garbage.
+///
+/// Why: a malformed value must warn and use the default, because silently
+/// treating garbage as `0` would UNCAP the walk — the failure this module
+/// exists to prevent, and one a typo in a deploy script would produce
+/// indistinguishably from a deliberate opt-out. Splitting this out of
+/// [`env_limit`] is what lets `malformed_value_falls_back_to_default` cover the
+/// branch as a pure function: `setenv` reallocates the C `environ` array, so a
+/// test that writes env inside the shared lib test binary can tear a concurrent
+/// `getenv` anywhere in the process (#3769, and `#[serial]` does not prevent it).
+/// What: `raw.parse::<T>()`, warning and returning `default` on `Err`.
+/// Test: `malformed_value_falls_back_to_default`.
+fn parse_limit<T: FromStr + std::fmt::Display>(name: &str, raw: &str, default: T) -> T {
     match raw.parse::<T>() {
         Ok(v) => v,
         Err(_) => {
@@ -235,34 +252,35 @@ mod tests {
     /// the guardrail — the exact failure this module exists to prevent — and a
     /// typo in a deploy script would be indistinguishable from a deliberate
     /// opt-out.
-    /// What: sets the var to a value that cannot parse and asserts the default
-    /// survives. This is the only test that reaches `env_limit`'s parse-`Err`
-    /// branch; `absent_value_falls_back_to_default` covers the other arm.
+    /// What: feeds the malformed values straight to [`parse_limit`] rather than
+    /// writing them to process env and reading them back through [`env_limit`].
+    /// The env round-trip proved nothing this does not, and it put a `setenv`
+    /// inside the ~1.6k-test lib binary, where the `environ` reallocation can
+    /// tear a concurrent `getenv` (#3769). `absent_value_falls_back_to_default`
+    /// still covers `env_limit`'s unset arm, which only reads.
     /// Test: this test.
     #[test]
-    #[serial_test::serial]
     fn malformed_value_falls_back_to_default() {
-        const VAR: &str = "TRUSTY_MAX_INDEX_FILES_MALFORMED_4356";
-        struct Guard;
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                std::env::remove_var(VAR);
-            }
-        }
-        let _g = Guard;
-
-        std::env::set_var(VAR, "banana");
+        const VAR: &str = ENV_MAX_INDEX_FILES;
         assert_eq!(
-            env_limit(VAR, 99usize),
+            parse_limit(VAR, "banana", 99usize),
             99,
             "garbage must fall back to the default, never to 0 (uncapped)"
         );
-
-        std::env::set_var(VAR, "-1");
         assert_eq!(
-            env_limit(VAR, 99usize),
+            parse_limit(VAR, "-1", 99usize),
             99,
             "a negative value does not parse as usize and must not uncap"
+        );
+        assert_eq!(
+            parse_limit(VAR, "", 99usize),
+            99,
+            "an empty override must not uncap either"
+        );
+        assert_eq!(
+            parse_limit(VAR, "7", 99usize),
+            7,
+            "a well-formed value is still honoured"
         );
     }
 
