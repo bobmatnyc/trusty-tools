@@ -87,6 +87,11 @@ reqwest = { workspace = true }
 rayon = "1"
 # Date/time
 chrono = { workspace = true }
+# Per-user data directory. #5463: `profile::selector::resolve_db_path` falls
+# back to `<data-dir>/tga/tga.db`, which is `~/Library/Application Support` on
+# macOS and `~/.local/share` on Linux — a distinction a bare `$HOME` join would
+# get wrong on one of the two.
+dirs = { workspace = true }
 # Error handling
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -143,6 +148,10 @@ criterion = { workspace = true }
 tracing-test = "0.2"
 # Temporary files for rule-loader tests
 tempfile = { workspace = true }
+# #5463: the `TGA_DB` resolution tests in `profile::selector` mutate the
+# environment, which is process-global — `#[serial]` keeps them off the other
+# test threads for the duration.
+serial_test = { workspace = true }
 
 [[bench]]
 name = "tga_bench"

@@ -12,6 +12,7 @@
 //! - [`report`] — Stage 3: CSV / JSON / Markdown report generation
 //! - [`commands`] — the subcommand handlers `main.rs` dispatches into
 //! - [`audit`] — the one-shot AUDIT sweep that drives those handlers end to end
+//! - [`profile`] — longitudinal per-contributor quality profiling (#5463)
 
 #![warn(missing_docs)]
 
@@ -28,4 +29,5 @@ pub mod classify;
 pub mod collect;
 pub mod commands;
 pub mod core;
+pub mod profile;
 pub mod report;
