@@ -401,6 +401,7 @@ tga dora --since 2026-04-01
 | `tga report` | Stage 3: generate CSV/JSON/Markdown reports | `--output`, `--formats`, `--author` |
 | `tga author` | Per-engineer drill-down (commits, effort, PRs, categories) | `<email>`, `--format`, `--since`, `--until` |
 | `tga pr-metrics` | Pull-request metrics per engineer | `--weeks`, `--csv`, `--output` |
+| `tga profile` | Longitudinal per-contributor quality profile ([#5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)) | `<contributor>`, `--since`, `--until`, `--window`, `--dry-run`, `--model`, `--github-issue` |
 | `tga install` | Interactive first-time config wizard | `--output`, `--force` |
 | `tga aliases` | Manage developer identity aliases | `list`, `merge <src> <dst>`, `add-login <email> <provider> <login>` |
 | `tga backfill` | Retroactive maintenance on existing rows | `--repos`, `--weeks`, `--since`, `--until`, `--dry-run` |
@@ -589,6 +590,49 @@ tga pr-metrics --weeks 12 --csv --output pr-metrics.csv
 The `pr_comments_given` and `avg_revisions` columns are reserved for future
 use and currently always output `0.0`; the underlying review-comment and
 revision-count data is not yet tracked.
+
+### tga profile
+
+Longitudinal per-contributor quality profile: identity resolution, period
+batching, representative diff sampling, per-period LLM review, cross-period
+synthesis, and a JSON/Markdown report — optionally published to a
+per-contributor GitHub issue thread. Contributor profiling used to live in
+`trusty-review`; [epic #5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)
+moved it here in tga 2.19.0.
+
+```bash
+tga profile <CONTRIBUTOR> [--db <PATH>] [--since <DATE>] [--until <DATE>]
+            [--window <WINDOW>] [--repos <NAME,...>] [--repos-root <PATH>]
+            [--output <DIR>] [--format <FORMAT>] [--max-diffs <N>]
+            [--dry-run] [--model <SLUG>]
+            [--github-issue --github-repo <OWNER/REPO>]
+```
+
+| Flag | Description |
+|------|-------------|
+| `<CONTRIBUTOR>` | Canonical email, GitHub login, or display name — resolved via the same identity table `tga aliases` manages |
+| `--db <PATH>` | Database to profile against; defaults to the global `--database` / config resolution |
+| `--since <DATE>` / `--until <DATE>` | Inclusive ISO 8601 window bounds |
+| `--window <WINDOW>` | Period granularity: `quarterly` (default), `monthly`, `weekly`, or a number of weeks |
+| `--repos <NAME,...>` | Restrict the reported repository list to these names |
+| `--repos-root <PATH>` | Root directory of local checkouts, used as `<root>/<repo-name>` when sampling diffs |
+| `--output <DIR>` | Output directory for the profile files |
+| `--format <FORMAT>` | `json`, `markdown`, or `both` (default) |
+| `--max-diffs <N>` | Maximum diffs sampled per period (default 10) |
+| `--dry-run` | Skip every model call; emit a deterministic, stats-only profile |
+| `--model <SLUG>` | Model slug including its routing prefix (e.g. `openrouter/…`, `bedrock/…`) |
+| `--github-issue` | Publish the report to a per-contributor GitHub issue thread (requires `--github-repo`) |
+| `--github-repo <OWNER/REPO>` | Repository holding the profile issues |
+
+A period whose model call fails is reported as SKIPPED, never as a period with
+no findings — the rendered report carries a Coverage section naming any
+skipped periods so a partial-outage run cannot read as a clean trajectory.
+
+```bash
+tga profile alice@example.com --window monthly --since 2026-01-01
+tga profile alice --dry-run                          # stats-only, no LLM calls
+tga profile alice@example.com --github-issue --github-repo my-org/my-repo
+```
 
 ### tga backfill
 
