@@ -144,71 +144,130 @@ fn build_system_prompt_for_no_override_matches_bundled_sections() {
     assert!(base > deleg, "BASE_PM floor must be last");
 }
 
-/// `prepare_session` must not write outside the `FrameworkPaths` base it was
-/// given.
+/// The MANAGED path must not seed `.claude.json` into the workspace.
 ///
-/// Why (#5544): `FrameworkPaths::under(tempdir)` exists to confine every write
-/// a session prepares. Two steps escaped it —
-/// `settings::preseed_workspace_trust_home` seeded `~/.claude.json` and
-/// `settings::remove_global_trusty_memory_hooks` read and rewrote
-/// `~/.claude/settings.json`, both resolved from `dirs::home_dir()` rather than
-/// from `fw`. Callers compensated by repointing the process's `$HOME`, which is
-/// a PROCESS-GLOBAL write: `cargo test` runs a target's tests as threads in ONE
-/// process, so every sibling saw the repoint for its duration, and `#[serial]`
-/// excludes only other `#[serial]` tests. Closing the escape is what lets those
-/// callers stop writing env at all.
+/// Why (#5544, code-critic BLOCK on PR #5583): this test exists because the
+/// first version of that PR resolved the two user-global writes through
+/// `fw.claude_home_dir()`, which walks up from `claude_agents` —
+/// `FrameworkPaths::for_managed_project` rewrites that field to
+/// `<workspace>/.claude/agents`, so on every managed path (`tm launch`,
+/// `tm connect`, daemon spawns, `tm register/load/run`) the "home" became the
+/// workspace. `prepare_session` then dropped an untracked `.claude.json` into
+/// the operator's repo. The earlier regression test used
+/// `FrameworkPaths::under()`, the one constructor that cannot expose this,
+/// which is exactly why it passed.
 ///
-/// FAILS BEFORE THIS CHANGE: `<base>/.claude.json` was never created — the seed
-/// landed in the operator's real `~/.claude.json` instead.
+/// FAILS BEFORE THE FIX: `<workspace>/.claude.json` is created. (Pre-fix, this
+/// test is itself minus the `home_tier` line — the field did not exist.)
 ///
-/// What: runs the real `prepare_session_inner` pipeline against a
-/// `FrameworkPaths::under(tempdir)` and asserts the trust seed appears under
-/// that base. Deliberately NOT `#[serial]` and deliberately env-free: a test
-/// asserting confinement must not itself depend on process-global state.
+/// What: builds the real managed layout with `for_managed_project`, redirects
+/// ONLY the home tier to a tempdir so the assertion does not depend on the
+/// developer's real `~/.claude.json`, runs the full pipeline, and asserts the
+/// seed landed on the home tier and NOT in the workspace.
+/// `home_tier_is_the_real_home_for_a_managed_workspace` pins the production
+/// value of that tier without writing to it.
 /// Test: this function IS the test.
 #[test]
-fn prepare_session_confines_home_writes_to_the_framework_base() {
-    let base = tempdir().unwrap();
-    let project = tempdir().unwrap();
-    let fw = crate::core::paths::FrameworkPaths::under(base.path());
+fn prepare_session_does_not_seed_the_workspace_on_the_managed_path() {
+    let managed_root = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
+    let home = tempdir().unwrap();
 
-    prepare_session_with_style_and_native(&fw, project.path(), None, true).expect("prep succeeds");
+    let mut fw = crate::core::paths::FrameworkPaths::for_managed_project(
+        managed_root.path(),
+        workspace.path(),
+    );
+    assert_eq!(
+        fw.claude_agents_dir(),
+        workspace.path().join(".claude").join("agents"),
+        "fixture must genuinely be the managed shape, else this test is vacuous"
+    );
+    fw.home_tier = Some(home.path().to_path_buf());
 
-    let seeded = base.path().join(".claude.json");
+    prepare_session_with_style_and_native(&fw, workspace.path(), None, true)
+        .expect("prep succeeds");
+
+    assert!(
+        !workspace.path().join(".claude.json").exists(),
+        "the managed deploy-destination rewrite must not relocate the user-global \
+         trust seed into the workspace (#5544)"
+    );
+    let seeded = home.path().join(".claude.json");
     assert!(
         seeded.is_file(),
-        "the workspace trust seed must land under the FrameworkPaths base, not \
-         the operator's real home (#5544); expected {}",
+        "the seed must land on the home tier; expected {}",
         seeded.display()
     );
-    let text = std::fs::read_to_string(&seeded).expect("seed readable");
     assert!(
-        text.contains(&project.path().to_string_lossy().to_string()),
+        std::fs::read_to_string(&seeded)
+            .expect("seed readable")
+            .contains(&workspace.path().to_string_lossy().to_string()),
         "the seed must name the prepared workspace"
     );
 }
 
-/// An unresolvable framework base declines the home-tier writes.
+/// A managed workspace's home tier is the operator's REAL home.
 ///
-/// Why (#5544): `FrameworkPaths::default()` substitutes `"."` when
-/// `dirs::home_dir()` returns `None`. Routing the two home-tier writes through
-/// `fw` would otherwise turn that fallback into a `.claude.json` next to the
-/// process's working directory — which is how a stray file appeared in the
-/// crate root during this change's own test run.
-/// What: builds a `FrameworkPaths` over a relative base, runs both home-tier
-/// helpers, and asserts nothing was written beside the cwd.
+/// Why (#5544): the hook-cleanup half of the same defect cannot be asserted by
+/// running it — `remove_global_trusty_memory_hooks` targets the user's real
+/// `~/.claude/settings.json`, and a test must not rewrite that file. The
+/// property that actually broke is the RESOLVED PATH, so this asserts the path
+/// and nothing else. Pointing the cleanup at a workspace made it a silent
+/// no-op, because a missing file is success by contract.
+/// What: pure accessor comparison, no I/O, no process env.
 /// Test: this function IS the test.
 #[test]
-fn home_writes_are_skipped_when_the_base_is_unresolved() {
-    let fw = crate::core::paths::FrameworkPaths::under(std::path::Path::new("."));
+fn home_tier_is_the_real_home_for_a_managed_workspace() {
     let workspace = tempdir().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(workspace.path());
+
+    assert_eq!(
+        fw.home_tier_dir(),
+        dirs::home_dir().as_deref(),
+        "a managed workspace must keep the user's real home as its home tier — \
+         the global hook cleanup and the trust seed both resolve from it"
+    );
+    assert_ne!(
+        fw.home_tier_dir(),
+        Some(workspace.path()),
+        "the workspace is never the home tier"
+    );
+}
+
+/// `under()` still confines the home tier, so tests stay hermetic.
+#[test]
+fn home_tier_is_the_temp_base_under() {
+    let base = tempdir().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
+    assert_eq!(fw.home_tier_dir(), Some(base.path()));
+}
+
+/// An unresolved home tier declines the user-global writes.
+///
+/// Why (#5544): `FrameworkPaths::default()` substitutes `"."` for the DEPLOY
+/// paths when `dirs::home_dir()` returns `None`. Treating that as a home would
+/// seed `.claude.json` beside the process's working directory — which is how a
+/// stray file appeared in the crate root during this change's own test run.
+/// `home_tier` is left unset in that case instead.
+/// What: clears the tier, runs both user-global helpers, asserts neither wrote.
+/// Test: this function IS the test.
+#[test]
+fn home_writes_are_skipped_when_the_home_tier_is_unresolved() {
+    let base = tempdir().unwrap();
+    let workspace = tempdir().unwrap();
+    let mut fw = crate::core::paths::FrameworkPaths::under(base.path());
+    fw.home_tier = None;
 
     super::settings::preseed_workspace_trust_home(&fw, workspace.path()).expect("soft skip");
     super::settings::remove_global_trusty_memory_hooks(&fw).expect("soft skip");
 
     assert!(
+        !base.path().join(".claude.json").exists(),
+        "an unresolved home tier must decline the seed, not guess a location"
+    );
+    assert!(
         !std::path::Path::new("./.claude.json").exists(),
-        "a relative framework base must decline the seed, not write it into the cwd"
+        "and must never fall back to the process's working directory"
     );
 }
 
