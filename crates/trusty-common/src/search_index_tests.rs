@@ -370,35 +370,31 @@ fn batch_budget_is_exhausted_at_and_past_the_cap() {
 /// `dropped_batches: 0` forever. Against the code before this fix the second
 /// half of this test fails: `truncated_batches` never moves off `0`.
 /// What: drives `stop_batch_for_budget` — the loop's ONLY interaction with the
-/// budget, so there is no reachable path that stops without recording — first
-/// under the cap, then past it. Under the cap it must return `false` and leave
-/// the counter alone; past it, it must return `true`, advance
-/// `truncated_batches` by exactly one, and report the age as recent. Both
-/// halves live in one test because the counter is process-wide and this is its
-/// only writer, so a sibling test can never perturb the delta. That the
-/// truncation does not touch the DROP counters is pinned deterministically on
-/// an isolated pool by `a_truncation_is_counted_apart_from_a_rejection`.
+/// budget, so there is no reachable path that stops without recording — past
+/// the cap, against the SHARED pool `index_drop_stats` reads. It must return
+/// `true`, advance `truncated_batches` by exactly one, and report the age as
+/// recent. Deliberately the shared pool and a delta rather than an isolated
+/// instance: that is what proves a truncation lands in the counter `GET /health`
+/// publishes, and this is the shared truncation counter's only test writer, so
+/// no sibling can perturb the delta. That a truncation leaves the DROP counters
+/// untouched is pinned absolutely, on an isolated pool, by
+/// `a_truncation_is_counted_apart_from_a_rejection`.
 /// Test: this test.
 #[test]
 fn a_truncated_batch_is_counted_separately_from_a_dropped_one() {
-    use std::time::Duration;
-
     let before = index_drop_stats().truncated_batches;
 
     assert!(
-        !stop_batch_for_budget(Duration::from_secs(0), "idx", 0, 10),
-        "a batch inside its budget must not be stopped"
-    );
-    assert_eq!(
-        index_drop_stats().truncated_batches,
-        before,
-        "a batch that was never stopped must not be counted as truncated"
-    );
-
-    assert!(
-        stop_batch_for_budget(BATCH_INDEX_BUDGET, "idx", 3, 10),
+        stop_batch_for_budget(
+            crate::index_dispatch::global(),
+            BATCH_INDEX_BUDGET,
+            "idx",
+            3,
+            10
+        ),
         "a batch that has spent its budget must be stopped"
     );
+
     let after = index_drop_stats();
     assert_eq!(
         after.truncated_batches,
@@ -411,6 +407,53 @@ fn a_truncated_batch_is_counted_separately_from_a_dropped_one() {
             .is_some_and(|since| since <= 60),
         "a truncation that just happened must be reported as recent, got {:?}",
         after.seconds_since_last_truncation
+    );
+}
+
+/// A batch that finishes INSIDE its budget records no truncation at all.
+///
+/// Why: the negative leg of the counter. Nothing else catches an over-counting
+/// regression — recording unconditionally instead of only past the cap — and
+/// that failure is worse than the under-counting one it guards the other side
+/// of: every healthy batch would report as truncated, so an operator watching
+/// `GET /health` learns nothing from a number that is always climbing.
+/// What: runs `stop_batch_for_budget` under the cap against a FRESH isolated
+/// pool, so the assertions are absolute rather than a delta — `truncated()`
+/// exactly `0` and `last_truncation_unix_secs()` exactly `None`, which no
+/// ordering against a sibling test can satisfy accidentally. Asserting `== 0`
+/// on the process-wide pool would be unpinnable: a sibling increments it.
+/// Test: this test.
+#[test]
+fn an_unexhausted_budget_records_no_truncation() {
+    use crate::index_dispatch::BoundedDispatcher;
+    use std::time::Duration;
+
+    let pool = BoundedDispatcher::new(1, 1);
+
+    assert!(
+        !stop_batch_for_budget(&pool, Duration::from_secs(0), "idx", 0, 10),
+        "a batch that has spent none of its budget must not be stopped"
+    );
+    assert!(
+        !stop_batch_for_budget(
+            &pool,
+            BATCH_INDEX_BUDGET - Duration::from_millis(1),
+            "idx",
+            9,
+            10
+        ),
+        "a batch one millisecond inside its budget must not be stopped"
+    );
+
+    assert_eq!(
+        pool.truncated(),
+        0,
+        "a batch that was never stopped must not be counted as truncated"
+    );
+    assert_eq!(
+        pool.last_truncation_unix_secs(),
+        None,
+        "with no truncation the stamp must stay unset, never a misleading epoch"
     );
 }
 

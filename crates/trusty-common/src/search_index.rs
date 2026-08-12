@@ -574,13 +574,19 @@ fn batch_budget_exhausted(elapsed: std::time::Duration) -> bool {
 /// rejection counter was added to close, reintroduced on the other loss path.
 /// Splitting "decide" from "record" is what would let it come back.
 /// What: returns `true` once [`batch_budget_exhausted`], and on that edge
-/// records the truncation on the shared pool (readable as
+/// records the truncation on `pool` (readable as
 /// [`IndexDropStats::truncated_batches`], distinct from a drop) and warns with
 /// how many of the batch's files were reached and how many are abandoned.
-/// Returns `false` and records nothing while the budget holds.
+/// Returns `false` and records nothing while the budget holds. `pool` is a
+/// parameter rather than a reach for [`crate::index_dispatch::global`] so the
+/// negative case can assert an untouched counter absolutely, on an isolated
+/// pool, instead of a delta against a process-wide one a sibling test also
+/// writes — the same reason [`crate::index_dispatch::BoundedDispatcher`]'s own
+/// tests build small instances rather than racing the shared pool.
 /// Test: `a_truncated_batch_is_counted_separately_from_a_dropped_one`,
 /// `an_unexhausted_budget_records_no_truncation`.
 fn stop_batch_for_budget(
+    pool: &crate::index_dispatch::BoundedDispatcher,
     elapsed: std::time::Duration,
     index_id: &str,
     done: usize,
@@ -589,7 +595,7 @@ fn stop_batch_for_budget(
     if !batch_budget_exhausted(elapsed) {
         return false;
     }
-    crate::index_dispatch::global().record_truncation();
+    pool.record_truncation();
     tracing::warn!(
         "incremental index update for '{index_id}' stopped after {done} of {total} \
          file(s): the {}s per-batch budget was exhausted; the remaining {} file(s) \
@@ -667,7 +673,13 @@ fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
     // large write holds a worker for minutes and the queue never turns over.
     let started = std::time::Instant::now();
     for (done, path) in paths.iter().enumerate() {
-        if stop_batch_for_budget(started.elapsed(), &index_id, done, paths.len()) {
+        if stop_batch_for_budget(
+            crate::index_dispatch::global(),
+            started.elapsed(),
+            &index_id,
+            done,
+            paths.len(),
+        ) {
             break;
         }
         let abs = if path.is_absolute() {
