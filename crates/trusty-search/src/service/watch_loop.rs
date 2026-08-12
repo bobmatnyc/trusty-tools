@@ -269,7 +269,22 @@ pub fn watcher_relative_path(canonical_root: &Path, raw_root: &Path, event_path:
 /// Re-chunk the file and merge it into the indexer. Stale chunks from a
 /// previous version of the same file are removed first so we don't accumulate
 /// dead entries on edit.
-async fn handle_modified(
+///
+/// Every chunk this function leaves in the corpus is recorded in
+/// `indexed_files`, including on the `index_file` error path — see the comment
+/// at that arm (#100). `handle_removed` can only evict what is recorded here,
+/// so anything committed but unrecorded is orphaned for the index's lifetime.
+///
+/// Test: `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` and
+/// `partial_commit_at_cap_then_edit_replaces_the_landed_chunk` in
+/// `tests/watcher_chunk_cap_orphans_100.rs`.
+///
+/// Public so that integration test can call it directly instead of racing real
+/// OS watcher events for a state the debouncer makes hard to hit on purpose;
+/// `#[doc(hidden)]` keeps it off the documented API surface, matching
+/// `server::typeahead_handler_for_tests`.
+#[doc(hidden)]
+pub async fn handle_modified(
     path: &Path,
     index_id: &crate::core::registry::IndexId,
     canonical_root: &Path,
@@ -373,6 +388,28 @@ async fn handle_modified(
     let idx = indexer.read().await;
     if let Err(err) = idx.index_file(&path_str, &content).await {
         tracing::warn!(?err, ?path, "index_file failed");
+        // #100: `index_file` refuses a write the `TRUSTY_MAX_CHUNKS` cap
+        // discarded, and raises that refusal AFTER committing the chunks that
+        // did fit. Returning without recording anything would leave those
+        // committed chunks untracked: a later delete finds no `IndexedFiles`
+        // entry, `handle_removed` returns early, and they stay in the corpus,
+        // BM25 and HNSW forever, with a later edit's stale-removal pass
+        // skipped the same way.
+        //
+        // Recorded from the corpus rather than from `new_ids` above, which is
+        // what the file PARSED into, not what landed. When the two disagree
+        // the corpus is the set a removal has to act on, so reading it here
+        // cannot leave a real chunk untracked. Error paths that commit nothing
+        // (the quarantine refusal, an embed failure) return an empty set and
+        // record nothing, which is also correct — the stale-removal pass above
+        // already took this file's prior entry.
+        let landed = idx.chunk_ids_for_file(&path_str).await;
+        drop(idx);
+        if !landed.is_empty() {
+            indexed_files
+                .record(std::path::PathBuf::from(&path_str), landed)
+                .await;
+        }
         return;
     }
     drop(idx);
@@ -399,8 +436,14 @@ async fn handle_modified(
 /// the lookup still hits the entry stored by `handle_modified`.
 ///
 /// Test: `removed_event_produces_same_relative_key_as_modified` and
-/// `removed_deleted_file_dual_root_fallback` unit tests below.
-async fn handle_removed(
+/// `removed_deleted_file_dual_root_fallback` unit tests below;
+/// `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` in
+/// `tests/watcher_chunk_cap_orphans_100.rs` covers the case where the entry it
+/// looks up was written by `handle_modified`'s error arm.
+///
+/// Public for that integration test on the same terms as `handle_modified`.
+#[doc(hidden)]
+pub async fn handle_removed(
     path: &Path,
     index_id: &crate::core::registry::IndexId,
     canonical_root: &Path,
