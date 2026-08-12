@@ -100,13 +100,35 @@
 #     - A `mod … {` whose leading whitespace differs from the `#[cfg(test)]`
 #       attribute's, or whose line does not end in `{`.
 #
-#   KNOWN LIMITATION — the counter is line-based, not a parser. A test module
-#   whose brace balance is skewed by braces inside string/char/raw-string
-#   literals is not excluded at all (it stays counted as production). That is
-#   the intended failure direction. There is no construct that causes the
-#   opposite — production code silently dropped — because exclusion requires
-#   the brace balance to return to exactly 0 on a line that is exactly the
-#   anchor indent plus `}`.
+#   STRING-AWARE BRACE COUNTING (issue #3049 follow-up). Method (a) counts
+#   braces over a STRING-BLANKED rendering of the raw line (`brace_text`), not
+#   over the pass-1 comment-stripped text. Braces inside `"…"`, `b"…"`,
+#   `r#"…"#`, and the `'{'` / `'}'` char literals therefore do not skew the
+#   balance.
+#
+#   This was not cosmetic. `crates/trusty-search/src/core/corpus/contrib.rs`
+#   plants a malformed redb row as `b"{ not a contrib graph"`; that one
+#   unmatched `{` left the file's whole `#[cfg(test)] mod tests` region reading
+#   as unterminated, so NOTHING was excluded. For the SLOC cap that is the
+#   intended fail-closed direction (a false cap violation). For
+#   scripts/check_teardown_guard.sh, which reuses this matcher via `emit_skip`
+#   to skip test-only call sites, the same miss reported ten test fixtures as
+#   unguarded production writers — and the only way to silence those is a row
+#   in the teardown manifest, i.e. a durable false claim that a write is
+#   exempt. Same fail-closed bias, opposite consequence: one gate's false
+#   positive is noise, the other's is an exemption someone later trusts.
+#
+#   Method (b) — the indentation anchor — is UNCHANGED and still independent,
+#   so exclusion continues to require two methods to agree. `brace_text` only
+#   makes method (a) accurate; it can never exclude a region whose closing line
+#   is not exactly the anchor indent plus `}`.
+#
+#   REMAINING LIMITATION — `brace_text` is a scanner, not a Rust lexer. It
+#   deliberately does NOT treat `'` as a general char-literal delimiter, because
+#   `'a` lifetimes are indistinguishable from an unterminated char literal
+#   without type context; only the exact `'X'` and `'\X'` forms are consumed. A
+#   spelling it does not recognise leaves the balance skewed and the region
+#   counted — the same fail-closed direction as before, never the opposite.
 #
 # Intentional pass-1 leniency (unchanged, issue #2563 item 2): this awk
 #   program has no notion of string/char literals or raw strings, so a `//` or
@@ -145,7 +167,70 @@ function brace_delta(s,   a, b, t) {
   t = s; b = gsub(/\}/, "", t)
   return a - b
 }
-BEGIN { depth = 0; sloc = 0; nlines = 0 }
+# Text of a RAW line with comments removed and string/char literal CONTENTS
+# blanked, for pass-2 brace counting only. Never used for SLOC counting, so
+# pass 1 and its documented leniency are untouched.
+#
+# Multi-line state is carried in globals across calls: bs_state is 0 in code,
+# 1 inside "…" (backslash escapes honoured), 2 inside a raw string (closed by
+# a quote followed by bs_hashes `#`), 3 inside a /* … */ block comment nested
+# bs_depth deep. Callers reset bs_state to 0 before scanning a region.
+function brace_text(s,   n, i, c, two, out, j, hashes, cnt) {
+  n = length(s); i = 1; out = ""
+  while (i <= n) {
+    c = substr(s, i, 1)
+    two = substr(s, i, 2)
+    if (bs_state == 3) {
+      if (two == "*/") { bs_depth--; if (bs_depth <= 0) bs_state = 0; i += 2; continue }
+      if (two == "/*") { bs_depth++; i += 2; continue }
+      i++; continue
+    }
+    if (bs_state == 1) {
+      if (c == "\\") { i += 2; continue }
+      if (c == "\"") { bs_state = 0 }
+      i++; continue
+    }
+    if (bs_state == 2) {
+      if (c == "\"") {
+        cnt = 0
+        while (substr(s, i + 1 + cnt, 1) == "#") cnt++
+        if (cnt >= bs_hashes) { bs_state = 0; i += 1 + bs_hashes; continue }
+      }
+      i++; continue
+    }
+    # --- bs_state == 0: ordinary code ---
+    if (two == "//") break                                  # line comment
+    if (two == "/*") { bs_state = 3; bs_depth = 1; i += 2; continue }
+    # Raw-string opener: r"…  r#"…  br#"…  rb#"…  (the `r` is what makes it raw;
+    # a plain b"…" falls through and is handled as an ordinary string below).
+    if (c == "r" || c == "b") {
+      j = (two == "br" || two == "rb") ? i + 2 : i + 1
+      hashes = 0
+      while (substr(s, j + hashes, 1) == "#") hashes++
+      if (substr(s, j + hashes, 1) == "\"" && (c == "r" || two == "br" || two == "rb")) {
+        bs_state = 2; bs_hashes = hashes; i = j + hashes + 1; continue
+      }
+    }
+    if (c == "\"") { bs_state = 1; i++; continue }
+    if (c == SQ) {
+      # SQ is the single-quote character, built in BEGIN — a literal one cannot
+      # appear here because this whole program is a single-quoted shell string.
+      #
+      # Only the two unambiguous char-literal forms are consumed: an escaped
+      # one (backslash, char, close) and a bare one (char, close). Anything
+      # else beginning with a quote is a LIFETIME, which must not open a
+      # literal — consuming it would blank the rest of the line and hide real
+      # braces. The quote itself is dropped either way; it is not a brace.
+      if (substr(s, i + 1, 1) == "\\" && substr(s, i + 3, 1) == SQ) { i += 4; continue }
+      if (substr(s, i + 2, 1) == SQ) { i += 3; continue }
+      i++; continue
+    }
+    out = out c
+    i++
+  }
+  return out
+}
+BEGIN { depth = 0; sloc = 0; nlines = 0; SQ = sprintf("%c", 39) }
 {
   line = $0
   n = length(line)
@@ -194,39 +279,55 @@ BEGIN { depth = 0; sloc = 0; nlines = 0 }
   }
   nlines++
   code[nlines] = out
+  raw[nlines] = line
 }
 END {
+  # ---- Pass 2 input: a string-aware re-strip of the RAW lines.
+  # Pass 1 has no notion of literals, so a `//` or an unmatched `/*` inside a
+  # string corrupts code[] — and `/*` corrupts it all the way to EOF, which
+  # blanks the `#[cfg(test)]` attribute itself and hides the region entirely.
+  # Glob patterns make that ordinary: "**/*.rs" opens a comment that never
+  # closes. Region detection therefore reads ctext[], never code[].
+  #
+  # Pass 1 and the SLOC count it feeds are deliberately NOT changed here; that
+  # undercount is long-standing, separately documented, and has its own pinned
+  # fixture (sloc-string-literal-slash-star.rs).
+  bs_state = 0; bs_depth = 0; bs_hashes = 0
+  for (i = 1; i <= nlines; i++) ctext[i] = brace_text(raw[i])
+
   # ---- Pass 2: mark #[cfg(test)] mod regions for exclusion (issue #5153).
   # Every branch that cannot prove a region falls through WITHOUT marking,
   # so the lines stay counted as production. Fail closed, always.
   i = 1
   while (i <= nlines) {
-    if (rtrim(ltrim(code[i])) != "#[cfg(test)]") { i++; continue }
-    lead = lead_ws(code[i])
+    if (rtrim(ltrim(ctext[i])) != "#[cfg(test)]") { i++; continue }
+    lead = lead_ws(ctext[i])
 
     # Walk to the attributed item, tolerating blank lines and further
     # attribute lines at the SAME indent.
     j = i + 1
     is_mod = 0
     while (j <= nlines) {
-      t = rtrim(ltrim(code[j]))
+      t = rtrim(ltrim(ctext[j]))
       if (t == "") { j++; continue }
-      if (lead_ws(code[j]) != lead) break
+      if (lead_ws(ctext[j]) != lead) break
       if (t ~ /^#\[.*\]$/) { j++; continue }
       if (t ~ /^(pub([(][a-z]+[)])?[ ]+)?mod[ ]+[A-Za-z_][A-Za-z0-9_]*[ ]*\{$/) is_mod = 1
       break
     }
     if (!is_mod) { i++; continue }
 
+    # Two INDEPENDENT signals must still agree before anything is excluded —
+    # that requirement is what keeps a lexing mistake pointed at "count it".
     # Method (a): brace balance from the `mod … {` line.
     # Method (b): the closing line must be exactly <lead>} and nothing else.
     d = 0
     close_at = 0
     for (k = j; k <= nlines; k++) {
-      d += brace_delta(code[k])
+      d += brace_delta(ctext[k])
       if (d < 0) break                                  # malformed -> count it
       if (d == 0) {
-        if (rtrim(code[k]) == lead "}") close_at = k    # both methods agree
+        if (rtrim(ctext[k]) == lead "}") close_at = k   # both methods agree
         break                                           # disagree -> count it
       }
     }

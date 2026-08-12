@@ -17,6 +17,14 @@
 #   Plus the fail-closed cases: an empty scan, a stale manifest row, and a
 #   CALLER:<fn> naming a function that does not take a guard.
 #
+#   And one FALSE-POSITIVE case, which is the opposite failure and just as
+#   real: a write inside a `#[cfg(test)] mod` whose brace balance is skewed by
+#   a `{` in a string literal. The gate excludes test regions through
+#   sloc_awk.sh's matcher, and when that matcher missed the region the gate
+#   demanded manifest rows for ten test fixtures. A gate that manufactures
+#   exemption pressure is failing too — the row it extracts outlives the
+#   mistake and reads later as a considered decision.
+#
 # What: builds a throwaway git repo per case, copies the gate and its data files
 #   in so the gate's own `SCRIPT_DIR`-derived repo root resolves inside the
 #   fixture, and asserts the exit status and the message. The fixtures are padded
@@ -170,6 +178,34 @@ pub async fn correctly_guarded(idx: &Indexer, id: &IndexId) {
 EOF
 }
 
+mutate_cfg_test_string_brace() {
+  # The contrib.rs shape. A durable write inside a `#[cfg(test)] mod` is test
+  # code and must not be reported at all — the gate skips those regions via
+  # sloc_awk.sh's matcher. That matcher balances braces, and an unmatched `{`
+  # inside a byte-string literal used to leave the whole module reading as
+  # unterminated, so every test call site in it surfaced as an unguarded
+  # production writer. Ten of them did on main, and the only way to silence
+  # one is a teardown-manifest row — a durable false claim that a real write
+  # is exempt. Hence a case: the fixture must stay clean, exit 0.
+  mutate_guarded_ok "$1"
+  cat >> "$1/crates/trusty-search/src/service/writer.rs" <<'EOF'
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BAD: &[u8] = b"{ not a contrib graph";
+
+    #[test]
+    fn writes_in_a_test_are_not_production() {
+        let store = CorpusStore::open(&tempdir().path().join("c.redb")).unwrap();
+        store.save_contrib_graph(&sample()).expect("save");
+        assert!(!BAD.is_empty());
+    }
+}
+EOF
+}
+
 mutate_stale_row() {
   mutate_guarded_ok "$1"
   printf 'crates/trusty-search/src/service/writer.rs\tcommit_parsed_batch\tcorrectly_guarded\tEXEMPT\tthis site is guarded, so the row is a lie\n' \
@@ -194,6 +230,7 @@ run_case late_guard     1 "UNDECLARED"           mutate_late_guard
 run_case spawn_escape   1 "UNDECLARED"           mutate_spawn_escape
 run_case deferred_spawn_escape 1 "UNDECLARED"    mutate_deferred_spawn_escape
 run_case guarded_ok     0 "OK: teardown guard"   mutate_guarded_ok
+run_case cfg_test_string_brace 0 "OK: teardown guard" mutate_cfg_test_string_brace
 run_case stale_row      1 "STALE ROW"            mutate_stale_row
 run_case bogus_caller   1 "UNVERIFIABLE CALLER"  mutate_bogus_caller
 run_case empty_reason   1 "NO REASON"            mutate_empty_reason

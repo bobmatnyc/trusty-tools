@@ -105,10 +105,22 @@
 #     to a clean tree; this repo has already shipped that bug (#4618, #5440).
 #
 # KNOWN LIMITS, stated rather than papered over:
-#   - Brace-based scope tracking has no notion of string or char literals, so a
-#     `{` or `}` inside one skews the balance for the rest of the file. The
-#     failure direction is toward reporting MORE unguarded sites (wrong or
-#     missing scope names), never toward silently satisfying one.
+#   - THIS script's own brace-based SCOPE tracking (the awk below) has no notion
+#     of string or char literals, so a `{` or `}` inside one skews the balance
+#     for the rest of the file. The failure direction is toward reporting MORE
+#     unguarded sites (wrong or missing scope names), never toward silently
+#     satisfying one.
+#
+#     Do not confuse that with the SEPARATE brace counter in
+#     scripts/lib/sloc_awk.sh that decides where a `#[cfg(test)] mod` region
+#     ends. That one IS string-aware, and had to become so: an unmatched `{`
+#     inside `b"{ not a contrib graph"` in
+#     crates/trusty-search/src/core/corpus/contrib.rs left that file's whole
+#     test module reading as unterminated, so this gate scanned it as
+#     production and reported ten test fixtures as undeclared writers. The
+#     pressure that creates is the danger — the only way to silence such a
+#     report is a manifest row asserting a real write is exempt. A false red
+#     here is cheap; a manifest row bought to clear one is not.
 #   - `CALLER:<fn>` is verified only as "that function exists and does take a
 #     guard" — the gate does not prove the call graph. It makes the claim
 #     explicit and checkable by a human, which prose in a doc comment was not.
@@ -184,7 +196,8 @@ METHODS="$(mktemp "$TMPDIR_BASE/tdguard.methods.XXXXXX")"
 SKIPF="$(mktemp "$TMPDIR_BASE/tdguard.skip.XXXXXX")"
 SITES="$(mktemp "$TMPDIR_BASE/tdguard.sites.XXXXXX")"
 GUARDFILES="$(mktemp "$TMPDIR_BASE/tdguard.guardfiles.XXXXXX")"
-trap 'rm -f "$FILELIST" "$METHODS" "$SKIPF" "$SITES" "$GUARDFILES"' EXIT
+REGIONW="$(mktemp "$TMPDIR_BASE/tdguard.regionw.XXXXXX")"
+trap 'rm -f "$FILELIST" "$METHODS" "$SKIPF" "$SITES" "$GUARDFILES" "$REGIONW"' EXIT
 
 # --- seed method list ------------------------------------------------------
 awk -F'\t' '/^[[:space:]]*#/ || NF == 0 { next } $1 != "" { print $1 }' \
@@ -242,6 +255,27 @@ while IFS= read -r f; do
   # matcher, so unit tests inside a production file are not scanned. Whole test
   # FILES were already dropped above.
   awk -v emit_skip=1 "$SLOC_AWK" "$f" > "$SKIPF" || fail "TOOL ERROR — cfg(test) scan failed on $f"
+
+  # Region-detection sanity, so a misclassification names ITSELF instead of
+  # naming innocent call sites. The matcher excludes a `#[cfg(test)] mod`
+  # region only when it can both find the opener AND close it. So "this file
+  # opens one, yet nothing was excluded" is precisely the shape of a failed
+  # close — not an approximation of it. On a tree that compiles, an inline
+  # `mod … {` always has a closer, so this does not fire on healthy files.
+  if [ ! -s "$SKIPF" ] && awk '
+        function tidy(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+        { t = tidy($0) }
+        t == "#[cfg(test)]" { pending = 1; next }
+        pending && t == "" { next }
+        pending && t ~ /^#\[.*\]$/ { next }
+        pending && t ~ /^(pub([(][a-z]+[)])?[ ]+)?mod[ ]+[A-Za-z_][A-Za-z0-9_]*[ ]*\{$/ {
+          found = 1; exit
+        }
+        { pending = 0 }
+        END { exit(found ? 0 : 1) }
+      ' "$f"; then
+    printf '%s\n' "$f" >> "$REGIONW"
+  fi
   awk -v SKIPF="$SKIPF" -v METHODSF="$METHODS" -v PATHNAME="$f" '
     function rtrim(s) { sub(/[ \t\r]+$/, "", s); return s }
     # Text before a `//` line comment. Doc comments are where the guard function
@@ -398,9 +432,19 @@ while IFS=$'\t' read -r _ path method scope line state; do
     echo "FAIL: UNDECLARED — $path:$line calls .$method() in scope '$scope' without" >&2
     echo "      acquiring the teardown guard earlier in that same scope, and has no row" >&2
     echo "      in $MANIFEST_TSV." >&2
-    echo "      Fix it (take the guard) or declare it:" >&2
-    printf '        %s\t%s\t%s\tEXEMPT\t<why this cannot corrupt a deleted index>\n' \
-      "$path" "$method" "$scope" >&2
+    if grep -qxF "$path" "$REGIONW" 2>/dev/null; then
+      echo "      🔴 READ THIS BEFORE TOUCHING THE MANIFEST. $path opens a" >&2
+      echo "      '#[cfg(test)] mod' region that the matcher could NOT close, so its test" >&2
+      echo "      code was scanned as production and '$scope' is very likely a TEST fn." >&2
+      echo "      A brace or a comment marker inside a string literal does this — b\"{ …\"," >&2
+      echo "      \"https://…\", or a glob like \"**/*.rs\". Fix scripts/lib/sloc_awk.sh;" >&2
+      echo "      do NOT add a manifest row. An EXEMPT row here would record a false" >&2
+      echo "      claim that a real write is safe, and outlive the mistake." >&2
+    else
+      echo "      Fix it (take the guard) or declare it:" >&2
+      printf '        %s\t%s\t%s\tEXEMPT\t<why this cannot corrupt a deleted index>\n' \
+        "$path" "$method" "$scope" >&2
+    fi
     RC=1
     continue
   fi
@@ -462,6 +506,13 @@ while IFS=$'\t' read -r path method scope disp reason; do
     RC=1
   fi
 done < "$MANIFEST_TSV"
+
+if [ -s "$REGIONW" ]; then
+  echo "" >&2
+  echo "WARNING: these file(s) open a '#[cfg(test)] mod' the region matcher could not" >&2
+  echo "close, so their test code was scanned as production (scripts/lib/sloc_awk.sh):" >&2
+  sed 's/^/  - /' "$REGIONW" >&2
+fi
 
 if [ "$RC" -ne 0 ]; then
   echo "" >&2

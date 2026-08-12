@@ -84,8 +84,18 @@ FIXTURE_DIR="$SCRIPT_DIR/test-data"
 # - sloc-cfg-test-nested-mod.rs: the same, INDENTED inside another module —
 #                              the closer is matched at the attribute's own
 #                              indent, not at column 0.
-# - sloc-cfg-test-brace-skew.rs and -unterminated.rs below are the fail-closed
-#                              half of the same matcher.
+# - sloc-cfg-test-brace-skew.rs: an unmatched `{` inside a raw string. The
+#                              counter blanks literal contents before
+#                              balancing, so the module still balances.
+# - sloc-cfg-test-string-braces.rs: the same for a byte string, a `//` inside
+#                              a string, and `'{'` / `'}'` char literals — the
+#                              shape that made check_teardown_guard.sh report
+#                              ten test fixtures as production writers. Its
+#                              `longest<'a>` line also pins the lifetime rule:
+#                              if a future edit treats every `'` as opening a
+#                              char literal, that line loses its `}`, the
+#                              module stops being excluded, and this case fails.
+# - sloc-cfg-test-unterminated.rs below is the fail-closed half of the matcher.
 #
 # #[cfg(test)] exclusion — MUST STILL BE COUNTED (fail-closed half):
 # - sloc-cfg-test-decl.rs:     `#[cfg(test)] mod tests;` declares a sibling
@@ -97,15 +107,13 @@ FIXTURE_DIR="$SCRIPT_DIR/test-data"
 #                              really does compile into non-test builds.
 # - sloc-cfg-test-non-mod-item.rs: `#[cfg(test)]` on an `fn` or a `use` is
 #                              counted — only `mod` bodies are in scope.
-# - sloc-cfg-test-brace-skew.rs: an unmatched `{` inside a raw string skews
-#                              the module's brace balance. The gate must
-#                              COUNT the module rather than guess where it
-#                              ends. This is THE fail-open regression: if a
-#                              future edit makes this fixture drop to 3, the
-#                              counter has started trusting a balance it
-#                              cannot verify.
 # - sloc-cfg-test-unterminated.rs: a `mod tests {` with no closer at all —
-#                              no closer found, nothing excluded.
+#                              no closer found, nothing excluded. With
+#                              brace-skew now excluded, this and
+#                              -other-predicate.rs are what keep the
+#                              fail-closed half honest: if a future edit makes
+#                              EITHER of them drop, the counter has started
+#                              trusting a balance it cannot verify.
 CASES="sloc-normal.rs	7
 sloc-pathglob-doc.rs	6
 sloc-real-block-comment.rs	2
@@ -117,7 +125,10 @@ sloc-cfg-test-nested-mod.rs	5
 sloc-cfg-test-decl.rs	8
 sloc-cfg-test-other-predicate.rs	17
 sloc-cfg-test-non-mod-item.rs	9
-sloc-cfg-test-brace-skew.rs	11
+sloc-cfg-test-brace-skew.rs	3
+sloc-cfg-test-string-braces.rs	6
+sloc-cfg-test-glob-comment.rs	6
+sloc-cfg-test-decoy-in-literal.rs	11
 sloc-cfg-test-unterminated.rs	9"
 
 fail=0
