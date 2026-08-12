@@ -316,7 +316,12 @@ and the like) belong in the project's own reference docs, not here.
 
 Before any `git push`, delegate a credential scan to the `security` agent:
 
-1. `git diff origin/main HEAD` — the diff about to be pushed.
+1. `git diff origin/main...HEAD` — the diff about to be pushed. Three-dot,
+   because it diffs from the merge base and shows only what YOUR branch changed.
+   Two-dot compares the two commits, so files DELETED from `main` since your
+   branch point come back as your additions: a measured run reported 19 hits
+   that were another PR's deletions where three-dot reported zero across 36
+   files. A scan people learn to wave through is where a real secret hides.
 2. `security` scans it for API keys, passwords, private keys, and tokens, and
    returns either clean or the list of blocked items.
 3. **Block the push if secrets are detected.** A leaked credential in git history
