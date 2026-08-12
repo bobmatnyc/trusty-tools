@@ -111,6 +111,103 @@ fn registry_create_and_open() {
     assert_eq!(palaces[0].name, "Alpha");
 }
 
+/// Why (issue #4911): eager hydration catches a per-palace open error, logs a
+/// WARN, and skips — so the palace is simply absent from the registry
+/// afterwards, indistinguishable from one that never existed. Once a read-only
+/// open of an incompatible-format store REFUSES instead of recreating it empty,
+/// that skip became the new way to lose a palace: the bytes survive, but nothing
+/// reports that the palace exists and cannot be read. Trading data destruction
+/// for data invisibility is not a fix.
+///
+/// Failing the whole `open` is the wrong surfacing — a multi-palace root would
+/// be bricked by one unrelated bad file, and the "one corrupt palace doesn't
+/// take the registry down" contract is what `SmMemory` / `PortfolioMemory` /
+/// trusty-agents construct against. So the palace is RETAINED as an observable
+/// unopenable entry instead.
+///
+/// What: persists a healthy palace, then hand-writes a SECOND palace this
+/// process never opens — a valid `palace.json` plus a DIRECTORY where the KG
+/// store file (`kg.redb`) belongs, which fails to open at the OS layer on every
+/// platform and redb version. Building it by hand matters: the store keeps a
+/// process-wide cache of open databases keyed by path, so a palace this process
+/// already opened would be served from cache and never read the corruption.
+/// Asserts (a) `open` still succeeds, (b) the healthy palace hydrated, (c) the
+/// broken one is NOT in the handle cache, and (d) it is nonetheless observable
+/// via `unopenable()` / `unopenable_reason()` with a non-empty reason. (c) and
+/// (d) together are the point: absent from the cache but not absent from the
+/// registry's account of what exists.
+/// Test: this is the test.
+#[test]
+fn open_keeps_an_unopenable_palace_observable() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+
+    {
+        let registry = PalaceRegistry::open(data_root).unwrap();
+        let palace = Palace {
+            id: PalaceId::new("healthy"),
+            name: "healthy".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("healthy"),
+        };
+        registry.create_palace(data_root, palace).unwrap();
+    }
+
+    let broken_dir = data_root.join("broken");
+    std::fs::create_dir_all(&broken_dir).unwrap();
+    std::fs::write(
+        broken_dir.join("palace.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "id": "broken",
+            "name": "broken",
+            "description": serde_json::Value::Null,
+            "created_at": "2020-01-02T03:04:05Z",
+            "data_dir": broken_dir,
+            "schema_version": 1,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir(broken_dir.join("kg.redb")).expect("directory where the KG store belongs");
+
+    let registry = PalaceRegistry::open(data_root)
+        .expect("one unopenable palace must not fail the whole registry open");
+
+    assert!(
+        registry.get(&PalaceId::new("healthy")).is_some(),
+        "the healthy palace must still hydrate"
+    );
+    assert!(
+        registry.get(&PalaceId::new("broken")).is_none(),
+        "the unopenable palace cannot be in the handle cache — nothing opened it"
+    );
+
+    let reason = registry.unopenable_reason(&PalaceId::new("broken")).expect(
+        "a palace that exists on disk and could not be opened must stay observable, \
+             not silently vanish from the registry",
+    );
+    assert!(
+        !reason.is_empty(),
+        "the recorded reason must say why the palace could not be opened"
+    );
+
+    let ids: Vec<String> = registry
+        .unopenable()
+        .into_iter()
+        .map(|(id, _)| id.as_str().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["broken".to_string()],
+        "exactly the unopenable palace is recorded — the healthy one must not be"
+    );
+}
+
 /// Why: Issue #52 — payloads (drawer content) must survive a process
 /// restart. Open a registry, write a drawer with a known content string,
 /// drop everything, reopen via `PalaceRegistry::open(path)`, and assert the

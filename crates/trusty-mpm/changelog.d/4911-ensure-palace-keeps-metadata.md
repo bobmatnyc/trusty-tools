@@ -1,0 +1,3 @@
+Fixed
+
+- `SmMemory` and `PortfolioMemory` no longer destroy a palace's metadata when the palace exists but cannot be opened. Both `ensure_palace` implementations treated every `open_palace` failure as "the palace does not exist" and fell through to `create_palace`, which rewrites `palace.json` unconditionally — so a palace that merely could not be READ lost its `created_at` and only then re-failed against the same unreadable store. They now fall through to create only when `PalaceStore::metadata_present` definitively reports no `palace.json`, and fail closed on a probe that cannot complete (#4911).
