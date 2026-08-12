@@ -246,13 +246,19 @@ pub(crate) async fn validate(path: Option<std::path::PathBuf>, repair: bool) -> 
 
     let complete = if repair {
         let outcome = validate_and_repair(&fw, &workspace, None);
-        if outcome.repaired {
+        // #4781: an attempt ran exactly when the pre-repair report had gaps;
+        // `repaired` now reports whether it SUCCEEDED, so it can no longer gate
+        // the attempt's own diagnostics — a failed repair used to print nothing.
+        if !outcome.before.is_complete() {
             println!(
                 "auto-repair ran ({} gap(s) found before repair)",
                 outcome.before.gaps.len()
             );
             if let Some(err) = &outcome.repair_error {
-                eprintln!("repair pipeline reported an error (non-fatal): {err}");
+                eprintln!("repair pipeline reported an error: {err}");
+            }
+            if !outcome.repaired {
+                eprintln!("auto-repair did NOT restore the workspace");
             }
         }
         print_gaps(&outcome.after.gaps);

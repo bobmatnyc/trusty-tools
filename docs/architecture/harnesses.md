@@ -288,9 +288,10 @@ That principle holds in all three. The *unification* does not yet.
 | **trusty-mpm** | Daemon-held `tokio::sync::broadcast` (`src/daemon/state/`) | Untyped `serde_json::Value` | SSE at `/events` and `/sessions/{id}/events`; a poll endpoint at `/events/poll` |
 
 trusty-agents and trusty-code each also relay events from a child process to
-their parent by prefixing NDJSON lines on stderr. Both use the same prefix,
-`__OMPM_EVENT__ `, each from its own crate-local constant rather than a shared
-one.
+their parent by prefixing NDJSON lines on stderr with `__OMPM_EVENT__ `. Both
+now re-export that prefix from the one declaration in
+`trusty_agents_common::events::EVENT_LINE_PREFIX` (#5129); each previously kept
+its own crate-local copy.
 
 ### The unified envelope, and why it is not yet the wire format
 
@@ -299,12 +300,16 @@ one.
 together with the process-global bus and a subscription `Filter`. It was landed
 as a foundation with no emit sites migrated onto it.
 
-That is still the state. No harness crate imports
-`trusty_agents_common::events`: the three buses above each carry their own
-payload type, and the envelope's own relay prefix, `__HARNESS_EVENT__ `, is not
-the one either subprocess relay actually emits. Consuming the unified envelope
-is the outstanding work, and until it lands, an event crossing a harness
-boundary is re-encoded rather than forwarded.
+That is still the state for the *payload*: the three buses above each carry
+their own type, so an event crossing a harness boundary is re-encoded rather
+than forwarded. Consuming the unified envelope is the outstanding work.
+
+The *framing* is now shared. `EVENT_LINE_PREFIX` used to read
+`__HARNESS_EVENT__ ` here while both subprocess relays wrote `__OMPM_EVENT__ `,
+and the session manager was told to watch for the former — a marker nothing
+emitted (#5129). The constant now carries the emitted value and trusty-code and
+trusty-agents re-export it, so the producers, the parent-side parser, and the
+harness-understanding doc cannot drift apart again.
 
 ---
 

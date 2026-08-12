@@ -58,14 +58,14 @@ Key facts:
 |---------|------------|-------|
 | Claude Code | `> ` (bare `>` at start of line) | Single `>` alone on the line |
 | Shell | `$ ` or `# ` | Standard Unix shell prompts |
-| tcode | No pane prompt (event-driven) | Uses `__HARNESS_EVENT__` NDJSON events |
+| tcode | No pane prompt (event-driven) | Uses `__OMPM_EVENT__` NDJSON events |
 
 An idle prompt on the **last line** of the pane is the strongest signal that a harness is Idle.
 
 ### 2.4 Tool-Call Patterns
 
 - **Claude Code**: Tool calls appear as bracketed blocks. The `✻` glyph appears during tool execution (`✻ Running bash...`, `✻ Reading file...`).
-- **tcode**: Emits structured NDJSON event lines prefixed with `__HARNESS_EVENT__`. Example: `__HARNESS_EVENT__ {"type":"tool_use","tool":"bash","input":{...}}`. Parseable as JSON after stripping the prefix.
+- **tcode**: Emits structured NDJSON event lines prefixed with `__OMPM_EVENT__`. Example: `__OMPM_EVENT__ {"type":"tool_use","tool":"bash","input":{...}}`. Parseable as JSON after stripping the prefix.
 - **Shell**: Raw command output; no structured wrapper.
 
 ### 2.5 Approval / Decision Gates
@@ -171,10 +171,10 @@ This directly addresses the `ActivityState::Unknown` fallback gap (issue #875).
 ### 5.2 tcode
 
 - **Task banners**: `=== Task: <description> ===` (start), `=== Done ===` (end)
-- **Event prefix**: `__HARNESS_EVENT__` NDJSON lines — parseable events
+- **Event prefix**: `__OMPM_EVENT__` NDJSON lines — parseable events
 - **Agent-delegation output**: `[agent-name] <output>` prefixed lines
 - **Diff/edit confirmation**: `Edit: src/foo.rs (+15, -3)`, `Write: src/bar.rs`
-- **State classification**: Prefer `__HARNESS_EVENT__` events over pane text
+- **State classification**: Prefer `__OMPM_EVENT__` events over pane text
 
 ---
 
@@ -240,9 +240,9 @@ A t-code overseer maps `HarnessEvent`s (filtered on `HarnessSource::Code`) to `O
 | Unexpected tool call | `Block { reason }` | Scope enforcement |
 | Long silence (>5 min) in Working state | `FlagForHuman` | Possible hang |
 
-### 7.3 `__HARNESS_EVENT__` Lines as Structured Overseer Input
+### 7.3 `__OMPM_EVENT__` Lines as Structured Overseer Input
 
-For a t-code overseer, `__HARNESS_EVENT__` lines are the primary structured input (vs. pane text for Claude Code). Strip the prefix, parse as `HarnessEvent`, filter on `source == HarnessSource::Code`.
+For a t-code overseer, `__OMPM_EVENT__` lines are the primary structured input (vs. pane text for Claude Code). Strip the prefix, parse as `HarnessEvent`, filter on `source == HarnessSource::Code`.
 
 ### 7.4 Reserved `HarnessSource::Code` Slot
 

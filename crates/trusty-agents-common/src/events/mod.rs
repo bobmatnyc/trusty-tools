@@ -236,7 +236,9 @@ mod tests {
 
     #[test]
     fn event_line_prefix_is_stable() {
-        assert_eq!(EVENT_LINE_PREFIX, "__HARNESS_EVENT__ ");
+        // #5129: this is the value tcode and tagent write to stderr, and the
+        // one the harness-understanding assets tell the SM to watch for.
+        assert_eq!(EVENT_LINE_PREFIX, "__OMPM_EVENT__ ");
     }
 
     #[test]

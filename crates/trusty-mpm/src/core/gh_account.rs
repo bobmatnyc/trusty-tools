@@ -16,14 +16,15 @@
 //! parses `github.com.user` (the active login) plus the `github.com.users` map
 //! (every logged-in login). [`gh_account_status_local`] returns both from one
 //! file read with no subprocess — safe for the statusline's hot render path.
-//! [`active_gh_account`] falls back to a bounded `gh auth status --active`
-//! subprocess when the local file is absent, and [`logged_in_gh_accounts`]
-//! parses `gh auth status` for the full multi-account list. Every entry point is
-//! fail-soft: a missing `gh`, absent config, or parse error yields `None` /
-//! an empty vec, never an error or panic.
+//! `tm doctor` instead runs one bounded `gh auth status` via [`probe_gh_auth`]:
+//! that is the only source that sees env-token auth (`GH_TOKEN` /
+//! `GITHUB_TOKEN`), which writes no config file at all (#5032). Every entry
+//! point is fail-soft: a missing `gh`, absent config, or parse error yields
+//! `None` / [`GhAuthProbe::Inconclusive`], never an error or panic.
 //!
 //! Test: the pure parsers (`parse_active_account_from_hosts_yml`,
-//! `parse_logged_in_accounts`, `parse_gh_account_status_from_hosts_yml`) are
+//! `parse_logged_in_accounts`, `parse_gh_account_status_from_hosts_yml`,
+//! `parse_gh_account_status_from_auth_status`) are
 //! unit-tested against sample `hosts.yml` and `gh auth status` strings in the
 //! inline `tests` module; the subprocess wrappers are thin bounded glue.
 //!
@@ -41,15 +42,22 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Bounded wall-clock timeout for any `gh` subprocess this module spawns.
+/// Bound for the `gh auth status` probe `tm doctor` runs (#5032).
 ///
-/// Why: both the statusline (hot render path) and `tm doctor` must never block
-/// on a wedged `gh` (stuck credential helper, slow keyring, network). A short
-/// bound turns "hung" into a clean "omit the segment / warn".
-/// What: 250 ms — generous enough for a local `gh auth status` yet short enough
-/// to never stall a render cycle.
-/// Test: covered indirectly (the parsers are the tested surface).
-pub const GH_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Why: the bound this replaced was 250 ms, inherited from the statusline's hot
+/// render path. `gh auth status` validates an env token (`GH_TOKEN` /
+/// `GITHUB_TOKEN`) over the network, which measured 281–389 ms across eight runs
+/// on the reporter's machine and 366–373 ms here — so every probe timed out and
+/// the doctor reported a fully authenticated `gh` as unauthenticated. The
+/// statusline never used this path (it reads `hosts.yml` directly, see
+/// [`gh_account_status_local`]), so nothing latency-sensitive is left to protect.
+/// What: 5 s, matching [`GH_ENFORCE_TIMEOUT`] — an order of magnitude above the
+/// measured token round trip, with headroom for a slow network, while still
+/// bounding a wedged `gh`. A probe that exceeds it reports UNKNOWN, never
+/// "unauthenticated" (see [`GhAuthProbe`]).
+/// Test: `doctor_probe_tolerates_token_auth_latency`,
+/// `probe_beyond_bound_is_inconclusive`.
+pub const GH_DOCTOR_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A snapshot of the local `gh` github.com account state.
 ///
@@ -272,47 +280,90 @@ where
     rx.recv_timeout(timeout).ok().flatten()
 }
 
-/// Resolve the active github.com login, preferring the cheap local path.
+/// Parse both the active login and every logged-in login from `gh auth status`.
 ///
-/// Why: the one call every surface uses to answer "which account is active?".
-/// Reads `hosts.yml` first (no subprocess) and only falls back to a bounded
-/// `gh auth status --active` when the local file cannot answer, so it is fast in
-/// the common case yet still correct when config lives only in the keyring.
-/// What: returns the active login from `hosts.yml`, else the first account
-/// parsed from a bounded `gh auth status --active`; `None` when `gh` is
-/// unconfigured/unauthenticated/absent.
-/// Test: the local parse is covered by `parse_active_account_*`; the subprocess
-/// fallback is thin bounded glue.
-pub fn active_gh_account() -> Option<String> {
-    if let Some(status) = gh_account_status_local()
-        && let Some(active) = status.active
-    {
-        return Some(active);
+/// Why: `gh auth status` is the only source that sees ALL auth modes — keyring,
+/// `hosts.yml`, and an env token (`GH_TOKEN` / `GITHUB_TOKEN`), which writes no
+/// config file at all (#5032). Reading active + logged-in from ONE invocation
+/// also means one network round trip instead of two.
+/// What: `logged_in` comes from [`parse_logged_in_accounts`]; `active` is the
+/// login of the block whose `- Active account: true` line follows it. A single
+/// logged-in account with no such marker (older `gh`) is taken as active.
+/// Test: `parse_auth_status_active_from_marker`,
+/// `parse_auth_status_token_auth`, `parse_auth_status_unauthenticated`.
+pub fn parse_gh_account_status_from_auth_status(auth_status: &str) -> GhAccountStatus {
+    let logged_in = parse_logged_in_accounts(auth_status);
+    let mut active: Option<String> = None;
+    let mut current: Option<String> = None;
+    for line in auth_status.lines() {
+        if let Some((_, rest)) = line.split_once("Logged in to") {
+            current = extract_login_token(rest);
+        } else if active.is_none() && line.contains("Active account: true") {
+            active = current.clone();
+        }
     }
-    run_bounded(GH_PROBE_TIMEOUT, || {
-        let out = std::process::Command::new("gh")
-            .args(["auth", "status", "--active"])
-            .output()
-            .ok()?;
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        text.push('\n');
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
-        parse_logged_in_accounts(&text).into_iter().next()
+    if active.is_none() && logged_in.len() == 1 {
+        active = logged_in.first().cloned();
+    }
+    GhAccountStatus { active, logged_in }
+}
+
+/// Outcome of a bounded `gh auth status` probe (#5032).
+///
+/// Why: "`gh` says no account" and "I could not tell within the bound" are
+/// different facts, and collapsing them is the defect this type exists to
+/// prevent — the doctor reported a working `GH_TOKEN` login as "not
+/// authenticated" because a timed-out probe was indistinguishable from an empty
+/// answer.
+/// What: `Answered` carries what `gh` reported (an empty `logged_in` IS a
+/// definitive "not authenticated"); `Inconclusive` carries why the state is
+/// unknown — the bound elapsed, or `gh` could not be run.
+/// Test: `probe_answered_parses_accounts`, `probe_beyond_bound_is_inconclusive`,
+/// `probe_missing_gh_is_inconclusive`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GhAuthProbe {
+    /// `gh` answered within the bound; an empty `logged_in` means unauthenticated.
+    Answered(GhAccountStatus),
+    /// Auth state is UNKNOWN, for the carried reason — not a negative answer.
+    Inconclusive(String),
+}
+
+/// Probe `gh`'s github.com auth state with an injectable runner (#5032).
+///
+/// Why: the seam lets the timeout arm — the one that produced the false
+/// "not authenticated" — be tested hermetically, with no live `gh` and no
+/// network.
+/// What: runs `run` on a bounded thread; `Some(text)` is parsed via
+/// [`parse_gh_account_status_from_auth_status`], `None` means `gh` could not be
+/// executed, and an elapsed bound yields [`GhAuthProbe::Inconclusive`].
+/// Test: `doctor_probe_tolerates_token_auth_latency`,
+/// `probe_beyond_bound_is_inconclusive`, `probe_missing_gh_is_inconclusive`.
+pub fn probe_gh_auth_with<F>(timeout: Duration, run: F) -> GhAuthProbe
+where
+    F: FnOnce() -> Option<String> + Send + 'static,
+{
+    run_bounded(timeout, move || {
+        Some(match run() {
+            Some(text) => GhAuthProbe::Answered(parse_gh_account_status_from_auth_status(&text)),
+            None => GhAuthProbe::Inconclusive("`gh` could not be run (is it on PATH?)".to_string()),
+        })
+    })
+    .unwrap_or_else(|| {
+        GhAuthProbe::Inconclusive(format!(
+            "`gh auth status` did not answer within {timeout:?}"
+        ))
     })
 }
 
-/// List every logged-in github.com account via a bounded `gh auth status`.
+/// Probe `gh`'s github.com auth state by running the real `gh auth status`.
 ///
-/// Why: detecting the MULTIPLE-accounts ambiguity (the condition that caused the
-/// admin-merge bug) is the authoritative signal `tm doctor` warns on. `gh auth
-/// status` is the definitive source across all storage backends (keyring or
-/// file), so the doctor uses it rather than trusting only `hosts.yml`.
-/// What: runs `gh auth status` (bounded by [`GH_PROBE_TIMEOUT`]) and parses its
-/// stdout+stderr via [`parse_logged_in_accounts`]; returns an empty vec on
-/// timeout, a missing `gh`, or when not authenticated.
-/// Test: the parse is covered by `parse_logged_in_*`; this is thin bounded glue.
-pub fn logged_in_gh_accounts() -> Vec<String> {
-    run_bounded(GH_PROBE_TIMEOUT, || {
+/// Why: the single entry point every caller that needs an authoritative,
+/// all-auth-modes answer uses — `hosts.yml` alone cannot see env-token auth.
+/// What: delegates to [`probe_gh_auth_with`] with a runner that returns
+/// `gh auth status`'s stdout+stderr, or `None` when the spawn itself fails.
+/// Test: covered via [`probe_gh_auth_with`]'s fake-runner tests.
+pub fn probe_gh_auth(timeout: Duration) -> GhAuthProbe {
+    probe_gh_auth_with(timeout, || {
         let out = std::process::Command::new("gh")
             .args(["auth", "status"])
             .output()
@@ -320,18 +371,17 @@ pub fn logged_in_gh_accounts() -> Vec<String> {
         let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
         text.push('\n');
         text.push_str(&String::from_utf8_lossy(&out.stderr));
-        Some(parse_logged_in_accounts(&text))
+        Some(text)
     })
-    .unwrap_or_default()
 }
 
 /// Bound for the `gh auth status` / `gh auth switch` calls the [`enforce`]
 /// module's `ensure_gh_account_for_project` makes, and that
 /// [`gh_token_via_cli`] below also uses for its `gh auth token` call.
 ///
-/// Why: unlike [`GH_PROBE_TIMEOUT`] (tuned for the statusline's hot render
-/// path), these calls are explicit, occasional pre-flights — generous enough
-/// for a keyring-backed `gh` to respond without hanging the caller indefinitely.
+/// Why: like [`GH_DOCTOR_TIMEOUT`], these calls are explicit, occasional
+/// pre-flights — generous enough for a keyring-backed or network-validated `gh`
+/// to respond without hanging the caller indefinitely.
 const GH_ENFORCE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[path = "gh_account_enforce.rs"]
@@ -686,6 +736,106 @@ github.com
     fn parse_logged_in_empty() {
         assert!(parse_logged_in_accounts("").is_empty());
         assert!(parse_logged_in_accounts("You are not logged into any GitHub hosts.").is_empty());
+    }
+
+    /// `gh auth status` for an env-token login — the #5032 reporter's exact
+    /// output shape, including the `(GH_TOKEN)` annotation.
+    const TOKEN_AUTH_STATUS: &str = "\
+github.com
+  ✓ Logged in to github.com account mac-duetto (GH_TOKEN)
+  - Active account: true
+  - Git operations protocol: https
+  - Token scopes: 'repo', 'workflow'
+";
+
+    /// Why: the doctor reads the active login out of `gh auth status`, so the
+    /// `- Active account: true` marker must bind to the login above it.
+    /// Test: itself.
+    #[test]
+    fn parse_auth_status_active_from_marker() {
+        let status = parse_gh_account_status_from_auth_status(MULTI_AUTH_STATUS);
+        assert_eq!(status.active.as_deref(), Some("bob-duetto"));
+        assert_eq!(
+            status.logged_in,
+            vec!["bob-duetto".to_string(), "bobmatnyc".to_string()]
+        );
+        assert!(status.is_ambiguous());
+    }
+
+    /// Why: env-token auth writes no `hosts.yml`, so `gh auth status` is the
+    /// ONLY place this login is visible (#5032).
+    /// Test: itself.
+    #[test]
+    fn parse_auth_status_token_auth() {
+        let status = parse_gh_account_status_from_auth_status(TOKEN_AUTH_STATUS);
+        assert_eq!(status.active.as_deref(), Some("mac-duetto"));
+        assert_eq!(status.logged_in, vec!["mac-duetto".to_string()]);
+        assert!(!status.is_ambiguous());
+    }
+
+    /// Why: a genuinely unauthenticated `gh` must parse to an empty status —
+    /// that is the one state the doctor may report as "not authenticated".
+    /// Test: itself.
+    #[test]
+    fn parse_auth_status_unauthenticated() {
+        let status =
+            parse_gh_account_status_from_auth_status("You are not logged into any GitHub hosts.");
+        assert_eq!(status, GhAccountStatus::default());
+    }
+
+    /// #5032 regression: `gh auth status` validates an env token over the
+    /// network — measured 281–389 ms by the reporter and 366–373 ms locally.
+    /// Under the old 250 ms bound every such probe timed out and the doctor
+    /// reported a working login as "not authenticated". This pins the doctor's
+    /// bound above realistic token-auth latency; it FAILS if
+    /// [`GH_DOCTOR_TIMEOUT`] is ever lowered below the simulated 400 ms probe.
+    #[test]
+    fn doctor_probe_tolerates_token_auth_latency() {
+        let probe = probe_gh_auth_with(GH_DOCTOR_TIMEOUT, || {
+            std::thread::sleep(Duration::from_millis(400));
+            Some(TOKEN_AUTH_STATUS.to_string())
+        });
+        let GhAuthProbe::Answered(status) = probe else {
+            panic!("token-auth probe must answer under GH_DOCTOR_TIMEOUT, got {probe:?}");
+        };
+        assert_eq!(status.active.as_deref(), Some("mac-duetto"));
+    }
+
+    /// Why: a probe that outruns its bound must report UNKNOWN, never an empty
+    /// (i.e. "unauthenticated") answer (#5032).
+    /// Test: itself.
+    #[test]
+    fn probe_beyond_bound_is_inconclusive() {
+        let probe = probe_gh_auth_with(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(500));
+            Some(TOKEN_AUTH_STATUS.to_string())
+        });
+        match probe {
+            GhAuthProbe::Inconclusive(reason) => assert!(reason.contains("did not answer")),
+            other => panic!("expected Inconclusive, got {other:?}"),
+        }
+    }
+
+    /// Why: a `gh` that cannot be executed is also an unknown auth state, not a
+    /// negative one.
+    /// Test: itself.
+    #[test]
+    fn probe_missing_gh_is_inconclusive() {
+        match probe_gh_auth_with(GH_DOCTOR_TIMEOUT, || None) {
+            GhAuthProbe::Inconclusive(reason) => assert!(reason.contains("could not be run")),
+            other => panic!("expected Inconclusive, got {other:?}"),
+        }
+    }
+
+    /// Why: the happy path must parse straight through the seam.
+    /// Test: itself.
+    #[test]
+    fn probe_answered_parses_accounts() {
+        let probe = probe_gh_auth_with(GH_DOCTOR_TIMEOUT, || Some(MULTI_AUTH_STATUS.to_string()));
+        assert_eq!(
+            probe,
+            GhAuthProbe::Answered(parse_gh_account_status_from_auth_status(MULTI_AUTH_STATUS))
+        );
     }
 
     /// Why: `is_ambiguous` is the load-bearing predicate for the warnings; assert
