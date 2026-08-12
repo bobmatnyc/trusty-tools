@@ -623,7 +623,27 @@ pub fn roster_from_dirs_reporting(dirs: &[PathBuf]) -> RosterScan {
 /// This function consults machine-global tiers, so it has no hermetic direct
 /// test of its own.
 pub fn resolve_roster(project_dir: &Path) -> Vec<AgentSummary> {
-    roster_from_dirs(&deployed_agent_dirs(project_dir))
+    resolve_roster_reporting(project_dir).agents
+}
+
+/// [`resolve_roster`], additionally reporting what the resolution could not read.
+///
+/// Why (#5544 review): `resolve_roster` returns a bare `Vec`, so the two
+/// consumers that publish its LENGTH — `tm session start`'s
+/// `"Instructions: N agents in delegation authority"` (via
+/// [`crate::core::instruction_pipeline::PipelineOutput::agent_count`]) and
+/// `tm doctor`'s `agents` check — had no way to know the number was short. That
+/// made `tm doctor` report a truncated roster as authoritative, which is the
+/// remedy the composed prompt's `ROSTER INCOMPLETE` banner points the operator
+/// at. Every surface that publishes the count now resolves through here.
+/// What: unions [`deployed_agent_dirs`] via [`roster_from_dirs_reporting`],
+/// carrying each tier's unreadable paths alongside the merged roster.
+/// Test: `session_start_roster_line_declares_an_incomplete_roster`
+/// (`commands/session/start.rs`), `agents_check_is_not_ok_when_a_roster_read_failed`
+/// (`doctor_fs_checks.rs`), `build_instructions_reports_an_unreadable_agent_file`
+/// (`instruction_pipeline_tests.rs`).
+pub fn resolve_roster_reporting(project_dir: &Path) -> RosterScan {
+    roster_from_dirs_reporting(&deployed_agent_dirs(project_dir))
 }
 
 /// Render the LIVE deployed roster for a project, or `None` when none is found.
@@ -648,7 +668,20 @@ pub fn resolve_roster(project_dir: &Path) -> Vec<AgentSummary> {
 /// (the rendered output reaching the delivered prompt). This function itself
 /// consults machine-global tiers, so it has no hermetic direct test.
 pub fn deployed_roster_section(project_dir: &Path) -> Option<String> {
-    roster_section_from_dirs(&deployed_agent_dirs(project_dir))
+    let dirs = deployed_agent_dirs(project_dir);
+    let section = roster_section_from_dirs(&dirs);
+    if section.is_none() {
+        // #5544 review (LOW): the tier-only seam cannot name the project, and
+        // dropping that field made the fallback event unattributable across
+        // concurrent sessions. The project-aware entry point owns this log.
+        tracing::info!(
+            project = %project_dir.display(),
+            tiers = dirs.len(),
+            "no deployed agents found in any tier; delegation section falls back to the \
+             bundled asset alone"
+        );
+    }
+    section
 }
 
 /// [`deployed_roster_section`] with the tiers supplied, so it can be tested.
@@ -673,14 +706,10 @@ pub fn roster_section_from_dirs(dirs: &[PathBuf]) -> Option<String> {
         // Reverting to the bundled asset must be an OBSERVABLE event, not an
         // invisible one — this is the state #4069 describes, and if it recurs
         // the operator needs a thread to pull rather than a silently stale
-        // 8-name prompt that looks healthy. #5544 split the unreadable case out
-        // of this branch: an empty roster caused by failed reads now renders a
-        // section carrying the banner instead of degrading to `None` here.
-        tracing::info!(
-            tiers = dirs.len(),
-            "no deployed agents found in any tier; delegation section falls back to the \
-             bundled asset alone"
-        );
+        // 8-name prompt that looks healthy. `deployed_roster_section` logs it,
+        // because only it knows the project. #5544 split the unreadable case
+        // out of this branch: an empty roster caused by failed reads now
+        // renders a section carrying the banner instead of degrading to `None`.
         return None;
     }
     Some(generate_authority_reporting(&agents, &scan.unreadable))
