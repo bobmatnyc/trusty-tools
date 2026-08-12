@@ -940,14 +940,14 @@ fn prepare_session_inner(
     // user-scope declaration, so removing the approval removes the
     // name-squatting exploit #3918→#3950 kept re-opening rather than defusing it
     // once more. Non-fatal: a failure only means the operator sees the dialog.
-    if let Err(err) = preseed_workspace_trust_home(project_dir) {
+    if let Err(err) = preseed_workspace_trust_home(fw, project_dir) {
         tracing::warn!("failed to pre-seed workspace trust: {err}");
     }
 
     // Remove the now-redundant global `trusty-memory` hook entries so they no
     // longer fire for every Claude Code session (including claude-mpm). The
     // project hooks above scope them to trusty-mpm sessions. Non-fatal.
-    if let Err(err) = remove_global_trusty_memory_hooks() {
+    if let Err(err) = remove_global_trusty_memory_hooks(fw) {
         tracing::warn!("failed to remove global trusty-memory hooks: {err}");
     }
 
@@ -1189,5 +1189,36 @@ pub fn build_system_prompt_for_with_style_and_native(
         explicit_style,
         prompt,
         native_supported,
+    )
+}
+
+/// Build the launch prompt with the deployed-agent roster supplied by the caller.
+///
+/// Why (#5544): [`build_system_prompt_for`] rescans the three live agent tiers
+/// on every call — `<project>/.claude/agents`, `$CLAUDE_CONFIG_DIR/agents`, and
+/// `$HOME/.claude/agents`. Two successive calls can therefore disagree, so any
+/// test comparing this prompt against another composition of it is racing
+/// machine-global state, and it fails with a message indistinguishable from a
+/// genuine regression. The remedy is to give both sides ONE roster value, not
+/// to pin `$HOME` — pinning it is a PROCESS-GLOBAL write every sibling test in
+/// the same target can observe mid-scan, which is the flake class #5544 tracks.
+/// [`crate::core::instruction_overrides::resolve_pm_prompt_with_roster`] is the
+/// matching seam one layer down; this is its launch-site counterpart.
+/// What: identical to [`build_system_prompt_for`] except the rendered
+/// `## Delegation Authority` block comes from `roster` instead of a live scan.
+/// Callers build `roster` with
+/// [`crate::core::delegation_authority::roster_section_from_dirs`] over tier
+/// directories they own.
+/// Test: `compose_session_instructions_display_matches_live_prompt` and its
+/// `_with_override` sibling (`tests_behavior_b_tests.rs`).
+pub fn build_system_prompt_for_with_roster(project_dir: &Path, roster: Option<String>) -> String {
+    let (prompt, _source) =
+        crate::core::instruction_overrides::resolve_pm_prompt_with_roster(project_dir, || roster);
+    let native = crate::core::output_style::claude_supports_native_output_style();
+    crate::core::output_style::apply_output_style_to_prompt_with_native(
+        project_dir,
+        None,
+        prompt,
+        native,
     )
 }
