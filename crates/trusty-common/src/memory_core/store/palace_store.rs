@@ -170,12 +170,13 @@ impl PalaceStore {
     /// and pushes the `Palace`. A child that is genuinely not a palace is
     /// skipped; a child that cannot be classified aborts the walk with the
     /// underlying error, which names the offending path.
-    /// Test: `list_palaces_finds_saved_palaces` and
-    /// `list_palaces_missing_dir_is_empty` pin the benign arms;
+    /// Test: `list_palaces_finds_saved_palaces`,
+    /// `list_palaces_missing_dir_is_empty`,
     /// `list_palaces_propagates_an_unstattable_registry_dir`,
     /// `list_palaces_propagates_an_unstattable_entry`,
     /// `list_palaces_propagates_an_unstattable_palace_json` and
-    /// `list_palaces_propagates_an_undecodable_palace` pin the error arms.
+    /// `list_palaces_propagates_an_undecodable_palace` — the first two pin the
+    /// benign arms, the other four the error arms.
     ///
     /// Absence and failure-to-determine stay distinct at every step, which is
     /// why the guards are `try_exists` and `metadata` rather than `exists` and
