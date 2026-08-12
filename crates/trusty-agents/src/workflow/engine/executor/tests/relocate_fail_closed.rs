@@ -6,10 +6,21 @@
 //! unblocked a rename over a real output followed by deletion of the source,
 //! logged as a success. ADR-0045 requires absent and undeterminable to be
 //! distinguished before a destructive filesystem operation.
-//! What: Injects an `ExistsProbe` that fails for one chosen path and defers
-//! every other path to the real filesystem, then asserts the DIRECTION of the
-//! outcome — the destination stays byte-identical, the source still exists,
-//! and the caller sees an error rather than a clean summary.
+//! What: Two techniques, both asserting the DIRECTION of the outcome — the
+//! destination stays byte-identical, the source still exists, and the caller
+//! sees an error rather than a clean summary.
+//!
+//! 1. A real-filesystem fixture: the destination is a symlink into a mode-000
+//!    directory, so `stat` is denied `EACCES` while `rename` onto it still
+//!    succeeds (`rename(2)` does not dereference its target). That reaches the
+//!    destructive branch with no injected probe at all, and is how the three
+//!    plain-file destinations are covered.
+//! 2. An injected `ExistsProbe` that fails for one chosen path. This is needed
+//!    for the `out_stubs` DIRECTORY site: its fallback runs `copy_dir_all`,
+//!    whose own `create_dir_all` hits the same `EACCES` wall, so a symlink
+//!    fixture there fails safe even pre-fix and proves nothing. The seam also
+//!    keeps the other sites' error arms deterministic under `EIO`/`ESTALE`,
+//!    which no fixture can produce on demand.
 //! Test: This file IS the test body.
 
 use super::*;
@@ -338,4 +349,214 @@ async fn fs_probe_reports_missing_path_as_absent_not_error() {
         matches!(answer, Ok(false)),
         "a missing path must answer Ok(false), got {answer:?}"
     );
+}
+
+// ── Real-filesystem fixtures: no seam, no injected probe ───────────────────
+//
+// #5551: the three plain-file destinations are renamed onto directly, and
+// `rename(2)` does not dereference the destination. So a destination symlink
+// pointing into a mode-000 directory denies `stat` while leaving the rename
+// path intact — exactly the pre-fix trigger, produced by the real filesystem.
+// These tests exercise the same sites as the injected-probe tests above and
+// hold against the fix with no production seam involved.
+
+#[cfg(unix)]
+mod real_fs {
+    use super::*;
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+
+    /// Restore a directory's mode on drop, including while unwinding.
+    ///
+    /// Without this, an assertion failure leaves a mode-000 directory that
+    /// `TempDir` cannot delete.
+    struct RestoreMode(PathBuf);
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, Permissions::from_mode(0o700));
+        }
+    }
+
+    /// A destination whose presence probe is denied while a rename onto it
+    /// still succeeds.
+    ///
+    /// Field order is drop order: `_restore` must run before `_tmp`, or
+    /// `TempDir` cannot delete a tree that still holds a mode-000 directory.
+    struct DeniedDest {
+        _restore: RestoreMode,
+        _tmp: TempDir,
+        locked: PathBuf,
+        dest: PathBuf,
+    }
+
+    impl DeniedDest {
+        /// What the destination resolves to now, read with the denial lifted.
+        ///
+        /// Pre-fix this returns the stray's bytes, because `rename` replaced
+        /// the symlink; post-fix it still returns the real output.
+        fn resolved(&self) -> Vec<u8> {
+            self.unlock();
+            let bytes = std::fs::read(&self.dest).expect("destination must still be readable");
+            self.relock();
+            bytes
+        }
+
+        fn unlock(&self) {
+            std::fs::set_permissions(&self.locked, Permissions::from_mode(0o700)).unwrap();
+        }
+
+        fn relock(&self) {
+            std::fs::set_permissions(&self.locked, Permissions::from_mode(0o000)).unwrap();
+        }
+    }
+
+    /// Point `dest` at a real file inside a directory the process may not
+    /// search, so probing `dest` is denied but renaming onto it is not.
+    ///
+    /// Panics rather than passes when the denial does not take hold — as root,
+    /// or on a filesystem that ignores POSIX mode bits, every test here would
+    /// otherwise pass vacuously, which on a fail-open guard is worse than no
+    /// test at all.
+    fn deny_presence_of(tmp: TempDir, dest: PathBuf, content: &[u8]) -> DeniedDest {
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let real = locked.join("real-output");
+        std::fs::write(&real, content).unwrap();
+        std::os::unix::fs::symlink(&real, &dest).unwrap();
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            content,
+            "fixture is wrong — {} must resolve to the real output before the denial",
+            dest.display()
+        );
+
+        std::fs::set_permissions(&locked, Permissions::from_mode(0o000)).unwrap();
+        let restore = RestoreMode(locked.clone());
+
+        match std::fs::metadata(&dest) {
+            Ok(_) => panic!(
+                "cannot exercise #5551: stat of {} still succeeds through a mode-000 parent. \
+                 Run this suite as a non-root user on a filesystem that honours POSIX \
+                 permission bits.",
+                dest.display()
+            ),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "expected the locked parent to deny the probe, got {e}"
+            ),
+        }
+        assert!(
+            dest.parent().is_some_and(|p| std::fs::metadata(p).is_ok()),
+            "fixture is wrong — the destination's own directory must stay writable, \
+             or the pre-fix rename would fail for the wrong reason"
+        );
+
+        DeniedDest {
+            _restore: restore,
+            _tmp: tmp,
+            locked,
+            dest,
+        }
+    }
+
+    /// #5551 (helpers.rs:116), real filesystem: the code-target destination
+    /// cannot be stat-ed, so pre-fix the project-root stray is renamed over it
+    /// and deleted. Uses no injected probe.
+    #[tokio::test]
+    async fn reconcile_against_leaves_an_unstattable_destination_intact() {
+        let tmp = TempDir::new().unwrap();
+        let project_root = canonical_dir(tmp.path(), "project").await;
+        let code_target = canonical_dir(tmp.path(), "code").await;
+        let assignments_dir = canonical_dir(tmp.path(), "artifacts").await;
+        tokio::fs::write(
+            assignments_dir.join("assignments.json"),
+            assignments_json("src/app.py"),
+        )
+        .await
+        .unwrap();
+
+        let dest = code_target.join("src/app.py");
+        tokio::fs::create_dir_all(dest.parent().unwrap())
+            .await
+            .unwrap();
+        let stray = project_root.join("src/app.py");
+        tokio::fs::create_dir_all(stray.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&stray, b"STRAY").await.unwrap();
+
+        let fx = deny_presence_of(tmp, dest, b"REAL OUTPUT");
+        let result = reconcile_code_outputs_against_from(
+            &project_root,
+            &assignments_dir,
+            &code_target,
+            &FsExistsProbe,
+        )
+        .await;
+
+        assert_eq!(
+            fx.resolved(),
+            b"REAL OUTPUT",
+            "the destination must still resolve to the real output"
+        );
+        assert!(stray.exists(), "the source must not be deleted");
+        assert!(result.is_err(), "an unstattable destination must error");
+    }
+
+    /// #5551 (helpers.rs:210), real filesystem: the `out_dir` twin.
+    #[tokio::test]
+    async fn reconcile_from_leaves_an_unstattable_destination_intact() {
+        let tmp = TempDir::new().unwrap();
+        let project_root = canonical_dir(tmp.path(), "project").await;
+        let out_dir = canonical_dir(tmp.path(), "out").await;
+        tokio::fs::write(
+            out_dir.join("assignments.json"),
+            assignments_json("src/app.py"),
+        )
+        .await
+        .unwrap();
+
+        let dest = out_dir.join("src/app.py");
+        tokio::fs::create_dir_all(dest.parent().unwrap())
+            .await
+            .unwrap();
+        let stray = project_root.join("src/app.py");
+        tokio::fs::create_dir_all(stray.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&stray, b"STRAY").await.unwrap();
+
+        let fx = deny_presence_of(tmp, dest, b"REAL OUTPUT");
+        let result = reconcile_code_outputs_from(&project_root, &out_dir, &FsExistsProbe).await;
+
+        assert_eq!(fx.resolved(), b"REAL OUTPUT");
+        assert!(stray.exists(), "the source must not be deleted");
+        assert!(result.is_err(), "an unstattable destination must error");
+    }
+
+    /// #5551 (helpers.rs:304), real filesystem: the destination is the plan
+    /// manifest the code phase and QA read.
+    #[tokio::test]
+    async fn relocate_plan_leaves_an_unstattable_manifest_intact() {
+        let tmp = TempDir::new().unwrap();
+        let project_root = canonical_dir(tmp.path(), "project").await;
+        let out_dir = canonical_dir(tmp.path(), "out").await;
+
+        let root_asg = project_root.join("assignments.json");
+        tokio::fs::write(&root_asg, b"STRAY").await.unwrap();
+
+        let fx = deny_presence_of(tmp, out_dir.join("assignments.json"), b"AUTHORITATIVE");
+        let result = relocate_plan_outputs_from(&project_root, &out_dir, &FsExistsProbe).await;
+
+        assert_eq!(
+            fx.resolved(),
+            b"AUTHORITATIVE",
+            "the plan manifest must not be overwritten"
+        );
+        assert!(root_asg.exists(), "the stray must not be deleted");
+        assert!(result.is_err(), "an unstattable manifest must error");
+    }
 }
