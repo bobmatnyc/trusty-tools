@@ -254,6 +254,127 @@ impl PeriodReview {
     }
 }
 
+// ─── Run coverage ─────────────────────────────────────────────────────────────
+
+/// A period the provider never answered for.
+///
+/// The reason is rendered from the [`InferenceError`] at record time rather than
+/// held as the error itself, so a summary stays `Clone` and can be written into
+/// a report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedPeriod {
+    /// The period's label, e.g. `2026Q2`.
+    pub period_label: String,
+    /// The provider failure, as rendered by its `Display`.
+    pub reason: String,
+}
+
+/// How much of a profile run actually reached the model.
+///
+/// Why (#5465): [`PeriodReview::skipped`] exists so a provider outage on one
+/// period cannot abort the run, but a caller that merely collects
+/// `review.findings` throws that distinction away again — twelve failed calls
+/// then render as twelve clean quarters, and the trajectory is computed over a
+/// sample the reader cannot see is smaller. This type is the call site's half of
+/// that contract: every review passes through [`Self::record`], so a skip is
+/// counted rather than silently flattened into "no findings".
+/// What: a reviewed count and the skipped periods, plus [`Self::coverage_line`]
+/// for stderr and [`Self::coverage_note`] for the report.
+/// Test: `period_run_summary_separates_a_skipped_period_from_a_clean_one`,
+/// `period_run_summary_coverage_note_absent_when_complete`.
+#[derive(Debug, Default, Clone)]
+#[non_exhaustive]
+pub struct PeriodRunSummary {
+    /// Periods the model answered for — including, legitimately, with nothing.
+    pub reviewed: usize,
+    /// Periods whose provider call failed, in the order they were attempted.
+    pub skipped: Vec<SkippedPeriod>,
+}
+
+impl PeriodRunSummary {
+    /// Fold one period's result in, returning its findings.
+    ///
+    /// A skipped period contributes no findings and increments nothing but
+    /// [`Self::skipped`]; a period the model answered counts as reviewed even
+    /// when it found nothing, because that is a real result.
+    ///
+    /// Test: `period_run_summary_separates_a_skipped_period_from_a_clean_one`.
+    pub fn record(&mut self, period_label: &str, review: PeriodReview) -> Vec<LongitudinalFinding> {
+        // #5465: the first caller of `review_period` — the branch below is what
+        // keeps a provider outage from rendering as a clean period.
+        match review.skipped {
+            Some(err) => {
+                self.skipped.push(SkippedPeriod {
+                    period_label: period_label.to_string(),
+                    reason: err.to_string(),
+                });
+                Vec::new()
+            }
+            None => {
+                self.reviewed += 1;
+                review.findings
+            }
+        }
+    }
+
+    /// Periods attempted, reviewed or not.
+    pub fn attempted(&self) -> usize {
+        self.reviewed + self.skipped.len()
+    }
+
+    /// Whether every attempted period was actually reviewed.
+    pub fn is_complete(&self) -> bool {
+        self.skipped.is_empty()
+    }
+
+    /// One line naming the coverage, for stderr.
+    ///
+    /// Test: `period_run_summary_separates_a_skipped_period_from_a_clean_one`.
+    pub fn coverage_line(&self) -> String {
+        let attempted = self.attempted();
+        if self.is_complete() {
+            return format!("{}/{attempted} period(s) reviewed", self.reviewed);
+        }
+        let labels: Vec<&str> = self
+            .skipped
+            .iter()
+            .map(|s| s.period_label.as_str())
+            .collect();
+        format!(
+            "{}/{attempted} period(s) reviewed — {} SKIPPED (provider failure): {}",
+            self.reviewed,
+            self.skipped.len(),
+            labels.join(", ")
+        )
+    }
+
+    /// A Markdown section naming the skipped periods, or `None` when complete.
+    ///
+    /// Why: the report outlives the terminal it was produced in, and a reader
+    /// deciding from it must be able to see that the trajectory covers fewer
+    /// periods than the window suggests.
+    /// Test: `period_run_summary_coverage_note_absent_when_complete`.
+    pub fn coverage_note(&self) -> Option<String> {
+        if self.is_complete() {
+            return None;
+        }
+        let mut note = String::from("## Coverage\n\n");
+        note.push_str(&format!(
+            "{} of {} period(s) were reviewed. The following period(s) were \
+             **skipped** because the inference provider call failed — they are \
+             absent from the findings and the trajectory, and are NOT evidence \
+             of clean work:\n\n",
+            self.reviewed,
+            self.attempted()
+        ));
+        for s in &self.skipped {
+            note.push_str(&format!("- `{}` — {}\n", s.period_label, s.reason));
+        }
+        note.push('\n');
+        Some(note)
+    }
+}
+
 /// The period-review transport: one model call per period, over the shared
 /// inference stack.
 ///

@@ -592,6 +592,21 @@ pub use project_index_id::{ProjectIdentity, derive_project_index_id};
 #[cfg(feature = "search-index")]
 pub mod search_index;
 
+/// Bounded worker pool behind [`search_index::index_files_best_effort`] (issue
+/// #2798), gated behind `search-index` alongside its only caller.
+///
+/// Why: the incremental index hook used to spawn one detached OS thread per
+/// write with no cap, so a degraded-but-reachable trusty-search daemon — whose
+/// per-file POSTs can each take ~6.2s — let threads accumulate faster than they
+/// drained. Crate-private: it is an implementation detail of the hook, not a
+/// general-purpose pool for other crates to reach for.
+/// What: a fixed-size worker pool with a bounded queue; a submission that finds
+/// both full is rejected (never blocked) and counted, and the caller logs what
+/// it dropped.
+/// Test: `cargo test -p trusty-common --features search-index -- index_dispatch`.
+#[cfg(feature = "search-index")]
+pub(crate) mod index_dispatch;
+
 /// Shared trusty-search index READINESS probe (issue #2784), gated behind the
 /// `search-index` feature alongside the warming helper it complements.
 ///
