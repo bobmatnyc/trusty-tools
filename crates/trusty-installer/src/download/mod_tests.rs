@@ -15,7 +15,7 @@
 //!
 //! Test: This is the test module.
 
-use super::test_fixture::{fake_tarball, sha256_hex, serve_fixture, Routes};
+use super::test_fixture::{fake_tarball, serve_fixture, sha256_hex, Routes};
 use super::*;
 
 /// A release whose asset is served with a `.sha256` naming `published_digest`.
@@ -67,7 +67,10 @@ async fn download_and_verify_reports_a_mismatch_as_a_mismatch() {
             actual,
         } => {
             assert_eq!(a, archive);
-            assert_eq!(expected, lie, "must report the digest the release published");
+            assert_eq!(
+                expected, lie,
+                "must report the digest the release published"
+            );
             assert_eq!(actual, real, "must report the digest of the bytes received");
         }
         other => panic!("a checksum mismatch must not be an opaque error: {other:?}"),
@@ -199,7 +202,10 @@ fn mismatch_message_names_both_digests_and_never_offers_a_source_build() {
         "https://example.invalid/asset.tar.gz",
         "Nothing was installed",
     ] {
-        assert!(text.contains(needle), "message must name {needle:?}: {text}");
+        assert!(
+            text.contains(needle),
+            "message must name {needle:?}: {text}"
+        );
     }
     assert!(
         !text.contains("prebuilt unavailable"),
