@@ -1,0 +1,30 @@
+# Recorded inputs for every formula the live bobmatnyc/homebrew-trusty tap held
+# on 2026-08-12, paired with the exact bytes the tap holds for it in
+# scripts/test-data/homebrew/expected/<crate>.rb.
+#
+# These are OBSERVATIONS, not fixtures anyone is free to adjust: each row's
+# version, tag and digests were read back out of the formula the retired inline
+# generator in release.yml actually produced and pushed. That is what makes
+# generate-homebrew-formula-selftest.sh a behavior-preservation test rather than
+# a test of the extracted script against itself. Do not "fix" a row to make a
+# failing render pass — a mismatch means the renderer drifted.
+#
+# trusty-controller is deliberately ABSENT. Its formula is a stale artifact of
+# the trusty-controller -> trusty-installer rename (#1757, ADR-0013): both
+# install `tctl`, and the tap's copy is three versions behind. It is being
+# deleted from the tap (#5636), not reproduced here.
+#
+# Columns, tab-separated:
+#   crate  version  tag  binaries(space-separated)  macos_sha256  linux_sha256
+#
+# `binaries` is CRATE_CONFIG's BINARIES for that crate in release.yml, in order.
+# The first entry is the formula's `test do` smoke-test target.
+trusty-search	0.45.1	trusty-search-v0.45.1	trusty-search trusty-embedderd	3c4849aa35d2fe687899dc5a61248a52e79329f2556e49d362a8e91aae211bc3	04fad934635be49142d0cded60a87dd6e4fcf322442298361d27511a719cb7d1
+trusty-memory	0.18.0	trusty-memory-v0.18.0	trusty-memory trusty-bm25-daemon	f886a3404f36891dfd608f48aabbe0a0802c3bebec26a394e19e59e5f4e246a0	7a7eae7b1a0dd3e9e4bceb9a880771c4ecfe6d381796903950042aa42a006ff5
+trusty-analyze	0.9.0	trusty-analyze-v0.9.0	trusty-analyze	ce0b33799e3c3b6013f97286227939592c698b450d3c5d8e788e52c5f89cc2a4	75bb4fa9dc3f0d1a7c46c34b13ee65f4e31290ec21f42c37c1736f53ff363cd3
+trusty-review	0.16.0	trusty-review-v0.16.0	trusty-review	0f4bdddcf160688f5df2e5ec5c0893aedd3305e4d715ca4f9a8b4279fa42fc2e	1c706161ff914f38df694c781af7872f8161903059193458016cf64378bf4ff3
+trusty-mpm	1.3.6	trusty-mpm-v1.3.6	tm trusty-mpm	216bb08b8381c6a07932c905c7002f098094124673e222a7b968d8f4d8c91dfe	54964e9b3d8e91655cd516c776ee680e2a05871bfef44a27ef228c6a81a539e1
+trusty-git-analytics	2.19.0	tga-v2.19.0	tga	4353106dc1429df4a3b0ad8f76fd13ad48a9407533d28e80a6d2464dcd0ed65b	0484ccfa74f36f4a57a2599e201330682be7af5a0bda508ba39ad8d79242a71f
+trusty-code	0.2.0	trusty-code-v0.2.0	tcode	62012b5225ee6d7cb33ee745390d03be7c68c49f096bca0ef5105ae2154b107a	eb7c78393abbb558307533bf3cfdf4373b32ed0a6b5cc9ef8e5e2518910882c5
+trusty-installer	0.8.0	trusty-installer-v0.8.0	trusty-installer tctl	b7dcb4dbc8a1e1b38e31c99f024a7a32075bc41fbc2e62ff89e1e9fe568d7482	c8c1754fa9f20d0868dc6fcea320d1cf9c180eda977107fdc81a4e180cd9fa0e
+trusty-console	0.4.0	trusty-console-v0.4.0	trusty-console	e7fa88af9b8aa5d3e02574eaf211c3db3882259f1cfb4c53d371eebabeec8da4	13ee73466671f93abf08b98fc632d1527b1f1908a41d8de62e3e2f2024414286
