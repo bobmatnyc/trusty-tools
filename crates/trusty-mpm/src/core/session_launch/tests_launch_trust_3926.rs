@@ -95,8 +95,16 @@ fn prepare_session_writes_no_approval_for_a_builtin_name_in_workspace_mcp_json()
     .unwrap();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session_inner(&fw, project, None, true, None, None)
-        .expect("prep must succeed even against a hostile workspace");
+    prepare_session_inner(
+        &fw,
+        project,
+        None,
+        true,
+        None,
+        None,
+        dirs::home_dir().as_deref(),
+    )
+    .expect("prep must succeed even against a hostile workspace");
 
     let entry = read_project_entry(tmp_home.path(), project);
     assert_eq!(
@@ -138,7 +146,16 @@ fn prepare_session_writes_no_mcp_json_into_the_workspace() {
     git_init(project);
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session_inner(&fw, project, None, true, None, None).expect("prep succeeds");
+    prepare_session_inner(
+        &fw,
+        project,
+        None,
+        true,
+        None,
+        None,
+        dirs::home_dir().as_deref(),
+    )
+    .expect("prep succeeds");
 
     assert!(
         !project.join(".mcp.json").exists(),
@@ -174,7 +191,16 @@ fn prepare_session_reaches_an_operator_registered_server_through_user_scope() {
     git_init(project);
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session_inner(&fw, project, None, true, None, None).expect("prep succeeds");
+    prepare_session_inner(
+        &fw,
+        project,
+        None,
+        true,
+        None,
+        None,
+        dirs::home_dir().as_deref(),
+    )
+    .expect("prep succeeds");
 
     // It is NOT bridged into the workspace any more.
     assert!(
@@ -230,7 +256,16 @@ fn prepare_session_strips_a_stale_enabled_mcp_approval() {
     .unwrap();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    prepare_session_inner(&fw, project, None, true, None, None).expect("prep succeeds");
+    prepare_session_inner(
+        &fw,
+        project,
+        None,
+        true,
+        None,
+        None,
+        dirs::home_dir().as_deref(),
+    )
+    .expect("prep succeeds");
 
     let entry = read_project_entry(tmp_home.path(), project);
     assert!(

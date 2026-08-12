@@ -294,8 +294,8 @@ fn restricted_reviewer_agents_carry_read_only_tools() {
     }
 }
 
-/// `documentation` and `research` remain byte-identical to trusty-mpm's
-/// source and unrestricted (`tools: None` — all tools allowed), per Bob's
+/// `documentation` and `research` are embedded straight from the shared asset
+/// crate and stay unrestricted (`tools: None` — all tools allowed), per Bob's
 /// explicit 2026-07-18 ruling that they build docs and research reports
 /// rather than issue verdicts.
 ///
@@ -533,17 +533,17 @@ fn ticketing_is_dispatchable_for_cross_product_delegation() {
     assert_ne!(cfg.agent.name, "pm", "must not silently fall back to pm");
 }
 
-/// #4027: the ported copy stays byte-identical to its trusty-mpm source, the
-/// same treatment `research` gets — it is a PARITY copy, never a pinned
-/// deviation.
+/// #4027: `ticketing` is embedded from the shared asset unmodified, the same
+/// treatment `research` gets — never a pinned deviation.
 ///
-/// Why: `scripts/check_agent_assets.sh` enforces this in CI, but a unit test
-/// makes the intent visible at the point of use: the ticketing persona has no
-/// tcode-specific restriction, because its non-coding property is enforced at
-/// the trusty-agents bridge (#4026's `NON_CODING_TARGETS` floor), not here.
+/// Why: makes the intent visible at the point of use — the ticketing persona
+/// has no tcode-specific restriction, because its non-coding property is
+/// enforced at the trusty-agents bridge (#4026's `NON_CODING_TARGETS` floor),
+/// not here. Since consolidation there is no copy to compare, so this is what
+/// catches a `tools:` line being added to the shared asset by mistake.
 /// What: asserts the embedded source carries no `tools:` frontmatter override
-/// (which is what the four deliberately-deviated files add).
-/// Test: this test; `scripts/check_agent_assets.sh` is the byte-parity gate.
+/// (which is what the four deliberately-forked files add).
+/// Test: this test.
 #[test]
 fn ticketing_copy_carries_no_tcode_only_tools_restriction() {
     let (_, md) = EMBEDDED_TM_AGENT_SOURCES

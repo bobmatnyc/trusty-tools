@@ -100,6 +100,19 @@ pub mod events;
 /// Test: `harness_doc::tests` exercises every accessor and the full-doc combinator.
 pub mod harness_doc;
 
+/// The shared agent-asset roster: 30 `.md` files embedded once, consumed by
+/// both `trusty-mpm` and `trusty-code`.
+///
+/// Why: both crates shipped byte-identical copies of the same 30 agent prompts,
+///      held in step only by a CI diff that failed after the fact. One physical
+///      file per agent makes drift unrepresentable instead of merely detected.
+/// What: 30 `pub const &str` items (5 `BASE-*` templates + 25 roster agents)
+///       plus `AGENT_ASSETS`, the `(filename, content)` table consumers use to
+///       resolve `extends:` chains by original filename.
+/// Test: `agent_assets::tests` — non-empty content, unique filenames, and every
+///       named const pointer-identical to its table row.
+pub mod agent_assets;
+
 /// Portable tool-output compression: `compress_tool_output(_async)` + filters.
 ///
 /// Why: Hoisted from `trusty-agents::compress::tool_output` in issue #1959 so

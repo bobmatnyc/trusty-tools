@@ -27,39 +27,31 @@
 
 use super::{start_session, start_session_in_place};
 
-/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
-/// identical pattern in `trusty_mpm::core::session_launch::tests::EnvVarGuard`
-/// and siblings (the `tm` binary is a SEPARATE crate target from the
-/// `trusty-mpm` lib, so `pub(crate) mod test_support` in the lib is not
-/// visible here — each target needs its own copy).
-///
-/// Why (#3965): `start_session_in_place` calls the REAL
-/// `session_launch::prepare_session(fw, path)`, which seeds
-/// `$HOME/.claude.json` via the REAL process `$HOME` — a DIFFERENT
-/// resolution path from the `fw` parameter this test already isolates via
-/// `FrameworkPaths::under(tmp_home.path())`. Pairs with
-/// `#[serial_test::serial]`.
-/// Test: used by `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`.
-struct HomeGuard(Option<String>);
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        // SAFETY: paired with `#[serial_test::serial]` — no other thread
-        // reads/writes the environment concurrently.
-        match self.0 {
-            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-    }
-}
-
-/// Point `$HOME` at `home` for the duration of the caller's scope. Callers
-/// MUST be `#[serial_test::serial]` — see [`HomeGuard`].
-fn set_home(home: &std::path::Path) -> HomeGuard {
-    let prior = std::env::var("HOME").ok();
-    // SAFETY: serialized via `#[serial_test::serial]`.
-    unsafe { std::env::set_var("HOME", home) };
-    HomeGuard(prior)
-}
+// #5544: there is no `$HOME` guard here any more. The two tests below used to
+// repoint the process's `$HOME` at a tempdir behind `#[serial]`, because
+// `prepare_session` reached the real `~/.claude.json` and `~/.claude/settings.json`
+// through `dirs::home_dir()` — a resolution path the `fw` parameter they already
+// isolated with `FrameworkPaths::under(tempdir)` had no say over.
+//
+// The home is now a PARAMETER: `prepare_session_with_home` takes it, and
+// `start_session_in_place` threads it through. Production passes
+// `dirs::home_dir()`, byte-identical to before under every framework root.
+//
+// 🔴 Do NOT "simplify" this by resolving the home from `fw` instead.
+// `FrameworkPaths::claude_home_dir()` still exists and looks like the obvious
+// answer; it is not. `for_managed_project` rewrites `claude_agents`, which that
+// accessor derives from, so for every managed session it returns the WORKSPACE —
+// which drops an untracked `.claude.json` into the operator's repo and points the
+// global hook cleanup at a file that does not exist. A missing file is success by
+// contract, so nothing reports it. That defect shipped twice in this PR's review
+// and cost two rounds; the parameter is what makes it unreachable.
+//
+// The env write had to go rather than be serialised: `cargo test` runs a
+// target's tests as threads in ONE process, so `$HOME` was repointed for every
+// sibling for the duration, and `#[serial]` excludes only other `#[serial]`
+// tests. `prepare_session_does_not_seed_the_workspace_on_the_managed_path` and
+// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`
+// (`core::session_launch::tests`) are the regression tests for the escape.
 
 /// Run `git <args>` in `dir`, panicking with full context on failure.
 ///
@@ -170,16 +162,23 @@ async fn session_start_dispatches_managed_new_for_github_repo() {
 /// POST — proving `prepare_session` still ran in place.
 /// Test: this function IS the test.
 #[tokio::test]
-#[serial_test::serial]
 async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable() {
     let tmp_home = tempfile::TempDir::new().expect("tmp home");
-    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
-    let _home = set_home(tmp_home.path());
     let target = tempfile::TempDir::new().expect("tmp target dir");
     let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let client = reqwest::Client::new();
-    let result = start_session_in_place(&client, UNREACHABLE_URL, target.path(), &fw).await;
+    // #5544: the home is INJECTED. Production passes `dirs::home_dir()`; this
+    // passes the same tempdir `fw` is rooted at, which is what lets the test
+    // stop repointing the process's `$HOME`.
+    let result = start_session_in_place(
+        &client,
+        UNREACHABLE_URL,
+        target.path(),
+        &fw,
+        Some(tmp_home.path()),
+    )
+    .await;
 
     // Preserves the original in-place `Start` behavior: a daemon-unreachable
     // `POST /sessions` propagates as a hard `Err` via `?`.
@@ -369,10 +368,7 @@ async fn session_start_posts_the_same_wire_shape_bare_tm_guided_default_sends() 
 /// unreachable daemon URL, and asserts (1) an error naming the directory and
 /// (2) that nothing was written into it.
 #[tokio::test]
-#[serial_test::serial]
 async fn session_start_refuses_a_non_git_directory() {
-    let tmp_home = tempfile::TempDir::new().expect("tmp home");
-    let _home = set_home(tmp_home.path());
     let tmp = tempfile::TempDir::new().expect("tmp dir");
     let plain = tmp.path();
 

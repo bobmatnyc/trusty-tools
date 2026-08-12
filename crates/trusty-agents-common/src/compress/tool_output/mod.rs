@@ -91,6 +91,19 @@ pub fn compress_tool_output(tool_name: &str, output: &str) -> String {
         }
         return output.to_string();
     }
+    // #1957: grep/rg/find emit a flat match-or-path list; ls emits a flat
+    // directory listing. Neither had a filter branch — the #1953 spike
+    // measured 0% reduction for grep and ls output. Matched on the first
+    // whitespace token (not `.contains()`, unlike the branches above)
+    // because "rg" is a substring of unrelated tool names this dispatch
+    // sees (e.g. "cargo", "git merge") that must not misfire.
+    let first_word = n.split_whitespace().next().unwrap_or("");
+    if first_word == "grep" || first_word == "rg" || first_word == "find" {
+        return filter_grep_output(output);
+    }
+    if first_word == "ls" {
+        return filter_ls_output(output);
+    }
     if n.contains("check") || n.contains("clippy") {
         return filter_cargo_check(output);
     }
@@ -327,4 +340,66 @@ pub fn filter_cargo_check(output: &str) -> String {
         .filter(|line| !line.starts_with("   Compiling ") && !line.starts_with("    Finished "))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Line count above which [`cap_line_list`] head/tail-caps its input.
+const LINE_LIST_CAP: usize = 60;
+/// Leading lines kept when [`cap_line_list`] triggers.
+const LINE_LIST_HEAD: usize = 25;
+/// Trailing lines kept when [`cap_line_list`] triggers.
+const LINE_LIST_TAIL: usize = 10;
+
+/// Head/tail-cap a flat, one-entry-per-line output, announcing the drop.
+///
+/// Why: `grep`/`rg`/`find`/`ls` output has no natural summary line the way
+/// `cargo test`'s `test result:` or a diff's hunk header does, so there is
+/// nothing to fall back to — the cap must state what it removed rather than
+/// dropping it silently (compression that silently drops content is this
+/// project's recurring defect; see #1957's PR discussion).
+/// What: Passes output through unchanged at or under `LINE_LIST_CAP` lines.
+/// Above that, keeps the first `LINE_LIST_HEAD` lines, inserts a
+/// `... N lines omitted ...` marker giving the exact count of dropped
+/// lines, then the last `LINE_LIST_TAIL` lines.
+/// Test: `filter_grep_output_caps_long_match_list`,
+/// `filter_ls_output_caps_long_listing`.
+fn cap_line_list(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    if lines.len() <= LINE_LIST_CAP {
+        return output.to_string();
+    }
+    let omitted = lines.len() - LINE_LIST_HEAD - LINE_LIST_TAIL;
+    let mut out: Vec<String> = Vec::with_capacity(LINE_LIST_HEAD + LINE_LIST_TAIL + 1);
+    out.extend(lines[..LINE_LIST_HEAD].iter().map(|s| (*s).to_string()));
+    out.push(format!("... {omitted} lines omitted ..."));
+    out.extend(
+        lines[lines.len() - LINE_LIST_TAIL..]
+            .iter()
+            .map(|s| (*s).to_string()),
+    );
+    out.join("\n")
+}
+
+/// Cap long `grep`/`rg`/`find` match-or-path lists.
+///
+/// Why: These tools emit one match/path per line with no built-in summary —
+/// the #1953 spike found grep output passed through `compress_tool_output`
+/// with 0% reduction because no filter branch existed for it (#1957).
+/// What: Delegates to [`cap_line_list`] — passthrough at/under
+/// `LINE_LIST_CAP` lines, head/tail-capped with an explicit omission count
+/// above it.
+/// Test: `filter_grep_output_caps_long_match_list`,
+/// `filter_grep_output_passthrough_short`.
+pub fn filter_grep_output(output: &str) -> String {
+    cap_line_list(output)
+}
+
+/// Cap long `ls` directory listings.
+///
+/// Why: Same coverage gap as [`filter_grep_output`] for `ls -la` output —
+/// the #1953 spike measured 0% reduction because no filter branch existed
+/// for it (#1957).
+/// What: Delegates to [`cap_line_list`].
+/// Test: `filter_ls_output_caps_long_listing`, `filter_ls_output_passthrough_short`.
+pub fn filter_ls_output(output: &str) -> String {
+    cap_line_list(output)
 }
