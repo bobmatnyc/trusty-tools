@@ -63,6 +63,8 @@ commands:
     description: Stage 3 — generate reports from classified commits
   pr-metrics:
     description: Aggregate pull-request metrics per engineer
+  profile:
+    description: Longitudinal per-contributor quality profile
   install:
     description: Interactive configuration wizard
   aliases:

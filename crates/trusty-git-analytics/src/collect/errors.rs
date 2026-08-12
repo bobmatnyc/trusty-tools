@@ -58,6 +58,24 @@ pub enum CollectError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// A GitHub REST call returned a non-success status, with its body kept.
+    ///
+    /// Why (#5465): [`Self::Http`] is what `error_for_status()` produces, and it
+    /// discards the response body — which is where GitHub puts the only useful
+    /// part of a write failure ("Resource not accessible by personal access
+    /// token"). Without the body a token-scope problem is indistinguishable
+    /// from any other 403, and the write path is exactly where that
+    /// distinction decides what the operator has to fix.
+    #[error("GitHub API error (HTTP {status}) for {endpoint}: {message}")]
+    GithubApi {
+        /// HTTP status returned by GitHub.
+        status: u16,
+        /// URL that was called, for the operator to reproduce.
+        endpoint: String,
+        /// GitHub's response body, truncated when long.
+        message: String,
+    },
+
     /// A paged JIRA changelog walk finished holding fewer history entries
     /// than the server reported existed (issue #4084).
     ///

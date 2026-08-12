@@ -40,6 +40,9 @@ pub struct GitHubClient {
     /// empty in single-repo mode; may contain many entries in org / multi-repo
     /// mode (see [`Self::new_for_prs`]).
     pub(crate) repos: Vec<(String, String)>,
+    /// REST root every request is built against. [`GITHUB_API_BASE`] unless a
+    /// caller overrode it with [`Self::with_api_base`] (#5465).
+    pub(crate) api_base: String,
 }
 
 /// Compute the JSON-encoded `commit_shas` value for a PR row.
@@ -87,6 +90,7 @@ impl GitHubClient {
             owner: owner.clone(),
             repo: repo.clone(),
             repos: vec![(owner, repo)],
+            api_base: GITHUB_API_BASE.to_string(),
         })
     }
 
@@ -122,6 +126,7 @@ impl GitHubClient {
             owner: primary_owner,
             repo: primary_repo,
             repos,
+            api_base: GITHUB_API_BASE.to_string(),
         })
     }
 
@@ -147,7 +152,28 @@ impl GitHubClient {
             owner: String::new(),
             repo: String::new(),
             repos: Vec::new(),
+            api_base: GITHUB_API_BASE.to_string(),
         })
+    }
+
+    /// Point every request at `base` instead of [`GITHUB_API_BASE`].
+    ///
+    /// Why: the write methods added in #5465 create issues and post comments,
+    /// and a test that never sends those to github.com is the only kind worth
+    /// having. The same seam is what a GitHub Enterprise host would need.
+    /// What: replaces the REST root; a trailing `/` is trimmed so callers can
+    /// pass a `wiremock` server URI unchanged.
+    /// Test: `upsert_comments_on_the_existing_thread_instead_of_opening_a_second`
+    /// and the other `issue_writer_tests` drive a local mock through it.
+    pub fn with_api_base(mut self, base: impl Into<String>) -> Self {
+        let base = base.into();
+        self.api_base = base.trim_end_matches('/').to_string();
+        self
+    }
+
+    /// The REST root this client builds its URLs against.
+    pub(crate) fn api_base(&self) -> &str {
+        &self.api_base
     }
 
     /// Fetch all PRs (open + closed + merged) by paginating through the
@@ -186,11 +212,12 @@ impl GitHubClient {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<PullRequest>> {
+        let base = self.api_base();
         let mut out: Vec<PullRequest> = Vec::new();
         let mut page = 1u32;
         loop {
             let url = format!(
-                "{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls?state=all&per_page={PAGE_SIZE}&page={page}"
+                "{base}/repos/{owner}/{repo}/pulls?state=all&per_page={PAGE_SIZE}&page={page}"
             );
             debug!(url = %url, "GET");
             let resp = self.retry_request(&url).await?;
@@ -321,10 +348,8 @@ impl GitHubClient {
     ///   non-success HTTP responses.
     /// - [`crate::collect::errors::CollectError::Json`] on payload parse failures.
     pub async fn fetch_issue(&self, number: u64) -> Result<Option<GitHubIssue>> {
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{}/{}/issues/{number}",
-            self.owner, self.repo
-        );
+        let base = self.api_base();
+        let url = format!("{base}/repos/{}/{}/issues/{number}", self.owner, self.repo);
         debug!(url = %url, "GET");
         let resp = self.client.get(&url).send().await?;
 
@@ -372,11 +397,12 @@ impl GitHubClient {
         repo: &str,
         pr_number: u64,
     ) -> Result<Vec<GitHubReview>> {
+        let base = self.api_base();
         let mut out = Vec::new();
         let mut page = 1u32;
         loop {
             let url = format!(
-                "{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page={PAGE_SIZE}&page={page}"
+                "{base}/repos/{owner}/{repo}/pulls/{pr_number}/reviews?per_page={PAGE_SIZE}&page={page}"
             );
             let resp = self.retry_request(&url).await?.error_for_status()?;
             let batch: Vec<GitHubReview> = resp.json().await?;
@@ -415,11 +441,12 @@ impl GitHubClient {
     ///   HTTP responses after retries are exhausted.
     /// - [`crate::collect::errors::CollectError::Json`] on payload parse failures.
     pub async fn fetch_pr_commits(&self, pr_number: u64) -> Result<Vec<GitHubPrCommit>> {
+        let base = self.api_base();
         let mut out = Vec::new();
         let mut page = 1u32;
         loop {
             let url = format!(
-                "{GITHUB_API_BASE}/repos/{}/{}/pulls/{pr_number}/commits?per_page={PAGE_SIZE}&page={page}",
+                "{base}/repos/{}/{}/pulls/{pr_number}/commits?per_page={PAGE_SIZE}&page={page}",
                 self.owner, self.repo
             );
             let resp = self.retry_request(&url).await?.error_for_status()?;
@@ -458,11 +485,12 @@ impl GitHubClient {
     ///   HTTP responses after retries are exhausted.
     /// - [`crate::collect::errors::CollectError::Json`] on payload parse failures.
     pub async fn list_issues(&self, state: &str, since: Option<&str>) -> Result<Vec<GitHubIssue>> {
+        let base = self.api_base();
         let mut out = Vec::new();
         let mut page = 1u32;
         loop {
             let mut url = format!(
-                "{GITHUB_API_BASE}/repos/{}/{}/issues?state={state}&per_page={PAGE_SIZE}&page={page}",
+                "{base}/repos/{}/{}/issues?state={state}&per_page={PAGE_SIZE}&page={page}",
                 self.owner, self.repo
             );
             if let Some(s) = since {
