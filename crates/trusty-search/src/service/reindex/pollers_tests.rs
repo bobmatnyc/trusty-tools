@@ -19,10 +19,14 @@ use super::pollers::{spawn_embedderd_rss_poller, spawn_memory_poller};
 
 /// Ceiling for a prompt shutdown.
 ///
-/// Well under the 500ms sidecar tick (the shorter of the two production
-/// cadences), so a regression back to waiting out a tick cannot pass by luck on
-/// a slow machine — the pre-fix path takes ~1400ms from this fixture.
-const PROMPT_SHUTDOWN_CEILING: Duration = Duration::from_millis(250);
+/// Deliberately loose. Every test below parks the daemon poller no more than
+/// `SETTLE` into its 1s tick, so the pre-fix path costs at least 900ms from any
+/// of these fixtures, while the fixed path measures 0.14–0.97ms. 750ms sits
+/// between those with ~150ms of margin on the failure side and ~750x on the
+/// pass side — wide enough to survive a runner loaded by parallel tests (the
+/// flake mode #3769, #4306 and #4488 all landed in) without letting a
+/// regression back to waiting out a tick through.
+const PROMPT_SHUTDOWN_CEILING: Duration = Duration::from_millis(750);
 
 /// Long enough for both pollers to take a sample and park mid-tick.
 const SETTLE: Duration = Duration::from_millis(100);
@@ -172,27 +176,48 @@ async fn memory_poller_still_trips_abort_then_stops_promptly() {
     );
 }
 
-/// A stop signalled before the poller parks must not be lost.
+/// A reindex that tears down before either poller has parked stays prompt.
 ///
-/// `Notify::notify_one` stores a permit when nothing is waiting, so the poller's
-/// first `sleep_until_next_sample` consumes it instead of sleeping. Without that
-/// property the wakeup would race the spawn and this would hang for a full tick.
+/// Covers the short-run case — a reindex that fails or finds nothing to do —
+/// where teardown races the pollers' first loop iteration. What it actually
+/// pins is the signal-both-before-joining order: the daemon poller exits on its
+/// top-of-loop flag check, but the sidecar poller parks during that join and
+/// then waits out its own 500ms tick if it was not signalled up front.
+///
+/// Budgeted over `RACE_ROUNDS` rather than one shot on purpose. A single round
+/// costs only ~500ms against the pre-fix code — under `PROMPT_SHUTDOWN_CEILING`,
+/// so a one-shot assertion at that ceiling would miss it. Repeating separates
+/// the two outcomes by an order of magnitude: a few ms for the whole loop when
+/// shutdown is prompt, ~4s when each round waits out a tick.
+///
+/// Note this does NOT isolate the `notify_one` permit — removing only the notify
+/// leaves this test green, because the top-of-loop flag check wins that
+/// particular race. `stop_pollers_returns_without_waiting_out_the_tick` is the
+/// test that covers a poller already parked mid-tick.
 #[tokio::test]
 async fn stop_signalled_before_the_poller_parks_still_stops_it() {
-    let fx = spawn_both(None);
+    /// Enough rounds that one lost wakeup per round blows the budget outright.
+    const RACE_ROUNDS: u32 = 8;
 
     let started = Instant::now();
-    stop_pollers(
-        fx.memory.1,
-        fx.memory.0,
-        Some(fx.sidecar.1),
-        Some(fx.sidecar.0),
-    )
-    .await;
+    for _ in 0..RACE_ROUNDS {
+        let fx = spawn_both(None);
+        stop_pollers(
+            fx.memory.1,
+            fx.memory.0,
+            Some(fx.sidecar.1),
+            Some(fx.sidecar.0),
+        )
+        .await;
+    }
+    let elapsed = started.elapsed();
+
     assert!(
-        started.elapsed() < PROMPT_SHUTDOWN_CEILING,
-        "teardown raced against spawn took {}ms",
-        started.elapsed().as_millis(),
+        elapsed < PROMPT_SHUTDOWN_CEILING,
+        "{RACE_ROUNDS} spawn-then-stop rounds took {}ms; a lost wakeup costs a \
+         full tick per round (budget {}ms)",
+        elapsed.as_millis(),
+        PROMPT_SHUTDOWN_CEILING.as_millis(),
     );
 }
 

@@ -31,8 +31,8 @@ use tokio::sync::Notify;
 /// `sleep_until_next_sample` parks until whichever of the two arrives first. The
 /// flag stays the source of truth — a lost wakeup degrades to the old
 /// wait-out-the-tick behaviour rather than to a poller that never exits.
-/// Test: `stop_pollers_returns_without_waiting_out_the_tick`,
-/// `stop_signalled_before_the_poller_parks_still_stops_it` (`pollers_tests.rs`).
+/// Test: `stop_pollers_returns_without_waiting_out_the_tick` (`pollers_tests.rs`)
+/// is the one that pins the wakeup — it parks both pollers mid-tick first.
 pub(super) struct PollerStop {
     stop: AtomicBool,
     wake: Notify,
