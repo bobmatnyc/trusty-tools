@@ -692,6 +692,53 @@ fn preview_truncates_at_char_boundary() {
 #[test]
 fn event_line_prefix_is_stable() {
     // Lock in the wire constant — changing it breaks the parent/child
-    // relay protocol.
+    // relay protocol. #5129: the constant now lives in trusty-agents-common
+    // and is re-exported here, so this also catches an upstream crate version
+    // whose value has drifted off the wire format.
     assert_eq!(EVENT_LINE_PREFIX, "__OMPM_EVENT__ ");
+}
+
+/// #5129: the session manager is told which prefix to watch for by the
+/// harness-understanding doc; tcode decides which prefix it writes. Nothing
+/// bound the two, and they disagreed — the doc said `__HARNESS_EVENT__`, the
+/// producer wrote `__OMPM_EVENT__`. This takes the line `emit` actually puts
+/// on stderr and asserts the SM's own instructions name that prefix, so a
+/// future divergence on either side fails here rather than in production.
+#[test]
+fn sm_harness_doc_documents_the_prefix_tcode_emits() {
+    let envelope = SessionEventEnvelope::new(
+        "s1".into(),
+        1,
+        Utc::now(),
+        Event::PmThinking {
+            session_id: "s1".into(),
+            text: "considering options".into(),
+        },
+    );
+
+    let line = format_event_line(&envelope).expect("envelope serialises");
+    let emitted_prefix = line
+        .split_once('{')
+        .map(|(prefix, _)| prefix)
+        .expect("relay line carries a JSON payload");
+    assert_eq!(
+        emitted_prefix, EVENT_LINE_PREFIX,
+        "the emitted line must start with the shared relay constant"
+    );
+
+    // The consumer side: the instruction text trusty-mpm assembles into the
+    // session-manager prompt, read straight from the crate that owns it.
+    let marker = emitted_prefix.trim_end();
+    for (section, text) in [
+        ("agnostic", trusty_agents_common::harness_doc::agnostic()),
+        ("tcode", trusty_agents_common::harness_doc::tcode()),
+        ("overseer", trusty_agents_common::harness_doc::overseer()),
+    ] {
+        assert!(
+            text.contains(marker),
+            "harness_understanding `{section}` section must name the prefix \
+             tcode emits ({marker}); the session manager watches for whatever \
+             this doc says"
+        );
+    }
 }

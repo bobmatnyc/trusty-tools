@@ -140,11 +140,21 @@ pub async fn handle_kg_rebuild_with(opts: KgRebuildOptions) -> Result<()> {
         return Ok(());
     }
 
-    let loaded = state
-        .load_palaces_from_disk()
-        .await
-        .context("load palaces from disk")?;
-    tracing::info!(palaces_loaded = loaded, "kg-rebuild: palaces opened");
+    // #4911: the applying pass ASSERTS triples through the handles it opens, so
+    // it must hold `Writer` intent. A `ReadOnlyClient` registry silently serves
+    // a snapshot when the daemon holds the lock, and every `kg.assert` against
+    // it fails into `rebuild_one`'s non-fatal warn arm — the run reports success
+    // having written nothing. Same reasoning `purge_one` already applies to its
+    // applying pass, and the same fail-loud direction as #1487.
+    //
+    // The `load_palaces_from_disk` hydration this replaces was redundant AND
+    // defeated the intent: it opens every palace with the zero-arg
+    // `PalaceHandle::open` (`ReadOnlyClient`) and registers it, so `rebuild_one`
+    // would then hit those cached read-only handles. `rebuild_palaces`
+    // enumerates from disk (`PalaceRegistry::list_palaces`), never from the
+    // handle cache, so dropping the pre-open changes nothing it can observe —
+    // each palace is opened once, lazily, through the writer-intent registry.
+    let state = state.with_writer_intent();
 
     let summaries = rebuild_palaces(&state, palace.as_deref()).await?;
     let mut total_drawers = 0usize;
