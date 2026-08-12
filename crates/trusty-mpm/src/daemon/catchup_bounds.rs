@@ -311,6 +311,9 @@ mod tests {
     /// `PausedSessionJson` is `#[non_exhaustive]`, so trusty-mpm cannot build
     /// one by hand — the fixture goes through a real snapshot store, which also
     /// keeps these tests honest about the shape the parser actually produces.
+    /// Each summary carries its own `<NNNN>-` prefix so a test can tell the
+    /// records apart — identical bodies would collapse under `assert_eq!` and
+    /// quietly pass a walk that dropped or repeated one.
     async fn digest(n: usize, summary_bytes: usize) -> CatchupJson {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join(".trusty-mpm").join("sessions");
@@ -319,7 +322,7 @@ mod tests {
         for i in 0..n {
             std::fs::write(
                 dir.join(format!("session-20260801-12{:02}{:02}.md", i / 60, i % 60)),
-                format!("## Summary\n{body}\n"),
+                format!("## Summary\n{i:04}-{body}\n"),
             )
             .unwrap();
         }

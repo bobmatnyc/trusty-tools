@@ -94,7 +94,7 @@ mcp__trusty-mpm__session_context_catchup(
   tmux_window: <your own `tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'`>,
   all_projects: false,   # true also scans machine-wide registered projects
   full: false,            # true ignores the watermark, returns full history
-  sessions_offset: 0      # which page of the newest-first session list to read
+  sessions_offset: 0      # which page of the ordered session list to read — yours first, then newest
 )
 ```
 
@@ -120,6 +120,8 @@ The tool returns:
   "recent_memory": [{ "title", "tags" }],
   "recent_memory_total": 0,
   "truncated": true,
+  "over_budget": false,
+  "page_bytes": 47812,
   "truncation_notice": "<what was withheld and how to get it, or null>",
   "resolved_snapshot": "<path or null>",
   "resolved_via": "session_id" | "tmux_window" | null,
