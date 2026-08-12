@@ -6,6 +6,169 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.0] — 2026-08-12
+
+### Added
+
+- New public `download::pinned` entry point installs prebuilt binaries at
+  caller-specified EXACT versions and fails closed. `install_pinned_set` takes a
+  set of `PinnedTool` pins, verifies each artifact against the published
+  SHA-256 (and, optionally, a caller-supplied digest), verifies the downloaded
+  binary itself reports the pinned version, and installs all tools or none —
+  nothing reaches the install directory until every tool has verified. Every
+  failure is a typed `PinnedError` naming what was pinned, what arrived, and
+  that nothing was installed; `cargo install` is unreachable from this path
+  (#5491)
+- Version bumped 0.6.0 → 0.7.0 in this PR. The change is purely additive — a
+  new module, new types, and `release::resolve_pinned_tag` — so a MINOR bump
+  under Cargo's 0.x rules. `scripts/check_semver.sh --crate trusty-installer`
+  confirms no breaking change against the published baseline (#5491)
+
+- `install_pinned_set` places the whole set with copy-then-commit: every binary
+  of every tool is copied into the install directory under a hidden temporary
+  name, and nothing is renamed to its final name until all copies succeed.
+  Previously phase 2 placed tools one at a time, so a failure on tool 2 returned
+  an error reading "nothing was installed" while tool 1's binary was already on
+  disk (#5517)
+- New `PinnedError::PlacementInterrupted` covers the one case where files do
+  survive a failure — a commit rename failing after an earlier one succeeded. It
+  lists every file left in the install directory and every crate they belong to,
+  instead of reusing the `Io` variant's "nothing was installed" text. Every other
+  variant now provably means no file was placed under its final name (#5517)
+- A set whose tools install two binaries to the same path, and a destination
+  already occupied by a directory, are both rejected before anything is copied
+  (#5517)
+
+- Check 5 EXECUTES the downloaded binary to read its `--version`, so a pinned
+  install runs a freshly downloaded, not-independently-signed artifact in the
+  installer's own process and user context during an unattended install. The
+  digest gating it is self-published by the same release pipeline that would be
+  compromised in the attack this guards against. The module doc records this as
+  an accepted trade-off: a mis-tagged or mis-built asset passes every URL- and
+  digest-level check, and executing the binary is the only thing that catches it
+  (#5517)
+- `download::try_install_prebuilt` is deliberately UNCHANGED. It still resolves
+  `latest` and still returns `Outcome::Fallback` to `cargo install` on any
+  failure, because `install`/`upgrade` depend on that behaviour. The pinned path
+  is a separate entry point rather than a change in its semantics (#5491)
+- `download::http_client()` is public. `download::pinned::install_pinned_set` takes a `&reqwest::Client`, and its out-of-crate caller had no way to obtain one without answering "how is this workspace's download client built?" a second time. Consumers now call this and need no `reqwest` dependency of their own ([#5495](https://github.com/bobmatnyc/trusty-tools/issues/5495))
+
+### Fixed
+
+- `plist_label_for` no longer keeps its own table of launchd labels. It kept a
+  `com.trusty.<binary>` convention plus hand-added overrides, held in step with
+  the daemon crates by grepping their `LAUNCHD_LABEL` constants — and it had
+  drifted: it resolved trusty-search to `com.trusty.trusty-search` and stated
+  the convention "is correct" for it, while the loaded unit is
+  `com.trusty.search`. Every `tctl start`/`stop`/`restart` bootout and every
+  `tctl stack doctor` plist-presence check therefore targeted a job that does
+  not exist. It now delegates to `trusty_common::launchd_labels`, which the
+  daemons read too (#4868)
+- The supervisor plist template carried `com.trusty.mpm.supervisor` as its own
+  literal beside `PLIST_LABEL`. Two copies of a label are two things that can
+  disagree, and a plist whose `Label` key differs from the label the installer
+  boots out is the #2827 defect landing on the unit that restarts everything
+  else. The template now fills the label from the constant, and the test asserts
+  on the rendered output rather than the raw template (#4868)
+- `plist_label_for` consults the service registry before falling back to the
+  naming convention, so a member whose only unit is a SUB-unit resolves
+  correctly — `trusty-agents` returned `com.trusty.agents` while the loaded unit
+  is `com.trusty.agents.slack`, which would have had `tctl` target a job that
+  does not exist (#4868)
+- `tctl upgrade` no longer installs every daemon member twice. On the prebuilt
+  path the binary was already on disk when the daemon branch went on to call
+  `upgrade_and_restart`, whose first step is `cargo install <crate> --locked` —
+  a second copy, in a second directory, from one command. The comment saying
+  that step was "a no-op if the binary is already current" was wrong: cargo
+  skips only when its own `.crates2.json` records that exact version, and the
+  prebuilt path writes no cargo metadata. Six of the seven stable-set members
+  are daemons, so this fired on nearly every upgrade — and on a machine with no
+  Rust toolchain it errored out after the new binary had already landed
+  ([#4964](https://github.com/bobmatnyc/trusty-tools/issues/4964))
+- `tctl upgrade` now actually restarts a daemon member. `upgrade_and_restart`
+  restarts by calling `std::process::exit(1)` and letting launchd's `KeepAlive`
+  respawn the process that just exited — correct for `trusty-search upgrade`,
+  `trusty-memory upgrade`, and the two MCP `upgrade` tools, which all run inside
+  the supervised daemon, and a guaranteed no-op for `tctl`, a terminal process
+  launchd has never heard of. The supervision check evaluated `tctl`, returned
+  false every time, and the manual-restart hint it produced was reported as
+  success, so the daemon kept serving the old process indefinitely. Both daemon
+  branches now bounce the member through the same launchd path `tctl restart`
+  uses (port-guard, then `bootout`, then `bootstrap` — never `kickstart -k`).
+  Note the bounce re-execs whatever path the plist's `ProgramArguments[0]`
+  names, and nothing yet rewrites that — so on a host whose plist was baked
+  from the other bin directory the daemon comes back on the same old binary.
+  Phase 4 of the epic regenerates the plist; this change stops the daemon being
+  left un-bounced, it does not yet guarantee which binary it comes back on
+  ([#4964](https://github.com/bobmatnyc/trusty-tools/issues/4964))
+- `tctl install` passes the concrete path of the binary it just wrote to a
+  member's `service install`, instead of a bare name resolved through `$PATH`.
+  The spawned process bakes its own `current_exe()` into the launchd plist's
+  `ProgramArguments[0]`, so a stale copy winning the `PATH` lookup persisted
+  that stale path into launchd, which then respawned it at every boot with
+  nothing to rewrite the plist
+  ([#4964](https://github.com/bobmatnyc/trusty-tools/issues/4964))
+- The component table's size column reads the binary this run just placed. It
+  joined the binary name onto the cargo bin dir while the prebuilt path writes
+  elsewhere, so it reported a stale copy's bytes, or zero
+  ([#4964](https://github.com/bobmatnyc/trusty-tools/issues/4964))
+- `install_all`'s install-directory fallback reads `CARGO_HOME`. It hardcoded
+  `~/.cargo/bin` while the sibling fallback in `install_one` — same job, same
+  file — did read it. Both, plus `tctl sign`'s `--dir` default,
+  `tctl self-update`'s cargo-destination check, and `tctl upgrade`'s health-gate
+  path, now share `trusty_common::bin_resolve::canonical_bin_dir`
+  ([#4964](https://github.com/bobmatnyc/trusty-tools/issues/4964))
+- Corrected the claim that `~/.local/bin` is preferred "to avoid cdhash issues
+  on macOS". What keeps the cdhash cache consistent is the atomic rename in the
+  download layer, which holds in any directory
+  ([#4964](https://github.com/bobmatnyc/trusty-tools/issues/4964))
+- `trusty-memory` and `trusty-analyze` are now signable targets. `tctl sign trusty-memory` signs all three binaries `cargo install --path crates/trusty-memory` produces (`trusty-memory` → `com.trusty.trusty-memory`, `trusty-bm25-daemon` → `com.trusty.trusty-bm25-daemon`, `trusty-memory-mcp-bridge` → `com.trusty.trusty-memory-mcp-bridge`); `tctl sign trusty-analyze` signs its single binary (`com.trusty.trusty-analyze`). Both were absent from `SIGNABLE_BINARIES` for no recorded reason: `trusty-memory setup`/`migrate` and `trusty-analyze setup --global` walk `$HOME` to depth 8 for `.claude/settings*.json`, and that walk skips `Library`/`Applications` but not `~/Desktop`, `~/Documents`, or `~/Downloads` — the same cdhash-keyed TCC exposure that put `trusty-search` ([#873](https://github.com/bobmatnyc/trusty-tools/issues/873)), `tm` ([#2721](https://github.com/bobmatnyc/trusty-tools/issues/2721)), and `tagent` ([#4277](https://github.com/bobmatnyc/trusty-tools/issues/4277)) in the table. `trusty-analyze`'s walk sits behind `--global` rather than its default path, so the exposure is narrower in how often it is reached and identical when it is. New `scripts/install-trusty-memory-signed.sh` / `make install-memory-signed` cover trusty-memory's local-source install; `tctl sign trusty-analyze` is trusty-analyze's whole surface. `trusty-review` was evaluated under the same test and excluded — it makes no `$HOME` walk and reads no other application's files.
+  - Hardened Runtime follows `trusty-search`'s conservative split (explicit `tctl sign` only, not the automatic hook) for both: `trusty-memory` links `ort`/`fastembed` through `trusty-common`'s `memory-core` and `trusty-analyze` links it directly, so both carry the same unverified ONNX-dylib-under-library-validation exposure.
+  - Signing establishes a stable designated requirement — the precondition for a durable TCC grant, not proof one was obtained. The script and `docs/reference/release-workflow.md` now say so, and record that macOS attributes Files-and-Folders access to the responsible process (usually the terminal for a shell-invoked CLI, which is exactly the `setup`/`migrate` path), leaving the CLI-path outcome unresolved.
+  - The `tctl sign` targets named in `signing_persistence_tip` had gone stale after [#4277](https://github.com/bobmatnyc/trusty-tools/issues/4277) (`trusty-agents` was missing). The tip's advertised list is now parsed and compared exactly against `SIGNABLE_BINARIES`, and each `SignTargetArg` variant's clap `#[value(name = …)]` is pinned against its `as_set_name()`, so a set can no longer be added to the table and left unreachable from the CLI by a typo on either side.
+- `trusty-analyze` is no longer routed to the `x86_64-linux-al2023` /
+  `aarch64-linux-al2023` assets on a below-glibc-floor host. It stopped
+  bundling ONNX Runtime when its unused neural embedder was removed, so the
+  release workflow no longer publishes an AL2023 variant for it and the old
+  routing would have 404'd on an asset that is never built (#5067)
+- **Breaking — version bumped 0.5.1 → 0.6.0 in this PR.** The public const
+  `download::glibc::ORT_CRATES` narrows from `[&str; 2]` to `[&str; 1]`. Array
+  length is part of the type, so any downstream binding it as `[&str; 2]`
+  stops compiling, and under Cargo's 0.x rules a break takes the MINOR
+  position. **`cargo semver-checks` does NOT catch this shape** — it has no
+  lint for a `const`'s type changing and reported `196 checks: 196 pass, 58
+  skip / no semver update required` against the 0.5.0 baseline. Read that
+  green as absence of coverage, not as evidence of compatibility; the bump was
+  made deliberately rather than left for the releaser to notice, because a
+  fragment missed at cut time is exactly how #4088 turned into a yank
+  (#5067, #4088)
+- `download::pinned::install_pinned_set` installs executables only. It placed every regular file in the archive, and every release tarball in this workspace ships a `LICENSE`, so a multi-tool set collided on one destination filename and refused — the three-tool `tga` / `trusty-analyze` / `trusty-review` set could never install. A genuine two-binaries-one-name conflict is still an error ([#5495](https://github.com/bobmatnyc/trusty-tools/issues/5495))
+
+### Changed
+
+- **The stable-set daemon-member rule now lives behind one entry point, `stable_set::daemon_members`, and its result is pinned by name.** `stack doctor` and `stack health` each carried an independent copy of the same `stable_set().into_iter().filter(|m| m.daemon)` expression, and no test in any crate exercised either one.
+  - This matters beyond `tctl`: `vmtest-harness` deliberately **derives** its daemon-liveness set from `stack doctor --json`'s member table rather than transcribing a list (`_verify_daemon_set`, `vmtest-harness/lib/verify.sh`). Narrowing the filter therefore shrank the harness's oracle silently — the dropped daemon stopped being probed, its name landed on the already-noisy `unreported` log line, and the run still reported PASS.
+  - `tests::daemon_members_is_pinned` pins the six daemon crate names in stable-set order, so a narrowing is a deliberate, reviewed edit rather than accidental drift. It pins the NAMES, not the filter expression, which would restate the implementation and catch nothing.
+  - `stack doctor <member>`'s named-member arm routes through the same entry point, so the daemon scoping cannot diverge between the two arms.
+  - Adds `tests::unknown_member_exits_3`, the unknown-member error path the `doctor` module header has claimed coverage for since the file was written; it also asserts a real but non-daemon member (`tga`) is rejected with exit 3 rather than sweeping the whole stack.
+- **MSRV raised to Rust 1.94** (was 1.91). `aws-config` >= 1.9.0 and
+  `aws-sdk-bedrockruntime` >= 1.136.0, published 2026-07-08, declare
+  `rust-version = "1.94.1"`; because those are unpinned caret ranges in the
+  workspace manifest, `cargo install` **without `--locked`** re-resolves into
+  them and then refuses to build on rustc below 1.94.1 — the reported
+  `cargo install trusty-code` failure on rustc 1.91.1. Users on rustc
+  1.91-1.93 must `rustup update` before installing any `trusty-*` crate. See
+  [ADR-0029](../../docs/adr/0029-msrv-1-94-and-edition-policy.md)
+  ([#4928](https://github.com/bobmatnyc/trusty-tools/pull/4928))
+
+### Documentation
+
+- The `kickstart -k` hazard notes on `probe_http` and `verify_tail::needs_kickstart`
+  described the shared plist renderer as emitting no `ExitTimeOut` and launchd
+  as SIGKILLing 20 s after SIGTERM. The renderer now declares the key (#4393),
+  and the pre-fix default measured 5 s, not 20 s. No behaviour change — the
+  confirmed-down gate is unaffected (#4393)
+
 ## [0.5.0] — 2026-08-04
 
 ### Added
