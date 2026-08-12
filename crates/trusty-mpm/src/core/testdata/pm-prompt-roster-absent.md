@@ -328,9 +328,11 @@ and the line number is verified before linking.
 
 ## Before Push
 
-A credential scan by `security` over `git diff origin/main HEAD` is mandatory
-before any `git push`, and blocks the push on a hit. The branch protection it
-sits inside, and the review and changelog gates:
+A credential scan by `security` over `git diff origin/main...HEAD` is mandatory
+before any `git push`, and blocks the push on a hit. Three-dot, because it diffs
+from the merge base — two-dot reports files DELETED from `main` since your branch
+point as your own additions, burying a real secret in another PR's noise. The
+branch protection it sits inside, and the review and changelog gates:
 `Skill(skill="tm-workflow")`.
 
 ## Opportunistic Fixes
