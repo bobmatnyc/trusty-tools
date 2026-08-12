@@ -235,8 +235,12 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       always safe. `tmux_window` is the caller's own
     ///       `session_name:window_index:window_id`; it resolves a snapshot only
     ///       when `session_id` matched nothing, and `resolved_via` says which
-    ///       of the two answered.
-    /// Test: `dispatch_session_context_catchup_tool` (mock).
+    ///       of the two answered. #5557: `sessions` is a bounded PAGE starting
+    ///       at `sessions_offset`, and the response carries `sessions_total` /
+    ///       `sessions_next_offset` / `truncated` / `truncation_notice` so a
+    ///       short page can never read as a complete one.
+    /// Test: `dispatch_session_context_catchup_tool` (mock),
+    ///       `dispatch_session_context_catchup_forwards_sessions_offset`.
     async fn session_context_catchup(
         &self,
         project_dir: &str,
@@ -244,6 +248,7 @@ pub trait OrchestratorBackend: Send + Sync {
         tmux_window: Option<&str>,
         all_projects: bool,
         full: bool,
+        sessions_offset: usize,
     ) -> Result<Value, String>;
 
     /// Back `session_context_pause`: write a pause snapshot + prune worktrees.
