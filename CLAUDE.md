@@ -100,10 +100,13 @@ claims, and disputed results. Full rule in
 🔴 **Never turn a red gate green by `#[ignore]`-ing, `cfg`-gating, or
 `--exclude`-ing a failing test** — prove your diff touches zero files in the
 failing crate instead (`git diff --name-only origin/main...HEAD -- <crate>/`).
-For the known-environmental flaky tests on this machine (the `trusty-search`
-filesystem-watcher tests, `execute_doctor_against_test_daemon`'s timing), the
-five-step protocol for telling a pre-existing red from one you caused, and the
-exact report-string format: see
+That proof holds only when the failing crate doesn't depend on anything you
+changed; across a dependency edge (e.g. `trusty-common` → `trusty-search`) it's
+invalid, and the valid proof is reproducing the failure on `origin/main`
+instead. For the known-environmental flaky tests on this machine (the
+`trusty-search` filesystem-watcher tests, `execute_doctor_against_test_daemon`'s
+timing), the five-step protocol for telling a pre-existing red from one you
+caused, and the exact report-string format: see
 [docs/reference/test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 ## Key Conventions

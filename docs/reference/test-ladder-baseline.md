@@ -151,6 +151,14 @@ git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
                                            crates/trusty-mpm/src/client/
 ```
 
+🔴 **That path-list proof is valid only when the failing crate doesn't depend
+on anything your diff touched** — across a dependency edge (`trusty-search` on
+`trusty-common`) it can read as a clean exoneration while being wrong; see the
+shared-crate caveat at step 5 and the valid alternative at step 2 below.
+`create_index_cannot_register_while_a_delete_is_tearing_the_id_down` above is a
+worked example of that alternative, reproduced directly on `origin/main`
+(documented by [#5607](https://github.com/bobmatnyc/trusty-tools/pull/5607)).
+
 ## Telling A Pre-Existing Red From One You Caused — Crate-Scoped Confirmation
 
 1. **Re-run the failure alone on your branch**, not the whole suite:
