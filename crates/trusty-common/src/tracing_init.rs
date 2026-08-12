@@ -57,8 +57,9 @@ pub fn init_tracing(verbose_count: u8) {
 /// valid (just empty) in that case.
 /// Also installs the shared panic hook (`crate::panic_hook`) so panic
 /// payloads land in this subscriber rather than only on raw stderr (#4764).
-/// Test: `cargo test -p trusty-common log_buffer` covers the layer; the
-/// daemon `/logs/tail` integration tests cover the wired path end-to-end.
+/// Test: `cargo test -p trusty-common --features unconditional-only log_buffer`
+/// covers the layer; the daemon `/logs/tail` integration tests cover the wired
+/// path end-to-end.
 #[must_use]
 pub fn init_tracing_with_buffer(verbose_count: u8, capacity: usize) -> log_buffer::LogBuffer {
     use tracing_subscriber::Layer as _;

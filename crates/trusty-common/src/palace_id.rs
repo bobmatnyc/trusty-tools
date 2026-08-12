@@ -30,9 +30,10 @@
 //! `owner/repo` identity is preserved; the on-disk token stays a single
 //! kebab-case segment.
 //!
-//! Test: `cargo test -p trusty-common -- palace_id::tests` exercises every
-//! precedence level and every git-URL variant (SSH/HTTPS, with/without `.git`,
-//! trailing slashes, non-GitHub hosts, owner-less paths, host:port URLs).
+//! Test: `cargo test -p trusty-common --features unconditional-only --
+//! palace_id::tests` exercises every precedence level and every git-URL variant
+//! (SSH/HTTPS, with/without `.git`, trailing slashes, non-GitHub hosts,
+//! owner-less paths, host:port URLs).
 
 use std::path::Path;
 

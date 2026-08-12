@@ -23,9 +23,10 @@
 //! actually changed — restoring and re-bootstrapping the previous plist if the
 //! new one fails to come up.
 //!
-//! Test: `cargo test -p trusty-common launchd_activate`. The `launchctl` calls
-//! are side-effecting and are exercised by the daemons' own `service install`;
-//! the decision logic that gates them is pure and unit-tested here.
+//! Test: `cargo test -p trusty-common --features unconditional-only
+//! launchd_activate`. The `launchctl` calls are side-effecting and are
+//! exercised by the daemons' own `service install`; the decision logic that
+//! gates them is pure and unit-tested here.
 #![cfg(target_os = "macos")]
 
 use anyhow::{Context, Result};
