@@ -114,11 +114,14 @@ pub struct CodeChunk {
   | `vector_unavailable` | 503 | per `reason` | Semantic lane cannot serve this query — see `POST /indexes/:id/search`. |
   | `contrib_not_merged` | 503 | earned | `POST /indexes/:id/graph` only (#5505). The contributed graph was stored durably (`persisted: true`, plus `producer` / `replaced` / `reason`) but could not be folded into the serving graph, so it is not queryable yet. One unreadable `kg_contrib` row fails the whole load, so `blocking_producer` names the row to fix when one is to blame: `retryable` is `true` only when no row is implicated or when the blocker is THIS producer's row (a re-send replaces it), and `false` when another producer's row is the blocker — retrying then fails identically forever. |
 
-  `restore_via` on `index_not_resident` names `POST /indexes/{id}/search`, the
-  only endpoint that reloads a cold-parked index. `status`, `chunks`, `grep`,
-  `index-file`, and `remove-file` report the state truthfully but cannot clear
-  it themselves; a search against the same id does, after which they answer
-  normally.
+  `restore_via` on `index_not_resident` names `POST /indexes/{id}/search`.
+  `search`, `index-file`, and `remove-file` all RELOAD a cold-parked index
+  themselves (#5349), so none of them returns `index_not_resident` at all — a
+  cold-but-not-failed index is loaded and the request served, and only a load
+  that fails produces a verdict (`index_restore_failed`, `index_loading`, or
+  `embedder_initializing`). `status`, `chunks`, and `grep` report the state
+  truthfully but cannot clear it themselves; any of the three reloading
+  endpoints does, after which they answer normally.
 
   **The MCP surface relays this contract as data (#5350).** A `503` whose body
   is a JSON object with an `error` field becomes a structured MCP error rather
