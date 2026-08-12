@@ -30,6 +30,7 @@ mod checkpoint_resume;
 mod parallel_merge;
 mod phase_order;
 mod relocate;
+mod relocate_fail_closed;
 mod retry;
 mod skill_discovery;
 mod wave_loop;
