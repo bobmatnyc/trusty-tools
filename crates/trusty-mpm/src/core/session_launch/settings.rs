@@ -553,68 +553,55 @@ pub(super) fn preseed_workspace_trust(
 
 /// Pre-seed workspace trust in the user's `~/.claude.json`.
 ///
-/// Why: thin home-resolving wrapper over [`preseed_workspace_trust`] so
-/// `prepare_session` can call it without knowing the config-dir layout; tests
-/// target a temp file via the inner function directly.
+/// Why: thin wrapper over [`preseed_workspace_trust`] so `prepare_session` can
+/// call it without knowing the config-dir layout; tests target a temp file via
+/// the inner function directly.
 ///
-/// #5544: the home comes from `fw.home_tier_dir()`, NOT `fw.claude_home_dir()`.
-/// `claude_home_dir()` walks up from `claude_agents`, which
-/// `FrameworkPaths::for_managed_project` rewrites to
-/// `<workspace>/.claude/agents` — so for every managed session (`tm launch`,
-/// `tm connect`, daemon spawns, `tm register/load/run`) it names the WORKSPACE
-/// and this would drop an untracked `<workspace>/.claude.json` into the
-/// operator's repo. `~/.claude.json` is a per-USER file; `home_tier` is the
-/// field that says so and that no constructor rewrites.
-/// What: resolves `<home tier>/.claude.json` and delegates. An unresolved home
-/// tier is a soft skip (logged), matching the pre-#5544 `dirs::home_dir()`
-/// behaviour — seeding a trust record beside the process's working directory
-/// would be worse than not seeding one.
+/// #5544: the home arrives as a PARAMETER rather than being read from `fw`.
+/// `FrameworkPaths` describes where a session's framework and `.claude/` tiers
+/// live, and the managed constructors deliberately relocate those onto the
+/// workspace — so every accessor on it answers a question this function is not
+/// asking. `~/.claude.json` belongs to the USER, under every root. Production
+/// passes `dirs::home_dir()`, exactly as before this change; only tests pass
+/// anything else.
+/// What: resolves `<home>/.claude.json` and delegates. An absent or relative
+/// home is a soft skip (logged) — seeding a trust record beside the process's
+/// working directory would be worse than not seeding one.
 /// Test: `prepare_session_does_not_seed_the_workspace_on_the_managed_path`,
-/// `home_writes_are_skipped_when_the_home_tier_is_unresolved`; the seeding
-/// behaviour itself by the inner `preseed_trust_*` tests.
+/// `home_writes_are_skipped_when_the_home_is_unusable`; the seeding behaviour
+/// itself by the inner `preseed_trust_*` tests.
 pub(super) fn preseed_workspace_trust_home(
-    fw: &crate::core::paths::FrameworkPaths,
+    home: Option<&Path>,
     workspace: &Path,
 ) -> Result<(), PrepError> {
-    let Some(home) = resolved_home_tier(fw) else {
+    let Some(home) = usable_home(home) else {
         return Ok(());
     };
     preseed_workspace_trust(&home.join(".claude.json"), workspace)
 }
 
-/// The user-global home tier, or `None` when this layout has none.
+/// The supplied home, when it is usable for a user-global write.
 ///
-/// Why (#5544): both callers below touch files that belong to the USER, not to
-/// a project — `~/.claude.json` and `~/.claude/settings.json`. Routing them
-/// through `fw.claude_home_dir()` pointed them at the workspace on every
-/// managed path, because that accessor derives its base from `claude_agents`,
-/// which the managed constructors rewrite. `home_tier` is stored, not derived,
-/// so it cannot be relocated by a deploy-destination change.
-/// What: returns `fw.home_tier_dir()` when it is present AND absolute, logging
-/// at `warn!` otherwise so the declined write is visible rather than silent.
-/// Test: `home_writes_are_skipped_when_the_home_tier_is_unresolved`,
-/// `home_writes_are_skipped_when_the_home_tier_is_relative`.
-fn resolved_home_tier(fw: &crate::core::paths::FrameworkPaths) -> Option<PathBuf> {
-    match fw.home_tier_dir() {
-        // #5544: absoluteness is the second gate, kept deliberately after the
-        // tier itself was made correct. `FrameworkPaths::default()` substitutes
-        // `"."` for the DEPLOY paths when no home resolves, and a relative tier
-        // reaching here would seed `./.claude.json` beside whatever directory
-        // the process happens to be in — the stray-file outcome this whole
-        // change exists to prevent. `Some(".")` must decline, not write.
-        Some(home) if home.is_absolute() => Some(home.to_path_buf()),
+/// Why (#5544): `dirs::home_dir()` returns `None` on a stripped environment, and
+/// a caller that substituted a relative fallback would send the write beside the
+/// process's working directory — the stray-file outcome this change exists to
+/// prevent. Declining is the correct answer; both callers are best-effort side
+/// effects.
+/// What: passes an absolute path through, logging at `warn!` otherwise so a
+/// declined write is visible rather than silent.
+/// Test: `home_writes_are_skipped_when_the_home_is_unusable`.
+fn usable_home(home: Option<&Path>) -> Option<&Path> {
+    match home {
+        Some(home) if home.is_absolute() => Some(home),
         Some(home) => {
             tracing::warn!(
-                tier = %home.display(),
-                "skipping user-global session writes: the home tier is not an absolute path"
+                home = %home.display(),
+                "skipping user-global session writes: the home directory is not absolute"
             );
             None
         }
         None => {
-            tracing::warn!(
-                "skipping user-global session writes: no home directory resolved for this \
-                 framework layout"
-            );
+            tracing::warn!("skipping user-global session writes: no home directory resolved");
             None
         }
     }
@@ -627,23 +614,21 @@ fn resolved_home_tier(fw: &crate::core::paths::FrameworkPaths) -> Option<PathBuf
 /// scopes them to trusty-mpm projects, the global entries must be removed to
 /// stop them double-firing (and firing for unrelated sessions like claude-mpm).
 ///
-/// #5544: resolved from `fw.home_tier_dir()` — see
-/// [`preseed_workspace_trust_home`] for why NOT `claude_home_dir()`. Pointing
-/// this at a managed workspace was the worse half of that bug: the file does not
-/// exist there, a missing file is success by contract, so the operator's REAL
-/// global hooks were never removed and kept double-firing with nothing to show
-/// for it. No second implementation of this cleanup exists to catch it.
-/// What: reads `<home tier>/.claude/settings.json`, and for each event in
+/// #5544: the home arrives as a PARAMETER — see [`preseed_workspace_trust_home`]
+/// for why it is not read off `FrameworkPaths`. Pointing this at a managed
+/// workspace was the worse half of that bug: the file does not exist there, a
+/// missing file is success by contract, so the operator's REAL global hooks were
+/// never removed and kept double-firing with nothing to show for it. No second
+/// implementation of this cleanup exists to catch it.
+/// What: reads `<home>/.claude/settings.json`, and for each event in
 /// [`GLOBAL_TRUSTY_MEMORY_EVENTS`] filters out handler groups whose `hooks`
 /// array contains a command matching `trusty-memory hooks fire`. An event key
 /// whose array becomes empty is removed entirely. Writes the file back. A
 /// missing or malformed file is treated as success (nothing to clean up).
 /// Test: `remove_global_hooks_removes_trusty_memory_entries`,
-/// `global_hook_cleanup_reaches_the_home_tier_under_an_overridden_root`.
-pub(super) fn remove_global_trusty_memory_hooks(
-    fw: &crate::core::paths::FrameworkPaths,
-) -> Result<(), PrepError> {
-    let Some(home) = resolved_home_tier(fw) else {
+/// `global_hook_cleanup_reaches_the_real_home_under_an_overridden_root`.
+pub(super) fn remove_global_trusty_memory_hooks(home: Option<&Path>) -> Result<(), PrepError> {
+    let Some(home) = usable_home(home) else {
         return Ok(());
     };
     clean_global_trusty_memory_hooks(&home.join(".claude").join("settings.json"))

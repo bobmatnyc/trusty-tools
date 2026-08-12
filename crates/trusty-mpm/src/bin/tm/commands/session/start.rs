@@ -92,7 +92,7 @@ pub(crate) async fn start_session(
     // Not a recognized GitHub-backed remote: no live source tree to protect —
     // preserve the original in-place deploy-and-start behavior.
     let fw = trusty_mpm::core::paths::FrameworkPaths::default();
-    start_session_in_place(client, url, &path, &fw).await
+    start_session_in_place(client, url, &path, &fw, dirs::home_dir().as_deref()).await
 }
 
 /// Refuse a launch from a directory that belongs to no git project (#4832).
@@ -150,12 +150,21 @@ async fn start_session_in_place(
     url: &str,
     path: &std::path::Path,
     fw: &trusty_mpm::core::paths::FrameworkPaths,
+    // #5544: the USER-GLOBAL home `prepare_session` seeds `~/.claude.json` and
+    // `~/.claude/settings.json` under. Production passes `dirs::home_dir()`; the
+    // test passes a tempdir, which is what lets it stop repointing the process's
+    // `$HOME` — a write every sibling test in this binary would observe.
+    home: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     // Prepare the custom instructions Claude Code reads at startup:
     // deploy composed agents to `~/.claude/agents/` and merge the
     // project CLAUDE.md. This shared prep is what makes a plain
     // `claude` process behave as a trusty-mpm session.
-    match trusty_mpm::core::session_launch::prepare_session(fw, path) {
+    // Same real version probe `prepare_session` performs; only the home is
+    // supplied explicitly (#5544).
+    let native = trusty_mpm::core::output_style::claude_supports_native_output_style();
+    match trusty_mpm::core::session_launch::prepare_session_with_home(fw, path, None, native, home)
+    {
         Ok(report) => {
             println!(
                 "{}",

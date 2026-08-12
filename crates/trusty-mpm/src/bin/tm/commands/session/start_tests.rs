@@ -158,7 +158,17 @@ async fn session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachabl
     let fw = trusty_mpm::core::paths::FrameworkPaths::under(tmp_home.path());
 
     let client = reqwest::Client::new();
-    let result = start_session_in_place(&client, UNREACHABLE_URL, target.path(), &fw).await;
+    // #5544: the home is INJECTED. Production passes `dirs::home_dir()`; this
+    // passes the same tempdir `fw` is rooted at, which is what lets the test
+    // stop repointing the process's `$HOME`.
+    let result = start_session_in_place(
+        &client,
+        UNREACHABLE_URL,
+        target.path(),
+        &fw,
+        Some(tmp_home.path()),
+    )
+    .await;
 
     // Preserves the original in-place `Start` behavior: a daemon-unreachable
     // `POST /sessions` propagates as a hard `Err` via `?`.

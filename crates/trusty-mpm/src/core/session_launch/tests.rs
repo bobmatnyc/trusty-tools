@@ -146,26 +146,18 @@ fn build_system_prompt_for_no_override_matches_bundled_sections() {
 
 /// The MANAGED path must not seed `.claude.json` into the workspace.
 ///
-/// Why (#5544, code-critic BLOCK on PR #5583): this test exists because the
-/// first version of that PR resolved the two user-global writes through
-/// `fw.claude_home_dir()`, which walks up from `claude_agents` —
-/// `FrameworkPaths::for_managed_project` rewrites that field to
-/// `<workspace>/.claude/agents`, so on every managed path (`tm launch`,
-/// `tm connect`, daemon spawns, `tm register/load/run`) the "home" became the
-/// workspace. `prepare_session` then dropped an untracked `.claude.json` into
-/// the operator's repo. The earlier regression test used
-/// `FrameworkPaths::under()`, the one constructor that cannot expose this,
-/// which is exactly why it passed.
+/// Why (#5544): `prepare_session` writes two USER-GLOBAL files. Earlier
+/// revisions of this change resolved them off `FrameworkPaths` — first via
+/// `claude_home_dir()`, then via a stored tier — and both followed
+/// `for_managed_project`'s relocation of every `.claude/` path onto the
+/// workspace, dropping an untracked `.claude.json` into the operator's repo.
+/// The home is now a parameter, so the managed layout cannot reach it.
 ///
-/// FAILS BEFORE THE FIX: `<workspace>/.claude.json` is created. (Pre-fix, this
-/// test is itself minus the `home_tier` line — the field did not exist.)
+/// FAILS BEFORE THE FIX: `<workspace>/.claude.json` is created.
 ///
-/// What: builds the real managed layout with `for_managed_project`, redirects
-/// ONLY the home tier to a tempdir so the assertion does not depend on the
-/// developer's real `~/.claude.json`, runs the full pipeline, and asserts the
-/// seed landed on the home tier and NOT in the workspace.
-/// `home_tier_is_the_real_home_for_a_managed_workspace` pins the production
-/// value of that tier without writing to it.
+/// What: builds the real managed layout, passes a temp home so the assertion
+/// does not depend on the developer's own `~/.claude.json`, runs the full
+/// pipeline, and asserts the seed landed on the home and NOT in the workspace.
 /// Test: this function IS the test.
 #[test]
 fn prepare_session_does_not_seed_the_workspace_on_the_managed_path() {
@@ -182,20 +174,18 @@ fn prepare_session_does_not_seed_the_workspace_on_the_managed_path() {
         workspace.path().join(".claude").join("agents"),
         "fixture must genuinely be the managed shape, else this test is vacuous"
     );
-    let fw = fw.with_home_tier(Some(home.path().to_path_buf()));
 
-    prepare_session_with_style_and_native(&fw, workspace.path(), None, true)
+    prepare_session_with_home(&fw, workspace.path(), None, true, Some(home.path()))
         .expect("prep succeeds");
 
     assert!(
         !workspace.path().join(".claude.json").exists(),
-        "the managed deploy-destination rewrite must not relocate the user-global \
-         trust seed into the workspace (#5544)"
+        "the managed layout must not capture the user-global trust seed (#5544)"
     );
     let seeded = home.path().join(".claude.json");
     assert!(
         seeded.is_file(),
-        "the seed must land on the home tier; expected {}",
+        "the seed must land on the supplied home; expected {}",
         seeded.display()
     );
     assert!(
@@ -206,77 +196,25 @@ fn prepare_session_does_not_seed_the_workspace_on_the_managed_path() {
     );
 }
 
-/// A managed workspace's home tier is the operator's REAL home.
+/// The global hook cleanup reaches the real home, on an OVERRIDDEN managed root.
 ///
-/// Why (#5544): the hook cleanup and the trust seed both resolve from this
-/// tier, and a managed session must not retarget either onto the workspace.
-/// What: pure accessor comparison, no I/O, no process env.
+/// Why (#5544): `--root` / `TRUSTY_MPM_ROOT` / config relocate the framework
+/// INSTALL (`core/standalone/load.rs` passes the result straight to
+/// `for_managed_project`), and an earlier revision derived the home from that
+/// base — so an override outside the home retargeted this cleanup at a file that
+/// does not exist. A missing file is success by contract, so the operator's real
+/// global `trusty-memory` hooks were never removed and nothing reported it.
+/// Asserting the EFFECT rather than a resolved path is what makes that
+/// indistinguishable-from-clean case visible.
+///
+/// FAILS BEFORE THE FIX: the seeded entry survives the cleanup untouched.
+///
+/// What: seeds `<home>/.claude/settings.json` with a `trusty-memory hooks fire`
+/// handler, builds the managed layout over a root deliberately outside any home,
+/// runs the cleanup with that home, and asserts the entry is gone.
 /// Test: this function IS the test.
 #[test]
-fn home_tier_is_the_real_home_for_a_managed_workspace() {
-    let workspace = tempdir().unwrap();
-    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(workspace.path());
-
-    assert_eq!(fw.home_tier_dir(), dirs::home_dir().as_deref());
-    assert_ne!(fw.home_tier_dir(), Some(workspace.path()));
-}
-
-/// An OVERRIDDEN managed root keeps the operator's real home as its tier.
-///
-/// Why (#5544, code-critic round 3): `for_managed_project` builds on
-/// `from_root(managed_root)`, and `managed_root` honours the documented
-/// `--root` > `TRUSTY_MPM_ROOT` > config > `~/.trusty-mpm` precedence
-/// (`core/standalone/load.rs` passes it straight through). Deriving the home
-/// tier from that base silently retargeted BOTH user-global writers whenever
-/// the root sat outside the home — the hook cleanup then read a file that does
-/// not exist, which is success by contract, so the operator's real global
-/// `trusty-memory` hooks were never removed and nothing reported it. Every
-/// other fixture is home-nested by construction, which is why a green suite
-/// said nothing about this path.
-///
-/// FAILS BEFORE THE FIX: `home_tier_dir()` is `Some("/opt/tm-roots/team-a")`.
-///
-/// What: builds the managed layout over a root deliberately outside any home
-/// and asserts the tier is unmoved.
-/// Test: this function IS the test.
-#[test]
-fn home_tier_is_the_real_home_for_an_overridden_managed_root() {
-    let overridden = std::path::Path::new("/opt/tm-roots/team-a/.trusty-mpm");
-    let workspace = tempdir().unwrap();
-
-    let fw = crate::core::paths::FrameworkPaths::for_managed_project(overridden, workspace.path());
-
-    assert_eq!(
-        fw.home_tier_dir(),
-        dirs::home_dir().as_deref(),
-        "an overridden --root/TRUSTY_MPM_ROOT relocates the framework INSTALL, \
-         never the user's home — the two are different questions (#5544)"
-    );
-    assert_ne!(
-        fw.home_tier_dir(),
-        Some(std::path::Path::new("/opt/tm-roots/team-a")),
-        "the install root's parent is not a home"
-    );
-}
-
-/// The global hook cleanup actually removes the entries, on an overridden root.
-///
-/// Why (#5544, code-critic round 3): asserting the resolved PATH proved the
-/// tier, not the effect. `remove_global_trusty_memory_hooks` treats a missing
-/// file as success, so a mis-resolved path is indistinguishable from a clean
-/// machine — the failure is invisible precisely because nothing errors. This
-/// runs it against a seeded file and asserts the entry is gone, over the
-/// overridden-root layout that broke it.
-///
-/// FAILS BEFORE THE FIX: the cleanup reads `/opt/.../team-a/.claude/settings.json`,
-/// finds nothing, returns `Ok(())`, and the seeded entry survives.
-///
-/// What: seeds `<temp home>/.claude/settings.json` with a
-/// `trusty-memory hooks fire` handler, redirects only the home tier there,
-/// runs the cleanup, and asserts the entry is removed.
-/// Test: this function IS the test.
-#[test]
-fn global_hook_cleanup_reaches_the_home_tier_under_an_overridden_root() {
+fn global_hook_cleanup_reaches_the_real_home_under_an_overridden_root() {
     let home = tempdir().unwrap();
     let workspace = tempdir().unwrap();
     let settings = home.path().join(".claude").join("settings.json");
@@ -291,14 +229,9 @@ fn global_hook_cleanup_reaches_the_home_tier_under_an_overridden_root() {
         std::path::Path::new("/opt/tm-roots/team-a/.trusty-mpm"),
         workspace.path(),
     );
-    assert_eq!(
-        fw.home_tier_dir(),
-        dirs::home_dir().as_deref(),
-        "the fixture must start from the production tier, else redirecting it proves nothing"
-    );
-    let fw = fw.with_home_tier(Some(home.path().to_path_buf()));
 
-    super::settings::remove_global_trusty_memory_hooks(&fw).expect("cleanup succeeds");
+    prepare_session_with_home(&fw, workspace.path(), None, true, Some(home.path()))
+        .expect("prep succeeds");
 
     let after = std::fs::read_to_string(&settings).expect("settings still readable");
     assert!(
@@ -307,65 +240,38 @@ fn global_hook_cleanup_reaches_the_home_tier_under_an_overridden_root() {
          pointed at a nonexistent file returns Ok(()) and looks identical (#5544). \
          Settings after: {after}"
     );
-}
-
-/// A relative home tier declines the user-global writes.
-///
-/// Why (#5544): `FrameworkPaths::default()` substitutes `"."` for the DEPLOY
-/// paths when `dirs::home_dir()` returns `None`. `Some(".")` passes an `Option`
-/// check, so the absoluteness gate is what stops a trust seed landing beside the
-/// process's working directory.
-/// Test: this function IS the test.
-#[test]
-fn home_writes_are_skipped_when_the_home_tier_is_relative() {
-    let base = tempdir().unwrap();
-    let workspace = tempdir().unwrap();
-    let fw = crate::core::paths::FrameworkPaths::under(base.path());
-    let fw = fw.with_home_tier(Some(std::path::PathBuf::from(".")));
-
-    super::settings::preseed_workspace_trust_home(&fw, workspace.path()).expect("soft skip");
-    super::settings::remove_global_trusty_memory_hooks(&fw).expect("soft skip");
-
     assert!(
-        !std::path::Path::new("./.claude.json").exists(),
-        "a relative home tier must decline, never write into the working directory"
+        !workspace
+            .path()
+            .join(".claude")
+            .join("settings.json")
+            .exists()
+            || !std::fs::read_to_string(workspace.path().join(".claude").join("settings.json"))
+                .unwrap_or_default()
+                .contains("trusty-memory hooks fire"),
+        "and the overridden install root must not have redirected it into the workspace"
     );
 }
 
-/// `under()` still confines the home tier, so tests stay hermetic.
-#[test]
-fn home_tier_is_the_temp_base_under() {
-    let base = tempdir().unwrap();
-    let fw = crate::core::paths::FrameworkPaths::under(base.path());
-    assert_eq!(fw.home_tier_dir(), Some(base.path()));
-}
-
-/// An unresolved home tier declines the user-global writes.
+/// An unusable home declines the user-global writes.
 ///
-/// Why (#5544): `FrameworkPaths::default()` substitutes `"."` for the DEPLOY
-/// paths when `dirs::home_dir()` returns `None`. Treating that as a home would
-/// seed `.claude.json` beside the process's working directory — which is how a
-/// stray file appeared in the crate root during this change's own test run.
-/// `home_tier` is left unset in that case instead.
-/// What: clears the tier, runs both user-global helpers, asserts neither wrote.
+/// Why (#5544): `dirs::home_dir()` returns `None` on a stripped environment, and
+/// a relative substitute would send the seed beside the process's working
+/// directory — which is how a stray `.claude.json` appeared in the crate root
+/// during this change's own test run.
+/// What: runs both user-global helpers with `None` and with `Some(".")`, and
+/// asserts neither wrote.
 /// Test: this function IS the test.
 #[test]
-fn home_writes_are_skipped_when_the_home_tier_is_unresolved() {
-    let base = tempdir().unwrap();
+fn home_writes_are_skipped_when_the_home_is_unusable() {
     let workspace = tempdir().unwrap();
-    let fw = crate::core::paths::FrameworkPaths::under(base.path());
-    let fw = fw.with_home_tier(None);
-
-    super::settings::preseed_workspace_trust_home(&fw, workspace.path()).expect("soft skip");
-    super::settings::remove_global_trusty_memory_hooks(&fw).expect("soft skip");
-
-    assert!(
-        !base.path().join(".claude.json").exists(),
-        "an unresolved home tier must decline the seed, not guess a location"
-    );
+    for home in [None, Some(std::path::Path::new("."))] {
+        super::settings::preseed_workspace_trust_home(home, workspace.path()).expect("soft skip");
+        super::settings::remove_global_trusty_memory_hooks(home).expect("soft skip");
+    }
     assert!(
         !std::path::Path::new("./.claude.json").exists(),
-        "and must never fall back to the process's working directory"
+        "an absent or relative home must decline, never write into the working directory"
     );
 }
 

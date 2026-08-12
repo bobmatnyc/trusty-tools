@@ -63,31 +63,6 @@ pub struct FrameworkPaths {
     pub claude_agents: PathBuf,
     /// `~/.claude/skills` — where Claude Code reads skill files.
     pub claude_skills: PathBuf,
-    /// The USER-GLOBAL home tier — the directory `~/.claude.json` and
-    /// `~/.claude/settings.json` actually live in. `None` when no home resolved.
-    ///
-    /// Why (#5544): those two files are per-USER, not per-project, and the only
-    /// other way to name their directory was
-    /// [`claude_home_dir`](Self::claude_home_dir), which DERIVES a base by
-    /// walking up from [`claude_agents`](Self::claude_agents) —
-    /// [`for_managed_project`](Self::for_managed_project) rewrites that field to
-    /// `<project_dir>/.claude/agents`, so `claude_home_dir()` returns the
-    /// WORKSPACE for every managed session. Resolving the two global files that
-    /// way dropped an untracked `<workspace>/.claude.json` into the operator's
-    /// repo and pointed the global `trusty-memory` hook cleanup at a file that
-    /// does not exist — and a missing file is success by contract, so the real
-    /// hooks were never removed and nothing reported it. Storing the tier
-    /// explicitly is what makes it un-derivable and therefore un-relocatable: a
-    /// future constructor that rewrites a deploy destination cannot move it by
-    /// accident, because moving it now requires naming it.
-    /// What: set ONCE, by [`under`](Self::under), to the base it was given —
-    /// the real home for [`default`](Self::default), the temp base for a
-    /// hermetic test. No other constructor touches it, so it survives
-    /// `for_managed_project`'s deploy-destination rewrite.
-    /// Test: `home_tier_survives_the_managed_project_rewrite`,
-    /// `home_tier_is_the_real_home_for_a_managed_workspace`,
-    /// `home_tier_is_the_temp_base_under`.
-    home_tier: Option<PathBuf>,
     /// `~/.trusty-tools/trusty-mpm/claude-config/agents` — the ONE tier
     /// bundled (framework-owned) agents deploy into (issue #4409).
     ///
@@ -157,14 +132,8 @@ impl FrameworkPaths {
     /// `default_is_a_single_global_path_never_project_relative`.
     #[allow(clippy::should_implement_trait)] // Intentional: no meaningful Default without I/O.
     pub fn default() -> Self {
-        let resolved = dirs::home_dir();
-        let home = resolved.clone().unwrap_or_else(|| PathBuf::from("."));
-        let mut paths = Self::under(home);
-        // #5544: `"."` is a fallback for the DEPLOY paths, never a home. Leaving
-        // `home_tier` unset here is what makes the user-global writes decline
-        // instead of landing beside the process's working directory.
-        paths.home_tier = resolved;
-        paths
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        Self::under(home)
     }
 
     /// Resolve the framework layout under an arbitrary base directory.
@@ -195,8 +164,6 @@ impl FrameworkPaths {
             // so `under(tempdir)` stays hermetic.
             agent_deploy: crate::core::trusty_tools_config::managed_claude_config_dir_at(base)
                 .join("agents"),
-            // #5544: the ONE place the home tier is decided.
-            home_tier: Some(base.to_path_buf()),
             trusty_mpm_root,
             framework,
             root,
@@ -279,13 +246,6 @@ impl FrameworkPaths {
         let mut paths = Self::from_root(managed_root);
         paths.claude_agents = project_dir.join(".claude").join("agents");
         paths.claude_skills = project_dir.join(".claude").join("skills");
-        // #5544: the install ROOT and the user's HOME are different questions.
-        // `under()` answers both with its base, which is right for a hermetic
-        // test and right for a home-nested install — but `managed_root` honours
-        // `--root` / `TRUSTY_MPM_ROOT` / config, so for an override the base is
-        // the override's parent, not a home. Resolving it here keeps `under()`
-        // as the ONLY place a base doubles as the tier.
-        paths.home_tier = dirs::home_dir();
         paths
     }
 
@@ -482,59 +442,21 @@ impl FrameworkPaths {
         self.claude_skills.clone()
     }
 
-    /// The USER-GLOBAL home tier, or `None` when this layout has none.
+    /// The base directory `.claude/{agents,skills}` nest under — the real home
+    /// for [`default`](Self::default), the temp dir for [`under`](Self::under).
     ///
-    /// Why (#5544): this is the accessor for files that belong to the USER —
-    /// `~/.claude.json` and `~/.claude/settings.json`. Its near-namesake
-    /// [`claude_home_dir`](Self::claude_home_dir) answers a DIFFERENT question
-    /// and is the wrong one here; see that method's docs for the distinction.
-    /// What: returns the stored [`home_tier`](Self::home_tier) — the real home
-    /// for every production constructor, the temp base for
-    /// [`under`](Self::under), and `None` when no home resolved. Derived from
-    /// nothing, so a deploy-destination change cannot move it.
-    /// Test: `home_tier_survives_the_managed_project_rewrite`,
-    /// `home_tier_is_the_real_home_for_an_overridden_managed_root`,
-    /// `home_tier_is_the_real_home_for_a_managed_workspace`.
-    pub fn home_tier_dir(&self) -> Option<&Path> {
-        self.home_tier.as_deref()
-    }
-
-    /// Redirect the user-global home tier.
-    ///
-    /// Why (#5544): a test driving the real `prepare_session` pipeline must be
-    /// able to point the user-global writes at a tempdir without repointing the
-    /// process's `$HOME`, which every sibling test in the same binary would see.
-    /// What: consuming builder; production never calls it.
-    /// Test: `prepare_session_does_not_seed_the_workspace_on_the_managed_path`.
-    pub fn with_home_tier(mut self, home: Option<PathBuf>) -> Self {
-        self.home_tier = home;
-        self
-    }
-
-    /// The base this layout's `.claude/{agents,skills}` tiers nest under.
-    ///
-    /// 🔴 NOT the user's home for a managed session. Callers touching a
-    /// USER-GLOBAL file want [`home_tier_dir`](Self::home_tier_dir) instead.
-    ///
-    /// Why (issue #1860): settings-file operations that need this layout's
-    /// `.claude/` directly (e.g. deploying the bundled output-style definition)
-    /// must honor the same base this `FrameworkPaths` was resolved against.
-    /// Calling `dirs::home_dir()` at those call sites ignores test isolation:
+    /// Why (issue #1860): settings-file operations that need `~/.claude`
+    /// directly (e.g. deploying the bundled output-style definition) must
+    /// honor the same base this `FrameworkPaths` was resolved against. Calling
+    /// `dirs::home_dir()` directly at those call sites ignores test isolation:
     /// `FrameworkPaths::under(tempdir)` is supposed to confine ALL filesystem
-    /// writes to the temp dir, but a stray `dirs::home_dir()` call re-escapes to
-    /// the real `$HOME` and leaks state between test runs.
+    /// writes to the temp dir, but a stray `dirs::home_dir()` call re-escapes
+    /// to the real `$HOME` and leaks state between test runs.
     /// What: derives the base by walking up two levels from `claude_agents`
     /// (`<base>/.claude/agents` -> `<base>/.claude` -> `<base>`). Falls back to
     /// `claude_agents` itself in the practically-unreachable case where it has
-    /// no grandparent. #5544: because
-    /// [`for_managed_project`](Self::for_managed_project) rewrites
-    /// `claude_agents` to `<project>/.claude/agents`, this FOLLOWS the rewrite
-    /// and returns the WORKSPACE for a managed session — correct for its own
-    /// callers, and the reason a user-global file resolved this way silently
-    /// landed in the operator's repo.
-    /// Test: `claude_home_dir_matches_under_base`,
-    /// `claude_home_dir_matches_default_home`,
-    /// `home_tier_survives_the_managed_project_rewrite`.
+    /// no grandparent (e.g. a root-relative path).
+    /// Test: `claude_home_dir_matches_under_base`, `claude_home_dir_matches_default_home`.
     pub fn claude_home_dir(&self) -> PathBuf {
         self.claude_agents
             .parent()
@@ -902,35 +824,6 @@ mod tests {
         // Distinct from both the bundled source and the deploy destination.
         assert_ne!(paths.user_skill_source_dir(), paths.skills);
         assert_ne!(paths.user_skill_source_dir(), paths.claude_skills_dir());
-    }
-
-    /// The managed deploy-destination rewrite must not move the home tier.
-    ///
-    /// Why (#5544): `for_managed_project` rewrites `claude_agents` and
-    /// `claude_skills` to `<project>/.claude/*`, and `claude_home_dir()` derives
-    /// its base from the former — so anything resolving a USER-GLOBAL file that
-    /// way silently follows the rewrite onto the workspace. This pins the two
-    /// apart: `claude_home_dir()` SHOULD follow (its callers want the tier base),
-    /// `home_tier` must not — and must not track the INSTALL ROOT either, which
-    /// `--root`/`TRUSTY_MPM_ROOT` can point anywhere.
-    /// Test: this function IS the test.
-    #[test]
-    fn home_tier_survives_the_managed_project_rewrite() {
-        let paths =
-            FrameworkPaths::for_managed_project("/opt/tm-roots/team-a/.trusty-mpm", "/repos/proj");
-
-        assert_eq!(
-            paths.home_tier_dir(),
-            dirs::home_dir().as_deref(),
-            "the user-global tier is the USER's home, never the install root or \
-             the project — both of which this constructor relocates"
-        );
-        assert_eq!(
-            paths.claude_home_dir(),
-            PathBuf::from("/repos/proj"),
-            "claude_home_dir() follows the deploy rewrite by design — that is \
-             precisely why it is the wrong accessor for a user-global file"
-        );
     }
 
     #[test]
