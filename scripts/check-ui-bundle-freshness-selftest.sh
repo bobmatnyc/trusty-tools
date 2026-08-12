@@ -123,6 +123,13 @@ add_bundle() {
 HTML
 }
 
+# stamp <repo> <crate> — record the current source digest into the bundle, as a
+# real build does via `make release-prep`. A fixture that never stamps exercises
+# STAMP-MISSING, not freshness, so every freshness case must call this.
+stamp() {
+  bash "${SCRIPT_DIR}/stamp-ui-bundle.sh" --repo "$1" "$2" 2> /dev/null
+}
+
 commit_all() {
   local repo="$1" msg="$2"
   git -C "$repo" add -A
@@ -157,8 +164,9 @@ add_crate "$R" cratea
 add_ui_source "$R" cratea dark
 add_bundle "$R" cratea ui-dist AAA111
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
 commit_all "$R" "feat(ui): dark mode + rebuilt bundle"
-run_case "case1 fresh (same commit)" 0 "3 blob hash(es)" "$R"
+run_case "case1 fresh (same commit)" 0 "4 blob hash(es)" "$R"
 run_case "case1 counts source files" 0 "4 source file(s)" "$R"
 
 # ---------------------------------------------------------------------------
@@ -169,11 +177,13 @@ add_crate "$R" cratea
 add_ui_source "$R" cratea light
 add_bundle "$R" cratea ui-dist AAA111
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
 commit_all "$R" "initial"
 add_ui_source "$R" cratea dark
 commit_all "$R" "feat(ui): dark mode"
 rm -rf "${R}/crates/cratea/ui-dist"
 add_bundle "$R" cratea ui-dist BBB222
+stamp "$R" cratea
 commit_all "$R" "chore(ui): rebuild bundle"
 run_case "case2 fresh (bundle rebuilt after source)" 0 "asset ref(s) resolved" "$R"
 
@@ -186,6 +196,7 @@ add_crate "$R" cratea
 add_ui_source "$R" cratea light
 add_bundle "$R" cratea ui-dist AAA111
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
 commit_all "$R" "initial"
 add_ui_source "$R" cratea dark
 commit_all "$R" "feat(ui): migrate to Foundry v2 tokens"
@@ -201,6 +212,7 @@ add_crate "$R" crateb
 add_ui_source "$R" crateb light
 add_bundle "$R" crateb ui/dist AAA111
 add_manifest "$R" "crateb${TAB}crates/crateb/ui${TAB}crates/crateb/ui/dist"
+stamp "$R" crateb
 commit_all "$R" "initial"
 add_ui_source "$R" crateb dark
 commit_all "$R" "feat(ui): dark mode"
@@ -264,6 +276,7 @@ add_crate "$R" cratec
 add_ui_source "$R" cratec dark
 add_bundle "$R" cratec ui/dist CCC333
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
 commit_all "$R" "second UI crate, unlisted"
 run_case "case9 unlisted UI crate" 1 "MANIFEST-GAP" "$R"
 
@@ -275,8 +288,9 @@ R="$(mkrepo case10)"
 add_crate "$R" cratea
 add_ui_source "$R" cratea dark
 add_bundle "$R" cratea ui-dist AAA111
-rm -f "${R}/crates/cratea/ui-dist/assets/index-AAA111.js"
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
+rm -f "${R}/crates/cratea/ui-dist/assets/index-AAA111.js"
 commit_all "$R" "partial mirror"
 run_case "case10 partially mirrored bundle" 1 "ASSET-MISSING" "$R"
 
@@ -292,6 +306,7 @@ echo "/* orphan */" > "${R}/crates/cratea/ui-dist/assets/index-AAA111.js"
 echo '<html><head><link href="https://fonts.googleapis.com"></head><body></body></html>' \
   > "${R}/crates/cratea/ui-dist/index.html"
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
 commit_all "$R" "index with no local refs"
 run_case "case11 vacuous: zero asset references" 1 "NO-ASSET-REFS" "$R"
 
@@ -304,6 +319,7 @@ add_ui_source "$R" cratea dark
 mkdir -p "${R}/crates/cratea/ui-dist/assets"
 echo "/* orphan */" > "${R}/crates/cratea/ui-dist/assets/index-AAA111.js"
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
 commit_all "$R" "bundle without index.html"
 run_case "case12 bundle has no index.html" 1 "NO-INDEX" "$R"
 
@@ -317,6 +333,7 @@ add_crate "$R" cratea
 add_ui_source "$R" cratea dark
 add_bundle "$R" cratea ui/dist AAA111 "/ui/"
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui/dist"
+stamp "$R" cratea
 commit_all "$R" "absolute base refs"
 run_case "case13 absolute /base/ asset refs resolve" 0 "2 asset ref(s) resolved" "$R"
 
@@ -328,35 +345,43 @@ add_crate "$R" cratea
 add_ui_source "$R" cratea dark
 add_bundle "$R" cratea ui-dist AAA111
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
 commit_all "$R" "initial"
 echo "# UI notes" > "${R}/crates/cratea/ui/README.md"
 commit_all "$R" "docs(ui): notes"
 run_case "case14 prose-only ui/ change is not staleness" 0 "-" "$R"
 
 # ---------------------------------------------------------------------------
-# Case 15 — uncommitted source edit with a clean bundle.
+# Case 15 — an UNCOMMITTED source edit is staleness too. Without --rev the
+# digest reads files off disk, so there is no window where a working tree is
+# stale but the gate says otherwise.
 # ---------------------------------------------------------------------------
 R="$(mkrepo case15)"
 add_crate "$R" cratea
 add_ui_source "$R" cratea light
 add_bundle "$R" cratea ui-dist AAA111
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
 commit_all "$R" "initial"
 echo "[data-theme='dark'] { color: #000; }" > "${R}/crates/cratea/ui/src/lib/styles/tokens.css"
-run_case "case15 dirty source, clean bundle" 1 "DIRTY-SOURCE" "$R"
+run_case "case15 uncommitted source edit" 1 "BUNDLE-STALE" "$R"
 
 # ---------------------------------------------------------------------------
-# Case 16 — the same edit with the bundle rebuilt alongside it, uncommitted.
+# Case 16 — the same edit, rebuilt AND re-stamped, clears it. Editing the
+# bundle alone does not (that is case 19); the stamp is what clears the gate.
 # ---------------------------------------------------------------------------
 R="$(mkrepo case16)"
 add_crate "$R" cratea
 add_ui_source "$R" cratea light
 add_bundle "$R" cratea ui-dist AAA111
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
 commit_all "$R" "initial"
 echo "[data-theme='dark'] { color: #000; }" > "${R}/crates/cratea/ui/src/lib/styles/tokens.css"
-echo "/* rebuilt */" >> "${R}/crates/cratea/ui-dist/assets/index-AAA111.css"
-run_case "case16 dirty source with rebuilt bundle" 0 "-" "$R"
+rm -rf "${R}/crates/cratea/ui-dist"
+add_bundle "$R" cratea ui-dist BBB222
+stamp "$R" cratea
+run_case "case16 uncommitted edit, rebuilt and re-stamped" 0 "-" "$R"
 
 # ---------------------------------------------------------------------------
 # Case 17 — a crate with no UI at all exits 0 with an explicit N/A line, so
@@ -370,6 +395,7 @@ add_crate "$R" plainlib
 mkdir -p "${R}/crates/plainlib/src"
 echo "pub fn f() {}" > "${R}/crates/plainlib/src/lib.rs"
 add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
 commit_all "$R" "workspace with one UI crate"
 run_case "case17 non-UI crate is N/A" 0 "tracks no committed UI bundle" "$R" plainlib
 
@@ -378,11 +404,92 @@ run_case "case17 non-UI crate is N/A" 0 "tracks no committed UI bundle" "$R" pla
 # at fc7f396f, the commit 0.37.0 was published from.
 # ---------------------------------------------------------------------------
 if git -C "$REPO_ROOT" rev-parse --verify --quiet 'fc7f396f^{commit}' > /dev/null; then
-  run_case "case18 real 0.37.0 publish commit" 1 "BUNDLE-STALE" \
+  # Every commit before this gate landed predates the stamp, so the real
+  # incident reports STAMP-MISSING rather than a digest mismatch. The commit
+  # diagnostic is what carries the finding for pre-stamp history, and asserting
+  # it is what keeps this case about #3509 rather than about a missing file.
+  run_case "case18 real 0.37.0 publish commit" 1 "STAMP-MISSING" \
     "$REPO_ROOT" --rev fc7f396f trusty-search
+  run_case "case18 names the source change the bundle missed" 1 \
+    "Foundry v2 tokens (#3509)" "$REPO_ROOT" --rev fc7f396f trusty-search
 else
   skip_case "case18 real 0.37.0 publish commit (fc7f396f not in this clone)"
 fi
+
+# ---------------------------------------------------------------------------
+# Case 19 — THE LAUNDERING REGRESSION. A review broke the ancestry version of
+# this gate in three commits: real source change (caught), then one unrelated
+# line appended to the bundle's index.html — and the still-stale bundle passed,
+# because any commit touching the bundle directory read as "rebuilt after the
+# source". The built JS never changed. Content cannot be laundered that way.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case19)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea light
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
+commit_all "$R" "c1: source v1 + bundle v1 (stamped)"
+add_ui_source "$R" cratea dark
+commit_all "$R" "c2: source v2, bundle NOT rebuilt"
+run_case "case19 source changed, no rebuild" 1 "BUNDLE-STALE" "$R"
+printf '<!-- unrelated tweak -->\n' >> "${R}/crates/cratea/ui-dist/index.html"
+commit_all "$R" "c3: unrelated one-line edit to bundle index.html"
+if ! git -C "$R" show "HEAD:crates/cratea/ui-dist/assets/index-AAA111.js" | grep -q 'built AAA111'; then
+  fail_case "case19 fixture broken: the built asset was modified, so this proves nothing"
+else
+  run_case "case19 launder attempt via bundle-dir edit" 1 "BUNDLE-STALE" "$R"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 20 — the false-positive exit. A source edit that produces a
+# byte-identical bundle still moves the digest, so the gate fails; the remedy
+# has to leave something to commit or it is not a remedy. Re-stamping changes
+# ui-source-hash.txt, which is why no override flag exists.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case20)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+stamp "$R" cratea
+commit_all "$R" "initial"
+printf '// comment only — output is byte-identical\n' >> "${R}/crates/cratea/ui/src/main.js"
+run_case "case20 comment-only source edit fails" 1 "BUNDLE-STALE" "$R"
+stamp "$R" cratea
+if [ -z "$(git -C "$R" status --porcelain -- crates/cratea/ui-dist)" ]; then
+  fail_case "case20 re-stamp left nothing to commit — the remedy cannot clear the gate"
+else
+  pass_case "case20 re-stamp produces a committable change"
+fi
+run_case "case20 re-stamp clears it" 0 "-" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 21 — a stamp is not trusted for existing. A hand-written digest that
+# does not match the source is BUNDLE-STALE, not a pass.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case21)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+echo "0000000000000000000000000000000000000000 4" \
+  > "${R}/crates/cratea/ui-dist/ui-source-hash.txt"
+commit_all "$R" "hand-written stamp"
+run_case "case21 forged stamp digest" 1 "BUNDLE-STALE" "$R"
+
+# ---------------------------------------------------------------------------
+# Case 22 — a stamp file with no digest line (comments only) is STAMP-MISSING,
+# not an empty-but-fine digest that matches an empty source.
+# ---------------------------------------------------------------------------
+R="$(mkrepo case22)"
+add_crate "$R" cratea
+add_ui_source "$R" cratea dark
+add_bundle "$R" cratea ui-dist AAA111
+add_manifest "$R" "cratea${TAB}crates/cratea/ui${TAB}crates/cratea/ui-dist"
+printf '# nothing here\n\n' > "${R}/crates/cratea/ui-dist/ui-source-hash.txt"
+commit_all "$R" "digest-less stamp"
+run_case "case22 stamp with no digest" 1 "STAMP-MISSING" "$R"
 
 echo
 echo "check-ui-bundle-freshness-selftest: ${PASSED} passed, ${FAILED} failed, ${SKIPPED} skipped"

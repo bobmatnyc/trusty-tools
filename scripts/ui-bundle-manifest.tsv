@@ -16,6 +16,10 @@
 #   2. source_dir  UI source root, repo-relative — the Svelte/Vite project
 #   3. bundle_dir  committed build output, repo-relative — what cargo packages
 #
+# Each bundle_dir carries ui-source-hash.txt, written by
+# scripts/stamp-ui-bundle.sh as part of the build. That file is the freshness
+# claim; the gate recomputes the digest and compares.
+#
 # trusty-search is the odd one out: its bundle lives at crate root as
 # ui-dist/ (built into ui/dist/, then mirrored by `make -C crates/trusty-search
 # sync-ui`), while the other three commit ui/dist/ directly. That extra mirror

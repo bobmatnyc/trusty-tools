@@ -15,20 +15,30 @@
 #   never reached ui-dist/. Nothing in CI or the publish path noticed any of
 #   the three.
 #
-# What: compares COMMITS, not bytes. For each row of
-#   scripts/ui-bundle-manifest.tsv it resolves two commits at <rev>: the last
-#   one that touched the crate's bundle-affecting UI source, and the last one
-#   that touched its committed bundle. The bundle is fresh only when those are
-#   the same commit, or the source commit is an ancestor of the bundle commit —
-#   i.e. the bundle was regenerated at or after the last source change. Anything
-#   else is BUNDLE-STALE.
+# What: compares CONTENT. Each bundle carries ui-source-hash.txt, a digest of
+#   the UI source it was built from, written by scripts/stamp-ui-bundle.sh as
+#   part of the build. This gate recomputes that digest from the source at <rev>
+#   and fails as BUNDLE-STALE when the two differ.
 #
-#   Comparing commits rather than rebuilding is deliberate.
-#   .github/workflows/ci.yml's ui-checks job already rejected rebuild-then-diff,
-#   correctly: Vite emits content-hashed filenames (index-CPNos4BT.js) that are
-#   not byte-stable across toolchain patch versions, so a byte diff is a flake
-#   generator. Ancestry has no such instability, needs no Node, and encodes the
-#   rule that was actually violated: touch the UI source, refresh the bundle.
+#   It compared commit ANCESTRY until a review broke it in three commits: change
+#   the source without rebuilding (correctly caught), then hand-edit one
+#   unrelated line of the bundle's index.html — and the still-stale bundle
+#   passed, because any commit touching any byte under the bundle directory
+#   satisfied "the bundle was written after the source." Content cannot be
+#   laundered that way: an edit to the bundle does not move the source digest,
+#   so the mismatch survives.
+#
+#   Not rebuilding is still deliberate. .github/workflows/ci.yml's ui-checks job
+#   rejected rebuild-then-diff correctly — Vite emits content-hashed filenames
+#   (index-CPNos4BT.js) that are not byte-stable across toolchain patch
+#   versions, so a byte diff is a flake generator. A source digest has no such
+#   instability and needs no Node.
+#
+#   The limit, stated plainly: the stamp records an assertion the maintainer
+#   makes by running the build. Re-stamping without rebuilding falsifies it, and
+#   nothing here can detect that. What it does remove is the accidental pass —
+#   a stale bundle no longer clears the gate because some unrelated commit
+#   happened to touch the directory.
 #
 #   Four further findings guard the ways a commit comparison could pass while
 #   inspecting nothing:
@@ -38,6 +48,8 @@
 #                      outside the gate.
 #     MANIFEST-STALE   a manifest row whose bundle directory tracks no files.
 #     NO-SOURCES       a row whose UI source tree tracks no files.
+#     STAMP-MISSING    a bundle with no ui-source-hash.txt, or one with no
+#                      readable digest in it. Never a skip.
 #     ASSET-MISSING /  the bundle's index.html references an asset that is not
 #     NO-ASSET-REFS    in the bundle, or references none at all. This catches a
 #                      half-finished mirror, where index.html is new and the
@@ -49,9 +61,14 @@
 #   green line states what was examined rather than only that nothing failed.
 #   Zero of anything is a failure, never a pass.
 #
-#   DIRTY-SOURCE additionally fails an unstaged edit under the UI source with no
-#   matching edit under the bundle. Only checked against the working tree (no
-#   --rev), where the question is meaningful.
+#   Without --rev the digest is computed from files on DISK, including
+#   uncommitted and untracked-not-ignored ones, so an unstaged source edit is
+#   reported the same way a committed one is.
+#
+#   There is no override flag and none is needed: the remedy always produces a
+#   commit. Even a byte-identical rebuild moves the digest, because the digest
+#   is over the SOURCE, not the output — so `make release-prep` leaves a changed
+#   ui-source-hash.txt to commit.
 #
 # Usage:
 #   scripts/check-ui-bundle-freshness.sh                      # every manifest row
@@ -86,6 +103,8 @@ for arg in "$@"; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/ui_source_digest.sh
+. "${SCRIPT_DIR}/lib/ui_source_digest.sh"
 REPO_ROOT=""
 REV=""
 CRATE_INPUT=""
@@ -131,9 +150,15 @@ REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
 MANIFEST="${REPO_ROOT}/scripts/ui-bundle-manifest.tsv"
 
 WORKTREE_MODE=0
+DIGEST_REV=""
 if [ -z "$REV" ]; then
   REV="HEAD"
   WORKTREE_MODE=1
+  # #3606: without --rev the question is "would publishing THIS tree be safe",
+  # so the digest reads files from disk — uncommitted edits count.
+  DIGEST_REV="--worktree"
+else
+  DIGEST_REV="$REV"
 fi
 
 git -C "$REPO_ROOT" rev-parse --verify --quiet "${REV}^{commit}" > /dev/null || {
@@ -283,51 +308,53 @@ check_row() {
   fi
   digest="$(printf '%s\n' "$bundle_hashes" | sort | g hash-object --stdin | cut -c1-12)"
 
-  # Source side: everything tracked under the UI project except the bundle
-  # itself, vendored deps, and prose. Prose is excluded so a README edit does
-  # not demand a rebuild; everything else (src/, index.html, package.json,
-  # lockfile, vite/svelte/tailwind config, static/) can change the output.
-  local src_files src_count
-  src_files="$(g ls-tree -r --name-only "$REV" -- "$src_dir" \
-    | grep -v "^${bundle_dir}/" \
-    | grep -v '/node_modules/' \
-    | grep -v '\.md$' || true)"
-  src_count="$(printf '%s\n' "$src_files" | grep -c . || true)"
-
-  if [ "$src_count" -eq 0 ]; then
-    fail "NO-SOURCES — ${crate}: ${src_dir} tracks ZERO bundle-affecting files at ${REV}." \
+  # Source side: the digest over every bundle-affecting source file. The
+  # selection rule and the hash both live in scripts/lib/ui_source_digest.sh so
+  # the stamper and this gate can never disagree about either.
+  local src_digest_pair src_digest src_count
+  if src_digest_pair="$(ui_source_digest "$REPO_ROOT" "$DIGEST_REV" "$src_dir" "$bundle_dir")"; then
+    src_digest="${src_digest_pair%% *}"
+    src_count="${src_digest_pair##* }"
+  else
+    fail "NO-SOURCES — ${crate}: ${src_dir} holds ZERO bundle-affecting files at ${REV}." \
       "Nothing to compare the bundle against; refusing to call that fresh."
     return
   fi
 
-  local src_commit bundle_commit
-  src_commit="$(g log -1 --format=%H "$REV" -- "$src_dir" \
-    ":(exclude)${bundle_dir}" \
-    ":(exclude,glob)${src_dir}/**/node_modules/**" \
-    ":(exclude,glob)${src_dir}/**/*.md" || true)"
-  bundle_commit="$(g log -1 --format=%H "$REV" -- "$bundle_dir" || true)"
-
-  if [ -z "$src_commit" ] || [ -z "$bundle_commit" ]; then
-    fail "NO-SOURCES — ${crate}: could not resolve a last-touch commit" \
-      "(source='${src_commit:-<none>}' bundle='${bundle_commit:-<none>}')."
-    return
+  # Recorded side: the digest the bundle claims it was built from.
+  local stamp_rel stamp_content stamp_digest
+  stamp_rel="$(ui_stamp_path "$bundle_dir")"
+  if [ "$WORKTREE_MODE" -eq 1 ] && [ -f "${REPO_ROOT}/${stamp_rel}" ]; then
+    stamp_content="$(cat "${REPO_ROOT}/${stamp_rel}")"
+  else
+    stamp_content="$(g show "${REV}:${stamp_rel}" 2>/dev/null || true)"
   fi
 
-  # Freshness. Same commit = built and committed together. Source commit an
-  # ancestor of the bundle commit = the bundle was regenerated after the last
-  # source change. Anything else means source moved and the bundle did not.
-  if [ "$src_commit" != "$bundle_commit" ] \
-    && ! g merge-base --is-ancestor "$src_commit" "$bundle_commit"; then
-    fail "BUNDLE-STALE — ${crate}: ${bundle_dir} was last built before the current UI source." \
-      "source  ${src_commit} $(g log -1 --format='%ci %s' "$src_commit")" \
-      "bundle  ${bundle_commit} $(g log -1 --format='%ci %s' "$bundle_commit")" \
+  if [ -z "$stamp_content" ] || ! stamp_digest="$(ui_read_stamp "$stamp_content")"; then
+    # The commit diagnostic is reported but never decides: it is what an audit
+    # of pre-stamp history has to go on, since every commit before this gate
+    # landed carries no stamp at all.
+    fail "STAMP-MISSING — ${crate}: ${stamp_rel} is absent or carries no digest at ${REV}." \
+      "Without it nothing records which source this bundle was built from, and" \
+      "the gate would be asserting freshness it never measured." \
+      "diagnostic: source last touched in $(g log -1 --format='%h %ci %s' "$REV" -- "$src_dir" \
+        ":(exclude)${bundle_dir}" ":(exclude,glob)${src_dir}/**/*.md" 2>/dev/null || echo '<unknown>')" \
+      "diagnostic: bundle last touched in $(g log -1 --format='%h %ci %s' "$REV" -- "$bundle_dir" 2>/dev/null || echo '<unknown>')" \
+      "Remedy: rebuild, then bash scripts/stamp-ui-bundle.sh ${crate}"
+  elif [ "$stamp_digest" != "$src_digest" ]; then
+    fail "BUNDLE-STALE — ${crate}: ${bundle_dir} was built from different source than ${src_dir} now holds." \
+      "recorded  ${stamp_digest}  (${stamp_rel})" \
+      "actual    ${src_digest}  (${src_count} source file(s) at ${REV})" \
+      "source last changed in $(g log -1 --format='%h %ci %s' "$REV" -- "$src_dir" \
+        ":(exclude)${bundle_dir}" ":(exclude,glob)${src_dir}/**/*.md" 2>/dev/null || echo '<unknown>')" \
       "Publishing now ships a UI built from source that has since changed —" \
       "the #3606 shape (0.37.0 shipped without dark mode)." \
-      "Remedy: make -C crates/${crate} release-prep && git commit ${bundle_dir}"
+      "Remedy: make -C crates/${crate} release-prep && git add ${bundle_dir}"
   fi
 
-  # Asset integrity: ancestry cannot see a mirror that copied index.html and
-  # stopped. Resolve every local asset the bundle's entry point references.
+  # Asset integrity: a digest match says the bundle was stamped against this
+  # source, not that every file the mirror should have copied arrived. Resolve
+  # every local asset the bundle's entry point references.
   local index_path ref_count=0 html refs ref
   index_path="$(printf '%s\n' "$bundle_files" | grep -x "${bundle_dir}/index.html" || true)"
   if [ -z "$index_path" ]; then
@@ -355,21 +382,6 @@ check_row() {
     fi
   fi
 
-  # Working-tree drift. Only meaningful without --rev.
-  if [ "$WORKTREE_MODE" -eq 1 ]; then
-    local dirty_src dirty_bundle
-    dirty_src="$(g status --porcelain -- "$src_dir" \
-      | grep -v " ${bundle_dir}/" \
-      | grep -v '/node_modules/' \
-      | grep -v '\.md$' || true)"
-    dirty_bundle="$(g status --porcelain -- "$bundle_dir" || true)"
-    if [ -n "$dirty_src" ] && [ -z "$dirty_bundle" ]; then
-      fail "DIRTY-SOURCE — ${crate}: uncommitted UI source changes with no matching bundle change:" \
-        "$dirty_src" \
-        "Rebuild before committing: make -C crates/${crate} release-prep"
-    fi
-  fi
-
   TOTAL_SRC=$((TOTAL_SRC + src_count))
   TOTAL_BUNDLE=$((TOTAL_BUNDLE + bundle_count))
   TOTAL_HASH=$((TOTAL_HASH + hash_count))
@@ -378,8 +390,8 @@ check_row() {
 
   if [ "$FINDINGS" -eq "$row_findings_before" ]; then
     echo "PASS: ${crate} — ${src_count} source file(s) vs ${bundle_count} bundle file(s)," \
-      "${hash_count} blob hash(es) digest=${digest}, ${ref_count} asset ref(s) resolved;" \
-      "bundle ${bundle_commit:0:8} >= source ${src_commit:0:8}" >&2
+      "${hash_count} blob hash(es) bundle=${digest}, ${ref_count} asset ref(s) resolved;" \
+      "recorded source digest ${src_digest:0:12} matches" >&2
   fi
 }
 

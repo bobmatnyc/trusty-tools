@@ -976,13 +976,22 @@ cargo publish                                  # single crate (lib + bin)
 the npm equivalent) and then mirrors `ui/dist/` into the crate-root
 `ui-dist/`.
 
-🔴 **CI does NOT check this.** This section used to claim a
-`.github/workflows/ci.yml` → `ui-dist-check` job fails on a stale bundle; no
-such job has ever existed, and believing it did is part of why 0.37.0 shipped
-without dark mode (#3606). What actually guards it is
-`scripts/preflight-publish.sh` CHECK 7, at the publish boundary:
-`scripts/check-ui-bundle-freshness.sh` fails when `ui-dist/`'s last-touch
-commit predates `ui/`'s. Run it yourself any time:
+🔴 **The `ui-dist-check` job this section used to cite was real, and it never
+ran once.** It lived in `crates/trusty-search/.github/workflows/ci.yml` — a
+pre-monorepo leftover carried in by the initial import (`13f9fa2c0`,
+2026-05-19) — and did exactly the rebuild-then-diff the old text described.
+GitHub Actions only discovers workflows in the REPO-ROOT
+`.github/workflows/`, so a nested copy is inert no matter what it contains.
+Believing in it is part of why 0.37.0 shipped without dark mode (#3606); that
+directory was deleted in the same change rather than hoisted, because hoisting
+it would reintroduce the byte-diff `ci.yml`'s `ui-checks` job had already
+rejected on Vite hash instability, and would duplicate the gate below.
+
+What guards it now is `scripts/preflight-publish.sh` CHECK 7 at the publish
+boundary, plus `.github/workflows/ui-bundle-freshness.yml` at merge time. Both
+run `scripts/check-ui-bundle-freshness.sh`, which compares the digest recorded
+in `ui-dist/ui-source-hash.txt` against the current `ui/` source. `make
+release-prep` writes that stamp; run the gate yourself any time:
 
 ```bash
 bash scripts/check-ui-bundle-freshness.sh trusty-search

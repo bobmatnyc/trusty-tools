@@ -132,8 +132,11 @@
 #     tokens.css/theme-bootstrap.js rewrite never reached ui-dist/.
 #     `.github/workflows/ci.yml` correctly declined a rebuild-then-diff (Vite's
 #     content-hashed filenames are not byte-stable across toolchains), so this
-#     compares COMMITS instead — no Node, no rebuild, nothing for a hash to
-#     make flaky.
+#     compares CONTENT instead: each bundle carries ui-source-hash.txt, a digest
+#     of the source it was built from, which the gate recomputes and compares.
+#     No Node, no rebuild, nothing for a hash to make flaky. It compared commit
+#     ancestry first, and a review laundered that in three commits — one
+#     unrelated edit under the bundle directory cleared a still-stale bundle.
 #
 #     No override flag. The remedy is one command:
 #     `make -C crates/<crate> release-prep` then commit the regenerated bundle.
@@ -199,13 +202,15 @@
 #         passes. Plus an end-to-end run of THIS script against `tga 2.17.0`,
 #         where check 6 reports the real 2026-08-11 drift.
 #     (g) BOTH modes for check 7 (#3606), via
-#         scripts/check-ui-bundle-freshness-selftest.sh: 19 cases over synthetic
-#         repos covering BUNDLE-STALE in both bundle layouts, ASSET-MISSING,
-#         DIRTY-SOURCE, and the vacuous-scan refusals (MANIFEST-MISSING,
-#         MANIFEST-STALE, MANIFEST-GAP, NO-SOURCES, NO-ASSET-REFS, NO-INDEX).
+#         scripts/check-ui-bundle-freshness-selftest.sh: 27 assertions over
+#         synthetic repos covering BUNDLE-STALE in both bundle layouts, a forged
+#         stamp, ASSET-MISSING, and the vacuous-scan refusals (MANIFEST-MISSING,
+#         MANIFEST-STALE, MANIFEST-GAP, NO-SOURCES, STAMP-MISSING,
+#         NO-ASSET-REFS, NO-INDEX). Case 19 is the laundering regression; case 20
+#         proves the byte-identical-rebuild remedy leaves something to commit.
 #         Case 18 runs against the real fc7f396f — the commit trusty-search
-#         0.37.0 was published from — and reports BUNDLE-STALE naming #3509's
-#         commit 972171e8 as the source change the bundle never picked up.
+#         0.37.0 was published from — and names #3509's commit 972171e8 as the
+#         source change the bundle never picked up.
 #   See the PR description for this script for the full raw terminal output.
 
 set -euo pipefail

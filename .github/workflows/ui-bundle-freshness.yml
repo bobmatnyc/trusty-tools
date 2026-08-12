@@ -16,8 +16,9 @@
 #
 # ci.yml's ui-checks job declined a rebuild-then-diff for a good reason — Vite's
 # content-hashed filenames are not byte-stable across toolchain patch versions.
-# This gate rebuilds nothing and compares last-touch COMMITS, so it needs no
-# Node, no pnpm, and has nothing for a hash to make flaky.
+# This gate rebuilds nothing. Each bundle carries ui-source-hash.txt, a digest of
+# the source it was built from, and the gate recomputes that digest and compares.
+# No Node, no pnpm, nothing for a content-hashed filename to make flaky.
 name: UI bundle freshness
 
 on:
@@ -28,6 +29,8 @@ on:
       - "crates/*/ui-dist/**"
       - "scripts/check-ui-bundle-freshness.sh"
       - "scripts/check-ui-bundle-freshness-selftest.sh"
+      - "scripts/stamp-ui-bundle.sh"
+      - "scripts/lib/ui_source_digest.sh"
       - "scripts/ui-bundle-manifest.tsv"
       - ".github/workflows/ui-bundle-freshness.yml"
   pull_request:
@@ -40,6 +43,8 @@ on:
       - "crates/*/ui-dist/**"
       - "scripts/check-ui-bundle-freshness.sh"
       - "scripts/check-ui-bundle-freshness-selftest.sh"
+      - "scripts/stamp-ui-bundle.sh"
+      - "scripts/lib/ui_source_digest.sh"
       - "scripts/ui-bundle-manifest.tsv"
       - ".github/workflows/ui-bundle-freshness.yml"
 
