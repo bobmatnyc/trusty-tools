@@ -34,13 +34,13 @@ WHEN-TO-INTERVENE protocol:
 | Unexpected tool call (out-of-scope) | `Block { reason }` | Scope enforcement |
 | Long silence (>5 min) in Working state | `FlagForHuman` | Possible hang |
 
-## `__HARNESS_EVENT__` as Structured Input
+## `__OMPM_EVENT__` as Structured Input
 
-For a t-code overseer, `__HARNESS_EVENT__` lines are the primary structured
+For a t-code overseer, `__OMPM_EVENT__` lines are the primary structured
 input (vs. pane text for Claude Code). The overseer SHOULD prefer event-stream
 classification over pane-text heuristics when events are available.
 
-Parse events as `HarnessEvent` (strip `__HARNESS_EVENT__ ` prefix, parse JSON).
+Parse events as `HarnessEvent` (strip `__OMPM_EVENT__ ` prefix, parse JSON).
 Filter on `source == HarnessSource::Code` and the session ID being overseen.
 
 ## `FlagForHuman` Escalation Policy
