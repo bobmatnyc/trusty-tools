@@ -1,7 +1,7 @@
 //! Dual-mode GitHub authentication strategy (run-mode-dependent).
 //!
 //! Why: trusty-review runs in two distinct contexts with different credential
-//! models (issue #582).  Local/CLI invocations (`run`, `compare`, `profile`)
+//! models (issue #582).  Local/CLI invocations (`run`, `compare`, `report`)
 //! authenticate as a *developer* using a Personal Access Token or the user's
 //! `gh` CLI login; the deployed webhook service (`serve`) authenticates as a
 //! *GitHub App* using per-installation tokens.  Routing every GitHub operation
@@ -34,12 +34,12 @@ use crate::integrations::github::{GithubClient, GithubError};
 /// CLI subcommand or the long-lived webhook daemon, so the caller declares its
 /// mode once at the entry point instead of threading credential choices
 /// through every GitHub call.
-/// What: `Cli` is the local developer path (`run`/`compare`/`profile`); `Serve`
+/// What: `Cli` is the local developer path (`run`/`compare`/`report`); `Serve`
 /// is the deployed webhook service.
 /// Test: `select_cli_defaults_to_cli_strategy`, `select_serve_defaults_to_app`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
-    /// Local developer CLI (`run`, `compare`, `profile`).
+    /// Local developer CLI (`run`, `compare`, `report`).
     Cli,
     /// Deployed webhook service (`serve`).
     Serve,
