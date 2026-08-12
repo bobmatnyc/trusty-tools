@@ -11,7 +11,9 @@
 
 use super::*;
 
-use crate::workflow::engine::helpers::{reconcile_code_outputs_from, relocate_plan_outputs_from};
+use crate::workflow::engine::helpers::{
+    FsExistsProbe, reconcile_code_outputs_from, relocate_plan_outputs_from,
+};
 
 /// #160: Regression test — if the plan-agent writes `assignments.json`
 /// at the git project root (because its claude CLI anchors relative
@@ -41,7 +43,7 @@ async fn post_plan_relocates_assignments_json_from_git_root() {
         .unwrap();
 
     // Act: run the relocation logic against the simulated project root.
-    relocate_plan_outputs_from(&project_root, &out_dir)
+    relocate_plan_outputs_from(&project_root, &out_dir, &FsExistsProbe)
         .await
         .expect("relocation should succeed");
 
@@ -94,7 +96,7 @@ async fn post_plan_relocation_is_noop_when_out_dir_has_assignments() {
     let stale = project_root.join("assignments.json");
     tokio::fs::write(&stale, b"STALE").await.unwrap();
 
-    relocate_plan_outputs_from(&project_root, &out_dir)
+    relocate_plan_outputs_from(&project_root, &out_dir, &FsExistsProbe)
         .await
         .expect("noop relocation ok");
 
@@ -147,7 +149,7 @@ async fn post_code_reconciles_files_from_project_root() {
         .unwrap();
 
     // Act: run reconciliation with the simulated project_root.
-    reconcile_code_outputs_from(&project_root, &out_dir)
+    reconcile_code_outputs_from(&project_root, &out_dir, &FsExistsProbe)
         .await
         .expect("reconciliation should succeed");
 
@@ -190,7 +192,7 @@ async fn post_code_reconcile_is_noop_without_assignments() {
         .await
         .unwrap();
 
-    reconcile_code_outputs_from(&project_root, &out_dir)
+    reconcile_code_outputs_from(&project_root, &out_dir, &FsExistsProbe)
         .await
         .expect("noop reconcile ok");
 
