@@ -30,6 +30,7 @@ use crate::core::catchup::resolve::{
     CallerIdentity, ResolvedSnapshot, redact_sessions_not_owned_by, resolve_snapshot_for_caller,
 };
 use crate::core::catchup::{CatchupOptions, generate_catchup_json};
+use crate::daemon::catchup_bounds::{CATCHUP_BUDGET_BYTES, bound_catchup};
 use crate::daemon::state::DaemonState;
 
 /// Shape the merged digest into the `session_context_catchup` response body.
@@ -41,28 +42,51 @@ use crate::daemon::state::DaemonState;
 /// `PausedSession` arms fall back to mtime, so substituting a literal `0` here
 /// would leave the suite green while the receipt stopped working (#5072). A
 /// pure function is the seam that makes the field assertable.
-/// What: the seven response keys. `resolved_via` names which lookup produced
+///
+/// #5557: the same argument now covers SIZE. The digest arrays used to go on
+/// the wire whole, so the body grew with the project's snapshot history until
+/// the harness could no longer deliver it. They are paged through
+/// [`bound_catchup`] here, and the page's own receipt —
+/// `truncated` / `truncation_notice` / `sessions_total` / `sessions_next_offset`
+/// — travels with it, because a capped response that reads exactly like a
+/// complete one recreates the silent-loss defect the withheld count exists to
+/// prevent.
+/// What: the seven original response keys, unchanged in meaning, plus six
+/// additive paging keys. `resolved_via` names which lookup produced
 /// `resolved_snapshot` (`session_id`, `tmux_window`, or `null` alongside a null
 /// snapshot), so a caller can tell an exact match from the window fallback
 /// instead of reading both as ownership. `watermark_advanced` is always `false`
 /// by construction — no path in this module calls `save_catchup_state`.
 /// Test: `catchup_payload_carries_the_undatable_drop_count`,
-/// `session_context_catchup_returns_expected_shape`.
+/// `session_context_catchup_returns_expected_shape`,
+/// `catchup_payload_bounds_an_oversized_store`,
+/// `catchup_payload_announces_what_it_withheld`.
 fn catchup_payload(
-    merged: &trusty_common::catchup::CatchupJson,
+    merged: trusty_common::catchup::CatchupJson,
+    sessions_offset: usize,
     resolved: Option<ResolvedSnapshot>,
 ) -> Value {
     let (snapshot, via) = match resolved {
         Some(r) => (Some(r.path.display().to_string()), Some(r.via.as_str())),
         None => (None, None),
     };
+    let undatable_sessions_dropped = merged.undatable_sessions_dropped;
+    // #5557: page the digest so the body cannot outgrow what a caller can read.
+    let page = bound_catchup(merged, sessions_offset, CATCHUP_BUDGET_BYTES);
     json!({
-        "sessions": merged.sessions,
-        "recent_commits": merged.recent_commits,
-        "recent_memory": merged.recent_memory,
+        "sessions": page.sessions,
+        "sessions_total": page.sessions_total,
+        "sessions_offset": page.sessions_offset,
+        "sessions_next_offset": page.next_offset(),
+        "recent_commits": page.recent_commits,
+        "recent_commits_total": page.recent_commits_total,
+        "recent_memory": page.recent_memory,
+        "recent_memory_total": page.recent_memory_total,
+        "truncated": page.truncated(),
+        "truncation_notice": page.truncation_notice(),
         "resolved_snapshot": snapshot,
         "resolved_via": via,
-        "undatable_sessions_dropped": merged.undatable_sessions_dropped,
+        "undatable_sessions_dropped": undatable_sessions_dropped,
         "watermark_advanced": false,
     })
 }
@@ -104,6 +128,14 @@ fn catchup_payload(
 /// [`redact_sessions_not_owned_by`](crate::core::catchup::resolve::redact_sessions_not_owned_by).
 /// The CLI `tm session catchup` digest is unchanged — it renders one operator's
 /// own terminal, not a response to a remote caller.
+///
+/// #5557: `sessions` is a PAGE, not the whole list. A live `full: true` call on
+/// this repo returned 112k characters, past what the harness could hand back to
+/// the calling model — so it spilled the body to a file and the session
+/// resuming from it had to read that instead. `sessions_offset` selects the
+/// page; `sessions_next_offset` names the one that follows, so `full` still
+/// delivers every snapshot in history, one readable page at a time, rather than
+/// one unreadable response. The CLI digest is again unchanged.
 /// Test: `session_context_catchup_missing_project_dir_errors`,
 /// `session_context_catchup_returns_expected_shape`,
 /// `session_context_catchup_never_resolves_another_sessions_snapshot`,
@@ -116,6 +148,7 @@ pub async fn session_context_catchup(
     tmux_window: Option<&str>,
     all_projects: bool,
     full: bool,
+    sessions_offset: usize,
 ) -> Result<Value, String> {
     let primary = PathBuf::from(project_dir);
     if !primary.is_dir() {
@@ -177,7 +210,7 @@ pub async fn session_context_catchup(
     // mints a new harness session id inside the same tmux window.
     let resolved = resolve_snapshot_for_caller(&primary, session_id, tmux_window);
 
-    Ok(catchup_payload(&merged, resolved))
+    Ok(catchup_payload(merged, sessions_offset, resolved))
 }
 
 /// Back the `session_context_pause` MCP tool.
@@ -295,9 +328,10 @@ mod tests {
 
     #[tokio::test]
     async fn session_context_catchup_missing_project_dir_errors() {
-        let err = session_context_catchup("/nonexistent/does/not/exist", None, None, false, true)
-            .await
-            .unwrap_err();
+        let err =
+            session_context_catchup("/nonexistent/does/not/exist", None, None, false, true, 0)
+                .await
+                .unwrap_err();
         assert!(err.contains("project_dir"), "{err}");
     }
 
@@ -319,9 +353,10 @@ mod tests {
         run(&["add", "."]);
         run(&["commit", "-m", "init"]);
 
-        let result = session_context_catchup(tmp.path().to_str().unwrap(), None, None, false, true)
-            .await
-            .unwrap();
+        let result =
+            session_context_catchup(tmp.path().to_str().unwrap(), None, None, false, true, 0)
+                .await
+                .unwrap();
         assert_eq!(result["watermark_advanced"], false);
         assert!(result["sessions"].is_array());
         assert!(result["recent_commits"].is_array());
@@ -350,7 +385,7 @@ mod tests {
             PathBuf::from("/tmp/snap.md"),
             crate::core::catchup::resolve::ResolutionPath::TmuxWindow,
         );
-        let body = catchup_payload(&merged, Some(resolved));
+        let body = catchup_payload(merged, 0, Some(resolved));
         assert_eq!(
             body["undatable_sessions_dropped"], 4,
             "the withheld count must reach the wire: {body}"
@@ -395,7 +430,7 @@ mod tests {
         .unwrap();
         let a_snapshot = paused["snapshot_path"].as_str().unwrap().to_string();
 
-        let for_b = session_context_catchup(dir, Some(session_b), None, false, true)
+        let for_b = session_context_catchup(dir, Some(session_b), None, false, true, 0)
             .await
             .unwrap();
         assert!(
@@ -404,13 +439,13 @@ mod tests {
             for_b["resolved_snapshot"]
         );
 
-        let for_a = session_context_catchup(dir, Some(session_a), None, false, true)
+        let for_a = session_context_catchup(dir, Some(session_a), None, false, true, 0)
             .await
             .unwrap();
         assert_eq!(for_a["resolved_snapshot"], a_snapshot);
         assert_eq!(for_a["resolved_via"], "session_id");
 
-        let anonymous = session_context_catchup(dir, None, None, false, true)
+        let anonymous = session_context_catchup(dir, None, None, false, true, 0)
             .await
             .unwrap();
         assert!(anonymous["resolved_snapshot"].is_null());
@@ -455,6 +490,7 @@ mod tests {
             Some(window),
             false,
             true,
+            0,
         )
         .await
         .unwrap();
@@ -469,6 +505,7 @@ mod tests {
             Some(window),
             false,
             true,
+            0,
         )
         .await
         .unwrap();
@@ -481,7 +518,7 @@ mod tests {
         // A window field that does not parse resolves nothing and does not panic.
         for bad in ["", "tm-dogfood", "tm-dogfood:0"] {
             let malformed =
-                session_context_catchup(dir, Some("never-paused"), Some(bad), false, true)
+                session_context_catchup(dir, Some("never-paused"), Some(bad), false, true, 0)
                     .await
                     .unwrap();
             assert!(
@@ -490,6 +527,119 @@ mod tests {
             );
             assert!(malformed["resolved_via"].is_null());
         }
+    }
+
+    /// Seed `n` paused snapshots of roughly `body_bytes` of prose each.
+    fn seed_snapshots(project: &std::path::Path, n: usize, body_bytes: usize) {
+        let dir = project.join(".trusty-mpm").join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = "x".repeat(body_bytes);
+        for i in 0..n {
+            std::fs::write(
+                dir.join(format!("session-20260801-12{:02}{:02}.md", i / 60, i % 60)),
+                format!("## Summary\n{body}\n\n## Next Steps\n{body}\n"),
+            )
+            .unwrap();
+        }
+    }
+
+    /// Why: the reported defect, end to end through the tool. `full: true` on
+    /// this repo's store returned 112,096 characters — the harness could not
+    /// hand that back to the calling model, spilled it to a file, and the
+    /// session trying to resume had to go read the file instead. Against this
+    /// 25-snapshot fixture the unbounded code returned 154,656 characters.
+    /// What: the encoded response body stays within the budget.
+    /// Test: itself.
+    #[tokio::test]
+    async fn catchup_payload_bounds_an_oversized_store() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_snapshots(tmp.path(), 25, 6_000);
+
+        let result =
+            session_context_catchup(tmp.path().to_str().unwrap(), None, None, false, true, 0)
+                .await
+                .unwrap();
+
+        let len = serde_json::to_string(&result).unwrap().len();
+        assert!(
+            len <= CATCHUP_BUDGET_BYTES + 12_000,
+            "response is {len} chars against a {CATCHUP_BUDGET_BYTES}-byte budget"
+        );
+        assert!(
+            !result["sessions"].as_array().unwrap().is_empty(),
+            "a bound that returns nothing is not a bound: {result}"
+        );
+    }
+
+    /// Why: this repo's recurring defect is an operation that returns an
+    /// incomplete result and reports success, so the loss is invisible. A
+    /// capped response that reads exactly like a complete one recreates it — so
+    /// the receipt has to be ON the response, naming what was withheld and how
+    /// to get it, not in a log the caller never sees.
+    /// What: the short page carries `truncated: true`, the full count, and a
+    /// notice naming the literal `sessions_offset` that retrieves the rest;
+    /// walking that offset reaches every snapshot with none repeated.
+    /// Test: itself.
+    #[tokio::test]
+    async fn catchup_payload_announces_what_it_withheld() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        seed_snapshots(tmp.path(), 25, 6_000);
+
+        let first = session_context_catchup(dir, None, None, false, true, 0)
+            .await
+            .unwrap();
+        assert_eq!(first["truncated"], true);
+        assert_eq!(first["sessions_total"], 25);
+        assert_eq!(first["sessions_offset"], 0);
+        let notice = first["truncation_notice"].as_str().unwrap().to_string();
+        assert!(notice.contains("25"), "names the total: {notice}");
+
+        let mut seen = first["sessions"].as_array().unwrap().len();
+        let mut next = first["sessions_next_offset"].as_u64();
+        assert!(
+            notice.contains(&format!("sessions_offset: {}", next.unwrap())),
+            "names the recovery: {notice}"
+        );
+
+        let mut pages = 1;
+        while let Some(offset) = next {
+            let body = session_context_catchup(dir, None, None, false, true, offset as usize)
+                .await
+                .unwrap();
+            assert_eq!(body["sessions_offset"], offset);
+            let n = body["sessions"].as_array().unwrap().len();
+            assert!(n > 0, "page at {offset} made no progress: {body}");
+            seen += n;
+            next = body["sessions_next_offset"].as_u64();
+            pages += 1;
+            assert!(pages < 50, "paging did not terminate");
+        }
+        assert!(pages > 1, "the fixture must actually need paging");
+        assert_eq!(seen, 25, "`full` must still deliver the whole history");
+    }
+
+    /// Why: the bound must not change what a normal project gets back — a
+    /// regression here breaks every resume in every project, and almost every
+    /// store is far under budget.
+    /// What: a three-snapshot store returns all three, reports no truncation,
+    /// no notice, and no next page.
+    /// Test: itself.
+    #[tokio::test]
+    async fn catchup_payload_leaves_a_normal_store_whole() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        seed_snapshots(tmp.path(), 3, 200);
+
+        let result =
+            session_context_catchup(tmp.path().to_str().unwrap(), None, None, false, true, 0)
+                .await
+                .unwrap();
+
+        assert_eq!(result["sessions"].as_array().unwrap().len(), 3);
+        assert_eq!(result["sessions_total"], 3);
+        assert_eq!(result["truncated"], false);
+        assert!(result["truncation_notice"].is_null());
+        assert!(result["sessions_next_offset"].is_null());
     }
 
     /// Why: #5386 — `resolved_snapshot` already refused to cross sessions
@@ -529,7 +679,7 @@ mod tests {
         .unwrap();
         let a_snapshot = paused["snapshot_path"].as_str().unwrap().to_string();
 
-        let for_b = session_context_catchup(dir, Some(session_b), None, false, true)
+        let for_b = session_context_catchup(dir, Some(session_b), None, false, true, 0)
             .await
             .unwrap();
         let listed = &for_b["sessions"][0];
@@ -558,7 +708,7 @@ mod tests {
         );
 
         // A's own digest entry is untouched — resume still renders it.
-        let for_a = session_context_catchup(dir, Some(session_a), None, false, true)
+        let for_a = session_context_catchup(dir, Some(session_a), None, false, true, 0)
             .await
             .unwrap();
         let own = &for_a["sessions"][0];
@@ -602,6 +752,7 @@ mod tests {
             Some(window),
             false,
             true,
+            0,
         )
         .await
         .unwrap();

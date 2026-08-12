@@ -293,7 +293,16 @@ pub(super) fn session_tools() -> Vec<Value> {
              listed with `format`, `paused_at` and `summary` only — its \
              `source_file`, `tmux_window`, `in_progress`, `next_steps` and \
              `git_context` are withheld, so the digest cannot hand you the \
-             means to adopt another session's state (#5386).",
+             means to adopt another session's state (#5386). \
+             `sessions` is a bounded PAGE, newest-first — the whole response is \
+             fitted to a size a caller can read in one tool result. \
+             `sessions_total` says how many matched, `sessions_offset` where \
+             this page starts, and `sessions_next_offset` the value to pass \
+             back as `sessions_offset` for the remainder (null on the last \
+             page). Whenever anything was withheld — sessions, commits or \
+             drawers — `truncated` is true and `truncation_notice` says what \
+             and how to retrieve it, so a short page never reads as a complete \
+             one (#5557).",
             json!({
                 "type": "object",
                 "properties": {
@@ -315,7 +324,12 @@ pub(super) fn session_tools() -> Vec<Value> {
                     },
                     "full": {
                         "type": "boolean",
-                        "description": "Ignore the watermark and return full history instead of just activity since the last catch-up. Defaults to false."
+                        "description": "Ignore the watermark and return full history instead of just activity since the last catch-up. Defaults to false. Full history is paged, not dropped — walk `sessions_next_offset` to read all of it."
+                    },
+                    "sessions_offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Index into the newest-first session list this page starts at. Defaults to 0 (the newest page, which is what a resume wants). Pass the previous response's `sessions_next_offset` to continue; when that field is null you have the whole history (#5557)."
                     }
                 },
                 "required": ["project_dir"],
