@@ -16,11 +16,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::core::{classifier::QueryClassifier, indexer::SearchQuery, registry::IndexId};
-use crate::service::lazy_loader::{
-    cold_reload_timeout, get_or_load_index, LazyLoadError, LAST_QUERIED_WRITE_INTERVAL_SECS,
-};
-use crate::service::lazy_restore::restore_index_on_demand;
-use crate::service::warm_boot::restore_one_index_bounded;
+use crate::service::lazy_loader::LAST_QUERIED_WRITE_INTERVAL_SECS;
 
 use super::helpers::file_is_within_root;
 use super::state::{DaemonEvent, SearchAppState};
@@ -374,98 +370,10 @@ pub(super) async fn search_handler(
         ));
     }
     let index_id = IndexId::new(id);
-    // Issue #993: try hot registry first, fall back to cold-store lazy load.
-    // Short-circuit with 503 when the embedder has not finished initializing:
-    // `restore_index_on_demand` requires a live embedder to rebuild the HNSW
-    // lane. Callers should retry once `/health` reports `embedder: "ready"`.
-    let handle = {
-        // Try hot path first — avoids the embedder check for warm indexes.
-        if let Some(h) = state.registry.get(&index_id) {
-            h
-        } else if state.cold_store.is_failed(&index_id) || !state.cold_store.contains(&index_id) {
-            // Issue #1106 / #5061: permanently-failed and genuinely-unknown are
-            // the two residency verdicts this handler can reach without
-            // attempting a load. Both go through the shared builder — this
-            // endpoint is the one every other endpoint's `restore_via` hint
-            // points at, so a body here that omits `retryable`/`index_id` is
-            // the one place the contract most needs to hold. The remaining
-            // verdict (`index_not_resident`) is unreachable from here by
-            // construction: a cold-but-not-failed index falls through to the
-            // lazy load below rather than erroring.
-            return Err(super::degraded::residency_miss_response(
-                &state.cold_store,
-                &index_id,
-            ));
-        } else {
-            // Cold index: need the embedder to restore.
-            let Some(embedder) = state.current_embedder().await else {
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({
-                        "error": "embedder_initializing",
-                        // #5061: every 5xx this handler emits carries
-                        // `retryable` and `index_id`. A client branching on
-                        // `retryable` must never meet a body that omits it —
-                        // absent reads as undefined, and both interpretations
-                        // are wrong for some state.
-                        "index_id": index_id.0,
-                        "retryable": true,
-                        "message": "embedder not yet ready — retry after /health reports embedder:ready",
-                    })),
-                ));
-            };
-            let s = Arc::clone(&state);
-            let load_result = get_or_load_index(
-                &index_id,
-                &state.registry,
-                &state.cold_store,
-                cold_reload_timeout(),
-                move |entry| async move {
-                    let e = Arc::clone(&embedder);
-                    // #4087 review follow-up: `is_complete()` preserves the
-                    // exact prior contract — anything short of a finished
-                    // restore is a lazy-load failure, which this handler
-                    // already surfaces loudly as a 503 below.
-                    restore_one_index_bounded(entry, move |en| async move {
-                        restore_index_on_demand(&s, &e, en).await;
-                    })
-                    .await
-                    .is_complete()
-                },
-            )
-            .await;
-            match load_result {
-                Ok(h) => h,
-                // #5061: both terminal load outcomes are residency verdicts and
-                // go through the shared builder. `RestoreFailed` lands on its
-                // `index_restore_failed` arm rather than a 404 because BOTH
-                // paths that produce this variant guarantee the entry is in the
-                // failed set — `loader.rs:116` returns it *because* `is_failed`
-                // is already true, and `loader.rs:148` calls `mark_failed`
-                // immediately before returning it.
-                Err(LazyLoadError::NotFound) | Err(LazyLoadError::RestoreFailed) => {
-                    return Err(super::degraded::residency_miss_response(
-                        &state.cold_store,
-                        &index_id,
-                    ));
-                }
-                // A load in flight is not a residency miss — the index is
-                // neither absent nor failed, it is arriving. Its own body
-                // carries the same `retryable` / `index_id` contract.
-                Err(LazyLoadError::Loading { retry_after_secs }) => {
-                    return Err((
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(serde_json::json!({
-                            "error": "index_loading",
-                            "index_id": index_id.0,
-                            "retryable": true,
-                            "retry_after_secs": retry_after_secs,
-                        })),
-                    ));
-                }
-            }
-        }
-    };
+    // Issue #993: hot registry first, then the cold-store lazy load. #5349 moved
+    // that flow into `index_resolve` so the write endpoints drive the identical
+    // load instead of 503-ing against the same daemon state.
+    let handle = super::index_resolve::resolve_or_load_index(&state, &index_id).await?;
     // #4087: a registered index whose durable corpus failed to open holds no
     // chunks at all, so every search against it returned HTTP 200 with
     // `results: []` — a total outage presented as "no matches". Fail loudly

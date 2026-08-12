@@ -126,10 +126,11 @@ pub(super) async fn corpus_failure_response(
 ///
 /// What: checks the failed set FIRST (a permanently-failed restore never clears
 /// on its own, so "retry later" would be a lie for it), then the cold store,
-/// then falls through to 404. `restore_via` on the not-resident arm is the
-/// load-bearing field: `POST /indexes/{id}/search` is the only endpoint that
-/// drives `get_or_load_index`, so it is how a caller un-sticks the 503 without
-/// waiting for a sweep that may never come.
+/// then falls through to 404. `restore_via` on the not-resident arm names
+/// `POST /indexes/{id}/search`: it is how a caller un-sticks the 503 without
+/// waiting for a sweep that may never come. Since #5349 the two write endpoints
+/// drive `get_or_load_index` too, so an endpoint that CAN load only ever reaches
+/// the failed or unknown arm here — never the not-resident one.
 ///
 /// Callers MUST have already missed the hot registry — this never checks it.
 /// Test: `residency_miss_is_404_only_when_absent_everywhere`,
