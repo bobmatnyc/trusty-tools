@@ -699,6 +699,25 @@ impl PalaceRegistry {
         self.unopenable.get(palace_id).map(|r| r.value().clone())
     }
 
+    /// Record that `palace_id` exists on disk but could not be opened.
+    ///
+    /// Why (issue #4911): [`PalaceRegistry::open`] is not the hydration path any
+    /// shipped binary runs — the daemon walks the registry root itself
+    /// (`AppState::load_palaces_from_disk`) so it can seed its own name cache
+    /// alongside each open. Without a way for that walk to file its skips, the
+    /// unopenable record would be populated only by a constructor nothing calls,
+    /// and "the palace stays observable" would be true of the type and false of
+    /// the daemon.
+    /// What: inserts `reason` under `palace_id`, replacing any earlier entry.
+    /// [`PalaceRegistry::register_arc`] clears it when that palace later opens,
+    /// so a record cannot outlive the condition that produced it.
+    /// Test: `registry_tests::record_unopenable_is_cleared_by_a_later_success`;
+    /// the daemon path is covered by
+    /// `trusty_memory::lib_tests::load_palaces_from_disk_records_an_unopenable_palace`.
+    pub fn record_unopenable(&self, palace_id: PalaceId, reason: String) {
+        self.unopenable.insert(palace_id, reason);
+    }
+
     /// Drop every idle, unreferenced palace handle — the "idle to disk" sweep.
     ///
     /// Why: even under the LRU cap the daemon keeps up to `max_open` palaces

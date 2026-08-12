@@ -208,6 +208,59 @@ fn open_keeps_an_unopenable_palace_observable() {
     );
 }
 
+/// Why (issue #4911): the daemon hydrates through its own walk
+/// (`AppState::load_palaces_from_disk`), not [`PalaceRegistry::open`], so it
+/// needs `record_unopenable` to file a skip. A record that outlived the
+/// condition would be worse than none — an operator would chase a palace that
+/// has been healthy since the next lazy open — so the clearing half is the
+/// property under test, not the insert.
+/// What: records a skip, asserts it is readable, then registers a real handle
+/// for that same id through `register_arc` (the sole success-path funnel) and
+/// asserts the record is gone.
+/// Test: this test itself.
+#[test]
+fn record_unopenable_is_cleared_by_a_later_success() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+
+    seed_shared_embedder_with_mock();
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let id = PalaceId::new("flaky");
+
+    let registry = PalaceRegistry::new();
+    registry.record_unopenable(id.clone(), "EMFILE: too many open files".to_string());
+    assert_eq!(
+        registry.unopenable_reason(&id).as_deref(),
+        Some("EMFILE: too many open files"),
+        "a recorded skip must be readable back"
+    );
+
+    // The same palace opens fine on a later attempt — the record must not
+    // survive that.
+    registry
+        .create_palace(
+            data_root,
+            Palace {
+                id: id.clone(),
+                name: "flaky".to_string(),
+                description: None,
+                created_at: Utc::now(),
+                data_dir: data_root.join("flaky"),
+            },
+        )
+        .expect("create_palace");
+
+    assert!(
+        registry.unopenable_reason(&id).is_none(),
+        "a successful open must clear the skip record, not leave it to mislead"
+    );
+    assert!(
+        registry.unopenable().is_empty(),
+        "no unopenable palace remains"
+    );
+}
+
 /// Why: Issue #52 — payloads (drawer content) must survive a process
 /// restart. Open a registry, write a drawer with a known content string,
 /// drop everything, reopen via `PalaceRegistry::open(path)`, and assert the
