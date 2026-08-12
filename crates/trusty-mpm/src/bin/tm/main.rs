@@ -560,6 +560,7 @@ async fn main() -> anyhow::Result<()> {
             source_id,
             current,
             all,
+            attached,
             root,
         }) => {
             if projects {
@@ -574,7 +575,7 @@ async fn main() -> anyhow::Result<()> {
                 // #3483 scope: `tm ls <term>` matches every visible column.
                 let filter = term.map(commands::session_picker::SessionFilter::visible);
                 commands::session_ls_connector::run_ls_connector(
-                    &client, &url, json, source_id, current, all, sort, filter,
+                    &client, &url, json, source_id, current, all, attached, sort, filter,
                 )
                 .await
             }

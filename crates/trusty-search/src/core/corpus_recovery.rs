@@ -252,7 +252,8 @@ pub(crate) fn is_incompatible_corpus_format(err: &DatabaseError) -> bool {
 /// first; this one answers a narrower question and says nothing about errors it
 /// does not recognise.
 /// Test: `corruption_and_old_format_classify_apart`,
-/// `real_redb_2x_file_is_old_format_not_corruption`.
+/// `old_format_is_backed_up_and_recreated_without_error` (built on a real
+/// redb 2.x file, not synthetic bytes).
 pub(crate) fn is_genuine_corpus_corruption(err: &DatabaseError) -> bool {
     use redb::StorageError;
     match err {

@@ -275,9 +275,10 @@ pub(super) fn vector_lane_unavailable(
 /// attempt), or when the blocker is this producer's own row, which a re-send
 /// replaces outright. Otherwise `false`, with `blocking_producer` naming the
 /// row an operator must re-send or delete.
-/// Test: `ingest_reports_503_when_the_contributed_overlay_cannot_be_merged`,
-/// `ingest_503_is_not_retryable_when_another_producers_row_is_the_blocker`,
-/// `ingest_route_answers_503_over_http_when_the_merge_fails`.
+/// Test: `ingest_reports_503_when_the_contributed_overlay_cannot_be_merged`
+/// and `ingest_route_answers_503_over_http_when_the_merge_fails` — the
+/// not-retryable-when-the-blocker-is-another-producer's-row verdict is
+/// asserted inside the first of these two.
 pub(super) fn contrib_not_merged_response(
     index_id: &str,
     producer: &str,

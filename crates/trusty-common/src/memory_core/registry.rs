@@ -605,7 +605,10 @@ impl PalaceRegistry {
     /// and for each persisted palace builds a `PalaceHandle` via
     /// `PalaceHandle::open` and registers it. Errors hydrating a single palace
     /// are logged and skipped so one corrupt palace doesn't take the whole
-    /// registry down — matches the resiliency choice in `PalaceStore::list_palaces`.
+    /// registry down. Enumeration is stricter than hydration: since #5543
+    /// `PalaceStore::list_palaces` fails rather than return a short list, so a
+    /// palace missing from this warmup was skipped by `PalaceHandle::open`, not
+    /// lost before it was ever seen.
     /// Test: `open_hydrates_persisted_palaces` exercises restart by writing,
     /// dropping, and reopening.
     pub fn open(data_root: &Path) -> Result<Self> {

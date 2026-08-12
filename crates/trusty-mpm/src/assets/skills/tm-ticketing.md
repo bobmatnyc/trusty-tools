@@ -107,9 +107,11 @@ disposition in `code-review-standards`. A reviewer marking `Promote` has
 recommended, not filed — the finding still has to clear the criteria above, and
 an APPROVE verdict never files a ticket on its own.
 
-### 3. Label the confidence state
+### 3. Label the confidence state — defects only
 
-Every filed issue states which of these it is, in the body:
+This distinguishes a reproduced defect from a suspected one, which changes
+what a reader does next: a `bug`-typed issue states which of these it is, in
+the body.
 
 | State | Meaning | Default disposition |
 |---|---|---|
@@ -121,6 +123,12 @@ Every filed issue states which of these it is, in the body:
 If your own draft says "not confirmed", "possible", or "same risk class", the
 state is Inferred or Speculative — keep it on the parent unless severity
 justifies escalation.
+
+🔴 **A feature, task, epic, or spec issue carries no confidence line.** The
+table above is written in defect language (behaviour, reproduction, risk) and
+has nothing to distinguish on a feature: the type label already says why the
+issue exists, and a line like "Confidence: Observed — accepted feature work"
+restates the type label under a different name. Omit it there entirely.
 
 ### 4. Size issues by outcome, not by finding
 
@@ -149,9 +157,11 @@ Ticket Bodies") — no structured headings, point rather than restate, cite file
 and symbol rather than line numbers, and stop when the body fills a short screen.
 Most tickets do all of it in under ten lines.
 
-Alongside the closure conditions a reader must be able to tell the confidence
-state (§3) and the relationship to parent work, including the search/dispatch
-outcome. Those are facts to convey, not headings to fill in.
+Alongside the closure conditions, a **defect** ticket must let the reader tell
+the confidence state (§3); a feature, task, epic, or spec ticket carries none.
+Every ticket, defect or not, conveys its relationship to parent work,
+including the search/dispatch outcome — a fact about the issue, not a heading
+to fill in.
 
 **Bounded exceptions.** Three shapes may exceed the short-body form, and only
 these:
