@@ -34,7 +34,11 @@ use trusty_common::codex_config;
 /// commands from drifting (e.g. one writing `trusty-search` and another
 /// writing `trusty_search`).
 /// What: the literal string `"trusty-search"`.
-const MCP_SERVER_KEY: &str = "trusty-search";
+///
+/// #5264: `doctor`'s registration check reads back what this command writes, so
+/// the key is crate-visible rather than private — a doctor that looked under a
+/// different key than setup writes would report a healthy install as unset.
+pub(crate) const MCP_SERVER_KEY: &str = "trusty-search";
 
 /// The MCP stdio entrypoint every client registration must launch.
 ///
