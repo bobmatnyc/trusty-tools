@@ -97,6 +97,7 @@ claims, and disputed results. Full rule in
 
 ### Baseline failures — the Rust specifics
 
+<!-- Load-bearing order below: keep the if/otherwise together — see the comment in test-ladder-baseline.md for why. -->
 🔴 **Never turn a red gate green by `#[ignore]`-ing, `cfg`-gating, or
 `--exclude`-ing a failing test — prove the failure is pre-existing instead.**
 If the failing crate depends on nothing you changed, prove it with an empty

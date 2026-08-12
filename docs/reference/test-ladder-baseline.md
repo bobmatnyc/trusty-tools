@@ -151,6 +151,8 @@ proof is reproducing the failure on `origin/main` (step 2 below; the
 shared-crate caveat is at step 5). When the path list is the applicable proof,
 paste it in the PR:
 
+<!-- Load-bearing order: keep both branches above this block — moving the
+     block ahead of them re-opens the #5594 misreading. -->
 ```bash
 git diff --name-only origin/main...HEAD -- crates/trusty-search/ \
                                            crates/trusty-mpm/src/client/
