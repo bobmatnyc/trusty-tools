@@ -65,7 +65,7 @@ is CB#2 / CB#10 in `tm-circuit-breaker`.
 | `search_similar` | Find code semantically similar to a known snippet |
 | `search_kg` / `get_call_chain` | Structural queries — call graphs, symbol relationships |
 | `grep` / `typeahead` | Lexical lookup once you already know the token to find |
-| `search_health` | Liveness check — **use instead of `curl`/`lsof`** (CB#7) |
+| `search_health` | Health check — **use instead of `curl`/`lsof`** (CB#7). Returns `Ok` even when the daemon is down; branch on the response's `healthy` field, never on the call succeeding |
 | `list_indexes` / `index_status` | Discover what projects are indexed and their freshness |
 
 **Example:**
