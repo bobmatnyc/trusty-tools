@@ -64,11 +64,22 @@
 //! frame: findings plus concrete, ready-to-run recommendations (drafted
 //! scenarios, specified test cases, recommended commands) handed off to an
 //! engineer/ops/CI to execute, never executed by the agent itself.
-//! `code-critic.md` needed no prose change — its review-only body already had
-//! no execute-oriented instructions. This is an ADDITIONAL deviation from
+//! `code-critic.md` needed no prose change at the time — its review-only body
+//! had no execute-oriented instructions. This is an ADDITIONAL deviation from
 //! trusty-mpm byte-parity beyond the `tools:` line alone; the deferred E4
 //! staleness guard must whitelist the reworded prose sections in these three
 //! files too, not just the `tools:` line.
+//!
+//! `code-critic.md` gained its own reworded section later (owner ruling
+//! 2026-08-12, PR #5596): trusty-mpm's upstream copy started instructing the
+//! agent to post its verdict via `gh pr review --comment` directly. tcode's
+//! copy has no `bash`/`gh` tool, so the "Posting the Verdict" section was
+//! reworded to the same read-only frame as the three files above — it
+//! specifies the exact command for the caller to run, never runs it itself.
+//! `code-critic.md` now joins `web-qa.md`/`qa.md`/`code-analyzer.md` as a
+//! four-of-four reworded-prose deviation, not three-of-four; the E4 staleness
+//! guard whitelists it the same way (pinned-hash reconciliation, not
+//! byte-parity).
 //!
 //! ## Non-coding cross-product roster addition (#4027, epic #4021)
 //!

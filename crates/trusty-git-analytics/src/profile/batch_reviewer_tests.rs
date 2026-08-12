@@ -21,13 +21,14 @@ use serial_test::serial;
 use trusty_common::credentials::{KeyStore, MemoryKeyStore};
 use trusty_common::inference::test_support::ScriptedAdapter;
 use trusty_common::inference::{
-    capabilities, AssistantMessage, ChatChoice, ChatResponse, ProviderId, UsageBlock,
+    capabilities, AssistantMessage, ChatChoice, ChatResponse, InferenceError, ProviderId,
+    UsageBlock,
 };
 
 use super::{
     build_period_request, build_period_user_message, parse_period_findings, period_findings_schema,
-    period_reviewer_system_prompt, severity_to_effort, PeriodReviewer, PERIOD_REVIEWER_MAX_TOKENS,
-    PERIOD_REVIEWER_TEMPERATURE,
+    period_reviewer_system_prompt, severity_to_effort, PeriodReview, PeriodReviewer,
+    PeriodRunSummary, PERIOD_REVIEWER_MAX_TOKENS, PERIOD_REVIEWER_TEMPERATURE,
 };
 use crate::profile::types::{
     AuthorPeriodSummary, Effort, PeriodBatch, SampledDiff, TokenCostSummary,
@@ -459,4 +460,101 @@ fn from_slug_with_store_errors_when_no_credential_resolves() {
         Err(other) => panic!("expected ProfileError::Inference, got {other:?}"),
         Ok(_) => panic!("an empty store with no env key must not resolve a credential"),
     }
+}
+
+// ─── Run coverage (#5465) ─────────────────────────────────────────────────────
+
+/// Build a `PeriodReview` that reports a provider failure.
+fn skipped_review() -> PeriodReview {
+    PeriodReview {
+        findings: Vec::new(),
+        skipped: Some(InferenceError::Transport("connection reset".to_string())),
+    }
+}
+
+/// Why: this is the #5465 call-site half of the #5464 fix. A run whose eleventh
+/// provider call failed must not report that period as clean — and the only
+/// place that can be decided is where the reviews are collected. A `record` that
+/// counted every review as reviewed would restore exactly the defect #5464
+/// closed, one layer up.
+/// What: folds in a clean-but-empty review and a skipped one, then asserts the
+/// two land in different counters and that the skipped period is named in the
+/// coverage line with its reason.
+/// Test: this test itself.
+#[test]
+fn period_run_summary_separates_a_skipped_period_from_a_clean_one() {
+    let mut summary = PeriodRunSummary::default();
+
+    let clean_findings = summary.record(
+        "2026Q1",
+        PeriodReview {
+            findings: Vec::new(),
+            skipped: None,
+        },
+    );
+    let skipped_findings = summary.record("2026Q2", skipped_review());
+
+    // Indistinguishable on findings alone — which is exactly the trap.
+    assert!(clean_findings.is_empty());
+    assert!(skipped_findings.is_empty());
+
+    assert_eq!(
+        summary.reviewed, 1,
+        "only the period the model answered for counts as reviewed"
+    );
+    assert_eq!(
+        summary.skipped.len(),
+        1,
+        "the failed period must be recorded as skipped, not flattened into 'no findings'"
+    );
+    assert_eq!(summary.skipped[0].period_label, "2026Q2");
+    assert!(
+        summary.skipped[0].reason.contains("connection reset"),
+        "the provider's own reason must survive: {}",
+        summary.skipped[0].reason
+    );
+    assert_eq!(summary.attempted(), 2);
+    assert!(!summary.is_complete());
+
+    let line = summary.coverage_line();
+    assert!(
+        line.contains("1/2") && line.contains("2026Q2"),
+        "the coverage line must name both the shortfall and the period: {line}"
+    );
+}
+
+/// Why: the report outlives the terminal, so a reader must see from the file
+/// itself that the trajectory covers fewer periods than the window — and must
+/// NOT see a coverage caveat on a run that had none.
+/// What: asserts the note is absent when every period was reviewed and, when
+/// one was not, that it names the period and says the gap is not clean work.
+/// Test: this test itself.
+#[test]
+fn period_run_summary_coverage_note_absent_when_complete() {
+    let mut complete = PeriodRunSummary::default();
+    complete.record(
+        "2026Q1",
+        PeriodReview {
+            findings: Vec::new(),
+            skipped: None,
+        },
+    );
+    assert!(
+        complete.coverage_note().is_none(),
+        "a complete run must not carry a coverage caveat"
+    );
+
+    let mut partial = PeriodRunSummary::default();
+    partial.record("2026Q2", skipped_review());
+    let note = partial
+        .coverage_note()
+        .expect("a skipped period needs a note");
+    assert!(
+        note.contains("2026Q2"),
+        "the note must name the period: {note}"
+    );
+    assert!(
+        note.contains("skipped"),
+        "the note must say the period was skipped: {note}"
+    );
 }

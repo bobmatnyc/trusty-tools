@@ -487,3 +487,125 @@ fn synthesizer_user_message_handles_no_findings() {
         "empty findings must be stated explicitly: {msg}"
     );
 }
+
+// ─── Narrative transport (#5465) ──────────────────────────────────────────────
+
+use std::sync::Arc;
+
+use trusty_common::inference::test_support::ScriptedAdapter;
+use trusty_common::inference::{
+    capabilities, AssistantMessage, ChatChoice, ChatResponse, ProviderId, UsageBlock,
+};
+
+use super::{
+    build_synthesis_request, Synthesizer, SYNTHESIZER_MAX_TOKENS, SYNTHESIZER_TEMPERATURE,
+};
+
+/// A scripted response carrying `body` and a usage block.
+fn scripted_response(body: &str) -> ChatResponse {
+    ChatResponse {
+        id: "synth-1".to_string(),
+        model: "test-model".to_string(),
+        choices: vec![ChatChoice {
+            message: AssistantMessage {
+                content: Some(body.to_string()),
+                tool_calls: Vec::new(),
+            },
+            finish_reason: Some("stop".to_string()),
+        }],
+        usage: UsageBlock {
+            prompt_tokens: 800,
+            completion_tokens: 200,
+            total_tokens: 1000,
+            ..Default::default()
+        },
+    }
+}
+
+fn profile_with_trend() -> ContributorProfile {
+    let mut p = ContributorProfile::new("a@example.com", "Alice", "2026-01-01", "2026-06-30");
+    p.quality_trend = vec![("2026Q1".to_string(), 3.0), ("2026Q2".to_string(), 3.9)];
+    p.improvement_trajectory = Trajectory::Improving;
+    p
+}
+
+/// Why: the narrative pass is the last stage of `tga profile`, and it must route
+/// through the same shared-inference adapter the period review uses — otherwise
+/// profiling grows a second transport and the #5464 seam only half holds.
+/// What: drives the real transport with the commons' `ScriptedAdapter` and
+/// asserts the model's strengths, weaknesses, and narrative all land on the
+/// profile, with usage billed.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesizer_transport_applies_the_models_narrative() {
+    let body = r#"{"strengths":["tests first"],"recurring_weaknesses":["broad error types"],
+        "improvement_trajectory":"improving","narrative":"Steady quarter over quarter."}"#;
+    let adapter = ScriptedAdapter::new("scripted", capabilities(ProviderId::OpenRouter))
+        .with_response(scripted_response(body));
+    let synth = Synthesizer::with_adapter(Arc::new(adapter), "openai/gpt-5.4-mini");
+
+    let mut profile = profile_with_trend();
+    let outcome = synth.synthesize(&mut profile).await;
+
+    assert!(outcome.is_none(), "the adapter answered: {outcome:?}");
+    assert_eq!(profile.strengths, vec!["tests first".to_string()]);
+    assert_eq!(
+        profile.recurring_weaknesses,
+        vec!["broad error types".to_string()]
+    );
+    assert_eq!(profile.narrative, "Steady quarter over quarter.");
+    assert_eq!(profile.token_cost.input_tokens, 800);
+    assert_eq!(profile.token_cost.output_tokens, 200);
+}
+
+/// Why: a narrative that failed to generate must not be presented as the model's
+/// assessment, and it must not take the deterministic results down with it —
+/// the trajectory is computed from the numbers and stays valid either way.
+/// What: an exhausted strict adapter errors; asserts the fallback narrative is
+/// written, the error is RETURNED so the caller can say so, and the trajectory
+/// survives.
+/// Test: this test itself.
+#[tokio::test]
+async fn synthesizer_transport_falls_back_and_reports_the_failure() {
+    let synth = Synthesizer::with_adapter(
+        Arc::new(ScriptedAdapter::new(
+            "scripted",
+            capabilities(ProviderId::OpenRouter),
+        )),
+        "openai/gpt-5.4-mini",
+    );
+
+    let mut profile = profile_with_trend();
+    let outcome = synth.synthesize(&mut profile).await;
+
+    assert!(
+        outcome.is_some(),
+        "a provider failure must be reported, not swallowed into a plausible narrative"
+    );
+    assert!(
+        profile
+            .narrative
+            .contains("Narrative generation unavailable"),
+        "the fallback must say it is one: {}",
+        profile.narrative
+    );
+    assert_eq!(
+        profile.improvement_trajectory,
+        Trajectory::Improving,
+        "the deterministic trajectory must survive a narrative failure"
+    );
+}
+
+/// Why: the routing prefix is what `provider_for` dispatches on; stripping it
+/// here would silently send every narrative call to the default provider.
+/// What: asserts the slug passes through unchanged and the sampling parameters
+/// are attached.
+/// Test: this test itself.
+#[test]
+fn synthesis_request_preserves_routing_prefix_and_sampling() {
+    let req = build_synthesis_request(&profile_with_trend(), "bedrock/us.anthropic.claude");
+    assert_eq!(req.model, "bedrock/us.anthropic.claude");
+    assert_eq!(req.temperature, Some(SYNTHESIZER_TEMPERATURE));
+    assert_eq!(req.max_tokens, Some(SYNTHESIZER_MAX_TOKENS));
+    assert_eq!(req.messages.len(), 2, "one system turn and one user turn");
+}

@@ -75,7 +75,12 @@ impl Migration for M001PerPubConstRust {
     /// 4. Read each candidate file from disk and re-run it through
     ///    `parse_and_embed_files` + `commit_parsed_batch`.
     /// Returns `Ok(())` if there are no candidate files (already migrated or
-    /// no qualifying Rust files).
+    /// no qualifying Rust files). `Ok` does NOT mean every re-chunked chunk
+    /// landed: a chunk id embeds its chunk TYPE, and a candidate file has no
+    /// `Constant` chunks by construction, so every one this pass emits is new
+    /// to the corpus and `TRUSTY_MAX_CHUNKS` can reject it. That count
+    /// is summed across batches and reported as a `warn!` (#100) rather than an
+    /// error, because failing here would re-run the whole pass at every boot.
     /// Test: `test_m001_apply_no_corpus_is_ok` (no corpus → no-op).
     async fn apply(&self, index: &IndexHandle) -> Result<(), anyhow::Error> {
         // ── Step 1: clone corpus Arc under a brief lock ────────────────────
@@ -171,6 +176,16 @@ impl Migration for M001PerPubConstRust {
         // Process files in chunks of 64 to bound per-batch memory.
         const BATCH_SIZE: usize = 64;
         let indexer_arc = std::sync::Arc::clone(&index.indexer);
+        // #100: these commits are not all updates. A named chunk's id is
+        // `{file}::{chunk_type}::{name}::{start_line}` (`chunker::walk::
+        // make_chunk_id`), so it embeds the TYPE — and every candidate above
+        // was selected precisely because it has zero `Constant` chunks in the
+        // corpus. Each `Constant` chunk this pass emits therefore carries an id
+        // the corpus has never held, which `TRUSTY_MAX_CHUNKS` rejects like any
+        // other new chunk. Nothing removes the wide `Code` chunk it was split
+        // out of either, so the corpus grows. On a legacy index near its cap,
+        // part of the re-chunk silently does not land.
+        let mut dropped_by_cap = 0usize;
 
         for (batch_idx, batch) in candidates.chunks(BATCH_SIZE).enumerate() {
             let files: Vec<(String, String)> = batch.to_vec();
@@ -189,18 +204,35 @@ impl Migration for M001PerPubConstRust {
 
             {
                 let indexer = indexer_arc.read().await;
-                indexer
+                let timings = indexer
                     .commit_parsed_batch(parsed, /* defer_graph_rebuild */ true)
                     .await
                     .with_context(|| {
                         format!("M001: commit_parsed_batch failed on batch {batch_idx}")
                     })?;
+                dropped_by_cap = dropped_by_cap.saturating_add(timings.chunks_dropped_by_cap);
             }
 
             tracing::debug!(
                 index_id = %index.id,
                 batch = batch_idx,
                 "M001: committed batch"
+            );
+        }
+
+        if dropped_by_cap > 0 {
+            // Reported, not fatal. Returning `Err` here would leave
+            // schema_version at 0, so every subsequent boot would re-run the
+            // whole re-chunk pass and drop the same chunks again. The operator
+            // action is to raise the cap and reindex; this line is what tells
+            // them the migration completed with less coverage than it claims.
+            tracing::warn!(
+                index_id = %index.id,
+                dropped = dropped_by_cap,
+                cap = crate::core::indexer::max_chunks_per_index(),
+                "M001: the chunk cap discarded {dropped_by_cap} newly-split Constant chunks — \
+                 this index is migrated but NOT fully re-chunked. Raise TRUSTY_MAX_CHUNKS and \
+                 reindex to recover the missing coverage (#100)"
             );
         }
 
