@@ -819,19 +819,31 @@ impl AppState {
     /// that gap by walking the on-disk layout (each subdirectory holding a
     /// `palace.json` is one palace) and rebuilding a live `PalaceHandle` for
     /// each, so recall paths see the full set immediately after a restart.
-    /// What: runs the blocking filesystem walk + per-palace `PalaceHandle::open`
-    /// on a `spawn_blocking` thread (so it never stalls the async runtime),
-    /// registers each successfully opened palace via `register_arc`, logs every
-    /// load at `debug!`, and returns the count loaded. A palace that fails to
-    /// open (corrupt index, unreadable `kg.db`, etc.) is logged at `warn!` and
-    /// skipped — one bad palace must not abort startup or crash the daemon.
-    /// `data_root` is expected to already be the palace registry directory —
-    /// `main.rs` resolves it via [`resolve_palace_registry_dir`] before
-    /// constructing the `AppState`, so the flat / legacy-`palaces/` layout
-    /// difference is handled exactly once.
+    /// What: runs the blocking filesystem walk + per-palace
+    /// `PalaceHandle::open_with_intent` on a `spawn_blocking` thread (so it
+    /// never stalls the async runtime), registers each successfully opened
+    /// palace via `register_arc`, logs every load at `debug!`, and returns the
+    /// count loaded. A palace that fails to open (corrupt index, unreadable
+    /// `kg.db`, etc.) is logged at `warn!` and skipped — one bad palace must not
+    /// abort startup or crash the daemon — but the skip is RECORDED (#4911) and
+    /// readable via [`PalaceRegistry::unopenable`], so a palace whose bytes
+    /// survive and whose contents cannot be read stays observable instead of
+    /// reading as absent. `data_root` is expected to already be the palace
+    /// registry directory — `main.rs` resolves it via
+    /// [`resolve_palace_registry_dir`] before constructing the `AppState`, so
+    /// the flat / legacy-`palaces/` layout difference is handled exactly once.
+    ///
+    /// Intent (#1487, #4911): every open uses the registry's own
+    /// `OpenIntent`, NOT the zero-arg `PalaceHandle::open` default. This is
+    /// the path a restarting daemon takes for every palace it already has on
+    /// disk, so hardcoding `ReadOnlyClient` here made the daemon's
+    /// `with_writer_intent()` guarantee false in the common case.
     /// Test: `tests::load_palaces_from_disk_rehydrates_registry` writes two
     /// palaces into a tempdir, constructs an `AppState`, calls this method, and
-    /// asserts the returned count and registry contents.
+    /// asserts the returned count and registry contents;
+    /// `load_palaces_from_disk_honours_registry_open_intent` covers the intent
+    /// contract in both directions and
+    /// `load_palaces_from_disk_records_an_unopenable_palace` the skip record.
     pub async fn load_palaces_from_disk(&self) -> Result<usize> {
         let registry_dir = self.data_root.clone();
         let registry = self.registry.clone();
@@ -844,8 +856,11 @@ impl AppState {
             let total = palaces.len();
             let mut loaded = 0usize;
             let mut skipped = 0usize;
+            // #4911: hydrate under the registry's own intent, not the zero-arg
+            // `PalaceHandle::open` default (`ReadOnlyClient`).
+            let intent = registry.open_intent();
             for palace in palaces {
-                match trusty_common::memory_core::PalaceHandle::open(&palace) {
+                match trusty_common::memory_core::PalaceHandle::open_with_intent(&palace, intent) {
                     Ok(handle) => {
                         tracing::debug!(
                             palace = %palace.id,
@@ -879,6 +894,10 @@ impl AppState {
                             "skipping palace during startup hydration: {e:#}; \
                              will retry lazily on first access"
                         );
+                        // #4911: a skipped palace is absent from the handle
+                        // cache, so record it or it reads as never having
+                        // existed. Cleared by `register_arc` if it later opens.
+                        registry.record_unopenable(palace.id.clone(), format!("{e:#}"));
                         skipped += 1;
                     }
                 }

@@ -170,6 +170,38 @@ pub(super) struct HealthResponse {
     /// parked, which is why #3992 read as HEALTHY for the whole incident.
     /// What: see [`WorkerHealth`].
     pub(super) worker: WorkerHealth,
+    /// Palaces that exist on disk but which startup hydration could not open,
+    /// each with the reason (issue #4911).
+    ///
+    /// Why: a palace the daemon skips is absent from the handle cache and so is
+    /// indistinguishable, from outside, from one that was never created —
+    /// `palace_list` simply does not mention it. That is how a refused open
+    /// reads as data loss to an operator even though the bytes are intact. The
+    /// registry records every skip; this is the only place a human or a script
+    /// can read that record back.
+    /// What: `(palace_id, reason)` pairs from
+    /// [`trusty_common::memory_core::PalaceRegistry::unopenable`]. Omitted
+    /// entirely when empty, so a healthy daemon's payload is unchanged.
+    /// Test: `health_reports_unopenable_palaces`,
+    /// `health_omits_unopenable_palaces_when_none`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) unopenable_palaces: Vec<UnopenablePalace>,
+}
+
+/// One palace the daemon has on disk but could not open (issue #4911).
+///
+/// Why: a bare id would tell an operator which palace is missing but not what
+/// to do about it — "incompatible on-disk format" and "too many open files"
+/// call for opposite responses, and the reason is what separates them.
+/// What: the palace id and the formatted open error the hydration walk
+/// recorded.
+/// Test: `health_reports_unopenable_palaces`.
+#[derive(serde::Serialize)]
+pub(super) struct UnopenablePalace {
+    /// The palace id as it appears on disk and in `palace_list`.
+    pub(super) id: String,
+    /// The formatted error from the failed open.
+    pub(super) reason: String,
 }
 
 /// Worker-pool occupancy block of the `/health` payload (issue #4001).
@@ -214,8 +246,11 @@ pub(super) struct WorkerHealth {
 /// `"ok"` or `"degraded"`. Without that flag the handler returns
 /// `status: "ok"` immediately after sampling the cheap resource metrics —
 /// suitable for 1-second LB polling without ONNX overhead.
+/// Issue #4911: `unopenable_palaces` lists palaces present on disk that startup
+/// hydration refused, so a skipped palace is visible instead of merely absent.
 /// What: Returns HTTP 200 with `{status, version, rss_mb, disk_bytes,
-/// cpu_pct, uptime_secs, open_fds?, fd_soft_limit?, detail?}`. Without
+/// cpu_pct, uptime_secs, open_fds?, fd_soft_limit?, detail?,
+/// unopenable_palaces?}`. Without
 /// `?probe=true`, `status` is always `"ok"` (daemon is alive). With
 /// `?probe=true`, `status` is `"ok"` or `"degraded"` based on the
 /// remember/recall/forget cycle. The handler never returns non-200 so
@@ -322,6 +357,19 @@ pub(super) async fn health(
     }
     .to_string();
 
+    // #4911: report palaces present on disk that hydration refused, so a
+    // skipped palace is visible rather than merely absent.
+    let mut unopenable_palaces: Vec<UnopenablePalace> = state
+        .registry
+        .unopenable()
+        .into_iter()
+        .map(|(id, reason)| UnopenablePalace {
+            id: id.as_str().to_string(),
+            reason,
+        })
+        .collect();
+    unopenable_palaces.sort_by(|a, b| a.id.cmp(&b.id));
+
     Json(HealthResponse {
         status,
         detail,
@@ -336,6 +384,7 @@ pub(super) async fn health(
         update_available,
         daemon_state,
         worker,
+        unopenable_palaces,
     })
 }
 
