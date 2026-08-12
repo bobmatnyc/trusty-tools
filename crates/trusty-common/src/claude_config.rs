@@ -185,6 +185,7 @@ pub fn mcp_server_entry(command: &str, args: &[&str]) -> Value {
 /// Test: `write_json_atomic_creates_and_backs_up` (`#[ignore]`, real fs),
 /// `concurrent_writers_never_publish_a_torn_file` (#4077),
 /// `concurrent_writers_never_tear_the_backup` (#4077),
+/// `failed_rename_leaves_destination_and_no_staging_file`,
 /// `staging_paths_are_unique_per_call`.
 pub fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent()
@@ -227,19 +228,30 @@ pub fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
 /// What: calls `fill(staged)`, then `rename(staged, dest)`. On either error the
 /// staged file is removed best-effort (its own removal failure is not worth
 /// masking the real error) and the original error is returned, leaving `dest`
-/// untouched.
+/// untouched. The context names the stage that actually failed — a fill error
+/// never reached the publish, so reporting it as "publish X onto Y" pointed a
+/// reader at a rename that was never attempted.
 /// Test: `concurrent_writers_never_publish_a_torn_file`,
-/// `failed_write_leaves_no_staging_file`.
+/// `failed_write_leaves_no_staging_file` (fill branch),
+/// `failed_rename_leaves_destination_and_no_staging_file` (rename branch).
 fn stage_then_publish(
     staged: &Path,
     dest: &Path,
     fill: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
-    let result = fill(staged).and_then(|()| std::fs::rename(staged, dest));
+    let filled = fill(staged);
+    let reached_publish = filled.is_ok();
+    let result = filled.and_then(|()| std::fs::rename(staged, dest));
     if result.is_err() {
         let _ = std::fs::remove_file(staged);
     }
-    result.with_context(|| format!("publish {} onto {}", staged.display(), dest.display()))
+    result.with_context(|| {
+        if reached_publish {
+            format!("publish {} onto {}", staged.display(), dest.display())
+        } else {
+            format!("fill staging file {}", staged.display())
+        }
+    })
 }
 
 /// A suffix unique to this call among every live writer on the machine.
@@ -688,6 +700,71 @@ mod tests {
         assert!(
             !dest.exists(),
             "a failed publish must not create the target"
+        );
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("fill staging file"),
+            "a fill failure must not be reported as a publish that never happened: {chain}"
+        );
+    }
+
+    /// Why: `stage_then_publish` promises the staged file is removed on EITHER
+    /// failure, and `write_json_atomic` promises a failed call leaves its target
+    /// byte-for-byte as it was. Only the fill-fails branch was covered; this is
+    /// the other one — fill SUCCEEDS and the rename fails.
+    ///
+    /// The failure is forced structurally, not by timing: `<path>.bak` is
+    /// planted as a non-empty DIRECTORY, and renaming a non-directory onto a
+    /// directory is required to fail by POSIX (`EISDIR` here, `ENOTDIR` on some
+    /// platforms) and fails on Windows too. So `fs::copy` fills the staged
+    /// backup, the rename onto `<path>.bak` cannot succeed, and the error
+    /// propagates before the target is ever touched. No sleep, no race, no
+    /// dependence on file permissions or on the test's uid.
+    #[test]
+    fn failed_rename_leaves_destination_and_no_staging_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = dir.path();
+        let path = dir.join("settings.json");
+
+        write_json_atomic(&path, &json!({ "v": 1 })).expect("seed target");
+        let before = std::fs::read(&path).expect("read seeded target");
+
+        // Occupy `<path>.bak` with a non-empty directory: the backup publish
+        // fills its staging file, then cannot rename onto this.
+        let backup = backup_path(&path);
+        std::fs::create_dir(&backup).expect("plant backup directory");
+        std::fs::write(backup.join("occupant"), b"not a backup").expect("occupy it");
+
+        let err = write_json_atomic(&path, &json!({ "v": 2 }))
+            .expect_err("a rename that cannot succeed must propagate");
+
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("publish ") && chain.contains(" onto "),
+            "a rename failure must name the publish stage: {chain}"
+        );
+
+        assert_eq!(
+            std::fs::read(&path).expect("target must survive"),
+            before,
+            "a failed publish must leave the target byte-for-byte unchanged"
+        );
+
+        let leftovers: Vec<String> = std::fs::read_dir(dir)
+            .expect("list scratch dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("settings.json.bak.") || n.starts_with("settings.json.tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed publish must remove its own staging file, left: {leftovers:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(backup.join("occupant")).expect("occupant must survive"),
+            b"not a backup",
+            "the rename destination must be untouched by the failed publish"
         );
     }
 

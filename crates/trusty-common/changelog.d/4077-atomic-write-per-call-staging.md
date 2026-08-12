@@ -14,3 +14,5 @@ Fixed
   now staged and published by rename like the target.
 - A write or rename that fails removes its own staging file, so a failed call
   leaves the target byte-for-byte as it was and drops no litter.
+- A failed staging write now reports `fill staging file <path>` instead of
+  `publish <path> onto <dest>`, which named a rename that was never attempted.
