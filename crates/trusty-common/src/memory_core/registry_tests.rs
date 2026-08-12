@@ -994,3 +994,82 @@ fn open_error_is_not_absent_for_an_unstattable_palace_json() {
          that an Io error at load_palace, and this classifier read it back as absence: {denied:#}"
     );
 }
+
+/// Why (#5592): the two tests above reach `load_palace` under the id the caller
+/// asked for, so `load_palace`'s own #5574 guard decides the answer. An ALIASED
+/// open does not: `resolve_palace_alias` probes the target itself before any of
+/// that, and while that probe used `Path::exists()` a target it was DENIED to
+/// stat read as a target that is not there. The redirect was then dropped and
+/// `load_palace` ran against the alias id's own genuinely-absent directory,
+/// returning a truthful `NotFound` for the wrong palace — so a palace that
+/// exists and merely could not be verified still reported absence, and the HTTP
+/// callers still rendered 404. That is the same coercion #5549 exists to
+/// remove, one call earlier in the same function.
+/// What: creates palace `bare-repo`, aliases `owner-repo` to it, evicts the
+/// cached handle so the next open reads disk, strips `bare-repo`'s own
+/// directory to mode 000 (the probe itself is denied, not just the read), and
+/// asserts the error from opening the ALIAS is NOT classified as absence.
+/// Panics rather than passing vacuously if the denial does not take hold.
+/// Test: this test itself.
+#[cfg(unix)]
+#[test]
+fn open_error_is_not_absent_for_an_unstattable_alias_target() {
+    use crate::memory_core::palace::Palace;
+    use crate::palace_alias::PalaceAliasStore;
+    use chrono::Utc;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("bare-repo"),
+            name: "bare-repo".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("bare-repo"),
+        },
+    )
+    .expect("create palace");
+    // `palace_aliases.json` sits in `data_root`, not inside the palace
+    // directory, so locking that directory below leaves the alias map readable.
+    PalaceAliasStore::register_alias(data_root, "owner-repo", "bare-repo").expect("register alias");
+    reg.remove(&PalaceId::new("bare-repo"));
+
+    let palace_dir = data_root.join("bare-repo");
+    std::fs::set_permissions(&palace_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Declared after `dir` so it drops first: the mode is restored before
+    // `TempDir` walks the tree, including while unwinding from a failure below.
+    let _restore = RestoreMode {
+        path: palace_dir.clone(),
+        mode: 0o700,
+    };
+
+    let target = palace_dir.join("palace.json");
+    match target.try_exists() {
+        Ok(_) => panic!(
+            "cannot exercise #5592: {} is still stattable with its directory at mode 000. Run \
+             this suite as a non-root user on a filesystem that honours POSIX permission bits.",
+            target.display()
+        ),
+        Err(e) => assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "expected the locked directory to deny statting palace.json, got {e}"
+        ),
+    }
+
+    // `PalaceHandle` is not `Debug`, so `expect_err` is unavailable here.
+    let denied = match reg.open_palace(data_root, &PalaceId::new("owner-repo")) {
+        Ok(_) => panic!("an alias whose target cannot be statted must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        !PalaceRegistry::open_error_is_absent(&denied),
+        "an aliased palace whose target could not be statted was classified as absent — \
+         resolve_palace_alias dropped the redirect and load_palace then answered for the alias \
+         id's own empty directory, so the caller renders 404 for a palace that exists: {denied:#}"
+    );
+}

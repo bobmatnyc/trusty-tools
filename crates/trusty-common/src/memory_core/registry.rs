@@ -558,16 +558,37 @@ impl PalaceRegistry {
     /// deleted palace (which would just fail load anyway, but this keeps the
     /// error message about the ORIGINAL id).
     /// What: returns `palace_id` unchanged when `<data_root>/<palace_id>/palace.json`
-    /// exists. Otherwise consults [`PalaceAliasStore::resolve_alias`]; if it maps
-    /// to a `target` whose `<data_root>/<target>/palace.json` exists, returns that
+    /// is present. Otherwise consults [`PalaceAliasStore::resolve_alias`]; if it maps
+    /// to a `target` whose `<data_root>/<target>/palace.json` is present, returns that
     /// target id. In every other case returns `palace_id` unchanged so the caller
     /// surfaces the normal "metadata missing" error. Alias-map read errors are
     /// swallowed (best-effort redirect) — a broken alias file must not break
     /// resolution of palaces that DO exist.
+    ///
+    /// Presence is `try_exists`, and only `Ok(false)` counts as absent (#5592,
+    /// ADR-0045). `exists()` reported a path we are denied to stat as one that is
+    /// not there, which broke both guards in the direction that lies: an alias
+    /// whose target could not be verified lost its redirect, and `load_palace`
+    /// then answered truthfully about the alias id's own empty directory — a
+    /// `NotFound` for the wrong palace, which [`Self::open_error_is_absent`]
+    /// cannot tell from the real thing. Returning `PalaceId` rather than a
+    /// `Result` is why an undeterminable probe presumes PRESENT instead of
+    /// propagating: this cannot fail, and every path it feeds ends at
+    /// `load_palace`, which classifies the same denial correctly one call later.
+    /// That also stops a stale alias from shadowing a real palace that merely
+    /// could not be stat'd.
     /// Test: `open_palace_follows_alias`, `open_palace_ignores_alias_when_target_missing`,
-    /// `open_palace_prefers_real_palace_over_alias`.
+    /// `open_palace_prefers_real_palace_over_alias`,
+    /// `open_error_is_not_absent_for_an_unstattable_alias_target`.
     fn resolve_palace_alias(data_root: &Path, palace_id: &PalaceId) -> PalaceId {
-        let exists = |id: &str| data_root.join(id).join("palace.json").exists();
+        // #5592: `exists()` read a palace we are DENIED to stat as one that is
+        // not there. Only `Ok(false)` is a genuine absence.
+        let exists = |id: &str| {
+            !matches!(
+                data_root.join(id).join("palace.json").try_exists(),
+                Ok(false)
+            )
+        };
         if exists(palace_id.as_str()) {
             return palace_id.clone();
         }
