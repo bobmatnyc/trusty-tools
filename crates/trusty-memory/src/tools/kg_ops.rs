@@ -11,6 +11,7 @@
 //! Test: `dispatch_kg_assert_then_query`, `dispatch_discover_aliases_*`,
 //! `dispatch_kg_gaps_returns_cached` in `tools::tests`.
 
+use crate::kg_write::CachePolicy;
 use crate::service::core_kg::{DEFAULT_KG_LIST_LIMIT, MAX_KG_LIST_LIMIT};
 use crate::AppState;
 use anyhow::{anyhow, Context, Result};
@@ -49,15 +50,6 @@ pub(crate) async fn handle_kg_assert(state: &AppState, args: Value) -> Result<Va
         .map(|s| s.to_string());
 
     let handle = open_palace_handle(state, palace)?;
-    // #4888: Tier S is injected on every turn of every session, so a
-    // hot-predicate write is gated on the 20-fact cap and the 80-char form
-    // constraint before it reaches storage. Fail-closed by construction —
-    // the `?` returns before `kg.assert`, so a rejected write never lands.
-    // `_admission` holds the lock that keeps the count valid until the write
-    // is enqueued; it must stay bound until after `kg.assert`.
-    let _admission =
-        crate::prompt_facts::check_tier_s_admission(state, &handle, &subject, &predicate, &object)
-            .await?;
     let triple = Triple {
         subject,
         predicate,
@@ -67,17 +59,10 @@ pub(crate) async fn handle_kg_assert(state: &AppState, args: Value) -> Result<Va
         confidence,
         provenance,
     };
-    let is_hot = crate::prompt_facts::is_hot_predicate(&triple.predicate);
-    handle.kg.assert(triple).await.context("kg.assert")?;
-    // Rebuild the prompt cache if this assertion touched a hot
-    // predicate; otherwise the cache stays valid and we skip the
-    // gather/format pass. Failures are logged but non-fatal — the
-    // write succeeded, the cache is only a denormalisation.
-    if is_hot {
-        if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
-            tracing::warn!("rebuild_prompt_cache after kg_assert failed: {e:#}");
-        }
-    }
+    // #5524: this was the one path that already ran admission → assert →
+    // rebuild correctly; that sequence now lives in `kg_write` so the other
+    // five surfaces get it too instead of each re-deriving it.
+    crate::kg_write::assert_triple(state, &handle, triple, CachePolicy::Inline).await?;
     Ok(json!({ "status": "asserted" }))
 }
 
@@ -176,17 +161,6 @@ pub(crate) async fn handle_add_alias(state: &AppState, args: Value) -> Result<Va
         Some(e) if !e.is_empty() => format!("{full} ({e})"),
         _ => full.clone(),
     };
-    // #4888: `is_alias_for` is a hot predicate, so an alias consumes a Tier S
-    // slot exactly like a convention does and is gated identically. Guard held
-    // until after `kg.assert` below.
-    let _admission = crate::prompt_facts::check_tier_s_admission(
-        state,
-        &handle,
-        &short,
-        "is_alias_for",
-        &object,
-    )
-    .await?;
     let triple = Triple {
         subject: short.clone(),
         predicate: "is_alias_for".to_string(),
@@ -196,14 +170,9 @@ pub(crate) async fn handle_add_alias(state: &AppState, args: Value) -> Result<Va
         confidence: 1.0,
         provenance: Some("add_alias".to_string()),
     };
-    handle
-        .kg
-        .assert(triple)
-        .await
-        .context("kg.assert (alias)")?;
-    if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
-        tracing::warn!("rebuild_prompt_cache after add_alias failed: {e:#}");
-    }
+    // #5524: `is_alias_for` is hot, so the entry point's hot check refreshes
+    // here exactly as the old unconditional rebuild did (#4888 gate included).
+    crate::kg_write::assert_triple(state, &handle, triple, CachePolicy::Inline).await?;
     Ok(json!({ "asserted": true, "short": short, "full": full }))
 }
 
@@ -502,6 +471,9 @@ pub(crate) async fn handle_discover_aliases(state: &AppState, args: Value) -> Re
 
     let mut already_known = 0usize;
     let mut newly_asserted = 0usize;
+    // #5524: accumulated from the write receipts so the trailing rebuild is
+    // decided by the entry point's hot check, not by this loop.
+    let mut any_hot = false;
     let mut reported: Vec<Value> = Vec::with_capacity(discoveries.len());
     // #4888: aliases the Tier S budget refused, plus the first refusal's
     // message. The reason is carried once rather than per row because it is
@@ -540,26 +512,6 @@ pub(crate) async fn handle_discover_aliases(state: &AppState, args: Value) -> Re
         // refusal behind as partial state. Every refused alias is instead
         // reported back in `rejected`, so nothing is silently dropped and the
         // cap is never exceeded.
-        // `_admission` holds the admission lock for the rest of this iteration,
-        // covering the `kg.assert` below.
-        let _admission = match crate::prompt_facts::check_tier_s_admission(
-            state,
-            &handle,
-            &d.short,
-            "is_alias_for",
-            &d.full,
-        )
-        .await
-        {
-            Ok(a) => a,
-            Err(e) => {
-                if rejected_reason.is_none() {
-                    rejected_reason = Some(format!("{e:#}"));
-                }
-                rejected.push(json!({ "short": d.short, "full": d.full }));
-                continue;
-            }
-        };
         let triple = Triple {
             subject: d.short.clone(),
             predicate: "is_alias_for".to_string(),
@@ -569,11 +521,30 @@ pub(crate) async fn handle_discover_aliases(state: &AppState, args: Value) -> Re
             confidence: 1.0,
             provenance: Some(format!("discover_aliases:{}", d.source.as_str())),
         };
-        handle
-            .kg
-            .assert(triple)
-            .await
-            .context("kg.assert (discover)")?;
+        // #5524: `Batch` keeps this loop's single trailing rebuild — a per-item
+        // refresh would walk every palace once per discovered alias — without
+        // letting the loop decide for itself what counts as hot.
+        let receipt = match crate::kg_write::assert_triple(
+            state,
+            &handle,
+            triple,
+            crate::kg_write::CachePolicy::Batch,
+        )
+        .await
+        {
+            Ok(r) => r,
+            // A Tier S refusal is reported per-alias and the batch continues; a
+            // genuine write failure still aborts the whole call.
+            Err(e @ crate::kg_write::KgWriteError::Admission(_)) => {
+                if rejected_reason.is_none() {
+                    rejected_reason = Some(format!("{e:#}"));
+                }
+                rejected.push(json!({ "short": d.short, "full": d.full }));
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+        any_hot |= receipt.hot;
         newly_asserted += 1;
         reported.push(json!({
             "short": d.short,
@@ -582,11 +553,9 @@ pub(crate) async fn handle_discover_aliases(state: &AppState, args: Value) -> Re
         }));
     }
 
-    if newly_asserted > 0 {
-        if let Err(e) = crate::prompt_facts::rebuild_prompt_cache(state).await {
-            tracing::warn!("rebuild_prompt_cache after discover_aliases failed: {e:#}");
-        }
-    }
+    // #5524: one rebuild for the whole batch, gated on the receipts rather than
+    // on a locally re-derived predicate list.
+    crate::kg_write::refresh_after_batch(state, any_hot).await?;
 
     Ok(json!({
         "discovered": reported,

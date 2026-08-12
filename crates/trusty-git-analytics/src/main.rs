@@ -28,6 +28,7 @@ use crate::commands::dora::DoraArgs;
 use crate::commands::install::InstallArgs;
 use crate::commands::override_cmd::OverrideArgs;
 use crate::commands::pr_metrics::PrMetricsArgs;
+use crate::commands::profile::ProfileArgs;
 use crate::commands::rules::RulesArgs;
 
 /// Top-level CLI parser.
@@ -120,6 +121,8 @@ enum Commands {
     Report(ReportArgs),
     /// Aggregate pull-request metrics per engineer.
     PrMetrics(PrMetricsArgs),
+    /// Longitudinal per-contributor quality profile (#5465).
+    Profile(ProfileArgs),
     /// Interactive configuration wizard for first-time setup.
     Install(InstallArgs),
     /// List, merge, or manage developer identity aliases.
@@ -367,6 +370,14 @@ async fn run() -> anyhow::Result<()> {
         return commands::tui::run(config, &db_path, args, log_capture).await;
     }
 
+    // #5465: `tga profile` opens the database through `ContributorSelector`,
+    // which seeds the identity resolver from the same connection the rest of the
+    // pipeline reads through — so it is dispatched before the shared open rather
+    // than opening the file twice.
+    if let Commands::Profile(args) = cli.command {
+        return commands::profile::run(config, &db_path, args).await;
+    }
+
     // Open SQLite database (runs migrations on open).
     tracing::info!(path = %db_path.display(), "opening database");
     let mut db = Database::open(&db_path)?;
@@ -400,6 +411,7 @@ async fn run() -> anyhow::Result<()> {
         },
         // Handled above — match is exhaustive.
         Commands::Tui(_) => unreachable!("tui dispatched above"),
+        Commands::Profile(_) => unreachable!("profile dispatched above"),
         Commands::Install(_) => unreachable!("install dispatched above"),
         Commands::Config(_) => unreachable!("config dispatched above"),
     }
