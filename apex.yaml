@@ -1,0 +1,26 @@
+# GENERATED from APEX repos.yaml — do not hand-edit.
+# Source: https://github.com/duettoresearch/APEX
+# Generated at: 2026-08-12T01:20:53Z
+#
+# Regenerate with: apex generate-apex-yaml --root <apex-repo>
+# Schema: https://github.com/duettoresearch/APEX/blob/main/schemas/apex.schema.json
+
+apex_repo: https://github.com/duettoresearch/APEX
+generated_at: '2026-08-12T01:20:53Z'
+generator_version: 1.0.0
+initiatives:
+- id: automated-pr-review
+  title: Automated PR Review Service
+  product: code-intelligence
+  domain: engineering-platform
+  role: dependency
+  status: delivery
+  active: true
+  apex_path: products/engineering-platform/code-intelligence/initiatives/automated-pr-review
+  paths:
+  - /
+  decisions: []
+  policies:
+  - policies/engineering/apex-repo-linkage.md
+  repo_role: dependency
+  repo_category: DevOps
