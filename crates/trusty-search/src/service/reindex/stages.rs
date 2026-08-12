@@ -14,6 +14,8 @@
 //!   that publish `semantic: Ready` (#4707).
 //! - `mark_semantic_ready_graph_in_progress` — after embed phase completes.
 //! - `mark_reindex_failed` — on zero-vector embed failure (#601).
+//! - `mark_reindex_failed_before_lexical` — on a refusal that fires before the
+//!   lexical phase ran, so no lane is left stranded at `InProgress` (#4356).
 //! - `mark_graph_ready` — after KG rebuild.
 //! - `schedule_progress_cleanup` — GC the progress entry after TTL.
 //! - `refresh_context_embedding` — refresh per-index routing embedding (#112).
@@ -243,6 +245,37 @@ pub(super) async fn mark_reindex_failed(handle: &Arc<IndexHandle>, reason: &str)
     // Lexical lane was genuinely built — keep it Ready/queryable.
     stages.semantic = StageState::failed(reason);
     stages.graph = StageState::failed(reason);
+}
+
+/// Mark every lane failed for a reindex refused BEFORE the lexical phase ran
+/// (issue #4356).
+///
+/// Why: [`mark_reindex_failed`] deliberately leaves `lexical` alone, under the
+/// invariant that the BM25 lane was genuinely built and is still queryable.
+/// That invariant does not hold for a refusal that fires between
+/// [`reset_stages_for_reindex`] (which sets `lexical: InProgress`) and the
+/// first batch — nothing was built, and reusing the other helper would strand
+/// `lexical` at `InProgress` with no reindex in flight, which is precisely the
+/// stuck-mid-walk condition #5575 teaches `/health` to report as degraded.
+/// What: replaces every lane that was going to run with
+/// [`StageState::failed`]. A lane already `Skipped` — `lexical_only`'s
+/// semantic/graph, `skip_kg`'s graph, `skip_vector`'s semantic — is left
+/// Skipped, because the operator turned it off and a refused walk says nothing
+/// about it.
+/// Test: `refusal_before_lexical_fails_every_running_lane` and
+/// `refusal_before_lexical_preserves_skipped_lanes` below, plus
+/// `reindex_refuses_walk_over_file_budget` in `tests.rs`.
+pub(super) async fn mark_reindex_failed_before_lexical(handle: &Arc<IndexHandle>, reason: &str) {
+    let mut guard = handle.stages.write().await;
+    // Deref the guard ONCE: `&mut guard.lexical` would go through `DerefMut`
+    // per field and borrow the whole guard each time, so the three field
+    // borrows could not be disjoint.
+    let stages = &mut *guard;
+    for stage in [&mut stages.lexical, &mut stages.semantic, &mut stages.graph] {
+        if stage.status != StageStatus::Skipped {
+            *stage = StageState::failed(reason);
+        }
+    }
 }
 
 /// Flip the graph stage to `Ready`. After this transition the search
@@ -502,5 +535,67 @@ mod tests {
             "an all-hash-skipped reindex over a populated store must stay Ready (#868)"
         );
         assert!(stages.search_capabilities().contains(&"vector"));
+    }
+
+    /// #4356: a refusal that fires before the lexical phase must not leave
+    /// `lexical` at the `InProgress` that `reset_stages_for_reindex` just set.
+    ///
+    /// Why: `mark_reindex_failed` deliberately leaves `lexical` alone, so
+    /// reusing it here strands the index in the stuck-mid-walk state #5575
+    /// teaches `/health` to report as degraded — for a refusal that is working
+    /// as designed.
+    /// What: reset the stages (the real precondition), refuse, assert all three
+    /// lanes are `Failed` and carry the reason.
+    /// Test: this test. It fails if the refusal path is pointed back at
+    /// `mark_reindex_failed`.
+    #[tokio::test]
+    async fn refusal_before_lexical_fails_every_running_lane() {
+        let handle = handle_with(false).await;
+        reset_stages_for_reindex(&handle).await;
+        assert_eq!(
+            handle.stages.read().await.lexical.status,
+            StageStatus::InProgress,
+            "fixture precondition: the reset must have armed lexical"
+        );
+
+        mark_reindex_failed_before_lexical(&handle, "over the file budget").await;
+
+        let stages = handle.stages.read().await;
+        assert_eq!(stages.lexical.status, StageStatus::Failed);
+        assert_eq!(stages.semantic.status, StageStatus::Failed);
+        assert_eq!(stages.graph.status, StageStatus::Failed);
+        assert_eq!(
+            stages.lexical.failure.as_deref(),
+            Some("over the file budget"),
+            "the lane must carry why it failed, not just that it did"
+        );
+        assert_eq!(stages.lifecycle_status(), "failed");
+    }
+
+    /// #4356: a lane the operator turned OFF stays `Skipped` through a refusal.
+    ///
+    /// Why: `lexical_only`, `skip_kg`, and `skip_vector` express a deliberate
+    /// choice. Reporting such a lane as `Failed` because an unrelated budget
+    /// check refused the walk would blame the operator's configuration for
+    /// something it had nothing to do with.
+    /// What: mark `graph` skipped after the reset, refuse, assert `graph` is
+    /// untouched while the two running lanes fail.
+    /// Test: this test.
+    #[tokio::test]
+    async fn refusal_before_lexical_preserves_skipped_lanes() {
+        let handle = handle_with(false).await;
+        reset_stages_for_reindex(&handle).await;
+        handle.stages.write().await.graph = StageState::skipped();
+
+        mark_reindex_failed_before_lexical(&handle, "over the file budget").await;
+
+        let stages = handle.stages.read().await;
+        assert_eq!(
+            stages.graph.status,
+            StageStatus::Skipped,
+            "a deliberately-disabled lane must not be reported as failed"
+        );
+        assert_eq!(stages.lexical.status, StageStatus::Failed);
+        assert_eq!(stages.semantic.status, StageStatus::Failed);
     }
 }

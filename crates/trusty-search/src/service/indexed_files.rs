@@ -46,6 +46,21 @@ impl IndexedFiles {
         self.inner.write().await.remove(path)
     }
 
+    /// Snapshot of every file path currently tracked.
+    ///
+    /// Why: the dropped-event reconcile in [`crate::service::watch_rescan`] must
+    /// find files that were deleted while the OS event queue was overflowing.
+    /// Those deletions are unrecoverable from the event stream, so the only way
+    /// to spot them is to compare what we believe is indexed against what the
+    /// walker still finds on disk.
+    /// What: clones the key set under a read lock so the caller can iterate
+    /// without holding it (removal takes the write lock).
+    /// Test: `rescan_reconcile_drops_files_deleted_during_the_gap` in
+    /// `crate::service::watch_rescan_tests`.
+    pub async fn paths(&self) -> Vec<PathBuf> {
+        self.inner.read().await.keys().cloned().collect()
+    }
+
     /// Number of distinct files currently tracked. Test-only accessor.
     #[cfg(test)]
     pub async fn len(&self) -> usize {
