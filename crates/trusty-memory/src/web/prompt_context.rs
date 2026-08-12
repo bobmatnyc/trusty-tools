@@ -76,8 +76,8 @@ pub(super) struct KgGapsQuery {
 /// What: Resolves the palace from the optional `palace` query arg (falling
 /// back to the daemon's `default_palace`, then erroring with 400 if neither
 /// is set). Returns `[]` when the cache has no entry yet — the dream cycle
-/// simply hasn't populated it. Returns 404 only when the palace name is
-/// unknown to the registry (handle.open failed).
+/// simply hasn't populated it. Returns 404 only when the palace is genuinely
+/// absent; an open that could not be completed is 500 (#5549, ADR-0045).
 /// Test: `kg_gaps_endpoint_returns_cached_gaps`,
 /// `kg_gaps_endpoint_returns_empty_when_uncached`.
 pub(super) async fn kg_gaps_handler(
