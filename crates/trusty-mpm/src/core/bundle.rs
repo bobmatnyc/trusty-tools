@@ -30,115 +30,115 @@ pub const OPTIMIZER_TOML: &str = include_str!("../assets/hooks/optimizer.toml");
 pub const OVERSEER_TOML: &str = include_str!("../assets/hooks/overseer.toml");
 
 /// Base agent — the root of every trusty-mpm inheritance chain.
-pub const BASE_AGENT: &str = include_str!("../assets/agents/BASE-AGENT.md");
+pub const BASE_AGENT: &str = trusty_agents_common::agent_assets::BASE_AGENT;
 
 /// Base engineer agent — foundation for all engineer agents.
-pub const BASE_ENGINEER: &str = include_str!("../assets/agents/BASE-ENGINEER.md");
+pub const BASE_ENGINEER: &str = trusty_agents_common::agent_assets::BASE_ENGINEER;
 
 /// Base research agent — foundation for all research agents.
-pub const BASE_RESEARCH: &str = include_str!("../assets/agents/BASE-RESEARCH.md");
+pub const BASE_RESEARCH: &str = trusty_agents_common::agent_assets::BASE_RESEARCH;
 
 /// Base QA agent — foundation for all QA agents.
-pub const BASE_QA: &str = include_str!("../assets/agents/BASE-QA.md");
+pub const BASE_QA: &str = trusty_agents_common::agent_assets::BASE_QA;
 
 /// Base ops agent — foundation for all ops agents.
-pub const BASE_OPS: &str = include_str!("../assets/agents/BASE-OPS.md");
+pub const BASE_OPS: &str = trusty_agents_common::agent_assets::BASE_OPS;
 
 /// Concrete general-purpose engineer agent (`extends: base-engineer`).
-pub const ENGINEER_AGENT: &str = include_str!("../assets/agents/engineer.md");
+pub const ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::ENGINEER;
 
 /// Concrete QA agent (`extends: base-qa`).
-pub const QA_AGENT: &str = include_str!("../assets/agents/qa.md");
+pub const QA_AGENT: &str = trusty_agents_common::agent_assets::QA;
 
 /// Concrete research agent (`extends: base-research`).
-pub const RESEARCH_AGENT: &str = include_str!("../assets/agents/research.md");
+pub const RESEARCH_AGENT: &str = trusty_agents_common::agent_assets::RESEARCH;
 
 /// Concrete security agent (`extends: base-agent`).
-pub const SECURITY_AGENT: &str = include_str!("../assets/agents/security.md");
+pub const SECURITY_AGENT: &str = trusty_agents_common::agent_assets::SECURITY;
 
 /// Concrete documentation agent (`extends: base-agent`).
-pub const DOCUMENTATION_AGENT: &str = include_str!("../assets/agents/documentation.md");
+pub const DOCUMENTATION_AGENT: &str = trusty_agents_common::agent_assets::DOCUMENTATION;
 
 /// Concrete data-engineer agent (`extends: base-engineer`).
-pub const DATA_ENGINEER_AGENT: &str = include_str!("../assets/agents/data-engineer.md");
+pub const DATA_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::DATA_ENGINEER;
 
 /// Concrete version-control agent (`extends: base-ops`).
-pub const VERSION_CONTROL_AGENT: &str = include_str!("../assets/agents/version-control.md");
+pub const VERSION_CONTROL_AGENT: &str = trusty_agents_common::agent_assets::VERSION_CONTROL;
 
 /// Concrete ticketing agent (`extends: base-agent`).
-pub const TICKETING_AGENT: &str = include_str!("../assets/agents/ticketing.md");
+pub const TICKETING_AGENT: &str = trusty_agents_common::agent_assets::TICKETING;
 
 /// Concrete code-analyzer agent (`extends: base-research`).
-pub const CODE_ANALYZER_AGENT: &str = include_str!("../assets/agents/code-analyzer.md");
+pub const CODE_ANALYZER_AGENT: &str = trusty_agents_common::agent_assets::CODE_ANALYZER;
 
 /// Concrete python-engineer agent (`extends: base-engineer`).
-pub const PYTHON_ENGINEER_AGENT: &str = include_str!("../assets/agents/python-engineer.md");
+pub const PYTHON_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::PYTHON_ENGINEER;
 
 /// Concrete typescript-engineer agent (`extends: base-engineer`).
-pub const TYPESCRIPT_ENGINEER_AGENT: &str = include_str!("../assets/agents/typescript-engineer.md");
+pub const TYPESCRIPT_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::TYPESCRIPT_ENGINEER;
 
 /// Concrete golang-engineer agent (`extends: base-engineer`).
-pub const GOLANG_ENGINEER_AGENT: &str = include_str!("../assets/agents/golang-engineer.md");
+pub const GOLANG_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::GOLANG_ENGINEER;
 
 /// Concrete rust-engineer agent (`extends: base-engineer`).
-pub const RUST_ENGINEER_AGENT: &str = include_str!("../assets/agents/rust-engineer.md");
+pub const RUST_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::RUST_ENGINEER;
 
 /// Concrete java-engineer agent (`extends: base-engineer`).
-pub const JAVA_ENGINEER_AGENT: &str = include_str!("../assets/agents/java-engineer.md");
+pub const JAVA_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::JAVA_ENGINEER;
 
 /// Concrete php-engineer agent (`extends: base-engineer`).
-pub const PHP_ENGINEER_AGENT: &str = include_str!("../assets/agents/php-engineer.md");
+pub const PHP_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::PHP_ENGINEER;
 
 /// Concrete ruby-engineer agent (`extends: base-engineer`).
-pub const RUBY_ENGINEER_AGENT: &str = include_str!("../assets/agents/ruby-engineer.md");
+pub const RUBY_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::RUBY_ENGINEER;
 
 /// Concrete react-engineer agent (`extends: base-engineer`).
-pub const REACT_ENGINEER_AGENT: &str = include_str!("../assets/agents/react-engineer.md");
+pub const REACT_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::REACT_ENGINEER;
 
 /// Concrete nextjs-engineer agent (`extends: base-engineer`).
-pub const NEXTJS_ENGINEER_AGENT: &str = include_str!("../assets/agents/nextjs-engineer.md");
+pub const NEXTJS_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::NEXTJS_ENGINEER;
 
 /// Concrete svelte-engineer agent (`extends: base-engineer`).
-pub const SVELTE_ENGINEER_AGENT: &str = include_str!("../assets/agents/svelte-engineer.md");
+pub const SVELTE_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::SVELTE_ENGINEER;
 
 /// Concrete web-qa agent (`extends: base-qa`).
-pub const WEB_QA_AGENT: &str = include_str!("../assets/agents/web-qa.md");
+pub const WEB_QA_AGENT: &str = trusty_agents_common::agent_assets::WEB_QA;
 
 /// Concrete api-qa agent (`extends: base-qa`).
-pub const API_QA_AGENT: &str = include_str!("../assets/agents/api-qa.md");
+pub const API_QA_AGENT: &str = trusty_agents_common::agent_assets::API_QA;
 
 // --- Increment 3 agents ---
 
 /// Concrete javascript-engineer agent (`extends: base-engineer`).
-pub const JAVASCRIPT_ENGINEER_AGENT: &str = include_str!("../assets/agents/javascript-engineer.md");
+pub const JAVASCRIPT_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::JAVASCRIPT_ENGINEER;
 
 /// Concrete elixir-engineer agent — Elixir/OTP/Mix (`extends: base-engineer`).
-pub const ELIXIR_ENGINEER_AGENT: &str = include_str!("../assets/agents/elixir-engineer.md");
+pub const ELIXIR_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::ELIXIR_ENGINEER;
 
 /// Concrete phoenix-engineer agent — the Phoenix web layer (`extends: base-engineer`).
-pub const PHOENIX_ENGINEER_AGENT: &str = include_str!("../assets/agents/phoenix-engineer.md");
+pub const PHOENIX_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::PHOENIX_ENGINEER;
 
 /// Concrete dart-engineer agent — Flutter/Dart (`extends: base-engineer`).
-pub const DART_ENGINEER_AGENT: &str = include_str!("../assets/agents/dart-engineer.md");
+pub const DART_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::DART_ENGINEER;
 
 /// Concrete dotnet-engineer agent — C#/.NET 8+ with VB.NET awareness (`extends: base-engineer`).
-pub const DOTNET_ENGINEER_AGENT: &str = include_str!("../assets/agents/dotnet-engineer.md");
+pub const DOTNET_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::DOTNET_ENGINEER;
 
 /// Concrete tauri-engineer agent (`extends: base-engineer`).
-pub const TAURI_ENGINEER_AGENT: &str = include_str!("../assets/agents/tauri-engineer.md");
+pub const TAURI_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::TAURI_ENGINEER;
 
 /// Concrete web-ui-engineer agent (`extends: base-engineer`).
-pub const WEB_UI_ENGINEER_AGENT: &str = include_str!("../assets/agents/web-ui-engineer.md");
+pub const WEB_UI_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::WEB_UI_ENGINEER;
 
 /// Concrete refactoring-engineer agent (`extends: base-engineer`).
 pub const REFACTORING_ENGINEER_AGENT: &str =
-    include_str!("../assets/agents/refactoring-engineer.md");
+    trusty_agents_common::agent_assets::REFACTORING_ENGINEER;
 
 /// Concrete prompt-engineer agent (`extends: base-engineer`).
-pub const PROMPT_ENGINEER_AGENT: &str = include_str!("../assets/agents/prompt-engineer.md");
+pub const PROMPT_ENGINEER_AGENT: &str = trusty_agents_common::agent_assets::PROMPT_ENGINEER;
 
 /// Concrete code-critic agent — adversarial reviewer (`extends: base-qa`).
-pub const CODE_CRITIC_AGENT: &str = include_str!("../assets/agents/code-critic.md");
+pub const CODE_CRITIC_AGENT: &str = trusty_agents_common::agent_assets::CODE_CRITIC;
 
 /// `code-review-standards` skill — the full adversarial review rubric
 /// (severity taxonomy, 80% confidence filter, verdict protocol) that
@@ -167,22 +167,22 @@ pub const CONTRACT_DRIVEN_TESTING: &str =
     include_str!("../assets/skills/contract-driven-testing.md");
 
 /// Concrete gcp-ops agent — Google Cloud Platform (`extends: base-ops`).
-pub const GCP_OPS_AGENT: &str = include_str!("../assets/agents/gcp-ops.md");
+pub const GCP_OPS_AGENT: &str = trusty_agents_common::agent_assets::GCP_OPS;
 
 /// Concrete vercel-ops agent (`extends: base-ops`).
-pub const VERCEL_OPS_AGENT: &str = include_str!("../assets/agents/vercel-ops.md");
+pub const VERCEL_OPS_AGENT: &str = trusty_agents_common::agent_assets::VERCEL_OPS;
 
 /// Concrete local-ops agent — local dev environment (`extends: base-ops`).
-pub const LOCAL_OPS_AGENT: &str = include_str!("../assets/agents/local-ops.md");
+pub const LOCAL_OPS_AGENT: &str = trusty_agents_common::agent_assets::LOCAL_OPS;
 
 /// Concrete memory-manager agent — trusty-memory MCP backend only (`extends: base-agent`).
-pub const MEMORY_MANAGER_AGENT: &str = include_str!("../assets/agents/memory-manager.md");
+pub const MEMORY_MANAGER_AGENT: &str = trusty_agents_common::agent_assets::MEMORY_MANAGER;
 
 /// Concrete mpm-agent-manager agent — bundled-asset catalog lifecycle (`extends: base-agent`).
-pub const MPM_AGENT_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-agent-manager.md");
+pub const MPM_AGENT_MANAGER_AGENT: &str = trusty_agents_common::agent_assets::MPM_AGENT_MANAGER;
 
 /// Concrete mpm-skills-manager agent — skill lifecycle and recommendations (`extends: base-agent`).
-pub const MPM_SKILLS_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-skills-manager.md");
+pub const MPM_SKILLS_MANAGER_AGENT: &str = trusty_agents_common::agent_assets::MPM_SKILLS_MANAGER;
 
 // --- Issue #2911: `documentation-style` bundled skill (SLD-grounded
 // per-artifact-type documentation conventions) — own module, kept separate

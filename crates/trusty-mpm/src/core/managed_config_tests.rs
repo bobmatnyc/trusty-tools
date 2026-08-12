@@ -225,7 +225,10 @@ fn manual_static_verify_full_roster() {
     // Copy the REAL bundled raw sources into the framework source dirs.
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for (src, dst) in [
-        (manifest.join("src/assets/agents"), &fw.agents),
+        (
+            std::path::PathBuf::from(trusty_agents_common::agent_assets::AGENT_ASSETS_DIR),
+            &fw.agents,
+        ),
         (manifest.join("src/assets/skills"), &fw.skills),
     ] {
         for entry in std::fs::read_dir(&src).unwrap() {
