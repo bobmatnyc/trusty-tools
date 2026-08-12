@@ -40,6 +40,8 @@ pub mod ui;
 pub mod walker;
 pub mod warm_boot;
 pub mod watch_loop;
+/// Dropped-event (`Flag::Rescan`) tree reconciliation for the file watcher.
+pub mod watch_rescan;
 /// #4731: condition-based waiting shared by every watcher test in this module.
 #[cfg(test)]
 pub(crate) mod watch_test_support;

@@ -84,6 +84,9 @@ pub fn spawn_watch_loop(
     indexed_files: IndexedFiles,
 ) -> Result<WatcherTask> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WatchEvent>();
+    // Retained so a failed dropped-event reconcile can re-arm itself. See
+    // `watch_rescan::schedule_rescan_retry`.
+    let retry_tx = tx.clone();
     let watcher = FileWatcher::start(root_path.to_path_buf(), tx)?;
 
     // Canonicalize the root exactly as the reindex walker does (issue #402).
@@ -102,8 +105,63 @@ pub fn spawn_watch_loop(
         std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
 
     let join = tokio::spawn(async move {
+        // Consecutive failed reconciles, driving the retry backoff. Reset to 0
+        // by the first pass that actually succeeds.
+        let mut rescan_failures: u32 = 0;
         while let Some(event) = rx.recv().await {
             match event {
+                // `Flag::Rescan`: the OS dropped an unknown batch of events and
+                // nothing will redeliver them, so the changed paths can only be
+                // re-derived from disk. Discarding this is a silent data loss.
+                WatchEvent::Rescan => {
+                    match crate::service::watch_rescan::reconcile_after_rescan(
+                        &index_id,
+                        &canonical_root,
+                        &raw_root,
+                        &indexer,
+                        &indexed_files,
+                    )
+                    .await
+                    {
+                        Ok(stats) if stats.is_complete() => {
+                            rescan_failures = 0;
+                            tracing::info!(
+                                index_id = %index_id,
+                                files_reindexed = stats.files_reindexed,
+                                chunks_indexed = stats.chunks_indexed,
+                                files_removed = stats.files_removed,
+                                "reconciled watched tree after a dropped-event rescan",
+                            );
+                        }
+                        // The pass ran, but some files could not be read, so
+                        // their contents are still unknown to the index. Say so
+                        // at `warn` instead of reporting a clean reconcile.
+                        Ok(stats) => {
+                            rescan_failures = 0;
+                            tracing::warn!(
+                                index_id = %index_id,
+                                files_reindexed = stats.files_reindexed,
+                                chunks_indexed = stats.chunks_indexed,
+                                files_removed = stats.files_removed,
+                                files_unreadable = stats.files_unreadable,
+                                "reconciled watched tree after a dropped-event rescan, but \
+                                 some files could not be read and remain unreconciled",
+                            );
+                        }
+                        Err(err) => {
+                            rescan_failures = rescan_failures.saturating_add(1);
+                            tracing::error!(
+                                index_id = %index_id,
+                                attempt = rescan_failures,
+                                "index is NOT in sync after a dropped-event rescan and will be retried: {err:#}",
+                            );
+                            crate::service::watch_rescan::schedule_rescan_retry(
+                                retry_tx.clone(),
+                                rescan_failures,
+                            );
+                        }
+                    }
+                }
                 WatchEvent::Modified(path) => {
                     handle_modified(
                         &path,
