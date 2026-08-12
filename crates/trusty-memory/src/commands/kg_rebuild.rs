@@ -50,8 +50,13 @@ const PURGE_SCAN_PAGE: usize = 1000;
 /// asserted so they can confirm the back-fill actually wrote something.
 /// What: Carries the palace id, drawers scanned, triples asserted, and any
 /// per-palace error captured as a string (so a failure on one palace can be
-/// logged without aborting the rest of the run).
-/// Test: `kg_rebuild_processes_all_drawers` asserts the field values.
+/// logged without aborting the rest of the run). `error` is `None` only when
+/// nothing failed — a palace that could not be opened AND a palace whose
+/// individual `assert` calls failed both set it (#5531), so `None` can never
+/// stand in for "nothing was examined".
+/// Test: `kg_rebuild_processes_all_drawers` asserts the field values;
+/// `rebuild_reports_failed_asserts_instead_of_a_clean_summary` covers the
+/// per-triple error arm.
 #[derive(Debug, Clone)]
 pub struct PalaceRebuildSummary {
     pub palace_id: String,
@@ -585,13 +590,26 @@ pub async fn rebuild_palaces(
 ///
 /// Why: Keeps the per-palace work in one focused function so error capture
 /// stays clean and the iteration over drawers reads top-to-bottom.
+///
+/// Error contract (#5531): a failed `assert` never aborts the remaining
+/// drawers, but it must not vanish either. It used to be logged and nothing
+/// else — the summary came back `error: None` however many asserts failed, so
+/// `error: None` could mean "every triple landed" or "not one did", and the
+/// operator read `[ok]` over a back-fill that wrote nothing. The producer of
+/// that state is real: with a running daemon holding the redb write lock a
+/// `ReadOnlyClient` open serves a snapshot, and every `assert` against it is
+/// rejected (#4911).
 /// What: Opens the palace handle, snapshots the drawer table, runs
 /// `extract_triples` on each drawer, and calls `handle.kg.assert` for every
-/// result. Failures on individual `assert` calls are logged but don't abort
-/// the rest of the drawers — the function only returns `Err` on hard failure
-/// to open the palace or read the drawer list.
+/// result. Each failure is counted and the first one is kept for the message;
+/// a non-zero count sets `error` to `N of M ... failed to assert`, exactly as
+/// `purge_one` reports its failed deletes. `Err` is still reserved for a hard
+/// failure to open the palace or read the drawer list. The exit code is
+/// unchanged — `handle_kg_rebuild_with` prints the `[error]` line and counts
+/// it, and gating the process exit on it is a separate decision (#5531).
 /// Test: `kg_rebuild_processes_all_drawers` (drawer count and asserted count
-/// must match the heuristic expectations).
+/// must match the heuristic expectations),
+/// `rebuild_reports_failed_asserts_instead_of_a_clean_summary` (the error arm).
 async fn rebuild_one(state: &AppState, palace_id: &str) -> Result<PalaceRebuildSummary> {
     let pid = PalaceId::new(palace_id);
     let handle = state
@@ -601,6 +619,12 @@ async fn rebuild_one(state: &AppState, palace_id: &str) -> Result<PalaceRebuildS
 
     let drawers = handle.drawers.read().clone();
     let mut asserted = 0usize;
+    // #5531: a failed assert has to reach the summary, not only the log.
+    // Counts plus the first failure keep the report bounded on a palace whose
+    // every triple fails.
+    let mut attempted = 0usize;
+    let mut failed = 0usize;
+    let mut first_failure: Option<String> = None;
     for d in &drawers {
         let room = room_id_to_label(d.room_id);
         let triples = extract_triples(&ExtractInput {
@@ -612,23 +636,35 @@ async fn rebuild_one(state: &AppState, palace_id: &str) -> Result<PalaceRebuildS
         for triple in triples {
             let s = triple.subject.clone();
             let p = triple.predicate.clone();
+            attempted += 1;
             match handle.kg.assert(triple).await {
                 Ok(()) => asserted += 1,
-                Err(e) => tracing::warn!(
-                    palace = %palace_id,
-                    drawer_id = %d.id,
-                    subject = %s,
-                    predicate = %p,
-                    "kg-rebuild: assert failed (non-fatal): {e:#}",
-                ),
+                Err(e) => {
+                    failed += 1;
+                    if first_failure.is_none() {
+                        first_failure = Some(format!("{s} --{p}-->: {e:#}"));
+                    }
+                    tracing::warn!(
+                        palace = %palace_id,
+                        drawer_id = %d.id,
+                        subject = %s,
+                        predicate = %p,
+                        "kg-rebuild: assert failed (non-fatal): {e:#}",
+                    );
+                }
             }
         }
     }
+    // `first_failure` is Some exactly when `failed` is non-zero, so the map
+    // carries the "did anything fail" test and the message in one step.
+    let error = first_failure.map(|first| {
+        format!("{failed} of {attempted} extracted triple(s) failed to assert; first: {first}")
+    });
     Ok(PalaceRebuildSummary {
         palace_id: palace_id.to_string(),
         drawers_scanned: drawers.len(),
         triples_asserted: asserted,
-        error: None,
+        error,
     })
 }
 
@@ -1305,6 +1341,100 @@ mod tests {
         let summaries = rebuild_palaces(&state, Some("a")).await?;
         assert_eq!(summaries.len(), 1, "only palace 'a' should be processed");
         assert_eq!(summaries[0].palace_id, "a");
+        Ok(())
+    }
+
+    /// Why: #5531 — every per-triple `assert` failure was downgraded to a
+    /// `tracing::warn!` and the summary still came back with `error: None`, so
+    /// the operator read `[ok] palace=b drawers=1 triples=0` about a back-fill
+    /// that wrote nothing. The live producer of that state is #4911's
+    /// read-only snapshot: with the daemon holding the redb write lock, a
+    /// `ReadOnlyClient` open serves a copy and every `assert` against it is
+    /// rejected by `check_writable`.
+    /// What: reproduces that exact condition — a palace whose store is locked
+    /// by a live writer — and asserts the summary carries `error: Some(_)`, a
+    /// non-zero `triples_failed`, and a `triples_asserted` of 0 over drawers it
+    /// really did scan. Deterministic: `ReadOnlyClient` takes the snapshot
+    /// branch on the first `DatabaseAlreadyOpen`, with no retry window.
+    /// Test: This test.
+    #[tokio::test]
+    async fn rebuild_reports_failed_asserts_instead_of_a_clean_summary() -> Result<()> {
+        seed_embedder();
+        let tmp = tempfile::tempdir()?;
+        let data_root = tmp.path().to_path_buf();
+        // SAFETY: idempotent constant write "1"; safe across test threads.
+        unsafe {
+            std::env::set_var("TRUSTY_SKIP_PALACE_ENFORCEMENT", "1");
+        }
+        {
+            let state = AppState::new(data_root.clone());
+            state.set_ready();
+            let _ =
+                crate::tools::dispatch_tool(&state, "palace_create", json!({"name": "a"})).await?;
+            let _ = crate::tools::dispatch_tool(
+                &state,
+                "memory_remember",
+                json!({
+                    "palace": "a",
+                    "text": "The Rustc compiler is a fast tool for the Rust language",
+                    "tags": ["compiler"],
+                }),
+            )
+            .await?;
+        }
+
+        // Clone the seeded palace onto an id this process has never opened.
+        // The store keeps a process-wide cache of open databases keyed by
+        // path, so a palace already opened here would be served a writable
+        // handle from that cache and never reach the lock at all — the same
+        // trap `purge_counts_an_unopenable_palace_as_exactly_one_failure`
+        // documents.
+        let mut record: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(data_root.join("a/palace.json"))?)?;
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("id".to_string(), json!("b"));
+            if obj.contains_key("name") {
+                obj.insert("name".to_string(), json!("b"));
+            }
+        }
+        let b_dir = data_root.join("b");
+        // `PalaceHandle::open` takes every store path from the record's
+        // `data_dir`, so the clone has to be re-rooted or it re-opens palace
+        // `a`'s files and never touches the locked one.
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("data_dir".to_string(), json!(b_dir));
+        }
+        std::fs::create_dir_all(&b_dir)?;
+        std::fs::write(b_dir.join("palace.json"), serde_json::to_string(&record)?)?;
+        std::fs::copy(data_root.join("a/kg.redb"), b_dir.join("kg.redb"))?;
+
+        // Stand in for the running daemon: hold the exclusive redb lock so the
+        // rebuild's `ReadOnlyClient` open degrades to a read-only snapshot.
+        let _daemon_lock = redb::Database::create(b_dir.join("kg.redb"))?;
+
+        let state = AppState::new(data_root.clone());
+        let summaries = rebuild_palaces(&state, Some("b")).await?;
+        assert_eq!(summaries.len(), 1, "palace 'b' must be processed");
+        let s = &summaries[0];
+        assert!(
+            s.drawers_scanned > 0,
+            "fixture must hand the rebuild at least one drawer to work on"
+        );
+        assert_eq!(
+            s.triples_asserted, 0,
+            "no assert can succeed against a read-only snapshot"
+        );
+        let Some(error) = s.error.as_deref() else {
+            panic!(
+                "a rebuild whose asserts all failed must not report a clean summary; \
+                 got error=None drawers={} triples={}",
+                s.drawers_scanned, s.triples_asserted
+            );
+        };
+        assert!(
+            error.contains("failed to assert"),
+            "the error must say what failed and how much of it, got {error:?}"
+        );
         Ok(())
     }
 
