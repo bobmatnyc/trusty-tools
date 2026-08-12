@@ -63,6 +63,60 @@ fn issue_search_query_scopes_to_repo_and_label() {
     );
 }
 
+/// Why: one email can be a SUBSTRING of another — `jones@x.com` is contained in
+/// `bob.jones@x.com` — and the two share every token, so a search for the
+/// shorter one plausibly returns both. An unanchored `title.contains(marker)`
+/// then appends Jones's performance profile onto Bob Jones's issue. The write
+/// goes to a live tracker and re-running does not take it back.
+/// What: builds exactly the critic's reproduction — Bob's title, the shorter
+/// marker — and asserts the anchored match rejects it while still finding the
+/// contributor's own thread.
+/// Test: this test itself.
+#[test]
+fn find_thread_by_marker_rejects_an_email_that_contains_the_marker() {
+    let bob: GitHubIssue =
+        serde_json::from_value(issue_json(3, "[dev-profile] Bob Jones <bob.jones@x.com>"))
+            .expect("parse");
+
+    // The unanchored predicate the anchoring replaced would accept this.
+    assert!(
+        bob.title.contains("jones@x.com"),
+        "precondition: the shorter email IS a substring of the longer one"
+    );
+
+    assert!(
+        find_thread_by_marker(std::slice::from_ref(&bob), "jones@x.com").is_none(),
+        "a marker that is merely a substring of another contributor's email must \
+         NOT match — this would comment on the wrong person's thread"
+    );
+    assert!(
+        find_thread_by_marker(std::slice::from_ref(&bob), "bob.jones@x.com").is_some(),
+        "the contributor's own marker must still match"
+    );
+
+    // The same inclusion in the other direction: a longer marker must not match
+    // the shorter title.
+    let jones: GitHubIssue =
+        serde_json::from_value(issue_json(4, "[dev-profile] Jones <jones@x.com>")).expect("parse");
+    assert!(
+        find_thread_by_marker(std::slice::from_ref(&jones), "bob.jones@x.com").is_none(),
+        "an issue for the shorter email must not answer a query for the longer one"
+    );
+}
+
+/// Why: the anchor is only correct if the title actually carries it — an issue
+/// opened under a title without `<marker>` is invisible to the next run, so
+/// every run would open another.
+/// What: asserts `issue_search_query`'s companion anchor is the bracketed form.
+/// Test: this test itself.
+#[test]
+fn thread_marker_anchor_is_bracketed() {
+    assert_eq!(
+        thread_marker_anchor("alice@example.com"),
+        "<alice@example.com>"
+    );
+}
+
 /// Why: GitHub search is a text index and returns near misses; accepting one
 /// would append Alice's profile to Alicia's thread.
 /// What: offers two issues whose titles share tokens with the marker and
@@ -111,8 +165,10 @@ async fn upsert_comments_on_the_existing_thread_instead_of_opening_a_second() {
 
     Mock::given(method("GET"))
         .and(path("/search/issues"))
-        .and(query_param("per_page", "30"))
+        .and(query_param("per_page", "100"))
+        .and(query_param("page", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total_count": 1,
             "items": [issue_json(42, "[dev-profile] Alice Smith <alice@example.com>")]
         })))
         .expect(1)
@@ -161,7 +217,9 @@ async fn upsert_creates_when_no_thread_exists() {
 
     Mock::given(method("GET"))
         .and(path("/search/issues"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"total_count": 0, "items": []})),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -269,5 +327,150 @@ async fn a_failed_search_aborts_rather_than_creating_a_duplicate() {
     assert!(
         err.to_string().contains("502"),
         "the search failure must be reported as itself: {err}"
+    );
+}
+
+/// Why: `in:title alice@example.com` is a TOKEN match, so it also matches every
+/// colleague at `example.com`. In an org with hundreds of profiled contributors
+/// the real thread sits past page one, and a lookup that read only the first
+/// page would conclude "no thread" and open a duplicate on a live tracker.
+/// What: page one returns a full page of other contributors' threads, page two
+/// carries Alice's; asserts the walk reaches it and comments rather than
+/// creating.
+/// Test: this test itself.
+#[tokio::test]
+async fn upsert_walks_past_page_one_to_find_the_thread() {
+    let server = MockServer::start().await;
+
+    // A full page of colleagues at the same domain — every one a token match,
+    // none the marker.
+    let page_one: Vec<serde_json::Value> = (0..100)
+        .map(|i| {
+            issue_json(
+                1000 + i,
+                &format!("[dev-profile] Dev {i} <dev{i}@example.com>"),
+            )
+        })
+        .collect();
+
+    Mock::given(method("GET"))
+        .and(path("/search/issues"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total_count": 101, "items": page_one
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/search/issues"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total_count": 101,
+            "items": [issue_json(77, "[dev-profile] Alice Smith <alice@example.com>")]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/repos/acme/profiles/issues/77/comments"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": 5})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // No create mock: reaching POST /repos/acme/profiles/issues fails the run.
+    let out = client_at(&server.uri())
+        .upsert_issue_thread(
+            "acme",
+            "profiles",
+            "dev-profile",
+            "[dev-profile] Alice Smith <alice@example.com>",
+            "alice@example.com",
+            "## profile",
+        )
+        .await
+        .expect("the walk must reach page two");
+
+    assert!(
+        !out.created,
+        "the thread exists on page two — this must append"
+    );
+    assert_eq!(out.number, 77);
+}
+
+/// Why: GitHub caps search at 1000 results, so `total_count` can exceed what
+/// paging will ever return. Reading that as "no thread exists" opens a duplicate
+/// issue that no re-run undoes, so an unreadable remainder is an error.
+/// What: a short page reporting far more matches than it returned; asserts the
+/// upsert errors and never posts.
+/// Test: this test itself.
+#[tokio::test]
+async fn upsert_refuses_to_create_when_the_search_could_not_be_exhausted() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/search/issues"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "total_count": 900,
+            "items": [issue_json(1, "[dev-profile] Someone <someone@example.com>")]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/repos/acme/profiles/issues"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(issue_json(2, "should not happen")))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let err = client_at(&server.uri())
+        .upsert_issue_thread(
+            "acme",
+            "profiles",
+            "dev-profile",
+            "[dev-profile] Alice Smith <alice@example.com>",
+            "alice@example.com",
+            "body",
+        )
+        .await
+        .expect_err("an unexhausted search must not fall through to create");
+
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("inconclusive") && rendered.contains("900"),
+        "the error must say what was missed: {rendered}"
+    );
+}
+
+/// Why: the next run finds this thread by searching for `<marker>` in the title.
+/// A title without it produces an issue that is invisible to every later run, so
+/// each one opens another — a duplicate generator rather than a thread.
+/// What: passes a title missing the angle-bracketed marker; asserts the upsert
+/// refuses before issuing any request.
+/// Test: this test itself.
+#[tokio::test]
+async fn upsert_refuses_a_title_that_the_next_run_could_not_find() {
+    let server = MockServer::start().await;
+    // Nothing is mounted: any HTTP call at all fails this test.
+
+    let err = client_at(&server.uri())
+        .upsert_issue_thread(
+            "acme",
+            "profiles",
+            "dev-profile",
+            "[dev-profile] Alice Smith",
+            "alice@example.com",
+            "body",
+        )
+        .await
+        .expect_err("an unanchored title must be refused");
+
+    assert!(
+        err.to_string().contains("<alice@example.com>"),
+        "the error must name the anchor the title is missing: {err}"
     );
 }

@@ -9,7 +9,9 @@ pub mod reviewer_store;
 pub mod types;
 
 pub use client::GitHubClient;
-pub use issue_writer::{find_thread_by_marker, issue_search_query, IssueUpsert};
+pub use issue_writer::{
+    find_thread_by_marker, issue_search_query, thread_marker_anchor, IssueUpsert,
+};
 pub use org_discovery::{discover_org_repos, effective_orgs};
 pub use repo_resolver::resolve_github_repos;
 pub use reviewer_store::{lookup_github_pr_id, upsert_github_pr_reviewer};

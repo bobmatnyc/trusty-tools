@@ -9,8 +9,14 @@
 //! What: [`GitHubClient::search_issues`], [`GitHubClient::create_issue`], and
 //! [`GitHubClient::create_issue_comment`] are the three REST calls;
 //! [`GitHubClient::upsert_issue_thread`] composes them into find-or-create.
-//! [`issue_search_query`] and [`find_thread_by_marker`] are the pure halves,
-//! testable with no network at all.
+//! [`issue_search_query`], [`thread_marker_anchor`], and
+//! [`find_thread_by_marker`] are the pure halves, testable with no network.
+//!
+//! Every ambiguity resolves to an ERROR, never to "create". A duplicate issue
+//! on a live tracker is not undone by re-running, so the marker match is
+//! anchored rather than a substring test, the search walks its pages rather
+//! than reading page one, and a result set larger than the budget is reported
+//! as inconclusive.
 //!
 //! These live beside `client.rs` rather than inside it because that file is
 //! already at 289 of its 500 SLOC and this repo splits at the PR that grows the
@@ -39,6 +45,10 @@ use crate::collect::github::types::GitHubIssue;
 struct IssueSearchPage {
     #[serde(default)]
     items: Vec<GitHubIssue>,
+    /// Matches GitHub says exist, which is what tells a paged walk whether it
+    /// has actually seen all of them.
+    #[serde(default)]
+    total_count: u64,
 }
 
 /// Request body for `POST /repos/{owner}/{repo}/issues`.
@@ -92,20 +102,41 @@ pub fn issue_search_query(owner: &str, repo: &str, label: &str, marker: &str) ->
     format!("repo:{owner}/{repo} label:{label} in:title {marker} type:issue")
 }
 
-/// Pick the thread whose title carries `marker`.
+/// The exact title substring that identifies `marker`'s thread.
 ///
-/// Why: GitHub's search is a text index, not an exact matcher — it happily
-/// returns issues that merely share a token with the marker. Confirming the
-/// marker is literally in the title is what keeps one contributor's profile
-/// from being appended to another's thread.
-/// What: returns the first issue whose `title` contains `marker` as a
-/// substring, or `None`.
-/// Test: `find_thread_by_marker_ignores_a_near_miss`.
+/// Why: a bare substring test admits INCLUSION — `"[dev-profile] Bob Jones
+/// <bob.jones@x.com>".contains("jones@x.com")` is `true`, so a search that
+/// returned both Bob's and Jones's issues could append one contributor's
+/// review to the other's thread. Writes go to a live tracker and a wrong
+/// comment cannot be undone by re-running. Angle brackets close it because
+/// they cannot appear inside an email address, so `<a@x>` matches `<a@x>` and
+/// nothing that merely ends with it.
+/// What: `<marker>`. [`issue_title`](crate::profile::issue_title) always
+/// produces a title containing exactly this, and
+/// [`GitHubClient::upsert_issue_thread`] refuses a title that does not.
+/// Test: `find_thread_by_marker_rejects_an_email_that_contains_the_marker`.
+pub fn thread_marker_anchor(marker: &str) -> String {
+    format!("<{marker}>")
+}
+
+/// Pick the thread whose title carries `marker`, anchored.
+///
+/// Why: GitHub's search is a token index, not an exact matcher — it returns
+/// issues that merely share a token with the marker, so the returned page has
+/// to be re-checked locally. That check must not admit substring inclusion; see
+/// [`thread_marker_anchor`].
+/// What: returns the first issue whose `title` contains
+/// [`thread_marker_anchor`]`(marker)`, or `None`.
+/// Test: `find_thread_by_marker_ignores_a_near_miss`,
+/// `find_thread_by_marker_rejects_an_email_that_contains_the_marker`.
 pub fn find_thread_by_marker<'a>(
     items: &'a [GitHubIssue],
     marker: &str,
 ) -> Option<&'a GitHubIssue> {
-    items.iter().find(|i| i.title.contains(marker))
+    // #5465: anchored, never a bare `contains` — one email can be a substring
+    // of another and the write is not undoable.
+    let anchor = thread_marker_anchor(marker);
+    items.iter().find(|i| i.title.contains(&anchor))
 }
 
 // ─── Write methods ────────────────────────────────────────────────────────────
@@ -116,10 +147,11 @@ impl GitHubClient {
     /// Why: the upsert needs to know whether a contributor already has a thread,
     /// and `/search/issues` is the only endpoint that answers that in one call
     /// across an entire repository's history.
-    /// What: `GET /search/issues?q=<query>&per_page=<per_page>`. The query is
-    /// percent-encoded by [`reqwest::Url::parse_with_params`], so callers pass
-    /// it raw. Search is not a write, but it lives here because the upsert is
-    /// the only thing that uses it.
+    /// What: `GET /search/issues?q=<query>&per_page=<per_page>&page=<page>`,
+    /// returning that page's issues and the `total_count` GitHub reports.
+    /// The query is percent-encoded by [`reqwest::Url::parse_with_params`], so
+    /// callers pass it raw. Search is not a write, but it lives here because
+    /// the upsert is the only thing that uses it.
     ///
     /// # Errors
     ///
@@ -128,19 +160,30 @@ impl GitHubClient {
     /// - [`CollectError::Http`] on transport failure or a malformed URL.
     /// - [`CollectError::Json`] on a payload that is not a search page.
     ///
-    /// Test: `upsert_comments_on_the_existing_thread_instead_of_opening_a_second`.
-    pub async fn search_issues(&self, query: &str, per_page: u32) -> Result<Vec<GitHubIssue>> {
+    /// Test: `upsert_comments_on_the_existing_thread_instead_of_opening_a_second`,
+    /// `upsert_walks_past_page_one_to_find_the_thread`.
+    pub async fn search_issues(
+        &self,
+        query: &str,
+        per_page: u32,
+        page: u32,
+    ) -> Result<(Vec<GitHubIssue>, u64)> {
         let per_page = per_page.to_string();
+        let page = page.to_string();
         let url = reqwest::Url::parse_with_params(
             &format!("{}/search/issues", self.api_base()),
-            &[("q", query), ("per_page", per_page.as_str())],
+            &[
+                ("q", query),
+                ("per_page", per_page.as_str()),
+                ("page", page.as_str()),
+            ],
         )
         .map_err(|e| CollectError::Config(format!("cannot build GitHub search URL: {e}")))?;
 
         debug!(url = %url, "GET (issue search)");
         let resp = self.http_client().get(url.clone()).send().await?;
-        let page: IssueSearchPage = read_json(resp, url.as_str()).await?;
-        Ok(page.items)
+        let body: IssueSearchPage = read_json(resp, url.as_str()).await?;
+        Ok((body.items, body.total_count))
     }
 
     /// Open a new issue on `owner/repo`.
@@ -221,19 +264,31 @@ impl GitHubClient {
     /// Why: this is the whole point of the write path — one issue per
     /// contributor, appended to on every run. Creating a second issue would
     /// scatter the longitudinal record the profile exists to accumulate.
-    /// What: searches with [`issue_search_query`], confirms the match with
-    /// [`find_thread_by_marker`], then comments on the hit or creates the issue
-    /// with `label` applied. `title` must contain `marker` for the NEXT run to
-    /// find what this one created.
+    /// What: searches with [`issue_search_query`], WALKING pages until the
+    /// anchored [`find_thread_by_marker`] hits or the results are exhausted,
+    /// then comments on the hit or creates the issue with `label` applied.
+    ///
+    /// Every way this can end without a definite answer opens a duplicate
+    /// issue on a live tracker, which no re-run undoes — so each is an error
+    /// instead:
+    ///
+    /// - a failed search page, rather than reading a 5xx as "no thread exists";
+    /// - a `title` that does not carry [`thread_marker_anchor`]`(marker)`,
+    ///   since the issue this call created would then be invisible to the next
+    ///   run and every run would create another;
+    /// - more matches than [`SEARCH_PAGE_BUDGET`] pages can cover, since the
+    ///   thread may be among the ones never seen.
     ///
     /// # Errors
     ///
-    /// As [`Self::create_issue`]. A search failure aborts rather than falling
-    /// through to create — a transient 5xx must not be read as "no thread
-    /// exists" and open a duplicate.
+    /// As [`Self::create_issue`], plus [`CollectError::Config`] for an
+    /// unanchored title and [`CollectError::GithubSearchInconclusive`] for the
+    /// budget case.
     ///
     /// Test: `upsert_creates_when_no_thread_exists`,
-    /// `upsert_comments_on_the_existing_thread_instead_of_opening_a_second`.
+    /// `upsert_comments_on_the_existing_thread_instead_of_opening_a_second`,
+    /// `upsert_walks_past_page_one_to_find_the_thread`,
+    /// `upsert_refuses_a_title_that_the_next_run_could_not_find`.
     pub async fn upsert_issue_thread(
         &self,
         owner: &str,
@@ -243,21 +298,50 @@ impl GitHubClient {
         marker: &str,
         body: &str,
     ) -> Result<IssueUpsert> {
-        let query = issue_search_query(owner, repo, label, marker);
-        let candidates = self.search_issues(&query, SEARCH_PAGE_SIZE).await?;
+        let anchor = thread_marker_anchor(marker);
+        if !title.contains(&anchor) {
+            return Err(CollectError::Config(format!(
+                "issue title '{title}' does not contain '{anchor}'; the thread it \
+                 opens would be invisible to the next run, which would open another"
+            )));
+        }
 
-        if let Some(existing) = find_thread_by_marker(&candidates, marker) {
-            self.create_issue_comment(owner, repo, existing.number, body)
-                .await?;
-            info!(
-                number = existing.number,
-                url = %existing.html_url,
-                "appended profile to the existing issue thread"
-            );
-            return Ok(IssueUpsert {
-                number: existing.number,
-                html_url: existing.html_url.clone(),
-                created: false,
+        let query = issue_search_query(owner, repo, label, marker);
+        let mut scanned = 0usize;
+        let mut total = 0u64;
+
+        // #5465: one contributor's marker shares tokens with every colleague on
+        // the same email domain, so the real thread can sit past page one.
+        for page in 1..=SEARCH_PAGE_BUDGET {
+            let (candidates, reported) = self.search_issues(&query, SEARCH_PAGE_SIZE, page).await?;
+            total = reported;
+            scanned += candidates.len();
+
+            if let Some(existing) = find_thread_by_marker(&candidates, marker) {
+                self.create_issue_comment(owner, repo, existing.number, body)
+                    .await?;
+                info!(
+                    number = existing.number,
+                    url = %existing.html_url,
+                    "appended profile to the existing issue thread"
+                );
+                return Ok(IssueUpsert {
+                    number: existing.number,
+                    html_url: existing.html_url.clone(),
+                    created: false,
+                });
+            }
+
+            if (candidates.len() as u32) < SEARCH_PAGE_SIZE {
+                break;
+            }
+        }
+
+        if (scanned as u64) < total {
+            return Err(CollectError::GithubSearchInconclusive {
+                query,
+                scanned,
+                total,
             });
         }
 
@@ -279,9 +363,18 @@ impl GitHubClient {
 
 // ─── Response handling ────────────────────────────────────────────────────────
 
-/// Issues requested per search page. One contributor has one thread; 30 is
-/// already far more candidates than a marker match should ever produce.
-const SEARCH_PAGE_SIZE: u32 = 30;
+/// Issues requested per search page — GitHub's maximum.
+const SEARCH_PAGE_SIZE: u32 = 100;
+
+/// Search pages the thread lookup will walk.
+///
+/// Why: `in:title alice@example.com` is a TOKEN match, so it also matches every
+/// colleague at `example.com` — in an org with hundreds of profiled
+/// contributors the real thread can sit well past page one, and stopping early
+/// would open a duplicate. GitHub's search API caps at 1000 results, so ten
+/// pages of 100 is the whole reachable set; beyond it the search is
+/// inconclusive rather than empty.
+const SEARCH_PAGE_BUDGET: u32 = 10;
 
 /// Longest GitHub error body kept in an error message.
 const MAX_ERROR_BODY: usize = 400;

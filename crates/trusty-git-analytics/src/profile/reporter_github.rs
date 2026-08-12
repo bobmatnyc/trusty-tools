@@ -104,7 +104,8 @@ pub fn issue_title(profile: &ContributorProfile) -> String {
 /// `CollectError::GithubApi` with GitHub's own message when the token lacks
 /// `issues: write` on the target repository.
 ///
-/// Test: `reporter_github_tests` drives the whole path against a local mock.
+/// Test: `upsert_profile_issue_appends_to_the_contributors_thread` drives the
+/// whole path against a local mock.
 pub async fn upsert_profile_issue(
     client: &GitHubClient,
     config: &GithubIssueConfig,
