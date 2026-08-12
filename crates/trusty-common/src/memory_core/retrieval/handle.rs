@@ -470,23 +470,27 @@ impl PalaceHandle {
         drawers.push(drawer);
     }
 
-    /// Rebuild the L1 cache (top-15 drawers by importance, descending).
+    /// Rebuild the L1 cache: the top `L1_CAP` drawers in
+    /// [`drawer_listing_order`].
     ///
     /// Why: L1 is the always-on essential context; we keep it pre-sorted so
     /// reads are constant-time. The L1 cap is small enough that a full re-sort
-    /// is cheaper than maintaining a heap.
-    /// What: Reads the drawer table, sorts a clone by importance descending,
+    /// is cheaper than maintaining a heap. #4836: this is a SELECTION, not
+    /// just an ordering — `l1_drawers` feeds `retrieve_l0_l1` and through it
+    /// `retrieve_l2`, so an importance-only sort here chose which 15 drawers
+    /// reach a prompt without reference to age.
+    /// What: Reads the drawer table, sorts a clone by [`drawer_listing_order`],
     /// and stores the first `L1_CAP` entries on `self.l1_drawers`.
     /// Test: `l0_l1_always_present` asserts a high-importance drawer makes it
-    /// into L1 after `refresh_l1` is called.
+    /// into L1 after `refresh_l1` is called;
+    /// `refresh_l1_keeps_the_newest_drawers_within_an_importance_tie` covers
+    /// what the cap cuts when importance ties.
     pub fn refresh_l1(&mut self) {
         let drawers = self.drawers.read();
         let mut sorted: Vec<Drawer> = drawers.clone();
-        sorted.sort_by(|a, b| {
-            b.importance
-                .partial_cmp(&a.importance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // #4836: shares the listers' comparator so L1 membership is decided by
+        // recency within a tie rather than by the drawer table's own order.
+        sorted.sort_by(super::types::drawer_listing_order);
         self.l1_drawers = sorted.into_iter().take(L1_CAP).collect();
     }
 

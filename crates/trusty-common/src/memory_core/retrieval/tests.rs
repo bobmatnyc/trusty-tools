@@ -16,6 +16,7 @@ use tempfile::tempdir;
 use uuid::Uuid;
 
 use super::layers::{L1_NO_SIMILARITY_PENALTY, uuid_prefix_eq};
+use super::types::L1_CAP;
 
 /// Pre-seed the process-wide shared embedder with `MockEmbedder` so no
 /// HuggingFace download is attempted. Safe to call multiple times (no-op
@@ -1798,7 +1799,8 @@ fn list_drawers_keeps_the_newest_drawer_within_an_importance_tie() {
 
     assert_eq!(listed.len(), 5, "the tag matches 20 drawers, limit is 5");
     assert_eq!(
-        listed[0].id, newest,
+        listed[0].id,
+        newest,
         "an importance tie must be broken by recency, so the newest drawer leads; got {:?}",
         listed.iter().map(|d| &d.content).collect::<Vec<_>>()
     );
@@ -1850,6 +1852,43 @@ fn list_drawers_ranks_importance_above_recency() {
     assert_eq!(
         listed[0].id, curated_id,
         "importance still outranks recency; recency only breaks ties"
+    );
+}
+
+/// #4836: L1 selection must be recency-aware too, not just the two listers.
+///
+/// Why: `refresh_l1` carried its own copy of the importance-only sort, and L1
+/// is not a cosmetic ordering — it is a SELECTION. `l1_drawers` is capped at
+/// `L1_CAP`, feeds `retrieve_l0_l1`, and from there seeds `retrieve_l2`, which
+/// is where the prompt-injection hook and `memory_recall` converge. Leaving the
+/// stale comparator here fixed `memory_list` while still letting the hook
+/// surface a set of drawers chosen without reference to age.
+/// What: 20 drawers tied at importance 0.5, appended oldest-first, against an
+/// `L1_CAP` of 15. Pre-fix the stable importance-only sort preserves insertion
+/// order, so L1 holds the 15 OLDEST and the newest five never reach a prompt.
+#[test]
+fn refresh_l1_keeps_the_newest_drawers_within_an_importance_tie() {
+    let dir = tempdir().unwrap();
+    let mut handle = make_handle(dir.path());
+    let newest = seed_importance_tie(&handle, Uuid::nil(), "pre-authorized", 20);
+
+    handle.refresh_l1();
+
+    assert_eq!(handle.l1_drawers.len(), L1_CAP, "L1 is capped at L1_CAP");
+    assert_eq!(
+        handle.l1_drawers[0].id,
+        newest,
+        "an importance tie must be broken by recency, so the newest drawer leads L1; got {:?}",
+        handle
+            .l1_drawers
+            .iter()
+            .map(|d| &d.content)
+            .collect::<Vec<_>>()
+    );
+    // Ids are 1..=20 ascending with age, so the newest 15 are ids 6..=20.
+    assert!(
+        handle.l1_drawers.iter().all(|d| d.id >= Uuid::from_u128(6)),
+        "L1 must hold the newest 15 of the tie, not the oldest 15"
     );
 }
 

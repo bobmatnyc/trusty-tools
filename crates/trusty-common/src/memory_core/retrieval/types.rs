@@ -77,38 +77,12 @@ impl ForgetOutcome {
 /// Maximum number of drawers held in the L1 cache.
 pub(super) const L1_CAP: usize = 15;
 
-/// Total order for a drawer LISTING: importance desc, then recency desc, then id.
+/// Re-export so `retrieval`'s call sites keep reading `super::types::…`.
 ///
-/// Why (#4836): `PalaceHandle::list_drawers` and
-/// [`super::scope::list_drawers_in_wing`] ranked on importance ALONE before
-/// truncating to `limit`. Rust's sort is stable, so drawers tied on importance
-/// kept the drawer table's own order — UUID ascending, as the store iterates
-/// it — and `limit` cut on that. Importance is effectively bimodal in a live
-/// palace (1.0 for curated facts, 0.5 for everything else), so the tie-break
-/// decided almost every listing: `memory_list(tag = "pre-authorized",
-/// limit = 12)` against the `trusty-tools` palace matched 94 drawers and
-/// returned the 12 lowest UUIDs, leaving all nine drawers written that day
-/// outside the window. Recency is what a caller passing `limit` is asking for,
-/// and the trailing `id` key makes the order total so two otherwise-equal
-/// drawers cannot swap places between calls.
-///
-/// Importance stays the PRIMARY key — this only decides ties, so curated
-/// essentials still lead a listing. `list_drawers_ranks_importance_above_recency`
-/// is the guard against that being flipped.
-///
-/// What: `importance` descending, then `created_at` descending, then `id`
-/// ascending. A NaN importance compares `Equal` and falls through to the two
-/// total keys rather than leaving the pair unordered.
-/// Test: `list_drawers_keeps_the_newest_drawer_within_an_importance_tie`,
-/// `list_drawers_in_wing_keeps_the_newest_drawer_within_an_importance_tie`,
-/// `list_drawers_ranks_importance_above_recency`.
-pub(super) fn drawer_listing_order(a: &Drawer, b: &Drawer) -> std::cmp::Ordering {
-    b.importance
-        .partial_cmp(&a.importance)
-        .unwrap_or(std::cmp::Ordering::Equal)
-        .then_with(|| b.created_at.cmp(&a.created_at))
-        .then_with(|| a.id.cmp(&b.id))
-}
+/// The definition lives next to `Drawer` in `memory_core::palace` because
+/// `store::l1_cache` needs the same comparator and must not depend upward on
+/// `retrieval`. See [`crate::memory_core::palace::drawer_listing_order`].
+pub(super) use crate::memory_core::palace::drawer_listing_order;
 
 /// Options for `PalaceHandle::remember_with_options` (issue #61).
 ///
