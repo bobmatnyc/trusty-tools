@@ -6,10 +6,9 @@ spec_refs: []
 
 **Status:** Draft — §14's five open questions were decided by the owner on
 2026-08-12, accepted exactly as proposed ("all as proposed"). §15's remaining
-named gaps (verification-side tooling, the return channel) are still open.
-This document describes the sequence as the current issue tree commits to it
-plus the owner's §14 decisions, not a design proposal competing with that
-tree.
+named gaps (the return channel, the #5475 dependency) are still open. This
+document describes the sequence as the current issue tree commits to it plus
+the owner's §14 decisions, not a design proposal competing with that tree.
 **Spec ID:** `SPEC-AUDITPKG-01~draft` … `SPEC-AUDITPKG-15~draft`
 **Subsystem:** `trusty-audit` — the auditor client (orchestration, working
 directory, engagement config, tool seam); `trusty-git-analytics` (tga) — clone
@@ -134,8 +133,8 @@ flowchart TD
     A -. "backed by" .-> A1["#5487 discovery endpoint\n#5497 native picker form\n#5476 gh detect+auth"]
     B -. "backed by" .-> B1["#5491 trusty-installer pinned entry point\n#5495 client-side call, fail-closed"]
     C -. "backed by" .-> C1["#5215 tga clone-on-demand\n(CONFIRMED UNIMPLEMENTED)"]
-    D -. "backed by" .-> D1["tga audit sweep (DOC-67)\ninvokes trusty-review as subprocess\n#5493 progress -> #5498 run view"]
-    E -. "backed by" .-> E1["#5478 config+keypair\n#5479 extract DB\n#5481 ed25519 signing\n#5499 assemble return zip"]
+    D -. "backed by" .-> D1["#5555 drives the sweep\ntga audit sweep (DOC-67)\ninvokes trusty-review as subprocess\n#5493 progress -> #5498 run view"]
+    E -. "backed by" .-> E1["#5478 config+keypair\n#5479 extract DB\n#5481 ed25519 signing\n#5563 verify signature\n#5499 assemble return zip"]
 ```
 
 Steps 1–2 are the only interactive surface, per DOC-67 §2 extended to this
@@ -375,7 +374,9 @@ in-scope amendment, not a resume path for a still-running client.
   *"A credential belongs in the file that goes to the recipient, never in
   the file that comes back."*
 
-**What "signed" means, and what the recipient/we verify it with (#5481).** A
+**What "signed" means, and what the recipient/we verify it with.** #5481
+owns the ed25519 signing scheme itself; [#5563](https://github.com/bobmatnyc/trusty-tools/issues/5563)
+owns the verification tooling that checks what #5481 signs (§14 Q5, §15). A
 fresh ed25519 keypair is generated per engagement by #5478's config
 generator. The **private half travels IN the outbound package**, so the
 recipient signs locally with no service call back to us. What gets signed is
@@ -575,28 +576,32 @@ CLI subcommand (`trusty-audit` or `tctl`) that takes a received package and
 the retained public key and reports pass/fail — consistent with §11's
 CLI-testability constraint, since this is exactly the kind of capability
 that must not exist only as something "run by hand" on the owner's machine.
-**No issue owns building it yet** — §15 states precisely what that issue
-needs to cover so filing it is mechanical.
+**Tracked by [#5563](https://github.com/bobmatnyc/trusty-tools/issues/5563)**
+(`feat(trusty-audit): verify a received handoff package`) — filed against
+this decision's checklist, per §15.
 
 ## {#SPEC-AUDITPKG-15~draft} 15. Gaps in the Issue Tree — Named, Not Designed
 
 Per this spec's own brief: a step the sequence needs but no issue currently
 tickets is named here as a gap, not designed as if it were already scoped.
 
-- **No issue owns the verification-side tooling** for #5481's signature
-  scheme — **genuinely still unticketed**, even though Q5 (§14) now decides
-  its shape. An issue for it needs to cover, precisely: (a) the CLI
-  invocation and its arguments — received-package path, retained-public-key
-  path/format; (b) the manifest-recompute step as a closure condition, not an
-  implementation detail — SHA-256 each delivered file, compare against the
-  signed manifest; (c) the ed25519 signature-verify step against the
-  retained public key; (d) a machine-checkable pass/fail signal (exit code,
-  not human-eyeballed output), per §11's CLI-testability constraint; (e)
-  which crate owns it — `trusty-audit` (co-located with #5481's signing code)
-  or `trusty-installer`/`tctl` (co-located with other pinned-artifact
-  verification) — a placement call the filing issue must make explicitly, not
-  leave implicit. Filing against this checklist is now mechanical; no issue
-  does it yet.
+- **Verification-side tooling for #5481's signature scheme is now tracked by
+  [#5563](https://github.com/bobmatnyc/trusty-tools/issues/5563)**
+  (`feat(trusty-audit): verify a received handoff package`) — #5481 owns the
+  ed25519 signing scheme itself; #5563 verifies what #5481 signs, per Q5's
+  decision (§14). §14 Q5's checklist is now that issue's scope rather than a
+  filing aid: (a) the CLI invocation and its arguments — received-package
+  path, retained-public-key path/format; (b) the manifest-recompute step —
+  SHA-256 each delivered file, compare against the signed manifest; (c) the
+  ed25519 signature-verify step against the retained public key; (d) a
+  machine-checkable pass/fail signal (exit code, not human-eyeballed output),
+  per §11's CLI-testability constraint; (e) crate placement. #5563's own
+  closure conditions cover (a)–(c) plus fail-closed on a tampered package or
+  a missing/wrong key, and (e) is settled as `trusty-audit` (co-located with
+  #5481's signing code, per #5563's own title) — nothing in the filed issue
+  states (d) as an explicit closure condition, so a machine-checkable
+  pass/fail signal (vs. printed text a human reads) is worth confirming when
+  #5563 is picked up.
 - **The step that invokes `tga audit` over the selected, cloned repos was
   unticketed** — #5540 installs the pinned tool set and #5498 covers only the
   progress *view*; nothing ticketed the `session::Command` variant that
@@ -622,19 +627,20 @@ tickets is named here as a gap, not designed as if it were already scoped.
   axis.
 - **#5475 (gh common entry point) is a soft prerequisite Q4's now-decided
   answer depends on** (§14), not a hard blocker recorded anywhere in the
-  #5473/#5477 tree as gating Q4's resolution. Flagged so the dependency is
-  visible before code lands, not discovered mid-implementation. Open as of
-  this update.
-- **Clone-credential distinctness** — #5215's own scope list names "clone
-  auth (distinct from API auth)" as something to decide. Q4 (§14) now folds
-  it into `gh`'s credential, accepted by the owner 2026-08-12, but no issue
-  implementing #5215 or #5476 yet carries that fold as a closure condition —
-  whoever picks up #5215 must add it, not merely cite this spec.
+  #5473/#5477 tree as gating Q4's resolution — open as of this update. The
+  same decision also folds #5215's "clone auth (distinct from API auth)"
+  scope item into `gh`'s credential (accepted by the owner 2026-08-12), but
+  neither #5215 nor #5476 carries that fold as a closure condition yet.
+  Both are the same dependency: whoever picks up #5215/#5476 must land #5475
+  first or alongside, and must encode the credential fold explicitly — not
+  merely cite this spec. Flagged so the dependency is visible before code
+  lands, not discovered mid-implementation.
 
 ---
 
 *This document is the deliverable requested by
 [#5474](https://github.com/bobmatnyc/trusty-tools/issues/5474). §14's five
 questions were decided by the owner on 2026-08-12, accepted exactly as
-proposed. §15's remaining gaps — verification-side tooling and the return
-channel — are still open and are named, not designed, above.*
+proposed. §15's genuinely remaining gaps are only the return channel and the
+#5475 dependency; the rest are now tracked by issue (#5555, #5556, #5563)
+and are named, not designed, above.*
