@@ -256,6 +256,18 @@ stay non-breaking by construction, and check a risky change yourself with
 `bash scripts/check_semver.sh --crate <crate>`. See
 [docs/reference/semver-gate.md](docs/reference/semver-gate.md).
 
+🔴 **The tag must name the commit that gets published.** Nothing bound the two
+together until `preflight-publish.sh` CHECK 6
+(`scripts/check-tag-publish-parity.sh`): `check-publish-ready.sh` GUARD 2 asks
+only whether the tag is an ANCESTOR of `origin/main`, and CHECK 1 asks only
+whether HEAD EQUALS `origin/main`, so a tag several commits behind HEAD passes
+both. That is where a release lands whenever `main` moves and the run is
+fast-forwarded to satisfy CHECK 1 — which shipped `tga-v2.17.0` tagged at
+`246e4ca2` against a published `.cargo_vcs_info.json` of `7d5cf82e1` on
+2026-08-11, all gates green. **Fast-forwarded after tagging? Re-tag before
+publishing.** After `cargo publish`, run `make publish-verify CRATE=<crate>`.
+See [release-workflow.md](docs/reference/release-workflow.md#tagpublish-commit-parity-guard).
+
 🔴 **CRITICAL macOS note:** never use `cp` to install a release binary on
 macOS — always `cargo install`. A plain `cp` over an on-PATH binary leaves a
 stale kernel cdhash cache and the next exec is SIGKILL'd as an invalid
