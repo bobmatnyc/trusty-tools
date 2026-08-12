@@ -1,0 +1,36 @@
+# ui-bundle-manifest.tsv — crates that ship a COMMITTED, pre-built UI bundle.
+#
+# #3606: trusty-search 0.37.0 published a ui-dist/ built from pre-#3509 source,
+# so the shipped dashboard had no dark mode. Three occurrences, no gate.
+#
+# Read by scripts/check-ui-bundle-freshness.sh, which is CHECK 7 of
+# scripts/preflight-publish.sh. The manifest is checked BOTH ways against what
+# the tree actually tracks: a crate that ships a bundle without a row here
+# FAILS (MANIFEST-GAP), and a row whose bundle directory has no tracked files
+# FAILS (MANIFEST-STALE). Neither direction can be satisfied by doing nothing,
+# which is what keeps a green run distinguishable from a run that inspected
+# nothing.
+#
+# Columns (tab-separated):
+#   1. crate_dir   directory under crates/ (not the crates.io package name)
+#   2. source_dir  UI source root, repo-relative — the Svelte/Vite project
+#   3. bundle_dir  committed build output, repo-relative — what cargo packages
+#
+# Each bundle_dir carries ui-source-hash.txt, written by
+# scripts/stamp-ui-bundle.sh as part of the build. That file is the freshness
+# claim; the gate recomputes the digest and compares.
+#
+# trusty-search is the odd one out: its bundle lives at crate root as
+# ui-dist/ (built into ui/dist/, then mirrored by `make -C crates/trusty-search
+# sync-ui`), while the other three commit ui/dist/ directly. That extra mirror
+# step is the one that keeps getting skipped.
+#
+# crates/trusty-agents has a ui/ but its dist is gitignored (Tauri packages it
+# at build time, nothing is embedded from git), so it ships no committed bundle
+# and correctly has no row. Adding one would fail NO-BUNDLE.
+#
+# crate_dir	source_dir	bundle_dir
+trusty-search	crates/trusty-search/ui	crates/trusty-search/ui-dist
+trusty-memory	crates/trusty-memory/ui	crates/trusty-memory/ui/dist
+trusty-analyze	crates/trusty-analyze/ui	crates/trusty-analyze/ui/dist
+trusty-console	crates/trusty-console/ui	crates/trusty-console/ui/dist

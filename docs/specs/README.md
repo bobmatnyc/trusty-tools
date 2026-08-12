@@ -84,6 +84,7 @@ normative grammar — this note does not restate it.
 | DOC-65 | `SPEC-UNIVAGENT-01~draft` … `-06~draft` | [Universal Framework Agents: Catalog, Boundaries, and the Four-Category Model](./DOC-65-universal-framework-agents.md) | trusty-mpm — bundled agent catalog, delegation roster, language scoping; consumed identically by trusty-code and referenced by trusty-agents' sub-agent tier. Catalogs the universal (non-language-gated) agent roster, maps it onto ADR-0025's four-category model, and reports (not resolves) the deprecated-but-still-deployed `ops` agent, the unscoped platform-ops agents (`gcp-ops`/`vercel-ops`), and undocumented routing gaps |
 | DOC-66 | `SPEC-SESSWS-01~draft` … `-07~draft` | [Session and Workstream in trusty-mpm: the 1:N model, lifecycle, and slot semantics](./DOC-66-session-workstream-model.md) | trusty-mpm — session/workstream data model, launch and provisioning paths, worktree reclamation. Encodes [ADR-0030](../adr/0030-sessions-own-many-workstreams-from-the-tm-checkout.md): one session owns many workstreams, the session's home is the tm checkout (managed, shared with the user — not the user's own clone), refreshed non-destructively, and the ~5 workstream cap is an advisory attention limit. Re-scopes DOC-52 §1.5/§3.1 |
 | DOC-67 | `SPEC-TGAUDIT-01~draft` … `-13~draft` | [tga AUDIT Mode: Remote Codebase Analysis for Acquisition Due Diligence](./DOC-67-tga-audit-mode.md) | `trusty-git-analytics` (tga) — orchestration, new `audit` subcommand, DD-manifest adapter; `trusty-review` — existing DD report pipeline, consumed unmodified; `trusty-analyze` — existing HTTP analysis surface, consumed unmodified by trusty-review, not touched by tga |
+| DOC-68 | `SPEC-AUDITPKG-01~draft` … `-15~draft` | [The Audit Engagement Handoff Package: Select, Clone, Analyze, Sign](./DOC-68-audit-handoff-package.md) | `trusty-audit` — the auditor client (orchestration, working directory, engagement config, tool seam); `trusty-git-analytics` (tga) — clone acquisition, the audit sweep, manifest emission; `trusty-installer` — pinned binary download and verification; `trusty-review` — report rendering, invoked unmodified as a subprocess |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -97,7 +98,14 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-68`** (updated 2026-08-08 — DOC-67 claimed by
+> **Next free `DOC-N` = `DOC-69`** (updated 2026-08-11 — DOC-68 claimed by
+> [The Audit Engagement Handoff Package: Select, Clone, Analyze, Sign](./DOC-68-audit-handoff-package.md),
+> verified free on `origin/main` (`aadbbd5bb`): no filename or self-label claim
+> under `docs/specs/**`, no open pull request claiming `DOC-68`/`DOC-69`,
+> `check_doc_numbers.sh` clean (116 docs / 110 claims, 3 grandfathered, 0
+> violations) before the file was added.
+>
+> Previously — updated 2026-08-08 — DOC-67 claimed by
 > [tga AUDIT Mode: Remote Codebase Analysis for Acquisition Due Diligence](./DOC-67-tga-audit-mode.md),
 > verified free on `origin/main` (`70d795a7`): no filename or self-label claim
 > under `docs/specs/**`, no open pull request claiming a `DOC-N`,

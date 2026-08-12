@@ -65,10 +65,19 @@ use std::path::Path;
 /// (issue #2914 regression) in `tests.rs`; the promoted logic is unit-tested in
 /// `trusty_common::search_index::tests`.
 pub(crate) fn register_project_index(project_root: &Path) -> Option<String> {
+    let skip_vector = worktree_skip_vector(project_root);
+    if skip_vector {
+        // #5069: a worktree's index carries no vectors, so launching a session
+        // in one must also ensure the base checkout — the facet that owns the
+        // embedding lane — actually exists. Worktrees created before #5069 never
+        // run the creation-time path again, so launch is the only hook they hit.
+        crate::core::base_facet_index::ensure_base_facet_indexed_in_background(
+            trusty_common::resolve_project_root(project_root),
+        );
+    }
     trusty_common::search_index::ensure_project_indexed_with(
         project_root,
-        trusty_common::search_index::IndexOptions::default()
-            .with_skip_vector(worktree_skip_vector(project_root)),
+        trusty_common::search_index::IndexOptions::default().with_skip_vector(skip_vector),
     )
 }
 

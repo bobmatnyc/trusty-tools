@@ -33,26 +33,23 @@ use super::state::SearchAppState;
 /// anywhere". Told "unknown index" for an index that exists, such a caller
 /// deregisters it or gives up, and the writes stop arriving — silently, since
 /// nothing else drives that index.
-/// What: shares [`super::degraded::residency_miss_response`] with the read
-/// path, so a cold-parked index answers `503 index_not_resident` with the
-/// `restore_via` hint instead of a bodyless 404.
-/// Test: `write_path_cold_parked_index_is_503_with_restore_hint`.
+/// What: resolves the handle through
+/// [`super::index_resolve::resolve_or_load_index`], the same function the read
+/// path uses, so a cold-parked index is LOADED and the write applied (#5349)
+/// rather than refused with a hint to go issue a search first. A load that
+/// genuinely fails propagates as the 503/404 residency verdict — never as a
+/// successful write.
+/// Test: `cold_parked_index_accepts_a_write_by_driving_the_load`,
+/// `write_against_an_unloadable_cold_index_fails_loudly`.
 pub(super) async fn index_file_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(req): Json<IndexFileRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let index_id = IndexId::new(id);
-    // #5061: the write path owes the same residency verdict as the read path.
-    let handle = match state.registry.get(&index_id) {
-        Some(h) => h,
-        None => {
-            return Err(super::degraded::residency_miss_response(
-                &state.cold_store,
-                &index_id,
-            ))
-        }
-    };
+    // #5349: the write path drives the same lazy load the read path drives —
+    // a cold-parked index is reloaded here, not reported as unwritable.
+    let handle = super::index_resolve::resolve_or_load_index(&state, &index_id).await?;
     // #3049: hold the teardown lock's shared side across the write so a
     // concurrent DELETE cannot remove_dir_all this index's data mid-write.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
@@ -90,24 +87,18 @@ pub(super) async fn index_file_handler(
 /// `POST /indexes/:id/remove-file` — drop one file's chunks from an index.
 ///
 /// Why and What: the delete half of [`index_file_handler`]'s contract — same
-/// callers, same network-mount motivation, same residency verdict.
-/// Test: `write_path_cold_parked_index_is_503_with_restore_hint`.
+/// callers, same network-mount motivation, same lazy load, same residency
+/// verdict when that load fails.
+/// Test: `cold_parked_index_accepts_a_delete_by_driving_the_load`.
 pub(super) async fn remove_file_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(req): Json<RemoveFileRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let index_id = IndexId::new(id);
-    // #5061: same residency verdict as its `index_file` twin.
-    let handle = match state.registry.get(&index_id) {
-        Some(h) => h,
-        None => {
-            return Err(super::degraded::residency_miss_response(
-                &state.cold_store,
-                &index_id,
-            ))
-        }
-    };
+    // #5349: see the sibling handler — a delete drives the load too, so the two
+    // halves of the incremental contract cannot disagree about reachability.
+    let handle = super::index_resolve::resolve_or_load_index(&state, &index_id).await?;
     // #3049: see the sibling handler — same guard, same reason.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let indexer = handle.indexer.read().await;

@@ -357,6 +357,7 @@ async fn handle_removed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::watch_test_support::{await_watch_condition, await_watch_condition_within};
     use std::path::PathBuf;
     use std::time::Duration;
     use tokio::sync::RwLock;
@@ -497,7 +498,10 @@ mod tests {
     }
 
     /// End-to-end: writing a `.rs` file inside a watched directory causes the
-    /// indexer's chunk count to grow within ~2s.
+    /// indexer's chunk count to grow.
+    ///
+    /// #4731: the save is re-applied until the indexer reacts, so a dropped
+    /// FSEvents batch no longer strands a fixed 2 s deadline.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn modified_file_triggers_indexing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -512,27 +516,26 @@ mod tests {
         )
         .expect("watch loop starts");
 
-        // Allow the OS watcher to install.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
         let file = dir.path().join("lib.rs");
-        tokio::fs::write(&file, "fn alpha() {}\nfn beta() {}\n")
+        let indexed = {
+            let indexer = Arc::clone(&indexer);
+            await_watch_condition(
+                |generation| {
+                    std::fs::write(
+                        &file,
+                        format!("fn alpha() {{}}\nfn beta{generation}() {{}}\n"),
+                    )
+                    .expect("write file");
+                },
+                move || {
+                    let indexer = Arc::clone(&indexer);
+                    async move { indexer.read().await.chunk_count() > 0 }
+                },
+            )
             .await
-            .expect("write file");
+        };
 
-        // Poll up to 2s for the indexer to pick the change up.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let count = indexer.read().await.chunk_count();
-            if count > 0 {
-                break;
-            }
-            if tokio::time::Instant::now() > deadline {
-                panic!("chunk_count never grew above 0");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
+        assert!(indexed, "chunk_count never grew above 0");
         assert!(
             tracker.len().await >= 1,
             "expected at least one tracked file"
@@ -541,6 +544,11 @@ mod tests {
 
     /// Issue #129: a file created inside `cdk.out/` must NOT be indexed by the
     /// watcher — the build-artefact subtree exclusion applies incrementally.
+    ///
+    /// #4731: both files are re-saved until the positive control indexes, then
+    /// the excluded file keeps being re-saved through a bounded window. The
+    /// exclusion therefore gets MORE chances to wrongly fire than the single
+    /// write plus 300 ms sleep it replaces, not fewer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cdk_out_file_is_not_indexed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -555,31 +563,44 @@ mod tests {
         )
         .expect("watch loop starts");
 
-        tokio::time::sleep(Duration::from_millis(150)).await;
-
-        // Write a real source file and a build-artefact file.
         let cdk_dir = dir.path().join("cdk.out/asset.abc/python");
-        tokio::fs::create_dir_all(&cdk_dir).await.expect("mkdir");
-        tokio::fs::write(cdk_dir.join("vendored.py"), "import boto3\n")
-            .await
-            .expect("write vendored");
-        tokio::fs::write(dir.path().join("handler.py"), "def handler(): pass\n")
-            .await
-            .expect("write handler");
+        std::fs::create_dir_all(&cdk_dir).expect("mkdir");
+        let vendored = cdk_dir.join("vendored.py");
+        let handler = dir.path().join("handler.py");
 
-        // Poll for the real file to be picked up.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if indexer.read().await.chunk_count() > 0 {
-                break;
-            }
-            if tokio::time::Instant::now() > deadline {
-                panic!("real source was never indexed");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        // Give the watcher a moment to (not) process the cdk.out file.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let save_vendored = |generation: u32| {
+            std::fs::write(&vendored, format!("import boto3\nV = {generation}\n"))
+                .expect("write vendored");
+        };
+
+        let indexed = {
+            let indexer = Arc::clone(&indexer);
+            await_watch_condition(
+                |generation| {
+                    save_vendored(generation);
+                    std::fs::write(&handler, format!("def handler{generation}(): pass\n"))
+                        .expect("write handler");
+                },
+                move || {
+                    let indexer = Arc::clone(&indexer);
+                    async move { indexer.read().await.chunk_count() > 0 }
+                },
+            )
+            .await
+        };
+        assert!(indexed, "real source was never indexed");
+
+        // Negative control: keep feeding the excluded path and assert it never
+        // becomes tracked. `false` here is the passing outcome.
+        let leaked = {
+            let tracker = tracker.clone();
+            await_watch_condition_within(Duration::from_secs(1), save_vendored, move || {
+                let tracker = tracker.clone();
+                async move { tracker.len().await > 1 }
+            })
+            .await
+        };
+        assert!(!leaked, "the cdk.out file must never be tracked");
 
         // Only handler.py should be tracked; vendored.py must be excluded.
         let tracked = tracker.len().await;
@@ -633,10 +654,11 @@ mod tests {
     /// indexed via the office-document extractor — the watcher path must not
     /// diverge from the reindex/ingest path (`service::reindex::batch`) that
     /// already routes these extensions through `core::extract`.
+    ///
+    /// #4731: the docx is re-written per generation rather than once behind a
+    /// fixed sleep.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn modified_docx_file_triggers_indexing_via_extractor() {
-        use std::io::Write as _;
-
         let dir = tempfile::tempdir().expect("tempdir");
         let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
         let tracker = IndexedFiles::new();
@@ -648,43 +670,52 @@ mod tests {
             tracker.clone(),
         )
         .expect("watch loop starts");
-        tokio::time::sleep(Duration::from_millis(150)).await;
 
-        // Minimal valid docx: a zip containing just word/document.xml with
-        // one paragraph — enough for `core::extract::docx::extract` to
-        // recover text (see `core::extract::docx` for the full fixture
-        // pattern; kept minimal here since only the watcher dispatch is
-        // under test, not extraction correctness).
-        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Watched document paragraph.</w:t></w:r></w:p></w:body></w:document>"#;
+        let file = dir.path().join("memo.docx");
+        let indexed = {
+            let indexer = Arc::clone(&indexer);
+            await_watch_condition(
+                |generation| {
+                    std::fs::write(&file, minimal_docx(generation)).expect("write docx");
+                },
+                move || {
+                    let indexer = Arc::clone(&indexer);
+                    async move { indexer.read().await.chunk_count() > 0 }
+                },
+            )
+            .await
+        };
+
+        assert!(indexed, "docx was never indexed via the watcher path");
+        assert!(
+            tracker.len().await >= 1,
+            "expected the docx to be tracked after indexing"
+        );
+    }
+
+    /// Minimal valid docx: a zip containing just `word/document.xml` with one
+    /// paragraph — enough for `core::extract::docx::extract` to recover text.
+    /// `generation` varies the body so successive saves are never identical
+    /// (see `core::extract::docx` for the full fixture pattern; kept minimal
+    /// here since only the watcher dispatch is under test, not extraction
+    /// correctness).
+    fn minimal_docx(generation: u32) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let document_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Watched document paragraph {generation}.</w:t></w:r></w:p></w:body></w:document>"#
+        );
         let mut docx_bytes = Vec::new();
         {
             let cursor = std::io::Cursor::new(&mut docx_bytes);
             let mut zip = zip::ZipWriter::new(cursor);
             let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
-            zip.start_file("word/document.xml", opts).unwrap();
-            zip.write_all(document_xml.as_bytes()).unwrap();
-            zip.finish().unwrap();
+            zip.start_file("word/document.xml", opts)
+                .expect("start docx entry");
+            zip.write_all(document_xml.as_bytes())
+                .expect("write docx entry");
+            zip.finish().expect("finish docx zip");
         }
-
-        let file = dir.path().join("memo.docx");
-        tokio::fs::write(&file, &docx_bytes)
-            .await
-            .expect("write docx");
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if indexer.read().await.chunk_count() > 0 {
-                break;
-            }
-            if tokio::time::Instant::now() > deadline {
-                panic!("docx was never indexed via the watcher path");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        assert!(
-            tracker.len().await >= 1,
-            "expected the docx to be tracked after indexing"
-        );
+        docx_bytes
     }
 }
