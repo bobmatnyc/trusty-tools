@@ -255,7 +255,7 @@ fn mutation_sites(code: &str) -> Vec<(usize, bool)> {
 
 /// Rule 1 — nothing in the `tm` bin target writes `$HOME` or `$CLAUDE_CONFIG_DIR`.
 ///
-/// Why: see the module docs. This is the rule that closes #5544's race class:
+/// Why: see the module docs. This is the rule that eliminates #5544's race class:
 /// with zero writers, a newly added non-serial reader of a `$HOME`-relative
 /// tier cannot race one, because there is nothing left to race.
 /// What: for each mutation site, inspects the following 120 CHARS — enough to
