@@ -45,6 +45,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "FILE")]
     pub manifest: Option<PathBuf>,
 
+    /// Engagement config from the handoff package (default: ./engagement.toml).
+    #[arg(long, global = true, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
     /// Capability to run. Omit to enter the guided flow.
     #[command(subcommand)]
     pub verb: Option<Verb>,
@@ -59,8 +63,10 @@ pub enum Verb {
     Workdir,
     /// Print the engagement metadata from the companion manifest.
     Manifest,
-    /// Report which pinned tools are installed.
+    /// Report which pinned tools are installed, and at which verified versions.
     Tools,
+    /// Download and verify the pinned tools named in the engagement config.
+    Install,
     /// List the repositories this engagement is configured to audit.
     Repos,
 }
@@ -81,6 +87,7 @@ impl Cli {
             Some(Verb::Workdir) => Command::WorkDir,
             Some(Verb::Manifest) => Command::Manifest,
             Some(Verb::Tools) => Command::Tools,
+            Some(Verb::Install) => Command::InstallTools,
             Some(Verb::Repos) => Command::Repos,
         }
     }
@@ -148,11 +155,35 @@ pub fn render(outcome: &Outcome) -> String {
         Outcome::Tools(statuses) => {
             let mut out = String::new();
             for status in statuses {
-                let mark = if status.installed { "ok " } else { "MISSING" };
+                // #5495: "installed" and "installed at a known version" are
+                // different states, and the recipient has to be able to tell
+                // them apart — a binary this client did not place is one it
+                // cannot vouch for, so it is never shown carrying a version.
+                let mark = match (status.installed, status.version.is_some()) {
+                    (false, _) => "MISSING",
+                    (true, true) => "ok",
+                    (true, false) => "UNVERIFIED",
+                };
+                let version = status.version.as_deref().unwrap_or("-");
                 out.push_str(&format!(
-                    "{mark:<8} {:<16} {}\n",
+                    "{mark:<11} {:<16} {version:<12} {}\n",
                     status.tool.binary_name(),
                     status.path.display()
+                ));
+            }
+            out
+        }
+        Outcome::Installed(installed) => {
+            let mut out = format!(
+                "Installed and verified {}:\n",
+                count_of(installed.len(), "tool", "tools")
+            );
+            for tool in installed {
+                out.push_str(&format!(
+                    "  {:<16} {:<12} {}\n",
+                    tool.crate_name,
+                    tool.version,
+                    tool.binary.display()
                 ));
             }
             out
@@ -182,7 +213,10 @@ fn describe_next(next: &NextStep) -> String {
         }
         NextStep::InstallTools(missing) => {
             let names: Vec<&str> = missing.iter().map(|t| t.binary_name()).collect();
-            format!("install the pinned tools: {}", names.join(", "))
+            format!(
+                "install the pinned tools (`trusty-audit install`): {}",
+                names.join(", ")
+            )
         }
         NextStep::ReadyForRun => {
             "everything checked here is in place; the audit run itself is later work".to_string()
@@ -195,6 +229,7 @@ mod cli_tests {
     use super::*;
     use crate::manifest::AuditManifest;
     use crate::session::{Session, WorkDirReport};
+    use crate::tools::{InstalledTool, RequiredTool, ToolStatus};
     use crate::workdir::WorkDir;
 
     /// The CLI invocation that produces each capability.
@@ -208,15 +243,17 @@ mod cli_tests {
             Command::WorkDir => vec!["taudit", "workdir"],
             Command::Manifest => vec!["taudit", "manifest"],
             Command::Tools => vec!["taudit", "tools"],
+            Command::InstallTools => vec!["taudit", "install"],
             Command::Repos => vec!["taudit", "repos"],
         }
     }
 
-    const ALL_COMMANDS: [Command; 5] = [
+    const ALL_COMMANDS: [Command; 6] = [
         Command::Guided,
         Command::WorkDir,
         Command::Manifest,
         Command::Tools,
+        Command::InstallTools,
         Command::Repos,
     ];
 
@@ -278,13 +315,56 @@ mod cli_tests {
         assert!(text.contains("guided flow"), "{text}");
     }
 
-    #[test]
-    fn rendering_a_guided_status_states_the_next_step() {
+    #[tokio::test]
+    async fn rendering_a_guided_status_states_the_next_step() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let session = Session::new(WorkDir::new(tmp.path().join("work")));
-        let outcome = session.execute(Command::Guided).expect("runs");
+        let outcome = session.execute(Command::Guided).await.expect("runs");
         let text = render(&outcome);
         assert!(text.contains("Next: pick the repositories"), "{text}");
+    }
+
+    /// A binary this client did not place must never be shown carrying a
+    /// version — the recipient has to be able to see the difference.
+    #[test]
+    fn an_unverified_binary_renders_differently_from_a_verified_one() {
+        let statuses = vec![
+            ToolStatus {
+                tool: RequiredTool::Tga,
+                path: PathBuf::from("/work/tools/tga"),
+                installed: true,
+                version: Some("2.9.4".to_owned()),
+            },
+            ToolStatus {
+                tool: RequiredTool::TrustyReview,
+                path: PathBuf::from("/work/tools/trusty-review"),
+                installed: true,
+                version: None,
+            },
+        ];
+        let text = render(&Outcome::Tools(statuses));
+        assert!(text.contains("2.9.4"), "{text}");
+        assert!(text.contains("UNVERIFIED"), "{text}");
+    }
+
+    #[test]
+    fn rendering_an_install_names_every_version() {
+        let installed = vec![InstalledTool {
+            crate_name: "tga".to_owned(),
+            version: "2.9.4".to_owned(),
+            binary: PathBuf::from("/work/tools/tga"),
+        }];
+        let text = render(&Outcome::Installed(installed));
+        assert!(text.contains("1 tool"), "{text}");
+        assert!(text.contains("2.9.4"), "{text}");
+    }
+
+    #[test]
+    fn the_config_path_is_overridable_from_the_command_line() {
+        let cli = Cli::try_parse_from(["taudit", "install", "--config", "/pkg/engagement.toml"])
+            .expect("the config flag parses");
+        assert_eq!(cli.config, Some(PathBuf::from("/pkg/engagement.toml")));
+        assert_eq!(cli.to_command(), Command::InstallTools);
     }
 
     #[test]

@@ -136,6 +136,12 @@ pub enum WorktreeIndexOutcome {
 /// `spawn_detached_returns_before_work_finishes`, and the decision logic by
 /// the [`index_new_worktree`] tests.
 pub fn index_new_worktree_in_background(worktree_path: PathBuf) {
+    // #5069: this worktree's index is BM25+KG only, so the base checkout it was
+    // cut from has to carry the embedding lane or semantic search has no index
+    // to route to. Its own detached thread — the base facet is the expensive
+    // index, and a failure there must not delay or mask this one.
+    crate::core::base_facet_index::ensure_base_facet_indexed_in_background(worktree_path.clone());
+
     spawn_detached(move || {
         let outcome = index_new_worktree(&worktree_path);
         match outcome {
@@ -180,7 +186,7 @@ pub fn index_new_worktree_in_background(worktree_path: PathBuf) {
 /// detaches the thread rather than waiting on it, so the caller returns as
 /// soon as the OS has the thread queued.
 /// Test: `spawn_detached_returns_before_work_finishes`.
-fn spawn_detached<F: FnOnce() + Send + 'static>(work: F) {
+pub(super) fn spawn_detached<F: FnOnce() + Send + 'static>(work: F) {
     std::thread::spawn(work);
 }
 

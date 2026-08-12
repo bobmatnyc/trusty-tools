@@ -286,20 +286,28 @@ async fn chunks_and_status_agree_on_a_cold_parked_index() {
     assert_eq!(status_body["restore_via"], chunks_body["restore_via"]);
 }
 
-/// The WRITE path answers a cold-parked index the same way the read path does.
+/// The WRITE path never answers `index_not_resident` — it loads instead.
 ///
-/// Why (#5061): `index_file` / `remove_file` are the supported incremental
-/// path for network-mounted roots (#3408), where nothing else keeps the index
-/// current — so a caller told "unknown index" for an index that merely is not
-/// resident deregisters it or gives up, and the writes stop arriving with no
-/// other signal. Pre-fix both handlers did a bare hot-registry lookup and
-/// returned `StatusCode::NOT_FOUND` with no body, which under #4715's rule
-/// asserts the index exists nowhere. The `expect_err` still passes pre-fix —
-/// it is the 503, the `restore_via` hint, and the body itself that do not.
+/// Why (#5061 → #5349): #5061 gave these two handlers the shared residency
+/// body, which made a cold-parked index a `503 index_not_resident` carrying a
+/// `restore_via` hint. #5349 went further: the write path now drives the same
+/// lazy load the read path drives, so `index_not_resident` is unreachable from
+/// here by construction — a cold-but-not-failed index is loaded, and only a
+/// load that FAILS produces a verdict. This test pins the negative half of
+/// that; the positive half (the write lands) lives in `tests_5349`.
+///
+/// The entry here points at `/tmp/trusty-5061-cold-write`, which does not
+/// exist, so the restore marks it permanently failed — which is why the verdict
+/// is `index_restore_failed` and not the `index_not_resident` this test
+/// asserted before #5349.
 /// Test: this test.
 #[tokio::test]
-async fn write_path_cold_parked_index_is_503_with_restore_hint() {
+async fn write_path_cold_parked_index_reports_only_a_failed_load() {
     let state = state_with_cold_index("cold-write");
+    let embedder: Arc<dyn crate::core::Embedder> =
+        Arc::new(crate::core::embed::MockEmbedder::new(8));
+    state.install_embedder(embedder).await;
+
     let index_req: super::router::IndexFileRequest = serde_json::from_value(
         serde_json::json!({ "path": "src/auth.rs", "content": "fn authenticate() {}" }),
     )
@@ -310,17 +318,21 @@ async fn write_path_cold_parked_index_is_503_with_restore_hint() {
         axum::Json(index_req),
     )
     .await
-    .expect_err("a non-resident index cannot accept a write");
+    .expect_err("the root is gone, so the load cannot succeed");
 
     assert_eq!(
         code,
         StatusCode::SERVICE_UNAVAILABLE,
-        "a cold-parked index EXISTS — 404 would tell the caller to stop pushing"
+        "a registered index EXISTS — 404 would tell the caller to stop pushing"
     );
-    assert_eq!(body["error"], "index_not_resident");
     assert_eq!(
-        body["restore_via"], "POST /indexes/cold-write/search",
-        "the writer must learn how to bring the index back"
+        body["error"], "index_restore_failed",
+        "the write attempted the load; a cold-parked index is never reported as \
+         un-writable without one"
+    );
+    assert!(
+        body.get("restore_via").is_none(),
+        "no endpoint restores a permanently-failed index; naming one would mislead"
     );
 
     let remove_req: super::router::RemoveFileRequest =
@@ -332,14 +344,13 @@ async fn write_path_cold_parked_index_is_503_with_restore_hint() {
         axum::Json(remove_req),
     )
     .await
-    .expect_err("a non-resident index cannot accept a delete");
+    .expect_err("the delete half sees the same failed load");
 
     assert_eq!(
         rm_code, code,
         "the delete half must not diverge from the add"
     );
     assert_eq!(rm_body["error"], body["error"]);
-    assert_eq!(rm_body["restore_via"], body["restore_via"]);
 }
 
 /// A genuinely unknown id keeps its 404 on the write path too.
