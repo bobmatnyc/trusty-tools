@@ -1,0 +1,15 @@
+toolchain: rustc 1.97.1 (selected over ambient 1.94.1; the scratch resolution ignores Cargo.lock)
+CHECK tga: 2.18.0 -> 2.19.0 (minor release), 1 feature(s)
+    Building tga v2.19.0 (current)
+       Built [  30.163s] (current)
+     Parsing tga v2.19.0 (current)
+      Parsed [   0.062s] (current)
+    Building tga v2.18.0 (baseline)
+       Built [  29.192s] (baseline)
+     Parsing tga v2.18.0 (baseline)
+      Parsed [   0.057s] (baseline)
+    Checking tga v2.18.0 -> v2.19.0 (minor change)
+     Checked [   0.058s] 196 checks: 196 pass, 58 skip
+     Summary no semver update required
+    Finished [  61.533s] tga
+semver gate: scanned (explicit); 1 crate(s) checked, 0 skipped — OK.

@@ -1,0 +1,15 @@
+toolchain: rustc 1.97.1 (selected over ambient 1.94.1; the scratch resolution ignores Cargo.lock)
+INVENTORY stub-crate: 0.2.0 -> 0.3.0 is already a breaking release — no bump can be owed, so this run is advisory: what does it break?
+    Building stub-crate v0.3.0 (current)
+       Built [  23.936s] (current)
+     Parsing stub-crate v0.3.0 (current)
+      Parsed [   0.027s] (current)
+    Building stub-crate v0.2.0 (baseline)
+       Built [  21.402s] (baseline)
+     Parsing stub-crate v0.2.0 (baseline)
+      Parsed [   0.024s] (baseline)
+    Checking stub-crate v0.2.0 -> v0.3.0 (minor change)
+     Checked [   0.871s] 196 checks: 196 pass, 58 skip
+     Summary no semver update required
+INVENTORY stub-crate: no breaking changes found against v0.2.0.
+semver gate: scanned (explicit); 0 crate(s) checked, 0 skipped, 1 inventoried (advisory) — OK.
