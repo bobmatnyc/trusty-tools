@@ -30,6 +30,7 @@ use super::defer_embed::spawn_deferred_embed_pass;
 use super::finish_teardown::{rebuild_kg, resolve_corpus_swap, resolve_hnsw_swap, stop_pollers};
 use super::guard::ReindexTerminationGuard;
 use super::hnsw_swap::HnswSwapPaths;
+use super::pollers::PollerStop;
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
 use super::stage_timings::StageTimings;
@@ -91,9 +92,9 @@ pub(super) struct FinishCtx {
     pub(super) peak_embedderd_rss_atomic: Arc<AtomicU64>,
     pub(super) embedderd_pid_slot: Option<Arc<AtomicU32>>,
     pub(super) poller_handle: tokio::task::JoinHandle<()>,
-    pub(super) poller_stop: Arc<AtomicBool>,
+    pub(super) poller_stop: Arc<PollerStop>,
     pub(super) embedderd_poller_handle: Option<tokio::task::JoinHandle<()>>,
-    pub(super) embedderd_poller_stop: Option<Arc<AtomicBool>>,
+    pub(super) embedderd_poller_stop: Option<Arc<PollerStop>>,
     pub(super) term_guard: ReindexTerminationGuard,
     pub(super) cleanup_map: Option<Arc<DashMap<IndexId, Arc<ReindexProgress>>>>,
     pub(super) cleanup_id: IndexId,

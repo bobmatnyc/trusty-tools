@@ -203,3 +203,55 @@ pub fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
 pub fn index_is_stuck_unwalked(lexical: StageStatus, walk_started: bool) -> bool {
     !walk_started && matches!(lexical, StageStatus::InProgress)
 }
+
+/// Issue #5336: `true` when an index's lexical stage claims a walk is underway,
+/// a walk really did start, and nothing is driving the index any more — the
+/// walk was abandoned part-way through.
+///
+/// Why: [`index_is_stuck_unwalked`] covers the index that never started walking
+/// and boot reconcile re-drives it. A walk that STARTED and never finished is
+/// the remaining hole (observed on `.tmp1rIzAZ`, #4708): the reindex runner
+/// stamps `last_walk_started_at` and flips lexical to `InProgress`, and if the
+/// task then panics or is cancelled, `ReindexTerminationGuard` marks the
+/// `ReindexProgress` `Failed` and emits an SSE error but never touches the
+/// stage. The handle is left claiming `"walking"` for the daemon's remaining
+/// lifetime. Nothing completes it, nothing retries it, and every caller reads
+/// that claim as an ordinary in-flight reindex, because it is byte-for-byte the
+/// same state one produces. A stage timeout is the wrong instrument here: it
+/// would abort a legitimate multi-minute walk, and a warm-boot-derived
+/// `InProgress` carries `started_at: None`, so there is no timestamp to key a
+/// stall on.
+///
+/// What: pure three-signal test — the two [`index_is_stuck_unwalked`] reads,
+/// plus a liveness signal.
+///   - `lexical == InProgress` — the stage claims a walk is underway.
+///   - `walk_started == true` — the complement of [`index_is_stuck_unwalked`],
+///     so the two predicates partition the `InProgress` lexical lane instead of
+///     double-counting it. Never-walked stays #4680's, which also owns its
+///     recovery.
+///   - `reindex_in_flight == false` — no task holds this index's
+///     mutual-exclusion permit, so no reindex, deferred-embed pass, or
+///     component catch-up is alive to move the stage on. The runner takes that
+///     permit before it flips the stage and holds it until it returns, so a
+///     healthy walk always reports `true` here. See
+///     `service::reindex::index_task_in_flight` for why
+///     `SearchAppState::reindex_progress` cannot answer this.
+///
+/// SURFACING ONLY. A `true` here is reported on `GET /health`
+/// (`indexes_stuck_mid_walk`, which also forces `status: "degraded"`) and on
+/// `GET /indexes/:id/status` (`stuck_mid_walk`). Nothing retries or rewrites the
+/// stage: unlike the never-walked case, a partial walk may have committed
+/// chunks, and re-driving it automatically on a per-poll signal would loop
+/// against whatever killed the first walk. An operator clears it with
+/// `POST /indexes/:id/reindex`.
+///
+/// Test: `stuck_mid_walk_matches_only_an_abandoned_started_walk` and
+/// `stuck_mid_walk_and_stuck_unwalked_partition_the_in_progress_lane` in
+/// `warm_boot_tests.rs`.
+pub fn index_is_stuck_mid_walk(
+    lexical: StageStatus,
+    walk_started: bool,
+    reindex_in_flight: bool,
+) -> bool {
+    walk_started && !reindex_in_flight && matches!(lexical, StageStatus::InProgress)
+}
