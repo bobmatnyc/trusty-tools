@@ -781,6 +781,7 @@ fn cli_parses_ls_connector_bare() {
             source_id,
             current,
             all,
+            attached,
             root,
         } => {
             assert!(
@@ -792,6 +793,7 @@ fn cli_parses_ls_connector_bare() {
             assert!(source_id.is_none());
             assert!(!current);
             assert!(!all);
+            assert!(!attached, "bare `tm ls` must not set --attached");
             assert!(root.is_none());
         }
         other => panic!("expected top-level ls, got {other:?}"),
@@ -828,6 +830,66 @@ fn cli_parses_ls_json() {
             assert!(!projects, "--json alone must not imply --projects");
         }
         other => panic!("expected top-level ls --json, got {other:?}"),
+    }
+}
+
+/// `tm ls -a` parses as attached-only, and does NOT set `--all`.
+///
+/// Why: `-a` conventionally means "all" (`ls -a`, `docker ps -a`), and `--all`
+/// is a real neighbouring flag on this very command. This asserts the short
+/// binds to `--attached` and leaves `--all` alone, so a future reader cannot
+/// quietly swap them.
+#[test]
+fn cli_parses_ls_attached_short() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "-a"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls {
+            attached,
+            all,
+            projects,
+            ..
+        } => {
+            assert!(attached, "-a must parse to --attached");
+            assert!(!all, "-a must NOT set --all");
+            assert!(!projects, "-a alone must not imply --projects");
+        }
+        other => panic!("expected top-level ls -a, got {other:?}"),
+    }
+}
+
+/// `tm ls --attached` is the long spelling of `-a`.
+#[test]
+fn cli_parses_ls_attached_long() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "--attached"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls { attached, all, .. } => {
+            assert!(attached, "--attached must parse to true");
+            assert!(!all);
+        }
+        other => panic!("expected top-level ls --attached, got {other:?}"),
+    }
+}
+
+/// `--all` stays long-only: it and `-a` are independent flags that can coexist.
+#[test]
+fn cli_parses_ls_all_and_attached_are_independent() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "--all"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls { all, attached, .. } => {
+            assert!(all, "--all must parse to true");
+            assert!(!attached, "--all must NOT imply --attached");
+        }
+        other => panic!("expected top-level ls --all, got {other:?}"),
+    }
+    let both = Cli::try_parse_from(["trusty-mpm", "ls", "--all", "-a"]).unwrap();
+    match both.command.unwrap() {
+        Command::Ls { all, attached, .. } => {
+            assert!(
+                all && attached,
+                "--all -a must parse as both, not a conflict"
+            );
+        }
+        other => panic!("expected top-level ls --all -a, got {other:?}"),
     }
 }
 
@@ -879,8 +941,8 @@ use crate::commands::session_ls_connector::should_show_picker;
 /// The picker opens only on a fully-interactive terminal with ≥1 session.
 #[test]
 fn ls_connector_should_show_picker_interactive_with_sessions() {
-    assert!(should_show_picker(true, true, false, false, 1));
-    assert!(should_show_picker(true, true, false, false, 5));
+    assert!(should_show_picker(true, true, false, false, false, 1));
+    assert!(should_show_picker(true, true, false, false, false, 5));
 }
 
 /// A non-TTY stdin OR stdout forces the static (pipeable) list path — never a
@@ -888,14 +950,14 @@ fn ls_connector_should_show_picker_interactive_with_sessions() {
 #[test]
 fn ls_connector_should_show_picker_non_tty_static() {
     assert!(
-        !should_show_picker(false, true, false, false, 3),
+        !should_show_picker(false, true, false, false, false, 3),
         "piped stdin -> static"
     );
     assert!(
-        !should_show_picker(true, false, false, false, 3),
+        !should_show_picker(true, false, false, false, false, 3),
         "piped stdout -> static"
     );
-    assert!(!should_show_picker(false, false, false, false, 3));
+    assert!(!should_show_picker(false, false, false, false, false, 3));
 }
 
 /// `--json` and `--all` force static output even on a TTY, and 0 sessions never
@@ -903,16 +965,33 @@ fn ls_connector_should_show_picker_non_tty_static() {
 #[test]
 fn ls_connector_should_show_picker_flags_and_empty_static() {
     assert!(
-        !should_show_picker(true, true, true, false, 3),
+        !should_show_picker(true, true, true, false, false, 3),
         "--json -> static"
     );
     assert!(
-        !should_show_picker(true, true, false, true, 3),
+        !should_show_picker(true, true, false, true, false, 3),
         "--all -> static"
     );
     assert!(
-        !should_show_picker(true, true, false, false, 0),
+        !should_show_picker(true, true, false, false, false, 0),
         "0 sessions -> static"
+    );
+}
+
+/// `-a` forces the static listing even on a full TTY with sessions present.
+///
+/// Why: the sessions `-a` keeps are exactly the ones a client is already on, so
+/// opening the picker to "connect" to one is a no-op. The flag is a listing
+/// question, and it must answer in a pipeable table like `--all` does.
+#[test]
+fn ls_connector_should_show_picker_attached_static() {
+    assert!(
+        !should_show_picker(true, true, false, false, true, 3),
+        "--attached -> static even with sessions on a TTY"
+    );
+    assert!(
+        should_show_picker(true, true, false, false, false, 3),
+        "the same invocation WITHOUT -a still opens the picker"
     );
 }
 
@@ -1049,6 +1128,106 @@ fn ls_test_session(
         slot: 0,
         deleted: false,
     }
+}
+
+// ── `tm ls -a` — attached-only listing ──────────────────────────────────────
+
+/// `-a` keeps exactly the sessions a tmux client is on.
+#[test]
+fn filter_attached_keeps_only_attached() {
+    let mut connected = ls_test_session("connected", "active", None, None, None, None);
+    connected.attached = true;
+    let mut also_connected = ls_test_session("also-connected", "active", None, None, None, None);
+    also_connected.attached = true;
+    let lonely = ls_test_session("lonely", "active", None, None, None, None);
+
+    let out =
+        crate::commands::managed::filter_attached(vec![connected, lonely, also_connected], true);
+
+    let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["connected", "also-connected"]);
+}
+
+/// A session that is RUNNING but has no client attached must NOT appear under
+/// `-a`.
+///
+/// Why: this is the whole feature. `state == "active"` means the tmux entity is
+/// live; `attached` means somebody is looking at it. If a detached-but-running
+/// session survived this filter, `-a` would just be a slower spelling of the
+/// default listing.
+#[test]
+fn filter_attached_excludes_running_but_detached() {
+    // Identical in every respect EXCEPT the attach flag — so nothing but
+    // `attached` can be what separates them.
+    let mut watched = ls_test_session("running", "active", None, None, None, None);
+    watched.attached = true;
+    let mut unwatched = ls_test_session("running", "active", None, None, None, None);
+    unwatched.attached = false;
+
+    let out = crate::commands::managed::filter_attached(vec![watched, unwatched], true);
+
+    assert_eq!(
+        out.len(),
+        1,
+        "the detached `active` session must be dropped"
+    );
+    assert!(out[0].attached);
+}
+
+/// With `-a` off, the listing is byte-identical to today's — the filter is a
+/// no-op, not a reorder or a dedupe.
+#[test]
+fn filter_attached_disabled_is_noop() {
+    let mut connected = ls_test_session("connected", "active", None, None, None, None);
+    connected.attached = true;
+    let sessions = vec![
+        ls_test_session("stopped-one", "stopped", None, None, None, None),
+        connected,
+        ls_test_session("detached-active", "active", None, None, None, None),
+    ];
+    let before: Vec<String> = sessions.iter().map(|s| s.name.clone()).collect();
+
+    let out = crate::commands::managed::filter_attached(sessions, false);
+
+    let after: Vec<String> = out.iter().map(|s| s.name.clone()).collect();
+    assert_eq!(before, after, "-a off must leave the list untouched");
+}
+
+/// Zero attached sessions is an ANSWER, not an error: `-a` says so in words.
+#[test]
+fn filter_attached_zero_matches_yields_the_explicit_line() {
+    let running_but_detached = vec![
+        ls_test_session("a", "active", None, None, None, None),
+        ls_test_session("b", "active", None, None, None, None),
+    ];
+
+    let out = crate::commands::managed::filter_attached(running_but_detached, true);
+
+    assert!(out.is_empty(), "no session in the fixture is attached");
+    // The caller renders this line and returns Ok(()) — exit 0, never an error.
+    assert_eq!(
+        crate::commands::managed_render::no_attached_sessions_line(None),
+        "no attached sessions"
+    );
+}
+
+/// The zero-attached line, unscoped.
+#[test]
+fn render_no_attached_sessions_line_unscoped() {
+    assert_eq!(
+        crate::commands::managed_render::no_attached_sessions_line(None),
+        "no attached sessions"
+    );
+}
+
+/// The zero-attached line names the scope when one was given, mirroring
+/// `render_session_table`'s "no managed sessions for <slug>".
+#[test]
+fn render_no_attached_sessions_line_scoped_to_source_id() {
+    assert_eq!(
+        crate::commands::managed_render::no_attached_sessions_line(Some("owner/repo")),
+        "no attached sessions for owner/repo"
+    );
 }
 
 /// The filter matches a substring of the `name` column, case-insensitively.
@@ -2746,6 +2925,7 @@ async fn session_ls_prunes_dead_records_on_piped_invocation() {
             false, // json = false: the piped/scripted table path
             None,
             false,
+            false, // attached = false: unfiltered, as `tm ls` is by default
             crate::commands::session_picker::SessionSortArg::Recent,
             None,
             ctx,
@@ -2796,6 +2976,7 @@ async fn session_ls_json_passthrough_prunes_dead_records() {
             true, // json = true
             None,
             false,
+            false, // attached = false
             crate::commands::session_picker::SessionSortArg::Recent,
             None,
             ctx,
@@ -3467,6 +3648,7 @@ async fn session_ls_json_never_refetches_after_pruning() {
         true,
         None,
         false,
+        false, // attached = false
         crate::commands::session_picker::SessionSortArg::Recent,
         None,
         &hermetic_prune_ctx(&marker_path),

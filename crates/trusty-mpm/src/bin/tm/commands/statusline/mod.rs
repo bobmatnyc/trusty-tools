@@ -11,7 +11,9 @@
 //! Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
 //! `assemble_statusline_pins_segment_order_with_markers` in tests.
 
-mod branch;
+// `pub(crate)` since #5539: `picker_delete_glob` reuses `branch`'s bounded
+// `tmux_session_name` probe rather than growing a second copy of it.
+pub(crate) mod branch;
 pub(crate) mod compaction;
 mod usage;
 

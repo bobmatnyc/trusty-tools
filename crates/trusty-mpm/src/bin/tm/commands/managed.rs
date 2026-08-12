@@ -205,18 +205,24 @@ pub(crate) fn filter_live_sessions(
 /// `picker_filter_excludes_decommissioned_keeps_active`; sort/filter logic by
 /// `sort_sessions_*` / `filter_sessions_by_term_*` in `session_picker.rs`; the
 /// prune coverage by `session_ls_prunes_dead_records_on_piped_invocation` and
-/// `session_ls_json_passthrough_prunes_dead_records`.
+/// `session_ls_json_passthrough_prunes_dead_records`; the `attached` filter by
+/// `filter_attached_*`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_ls(
     client: &reqwest::Client,
     url: &str,
     json: bool,
     source_id: Option<&str>,
     all: bool,
+    attached: bool,
     sort: crate::commands::session_picker::SessionSortArg,
     term: Option<crate::commands::session_picker::SessionFilter>,
 ) -> anyhow::Result<()> {
     let ctx = crate::commands::session_picker_prune::PruneContext::production();
-    session_ls_at(client, url, json, source_id, all, sort, term, &ctx).await
+    session_ls_at(
+        client, url, json, source_id, all, attached, sort, term, &ctx,
+    )
+    .await
 }
 
 /// [`session_ls`] with an injected auto-prune context — the testable core
@@ -256,6 +262,7 @@ pub(crate) async fn session_ls_at(
     json: bool,
     source_id: Option<&str>,
     all: bool,
+    attached: bool,
     sort: crate::commands::session_picker::SessionSortArg,
     term: Option<crate::commands::session_picker::SessionFilter>,
     ctx: &crate::commands::session_picker_prune::PruneContext,
@@ -291,11 +298,44 @@ pub(crate) async fn session_ls_at(
         all,
         &listing.dead_ids,
     );
-    let mut sessions =
+    let sessions =
         crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_ref());
+    // `tm ls -a`: keep only what a tmux client is on RIGHT NOW.
+    let mut sessions = filter_attached(sessions, attached);
     crate::commands::session_picker::sort_sessions(&mut sessions, sort);
+    if attached && sessions.is_empty() {
+        // An empty table under `-a` is a real answer, not a failure — say so
+        // explicitly and exit 0 rather than printing a bare header.
+        crate::commands::managed_render::render_no_attached_sessions(source_id);
+        return Ok(());
+    }
     crate::commands::managed_render::render_session_table(&sessions, source_id);
     Ok(())
+}
+
+/// Keep only sessions with a tmux client attached (`tm ls -a`).
+///
+/// Why: "attached" and "running" are different states, and only the first
+/// answers "which session am I looking at?". A session whose tmux entity is
+/// live but has no client is reported by the daemon as `active` with
+/// `attached == false` — this filter must drop it, or `-a` degrades into a
+/// second spelling of the default listing.
+/// What: `attached_only == false` returns `sessions` untouched (so every
+/// caller that does not pass `-a` is byte-identically unaffected); otherwise
+/// keeps exactly the summaries whose `attached` flag is set. That flag
+/// originates in tmux's `#{session_attached}`, reconciled by the daemon's list
+/// endpoint — it is never inferred from the lifecycle `state` word.
+/// Test: `filter_attached_keeps_only_attached`,
+/// `filter_attached_excludes_running_but_detached`,
+/// `filter_attached_disabled_is_noop`.
+pub(crate) fn filter_attached(
+    sessions: Vec<trusty_mpm::client::ManagedSessionSummary>,
+    attached_only: bool,
+) -> Vec<trusty_mpm::client::ManagedSessionSummary> {
+    if !attached_only {
+        return sessions;
+    }
+    sessions.into_iter().filter(|s| s.attached).collect()
 }
 
 // The `tm ls` table renderer — `render_session_table` and its pure row/column

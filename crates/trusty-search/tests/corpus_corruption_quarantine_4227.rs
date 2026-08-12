@@ -43,6 +43,7 @@ use tempfile::tempdir;
 use tokio::sync::RwLock;
 use trusty_common::embedder::MockEmbedder;
 use trusty_search::core::corpus::CorpusOpenFailure;
+use trusty_search::core::registry::IndexId;
 use trusty_search::core::Embedder;
 use trusty_search::service::indexed_files::IndexedFiles;
 use trusty_search::service::persistence::PersistedIndex;
@@ -258,10 +259,20 @@ async fn corrupt_corpus_refuses_watcher_writes_and_chunk_count_stays_zero() {
     let corrupt = Arc::new(RwLock::new(corrupt));
     let healthy = Arc::new(RwLock::new(healthy));
 
-    let _corrupt_watch = spawn_watch_loop(&corrupt_root, Arc::clone(&corrupt), IndexedFiles::new())
-        .expect("spawn corrupt watch loop");
-    let _healthy_watch = spawn_watch_loop(&healthy_root, Arc::clone(&healthy), IndexedFiles::new())
-        .expect("spawn healthy watch loop");
+    let _corrupt_watch = spawn_watch_loop(
+        &corrupt_root,
+        IndexId::new("corrupt-4227-watch"),
+        Arc::clone(&corrupt),
+        IndexedFiles::new(),
+    )
+    .expect("spawn corrupt watch loop");
+    let _healthy_watch = spawn_watch_loop(
+        &healthy_root,
+        IndexId::new("healthy-4227"),
+        Arc::clone(&healthy),
+        IndexedFiles::new(),
+    )
+    .expect("spawn healthy watch loop");
 
     let roots = [corrupt_root.as_path(), healthy_root.as_path()];
 

@@ -50,6 +50,9 @@ mod tests_2336;
 mod tests_2984;
 #[cfg(test)]
 mod tests_3304;
+// #3049: DELETE must quiesce in-flight writers and report what it actually did.
+#[cfg(test)]
+mod tests_3049;
 #[cfg(test)]
 mod tests_4087;
 #[cfg(test)]

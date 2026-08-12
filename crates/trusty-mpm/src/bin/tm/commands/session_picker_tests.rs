@@ -208,6 +208,56 @@ fn parse_picker_choice_rename_deleted_slot_is_slot_deleted() {
     );
 }
 
+// ── d <glob> bulk delete parsing (#5539) ────────────────────────────────────
+
+#[test]
+fn parse_picker_choice_glob_delete_recognised() {
+    let sessions = vec![session("tm-test-01", "stopped", 1)];
+    let parsed = parse_picker_choice("d tm-test-*", &sessions, false);
+    match parsed {
+        PickerDecision::DeleteGlob(req) => {
+            assert_eq!(req.pattern, "tm-test-*");
+            assert!(!req.dry_run);
+        }
+        other => panic!("expected DeleteGlob, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_picker_choice_glob_delete_dry_run() {
+    let sessions = vec![session("tm-test-01", "stopped", 1)];
+    match parse_picker_choice("d tm-test-* --dry-run", &sessions, false) {
+        PickerDecision::DeleteGlob(req) => assert!(req.dry_run),
+        other => panic!("expected DeleteGlob, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_picker_choice_glob_delete_does_not_shadow_slot_delete() {
+    // `d1` stays the single-slot delete — the numeric form is tried first.
+    let sessions = vec![session("s1", "stopped", 1)];
+    assert_eq!(
+        parse_picker_choice("d1", &sessions, false),
+        PickerDecision::Delete(0)
+    );
+}
+
+#[test]
+fn parse_picker_choice_glob_delete_typo_stays_unrecognised() {
+    // The property the metacharacter gate exists for: a mistyped `delete` must
+    // NOT become a bulk destructive action against a session named `elete`.
+    let sessions = vec![session("elete", "stopped", 1)];
+    assert_eq!(
+        parse_picker_choice("delete", &sessions, false),
+        PickerDecision::Unrecognised
+    );
+    // An unknown slot number likewise stays inert rather than globbing.
+    assert_eq!(
+        parse_picker_choice("d99", &sessions, false),
+        PickerDecision::Unrecognised
+    );
+}
+
 // ── session_picker_render: colorize / state_color ───────────────────────────
 
 #[test]
@@ -416,10 +466,32 @@ fn command_legend_populated_menu_shape() {
             "[4]",
             "[n <name>]",
             "[d<N>]",
+            "[d <glob>]",
             "[r<N> <new-name>]",
             "[ls]",
             "[q]"
         ]
+    );
+}
+
+/// #5539: the bulk-delete row must name the pattern form AND the preview flag —
+/// an operator who cannot see `--dry-run` on the menu will not discover it, and
+/// a bulk destructive command whose preview is undiscoverable is the wrong
+/// default.
+#[test]
+fn command_legend_glob_row_advertises_dry_run() {
+    let lines = command_legend(Some(4));
+    let row = lines
+        .iter()
+        .find(|l| l.starts_with("[d <glob>]"))
+        .expect("the glob-delete row must be present");
+    assert!(
+        row.contains("--dry-run"),
+        "row must offer the preview: {row}"
+    );
+    assert!(
+        row.contains("stopped"),
+        "row must say it only deletes stopped sessions: {row}"
     );
 }
 

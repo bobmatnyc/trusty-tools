@@ -300,6 +300,8 @@ pub(crate) async fn run_f_command(
             json,
             sid.as_deref(),
             all,
+            // `-a` is a `tm ls` flag only; `tm f`'s fallback is unchanged.
+            false,
             SessionSortArg::Recent,
             filter,
         )

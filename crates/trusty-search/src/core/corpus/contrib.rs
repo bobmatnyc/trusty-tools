@@ -92,7 +92,10 @@ pub struct ContribGraph {
 /// the blocker, so it would retry forever (#5505). Carried inside the
 /// `anyhow::Error` so no signature changes; recover it with `downcast_ref`.
 /// What: the producer key of the offending row plus the serde failure.
-/// Test: `contrib_load_failure_names_the_blocking_producer`.
+/// Test: `contrib_load_failure_installs_nothing` in
+/// `core::symbol_graph::contrib_tests` — its assertions on
+/// `blocking_producer` and the reason string were added inline to this test
+/// rather than a dedicated one (#5514).
 #[derive(Debug, thiserror::Error)]
 #[error("contrib row for producer '{producer}' is unreadable: {source}")]
 pub struct ContribRowError {

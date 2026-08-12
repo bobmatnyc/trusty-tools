@@ -514,7 +514,9 @@ with `curl`/`lsof`/`ps`/`netstat`.
 - `mcp__trusty-search__search` before Read/Grep. **Omit `index_id`** — your
   `.mcp.json` pins this session to its own index, and a guessed id fails with
   `404 unknown index` (#1373).
-- `mcp__trusty-search__search_health` for liveness, not a shell command.
+- `mcp__trusty-search__search_health` for liveness, not a shell command — it
+  returns `Ok` even when the daemon is down, so branch on `healthy`, not on
+  the call succeeding.
 
 Full per-tool tables: `Skill(skill="tm-tool-usage-guide")`. A tool missing from
 your loaded list is not unavailable — load its schema with `ToolSearch` first.

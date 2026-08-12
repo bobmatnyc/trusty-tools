@@ -425,7 +425,12 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
             for id in reapable {
                 // delete_data=false: never destroy on-disk data automatically —
                 // a false-positive detection stays recoverable by re-registering.
-                if super::search::unregister_index(&state, &id, false).await {
+                // #3049: `unregister_index` now reports what it did rather than
+                // a bare bool; the reaper only ever cares about deregistration.
+                if super::search::unregister_index(&state, &id, false)
+                    .await
+                    .removed
+                {
                     reaped += 1;
                     tracing::info!(
                         "orphan-reaper: unregistered index '{id}' — root_path deleted \

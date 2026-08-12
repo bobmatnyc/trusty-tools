@@ -33,7 +33,10 @@ use super::hnsw_swap::begin_staged_hnsw_swap;
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
 use super::root_gate;
-use super::semaphore::{index_semaphore, reindex_semaphore_for, BACKGROUND_QUEUE_DEPTH};
+use super::semaphore::{
+    acquire_index_teardown_read, index_cancel_flag, index_semaphore, reindex_semaphore_for,
+    BACKGROUND_QUEUE_DEPTH,
+};
 use super::stage_timings::StageTimings;
 use super::stages::{mark_reindex_failed, now_rfc3339, schedule_progress_cleanup};
 use super::staging;
@@ -85,6 +88,15 @@ pub(super) async fn run_reindex(
     let _index_permit = index_semaphore(&handle.id).acquire_owned().await.expect(
         "per-index semaphore is never closed — it is a fresh Semaphore per IndexId, never dropped",
     );
+    // #3049: fetched AFTER the permit so a delete that already completed cannot
+    // leave a stale `true` here — that delete evicted the flag, so this call
+    // allocates a fresh `false` one. Polled at the producer/consumer batch
+    // boundaries below.
+    let cancel = index_cancel_flag(&handle.id);
+    // #3049: the reindex is the longest-running writer — hold the teardown
+    // lock's shared side for its whole duration. The cancel flag above is what
+    // keeps a waiting DELETE bounded to one batch rather than one corpus.
+    let _teardown_guard = acquire_index_teardown_read(&handle.id).await;
 
     // Arm the termination guard. Any early exit — panic, early return, or
     // `.await` cancellation — fires `ReindexTerminationGuard::drop`, which logs
@@ -467,8 +479,22 @@ pub(super) async fn run_reindex(
     let producer_mem_abort = mem_abort.clone();
     let producer_index_id = index_id.0.clone();
     let total_batches = batches.len();
+    let producer_cancel = cancel.clone();
     let producer = tokio::spawn(async move {
         for (batch_idx, batch) in batches.into_iter().enumerate() {
+            // #3049: a DELETE for this index sets the cancel flag and then waits
+            // on the permit this reindex holds. Stopping at the batch boundary
+            // bounds that wait to one batch instead of the whole corpus.
+            if producer_cancel.load(AtomicOrdering::Acquire) {
+                tracing::warn!(
+                    "reindex: index {} was deleted mid-run — producer halting at batch \
+                     {}/{} (issue #3049)",
+                    producer_index_id,
+                    batch_idx,
+                    total_batches,
+                );
+                break;
+            }
             if producer_mem_abort.load(AtomicOrdering::Acquire) {
                 let rss = current_rss_mb().unwrap_or(0);
                 tracing::warn!(
@@ -501,6 +527,19 @@ pub(super) async fn run_reindex(
 
     // Consumer loop: commits batches sequentially.
     while let Some(ready) = rx.recv().await {
+        // #3049: same checkpoint on the commit side. Dropping the batch rather
+        // than committing it means the delete's `remove_dir_all` never races a
+        // redb/HNSW write that started after the cancel was signalled.
+        if cancel.load(Ordering::Acquire) {
+            tracing::warn!(
+                "reindex: index {} was deleted mid-run — consumer discarding the \
+                 in-flight batch and halting (issue #3049)",
+                index_id.0,
+            );
+            rx.close();
+            while rx.recv().await.is_some() {}
+            break;
+        }
         tracing::debug!(
             index_id = %index_id.0,
             indexed = progress.indexed_count(),
