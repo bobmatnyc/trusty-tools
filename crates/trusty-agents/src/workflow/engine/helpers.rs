@@ -188,9 +188,15 @@ pub(crate) async fn reconcile_code_outputs_against_from(
             {
                 continue;
             }
+            // #5551: an unstattable stray is not a clean skip either — the
+            // recency gate cannot be evaluated, so the file goes unaccounted.
             let meta = match tokio::fs::metadata(&stray).await {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::error!(error = %undeterminable(&stray, e), "aborting this file's relocation");
+                    unresolved.push(file.path.clone());
+                    continue;
+                }
             };
             let is_recent = meta
                 .modified()
@@ -304,9 +310,10 @@ pub(crate) async fn reconcile_code_outputs_from(
             // belong to the just-finished code phase.
             let meta = match tokio::fs::metadata(&stray).await {
                 Ok(m) => m,
+                // #5551: same as above — record it rather than skipping silently.
                 Err(e) => {
-                    tracing::debug!(error = %e, path = %stray.display(),
-                        "reconcile_code_outputs: stat failed");
+                    tracing::error!(error = %undeterminable(&stray, e), "aborting this file's relocation");
+                    unresolved.push(file.path.clone());
                     continue;
                 }
             };

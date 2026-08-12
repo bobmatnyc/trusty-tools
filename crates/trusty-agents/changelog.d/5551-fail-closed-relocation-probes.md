@@ -16,3 +16,7 @@ Fixed
   and `skipped_too_old`. A failed `copy_dir_all` fallback on `stubs/` also
   stops firing the "relocated to out_dir" warning it never earned. Governed by
   ADR-0045.
+- An unstattable stray at the project root is recorded the same way rather than
+  skipped silently: `metadata` failing there means the recency gate cannot be
+  evaluated, so the file was previously counted in neither `moved` nor
+  `skipped_too_old`.
