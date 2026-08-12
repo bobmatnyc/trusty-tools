@@ -327,13 +327,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `install_and_activate` gained a forced variant. A deploy replaces the binary
   behind a byte-identical plist, so the unchanged-unit skip that removes the
   reinstall outage would have let `make deploy` finish without ever activating
-  what it built — launchd kept running the old image (#4919)
+  what it built — launchd kept running the old image (#4868)
 - Rollback no longer reports success it did not achieve, and no longer takes
   down a daemon it should have left alone. Liveness is captured before the plist
   is overwritten, because launchd keeps a job registered after its plist file is
   deleted — so "no previous plist" never meant "nothing was running". The
   restoring bootstrap's result is now checked, and a failed restore says the
-  service is down instead of claiming it was preserved (#4919)
+  service is down instead of claiming it was preserved (#4868)
 - `launchd_labels` is now the one definition of every trusty-* LaunchAgent's
   label, and each daemon crate, the installer, and `tctl` read it instead of
   restating their own literal. They had drifted: `trusty-search service install`
@@ -346,7 +346,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   its `trusty-` prefix stripped>`, which every loaded unit on a real host obeys;
   `canonical_label` is that rule as code and the registry table is checked
   against it. Correcting one literal is what was done for #2827, and the defect
-  came back — so the second copy is gone rather than corrected (#4919)
+  came back — so the second copy is gone rather than corrected (#4868)
 - `LaunchdConfig::install_and_activate` replaces the bare `install()` +
   `bootstrap()` pair for service installs. It boots out the service's recorded
   legacy labels and deletes their plists first, so an upgrade cannot leave the
@@ -355,11 +355,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   which is where the ~1 minute of release downtime came from; verifies the label
   actually came up rather than trusting `launchctl bootstrap`'s exit code
   (#2498); and restores plus re-bootstraps the previous plist if activation
-  fails, so a failed install no longer leaves the service down (#4919)
+  fails, so a failed install no longer leaves the service down (#4868)
 - A workspace-scanning test now fails on any `com.trusty.*` / `com.bobmatnyc.*`
   label literal in production source that the registry does not own. Codesign
   identifiers (`macos_signing`) are exempt — they are a different namespace and
-  renaming one invalidates a binary's designated requirement (#2558) (#4919)
+  renaming one invalidates a binary's designated requirement (#2558) (#4868)
 - The launchd-label drift guard no longer skips production code. Four holes, each
   proven by planting a literal that passed: `#[cfg(not(test))]` and
   `#[cfg(any(…, test))]` gate PRODUCTION code but were treated as test items, so
@@ -373,7 +373,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   state is tracked across lines, a self-contained attribute line consumes nothing
   further, and only the identifier token adjacent to the marker is exempt. A
   build file may name a legacy label on a `bootout`/`unload` line — evicting an
-  old label is the migration, not the drift (#4919)
+  old label is the migration, not the drift (#4868)
 - Rollback no longer reports success while the service is down. `bootstrap`
   boots out first, so on the "no previous plist but the label was loaded" path
   the running job is already gone by the time rollback executes — deleting the
@@ -382,11 +382,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and bootstraps it, because the displaced job had no plist on disk and cannot be
   reconstructed; a failed revival reports the outage instead of swallowing it.
   The effects are injected so the outcome is asserted rather than the plan value,
-  which is why the previous tests passed while the goal was unmet (#4919)
+  which is why the previous tests passed while the goal was unmet (#4868)
 - `LaunchdConfig` renders a `WorkingDirectory` when one is set, so a regenerated
-  unit can preserve the installed one's (#4919)
+  unit can preserve the installed one's (#4868)
 - `evict_legacy` is public, so `service uninstall` can remove a unit registered
-  under an old label rather than reporting "nothing to do" (#4919)
+  under an old label rather than reporting "nothing to do" (#4868)
 - recall no longer serves a drawer past its `expires_at`. Expiry used to be consulted only when a palace was opened, and the daemon opens once as `OpenIntent::Writer` and holds that handle for its whole life — so a drawer that expired mid-session kept being injected until the daemon restarted. `retrieve_l0_l1`, `retrieve_l2_scoped`, and `retrieve_l3_scoped` now drop expired drawers on every read (ADR-0028 D4), which also closes a second gap: `l1_drawers` is filled from the L1 cache snapshot, which the open-time sweep never pruned, so an expired L1 drawer survived even a reopen. The read paths filter without deleting — reclamation stays with `purge_expired` and the open-time sweep, so a recall can never fail because a cleanup failed. All three sites plus the sweep now share one predicate, `Drawer::is_expired_at`, instead of hand-copying the comparison (closes [#4885](https://github.com/bobmatnyc/trusty-tools/issues/4885))
 - memory secret-scanner no longer rejects ordinary prose, branch names, or short tokens as credentials (closes [#4898](https://github.com/bobmatnyc/trusty-tools/issues/4898))
   - a `+`-joined English phrase (`PM+instructions+subagents`) is recognised as prose instead of base64; `+` no longer disqualifies a token outright, and each segment must be character-class-uniform so encoder output like `j1u7nJd+tvZers+wdZyr` stays flagged
