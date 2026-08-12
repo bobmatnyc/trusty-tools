@@ -23,6 +23,7 @@ use std::sync::Arc;
 use super::completion::{rebuild_symbol_graph_for_reindex, KgRebuildOutcome};
 use super::corpus_swap::{abort_staged_corpus_swap, commit_staged_corpus_swap};
 use super::hnsw_swap::{abort_staged_hnsw_swap, commit_staged_hnsw_swap, HnswSwapPaths};
+use super::pollers::PollerStop;
 use super::progress::ReindexProgress;
 use super::stages::{mark_graph_failed, mark_graph_ready};
 use super::staging;
@@ -31,20 +32,34 @@ use super::validate;
 /// Stop both RSS pollers and await their join handles.
 ///
 /// Why: the same teardown sequence is needed on two code paths (hard failure
-/// exit and the normal success path). Extracted to avoid duplication.
-/// What: sets the stop flag, awaits the join handle. No-ops for `None` handles.
-/// Test: exercised on every `finish_reindex` code path.
+/// exit and the normal success path). Extracted to avoid duplication. #5047:
+/// this used to cost 584–952ms per reindex, from two compounding waits — a
+/// parked poller could not see its stop flag until its tick expired, and the
+/// sidecar poller was not even told to stop until the daemon poller had joined,
+/// so the two shutdowns ran back to back instead of together.
+/// What: signals BOTH pollers first (so their shutdowns overlap), then awaits
+/// both join handles. `PollerStop::signal` wakes a parked poller immediately, so
+/// each join costs one final loop iteration rather than the rest of a tick. The
+/// pollers do no work between the signal and their exit — they re-check the flag
+/// at the top of the loop and break before sampling — so nothing is skipped;
+/// `finish_reindex` takes its own synchronous post-teardown RSS sample for both
+/// peaks either way. No-ops for `None` handles.
+/// Test: `stop_pollers_returns_without_waiting_out_the_tick` and
+/// `stop_pollers_still_joins_both_pollers` (`pollers_tests.rs`), plus every
+/// `finish_reindex` code path.
 pub(super) async fn stop_pollers(
-    poller_stop: Arc<AtomicBool>,
+    poller_stop: Arc<PollerStop>,
     poller_handle: tokio::task::JoinHandle<()>,
-    embedderd_stop: Option<Arc<AtomicBool>>,
+    embedderd_stop: Option<Arc<PollerStop>>,
     embedderd_handle: Option<tokio::task::JoinHandle<()>>,
 ) {
-    poller_stop.store(true, AtomicOrdering::Release);
-    let _ = poller_handle.await;
-    if let Some(stop) = embedderd_stop {
-        stop.store(true, AtomicOrdering::Release);
+    // #5047: signal both before awaiting either — serial signalling made the
+    // sidecar poller's tick wait strictly additive to the daemon poller's.
+    poller_stop.signal();
+    if let Some(stop) = embedderd_stop.as_ref() {
+        stop.signal();
     }
+    let _ = poller_handle.await;
     if let Some(h) = embedderd_handle {
         let _ = h.await;
     }

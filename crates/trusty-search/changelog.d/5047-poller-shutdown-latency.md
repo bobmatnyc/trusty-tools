@@ -1,0 +1,8 @@
+Fixed
+
+- **Reindex teardown no longer waits out a poll tick to stop the RSS pollers.** Both pollers tested their stop `AtomicBool` only at the top of their loop, so a poller parked in `Interval::tick()` could not see the flag until the tick expired; `stop_pollers` then made it worse by not signalling the sidecar poller until the daemon poller had already joined, so the two waits ran back to back instead of together. The pollers now park on a shutdown `Notify` alongside the tick, and `stop_pollers` signals both before awaiting either (closes [#5047](https://github.com/bobmatnyc/trusty-tools/issues/5047))
+  - measured on the same fixture, `stop_pollers` end to end: **1399–1401ms before, 0.14–0.97ms after**
+  - sampling cadence is unchanged (1s daemon / 500ms sidecar) — the fix is a wakeup, not a shorter interval, so RSS is sampled exactly as often as before
+  - nothing is skipped: the pollers already did no work between the flag being set and their exit (they re-check the flag at the top of the loop and break before sampling), and `finish_reindex` still takes its own synchronous post-teardown sample for both peaks
+  - the stop flag remains the source of truth, so a lost wakeup degrades to the old wait-out-the-tick behaviour rather than to a poller that never exits
+  - covered by `pollers_tests.rs`; reverting either half of the fix takes `stop_pollers_returns_without_waiting_out_the_tick` back to 1401ms against its 250ms ceiling

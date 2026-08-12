@@ -274,3 +274,6 @@ mod resume_tests;
 // passing coverage while the swap silently discarded every contribution.
 #[cfg(test)]
 mod contrib_survival_tests;
+// #5047: poller shutdown latency — teardown must not wait out the current tick.
+#[cfg(test)]
+mod pollers_tests;
