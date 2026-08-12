@@ -58,6 +58,45 @@ pub enum CollectError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// A GitHub REST call returned a non-success status, with its body kept.
+    ///
+    /// Why (#5465): [`Self::Http`] is what `error_for_status()` produces, and it
+    /// discards the response body — which is where GitHub puts the only useful
+    /// part of a write failure ("Resource not accessible by personal access
+    /// token"). Without the body a token-scope problem is indistinguishable
+    /// from any other 403, and the write path is exactly where that
+    /// distinction decides what the operator has to fix.
+    #[error("GitHub API error (HTTP {status}) for {endpoint}: {message}")]
+    GithubApi {
+        /// HTTP status returned by GitHub.
+        status: u16,
+        /// URL that was called, for the operator to reproduce.
+        endpoint: String,
+        /// GitHub's response body, truncated when long.
+        message: String,
+    },
+
+    /// A find-or-create issue lookup could not see every match GitHub reported.
+    ///
+    /// Why (#5465): the alternative to erroring here is treating "not on the
+    /// pages I read" as "does not exist", which opens a duplicate issue on a
+    /// live tracker — and no re-run undoes that. Distinct from a transport
+    /// failure: every request SUCCEEDED, the result set was simply larger than
+    /// the paging budget, so the answer is unknown rather than absent.
+    #[error(
+        "GitHub issue search for `{query}` is inconclusive: {scanned} of {total} \
+         match(es) were read within the paging budget, so an existing thread may \
+         have been missed; refusing to create a possible duplicate"
+    )]
+    GithubSearchInconclusive {
+        /// Search query that returned more than the walk could cover.
+        query: String,
+        /// Matches actually read across the walked pages.
+        scanned: usize,
+        /// Matches GitHub reported via `total_count`.
+        total: u64,
+    },
+
     /// A paged JIRA changelog walk finished holding fewer history entries
     /// than the server reported existed (issue #4084).
     ///
