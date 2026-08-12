@@ -17,13 +17,25 @@
 # session-manager state, never a deliverable — issue #3972)
 .base/
 
-# Ignore all of .claude/ and .claude-mpm/ by default, then re-include what we want
+# Ignore all of .claude/ and .claude-mpm/ by default, then re-include what we
+# want. `.claude/` has no leading or middle slash (only a trailing one, which
+# doesn't count), so per gitignore's matching rule it already reaches every
+# depth — root AND every crate's `.claude/`.
 .claude/
 .claude-mpm/*
 
-# Re-include tracked files from .claude/
-!.claude/
-!.claude/settings.json
+# Re-include tracked files from .claude/ — root only (#4789). These negations
+# are ANCHORED with a leading slash on purpose: an unanchored `!.claude/` /
+# `!.claude/settings.json` would re-include `.claude/` at every depth just
+# like the ignore above, silently cancelling it out everywhere except the one
+# specific nested path a later rule happens to re-ignore. That was the actual
+# defect — `crates/*/.claude/` re-ignored exactly one level of nesting and
+# missed everything past it (`crates/trusty-mpm/src/.claude/`, `docs/.claude/`,
+# `crates/.claude/`, …). Anchoring the negation to root removes the need for
+# that nested re-ignore rule entirely: nested `.claude/` dirs now simply stay
+# ignored, full stop.
+!/.claude/
+!/.claude/settings.json
 
 # Project-tier agent files are NEVER tracked in this repo. They are deployed
 # artifacts, not source: the bundled roster is the product and lives in
@@ -53,10 +65,13 @@
 .claude/agent-memory/
 
 # trusty-mpm session/worktree runtime state is machine-local (issue #3972).
-# Uses `.trusty-mpm/*` (ignore immediate children only), NOT `.trusty-mpm/` +
-# `!.trusty-mpm/` — the latter un-ignores the directory itself and reproduces
-# the exact `.claude/` bug this issue is about (only the explicitly re-included
-# children survive; every other child falls through as untracked).
+# Uses `**/.trusty-mpm/*` (ignore immediate children only, at every depth —
+# root and every crate's), NOT `**/.trusty-mpm/` + a re-include — an ignored
+# *directory* blocks git from descending into it at all, so any future
+# re-include of a specific child file would silently fail to fire (the same
+# `.claude/` trap called out above). `.trusty-mpm/*` (no `**/`) used to anchor
+# this to the repo root only, which is what left nested project-tier state
+# like `crates/trusty-mpm/ui/.trusty-mpm/x.md` committable (#4789).
 #
 # Nothing here is re-included any more. `INSTRUCTIONS.md` used to be, as the
 # tracked project-instruction host; #4286 retired all five `.trusty-mpm/`
@@ -66,25 +81,17 @@
 # four siblings were correctly ignored — so a session that recreated it got a
 # `??` entry inviting it back, and `tm doctor`'s `legacy_overrides` check now
 # fails on exactly that file.
-.trusty-mpm/*
+**/.trusty-mpm/*
 
 # Harness-generated project tier under a CRATE directory is machine-local and
 # never a deliverable (#4752). Running `tm` inside `crates/<name>/` seeds a full
 # project tier there: a `.claude/settings.json` carrying absolute
 # `/Users/<me>/.cargo/bin/...` hook commands, a `.claude/skills/` roster that
 # SHADOWS the bundled one (the #4448/#4526 hazard, same shape as `agents/`
-# above), and a `.trusty-mpm/` session stash.
-#
-# The root-level rules above do NOT reach these, for two different reasons:
-#   * `!.claude/` (above) has no leading or middle slash, so it un-ignores
-#     `.claude` at EVERY level — including every crate's.
-#   * `.trusty-mpm/*` (below) has a middle slash, so it anchors to the repo
-#     root only.
-# 140 such files reached PR #4759 before this rule existed. Scoped to
-# `crates/*/` rather than `**/` on purpose: a bare `**/.claude/` would re-ignore
-# the root `.claude/settings.json` that the re-includes above deliberately keep.
-crates/*/.claude/
-crates/*/.trusty-mpm/
+# above), and a `.trusty-mpm/` session stash. 140 such files reached PR #4759
+# before any rule existed for this. The `.claude/` and `.trusty-mpm/*` rules
+# above now reach every depth directly (#4789 fix) — no separate `crates/*/`
+# rule is needed here any more.
 
 # Re-include tracked files from .claude-mpm/
 !.claude-mpm/INSTRUCTIONS.md
