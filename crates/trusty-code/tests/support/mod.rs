@@ -63,8 +63,8 @@ const WIRE_TIMEOUT: Duration = Duration::from_secs(5);
 /// whichever `run_task` before/after diff assertion happens to be open,
 /// which is why a different test failed each run and why `--test-threads=1`
 /// looked green. `spawn_inner`/`spawn_http_daemon_with_env` already set this
-/// on the two children they own; the ~26 tests that built their own
-/// `Command` did not, and that residue is #3036/#3195.
+/// on the two children they own; the 28 call sites across 24 test functions
+/// that built their own `Command` did not, and that residue is #3036/#3195.
 /// What: `std::process::Command` for the binary, with
 /// `TRUSTY_TEST_HARNESS=1` set so the child reports itself as a test process
 /// and every `search_index` write is refused at the source. Pinning `HOME`

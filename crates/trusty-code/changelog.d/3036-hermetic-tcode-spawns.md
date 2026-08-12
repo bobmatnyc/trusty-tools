@@ -15,8 +15,9 @@ Fixed
   before/after diff assertion was open — which is why a different test failed
   each run, only on a machine with a daemon, and never under
   `--test-threads=1`. `tests/support/mod.rs` set `TRUSTY_TEST_HARNESS=1` on the
-  two children it owned; 26 tests built their own `Command` and did not. All of
-  them now go through the one guarded constructor `support::tcode_command()`,
+  two children it owned; 28 call sites across 24 test functions built their own
+  `Command` and did not. All of them now go through
+  the one guarded constructor `support::tcode_command()`,
   and `no_test_spawns_the_tcode_binary_unguarded` fails the build if a new test
   names the binary directly. One `cargo test -p trusty-code` used to leave 3
   new indexes behind in the operator's daemon; it now leaves none.
