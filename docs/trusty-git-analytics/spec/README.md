@@ -88,11 +88,14 @@ backlog as of the review date. The most material reconciliations:
 - **DB table names.** Live tables are `commits` / `collection_runs`, not the
   predecessor's `cached_commits` / `weekly_fetch_status`. Migrations run to
   `0019`, past the `0013` ceiling documented in `requirements/database-schema.md`.
-- **Contributor-profile data pipeline.** Two new public library functions added
-  for the longitudinal contributor-profile epic (#558): `collect::git::diff::diff_for_commit`
-  (unified diff text with 200 KiB cap, closes #559) and
-  `report::query_author_period_trends` (N-week period roll-ups for one canonical
-  author, closes #560). These are the primary tga data-supply layer for trusty-review.
+- **Contributor profiling.** Originally two public library functions added for
+  the longitudinal contributor-profile epic (#558) and consumed by trusty-review:
+  `collect::git::diff::diff_for_commit` (unified diff text with 200 KiB cap,
+  closes #559) and `report::query_author_period_trends` (N-week period roll-ups
+  for one canonical author, closes #560). [Epic #5468](https://github.com/bobmatnyc/trusty-tools/issues/5468)
+  moved contributor profiling into tga entirely — identity resolution, batch
+  review, synthesis, reporting, and the `tga profile` CLI subcommand all now
+  live in this crate, and these two functions are their primary caller.
 - **AI co-authorship attribution.** `collect/ai_attribution.rs` detects
   Claude/Copilot/Cursor from `Co-Authored-By:` trailers at collection time,
   persisting `commits.is_ai_assisted` + `commits.ai_tool` (migration `0017`, #445 batch A).
