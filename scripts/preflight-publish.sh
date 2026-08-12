@@ -17,7 +17,7 @@
 #   absolute stop.
 #
 # What: given a crate (by package name or crates/ directory name) and,
-#   optionally, an explicit version, runs FIVE independent checks and exits
+#   optionally, an explicit version, runs SIX independent checks and exits
 #   nonzero if any of them fail:
 #
 #   CHECK 1 (merged-main): after `git fetch origin main`, current HEAD's
@@ -91,6 +91,29 @@
 #     Requires `cargo-semver-checks` (`cargo install cargo-semver-checks@0.50.0
 #     --locked`). Its absence is a FAILURE with that remedy, never a skip.
 #
+#   CHECK 6 (tag names the publish commit): delegates to
+#     `scripts/check-tag-publish-parity.sh`, which asserts that the release tag
+#     `<crate>-v<version>` (or the accepted `tga-v<version>` alias, #1128) names
+#     EXACTLY the commit this publish will ship.
+#
+#     WHY THIS IS NOT ALREADY COVERED by checks 1-5 or by
+#     check-publish-ready.sh: nothing anywhere binds the tag to the upload.
+#     check-publish-ready.sh's GUARD 2 asks only whether the tag's commit is an
+#     ANCESTOR of origin/main; CHECK 1 above asks only whether HEAD EQUALS
+#     origin/main. Both are satisfied when the tag sits several commits behind
+#     HEAD — which is the state a release run lands in whenever main moves and
+#     the run is fast-forwarded to satisfy CHECK 1. On 2026-08-11 that shipped
+#     `tga-v2.17.0` tagged at 246e4ca2 while the published crate's
+#     .cargo_vcs_info.json recorded 7d5cf82e1, with every gate green.
+#     `git diff 246e4ca2 7d5cf82e1 -- crates/trusty-git-analytics/` is empty, so
+#     that tag happens to misrepresent nothing; on a release where the
+#     intervening commits touch the crate, `git checkout <tag>` shows a tree
+#     that is not what shipped and nothing says so.
+#
+#     No override flag. The remedy is to move the tag onto the commit being
+#     published (or reset the checkout back to the tag) — one of the two is
+#     always correct, so there is no case an override would serve.
+#
 # Crate + version resolution: accepts EITHER
 #     scripts/preflight-publish.sh <crate-name-or-dir> [version]
 #   or, when [version] is omitted, reads the version from that crate's
@@ -105,7 +128,7 @@
 #   check-publish-ready.sh does, to avoid a second, divergent lookup
 #   convention in this workspace.
 #
-#   --check-only     run all 5 checks unconditionally (never short-circuits)
+#   --check-only     run all 6 checks unconditionally (never short-circuits)
 #                     and print one [PASS]/[FAIL] line per check, then a
 #                     one-line summary. Useful to preview status without
 #                     assuming you are mid-publish. Exit code is still
@@ -116,8 +139,11 @@
 #   for check 1 only) — safe to `cargo publish`. Nonzero = at least one check
 #   failed — DO NOT PUBLISH. 2 = usage error (bad arguments).
 #
-# Test: exercised manually (this repo has no shell-test harness; see
-#   check_line_cap.sh and check-publish-ready.sh for the same convention).
+# Test: checks 1-4 are exercised manually — they are bound to the network, the
+#   real crates.io registry, and the logged-in gh account, none of which a
+#   fixture can stand in for. Check 5 has scripts/check_semver_selftest.sh and
+#   check 6 has scripts/check-tag-publish-parity-selftest.sh, both of which
+#   drive every failure branch of the delegated script against fixtures.
 #   Verified by construction:
 #     (a) FAIL mode — run from an unmerged feature branch (HEAD != origin/main)
 #         to demonstrate check 1 failing.
@@ -141,6 +167,12 @@
 #         method_receiver_type_changed on DedupStore::{claim,complete,release}
 #         — and the script exits 1 with "do NOT run 'cargo publish'". The same
 #         crate unmodified at 0.11.1 PASSES: 196 checks, 196 pass.
+#     (f) BOTH modes for check 6, via
+#         scripts/check-tag-publish-parity-selftest.sh: 15 cases over synthetic
+#         repos covering TAG-MISSING, TAG-SPLIT, TAG-DRIFT (fast-forward AND
+#         divergent), VCS-INFO-MISMATCH, and the clean/annotated-tag/alias
+#         passes. Plus an end-to-end run of THIS script against `tga 2.17.0`,
+#         where check 6 reports the real 2026-08-11 drift.
 #   See the PR description for this script for the full raw terminal output.
 
 set -euo pipefail
@@ -437,6 +469,29 @@ check5_semver() {
   return 1
 }
 
+# ===========================================================================
+# CHECK 6 — the release tag names the commit this publish ships
+# ===========================================================================
+# Delegated rather than inlined so the comparison has somewhere to be tested:
+# scripts/check-tag-publish-parity-selftest.sh drives every failure branch
+# against synthetic repos, which is not something this script's network- and
+# identity-bound checks can be wrapped in.
+check6_tag_parity() {
+  local log="${TMP_PARITY}" rc=0
+
+  bash "${REPO_ROOT}/scripts/check-tag-publish-parity.sh" \
+    "$PKG_NAME" "$VERSION" > "$log" 2>&1 || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    echo "[PASS] tag-parity: $(grep '^PASS:' "$log" | head -1)" >&2
+    return 0
+  fi
+
+  echo "[FAIL] tag-parity: the release tag does not name the commit about to be published:" >&2
+  sed 's/^/       /' "$log" >&2
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Scratch temp file for check 4's curl response body. Created once up front
 # and cleaned up via a script-scoped EXIT trap (matches check_line_cap.sh's
@@ -444,10 +499,11 @@ check5_semver() {
 # ---------------------------------------------------------------------------
 TMP_BODY="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.body.XXXXXX")"
 TMP_SEMVER="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.semver.XXXXXX")"
-trap 'rm -f "$TMP_BODY" "$TMP_SEMVER"' EXIT
+TMP_PARITY="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.parity.XXXXXX")"
+trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY"' EXIT
 
 # ---------------------------------------------------------------------------
-# Run all 5 checks. Always run every check (rather than short-circuiting) so
+# Run all 6 checks. Always run every check (rather than short-circuiting) so
 # --check-only and normal mode share one code path and a single run always
 # reports the full picture — a partial preflight is how gaps get missed.
 # ---------------------------------------------------------------------------
@@ -457,6 +513,7 @@ check2_identity;         [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check3_clean_tree;       [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check4_version_not_live; [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check5_semver;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check6_tag_parity;       [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 set -e
 
 if [ "$FAILURES" -gt 0 ]; then
@@ -464,5 +521,7 @@ if [ "$FAILURES" -gt 0 ]; then
   exit 1
 fi
 
-echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 5 checks. Safe to publish." >&2
+echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 6 checks. Safe to publish." >&2
+echo "preflight-publish: after 'cargo publish', confirm what cargo actually recorded:" >&2
+echo "  scripts/check-tag-publish-parity.sh --vcs-info auto ${PKG_NAME} ${VERSION}" >&2
 exit 0

@@ -26,6 +26,8 @@ Every publish follows this exact sequence:
 4. git push origin <crate-name>-v<version>
 5. scripts/preflight-publish.sh <crate>     — MANDATORY, MUST PASS (run again, immediately before step 6)
 6. cargo publish
+6b. scripts/check-tag-publish-parity.sh --vcs-info auto <crate>  — confirm the
+    tag names the commit cargo actually recorded
 7. Wait 60-120s for propagation
 8. Verify with curl to crates.io API
 9. cargo install --path crates/<dir> --locked (binaries only)
@@ -98,7 +100,7 @@ scripts/preflight-publish.sh trusty-mpm
 
 Reads the crate's name/version straight from `crates/trusty-mpm/Cargo.toml`
 (pass an explicit version as a second argument to check a hypothetical
-version instead). Runs five checks and fails loud on any of them:
+version instead). Runs six checks and fails loud on any of them:
 
 1. **merged-main**: current HEAD's commit SHA is EXACTLY `origin/main`'s HEAD
    SHA (stricter than `check-publish-ready.sh`'s ancestor check).
@@ -120,7 +122,33 @@ version instead). Runs five checks and fails loud on any of them:
    `.github/workflows/semver-checks.yml` runs the same check on the tag push
    (step 4), so a red run there is visible before you reach step 6.
 
-`scripts/preflight-publish.sh --check-only <crate>` runs all five checks
+6. **tag/publish-commit parity**: the release tag `<crate>-v<version>` (or the
+   `tga-v<version>` alias) must name EXACTLY the commit this publish will ship.
+   Delegates to `scripts/check-tag-publish-parity.sh`. No override.
+
+   **Why this is not already covered by 1-5 or by `check-publish-ready.sh`:**
+   nothing bound the tag to the upload. GUARD 2 asks whether the tag is an
+   ANCESTOR of `origin/main`; CHECK 1 asks whether HEAD EQUALS `origin/main`.
+   A tag several commits behind HEAD satisfies both — which is where a release
+   run lands whenever main moves and the run is fast-forwarded to satisfy CHECK
+   1. On 2026-08-11 that shipped `tga-v2.17.0` tagged at `246e4ca2` while the
+   published `.cargo_vcs_info.json` recorded `7d5cf82e1`, with every gate green.
+
+   🔴 **If you fast-forward this checkout after tagging, re-tag before
+   publishing.** `git tag -f <tag> <new-head> && git push --force origin <tag>`.
+   The gate prints that command with the SHAs filled in.
+
+   After `cargo publish`, verify what cargo recorded rather than what it should
+   have recorded — the only check that still works post-upload:
+
+   ```bash
+   scripts/check-tag-publish-parity.sh --vcs-info auto <crate>
+   ```
+
+   Full rationale, the four finding codes, and the residual gap:
+   [docs/reference/release-workflow.md](../../../docs/reference/release-workflow.md#tagpublish-commit-parity-guard).
+
+`scripts/preflight-publish.sh --check-only <crate>` runs all six checks
 unconditionally and prints a `[PASS]`/`[FAIL]` line per check without
 assuming you're mid-publish — use it to preview status. `--help` documents
 the rare, logged `PREFLIGHT_ALLOW_DETACHED=1` override for check 1 (validated

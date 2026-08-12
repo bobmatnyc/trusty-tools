@@ -11,7 +11,7 @@
 # they are deleted and the target exits 0.  Run it again on a clean tree
 # and assert it still exits 0 (idempotent).
 
-.PHONY: check clean-runtime e2e-docker install-search-signed install-mpm-signed install-agents-signed install-memory-signed publish-check version-parity-check publish-dry-run-order
+.PHONY: check clean-runtime e2e-docker install-search-signed install-mpm-signed install-agents-signed install-memory-signed publish-check publish-verify version-parity-check publish-dry-run-order
 
 # Remove per-crate runtime artefacts that accumulate during development.
 #
@@ -199,6 +199,34 @@ publish-check:
 		exit 2; \
 	fi
 	bash scripts/check-publish-ready.sh $(CRATE)
+
+# Post-publish tag/publish-commit parity verification.
+#
+# Why: on 2026-08-11 `tga-v2.17.0` was tagged at 246e4ca2 while the published
+# crate's .cargo_vcs_info.json recorded 7d5cf82e1 — a fast-forward between
+# tagging and publishing, which every release gate passed. preflight-publish.sh
+# CHECK 6 now blocks that BEFORE the upload; this target is the confirmation
+# AFTER it, read off what cargo actually recorded rather than what it should
+# have. It is the only form of the check that still works once the upload has
+# happened.
+#
+# What: delegates to scripts/check-tag-publish-parity.sh --vcs-info auto, which
+# compares target/package/<pkg>-<version>/.cargo_vcs_info.json against the
+# release tag's commit and fails if the artifact is absent, unreadable, or
+# records a different commit.
+#
+# Test: scripts/check-tag-publish-parity-selftest.sh drives every failure
+# branch against synthetic repos; CI runs it via
+# .github/workflows/tag-publish-parity.yml.
+#
+# Usage:
+#   make publish-verify CRATE=trusty-mpm     # run right after `cargo publish`
+publish-verify:
+	@if [ -z "$(CRATE)" ]; then \
+		echo "Usage: make publish-verify CRATE=<crate-name-or-dir>" >&2; \
+		exit 2; \
+	fi
+	bash scripts/check-tag-publish-parity.sh --vcs-info auto $(CRATE)
 
 # Version-parity drift gate (issue #3366).
 #
