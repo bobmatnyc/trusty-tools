@@ -95,6 +95,13 @@ FIXTURE_DIR="$SCRIPT_DIR/test-data"
 #                              if a future edit treats every `'` as opening a
 #                              char literal, that line loses its `}`, the
 #                              module stops being excluded, and this case fails.
+# - sloc-cfg-test-unicode-escape.rs: `'\u{7B}'` — the one spelling that puts a
+#                              brace glyph past the char-literal rule, which
+#                              consumes only `'X'` and `'\X'`. It is harmless
+#                              because it is self-balanced; this pins that. If
+#                              the `'\X'` rule stops checking its closing
+#                              quote it eats `'\u{`, the `}` is left behind,
+#                              and the module stops being excluded.
 # - sloc-cfg-test-unterminated.rs below is the fail-closed half of the matcher.
 #
 # #[cfg(test)] exclusion — MUST STILL BE COUNTED (fail-closed half):
@@ -130,6 +137,7 @@ sloc-cfg-test-string-braces.rs	6
 sloc-cfg-test-glob-comment.rs	3
 sloc-cfg-test-decoy-in-literal.rs	11
 sloc-cfg-test-anchor-disagrees.rs	7
+sloc-cfg-test-unicode-escape.rs	3
 sloc-cfg-test-unterminated.rs	9"
 
 fail=0

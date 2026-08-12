@@ -4,10 +4,11 @@
 //! Why this rather than a fixture built from some construct the scanner
 //! mis-lexes: in valid Rust an unmatched brace can only come from a literal or
 //! a comment, and the scanner blanks every literal form there is (normal,
-//! byte, raw-with-hashes, `'X'`, `'\X'`). Probing `'\u{1F600}'`, `'\u{7b}'`,
-//! `b'{'`, `r##"a "# b {"##`, `"\"{"`, a lifetime, and `println!("{{")` found
-//! no shape that unbalances it. A fixture asserting "this specific input is
-//! lexed right" would only ever prove what it names.
+//! byte, raw-with-hashes, `'X'`, `'\X'`). The shapes that reach past those
+//! rules are self-balanced, so they cannot unbalance a line —
+//! sloc-cfg-test-unicode-escape.rs pins that for `'\u{7B}'`, the only way a
+//! brace glyph gets there. A fixture asserting "this specific input is lexed
+//! right" would only ever prove what it names.
 //!
 //! So this pins the INVARIANT that protects against the hole nobody has found
 //! yet. Teaching the matcher about literals is structurally a change that

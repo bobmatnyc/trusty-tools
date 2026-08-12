@@ -25,6 +25,12 @@
 #   exemption pressure is failing too — the row it extracts outlives the
 #   mistake and reads later as a considered decision.
 #
+#   And one DIAGNOSTIC case, because a wrong message survives a right exit
+#   code: a real unguarded write in a file that only quotes `#[cfg(test)] mod`
+#   inside a string must get the ordinary "take the guard or declare it"
+#   advice, not the region-misclassification warning that says a manifest row
+#   is the wrong fix.
+#
 # What: builds a throwaway git repo per case, copies the gate and its data files
 #   in so the gate's own `SCRIPT_DIR`-derived repo root resolves inside the
 #   fixture, and asserts the exit status and the message. The fixtures are padded
@@ -93,9 +99,14 @@ EOF
   git -C "$fx" add -A
 }
 
-# run_case <name> <expect_exit 0|1> <expected substring, or "" > <mutation fn>
+# run_case <name> <expect_exit 0|1> <expected substring, or ""> <mutation fn>
+#          [<substring the output must NOT contain>]
+#
+# The fifth argument exists because a diagnostic can be wrong without changing
+# the exit status: the gate can fail for the right reason and still print advice
+# that sends the reader the wrong way. Only an absence assertion catches that.
 run_case() {
-  name="$1"; want_exit="$2"; want_msg="$3"; mutate="$4"
+  name="$1"; want_exit="$2"; want_msg="$3"; mutate="$4"; forbid_msg="${5:-}"
   fx="$(mktemp -d "${TMPDIR:-/tmp}/tdguard-selftest.XXXXXX")"
   make_fixture "$fx" "$([ "$name" = "empty_scan" ] && echo empty || echo full)"
   "$mutate" "$fx"
@@ -106,11 +117,14 @@ run_case() {
   if [ -n "$want_msg" ]; then
     case "$out" in *"$want_msg"*) ;; *) ok=0 ;; esac
   fi
+  if [ -n "$forbid_msg" ]; then
+    case "$out" in *"$forbid_msg"*) ok=0 ;; esac
+  fi
   if [ "$ok" -eq 1 ]; then
     echo "PASS: $name"
     PASSED=$(( PASSED + 1 ))
   else
-    echo "FAIL: $name — expected exit $want_exit${want_msg:+ containing '$want_msg'}, got exit $rc:" >&2
+    echo "FAIL: $name — expected exit $want_exit${want_msg:+ containing '$want_msg'}${forbid_msg:+ and NOT containing '$forbid_msg'}, got exit $rc:" >&2
     echo "$out" | sed 's/^/      /' >&2
     FAILED=$(( FAILED + 1 ))
   fi
@@ -206,6 +220,55 @@ mod tests {
 EOF
 }
 
+mutate_decoy_region_in_literal() {
+  # A genuine unguarded write in a file whose only `#[cfg(test)] mod` TEXT sits
+  # inside a raw string. The matcher is literal-aware, so it correctly finds no
+  # region and excludes nothing. The gate must therefore say "take the guard or
+  # declare it" — the ordinary advice.
+  #
+  # The regression this pins: the region-detection warning once re-scanned the
+  # raw file with its own comment-blind, string-blind awk, so this file read as
+  # "opens a region that could not be closed" and the gate printed "do NOT add a
+  # manifest row, fix sloc_awk.sh" over a real unguarded write. Right exit code,
+  # advice pointing at a phantom parser bug.
+  #
+  # The quoted braces are balanced so the gate's OWN scope tracker (which has no
+  # notion of literals, by documented design) is not what this case measures.
+  cat > "$1/crates/trusty-search/src/service/writer.rs" <<'EOF'
+pub async fn writes_without_any_guard(idx: &Indexer) {
+    let sample = r#"
+#[cfg(test)]
+mod tests {
+}
+"#;
+    idx.commit_parsed_batch(parsed, false).await.ok();
+    let _ = sample;
+}
+EOF
+}
+
+mutate_region_miss_names_itself() {
+  # The other half of the same diagnostic: when a region really does open and
+  # really cannot be closed, the warning must still fire. Without this case the
+  # warning could stop firing entirely and every other case would stay green —
+  # which is the failure shape this whole gate exists to refuse.
+  #
+  # The closer here is `    } }`, so the brace balance returns to 0 on a line
+  # that is not exactly the anchor indent plus `}`. Method (b) disagrees, the
+  # region is counted as production, and the test fn inside it surfaces as an
+  # unguarded writer.
+  mutate_guarded_ok "$1"
+  cat >> "$1/crates/trusty-search/src/service/writer.rs" <<'EOF'
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn writes_in_a_test(idx: &Indexer) {
+        idx.commit_parsed_batch(parsed, false).await.ok();
+    } }
+EOF
+}
+
 mutate_stale_row() {
   mutate_guarded_ok "$1"
   printf 'crates/trusty-search/src/service/writer.rs\tcommit_parsed_batch\tcorrectly_guarded\tEXEMPT\tthis site is guarded, so the row is a lie\n' \
@@ -231,6 +294,10 @@ run_case spawn_escape   1 "UNDECLARED"           mutate_spawn_escape
 run_case deferred_spawn_escape 1 "UNDECLARED"    mutate_deferred_spawn_escape
 run_case guarded_ok     0 "OK: teardown guard"   mutate_guarded_ok
 run_case cfg_test_string_brace 0 "OK: teardown guard" mutate_cfg_test_string_brace
+run_case decoy_region_in_literal 1 "UNDECLARED"  mutate_decoy_region_in_literal \
+  "READ THIS BEFORE TOUCHING THE MANIFEST"
+run_case region_miss_names_itself 1 "READ THIS BEFORE TOUCHING THE MANIFEST" \
+  mutate_region_miss_names_itself
 run_case stale_row      1 "STALE ROW"            mutate_stale_row
 run_case bogus_caller   1 "UNVERIFIABLE CALLER"  mutate_bogus_caller
 run_case empty_reason   1 "NO REASON"            mutate_empty_reason

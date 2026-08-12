@@ -129,6 +129,10 @@
 #   without type context; only the exact `'X'` and `'\X'` forms are consumed. A
 #   spelling it does not recognise leaves the balance skewed and the region
 #   counted — the same fail-closed direction as before, never the opposite.
+#   `'\u{XXXX}'` is the one such spelling that puts a brace GLYPH through
+#   unconsumed, and it is harmless because it is self-balanced. Pinned by
+#   scripts/test-data/sloc-cfg-test-unicode-escape.rs, which drops from 3 SLOC
+#   to 9 if the `'\X'` rule stops verifying its closing quote.
 #
 # Intentional pass-1 leniency (unchanged, issue #2563 item 2): this awk
 #   program has no notion of string/char literals or raw strings, so a `//` or
@@ -149,7 +153,11 @@
 #   string literal, and the six `#[cfg(test)]` cases from #5153: excluded
 #   inline mod, nested/indented mod, sibling-file `mod tests;` declaration,
 #   non-literal cfg predicate, brace-skewing raw string, and an unterminated
-#   region).
+#   region), plus the literal-awareness cases added with `brace_text`
+#   (sloc-cfg-test-string-braces.rs, -glob-comment.rs, -decoy-in-literal.rs,
+#   -anchor-disagrees.rs, -unicode-escape.rs). `emit_opener` is exercised
+#   end to end by scripts/check_teardown_guard_selftest.sh's
+#   `decoy_region_in_literal` and `region_miss_names_itself` cases.
 SLOC_AWK='
 function rtrim(s) { sub(/[ \t\r]+$/, "", s); return s }
 function ltrim(s) { sub(/^[ \t]+/, "", s); return s }
@@ -316,6 +324,7 @@ END {
       break
     }
     if (!is_mod) { i++; continue }
+    opened_region = 1
 
     # Two INDEPENDENT signals must still agree before anything is excluded —
     # that requirement is what keeps a lexing mistake pointed at "count it".
@@ -336,6 +345,15 @@ END {
     for (m = i; m <= close_at; m++) skip[m] = 1
     i = close_at + 1
   }
+
+  # Audit hook: `awk -v emit_opener=1 "$SLOC_AWK" file.rs` prints nothing and
+  # exits 0 when the file OPENS a `#[cfg(test)] mod` region, 1 when it does
+  # not. Paired with an empty emit_skip result it distinguishes "no region
+  # here" from "a region the matcher could not close", which is the only thing
+  # a caller can say about a miss without re-deciding where regions are. It
+  # reads the SAME literal-aware ctext[] the matcher does, so a `#[cfg(test)]
+  # mod` that exists only inside a string literal is not an opener.
+  if (emit_opener) exit(opened_region ? 0 : 1)
 
   # Audit hook: `awk -v emit_skip=1 "$SLOC_AWK" file.rs` prints the excluded
   # line ranges instead of the count, so the pass-2 matcher can be diffed

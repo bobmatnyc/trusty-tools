@@ -262,18 +262,13 @@ while IFS= read -r f; do
   # opens one, yet nothing was excluded" is precisely the shape of a failed
   # close — not an approximation of it. On a tree that compiles, an inline
   # `mod … {` always has a closer, so this does not fire on healthy files.
-  if [ ! -s "$SKIPF" ] && awk '
-        function tidy(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
-        { t = tidy($0) }
-        t == "#[cfg(test)]" { pending = 1; next }
-        pending && t == "" { next }
-        pending && t ~ /^#\[.*\]$/ { next }
-        pending && t ~ /^(pub([(][a-z]+[)])?[ ]+)?mod[ ]+[A-Za-z_][A-Za-z0-9_]*[ ]*\{$/ {
-          found = 1; exit
-        }
-        { pending = 0 }
-        END { exit(found ? 0 : 1) }
-      ' "$f"; then
+  #
+  # The opener question goes back to the SAME matcher via emit_opener, never to
+  # a second scan of the raw text. A simpler scan would not know a literal from
+  # code, so a `#[cfg(test)] mod` quoted inside a string would read as an opener
+  # the matcher never saw, and this diagnostic would print "do NOT add a
+  # manifest row" over a genuine unguarded write.
+  if [ ! -s "$SKIPF" ] && awk -v emit_opener=1 "$SLOC_AWK" "$f"; then
     printf '%s\n' "$f" >> "$REGIONW"
   fi
   awk -v SKIPF="$SKIPF" -v METHODSF="$METHODS" -v PATHNAME="$f" '
