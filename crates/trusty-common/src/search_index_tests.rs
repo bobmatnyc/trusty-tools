@@ -360,6 +360,60 @@ fn batch_budget_is_exhausted_at_and_past_the_cap() {
     ));
 }
 
+/// Stopping a batch on the budget is COUNTED, and lands in a different field
+/// from a pool rejection (#2798 round-3 review).
+///
+/// Why: the budget's `break` was a `warn!` and nothing else. That is the exact
+/// single-reader blind spot the drop counter was added to close — an episode
+/// where every batch is ACCEPTED and then repeatedly truncated leaves files
+/// unindexed batch after batch while `GET /health` reports
+/// `dropped_batches: 0` forever. Against the code before this fix the second
+/// half of this test fails: `truncated_batches` never moves off `0`.
+/// What: drives `stop_batch_for_budget` — the loop's ONLY interaction with the
+/// budget, so there is no reachable path that stops without recording — first
+/// under the cap, then past it. Under the cap it must return `false` and leave
+/// the counter alone; past it, it must return `true`, advance
+/// `truncated_batches` by exactly one, and report the age as recent. Both
+/// halves live in one test because the counter is process-wide and this is its
+/// only writer, so a sibling test can never perturb the delta. That the
+/// truncation does not touch the DROP counters is pinned deterministically on
+/// an isolated pool by `a_truncation_is_counted_apart_from_a_rejection`.
+/// Test: this test.
+#[test]
+fn a_truncated_batch_is_counted_separately_from_a_dropped_one() {
+    use std::time::Duration;
+
+    let before = index_drop_stats().truncated_batches;
+
+    assert!(
+        !stop_batch_for_budget(Duration::from_secs(0), "idx", 0, 10),
+        "a batch inside its budget must not be stopped"
+    );
+    assert_eq!(
+        index_drop_stats().truncated_batches,
+        before,
+        "a batch that was never stopped must not be counted as truncated"
+    );
+
+    assert!(
+        stop_batch_for_budget(BATCH_INDEX_BUDGET, "idx", 3, 10),
+        "a batch that has spent its budget must be stopped"
+    );
+    let after = index_drop_stats();
+    assert_eq!(
+        after.truncated_batches,
+        before + 1,
+        "stopping on the budget must be counted, not only logged"
+    );
+    assert!(
+        after
+            .seconds_since_last_truncation
+            .is_some_and(|since| since <= 60),
+        "a truncation that just happened must be reported as recent, got {:?}",
+        after.seconds_since_last_truncation
+    );
+}
+
 /// `relative_index_path` strips the project root prefix so the posted
 /// path matches the corpus's existing `file` field convention.
 ///

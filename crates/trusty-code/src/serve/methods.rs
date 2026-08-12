@@ -94,20 +94,27 @@ async fn health(
 /// is no fallible state to check.
 ///
 /// `incremental_index` is additive too (#2798). The write/edit tool executors
-/// hand every successful write to a BOUNDED background pool, which drops a
-/// batch when a degraded trusty-search daemon has filled it. Those drops used
-/// to exist only as a `warn!` line, so a sustained saturation episode — files
-/// silently not indexed for as long as it lasts — looked identical to a healthy
-/// daemon here. This is the same process that owns the counter, and the TUI
-/// already polls this payload, so it is where the loss becomes visible:
-/// `dropped_batches` (0 means it has never happened) and
-/// `seconds_since_last_drop` (`null` until the first drop) together separate
-/// "fine" from "happening right now".
+/// hand every successful write to a BOUNDED background pool, which loses work
+/// two ways when a degraded trusty-search daemon backs it up. Both used to
+/// exist only as a `warn!` line, so a sustained episode — files silently not
+/// indexed for as long as it lasts — looked identical to a healthy daemon here.
+/// This is the same process that owns the counters, and the TUI already polls
+/// this payload, so it is where the loss becomes visible.
+///
+/// Each loss is a count plus an age, and the age (`null` until the first one)
+/// is what separates "happened once an hour ago" from "happening right now".
+/// The two losses stay separate numbers because they need different fixes:
+/// `dropped_batches` means the pool refused the batch outright and none of it
+/// ran, while `truncated_batches` means the pool accepted and started it and
+/// the 30s per-batch budget then cut it short partway, abandoning the files it
+/// had not reached. Reporting only drops would read `0` throughout an episode
+/// in which every batch is accepted and then truncated.
 /// Test: `health_payload_has_expected_shape`,
 /// `health_payload_reports_a_bound_project_root`,
-/// `health_payload_reports_incremental_index_drops`.
+/// `health_payload_reports_incremental_index_drops`,
+/// `health_payload_reports_incremental_index_truncations`.
 pub(crate) fn health_payload(binding: &ProjectBinding) -> Value {
-    // #2798: publish the background-index drop counters where a health check
+    // #2798: publish the background-index loss counters where a health check
     // already looks, so a saturated pool is not invisible.
     let drops = trusty_common::search_index::index_drop_stats();
     json!({
@@ -119,6 +126,8 @@ pub(crate) fn health_payload(binding: &ProjectBinding) -> Value {
         "incremental_index": {
             "dropped_batches": drops.dropped_batches,
             "seconds_since_last_drop": drops.seconds_since_last_drop,
+            "truncated_batches": drops.truncated_batches,
+            "seconds_since_last_truncation": drops.seconds_since_last_truncation,
         },
     })
 }
@@ -175,21 +184,62 @@ mod tests {
     /// trade because the loss is visible somewhere a health check reads. This
     /// pins that it IS on the wire — the field existing is the whole fix, and a
     /// later edit that quietly removes it would restore the blind spot.
-    /// What: asserts `incremental_index.dropped_batches` is present and numeric,
-    /// and that with no drops in this test process `seconds_since_last_drop` is
-    /// `null` rather than a misleading `0`.
+    /// What: nothing in this crate's tests submits to the shared index pool, so
+    /// `dropped_batches` is provably `0` here — asserted exactly, not merely as
+    /// "numeric". The age is then asserted STRICTLY `null`: a `|| is_u64()`
+    /// disjunction would pass just as happily if a later edit reported a
+    /// misleading `0`, which is the regression this test exists to catch.
     /// Test: this test.
     #[test]
     fn health_payload_reports_incremental_index_drops() {
         let v = health_payload(&ProjectBinding::None);
         let drops = &v["incremental_index"];
-        assert!(
-            drops["dropped_batches"].is_u64(),
-            "dropped_batches must be a number, got {drops}"
+        assert_eq!(
+            drops["dropped_batches"], 0,
+            "no test in this crate submits to the pool, so nothing can have been \
+             dropped, got {drops}"
         );
         assert!(
-            drops["seconds_since_last_drop"].is_null() || drops["seconds_since_last_drop"].is_u64(),
-            "seconds_since_last_drop must be null or a number, got {drops}"
+            drops["seconds_since_last_drop"].is_null(),
+            "with no drops the age must be null, never a misleading 0, got {drops}"
+        );
+    }
+
+    /// The budget-truncation counters must be on the wire too, and must be
+    /// their own fields rather than folded into the drop counters (#2798).
+    ///
+    /// Why: a batch the pool ACCEPTS and then cuts short at the 30s budget is a
+    /// different fault from one the pool refuses — different cause, different
+    /// fix — and an operator who cannot tell them apart cannot act on either.
+    /// Summing them, or publishing only the drop pair, would leave an episode
+    /// of repeated truncations reading as a perfectly healthy `0`.
+    /// What: asserts both truncation fields are present under
+    /// `incremental_index` and are NOT the same JSON values as the drop pair's
+    /// keys; as with drops, a fresh test process has truncated nothing, so the
+    /// count is exactly `0` and the age is strictly `null`.
+    /// Test: this test.
+    #[test]
+    fn health_payload_reports_incremental_index_truncations() {
+        let v = health_payload(&ProjectBinding::None);
+        let drops = &v["incremental_index"];
+        assert_eq!(
+            drops["truncated_batches"], 0,
+            "no test in this crate runs a batch, so nothing can have been \
+             truncated, got {drops}"
+        );
+        assert!(
+            drops["seconds_since_last_truncation"].is_null(),
+            "with no truncations the age must be null, never a misleading 0, got {drops}"
+        );
+        let keys: Vec<&String> = drops
+            .as_object()
+            .expect("incremental_index must be an object")
+            .keys()
+            .collect();
+        assert!(
+            keys.contains(&&"dropped_batches".to_string())
+                && keys.contains(&&"truncated_batches".to_string()),
+            "the two losses must be separate fields, never one summed number, got {keys:?}"
         );
     }
 

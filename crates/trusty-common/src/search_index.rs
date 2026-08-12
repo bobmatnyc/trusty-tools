@@ -470,43 +470,73 @@ pub fn index_files_best_effort(project_root: &Path, paths: &[std::path::PathBuf]
 /// Why: the bound is only acceptable because the loss it creates is visible.
 /// A `warn!` line nobody greps is not visibility, so this is the read surface a
 /// health check consumes — trusty-code's `GET /health` publishes it as
-/// `incremental_index`. The two fields answer different questions and a
-/// consumer needs both: `dropped_batches` says whether saturation has EVER
-/// happened, `seconds_since_last_drop` says whether it is happening NOW. A
-/// monotonic total alone cannot distinguish a wedged daemon right now from one
-/// episode an hour ago.
-/// What: `dropped_batches` is monotonic for the life of the process;
-/// `seconds_since_last_drop` is `None` until the first drop, then the age of
-/// the most recent one (saturating at 0 if the wall clock moved backwards).
-/// Both read the shared pool, so they cover every caller in the process.
+/// `incremental_index`.
+///
+/// The four fields are two pairs, and both pairs are needed. Within a pair, the
+/// count says whether the loss has EVER happened and the age says whether it is
+/// happening NOW — a monotonic total alone cannot distinguish a wedged daemon
+/// right now from one episode an hour ago. Between the pairs, a DROP means the
+/// pool refused the batch outright and none of it ran, while a TRUNCATION means
+/// the pool accepted and started the batch and then
+/// [`BATCH_INDEX_BUDGET`] cut it short partway. Different causes, different
+/// fixes, so they are never summed: an episode where every batch is accepted
+/// and then truncated leaves files unindexed while `dropped_batches` reads `0`
+/// forever.
+/// What: both counts are monotonic for the life of the process; each age is
+/// `None` until that loss first happens, then the age of the most recent one
+/// (saturating at 0 if the wall clock moved backwards). All four read the
+/// shared pool, so they cover every caller in the process.
 /// Test: `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`
-/// (asserts both fields right after a real drop),
+/// (asserts the drop pair right after a real drop),
+/// `a_truncated_batch_is_counted_separately_from_a_dropped_one`,
 /// `a_fresh_pool_reports_no_drop_ever`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct IndexDropStats {
-    /// Batches dropped because the pool was saturated, since process start.
+    /// Batches refused at submission because the pool was saturated, since
+    /// process start. None of a dropped batch's files were indexed.
     pub dropped_batches: u64,
     /// Age in seconds of the most recent drop; `None` if there has been none.
     pub seconds_since_last_drop: Option<u64>,
+    /// Batches the pool accepted and started, then cut short at
+    /// [`BATCH_INDEX_BUDGET`], since process start.
+    ///
+    /// The files a truncated batch had not reached yet are ABANDONED, not
+    /// retried: nothing records which paths were skipped, so this crate never
+    /// attempts them again. They become searchable once something unrelated
+    /// covers them — the next write to the same file, a full reindex, or
+    /// trusty-search's own file watcher where one is running for that index —
+    /// and nothing here triggers or confirms any of those.
+    pub truncated_batches: u64,
+    /// Age in seconds of the most recent truncation; `None` if there has been
+    /// none.
+    pub seconds_since_last_truncation: Option<u64>,
 }
 
-/// Snapshot the shared pool's drop counters — see [`IndexDropStats`].
+/// Snapshot the shared pool's loss counters — see [`IndexDropStats`].
 ///
-/// Test: `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`.
+/// Test: `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`,
+/// `a_truncated_batch_is_counted_separately_from_a_dropped_one`.
 #[must_use]
 pub fn index_drop_stats() -> IndexDropStats {
     let pool = crate::index_dispatch::global();
-    let seconds_since_last_drop = pool.last_drop_unix_secs().map(|at| {
+    IndexDropStats {
+        dropped_batches: pool.rejected(),
+        seconds_since_last_drop: seconds_since(pool.last_drop_unix_secs()),
+        truncated_batches: pool.truncated(),
+        seconds_since_last_truncation: seconds_since(pool.last_truncation_unix_secs()),
+    }
+}
+
+/// Age in seconds of a unix-second stamp, saturating at 0 if the clock moved
+/// backwards.
+fn seconds_since(at: Option<u64>) -> Option<u64> {
+    at.map(|at| {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         now.saturating_sub(at)
-    });
-    IndexDropStats {
-        dropped_batches: pool.rejected(),
-        seconds_since_last_drop,
-    }
+    })
 }
 
 /// Wall-clock budget one batch may spend indexing before it stops early.
@@ -521,15 +551,54 @@ pub fn index_drop_stats() -> IndexDropStats {
 /// flight (~36s), so a full 64-slot queue drains in ~10 minutes worst case
 /// rather than an unbounded time.
 /// What: 30s, checked before each file — never mid-request, so an in-flight
-/// POST always finishes.
+/// POST always finishes. Files the batch had not reached when the budget ran
+/// out are abandoned; the loss is counted as
+/// [`IndexDropStats::truncated_batches`], separately from a pool rejection.
 /// Test: `batch_budget_is_exhausted_at_and_past_the_cap`.
-const BATCH_INDEX_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const BATCH_INDEX_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Has this batch spent its [`BATCH_INDEX_BUDGET`]?
 ///
 /// Test: `batch_budget_is_exhausted_at_and_past_the_cap`.
 fn batch_budget_exhausted(elapsed: std::time::Duration) -> bool {
     elapsed >= BATCH_INDEX_BUDGET
+}
+
+/// Should this batch stop here? Counts and logs the truncation when it should.
+///
+/// Why: the decision and the accounting are one function so a batch cannot stop
+/// without being counted. When the `break` only logged, a sustained episode in
+/// which every batch was accepted and then truncated reported
+/// `dropped_batches: 0` in `GET /health` for as long as it lasted, while files
+/// went unindexed batch after batch — the same single-reader blind spot the
+/// rejection counter was added to close, reintroduced on the other loss path.
+/// Splitting "decide" from "record" is what would let it come back.
+/// What: returns `true` once [`batch_budget_exhausted`], and on that edge
+/// records the truncation on the shared pool (readable as
+/// [`IndexDropStats::truncated_batches`], distinct from a drop) and warns with
+/// how many of the batch's files were reached and how many are abandoned.
+/// Returns `false` and records nothing while the budget holds.
+/// Test: `a_truncated_batch_is_counted_separately_from_a_dropped_one`,
+/// `an_unexhausted_budget_records_no_truncation`.
+fn stop_batch_for_budget(
+    elapsed: std::time::Duration,
+    index_id: &str,
+    done: usize,
+    total: usize,
+) -> bool {
+    if !batch_budget_exhausted(elapsed) {
+        return false;
+    }
+    crate::index_dispatch::global().record_truncation();
+    tracing::warn!(
+        "incremental index update for '{index_id}' stopped after {done} of {total} \
+         file(s): the {}s per-batch budget was exhausted; the remaining {} file(s) \
+         were skipped and are NOT retried — they stay searchable only from the next \
+         write, a reindex, or the daemon's own file watcher (#2798)",
+        BATCH_INDEX_BUDGET.as_secs(),
+        total.saturating_sub(done),
+    );
+    true
 }
 
 /// Synchronous body of [`index_files_best_effort`], run on a pool worker (or
@@ -548,9 +617,11 @@ fn batch_budget_exhausted(elapsed: std::time::Duration) -> bool {
 /// e.g. deleted since the write — is logged at debug and skipped, not fatal to
 /// the batch), and POSTs it via [`best_effort_index_one_file`] (which itself
 /// retries transient send failures with backoff). Every step fails open. The
-/// loop also stops early once [`BATCH_INDEX_BUDGET`] is spent (#2798), logging
-/// how many files it skipped — a batch has no size limit, so without that a
-/// single large write pins a pool worker for minutes.
+/// loop also stops early once [`BATCH_INDEX_BUDGET`] is spent (#2798) — a batch
+/// has no size limit, so without that a single large write pins a pool worker
+/// for minutes. Stopping goes through [`stop_batch_for_budget`], which counts
+/// the truncation into [`index_drop_stats`] as well as logging it; the files it
+/// had not reached are abandoned, never retried from here.
 /// Test: `index_files_inner_is_noop_for_empty_paths`,
 /// `index_files_inner_skips_when_index_id_empty`,
 /// `index_files_inner_skips_gracefully_when_daemon_down`.
@@ -596,16 +667,7 @@ fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
     // large write holds a worker for minutes and the queue never turns over.
     let started = std::time::Instant::now();
     for (done, path) in paths.iter().enumerate() {
-        if batch_budget_exhausted(started.elapsed()) {
-            tracing::warn!(
-                "incremental index update for '{index_id}' stopped after {done} of {} \
-                 file(s): the {}s per-batch budget was exhausted; the remaining {} \
-                 file(s) were skipped and stay searchable only from the next write or \
-                 reindex (#2798)",
-                paths.len(),
-                BATCH_INDEX_BUDGET.as_secs(),
-                paths.len() - done,
-            );
+        if stop_batch_for_budget(started.elapsed(), &index_id, done, paths.len()) {
             break;
         }
         let abs = if path.is_absolute() {

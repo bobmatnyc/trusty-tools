@@ -168,6 +168,48 @@ fn a_rejection_records_when_it_happened() {
     let _ = release_tx.send(());
 }
 
+/// A truncation is counted and stamped, and does NOT move the drop counters.
+///
+/// Why: the two losses need different fixes — a full pool versus one batch
+/// overrunning its budget — so an operator who sees them summed, or sees a
+/// truncation surface as a "drop", is pointed at the wrong cause. This pins
+/// that they stay separate numbers rather than one aggregate.
+/// What: records a truncation on a fresh pool and asserts the truncation count
+/// went to 1 with a stamp within a minute of now, while `rejected` and
+/// `last_drop_unix_secs` stayed at their never-happened values.
+/// Test: this test.
+#[test]
+fn a_truncation_is_counted_apart_from_a_rejection() {
+    let pool = BoundedDispatcher::new(1, 1);
+    assert_eq!(pool.truncated(), 0, "a fresh pool has truncated nothing");
+    assert_eq!(pool.last_truncation_unix_secs(), None);
+
+    pool.record_truncation();
+
+    assert_eq!(pool.truncated(), 1, "the truncation must be counted");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let at = pool
+        .last_truncation_unix_secs()
+        .expect("a truncation must record when it happened");
+    assert!(
+        now.saturating_sub(at) <= 60,
+        "truncation stamp {at} is not close to now ({now})"
+    );
+
+    assert_eq!(
+        pool.rejected(),
+        0,
+        "a truncation must not be reported as a pool rejection"
+    );
+    assert_eq!(
+        pool.last_drop_unix_secs(),
+        None,
+        "a truncation must not stamp the drop clock"
+    );
+}
+
 /// A panicking job does not retire the worker that ran it.
 ///
 /// Why: with a fixed worker count, a worker lost to a panic is never replaced —

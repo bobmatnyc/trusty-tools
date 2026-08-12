@@ -11,7 +11,12 @@ Fixed
   without limit: blocking would stall the agent task the fail-open contract
   exists to protect. The caller contract is unchanged — still non-blocking,
   still fail-open.
-- A batch also stops after a 30s budget, logging how many files it skipped. A
-  `write_files` call has no size limit, so one large scaffold write is a single
-  job; without the budget it would hold a worker for minutes and the queue
-  would never turn over.
+- A batch also stops after a 30s budget. A `write_files` call has no size limit,
+  so one large scaffold write is a single job; without the budget it would hold
+  a worker for minutes and the queue would never turn over. The files the batch
+  had not reached when the budget ran out are ABANDONED — nothing records which
+  paths were skipped, so they are never retried from here. They become
+  searchable again only when something unrelated covers them: the next write to
+  the same file, a full reindex, or trusty-search's own file watcher where one
+  is running for that index. The stop is counted as a truncation (see below),
+  not only logged.

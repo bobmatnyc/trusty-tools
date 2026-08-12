@@ -27,11 +27,22 @@
 //! at EXECUTION time, so a batch that waits in the queue indexes whatever the
 //! file says when it finally runs.
 //!
+//! The bound loses work in TWO places, and this module counts both because a
+//! health consumer must be able to tell them apart. A SUBMISSION the pool
+//! refuses is a rejection ([`BoundedDispatcher::rejected`]) — the pool was full,
+//! and nothing of that batch ran. A batch the pool ACCEPTED and started, then
+//! cut short at [`crate::search_index::BATCH_INDEX_BUDGET`], is a truncation
+//! ([`BoundedDispatcher::truncated`]) — part of it landed and the rest was
+//! abandoned. The two have different causes and different fixes (a full pool
+//! vs. a slow daemon making one batch overrun), so they are never summed into
+//! one number.
+//!
 //! Test: `dispatcher_rejects_submissions_once_workers_and_queue_are_full`,
 //! `no_more_jobs_run_concurrently_than_the_worker_count`,
 //! `a_panicking_job_does_not_kill_its_worker`, `a_fresh_pool_reports_no_drop_ever`,
-//! `a_rejection_records_when_it_happened` (in the `tests` module below),
-//! and the end-to-end
+//! `a_rejection_records_when_it_happened`,
+//! `a_truncation_is_counted_apart_from_a_rejection` (in the `tests` module
+//! below), and the end-to-end
 //! `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`
 //! in `search_index_tests.rs`.
 
@@ -59,21 +70,64 @@ pub(crate) const MAX_INDEX_WORKERS: usize = 4;
 /// `dispatcher_rejects_submissions_once_workers_and_queue_are_full`.
 pub(crate) const INDEX_QUEUE_CAPACITY: usize = 64;
 
+/// How many times one kind of work loss has happened, and when the last one was.
+///
+/// Why: both loss modes in the module doc need exactly this pair, and a health
+/// consumer needs both halves — the total says whether it has EVER happened,
+/// the stamp says whether it is happening NOW. One type so the two halves
+/// cannot drift apart, and so a later loss mode inherits the shape instead of
+/// growing a third near-copy of `fetch_add` + `SystemTime::now`.
+/// What: `count` is monotonic for the life of the process. `last_unix_secs`
+/// stores `0` until the first [`LossCounter::record`], which is why
+/// [`LossCounter::last_unix_secs`] hands back an `Option` rather than leaking
+/// that sentinel to callers.
+/// Test: `a_fresh_pool_reports_no_drop_ever`,
+/// `a_rejection_records_when_it_happened`,
+/// `a_truncation_is_counted_apart_from_a_rejection`.
+#[derive(Default)]
+pub(crate) struct LossCounter {
+    count: AtomicU64,
+    last_unix_secs: AtomicU64,
+}
+
+impl LossCounter {
+    /// Count one loss and stamp when it happened.
+    fn record(&self) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.last_unix_secs.store(now, Ordering::Relaxed);
+    }
+
+    /// How many losses of this kind since process start.
+    fn count(&self) -> u64 {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// Unix seconds of the most recent loss, or `None` if there has never been
+    /// one.
+    fn last_unix_secs(&self) -> Option<u64> {
+        match self.last_unix_secs.load(Ordering::Relaxed) {
+            0 => None,
+            secs => Some(secs),
+        }
+    }
+}
+
 /// A fixed worker pool with a bounded queue, rejecting work when both are full.
 ///
-/// Why / What / design rationale: see the module doc.
+/// Why / What / design rationale: see the module doc, including why the two
+/// loss counters below stay separate numbers.
 /// Test: the module's `tests` submodule constructs small instances
 /// (`BoundedDispatcher::new(1, 1)`) so the saturation boundary is exercised
 /// deterministically rather than by racing the shared pool.
 pub(crate) struct BoundedDispatcher {
     tx: SyncSender<IndexJob>,
-    rejected: AtomicU64,
-    /// Unix seconds of the most recent rejection; `0` means "never rejected".
-    ///
-    /// Why: a monotonic total alone cannot answer "is this happening NOW" — the
-    /// question a health consumer asks. See
-    /// [`crate::search_index::index_drop_stats`].
-    last_drop_unix_secs: AtomicU64,
+    /// Batches refused at SUBMISSION because workers and queue were both full.
+    rejected: LossCounter,
+    /// Batches accepted and started, then cut short by the per-batch budget.
+    truncated: LossCounter,
 }
 
 impl BoundedDispatcher {
@@ -96,8 +150,8 @@ impl BoundedDispatcher {
         }
         Self {
             tx,
-            rejected: AtomicU64::new(0),
-            last_drop_unix_secs: AtomicU64::new(0),
+            rejected: LossCounter::default(),
+            truncated: LossCounter::default(),
         }
     }
 
@@ -118,11 +172,11 @@ impl BoundedDispatcher {
         match self.tx.try_send(job) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
-                self.record_rejection();
+                self.rejected.record();
                 false
             }
             Err(TrySendError::Disconnected(_)) => {
-                self.record_rejection();
+                self.rejected.record();
                 tracing::warn!(
                     "background index dispatch pool has no live workers; work is being \
                      dropped (issue #2798)"
@@ -134,7 +188,7 @@ impl BoundedDispatcher {
 
     /// How many jobs this pool has rejected since process start.
     pub(crate) fn rejected(&self) -> u64 {
-        self.rejected.load(Ordering::Relaxed)
+        self.rejected.count()
     }
 
     /// Unix seconds of the most recent rejection, or `None` if there has never
@@ -145,19 +199,37 @@ impl BoundedDispatcher {
     /// Test: `a_fresh_pool_reports_no_drop_ever`,
     /// `a_rejection_records_when_it_happened`.
     pub(crate) fn last_drop_unix_secs(&self) -> Option<u64> {
-        match self.last_drop_unix_secs.load(Ordering::Relaxed) {
-            0 => None,
-            secs => Some(secs),
-        }
+        self.rejected.last_unix_secs()
     }
 
-    /// Count a rejection and stamp when it happened.
-    fn record_rejection(&self) {
-        self.rejected.fetch_add(1, Ordering::Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        self.last_drop_unix_secs.store(now, Ordering::Relaxed);
+    /// Count a batch that ran but was cut short by its per-batch budget.
+    ///
+    /// Why: the budget's `break` used to be a `warn!` and nothing else, which
+    /// is the same single-reader blind spot the rejection counter exists to
+    /// close. A saturation episode where every batch is ACCEPTED but repeatedly
+    /// truncated leaves files unindexed batch after batch while
+    /// `dropped_batches` stays `0` forever, so the loss needs its own readable
+    /// number. Recorded here rather than in a second global because this pool
+    /// is already the one process-wide object the health surface reads.
+    /// What: called by [`crate::search_index`]'s budget guard, from a worker
+    /// thread — hence the same relaxed atomics as the rejection path.
+    /// Test: `a_truncation_is_counted_apart_from_a_rejection`,
+    /// and `a_truncated_batch_is_counted_separately_from_a_dropped_one` in
+    /// `search_index_tests.rs` for the call site.
+    pub(crate) fn record_truncation(&self) {
+        self.truncated.record();
+    }
+
+    /// How many batches this pool has started and then cut short, since process
+    /// start.
+    pub(crate) fn truncated(&self) -> u64 {
+        self.truncated.count()
+    }
+
+    /// Unix seconds of the most recent truncation, or `None` if there has never
+    /// been one.
+    pub(crate) fn last_truncation_unix_secs(&self) -> Option<u64> {
+        self.truncated.last_unix_secs()
     }
 }
 
