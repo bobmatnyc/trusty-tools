@@ -551,44 +551,86 @@ pub(super) fn preseed_workspace_trust(
     Ok(())
 }
 
-/// Pre-seed workspace trust in the operator's real `~/.claude.json`.
+/// Pre-seed workspace trust in `<fw base>/.claude.json`.
 ///
 /// Why: thin home-resolving wrapper over [`preseed_workspace_trust`] so
 /// `prepare_session` can call it without knowing the config-dir layout; tests
 /// target a temp file via the inner function directly.
-/// What: resolves `~/.claude.json` and delegates. A missing home directory is a
-/// soft failure (logged, non-fatal) so launch still proceeds.
-/// Test: covered by the inner `preseed_trust_*` tests.
-pub(super) fn preseed_workspace_trust_home(workspace: &Path) -> Result<(), PrepError> {
-    let Some(home) = dirs::home_dir() else {
-        tracing::warn!("skipping trust pre-seed: home directory unresolved");
+///
+/// #5544: the home comes from `fw.claude_home_dir()`, not `dirs::home_dir()`.
+/// This is the exact escape [`crate::core::paths::FrameworkPaths::claude_home_dir`]
+/// was added for in #1860 — `FrameworkPaths::under(tempdir)` is supposed to
+/// confine every write to the temp dir, and a bare `dirs::home_dir()` here
+/// re-escaped to the operator's real `~/.claude.json`. Tests were compensating
+/// by repointing the process's `$HOME`, a global write every sibling in the
+/// same test target could observe mid-flight. Production is unchanged:
+/// `FrameworkPaths::default().claude_home_dir()` IS the real home.
+/// What: resolves `<fw base>/.claude.json` and delegates. An unresolvable home
+/// is still a soft skip: `FrameworkPaths::default()` substitutes `"."` when
+/// `dirs::home_dir()` returns `None`, and seeding a trust record into whatever
+/// directory the process happens to be running in is worse than not seeding one.
+/// The check is `is_absolute`, which is exactly the shape of that fallback.
+/// Test: `prepare_session_confines_home_writes_to_the_framework_base`,
+/// `home_writes_are_skipped_when_the_base_is_unresolved`; the seeding behaviour
+/// itself by the inner `preseed_trust_*` tests.
+pub(super) fn preseed_workspace_trust_home(
+    fw: &crate::core::paths::FrameworkPaths,
+    workspace: &Path,
+) -> Result<(), PrepError> {
+    let Some(home) = resolved_home_base(fw) else {
         return Ok(());
     };
     preseed_workspace_trust(&home.join(".claude.json"), workspace)
 }
 
-/// Remove the `trusty-memory` hook entries from `~/.claude/settings.json`.
+/// The `FrameworkPaths` base, or `None` when it did not resolve to a real home.
+///
+/// Why (#5544): `FrameworkPaths::default()` falls back to `"."` when
+/// `dirs::home_dir()` returns `None`, so routing the two home-tier writes
+/// through `fw` (instead of a second `dirs::home_dir()` call that skipped on
+/// `None`) would silently turn that fallback into a write next to the process's
+/// working directory. Both callers are best-effort side effects, so declining is
+/// the correct outcome.
+/// What: returns the base when absolute, else logs at `warn!` and returns `None`.
+/// Test: `home_writes_are_skipped_when_the_base_is_unresolved`.
+fn resolved_home_base(fw: &crate::core::paths::FrameworkPaths) -> Option<PathBuf> {
+    let home = fw.claude_home_dir();
+    if home.is_absolute() {
+        Some(home)
+    } else {
+        tracing::warn!(
+            base = %home.display(),
+            "skipping home-tier session writes: the framework base is not an absolute home"
+        );
+        None
+    }
+}
+
+/// Remove the `trusty-memory` hook entries from `<fw base>/.claude/settings.json`.
 ///
 /// Why: `trusty-memory` hooks were previously registered globally, so they
 /// fired for every Claude Code session. Now that [`write_project_hooks`]
 /// scopes them to trusty-mpm projects, the global entries must be removed to
 /// stop them double-firing (and firing for unrelated sessions like claude-mpm).
-/// What: reads `~/.claude/settings.json`, and for each event in
+///
+/// #5544: resolved from `fw.claude_home_dir()` rather than `dirs::home_dir()`,
+/// for the reason spelled out on [`preseed_workspace_trust_home`] — an
+/// isolated `FrameworkPaths::under(tempdir)` must not reach the operator's real
+/// `~/.claude/settings.json`.
+/// What: reads `<fw base>/.claude/settings.json`, and for each event in
 /// [`GLOBAL_TRUSTY_MEMORY_EVENTS`] filters out handler groups whose `hooks`
 /// array contains a command matching `trusty-memory hooks fire`. An event key
 /// whose array becomes empty is removed entirely. Writes the file back. A
 /// missing or malformed file is treated as success (nothing to clean up).
-/// Test: `remove_global_hooks_removes_trusty_memory_entries`.
-pub(super) fn remove_global_trusty_memory_hooks() -> Result<(), PrepError> {
-    let home = match dirs::home_dir() {
-        Some(home) => home,
-        None => {
-            tracing::warn!("skipping global trusty-memory hook removal: home unresolved");
-            return Ok(());
-        }
+/// Test: `remove_global_hooks_removes_trusty_memory_entries`,
+/// `prepare_session_confines_home_writes_to_the_framework_base`.
+pub(super) fn remove_global_trusty_memory_hooks(
+    fw: &crate::core::paths::FrameworkPaths,
+) -> Result<(), PrepError> {
+    let Some(home) = resolved_home_base(fw) else {
+        return Ok(());
     };
-    let settings_path = home.join(".claude").join("settings.json");
-    clean_global_trusty_memory_hooks(&settings_path)
+    clean_global_trusty_memory_hooks(&home.join(".claude").join("settings.json"))
 }
 
 /// Filter `trusty-memory` hook entries out of the settings file at `settings_path`.

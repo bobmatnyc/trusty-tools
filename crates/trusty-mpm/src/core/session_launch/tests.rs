@@ -144,6 +144,74 @@ fn build_system_prompt_for_no_override_matches_bundled_sections() {
     assert!(base > deleg, "BASE_PM floor must be last");
 }
 
+/// `prepare_session` must not write outside the `FrameworkPaths` base it was
+/// given.
+///
+/// Why (#5544): `FrameworkPaths::under(tempdir)` exists to confine every write
+/// a session prepares. Two steps escaped it —
+/// `settings::preseed_workspace_trust_home` seeded `~/.claude.json` and
+/// `settings::remove_global_trusty_memory_hooks` read and rewrote
+/// `~/.claude/settings.json`, both resolved from `dirs::home_dir()` rather than
+/// from `fw`. Callers compensated by repointing the process's `$HOME`, which is
+/// a PROCESS-GLOBAL write: `cargo test` runs a target's tests as threads in ONE
+/// process, so every sibling saw the repoint for its duration, and `#[serial]`
+/// excludes only other `#[serial]` tests. Closing the escape is what lets those
+/// callers stop writing env at all.
+///
+/// FAILS BEFORE THIS CHANGE: `<base>/.claude.json` was never created — the seed
+/// landed in the operator's real `~/.claude.json` instead.
+///
+/// What: runs the real `prepare_session_inner` pipeline against a
+/// `FrameworkPaths::under(tempdir)` and asserts the trust seed appears under
+/// that base. Deliberately NOT `#[serial]` and deliberately env-free: a test
+/// asserting confinement must not itself depend on process-global state.
+/// Test: this function IS the test.
+#[test]
+fn prepare_session_confines_home_writes_to_the_framework_base() {
+    let base = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let fw = crate::core::paths::FrameworkPaths::under(base.path());
+
+    prepare_session_with_style_and_native(&fw, project.path(), None, true).expect("prep succeeds");
+
+    let seeded = base.path().join(".claude.json");
+    assert!(
+        seeded.is_file(),
+        "the workspace trust seed must land under the FrameworkPaths base, not \
+         the operator's real home (#5544); expected {}",
+        seeded.display()
+    );
+    let text = std::fs::read_to_string(&seeded).expect("seed readable");
+    assert!(
+        text.contains(&project.path().to_string_lossy().to_string()),
+        "the seed must name the prepared workspace"
+    );
+}
+
+/// An unresolvable framework base declines the home-tier writes.
+///
+/// Why (#5544): `FrameworkPaths::default()` substitutes `"."` when
+/// `dirs::home_dir()` returns `None`. Routing the two home-tier writes through
+/// `fw` would otherwise turn that fallback into a `.claude.json` next to the
+/// process's working directory — which is how a stray file appeared in the
+/// crate root during this change's own test run.
+/// What: builds a `FrameworkPaths` over a relative base, runs both home-tier
+/// helpers, and asserts nothing was written beside the cwd.
+/// Test: this function IS the test.
+#[test]
+fn home_writes_are_skipped_when_the_base_is_unresolved() {
+    let fw = crate::core::paths::FrameworkPaths::under(std::path::Path::new("."));
+    let workspace = tempdir().unwrap();
+
+    super::settings::preseed_workspace_trust_home(&fw, workspace.path()).expect("soft skip");
+    super::settings::remove_global_trusty_memory_hooks(&fw).expect("soft skip");
+
+    assert!(
+        !std::path::Path::new("./.claude.json").exists(),
+        "a relative framework base must decline the seed, not write it into the cwd"
+    );
+}
+
 #[test]
 #[serial_test::serial]
 fn prepare_session_stash_reflects_override() {
