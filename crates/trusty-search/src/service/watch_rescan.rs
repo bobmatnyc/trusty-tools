@@ -231,6 +231,15 @@ pub async fn reconcile_after_rescan(
 /// before removing anything. That guard matters because the walk and the
 /// watcher do not use identical filters — a file the walk excluded but which
 /// still exists must not be mistaken for a deletion.
+///
+/// Caller obligation (#3049): `remove_file` is a durable write and this
+/// function does NOT take the teardown guard — [`reconcile_after_rescan`] holds
+/// it across the call, and is the only caller. Do not add a second caller
+/// without one, and do not "fix" this by acquiring the guard here: that is the
+/// read side twice on one task, and once a concurrent DELETE queues for the
+/// write side the second read parks behind it while this task still holds the
+/// first, deadlocking the pass. Declared as `CALLER:reconcile_after_rescan` in
+/// `scripts/teardown-guard-manifest.tsv`.
 async fn sweep_deleted(
     index_id: &IndexId,
     canonical_root: &Path,
