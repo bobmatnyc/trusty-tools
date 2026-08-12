@@ -284,6 +284,12 @@ impl PalaceStore {
     /// `None` is exercised by `load_identity_missing_returns_none`.
     pub fn load_identity(data_dir: &Path) -> Result<Option<String>> {
         let target = data_dir.join(IDENTITY_TXT);
+        // intentional fail-open (ADR-0045 decision 4): `exists()` reads a
+        // denied stat as "absent" here as everywhere, and that is the safe
+        // direction for this one. The only consumer treats `None` as "no
+        // identity yet" and falls back to a default prompt, so the worst case
+        // is a thinner prompt — nothing destructive, enumerating, or
+        // operator-reporting branches on this answer.
         if !target.exists() {
             return Ok(None);
         }
