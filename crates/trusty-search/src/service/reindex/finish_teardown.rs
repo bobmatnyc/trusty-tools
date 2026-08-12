@@ -44,8 +44,11 @@ use super::validate;
 /// at the top of the loop and break before sampling — so nothing is skipped;
 /// `finish_reindex` takes its own synchronous post-teardown RSS sample for both
 /// peaks either way. No-ops for `None` handles.
-/// Test: `stop_pollers_returns_without_waiting_out_the_tick` and
-/// `stop_pollers_still_joins_both_pollers` (`pollers_tests.rs`), plus every
+/// Test: the two halves are pinned separately in `pollers_tests.rs` —
+/// `stop_pollers_returns_without_waiting_out_the_tick` for the wakeup,
+/// `stop_pollers_signals_both_before_awaiting_either` for the signal-both-first
+/// order (which is too cheap, ~100µs, for any wall-clock assertion to catch).
+/// `stop_pollers_still_joins_both_pollers` covers completeness. Plus every
 /// `finish_reindex` code path.
 pub(super) async fn stop_pollers(
     poller_stop: Arc<PollerStop>,

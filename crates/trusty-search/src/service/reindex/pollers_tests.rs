@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::finish_teardown::stop_pollers;
-use super::pollers::{spawn_embedderd_rss_poller, spawn_memory_poller};
+use super::pollers::{spawn_embedderd_rss_poller, spawn_memory_poller, PollerStop};
 
 /// Ceiling for a prompt shutdown.
 ///
@@ -179,21 +179,23 @@ async fn memory_poller_still_trips_abort_then_stops_promptly() {
 /// A reindex that tears down before either poller has parked stays prompt.
 ///
 /// Covers the short-run case — a reindex that fails or finds nothing to do —
-/// where teardown races the pollers' first loop iteration. What it actually
-/// pins is the signal-both-before-joining order: the daemon poller exits on its
-/// top-of-loop flag check, but the sidecar poller parks during that join and
-/// then waits out its own 500ms tick if it was not signalled up front.
+/// where teardown races the pollers' first loop iteration, rather than the
+/// mid-tick case the other latency tests set up.
 ///
 /// Budgeted over `RACE_ROUNDS` rather than one shot on purpose. A single round
-/// costs only ~500ms against the pre-fix code — under `PROMPT_SHUTDOWN_CEILING`,
-/// so a one-shot assertion at that ceiling would miss it. Repeating separates
-/// the two outcomes by an order of magnitude: a few ms for the whole loop when
-/// shutdown is prompt, ~4s when each round waits out a tick.
+/// costs only ~500ms against the fully pre-fix code — under
+/// `PROMPT_SHUTDOWN_CEILING`, so a one-shot assertion at that ceiling would miss
+/// it. Repeating separates the two outcomes by an order of magnitude: a few ms
+/// for the whole loop when shutdown is prompt, ~4s when each round waits out a
+/// tick.
 ///
-/// Note this does NOT isolate the `notify_one` permit — removing only the notify
-/// leaves this test green, because the top-of-loop flag check wins that
-/// particular race. `stop_pollers_returns_without_waiting_out_the_tick` is the
-/// test that covers a poller already parked mid-tick.
+/// Mutation testing says this pins the same "the wakeup exists" property every
+/// other timing test here pins, just timed at spawn-race instead of mid-tick:
+/// removing only `notify_one` leaves it green (the top-of-loop flag check wins
+/// that race), and reverting only the signalling order leaves it green too
+/// (once the wakeup exists, that reordering costs ~100µs). The two properties
+/// are isolated by `stop_pollers_returns_without_waiting_out_the_tick` and
+/// `stop_pollers_signals_both_before_awaiting_either` respectively.
 #[tokio::test]
 async fn stop_signalled_before_the_poller_parks_still_stops_it() {
     /// Enough rounds that one lost wakeup per round blows the budget outright.
@@ -218,6 +220,51 @@ async fn stop_signalled_before_the_poller_parks_still_stops_it() {
          full tick per round (budget {}ms)",
         elapsed.as_millis(),
         PROMPT_SHUTDOWN_CEILING.as_millis(),
+    );
+}
+
+/// Both pollers are signalled before either join is awaited.
+///
+/// The other half of the fix, and the one no wall-clock test can pin: once the
+/// wakeup exists, signalling serially instead costs ~100µs, far below any
+/// ceiling this file could assert without becoming a flake generator. So this
+/// observes the ORDER directly instead of timing it.
+///
+/// The daemon poller is stood in for by a task that will not finish until the
+/// test releases it. While that join is blocked, the sidecar's stop flag must
+/// ALREADY be set. Under serial signalling it is not set until the first join
+/// returns, so `wait_for` exhausts its budget and the assertion fails — and it
+/// fails on any machine at any load, because the flag never becomes true rather
+/// than becoming true late.
+#[tokio::test]
+async fn stop_pollers_signals_both_before_awaiting_either() {
+    let memory_stop = PollerStop::new();
+    let sidecar_stop = PollerStop::new();
+
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::clone(&release);
+    // Stands in for a daemon poller still winding down.
+    let memory_handle = tokio::spawn(async move { gate.notified().await });
+    let sidecar_handle = tokio::spawn(async {});
+
+    let observed = Arc::clone(&sidecar_stop);
+    let teardown = tokio::spawn(stop_pollers(
+        memory_stop,
+        memory_handle,
+        Some(sidecar_stop),
+        Some(sidecar_handle),
+    ));
+
+    let signalled = wait_for(Duration::from_secs(5), || observed.should_stop()).await;
+
+    // Release regardless, so the assertion below reports rather than hangs.
+    release.notify_one();
+    let _ = teardown.await;
+
+    assert!(
+        signalled,
+        "the sidecar poller was still unsignalled while the daemon poller's \
+         join was blocked — the two shutdowns are running back to back",
     );
 }
 

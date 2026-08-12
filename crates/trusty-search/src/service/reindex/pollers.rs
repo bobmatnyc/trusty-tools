@@ -39,7 +39,9 @@ pub(super) struct PollerStop {
 }
 
 impl PollerStop {
-    fn new() -> Arc<Self> {
+    /// `pub(super)` so `pollers_tests` can drive a shutdown without spawning a
+    /// real poller — the ordering test needs a join handle it controls.
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             stop: AtomicBool::new(false),
             wake: Notify::new(),
@@ -55,7 +57,9 @@ impl PollerStop {
         self.wake.notify_one();
     }
 
-    fn should_stop(&self) -> bool {
+    /// `pub(super)` so a test can observe that a signal has landed without
+    /// timing how long the poller took to notice it.
+    pub(super) fn should_stop(&self) -> bool {
         self.stop.load(AtomicOrdering::Acquire)
     }
 
