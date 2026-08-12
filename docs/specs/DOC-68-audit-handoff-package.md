@@ -4,10 +4,12 @@ spec_refs: []
 
 # DOC-68 — The Audit Engagement Handoff Package: Select, Clone, Analyze, Sign
 
-**Status:** Draft — awaiting owner review of §14's open questions and §15's
-named gaps. Nothing below is implementation-ready until those are resolved;
-this document describes the sequence as the current issue tree commits to it,
-not a design proposal competing with that tree.
+**Status:** Draft — §14's five open questions were decided by the owner on
+2026-08-12, accepted exactly as proposed ("all as proposed"). §15's remaining
+named gaps (verification-side tooling, the return channel) are still open.
+This document describes the sequence as the current issue tree commits to it
+plus the owner's §14 decisions, not a design proposal competing with that
+tree.
 **Spec ID:** `SPEC-AUDITPKG-01~draft` … `SPEC-AUDITPKG-15~draft`
 **Subsystem:** `trusty-audit` — the auditor client (orchestration, working
 directory, engagement config, tool seam); `trusty-git-analytics` (tga) — clone
@@ -15,7 +17,7 @@ acquisition, the audit sweep, manifest emission; `trusty-installer` — pinned
 binary download and verification; `trusty-review` — report rendering, invoked
 unmodified as a subprocess
 **Owner:** Bob Matsuoka
-**Last-updated:** 2026-08-11
+**Last-updated:** 2026-08-12
 **DOC-N claim:** `DOC-68`, scan-before-claim per DOC-38 §4.1. Verified against
 this worktree (branched from `origin/main` at `aadbbd5bb`):
 `scripts/check_doc_numbers.sh` reports 116 docs / 110 claims, 3 grandfathered,
@@ -257,16 +259,18 @@ commands into its own webview, never through a served HTTP endpoint a
 separate browser process would have to trust. §2 above states this is a
 correction to #5474's own filed text, not a new decision.
 
-**What backs the picker and is still open.** #5487 (repo-discovery endpoint)
-is unresolved on one axis its own closure conditions leave explicit: discover
-via the GitHub API directly, or shell out to `gh repo list` — and that choice
-is entangled with #5475 (gh has no common entry point across 5+ existing call
-sites in tga). §14 Q4 below states this spec's proposed answer; it is not
-settled by any issue today.
+**What backs the picker, decided (§14 Q4).** #5487 (repo-discovery endpoint)
+left one axis of its own closure conditions open: discover via the GitHub API
+directly, or shell out to `gh repo list`. The owner decided this 2026-08-12:
+route discovery through `gh`, contingent on #5475 (gh has no common entry
+point across 5+ existing call sites in tga) landing first or alongside.
+Neither #5487 nor #5215 should implement discovery ahead of #5475 — see §15.
 
-**Empty or partial selection.** No issue states a minimum or maximum repo
-count, or what happens when the recipient selects zero repos. §14 Q3
-proposes an answer.
+**Empty or partial selection, decided (§14 Q3).** No minimum or maximum repo
+count in v1 — a single-repo audit is a legitimate engagement. On empty
+selection, the picker (#5497) disables the action that starts the sweep
+until at least one repo is selected. Neither is yet a closure condition on
+any issue — #5497 must add it.
 
 ## {#SPEC-AUDITPKG-07~draft} 7. Step 2 — Tool Installation, Fail-Closed on Verification
 
@@ -302,27 +306,32 @@ be a checkout on disk before any existing tga command runs
 step 3 is the thing that is supposed to make that true for a recipient who
 has never run `git clone` against any of their own repositories.
 
-**Credential.** Step 1 already resolved `gh auth login` against the
-recipient's own account (#5476). Whether cloning reuses that same credential
-(via `gh`'s git-credential helper) or requires a second, separate
-authentication step is not decided by any issue in the current tree — #5215's
-scope list names "clone auth (distinct from API auth)" as something to
-decide, without deciding it. §14 Q4's proposed answer covers this alongside
-discovery.
+**Credential, decided (§14 Q4).** Step 1 already resolved `gh auth login`
+against the recipient's own account (#5476). Cloning reuses that same
+credential via `gh`'s git-credential helper, rather than a second, separate
+authentication step — the owner accepted this 2026-08-12, contingent on #5475
+landing first or alongside. #5215's scope list names "clone auth (distinct
+from API auth)" as something to decide; this is the decision, not yet
+reflected as a closure condition on #5215 itself (§15).
 
-**Partial failure.** No issue states what happens when one repo among several
-fails to clone — does the sequence abort, skip that repo and continue, or
-something else? §14 Q2 proposes an answer, extending DOC-67 §9's
-continue-on-failure policy (already established for the *analysis* stage) to
-this earlier, currently undesigned stage.
+**Partial failure, decided (§14 Q2).** DOC-67 §9's continue-on-failure policy
+(already established for the *analysis* stage) now extends to clone: one
+repo failing to clone does not abort the sequence, and the failure is named
+in `AuditManifest.report.gaps` the same way an analysis gap is. The sequence
+aborts only when every repo fails to clone, or the recipient selected zero
+repos (§14 Q3). #5215's own closure conditions do not yet state this;
+whoever implements clone-on-demand must encode it.
 
 ## {#SPEC-AUDITPKG-09~draft} 9. Step 4 — Run Analysis
 
-**Owner:** tga's existing `run_full_sweep` (DOC-67, unchanged), invoked by
-this client exactly as DOC-67 §6 specifies — one `manifest.toml`, one
-subprocess call into `trusty-review report --manifest <path> --analyze`. This
-spec adds nothing new to the sweep's internals; it names what the client
-around it must do while the sweep runs.
+**Owner:** tga's existing `run_full_sweep` (DOC-67, unchanged). This client's
+own step of calling it — a `session::Command` variant that shells out to
+`tga audit` over the cloned repos and captures per-repo results — is itself
+unticketed today, tracked by [#5555](https://github.com/bobmatnyc/trusty-tools/issues/5555)
+(§15). Once wired, it invokes exactly DOC-67 §6's contract — one
+`manifest.toml`, one subprocess call into `trusty-review report --manifest
+<path> --analyze`. This spec adds nothing new to the sweep's internals; it
+names what the client around it must do while the sweep runs.
 
 **Progress, not silence, for up to an hour-plus.** #5498's closure conditions
 require the run view to show live per-repo clone progress (once #5215 lands)
@@ -468,103 +477,106 @@ from it. The README's `rm -rf <work-dir>` deletion guarantee
 `workdir::layout_tests::every_layout_path_is_inside_the_root`) is what makes
 that posture inspectable and reversible, not merely asserted.
 
-## {#SPEC-AUDITPKG-14~draft} 14. Open Questions for the Owner
+## {#SPEC-AUDITPKG-14~draft} 14. Decided Questions
 
-Five questions the current issue tree leaves genuinely unanswered. Each is
-marked **proposed-pending-owner-approval** — none of these is a decision this
-spec is entitled to make silently.
+Five questions the current issue tree left genuinely unanswered when this
+spec was first drafted. **The owner accepted all five exactly as proposed,
+verbatim — "all as proposed" — on 2026-08-12.** Each subsection below states
+the decision and keeps the original reasoning as its rationale; none of it
+was a decision this spec was entitled to make silently, and now none of it
+is silent.
 
-**Q1 — Can an e2e test of this sequence use fixture repositories, or does it
-require real GitHub repos?**
+**Q1 — DECIDED 2026-08-12: an e2e test of this sequence uses fixture
+repositories, not live GitHub repos.**
 
 Nothing in #5215's closure conditions forbids a fixture remote; the
 conditions ("tga can take an org/workspace + a repo name it has never seen
 and produce a local checkout") describe production behavior, not a test
-harness's inputs. **Proposed:** yes, fixture repositories — bare local git
-repos as clone sources for the clone-and-analyze legs, plus a fake/recorded
-discovery source behind a trait seam for the picker leg — should cover the
-sequence in CI, consistent with §11's CLI-testability constraint (a test that
-needs a live GitHub credential is not runnable in CI with no window and no
-network egress either). A single opt-in, `--include-ignored`-gated test
-against a real throwaway GitHub org is reasonable as an additional release
-gate, not as the only coverage. **Not decided by any issue today** — no
-child of #5473/#5477 tickets an e2e test harness at all (§15).
+harness's inputs. Fixture repositories — bare local git repos as clone
+sources for the clone-and-analyze legs, plus a fake/recorded discovery source
+behind a trait seam for the picker leg — cover the sequence in CI, consistent
+with §11's CLI-testability constraint (a test that needs a live GitHub
+credential is not runnable in CI with no window and no network egress
+either). A single opt-in, `--include-ignored`-gated test against a real
+throwaway GitHub org is an *additional* release gate, not the only coverage.
+**Tracked by [#5556](https://github.com/bobmatnyc/trusty-tools/issues/5556)**
+(`test(trusty-audit): end-to-end CLI run — select, clone, analyze`), which
+carries the owner's directive verbatim (§15).
 
-**Q2 — How do partial failures surface: one repo of five fails to clone, or
-analysis fails on one repo? Does the run abort, continue, or produce a
-partial package?**
+**Q2 — DECIDED 2026-08-12: partial clone failures extend DOC-67 §9's
+continue-on-failure policy to the clone stage.**
 
 DOC-67 §9 already answers this for the *analysis* stage: continue, name the
 excluded repo in Gaps & Caveats, never abort the other repos for one
 transient failure — "a one-shot, unattended, potentially hundred-repo org
 sweep cannot abort the entire run because one repo among many had a transient
-fetch failure." **Proposed:** extend the identical policy to the *clone*
-stage (§8), which DOC-67 never covered because clone-on-demand didn't exist
-when DOC-67 was written. `AuditManifest.report.gaps: Vec<String>`
+fetch failure." The identical policy now extends to the *clone* stage (§8),
+which DOC-67 never covered because clone-on-demand didn't exist when DOC-67
+was written. `AuditManifest.report.gaps: Vec<String>`
 (`crates/trusty-audit/src/manifest.rs:56-58`) already has a field built to
-carry exactly this kind of named exclusion — a failed-repo clone should
-populate it the same way an analysis gap does. The package that step 5
-assembles is then always the best-effort result of whichever repos succeeded,
-never a hard abort, unless every repo fails or the recipient selected zero
-repos (Q3). **Not decided by any issue** — #5215's scope list names "partial
-clone failure" as something to handle without saying whether the *sequence*
-(as opposed to the individual clone operation) continues past it.
+carry exactly this kind of named exclusion — a failed-repo clone populates it
+the same way an analysis gap does. The package step 5 assembles is always
+the best-effort result of whichever repos succeeded, never a hard abort,
+**unless** every repo fails or the recipient selected zero repos (Q3).
+**Implementation still pending:** #5215's scope list names "partial clone
+failure" as something to handle without stating whether the *sequence* (as
+opposed to the individual clone operation) continues past it — whoever picks
+up #5215 must encode this decision as a closure condition, not merely cite
+this spec.
 
-**Q3 — Is repository selection cross-org? Is there a minimum or maximum
-count? What happens when the selected set is empty?**
+**Q3 — DECIDED 2026-08-12: cross-org selection was already settled by #5487;
+no minimum or maximum count in v1; the picker disables the run action on an
+empty selection.**
 
 #5487's own closure conditions settle cross-org: discovery "Returns the set
 of repos the configured credential can access, not limited to a single named
-org" and "covers personal repos and org repos the token can see." **Proposed
-for count:** no hard minimum or maximum in v1 — a single-repo audit is a
-legitimate engagement and nothing in the issue tree tickets an upper bound.
-**Proposed for empty selection:** the picker form (#5497) should disable
-whatever action starts the sweep until at least one repo is selected, the
-same way `Session::guided()`'s `NextStep::SelectRepositories`
-(`crates/trusty-audit/src/session.rs:204-219`) already gates on "no manifest
-or an empty repository list" before offering to move on to tool installation
-— client-side validation, not a runtime error path. **Not decided by any
-issue** — no child states a minimum/maximum or an empty-selection behavior
-explicitly.
+org" and "covers personal repos and org repos the token can see." For count:
+no hard minimum or maximum in v1 — a single-repo audit is a legitimate
+engagement and nothing in the issue tree tickets an upper bound. For empty
+selection: the picker form (#5497) disables whatever action starts the sweep
+until at least one repo is selected, the same way `Session::guided()`'s
+`NextStep::SelectRepositories` (`crates/trusty-audit/src/session.rs:204-219`)
+already gates on "no manifest or an empty repository list" before offering
+to move on to tool installation — client-side validation, not a runtime
+error path. **Implementation still pending:** no child issue states a
+minimum/maximum or an empty-selection behavior as a closure condition yet;
+#5497 must add it.
 
-**Q4 — What credential does discovery and cloning use? Does discovery go
-through the GitHub API or shell out to `gh repo list`?**
+**Q4 — DECIDED 2026-08-12, contingent on #5475: both discovery and cloning
+route through `gh` rather than a second GitHub API client.**
 
 #5476 resolves the auth-flow half: the client detects-or-downloads `gh` and
-runs `gh auth login` pre-sweep. #5487 leaves the discovery-mechanism half
+runs `gh auth login` pre-sweep. #5487 left the discovery-mechanism half
 explicitly open, entangled with #5475 (gh has no common entry point across
-5+ existing tga call sites). **Proposed:** route both discovery and clone
-through `gh` — `gh repo list --json ...` (or `gh api`) for discovery, and
-`gh`'s git-credential helper for the actual clone — rather than building a
-second, independent GitHub API HTTP client inside `trusty-audit` or `tga`.
-Reasoning: #5476 already commits to `gh` as the on-machine credential holder
-for this exact flow, and a second credential surface (a raw API token
-resolved and held separately from `gh`'s own store) duplicates a capability
-`gh` already owns — the same class of defect CLAUDE.md's common-entry-point
-rule names for `Command::new`/HTTP-client construction generally. This
-proposal is contingent on #5475 landing first or alongside: adding a sixth
-`gh` call site to a tool with no common entry point across its existing five
-compounds the defect #5475 already tracks rather than fixing it. **Not
-decided by any issue** — #5487 states the fork exists and does not resolve
-it; #5475 is filed but unscoped to this decision.
+5+ existing tga call sites). Both discovery and clone now route through
+`gh` — `gh repo list --json ...` (or `gh api`) for discovery, and `gh`'s
+git-credential helper for the actual clone — rather than a second,
+independent GitHub API HTTP client inside `trusty-audit` or `tga`. Reasoning:
+#5476 already commits to `gh` as the on-machine credential holder for this
+exact flow, and a second credential surface (a raw API token resolved and
+held separately from `gh`'s own store) would duplicate a capability `gh`
+already owns — the same class of defect CLAUDE.md's common-entry-point rule
+names for `Command::new`/HTTP-client construction generally. **The
+contingency is real, not decorative:** this decision holds only once #5475
+lands first or alongside — adding a sixth ungoverned `gh` call site
+compounds the defect #5475 tracks rather than fixing it. #5475 is open as of
+this update (§15); #5487 and #5215 should not implement discovery or clone
+auth ahead of it.
 
-**Q5 — What makes the handoff package "signed," and what does the recipient
-verify it with?**
+**Q5 — DECIDED 2026-08-12: verification is a CLI subcommand checking a
+received package against the retained public key.**
 
-This is answered by #5481, not genuinely open — restated here because #5474's
-own closure conditions ask for it explicitly. See §10: an ed25519 signature
+§10 already specifies the signing mechanism itself (an ed25519 signature
 over a SHA-256 manifest of delivered files, signed locally by the recipient
 using a private key that travelled in the outbound package, verified by us
-against a public key we retain out of band. **The one open sub-question
-#5481 does not settle:** where and how "we" perform that verification — no
-issue names a tool, command, or location for the verification step itself
-(only that it happens on "our side"). **Proposed:** a `trusty-audit`
-(or `tctl`) subcommand that takes a received package and the retained public
-key and reports pass/fail — consistent with §11's CLI-testability
-constraint, since this is exactly the kind of capability that must not exist
-only as something "run by hand" on the owner's machine. **Not decided by any
-issue** — named as a gap in §15 as well, since no child issue currently owns
-building it.
+against a public key we retain out of band). This decision settles the one
+piece #5481 left open: where and how "we" perform that verification. It is a
+CLI subcommand (`trusty-audit` or `tctl`) that takes a received package and
+the retained public key and reports pass/fail — consistent with §11's
+CLI-testability constraint, since this is exactly the kind of capability
+that must not exist only as something "run by hand" on the owner's machine.
+**No issue owns building it yet** — §15 states precisely what that issue
+needs to cover so filing it is mechanical.
 
 ## {#SPEC-AUDITPKG-15~draft} 15. Gaps in the Issue Tree — Named, Not Designed
 
@@ -572,12 +584,33 @@ Per this spec's own brief: a step the sequence needs but no issue currently
 tickets is named here as a gap, not designed as if it were already scoped.
 
 - **No issue owns the verification-side tooling** for #5481's signature
-  scheme (Q5 above). #5481's closure conditions require "verification tooling
-  on our side" to exist, but no child issue builds it.
-- **No issue tickets an end-to-end test harness** for this five-step
-  sequence as a whole (Q1 above). Individual steps have their own unit tests
-  once built; nothing currently owns proving the *sequence* — select, clone,
-  analyze, sign — works together against a fixture engagement.
+  scheme — **genuinely still unticketed**, even though Q5 (§14) now decides
+  its shape. An issue for it needs to cover, precisely: (a) the CLI
+  invocation and its arguments — received-package path, retained-public-key
+  path/format; (b) the manifest-recompute step as a closure condition, not an
+  implementation detail — SHA-256 each delivered file, compare against the
+  signed manifest; (c) the ed25519 signature-verify step against the
+  retained public key; (d) a machine-checkable pass/fail signal (exit code,
+  not human-eyeballed output), per §11's CLI-testability constraint; (e)
+  which crate owns it — `trusty-audit` (co-located with #5481's signing code)
+  or `trusty-installer`/`tctl` (co-located with other pinned-artifact
+  verification) — a placement call the filing issue must make explicitly, not
+  leave implicit. Filing against this checklist is now mechanical; no issue
+  does it yet.
+- **The step that invokes `tga audit` over the selected, cloned repos was
+  unticketed** — #5540 installs the pinned tool set and #5498 covers only the
+  progress *view*; nothing ticketed the `session::Command` variant that
+  actually shells out to `tga audit`, captures per-repo results, and surfaces
+  a partial failure distinctly from a total one (§9). **Now tracked by
+  [#5555](https://github.com/bobmatnyc/trusty-tools/issues/5555)**
+  (`feat(trusty-audit): drive the audit run over the selected repos`).
+- **No issue ticketed an end-to-end test harness** for this five-step
+  sequence as a whole (Q1, §14) — individual steps have their own unit tests
+  once built; nothing previously owned proving the *sequence* — select,
+  clone, analyze, sign — works together against a fixture engagement. **Now
+  tracked by [#5556](https://github.com/bobmatnyc/trusty-tools/issues/5556)**
+  (`test(trusty-audit): end-to-end CLI run — select, clone, analyze`), which
+  carries the owner's directive verbatim and depends on #5555 among others.
 - **The return channel is explicitly unresolved**, and epic #5473 already
   says so rather than this spec discovering it: "the return channel for the
   finished package (email attachment, an upload endpoint we don't have, or
@@ -585,19 +618,23 @@ tickets is named here as a gap, not designed as if it were already scoped.
   since a 25–115 MB bundle may rule out email." This spec's step 5 (§10) ends
   at "the client surfaces the finished zip's location... for the recipient to
   send back" (#5499) — what "send back" means mechanically is the named gap.
-- **#5475 (gh common entry point) is a soft prerequisite this spec's Q4
-  proposal depends on**, not a hard blocker recorded anywhere in the #5473/
-  #5477 tree as gating Q4's resolution. Flagged so the dependency is visible
-  before code lands, not discovered mid-implementation.
+  **Genuinely still unticketed and undecided** — #5473 is left open on this
+  axis.
+- **#5475 (gh common entry point) is a soft prerequisite Q4's now-decided
+  answer depends on** (§14), not a hard blocker recorded anywhere in the
+  #5473/#5477 tree as gating Q4's resolution. Flagged so the dependency is
+  visible before code lands, not discovered mid-implementation. Open as of
+  this update.
 - **Clone-credential distinctness** — #5215's own scope list names "clone
-  auth (distinct from API auth)" as something to decide, and this spec's Q4
-  proposes folding it into `gh`'s credential, but no issue has accepted or
-  rejected that specific fold.
+  auth (distinct from API auth)" as something to decide. Q4 (§14) now folds
+  it into `gh`'s credential, accepted by the owner 2026-08-12, but no issue
+  implementing #5215 or #5476 yet carries that fold as a closure condition —
+  whoever picks up #5215 must add it, not merely cite this spec.
 
 ---
 
 *This document is the deliverable requested by
-[#5474](https://github.com/bobmatnyc/trusty-tools/issues/5474). No code was
-written and no issue was filed. §14's five questions and §15's gaps are
-presented for owner review; nothing in this spec should be read as resolving
-them.*
+[#5474](https://github.com/bobmatnyc/trusty-tools/issues/5474). §14's five
+questions were decided by the owner on 2026-08-12, accepted exactly as
+proposed. §15's remaining gaps — verification-side tooling and the return
+channel — are still open and are named, not designed, above.*
