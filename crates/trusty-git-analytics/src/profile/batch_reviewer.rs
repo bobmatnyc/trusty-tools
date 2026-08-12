@@ -23,9 +23,10 @@ use std::time::Instant;
 
 use serde::Deserialize;
 use tracing::{debug, warn};
-use trusty_common::credentials::default_store;
+use trusty_common::credentials::{default_store, KeyStore};
 use trusty_common::inference::{
     register_default_factories, ChatMessage, ChatRequest, Configurator, InferenceAdapter,
+    InferenceError,
 };
 
 use super::types::{Effort, Finding, LongitudinalFinding, PeriodBatch, TokenCostSummary};
@@ -218,6 +219,41 @@ pub fn build_period_request(batch: &PeriodBatch, model: &str) -> ChatRequest {
 
 // ─── Transport ────────────────────────────────────────────────────────────────
 
+/// What one period's review produced, and whether it happened at all.
+///
+/// Why: a bare `Vec` cannot tell a caller "the model read this period and found
+/// nothing" from "the provider never answered" — both are zero findings, and a
+/// Bedrock outage across twelve quarters would render as twelve clean quarters.
+/// Since the profile's trajectory is derived from the periods that WERE
+/// reviewed, a caller that cannot see the difference publishes a trend over a
+/// silently smaller sample. #5464: the shape is inherited from trusty-review's
+/// original; it is fixed here rather than after #5465 wires the first caller to
+/// it.
+/// What: the findings, plus [`Self::skipped`] carrying the provider error when
+/// the call failed. Deliberately NOT a `Result`, so no caller can `?` a single
+/// period's outage into aborting the whole run — the audit must survive one bad
+/// period. `#[non_exhaustive]` because the parse-failure case wants the same
+/// treatment once `ChatRequest` can enforce a schema.
+/// Test: `period_review_distinguishes_provider_failure_from_a_clean_period`.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct PeriodReview {
+    /// Findings the model reported. Empty whenever [`Self::skipped`] is set.
+    pub findings: Vec<LongitudinalFinding>,
+
+    /// The provider error that skipped this period, or `None` when the model
+    /// answered — in which case `findings` is what it said, including,
+    /// legitimately, nothing.
+    pub skipped: Option<InferenceError>,
+}
+
+impl PeriodReview {
+    /// Whether the provider call failed and this period was never reviewed.
+    pub fn was_skipped(&self) -> bool {
+        self.skipped.is_some()
+    }
+}
+
 /// The period-review transport: one model call per period, over the shared
 /// inference stack.
 ///
@@ -227,10 +263,10 @@ pub fn build_period_request(batch: &PeriodBatch, model: &str) -> ChatRequest {
 /// with trusty-review stays a process boundary (its `review_diff` MCP tool, or
 /// the `trusty-review` binary `tga audit` already spawns) — never a Cargo edge.
 /// What: holds a [`InferenceAdapter`] and the routing slug it was resolved from.
-/// [`Self::review_period`] is fail-safe: a provider failure costs that period's
-/// findings, not the run.
+/// [`Self::review_period`] survives a provider failure and reports it as a
+/// skipped period rather than a clean one.
 /// Test: `period_reviewer_routes_through_shared_inference`,
-/// `period_reviewer_fail_safe_on_adapter_error`.
+/// `period_review_distinguishes_provider_failure_from_a_clean_period`.
 pub struct PeriodReviewer {
     adapter: Arc<dyn InferenceAdapter>,
     model: String,
@@ -250,7 +286,28 @@ impl PeriodReviewer {
     ///
     /// [`super::ProfileError::Inference`] when no credential resolves for the
     /// slug's provider family, or when no factory is registered for it.
+    ///
+    /// Test: `from_slug_with_store_builds_an_adapter_for_a_stored_credential`,
+    /// `from_slug_with_store_errors_when_no_credential_resolves`.
     pub fn from_slug(model: &str) -> super::Result<Self> {
+        Self::from_slug_with_store(model, default_store().as_ref())
+    }
+
+    /// [`Self::from_slug`] against an explicit credential store.
+    ///
+    /// Why: [`default_store`] reads the machine's real keychain, so a test built
+    /// on it asserts whatever the developer happens to have exported. Injecting
+    /// the store is how `trusty_common`'s own `provider_for` tests stay
+    /// deterministic, and taking the same seam here is what makes both arms of
+    /// this resolution testable.
+    /// What: registers the default HTTP provider factories (plus the Bedrock
+    /// Converse factory under tga's `bedrock` feature), then resolves `model`
+    /// against `store` — env tier first, then the store, per `resolve_key_with`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_slug`].
+    pub fn from_slug_with_store(model: &str, store: &dyn KeyStore) -> super::Result<Self> {
         let mut configurator = Configurator::new();
         register_default_factories(&mut configurator);
         // #5464: the Bedrock Converse factory is registered separately from the
@@ -258,7 +315,7 @@ impl PeriodReviewer {
         #[cfg(feature = "bedrock")]
         trusty_common::inference::register_bedrock_factory(&mut configurator);
 
-        let adapter = configurator.build(model, default_store().as_ref())?;
+        let adapter = configurator.build(model, store)?;
         Ok(Self {
             adapter: Arc::from(adapter),
             model: model.to_string(),
@@ -278,23 +335,26 @@ impl PeriodReviewer {
         }
     }
 
-    /// Review one period and return its findings.
+    /// Review one period.
     ///
-    /// Why: fail-safe by contract — a run over twelve quarters must not be lost
-    /// because the eleventh call timed out, so every failure path logs and
-    /// returns an empty `Vec` rather than propagating.
+    /// Why: a run over twelve quarters must not be lost because the eleventh
+    /// call timed out, so a provider failure never propagates — but it is
+    /// REPORTED, in [`PeriodReview::skipped`], so the caller can say "9 of 12
+    /// periods reviewed" instead of publishing a trend over a silently smaller
+    /// sample.
     /// What: sends [`build_period_request`] through the adapter, accumulates the
     /// call's usage into `cost_out`, and parses the body with
     /// [`parse_period_findings`]. `cost_usd` is the provider's authoritative
     /// figure; a provider that reports none contributes 0 and leaves the token
-    /// counts as the record of what the call cost. A failed call bills nothing.
+    /// counts as the record of what the call cost. A failed call bills nothing
+    /// and returns no findings.
     /// Test: `period_reviewer_routes_through_shared_inference`,
-    /// `period_reviewer_fail_safe_on_adapter_error`.
+    /// `period_review_distinguishes_provider_failure_from_a_clean_period`.
     pub async fn review_period(
         &self,
         batch: &PeriodBatch,
         cost_out: &mut TokenCostSummary,
-    ) -> Vec<LongitudinalFinding> {
+    ) -> PeriodReview {
         let period = &batch.stats.period_label;
         let request = build_period_request(batch, &self.model);
         let start = Instant::now();
@@ -302,13 +362,18 @@ impl PeriodReviewer {
         let response = match self.adapter.chat(&request).await {
             Ok(r) => r,
             Err(e) => {
+                // #5464: the error travels back to the caller — a logged warning
+                // alone made a skipped period indistinguishable from a clean one.
                 warn!(
                     period = %period,
                     model = %self.model,
                     error = %e,
-                    "batch_reviewer: inference call failed — returning empty findings"
+                    "batch_reviewer: inference call failed — period skipped"
                 );
-                return Vec::new();
+                return PeriodReview {
+                    findings: Vec::new(),
+                    skipped: Some(e),
+                };
             }
         };
 
@@ -330,7 +395,10 @@ impl PeriodReviewer {
             "batch_reviewer: inference call complete"
         );
 
-        parse_period_findings(&response.first_text().unwrap_or_default(), period)
+        PeriodReview {
+            findings: parse_period_findings(&response.first_text().unwrap_or_default(), period),
+            skipped: None,
+        }
     }
 }
 

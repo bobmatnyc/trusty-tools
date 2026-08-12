@@ -39,7 +39,7 @@ pub mod synthesizer;
 pub mod types;
 
 pub use batch::{assemble_period_batches, Window};
-pub use batch_reviewer::{build_period_request, PeriodReviewer};
+pub use batch_reviewer::{build_period_request, PeriodReview, PeriodReviewer};
 pub use diff_sampler::{sample_diffs_for_batches, DiffSamplerConfig, MAX_DIFF_CHARS};
 pub use error::{ProfileError, Result};
 pub use reporter::{render_markdown, ReportFormat, Reporter};

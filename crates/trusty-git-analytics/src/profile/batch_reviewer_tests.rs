@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use serial_test::serial;
+use trusty_common::credentials::{KeyStore, MemoryKeyStore};
 use trusty_common::inference::test_support::ScriptedAdapter;
 use trusty_common::inference::{
     capabilities, AssistantMessage, ChatChoice, ChatResponse, ProviderId, UsageBlock,
@@ -30,6 +32,7 @@ use super::{
 use crate::profile::types::{
     AuthorPeriodSummary, Effort, PeriodBatch, SampledDiff, TokenCostSummary,
 };
+use crate::profile::ProfileError;
 
 fn make_batch() -> PeriodBatch {
     PeriodBatch::from_stats(AuthorPeriodSummary {
@@ -314,6 +317,13 @@ fn period_request_carries_schema_and_sampling() {
     assert_eq!(req.max_tokens, Some(PERIOD_REVIEWER_MAX_TOKENS));
 }
 
+/// Build a reviewer over a strict `ScriptedAdapter` serving `body` once.
+fn reviewer_answering(body: &str, prompt_tokens: u32, completion_tokens: u32) -> PeriodReviewer {
+    let adapter = ScriptedAdapter::new("scripted", capabilities(ProviderId::OpenRouter))
+        .with_response(scripted_response(body, prompt_tokens, completion_tokens));
+    PeriodReviewer::with_adapter(Arc::new(adapter), "openai/gpt-5.4-mini")
+}
+
 /// Why: this is the closure condition of #5464 — the period-review call reaches
 /// a model through `trusty_common::inference::InferenceAdapter`, so tga needs no
 /// dependency on trusty-review's `crate::llm`. Driving it with the commons'
@@ -325,39 +335,128 @@ fn period_request_carries_schema_and_sampling() {
 /// Test: this test itself.
 #[tokio::test]
 async fn period_reviewer_routes_through_shared_inference() {
-    let adapter = ScriptedAdapter::new("scripted", capabilities(ProviderId::OpenRouter))
-        .with_response(scripted_response(JSON_RESPONSE, 1200, 340));
-    let reviewer = PeriodReviewer::with_adapter(Arc::new(adapter), "openai/gpt-5.4-mini");
+    let reviewer = reviewer_answering(JSON_RESPONSE, 1200, 340);
 
     let mut cost = TokenCostSummary::default();
-    let findings = reviewer.review_period(&make_batch(), &mut cost).await;
+    let review = reviewer.review_period(&make_batch(), &mut cost).await;
 
+    assert!(!review.was_skipped(), "the adapter answered");
     assert_eq!(
-        findings.len(),
+        review.findings.len(),
         2,
         "both findings must survive the round trip"
     );
-    assert_eq!(findings[0].period_label, "2026-Q1");
-    assert_eq!(findings[1].finding.kind, "security");
+    assert_eq!(review.findings[0].period_label, "2026-Q1");
+    assert_eq!(review.findings[1].finding.kind, "security");
 
     assert_eq!(cost.input_tokens, 1200, "adapter usage must be accumulated");
     assert_eq!(cost.output_tokens, 340);
 }
 
-/// Why: one unreachable provider must cost that period's findings, not the run —
-/// a twelve-quarter profile should not be lost to the eleventh call.
-/// What: exhausts a strict `ScriptedAdapter` (its empty queue errors), asserts an
-/// empty finding list and that no token counts were invented for the failed call.
+/// Why: a provider outage and a genuinely clean period both produce zero
+/// findings, and if the caller cannot tell them apart a Bedrock outage across
+/// twelve quarters reads as twelve clean quarters — the profile then publishes a
+/// trajectory derived from a silently smaller sample. This is the #5464 fix: the
+/// two outcomes must be distinguishable from the return value alone, not merely
+/// from a log line nobody parses.
+/// What: reviews the same batch twice — once against an adapter that answers
+/// `{"findings":[]}`, once against an exhausted strict adapter that errors — and
+/// asserts the finding lists match while the outcomes do not. Also pins that the
+/// failed call bills nothing.
 /// Test: this test itself.
 #[tokio::test]
-async fn period_reviewer_fail_safe_on_adapter_error() {
-    let adapter = ScriptedAdapter::new("scripted", capabilities(ProviderId::OpenRouter));
-    let reviewer = PeriodReviewer::with_adapter(Arc::new(adapter), "openai/gpt-5.4-mini");
+async fn period_review_distinguishes_provider_failure_from_a_clean_period() {
+    let mut clean_cost = TokenCostSummary::default();
+    let clean = reviewer_answering(r#"{"findings":[]}"#, 900, 12)
+        .review_period(&make_batch(), &mut clean_cost)
+        .await;
 
-    let mut cost = TokenCostSummary::default();
-    let findings = reviewer.review_period(&make_batch(), &mut cost).await;
+    // A strict adapter with an empty queue errors rather than echoing.
+    let failed_reviewer = PeriodReviewer::with_adapter(
+        Arc::new(ScriptedAdapter::new(
+            "scripted",
+            capabilities(ProviderId::OpenRouter),
+        )),
+        "openai/gpt-5.4-mini",
+    );
+    let mut failed_cost = TokenCostSummary::default();
+    let failed = failed_reviewer
+        .review_period(&make_batch(), &mut failed_cost)
+        .await;
 
-    assert!(findings.is_empty(), "an adapter error yields no findings");
-    assert_eq!(cost.input_tokens, 0, "a failed call bills nothing");
-    assert_eq!(cost.output_tokens, 0);
+    // Indistinguishable on findings alone — which is exactly the trap.
+    assert!(clean.findings.is_empty());
+    assert!(failed.findings.is_empty());
+
+    assert!(
+        !clean.was_skipped(),
+        "a model that answered 'no findings' reviewed this period"
+    );
+    assert!(
+        failed.was_skipped(),
+        "a provider failure must not read as a clean period"
+    );
+    assert!(
+        failed.skipped.is_some(),
+        "the provider error must reach the caller, not just the log"
+    );
+
+    assert_eq!(clean_cost.input_tokens, 900, "an answered call bills");
+    assert_eq!(failed_cost.input_tokens, 0, "a failed call bills nothing");
+    assert_eq!(failed_cost.output_tokens, 0);
+}
+
+/// Why: `from_slug` is the production construction path and the only reason
+/// `ProfileError::Inference` exists, so both arms of its resolution need
+/// coverage. The store is injected because `default_store` reads the machine's
+/// real keychain — a test over that asserts whatever the developer exported.
+/// What: seeds an OpenRouter credential into a `MemoryKeyStore` and asserts an
+/// adapter is built for a slug routed to that family.
+/// Test: this test itself.
+#[test]
+fn from_slug_with_store_builds_an_adapter_for_a_stored_credential() {
+    let store = MemoryKeyStore::new();
+    store.set("openrouter", "test-key").expect("seed key");
+
+    let reviewer = PeriodReviewer::from_slug_with_store("openrouter/openai/gpt-5.4-mini", &store);
+    assert!(
+        reviewer.is_ok(),
+        "a resolvable credential must yield an adapter: {:?}",
+        reviewer.err()
+    );
+}
+
+/// Why: an unresolvable credential must surface as `ProfileError::Inference`
+/// rather than a panic or a silently unusable reviewer — this is the arm that
+/// variant was added for.
+/// What: resolves against an EMPTY store with `OPENROUTER_API_KEY` cleared, so
+/// neither the env tier nor the store tier can answer, and asserts the variant.
+/// Test: this test itself. `#[serial]` because it mutates the environment; the
+/// prior value is restored so a developer with a real key keeps it.
+#[test]
+#[serial]
+fn from_slug_with_store_errors_when_no_credential_resolves() {
+    let saved = std::env::var("OPENROUTER_API_KEY").ok();
+    // SAFETY: `#[serial]` keeps every env-mutating test in this crate off other
+    // threads for the duration, which is what `remove_var` requires.
+    unsafe {
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+
+    let result = PeriodReviewer::from_slug_with_store(
+        "openrouter/openai/gpt-5.4-mini",
+        &MemoryKeyStore::new(),
+    );
+
+    if let Some(value) = saved {
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", value);
+        }
+    }
+
+    match result {
+        Err(ProfileError::Inference(_)) => {}
+        Err(other) => panic!("expected ProfileError::Inference, got {other:?}"),
+        Ok(_) => panic!("an empty store with no env key must not resolve a credential"),
+    }
 }
