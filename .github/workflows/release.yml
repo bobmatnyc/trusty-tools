@@ -1823,6 +1823,47 @@ jobs:
         env:
           OUTPUT: RELEASE_NOTES.md
 
+      # ── Clear a stale, asset-less release before softprops runs (issue #5455) ──
+      # WHY: GitHub's "Immutable Releases" enforcement rejects ANY update to an
+      #   already-published release that includes `target_commitish` —
+      #   softprops/action-gh-release@v2 submits it on its update-existing-
+      #   release path unconditionally (upstream: softprops/action-gh-release
+      #   issues #653 and #641, "Incompatible with immutable releases"). If a
+      #   release object for this tag ALREADY exists when this job runs — from
+      #   an earlier partial/failed run of this same workflow, a manual
+      #   `gh release create`, or any retry/re-dispatch — softprops's own GET
+      #   finds it, tries to reconcile fields via PATCH, and dies with:
+      #     "target_commitish cannot be changed when release is immutable"
+      #   *before ever uploading assets*. That is exactly what happened to
+      #   trusty-installer-v0.5.0 (run 30961682562, 2026-08-04): all three
+      #   build legs succeeded and produced valid tarballs, but the release
+      #   was left with ZERO assets because this step failed first — breaking
+      #   install.sh for every new user with a 404 on the checksum download.
+      #
+      # WHAT: if a release already exists for this tag AND it currently has no
+      #   assets attached, delete the release OBJECT only (never the git tag —
+      #   `--cleanup-tag` is intentionally omitted) so softprops's normal
+      #   create → upload-assets → publish path runs unobstructed on a clean
+      #   slate. A release that already carries real assets is left
+      #   completely untouched — this only clears the specific "empty stale
+      #   release" collision, never a legitimate published release.
+      - name: Clear a stale asset-less release for this tag, if present
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ASSET_COUNT="$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
+            --jq '.assets | length' 2>/dev/null || echo "")"
+          if [[ -z "$ASSET_COUNT" ]]; then
+            echo "No existing release for tag '${TAG}' — nothing to clear."
+          elif [[ "$ASSET_COUNT" == "0" ]]; then
+            echo "::warning::Found an existing release for '${TAG}' with 0 assets — deleting the release object (tag left intact) so softprops/action-gh-release can recreate it cleanly. See #5455."
+            gh release delete "${TAG}" --yes
+          else
+            echo "Existing release for '${TAG}' already has ${ASSET_COUNT} asset(s) attached — leaving it in place."
+          fi
+
       - name: Create / update GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
