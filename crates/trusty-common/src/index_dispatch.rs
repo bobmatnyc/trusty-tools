@@ -29,7 +29,8 @@
 //!
 //! Test: `dispatcher_rejects_submissions_once_workers_and_queue_are_full`,
 //! `no_more_jobs_run_concurrently_than_the_worker_count`,
-//! `a_panicking_job_does_not_kill_its_worker` (in the `tests` module below),
+//! `a_panicking_job_does_not_kill_its_worker`, `a_fresh_pool_reports_no_drop_ever`,
+//! `a_rejection_records_when_it_happened` (in the `tests` module below),
 //! and the end-to-end
 //! `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`
 //! in `search_index_tests.rs`.
@@ -67,6 +68,12 @@ pub(crate) const INDEX_QUEUE_CAPACITY: usize = 64;
 pub(crate) struct BoundedDispatcher {
     tx: SyncSender<IndexJob>,
     rejected: AtomicU64,
+    /// Unix seconds of the most recent rejection; `0` means "never rejected".
+    ///
+    /// Why: a monotonic total alone cannot answer "is this happening NOW" — the
+    /// question a health consumer asks. See
+    /// [`crate::search_index::index_drop_stats`].
+    last_drop_unix_secs: AtomicU64,
 }
 
 impl BoundedDispatcher {
@@ -90,6 +97,7 @@ impl BoundedDispatcher {
         Self {
             tx,
             rejected: AtomicU64::new(0),
+            last_drop_unix_secs: AtomicU64::new(0),
         }
     }
 
@@ -110,11 +118,11 @@ impl BoundedDispatcher {
         match self.tx.try_send(job) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
-                self.rejected.fetch_add(1, Ordering::Relaxed);
+                self.record_rejection();
                 false
             }
             Err(TrySendError::Disconnected(_)) => {
-                self.rejected.fetch_add(1, Ordering::Relaxed);
+                self.record_rejection();
                 tracing::warn!(
                     "background index dispatch pool has no live workers; work is being \
                      dropped (issue #2798)"
@@ -127,6 +135,29 @@ impl BoundedDispatcher {
     /// How many jobs this pool has rejected since process start.
     pub(crate) fn rejected(&self) -> u64 {
         self.rejected.load(Ordering::Relaxed)
+    }
+
+    /// Unix seconds of the most recent rejection, or `None` if there has never
+    /// been one.
+    ///
+    /// Why: lets a health consumer separate "no drops ever" from "drops right
+    /// now" — see [`crate::search_index::index_drop_stats`].
+    /// Test: `a_fresh_pool_reports_no_drop_ever`,
+    /// `a_rejection_records_when_it_happened`.
+    pub(crate) fn last_drop_unix_secs(&self) -> Option<u64> {
+        match self.last_drop_unix_secs.load(Ordering::Relaxed) {
+            0 => None,
+            secs => Some(secs),
+        }
+    }
+
+    /// Count a rejection and stamp when it happened.
+    fn record_rejection(&self) {
+        self.rejected.fetch_add(1, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.last_drop_unix_secs.store(now, Ordering::Relaxed);
     }
 }
 

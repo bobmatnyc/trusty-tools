@@ -118,6 +118,56 @@ fn no_more_jobs_run_concurrently_than_the_worker_count() {
     assert_eq!(pool.rejected(), 0, "nothing should have been rejected");
 }
 
+/// A pool that has never rejected anything says so, distinguishably.
+///
+/// Why: the health surface has to separate "no drops ever" from "drops right
+/// now". If a never-dropped pool reported a timestamp, every consumer would
+/// have to guess whether `0` meant the epoch or meant nothing.
+/// What: asserts a fresh pool reports zero rejections and `None` for the last
+/// drop.
+/// Test: this test.
+#[test]
+fn a_fresh_pool_reports_no_drop_ever() {
+    let pool = BoundedDispatcher::new(1, 1);
+    assert_eq!(pool.rejected(), 0);
+    assert_eq!(pool.last_drop_unix_secs(), None);
+}
+
+/// A rejection records when it happened, not just that it did.
+///
+/// Why: `dropped_batches` alone cannot answer "is saturation happening now",
+/// which is the question a health check asks.
+/// What: saturates a 1-worker/1-slot pool, forces a rejection, and asserts the
+/// recorded unix-second stamp is within a minute of now — i.e. it is a real
+/// timestamp of this drop, not a placeholder.
+/// Test: this test.
+#[test]
+fn a_rejection_records_when_it_happened() {
+    let pool = BoundedDispatcher::new(1, 1);
+    let (started_tx, started_rx) = channel();
+    let (release_tx, release_rx) = channel::<()>();
+    assert!(pool.try_submit(Box::new(move || {
+        let _ = started_tx.send(());
+        let _ = release_rx.recv_timeout(WAIT);
+    })));
+    started_rx.recv_timeout(WAIT).expect("worker never started");
+    assert!(pool.try_submit(Box::new(|| {})), "queue slot must accept");
+    assert!(!pool.try_submit(Box::new(|| {})), "third must be rejected");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let at = pool
+        .last_drop_unix_secs()
+        .expect("a rejection must record when it happened");
+    assert!(
+        now.saturating_sub(at) <= 60,
+        "drop stamp {at} is not close to now ({now})"
+    );
+
+    let _ = release_tx.send(());
+}
+
 /// A panicking job does not retire the worker that ran it.
 ///
 /// Why: with a fixed worker count, a worker lost to a panic is never replaced —

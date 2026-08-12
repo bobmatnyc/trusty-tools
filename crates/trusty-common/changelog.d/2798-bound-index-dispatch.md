@@ -9,8 +9,17 @@ Fixed
   up to ~6.2s — threads used to pile up faster than they drained, with nothing
   pushing back. At saturation a batch is DROPPED rather than blocked or queued
   without limit: blocking would stall the agent task the fail-open contract
-  exists to protect. The drop is logged at `warn` with the file count, the
-  project root, the first path, and the running process-wide drop total, so a
-  degraded daemon is visible instead of silently losing updates. The caller
-  contract is unchanged — still non-blocking, still fail-open, still no public
-  API change.
+  exists to protect. The caller contract is unchanged — still non-blocking,
+  still fail-open.
+- A batch also stops after a 30s budget, logging how many files it skipped. A
+  `write_files` call has no size limit, so one large scaffold write is a single
+  job; without the budget it would hold a worker for minutes and the queue
+  would never turn over.
+
+Added
+
+- `search_index::index_drop_stats` (and `IndexDropStats`) report how many
+  batches this process has dropped and how long ago the last one was, so a
+  saturation episode is readable state rather than only a `warn!` line.
+  `dropped_batches == 0` means it has never happened; `seconds_since_last_drop`
+  is `None` until the first drop. trusty-code's `GET /health` publishes both.

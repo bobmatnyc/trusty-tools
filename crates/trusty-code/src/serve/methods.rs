@@ -91,17 +91,35 @@ async fn health(
 /// (`CARGO_PKG_VERSION`), `status = "ok"`, `pid = std::process::id()`,
 /// `binding = ProjectBinding::to_json()` (the SAME `{state, root}` wire shape
 /// `Session` already serialises, not a second spelling). Never fails — there
-/// is no fallible state to check; a future ticket that adds real readiness
-/// checks will extend this function.
+/// is no fallible state to check.
+///
+/// `incremental_index` is additive too (#2798). The write/edit tool executors
+/// hand every successful write to a BOUNDED background pool, which drops a
+/// batch when a degraded trusty-search daemon has filled it. Those drops used
+/// to exist only as a `warn!` line, so a sustained saturation episode — files
+/// silently not indexed for as long as it lasts — looked identical to a healthy
+/// daemon here. This is the same process that owns the counter, and the TUI
+/// already polls this payload, so it is where the loss becomes visible:
+/// `dropped_batches` (0 means it has never happened) and
+/// `seconds_since_last_drop` (`null` until the first drop) together separate
+/// "fine" from "happening right now".
 /// Test: `health_payload_has_expected_shape`,
-/// `health_payload_reports_a_bound_project_root`.
+/// `health_payload_reports_a_bound_project_root`,
+/// `health_payload_reports_incremental_index_drops`.
 pub(crate) fn health_payload(binding: &ProjectBinding) -> Value {
+    // #2798: publish the background-index drop counters where a health check
+    // already looks, so a saturated pool is not invisible.
+    let drops = trusty_common::search_index::index_drop_stats();
     json!({
         "server": "tcode",
         "version": crate::VERSION,
         "status": "ok",
         "pid": std::process::id(),
         "binding": binding.to_json(),
+        "incremental_index": {
+            "dropped_batches": drops.dropped_batches,
+            "seconds_since_last_drop": drops.seconds_since_last_drop,
+        },
     })
 }
 
@@ -148,6 +166,31 @@ mod tests {
         assert_eq!(v["pid"], std::process::id());
         assert_eq!(v["binding"]["state"], crate::binding::STATE_PROJECTLESS);
         assert!(v["binding"]["root"].is_null());
+    }
+
+    /// The background-index drop counters must be on the wire, and a process
+    /// that has dropped nothing must say so distinguishably (#2798).
+    ///
+    /// Why: dropping a batch when the pool saturates is only an acceptable
+    /// trade because the loss is visible somewhere a health check reads. This
+    /// pins that it IS on the wire — the field existing is the whole fix, and a
+    /// later edit that quietly removes it would restore the blind spot.
+    /// What: asserts `incremental_index.dropped_batches` is present and numeric,
+    /// and that with no drops in this test process `seconds_since_last_drop` is
+    /// `null` rather than a misleading `0`.
+    /// Test: this test.
+    #[test]
+    fn health_payload_reports_incremental_index_drops() {
+        let v = health_payload(&ProjectBinding::None);
+        let drops = &v["incremental_index"];
+        assert!(
+            drops["dropped_batches"].is_u64(),
+            "dropped_batches must be a number, got {drops}"
+        );
+        assert!(
+            drops["seconds_since_last_drop"].is_null() || drops["seconds_since_last_drop"].is_u64(),
+            "seconds_since_last_drop must be null or a number, got {drops}"
+        );
     }
 
     /// A BOUND daemon must publish its project root, since that is the field

@@ -314,6 +314,7 @@ fn index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated() {
     let before = global().rejected();
     index_files_best_effort(Path::new("/nonexistent-2798"), &[PathBuf::from("main.rs")]);
     let after = global().rejected();
+    let stats = index_drop_stats();
 
     for release in &releases {
         let _ = release.send(());
@@ -324,6 +325,39 @@ fn index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated() {
         before + 1,
         "a batch submitted to a saturated pool must be dropped and counted"
     );
+    assert_eq!(
+        stats.dropped_batches, after,
+        "the public stats must read the same counter the pool increments"
+    );
+    assert!(
+        stats
+            .seconds_since_last_drop
+            .is_some_and(|since| since <= 60),
+        "a drop that just happened must be reported as recent, got {:?}",
+        stats.seconds_since_last_drop
+    );
+}
+
+/// The per-batch time budget stops the loop at the cap, not one file past it.
+///
+/// Why: a `write_files` batch has no size limit, so the only thing keeping one
+/// large write from pinning a pool worker for minutes is this budget — and the
+/// queue-drain reasoning behind the pool sizing depends on the exact boundary.
+/// What: asserts the predicate is false just under the cap and true at and past
+/// it. The predicate is pure so the boundary is testable without a daemon or a
+/// 30-second wait.
+/// Test: this test.
+#[test]
+fn batch_budget_is_exhausted_at_and_past_the_cap() {
+    use std::time::Duration;
+    assert!(!batch_budget_exhausted(Duration::from_secs(0)));
+    assert!(!batch_budget_exhausted(
+        BATCH_INDEX_BUDGET - Duration::from_millis(1)
+    ));
+    assert!(batch_budget_exhausted(BATCH_INDEX_BUDGET));
+    assert!(batch_budget_exhausted(
+        BATCH_INDEX_BUDGET + Duration::from_secs(600)
+    ));
 }
 
 /// `relative_index_path` strips the project root prefix so the posted

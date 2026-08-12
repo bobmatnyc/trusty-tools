@@ -417,9 +417,12 @@ fn refuse_daemon_write_under_test(operation: &str, index_id: &str) -> bool {
 /// the alternative, blocking the caller, would turn a slow daemon into a
 /// stalled agent task. The drop is not silent: it is logged at `warn` naming
 /// the file count, the project root, the first path, and the running
-/// process-wide drop total. Losing an incremental update degrades mid-task
-/// search freshness until the next write or reindex covers the file; it does
-/// not lose the file, and it does not fail the tool call.
+/// process-wide drop total — and it is readable as state via
+/// [`index_drop_stats`], which trusty-code's `GET /health` publishes so a
+/// saturation episode changes the health answer rather than only a log line.
+/// Losing an incremental update degrades mid-task search freshness until the
+/// next write or reindex covers the file; it does not lose the file, and it
+/// does not fail the tool call.
 ///
 /// Sensitive-path note (issue #2747): unlike `POST /indexes`, the per-file
 /// `index-file` endpoint does NOT re-run the sensitive-path denylist — it
@@ -461,6 +464,73 @@ pub fn index_files_best_effort(project_root: &Path, paths: &[std::path::PathBuf]
     }
 }
 
+/// How many incremental index batches this process has dropped, and when the
+/// last one happened (#2798 review).
+///
+/// Why: the bound is only acceptable because the loss it creates is visible.
+/// A `warn!` line nobody greps is not visibility, so this is the read surface a
+/// health check consumes — trusty-code's `GET /health` publishes it as
+/// `incremental_index`. The two fields answer different questions and a
+/// consumer needs both: `dropped_batches` says whether saturation has EVER
+/// happened, `seconds_since_last_drop` says whether it is happening NOW. A
+/// monotonic total alone cannot distinguish a wedged daemon right now from one
+/// episode an hour ago.
+/// What: `dropped_batches` is monotonic for the life of the process;
+/// `seconds_since_last_drop` is `None` until the first drop, then the age of
+/// the most recent one (saturating at 0 if the wall clock moved backwards).
+/// Both read the shared pool, so they cover every caller in the process.
+/// Test: `index_drop_stats_sees_the_shared_pools_drops`,
+/// `a_fresh_pool_reports_no_drop_ever`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IndexDropStats {
+    /// Batches dropped because the pool was saturated, since process start.
+    pub dropped_batches: u64,
+    /// Age in seconds of the most recent drop; `None` if there has been none.
+    pub seconds_since_last_drop: Option<u64>,
+}
+
+/// Snapshot the shared pool's drop counters — see [`IndexDropStats`].
+///
+/// Test: `index_drop_stats_sees_the_shared_pools_drops`.
+#[must_use]
+pub fn index_drop_stats() -> IndexDropStats {
+    let pool = crate::index_dispatch::global();
+    let seconds_since_last_drop = pool.last_drop_unix_secs().map(|at| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        now.saturating_sub(at)
+    });
+    IndexDropStats {
+        dropped_batches: pool.rejected(),
+        seconds_since_last_drop,
+    }
+}
+
+/// Wall-clock budget one batch may spend indexing before it stops early.
+///
+/// Why (#2798 review): a job is a whole `write_files` BATCH, and that tool caps
+/// nothing — a scaffold write is one job. At [`MAX_INDEX_ATTEMPTS`]'s ~6.2s
+/// worst case per file against a degraded daemon, a 30-file batch would hold
+/// one of the four workers for over three minutes, and the queue-depth
+/// reasoning behind [`crate::index_dispatch::INDEX_QUEUE_CAPACITY`] collapses.
+/// Capping the batch in TIME is what makes worker turnover derivable: no job
+/// occupies a worker for more than this budget plus the one file already in
+/// flight (~36s), so a full 64-slot queue drains in ~10 minutes worst case
+/// rather than an unbounded time.
+/// What: 30s, checked before each file — never mid-request, so an in-flight
+/// POST always finishes.
+/// Test: `batch_budget_is_exhausted_at_and_past_the_cap`.
+const BATCH_INDEX_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Has this batch spent its [`BATCH_INDEX_BUDGET`]?
+///
+/// Test: `batch_budget_is_exhausted_at_and_past_the_cap`.
+fn batch_budget_exhausted(elapsed: std::time::Duration) -> bool {
+    elapsed >= BATCH_INDEX_BUDGET
+}
+
 /// Synchronous body of [`index_files_best_effort`], run on a pool worker (or
 /// called directly by tests for determinism).
 ///
@@ -476,7 +546,10 @@ pub fn index_files_best_effort(project_root: &Path, paths: &[std::path::PathBuf]
 /// against `root`, reads its current content from disk (an unreadable file —
 /// e.g. deleted since the write — is logged at debug and skipped, not fatal to
 /// the batch), and POSTs it via [`best_effort_index_one_file`] (which itself
-/// retries transient send failures with backoff). Every step fails open.
+/// retries transient send failures with backoff). Every step fails open. The
+/// loop also stops early once [`BATCH_INDEX_BUDGET`] is spent (#2798), logging
+/// how many files it skipped — a batch has no size limit, so without that a
+/// single large write pins a pool worker for minutes.
 /// Test: `index_files_inner_is_noop_for_empty_paths`,
 /// `index_files_inner_skips_when_index_id_empty`,
 /// `index_files_inner_skips_gracefully_when_daemon_down`.
@@ -518,7 +591,22 @@ fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
         }
     };
 
-    for path in paths {
+    // #2798: a batch is unbounded in size, so cap it in time — otherwise one
+    // large write holds a worker for minutes and the queue never turns over.
+    let started = std::time::Instant::now();
+    for (done, path) in paths.iter().enumerate() {
+        if batch_budget_exhausted(started.elapsed()) {
+            tracing::warn!(
+                "incremental index update for '{index_id}' stopped after {done} of {} \
+                 file(s): the {}s per-batch budget was exhausted; the remaining {} \
+                 file(s) were skipped and stay searchable only from the next write or \
+                 reindex (#2798)",
+                paths.len(),
+                BATCH_INDEX_BUDGET.as_secs(),
+                paths.len() - done,
+            );
+            break;
+        }
         let abs = if path.is_absolute() {
             path.clone()
         } else {
