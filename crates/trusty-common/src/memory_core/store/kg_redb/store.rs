@@ -7,7 +7,7 @@
 //! Test: `open_then_reopen_persists_state`, `write_on_snapshot_returns_read_only_error`.
 
 use crate::memory_core::store::concurrent_open::{
-    OpenIntent, OpenMode, backoff_sleep_ms, try_open_or_snapshot,
+    OpenIntent, OpenMode, backoff_sleep_ms, is_incompatible_format_refusal, try_open_or_snapshot,
 };
 use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS, ROOMS, TRIPLES,
@@ -207,6 +207,11 @@ impl KgStoreRedb {
                     });
                 }
                 Err(e) => {
+                    // #4911: an incompatible on-disk format never resolves by
+                    // waiting, unlike the lock races this loop exists for.
+                    if is_incompatible_format_refusal(&e) {
+                        return Err(e);
+                    }
                     last_err = Some(e);
                     if attempt < max_attempts {
                         // Exponential backoff: let any concurrent in-process

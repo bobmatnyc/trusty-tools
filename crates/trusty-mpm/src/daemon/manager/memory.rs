@@ -310,6 +310,7 @@ mod live {
     use trusty_common::memory_core::retrieval::{
         PalaceHandle, RecallResult, RememberOptions, recall_with_default_embedder,
     };
+    use trusty_common::memory_core::store::PalaceStore;
 
     /// Result alias for portfolio memory operations.
     pub type PortfolioMemoryResult<T> = std::result::Result<T, PortfolioMemoryError>;
@@ -383,15 +384,35 @@ mod live {
         /// What: returns the cached handle if registered; else tries `open_palace`
         /// (succeeds when `palace.json` is already on disk, including a concurrent
         /// creator that just finished) and falls back to the idempotent
-        /// `create_palace`. Both branches are scoped entirely to `self.palace_id`.
-        /// Test: `portfolio_palace_provisions_and_is_idempotent`.
+        /// `create_palace` ONLY when [`PalaceStore::metadata_present`]
+        /// definitively reports no `palace.json`. A palace that exists but
+        /// cannot be opened propagates the open error (#4911) rather than being
+        /// recreated over. Both branches are scoped entirely to `self.palace_id`.
+        /// Test: `portfolio_palace_provisions_and_is_idempotent`,
+        /// `portfolio_ensure_palace_never_rewrites_metadata_of_a_present_but_unopenable_palace`.
         fn ensure_palace(&self) -> PortfolioMemoryResult<Arc<PalaceHandle>> {
             if let Some(handle) = self.registry.get(&self.palace_id) {
                 return Ok(handle);
             }
-            if let Ok(handle) = self.registry.open_palace(&self.data_root, &self.palace_id) {
-                return Ok(handle);
+            let open_err = match self.registry.open_palace(&self.data_root, &self.palace_id) {
+                Ok(handle) => return Ok(handle),
+                Err(source) => source,
+            };
+
+            // #4911: a failed open is not proof the palace is absent — only a
+            // definitively missing `palace.json` is. Creating against a palace
+            // that exists but could not be READ rewrites its metadata and
+            // destroys `created_at` before failing on the same unreadable store
+            // anyway. Fail closed: anything other than a definite `Ok(false)` —
+            // present, or a probe we could not complete — propagates instead.
+            let palace_dir = self.data_root.join(self.palace_id.as_str());
+            if !matches!(PalaceStore::metadata_present(&palace_dir), Ok(false)) {
+                return Err(PortfolioMemoryError::Palace {
+                    palace: self.palace_id.to_string(),
+                    source: open_err,
+                });
             }
+
             let palace = Palace {
                 id: self.palace_id.clone(),
                 name: "tm manager (portfolio)".to_string(),
