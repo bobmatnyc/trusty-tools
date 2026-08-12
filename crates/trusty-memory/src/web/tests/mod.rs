@@ -60,6 +60,7 @@ mod health_tests;
 mod kg_tests;
 mod origin_guard_tests;
 mod palace_crud_tests;
+mod palace_open_error_tests;
 mod palace_tests;
 mod prompt_tests;
 mod recall_tests;
