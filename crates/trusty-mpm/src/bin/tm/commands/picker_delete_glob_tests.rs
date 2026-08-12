@@ -121,6 +121,25 @@ fn glob_parse_strips_dry_run() {
 }
 
 #[test]
+fn glob_parse_accepts_leading_dry_run() {
+    // `d --dry-run tm-test-*` is the more common CLI habit; treating the flag
+    // as glob text would report "no sessions match" exactly when the operator
+    // asked to preview.
+    assert_eq!(
+        parse_glob_delete("--dry-run tm-test-*"),
+        Some(req("tm-test-*", true))
+    );
+    assert_eq!(
+        parse_glob_delete("  --dry-run   tm-test-*  "),
+        Some(req("tm-test-*", true))
+    );
+    // The whitespace requirement keeps a `--dry-run`-prefixed NAME matchable.
+    let parsed = parse_glob_delete("--dry-runner-*").expect("pattern");
+    assert_eq!(parsed.pattern, "--dry-runner-*");
+    assert!(!parsed.dry_run);
+}
+
+#[test]
 fn glob_parse_keeps_inner_dry_run_text() {
     // Only a TRAILING `--dry-run` is the flag; mid-pattern it is glob text, so
     // a session actually named `tm--dry-run-01` stays reachable.
@@ -433,8 +452,8 @@ fn glob_report_leads_with_the_tmux_name() {
     let lines = plan_lines(&fleet, &plan);
     assert_eq!(lines.len(), 1);
     assert!(
-        lines[0].trim_start().starts_with("tm-apex-02"),
-        "row must start with the tmux name, got: {}",
+        lines[0].trim_start().starts_with("DELETE  tm-apex-02"),
+        "row must lead with the marker then the tmux name, got: {}",
         lines[0]
     );
 }
@@ -457,7 +476,7 @@ fn glob_report_lists_every_match() {
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("tm-test-03") && l.contains("kept: active"))
+            .any(|l| l.contains("tm-test-03") && l.contains("keep") && l.contains("active"))
     );
     assert!(
         lines

@@ -32,16 +32,29 @@
 //!      be deleted one at a time through `d<N>`'s own force-confirm.
 //!   2. The caller's OWN session is additionally excluded by tmux name, so it
 //!      survives even if the daemon reported its state as stopped (a stale or
-//!      display-reconciled record). Two independent guards, since this is the
-//!      one deletion the operator can never undo from inside the session.
+//!      display-reconciled record). This is a BEST-EFFORT second guard, not an
+//!      independent one: `tmux_session_name` is a 100 ms bounded probe, and a
+//!      timeout leaves it silently absent. The driver warns when the probe
+//!      fails inside tmux rather than implying protection it did not apply;
+//!      guard 1 and the daemon's own tmux-based 409 are what actually hold.
 //!   3. A session with an EMPTY tmux name matches no pattern at all, `*`
 //!      included. See [`build_plan`] — treating an absent name as an empty
 //!      string is what would let `*` sweep up every nameless record.
 //!   4. A pattern matching nothing is an explicit, non-destructive report — it
 //!      must never read as a successful no-op.
-//!   5. Confirmation is the exact MATCH COUNT typed back, not `y`. Typing the
-//!      number is what proves the operator read it; a `y` habit does not.
-//!   6. `--dry-run` prints the same plan and exits before the prompt.
+//!   5. Confirmation is the deletable COUNT typed back, not `y` — and the
+//!      prompt does NOT print that number. Printing it would let the operator
+//!      confirm without reading a row, which is a slower `y`, not proof they
+//!      looked. Each row carries a `DELETE`/`keep` marker so counting is
+//!      mechanical.
+//!   6. `--dry-run`, on either side of the pattern, prints the same plan and
+//!      exits before the prompt.
+//!
+//! Known sharp edge: after a `tmux kill-server` or a reboot every session reads
+//! `stopped`, so `d *` proposes the whole fleet. That is a legitimate pattern
+//! and the plan is not truncated — every row prints — so guard 5 is what stands
+//! between the operator and a fleet-wide delete. It is the specific reason the
+//! prompt withholds the number.
 //!
 //! Test: `glob_*` in `picker_delete_glob_tests.rs`.
 
@@ -148,20 +161,36 @@ pub(crate) enum GlobDeleteOutcome {
 ///
 /// What: `None` when `rest` is not a bulk pattern (empty, or no glob
 /// metacharacter — including the numeric `d2` form, which the caller handles
-/// first). `Some(request)` otherwise, with a trailing `--dry-run` token stripped
-/// and recorded. The pattern itself is NOT validated here — an unparseable glob
-/// is reported by [`decide_glob_delete`] so the operator sees the compiler's
-/// message rather than a bare `Unrecognised`.
+/// first). `Some(request)` otherwise, with a `--dry-run` token stripped and
+/// recorded. The flag is accepted on EITHER side of the pattern — `d <glob>
+/// --dry-run` and `d --dry-run <glob>` are the same request — because a leading
+/// flag is the more common CLI habit and silently treating it as glob text
+/// would report "no sessions match" at the exact moment the operator asked to
+/// preview. As a prefix it must be followed by whitespace, so a session named
+/// `--dry-runner-*` is still matchable. Mid-pattern the text stays part of the
+/// glob (a session may legitimately be named `tm--dry-run-01`). The pattern
+/// itself is NOT validated here — an unparseable glob is reported by
+/// [`decide_glob_delete`] so the operator sees the compiler's message rather
+/// than a bare `Unrecognised`.
 /// Test: `glob_parse_requires_metacharacter`, `glob_parse_strips_dry_run`,
-/// `glob_parse_rejects_empty`, `glob_parse_keeps_inner_dry_run_text`.
+/// `glob_parse_rejects_empty`, `glob_parse_keeps_inner_dry_run_text`,
+/// `glob_parse_accepts_leading_dry_run`.
 pub(crate) fn parse_glob_delete(rest: &str) -> Option<GlobDeleteRequest> {
-    let rest = rest.trim();
-    // Only a TRAILING `--dry-run` is a flag; the same text mid-pattern stays
-    // part of the glob (a session may legitimately be named `tm--dry-run-01`).
-    let (pattern, dry_run) = match rest.strip_suffix("--dry-run") {
-        Some(head) => (head.trim_end(), true),
-        None => (rest, false),
-    };
+    let mut pattern = rest.trim();
+    let mut dry_run = false;
+    // Trailing form: `<glob> --dry-run`.
+    if let Some(head) = pattern.strip_suffix("--dry-run") {
+        pattern = head.trim_end();
+        dry_run = true;
+    }
+    // Leading form: `--dry-run <glob>`. The whitespace requirement is what
+    // keeps `--dry-runner-*` a pattern rather than a flag plus `ner-*`.
+    if let Some(tail) = pattern.strip_prefix("--dry-run")
+        && (tail.is_empty() || tail.starts_with(char::is_whitespace))
+    {
+        pattern = tail.trim_start();
+        dry_run = true;
+    }
     let pattern = pattern.trim();
     if pattern.is_empty() || !has_glob_metachar(pattern) {
         return None;
@@ -284,9 +313,10 @@ pub(crate) fn decide_glob_delete(
 ///
 /// Why: `y` is a reflex; a number is not. The failure this defends against is a
 /// pattern that matches more sessions than the operator pictured — and the only
-/// input that proves the number on screen was actually read is that number,
-/// typed back. It also scales with the danger for free: confirming 3 deletions
-/// is easy, confirming 63 makes the operator look at 63 first.
+/// input that proves the listing was actually read is its `DELETE` row count,
+/// typed back. The caller must therefore NOT print that number in the prompt;
+/// printing it reduces this to a slower `y`. It also scales with the danger for
+/// free: counting 3 rows is easy, counting 63 makes the operator look at 63.
 /// What: `true` only when the trimmed line parses as a `usize` equal to `count`.
 /// `y`, `yes`, empty, a wrong number, and `all` are all `false`.
 /// Test: `glob_confirm_requires_exact_count`, `glob_confirm_rejects_yes`.
@@ -306,9 +336,15 @@ pub(crate) fn confirm_matches_count(line: &str, count: usize) -> bool {
 /// is strictly more informative. The project follows when the record has one.
 /// Pure, so the report's completeness — every matched row appears, protected
 /// ones with a reason — is assertable without capturing stderr.
-/// What: `  <name>  <short-id>  <project>  (<state>)` per deletable row, then
-/// `  <name>  <short-id>  — kept: <reason>` per skipped row.
-/// Test: `glob_report_lists_every_match`, `glob_report_disambiguates_same_name`.
+///
+/// Why each row carries a `DELETE` / `keep` marker: the confirm prompt does not
+/// print the number to type, so the operator counts it off these rows. A marker
+/// in a fixed leading column makes that count mechanical instead of a reading
+/// comprehension exercise over mixed lines.
+/// What: `  DELETE  <name>  <short-id>  <project>  (<state>)` per deletable row,
+/// then `  keep    <name>  <short-id>  — <reason>` per skipped row.
+/// Test: `glob_report_lists_every_match`, `glob_report_disambiguates_same_name`,
+/// `glob_report_marks_delete_rows`.
 pub(crate) fn plan_lines(sessions: &[ManagedSessionSummary], plan: &GlobDeletePlan) -> Vec<String> {
     // First 8 hex chars — the same prefix length `git` uses for a short SHA,
     // enough to separate two same-named records in a fleet of this size.
@@ -323,7 +359,7 @@ pub(crate) fn plan_lines(sessions: &[ManagedSessionSummary], plan: &GlobDeletePl
     for &i in &plan.deletable {
         let s = &sessions[i];
         lines.push(format!(
-            "  {}  {}{}  ({})",
+            "  DELETE  {}  {}{}  ({})",
             s.name,
             short(&s.id),
             project(s),
@@ -333,11 +369,11 @@ pub(crate) fn plan_lines(sessions: &[ManagedSessionSummary], plan: &GlobDeletePl
     for (i, reason) in &plan.skipped {
         let s = &sessions[*i];
         let why = match reason {
-            GlobSkip::Running(state) => format!("kept: {state}, needs `d<N>` to force"),
-            GlobSkip::Tombstoned => "kept: already deleted".to_string(),
-            GlobSkip::SelfSession => "kept: this is the session you are in".to_string(),
+            GlobSkip::Running(state) => format!("{state}, needs `d<N>` to force"),
+            GlobSkip::Tombstoned => "already deleted".to_string(),
+            GlobSkip::SelfSession => "this is the session you are in".to_string(),
         };
-        lines.push(format!("  {}  {}  — {why}", s.name, short(&s.id)));
+        lines.push(format!("  keep    {}  {}  — {why}", s.name, short(&s.id)));
     }
     lines
 }
@@ -352,11 +388,15 @@ pub(crate) fn plan_lines(sessions: &[ManagedSessionSummary], plan: &GlobDeletePl
 /// there is then no own-session to protect, and the running-session guard still
 /// covers it), then runs [`decide_glob_delete`]. Every outcome except `Confirm`
 /// prints its report and returns `Ok(0)` WITHOUT contacting the daemon.
-/// `Confirm` prints the plan, requires the match count typed back
-/// ([`confirm_matches_count`]), and only then loops over `plan.deletable`
-/// calling [`delete_managed_then_local`] with `force = false` — a daemon 409 is
-/// reported and skipped, never escalated to a force. Returns how many records
-/// were actually removed, so the caller can tell a real deletion from a cancel.
+/// `Confirm` prints the plan, requires the deletable count typed back WITHOUT
+/// printing it ([`confirm_matches_count`]), and only then loops over
+/// `plan.deletable` calling [`delete_managed_then_local`] with `force = false` —
+/// a daemon 409 is reported and skipped, never escalated to a force. Every
+/// per-row outcome, an `Err` included, is reported and the loop CONTINUES, so a
+/// single unreachable record cannot abort a confirmed batch mid-way and leave
+/// the operator with no account of it; the tallies are printed at the end.
+/// Returns how many records were actually removed, so the caller can tell a
+/// real deletion from a cancel.
 /// Test: the pure seams it composes are unit-tested (see module doc); the
 /// stdin/HTTP path is side-effect-only, as with `picker_delete::confirm_and_delete`.
 pub(crate) async fn confirm_and_delete_glob(
@@ -366,6 +406,12 @@ pub(crate) async fn confirm_and_delete_glob(
     req: &GlobDeleteRequest,
 ) -> anyhow::Result<usize> {
     let current = super::statusline::branch::tmux_session_name();
+    // The probe returns `None` both when we are not inside tmux (nothing to
+    // protect) and when its 100 ms budget expires (protection silently absent).
+    // Those are different situations, and only the second is worth a warning —
+    // `$TMUX` set with no name resolved is the one where the operator would
+    // otherwise assume a guard that is not running.
+    let probe_failed = current.is_none() && std::env::var_os("TMUX").is_some();
     let (outcome, plan) = decide_glob_delete(sessions, req, current.as_deref());
     let pattern = &req.pattern;
     match outcome {
@@ -410,14 +456,22 @@ pub(crate) async fn confirm_and_delete_glob(
     }
 
     let count = plan.deletable.len();
-    eprintln!(
-        "tm: '{pattern}' matches {} session(s); {count} will be PERMANENTLY deleted:",
-        plan.matched()
-    );
+    // The count is deliberately NOT printed here. Printing the number the
+    // operator must type would let them confirm without reading a single row,
+    // making this a slower `y` rather than a proof they looked. The rows carry
+    // a `DELETE` / `keep ` marker so counting them is mechanical.
+    if probe_failed {
+        eprintln!(
+            "tm: warning — could not read this tmux session's name, so the \
+             own-session exclusion is NOT applied. Check the DELETE rows below \
+             for the session you are in."
+        );
+    }
+    eprintln!("tm: '{pattern}' will PERMANENTLY delete the sessions marked DELETE:");
     for line in plan_lines(sessions, &plan) {
         eprintln!("{line}");
     }
-    eprint!("tm: type {count} to confirm, or anything else to cancel > ");
+    eprint!("tm: type the number of DELETE rows to confirm, or anything else to cancel > ");
     let _ = std::io::stderr().flush();
 
     let mut line = String::new();
@@ -431,23 +485,40 @@ pub(crate) async fn confirm_and_delete_glob(
         return Ok(0);
     }
 
-    let mut deleted = 0usize;
+    let (mut deleted, mut refused, mut missing, mut failed) = (0usize, 0usize, 0usize, 0usize);
     for &i in &plan.deletable {
         let s = &sessions[i];
         // `force = false`, always: a bulk action never escalates past a guard.
         // The daemon's own tmux probe can still refuse (409) even though the
         // persisted state read as stopped — that refusal is reported and the
         // row is skipped.
-        match delete_managed_then_local(client, url, &s.id, false).await? {
-            DeleteReport::Deleted { name, .. } => {
+        //
+        // A transport error or a 500 is reported and the loop CONTINUES: the
+        // operator confirmed a batch, so one unreachable record must not abort
+        // the remaining deletions and drop the picker with no account of what
+        // already happened.
+        match delete_managed_then_local(client, url, &s.id, false).await {
+            Ok(DeleteReport::Deleted { name, .. }) => {
                 deleted += 1;
                 eprintln!("tm: deleted '{name}'.");
             }
-            DeleteReport::Refused(msg) => eprintln!("tm: '{}' refused: {msg}", s.name),
-            DeleteReport::NotFound => eprintln!("tm: '{}' not found — already gone.", s.name),
+            Ok(DeleteReport::Refused(msg)) => {
+                refused += 1;
+                eprintln!("tm: '{}' refused: {msg}", s.name);
+            }
+            Ok(DeleteReport::NotFound) => {
+                missing += 1;
+                eprintln!("tm: '{}' not found — already gone.", s.name);
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("tm: '{}' failed: {e}", s.name);
+            }
         }
     }
-    eprintln!("tm: {deleted} of {count} session(s) deleted.");
+    eprintln!(
+        "tm: {deleted} of {count} deleted ({refused} refused, {missing} already gone, {failed} failed)."
+    );
     Ok(deleted)
 }
 
