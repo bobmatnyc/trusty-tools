@@ -343,6 +343,46 @@ impl Drawer {
     }
 }
 
+/// Total order for picking a bounded set of drawers: importance desc, then
+/// recency desc, then id asc.
+///
+/// Why (#4836): four call sites ranked on importance ALONE before truncating —
+/// `PalaceHandle::list_drawers`, `list_drawers_in_wing`,
+/// `PalaceHandle::refresh_l1`, and `L1Cache::save_l1_cache`. Rust's sort is
+/// stable, so drawers tied on importance kept whatever order the input
+/// happened to have — UUID ascending out of the drawer table, insertion order
+/// out of the in-memory Vec — and the truncation cut on that. `Drawer::new`
+/// mints a v4 UUID, so neither order correlates with age. Importance is
+/// effectively bimodal in a live palace (1.0 for curated facts, 0.5 for
+/// everything else), so the tie-break decided almost every result:
+/// `memory_list(tag = "pre-authorized", limit = 12)` against the
+/// `trusty-tools` palace matched 94 drawers and returned the 12 lowest UUIDs,
+/// leaving all nine drawers written that day outside the window.
+///
+/// This lives beside `Drawer` rather than in `retrieval` because the two L1
+/// sites straddle the module boundary: `store::l1_cache` needs the same order
+/// and must not depend upward on `retrieval`.
+///
+/// Importance stays the PRIMARY key — this only decides ties, so curated
+/// essentials still lead. `list_drawers_ranks_importance_above_recency` is the
+/// guard against that being flipped.
+///
+/// What: `importance` descending, then `created_at` descending, then `id`
+/// ascending. A NaN importance compares `Equal` and falls through to the two
+/// total keys rather than leaving the pair unordered.
+/// Test: `list_drawers_keeps_the_newest_drawer_within_an_importance_tie`,
+/// `list_drawers_in_wing_keeps_the_newest_drawer_within_an_importance_tie`,
+/// `list_drawers_ranks_importance_above_recency`,
+/// `refresh_l1_keeps_the_newest_drawers_within_an_importance_tie`,
+/// `l1_snapshot_keeps_the_newest_drawers_within_an_importance_tie`.
+pub(crate) fn drawer_listing_order(a: &Drawer, b: &Drawer) -> std::cmp::Ordering {
+    b.importance
+        .partial_cmp(&a.importance)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| b.created_at.cmp(&a.created_at))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
