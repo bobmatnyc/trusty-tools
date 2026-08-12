@@ -222,7 +222,6 @@ crates/trusty-common/src/memory_core/store/kg_redb/write_ops.rs	cascade_delete_r
 crates/trusty-common/src/memory_core/store/kg_writer.rs	writer_reports_error_per_op
 crates/trusty-common/src/memory_core/store/kg/ops.rs	cascade_delete_removes_triples_for_drawer
 crates/trusty-common/src/memory_core/store/kg/ops.rs	palace_handle_read_only_when_kg_snapshotted
-crates/trusty-common/src/memory_core/store/palace_store.rs	load_palace_missing_returns_not_found
 crates/trusty-common/src/rpc/client.rs	parse_args
 crates/trusty-common/src/rpc/transport/http.rs	http_transport_roundtrip
 crates/trusty-common/src/rpc/transport/stdio.rs	stdio_transport_echo

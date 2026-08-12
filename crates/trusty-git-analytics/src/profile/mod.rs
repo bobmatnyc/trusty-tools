@@ -11,15 +11,17 @@
 //! 1. [`selector`] — turn a login, name, or email into a canonical identity.
 //! 2. [`batch`] — bucket that contributor's history into [`PeriodBatch`] windows.
 //! 3. [`diff_sampler`] — attach a stratified sample of real diffs per period.
-//! 4. [`batch_reviewer`] — build each period's review prompt and parse its answer.
+//! 4. [`batch_reviewer`] — build each period's review prompt, send it through
+//!    `trusty_common::inference`, and parse its answer.
 //! 5. [`synthesizer`] — tag findings across periods and derive the trajectory.
 //! 6. [`reporter`] — render JSON and Markdown.
 //!
-//! Stages 1–3 and 5–6 are fully deterministic. Stage 4 supplies the prompt text
-//! and the response parser but not the transport that carries them to a model —
-//! that arrives in #5464, on top of `trusty_common::inference`, followed by the
-//! GitHub write path and the `tga profile` subcommand in #5465. A run that skips
-//! the model still produces a complete profile with a fallback narrative.
+//! Stages 1–3 and 5–6 are fully deterministic. Stage 4 is the only one that
+//! reaches a model, and since #5464 it does so through
+//! `trusty_common::inference` — so profiling needs no Cargo edge to
+//! trusty-review. The GitHub write path and the `tga profile` subcommand follow
+//! in #5465. A run that skips the model still produces a complete profile with a
+//! fallback narrative.
 //!
 //! Ported from trusty-review's `src/profile/` under #5463. The port drops that
 //! crate's `Finding`/`Effort`, LLM client, review config, and GitHub client; see
@@ -37,6 +39,7 @@ pub mod synthesizer;
 pub mod types;
 
 pub use batch::{assemble_period_batches, Window};
+pub use batch_reviewer::{build_period_request, PeriodReview, PeriodReviewer};
 pub use diff_sampler::{sample_diffs_for_batches, DiffSamplerConfig, MAX_DIFF_CHARS};
 pub use error::{ProfileError, Result};
 pub use reporter::{render_markdown, ReportFormat, Reporter};
