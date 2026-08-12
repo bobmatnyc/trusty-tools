@@ -124,7 +124,7 @@ pub mod bin_resolve;
 pub mod launchd;
 
 /// Label-correct LaunchAgent activation with legacy eviction and rollback
-/// (#4868). macOS-only, like [`launchd`] itself.
+/// (#4919). macOS-only, like [`launchd`] itself.
 ///
 /// Why: `install()` + `bootstrap()` could write one plist and activate a
 /// different unit, bounced daemons that had not changed, and left the service
@@ -135,7 +135,7 @@ pub mod launchd;
 #[cfg(target_os = "macos")]
 pub mod launchd_activate;
 
-/// Canonical launchd labels for every trusty-* LaunchAgent (#4868).
+/// Canonical launchd labels for every trusty-* LaunchAgent (#4919).
 ///
 /// Why: each daemon crate, the installer's mirror table, the Makefiles, and
 /// the install scripts each restated their own label literal, so they drifted
