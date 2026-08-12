@@ -64,10 +64,8 @@ Homebrew provides:
 > IAM role, or SSO) for the default `bedrock/` provider, or `OPENROUTER_API_KEY`
 > for OpenRouter models.
 >
-> **Contributor profiling** (`trusty-review profile`): requires a pre-populated
-> `tga` SQLite database. Set `TRUSTY_TGA_DB` or pass `--db <path>`. Compiled in
-> by default; omit with `--no-default-features --features http-server,mcp` for a
-> slimmer build without `tga`/`rusqlite` compilation.
+> **Contributor profiling** moved to `tga profile` in tga 2.19.0 (#5468).
+> `trusty-review profile` was removed in 0.16.0.
 >
 > **Sidecar services** (optional, degrade gracefully when absent):
 > - **trusty-search** on `:7878` — code-context hybrid search for richer reviews
@@ -628,7 +626,7 @@ actionable.
 |---------|---------|-------------|
 | `http-server` | yes | Axum HTTP daemon (`serve` subcommand without `--stdio`) |
 | `mcp` | yes | MCP stdio JSON-RPC service (`serve --stdio`) |
-| `profile` | yes | Longitudinal contributor-profiling pipeline (`profile` subcommand); pulls in `tga` + `rusqlite` |
+| `report` | yes | Deterministic technical due-diligence report generator (`report` subcommand) |
 
 > The conformance back gate (above) is backed by **trusty-common**'s
 > **`intent-source`** feature, which `trusty-review` enables unconditionally
@@ -636,7 +634,7 @@ actionable.
 > feature gates the shared intent-source resolver (ISR) so the other trusty-common
 > consumers that do not need it pay nothing.
 
-Slim build (no contributor profiling, no `tga`/`rusqlite` compilation):
+Slim build (review pipeline only, no DD report generator):
 
 ```bash
 cargo install --git https://github.com/bobmatnyc/trusty-tools trusty-review \

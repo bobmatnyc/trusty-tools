@@ -11782,7 +11782,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11797,17 +11797,14 @@ dependencies = [
  "dashmap 6.2.1",
  "dirs 5.0.1",
  "futures-util",
- "git2",
  "jsonwebtoken",
  "redb 4.1.0",
  "regex",
  "reqwest 0.12.28",
- "rusqlite",
  "serde",
  "serde_json",
  "serial_test",
  "tempfile",
- "tga",
  "thiserror 1.0.69",
  "tokio",
  "toml 0.8.23",
