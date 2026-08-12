@@ -1,34 +1,12 @@
 //! Handler for `trusty-search serve` -- MCP server (stdio + optional HTTP/SSE).
 
 use super::daemon_utils::{daemon_base_url, mcp_http_addr_path};
+use super::serve_scope::{auto_pin_from_cwd, PinChoice};
 use anyhow::Result;
 use colored::Colorize;
 use trusty_common::mcp::DaemonBridgeConfig;
 
-/// Resolve the index an MCP session pins to (issue #1373), from the `serve`
-/// subcommand's parsed `--index` and `--project`.
-///
-/// Why: precedence here decides which index every tool call in the session
-/// defaults to, and getting it wrong is exactly the wrong-index defect #1373
-/// fixed. Holding it in one function keeps `main`'s match arm thin and lets the
-/// precedence be asserted directly rather than re-implemented in a test.
-/// What: an index from any source wins; otherwise the id is derived from
-/// `--project` the same way the CLI and trusty-mpm derive it; otherwise the
-/// session is unpinned and callers must supply `index_id`. `index` carries the
-/// `TRUSTY_INDEX` environment value as well as the explicit flag — clap
-/// resolves that precedence at parse time, flag over environment.
-/// Test: `commands::serve::index_env_tests`.
-pub(crate) fn resolve_pinned_index(
-    index: Option<String>,
-    project: Option<String>,
-) -> Option<String> {
-    index.or_else(|| {
-        project.map(|p| {
-            let root = trusty_common::resolve_project_root(&std::path::PathBuf::from(&p));
-            trusty_common::derive_index_id(&root)
-        })
-    })
-}
+pub(crate) use super::serve_scope::resolve_pinned_index;
 
 /// Why: extracted from `main()`. The HTTP path involves a discovery file
 /// (`~/.trusty-search/mcp_http_addr`) and cleanup-on-exit logic that's easier
@@ -52,7 +30,7 @@ pub async fn handle_serve(
     with_http: bool,
     port: u16,
     http: Option<String>,
-    pinned_index: Option<String>,
+    pinned_index: Option<PinChoice>,
 ) -> Result<()> {
     // Resolve the HTTP bind address. HTTP is OFF by default (issue #123) --
     // Claude Code MCP hooks only need stdio. Precedence:
@@ -69,15 +47,25 @@ pub async fn handle_serve(
 
     // Apply the optional index pin (#1373) to the dispatcher so omitted
     // `index_id`s default to it and fan-out tools scope to it.
-    let pin = |server: crate::mcp::McpServer| match pinned_index.clone() {
-        Some(id) => server.with_pinned_index(id),
+    let pin = |server: crate::mcp::McpServer, choice: Option<&PinChoice>| match choice {
+        Some(c) => server.with_pinned_index(c.index_id.clone()),
         None => server,
     };
 
     match bind_addr {
         Some(addr) => {
+            // #5264: the working-directory tier is deliberately stdio-only. An
+            // HTTP listener is a shared, multi-client endpoint; deriving its
+            // scope from whichever directory happened to launch it would apply
+            // one client's project to every other client.
             let daemon_url = daemon_base_url();
-            let server = pin(crate::mcp::McpServer::new(daemon_url.clone()));
+            let server = pin(
+                crate::mcp::McpServer::new(daemon_url.clone()),
+                pinned_index.as_ref(),
+            );
+            if let Some(ref choice) = pinned_index {
+                eprintln!("{} {}", "\u{25c9}".green(), choice.report());
+            }
             serve_http(server, addr, &daemon_url).await
         }
         None => {
@@ -85,13 +73,36 @@ pub async fn handle_serve(
             // MCP dispatch loop. The McpServer forwards every tool call to
             // the daemon's REST API, so the daemon MUST be reachable.
             let base_url = ensure_search_daemon_up().await?;
-            let server = pin(crate::mcp::McpServer::new(base_url.clone()));
-            if let Some(ref id) = pinned_index {
-                eprintln!(
-                    "{} MCP session pinned to index {}",
-                    "\u{25c9}".green(),
-                    id.cyan()
-                );
+
+            // #5264: with no explicit flag, scope the session to the working
+            // directory — confirmed against the daemon first, so an unindexed
+            // or basename-colliding directory declines to pin rather than
+            // silently serving another project. Resolved once: `serve` is a
+            // long-lived stdio process whose cwd cannot change after exec.
+            let resolved = match pinned_index {
+                Some(choice) => Some(super::serve_scope::AutoPin::Pinned(choice)),
+                None => match std::env::current_dir() {
+                    Ok(cwd) => auto_pin_from_cwd(&base_url, &cwd).await,
+                    Err(e) => Some(super::serve_scope::AutoPin::Unpinned {
+                        reason: format!(
+                            "MCP session UNPINNED — could not read the working directory \
+                             ({e}). Pass index_id explicitly."
+                        ),
+                    }),
+                },
+            };
+
+            let server = pin(
+                crate::mcp::McpServer::new(base_url.clone()),
+                resolved.as_ref().and_then(|r| r.choice()),
+            );
+            if let Some(ref r) = resolved {
+                let marker = if r.choice().is_some() {
+                    "\u{25c9}".green()
+                } else {
+                    "\u{26a0}".yellow()
+                };
+                eprintln!("{} {}", marker, r.report());
             }
             eprintln!(
                 "{} MCP stdio (no HTTP) -> daemon {}",
@@ -203,3 +214,8 @@ async fn serve_http(server: crate::mcp::McpServer, addr: String, daemon_url: &st
 #[cfg(test)]
 #[path = "serve_index_env_tests.rs"]
 mod index_env_tests;
+
+/// Working-directory scoping tests (#5264) — see `serve_scope_tests.rs`.
+#[cfg(test)]
+#[path = "serve_scope_tests.rs"]
+mod scope_tests;
