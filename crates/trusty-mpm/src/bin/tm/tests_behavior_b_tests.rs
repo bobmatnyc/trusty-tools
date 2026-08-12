@@ -308,6 +308,64 @@ fn cli_parses_services_restart() {
 // display exactly what it stashes and what the live launch prompt is.
 // ------------------------------------------------------------------
 
+/// Pin every ambient agent tier to a seeded fixture for the duration of `body`.
+///
+/// Why (#5544, #4937): the two convergence tests below compare two independently
+/// composed prompts, and each composition rescans the agent roster from tiers
+/// rooted in `$HOME` and `$CLAUDE_CONFIG_DIR` — process-global state that other
+/// tests IN THIS BINARY repoint. `#[serial_test::serial]` makes those writers
+/// serial with respect to each other, not with respect to a parallel reader, so
+/// a banner or trust test could repoint `$HOME` between the two scans; the
+/// second one then saw a tier the first did not. On this workstation
+/// `~/.claude/agents` is the only tier carrying `copyeditor`, `pangram-editor`,
+/// `proofreader`, `writer` and `writing-critic`, which is why the diff was
+/// always those exact five names and why CI — which has no ambient tier at all —
+/// never reproduced it. Pinning both variables makes the roster a fixture, and
+/// taking `#[serial]` on the callers puts these tests in the same group as every
+/// `$HOME` mutator so nothing can repoint the environment underneath them.
+/// What: seeds a fake home with an empty `~/.claude/agents` and a managed
+/// config dir holding one agent, points `$HOME` and `$CLAUDE_CONFIG_DIR` at
+/// them, runs `body`, and restores both even when `body` panics.
+/// Test: used by `compose_session_instructions_display_matches_live_prompt` and
+/// `compose_session_instructions_display_matches_live_prompt_with_override`.
+fn with_pinned_agent_tiers(body: impl FnOnce()) {
+    let home = tempfile::tempdir().expect("fixture home");
+    let managed = home.path().join("managed-config");
+    std::fs::create_dir_all(home.path().join(".claude").join("agents")).expect("home tier");
+    std::fs::create_dir_all(managed.join("agents")).expect("managed tier");
+    // One agent, so the roster-present composer path is the one under test —
+    // the same branch the ambient roster used to select.
+    std::fs::write(
+        managed.join("agents").join("engineer.md"),
+        "---\nname: engineer\nrole: engineer\nmodel: sonnet\n---\n\n# Engineer\n",
+    )
+    .expect("seed fixture agent");
+
+    let prev_home = std::env::var_os("HOME");
+    let prev_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+    // SAFETY: every caller is `#[serial_test::serial]`, which is the same
+    // unnamed group every other `$HOME` mutator in this bin target joined
+    // (#4407); the restore below runs regardless of a panic in `body`.
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", &managed);
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    unsafe {
+        match prev_home {
+            Some(ref v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_config {
+            Some(ref v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+    }
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 #[test]
 fn compose_session_instructions_display_matches_stash() {
     // Why: the #382 bug was that `tm session instructions` printed
@@ -334,6 +392,7 @@ fn compose_session_instructions_display_matches_stash() {
 }
 
 #[test]
+#[serial_test::serial]
 fn compose_session_instructions_display_matches_live_prompt() {
     // Why: `tm session instructions` must show exactly what `claude` receives
     // via `--append-system-prompt-file`; the live prompt is produced by
@@ -342,23 +401,33 @@ fn compose_session_instructions_display_matches_live_prompt() {
     // `build_system_prompt_for`, the stash would again diverge from reality.
     // What: runs `compose_session_instructions` and `build_system_prompt_for`
     // on the same empty project directory and asserts the outputs match.
+    // #5544: both sides rescan the agent roster from `$HOME`/`$CLAUDE_CONFIG_DIR`,
+    // so the comparison is only meaningful with those tiers pinned.
     // Test: any future change that re-introduces the #382 divergence will
     // break this test immediately.
-    let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
+    with_pinned_agent_tiers(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
 
-    let (display, _output, _stash) =
-        compose_session_instructions(project).expect("compose succeeds");
+        let (display, _output, _stash) =
+            compose_session_instructions(project).expect("compose succeeds");
 
-    let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
+        let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
 
-    assert_eq!(
-        display, live_prompt,
-        "tm session instructions output must match the live launch prompt (issue #382)"
-    );
+        assert_eq!(
+            display, live_prompt,
+            "tm session instructions output must match the live launch prompt (issue #382)"
+        );
+        assert!(
+            display.contains("### engineer"),
+            "the pinned fixture roster must reach the composed prompt, or this \
+             test is no longer comparing the roster-present composer path"
+        );
+    });
 }
 
 #[test]
+#[serial_test::serial]
 fn compose_session_instructions_display_matches_live_prompt_with_override() {
     // Why: the same convergence guarantee must hold when project-level override
     // files are present — the stash and the display must reflect the override,
@@ -367,36 +436,40 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
     // `.trusty-mpm/WORKFLOW.md` file this used to write is no longer read),
     // then asserts the display and the live prompt both include it (and don't
     // include the bundled heading).
+    // #5544: pinned for the same reason as the test above — two rescans of the
+    // ambient roster are not a comparison.
     // Test: if `compose_session_instructions` stops reading overrides for the
     // display path, this test fails.
-    let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
+    with_pinned_agent_tiers(|| {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
 
-    std::fs::write(
-        project.join("CLAUDE.md"),
-        "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
-         # Custom Workflow\n\nCOMPOSE_OVERRIDE_MARKER\n\
-         <!-- TRUSTY-MPM: WORKFLOW END -->\n",
-    )
-    .unwrap();
+        std::fs::write(
+            project.join("CLAUDE.md"),
+            "<!-- TRUSTY-MPM: WORKFLOW START v=1 -->\n\
+             # Custom Workflow\n\nCOMPOSE_OVERRIDE_MARKER\n\
+             <!-- TRUSTY-MPM: WORKFLOW END -->\n",
+        )
+        .unwrap();
 
-    let (display, _output, _stash) =
-        compose_session_instructions(project).expect("compose succeeds");
+        let (display, _output, _stash) =
+            compose_session_instructions(project).expect("compose succeeds");
 
-    let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
+        let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project);
 
-    assert_eq!(
-        display, live_prompt,
-        "display and live prompt must match with overrides present (issue #382)"
-    );
-    assert!(
-        display.contains("COMPOSE_OVERRIDE_MARKER"),
-        "override must be reflected in display"
-    );
-    assert!(
-        !display.contains("# PM Workflow Configuration"),
-        "bundled workflow must be replaced in display"
-    );
+        assert_eq!(
+            display, live_prompt,
+            "display and live prompt must match with overrides present (issue #382)"
+        );
+        assert!(
+            display.contains("COMPOSE_OVERRIDE_MARKER"),
+            "override must be reflected in display"
+        );
+        assert!(
+            !display.contains("# PM Workflow Configuration"),
+            "bundled workflow must be replaced in display"
+        );
+    });
 }
 
 #[test]

@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::cli::SessionAction;
 use crate::commands::project::resolve_dir;
-use crate::formatters::session::deploy_summary_line;
+use crate::formatters::session::{delegation_roster_line, deploy_summary_line};
 
 /// `session start` — launch a session, routed through protected-path segregation
 /// for a recognized GitHub-backed git repo (#1916).
@@ -178,10 +178,21 @@ async fn start_session_in_place(
             if report.instructions.claude_md_created {
                 println!("  Created CLAUDE.md stub in {}", path.display());
             }
+            // #5544: the count is a floor when a roster read failed; say so.
             println!(
-                "Instructions: {} agents in delegation authority",
-                report.instructions.agent_count
+                "{}",
+                delegation_roster_line(
+                    report.instructions.agent_count,
+                    &report.instructions.unreadable_agent_paths,
+                )
             );
+            for path in &report.instructions.unreadable_agent_paths {
+                eprintln!(
+                    "error: agent roster incomplete: {} could not be read; \
+                     any agent it holds is undelegatable this session",
+                    path.display()
+                );
+            }
             println!(
                 "  Merged instructions written to {}",
                 report.stash.display()
