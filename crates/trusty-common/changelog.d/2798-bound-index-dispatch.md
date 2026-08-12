@@ -15,11 +15,3 @@ Fixed
   `write_files` call has no size limit, so one large scaffold write is a single
   job; without the budget it would hold a worker for minutes and the queue
   would never turn over.
-
-Added
-
-- `search_index::index_drop_stats` (and `IndexDropStats`) report how many
-  batches this process has dropped and how long ago the last one was, so a
-  saturation episode is readable state rather than only a `warn!` line.
-  `dropped_batches == 0` means it has never happened; `seconds_since_last_drop`
-  is `None` until the first drop. trusty-code's `GET /health` publishes both.

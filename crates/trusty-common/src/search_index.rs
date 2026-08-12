@@ -479,7 +479,8 @@ pub fn index_files_best_effort(project_root: &Path, paths: &[std::path::PathBuf]
 /// `seconds_since_last_drop` is `None` until the first drop, then the age of
 /// the most recent one (saturating at 0 if the wall clock moved backwards).
 /// Both read the shared pool, so they cover every caller in the process.
-/// Test: `index_drop_stats_sees_the_shared_pools_drops`,
+/// Test: `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`
+/// (asserts both fields right after a real drop),
 /// `a_fresh_pool_reports_no_drop_ever`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -492,7 +493,7 @@ pub struct IndexDropStats {
 
 /// Snapshot the shared pool's drop counters — see [`IndexDropStats`].
 ///
-/// Test: `index_drop_stats_sees_the_shared_pools_drops`.
+/// Test: `index_files_best_effort_drops_the_batch_when_the_shared_pool_is_saturated`.
 #[must_use]
 pub fn index_drop_stats() -> IndexDropStats {
     let pool = crate::index_dispatch::global();
