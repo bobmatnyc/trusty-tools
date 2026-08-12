@@ -230,8 +230,19 @@ pub fn tool_descriptors() -> Value {
         },
         {
             "name": "search_health",
-            "description": "Probe daemon liveness and version",
-            "inputSchema": { "type": "object", "properties": {} }
+            "description": "Diagnose this session's search back-end (issue #5264). \
+                            Reports which daemon answered — base URL, version, index \
+                            and chunk counts — so a healthy daemon that is not YOUR \
+                            daemon is visible, and separates 'nothing is listening' \
+                            from 'answered badly' from 'healthy but this project is \
+                            not indexed'. Branch on `healthy`, not on the call \
+                            succeeding; every non-ok status carries a `remediation`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index_id": { "type": "string" }
+                }
+            }
         },
         {
             "name": "delete_index",
